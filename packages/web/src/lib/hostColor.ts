@@ -3,9 +3,12 @@ import type { Project, SystemInfo } from "@mojito/shared";
 /**
  * 主机身份色。
  *
- * 由 user@host:port 稳定哈希到一个在深色底上可读的 hue，同一台机器在侧栏、
- * tab、抽屉里永远是同一条色带。本地项目**不给**色条——"有颜色 = 在别人的机器上"
- * 这个信号必须独占，才有警示价值。
+ * 由 user@host:port 稳定哈希到一个 hue，同一台机器在侧栏、tab、抽屉里永远是
+ * 同一条色带。本地项目**不给**色条——"有颜色 = 在别人的机器上"这个信号必须
+ * 独占，才有警示价值。
+ *
+ * 只哈希色相；深浅交给 CSS 变量 --host-s / --host-l（styles.css 里明暗各一套），
+ * 于是同一台机器在浅色下是深色条、在深色下是浅色条，色相不变、认得出来。
  */
 
 /** 避开 100–150（绿，与运行中冲突）和 0–20（红，与已丢失冲突） */
@@ -35,7 +38,8 @@ export function hostBar(project?: Project | null, alpha?: string): string {
     return alpha ? "transparent" : "var(--border)";
   }
   const h = hostHue(hostKey(project));
-  return alpha ? `hsl(${h} 34% 56% / ${alpha})` : `hsl(${h} 34% 56%)`;
+  const base = `${h} var(--host-s) var(--host-l)`;
+  return alpha ? `hsl(${base} / ${alpha})` : `hsl(${base})`;
 }
 
 /** SSH 项目才有色条；本地项目返回 undefined，调用方据此不渲染色条 */

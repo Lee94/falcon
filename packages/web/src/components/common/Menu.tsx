@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { Check } from "lucide-react";
 import { useApp } from "@/store.js";
 import {
   DropdownMenu,
@@ -51,6 +52,7 @@ export function Menu() {
               onSelect={() => item.onSelect()}
             >
               <span className="flex-1">{item.label}</span>
+              {item.checked && <Check className="text-muted-foreground" />}
               {item.kbd && <DropdownMenuShortcut>{item.kbd}</DropdownMenuShortcut>}
             </DropdownMenuItem>
           </Fragment>

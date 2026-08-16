@@ -17,6 +17,7 @@ import { useApp, selectSidebarVisible } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { chord } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
+import { THEME_ICONS, THEME_PREFS } from "./common/ThemeToggle.js";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   Command,
@@ -58,6 +59,7 @@ export function CommandPalette() {
   const active = useApp((s) => s.active);
   const auth = useApp((s) => s.auth);
   const sidebarVisible = useApp(selectSidebarVisible);
+  const themePref = useApp((s) => s.themePref);
   const actions = useActions();
   const [query, setQuery] = useState("");
 
@@ -153,6 +155,14 @@ export function CommandPalette() {
       icon: PanelLeft,
       run: () => store.toggleSidebar(),
     });
+    THEME_PREFS.filter((pref) => pref !== store.themePref).forEach((pref) =>
+      actionItems.push({
+        key: `>${t("theme.label")} ${t(`theme.${pref}`)} theme`,
+        label: t("palette.theme", { name: t(`theme.${pref}`) }),
+        icon: THEME_ICONS[pref],
+        run: () => store.setTheme(pref),
+      })
+    );
     actionItems.push({
       key: `>${t("palette.setPassword")}`,
       label: t("palette.setPassword"),
@@ -177,7 +187,7 @@ export function CommandPalette() {
     ];
     // actions 每次渲染都是新对象，纳入依赖会让 memo 失效；它只读 store，不用跟
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sessions, projects, active, auth, sidebarVisible, t]);
+  }, [open, sessions, projects, active, auth, sidebarVisible, themePref, t]);
 
   const prefix = query.charAt(0);
   const needle = query.replace(/^[>@#]/, "").trim().toLowerCase();

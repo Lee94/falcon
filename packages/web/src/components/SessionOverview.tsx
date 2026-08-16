@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import { StatusMark } from "./common/StatusMark.js";
 import { menuAnchor } from "./common/Menu.js";
+import { ThemeChoice } from "./common/ThemeToggle.js";
 
 const CARD_STATES: SessionState[] = ["active", "unverified", "dead"];
 
@@ -175,6 +176,8 @@ export function SessionOverview() {
         {t("overview.settings")}
       </h2>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{t("theme.label")}</span>
+        <ThemeChoice />
         <Button variant="outline" size="sm" onClick={() => setPasswordOpen(true)}>
           {t("password.title")}
         </Button>
@@ -247,7 +250,8 @@ function Row({
         {session.name}
       </TableCell>
       <TableCell className="max-w-0 truncate text-muted-foreground">
-        {session.projectName} <span className="text-border">·</span>{" "}
+        {/* 分隔点用透明度而不是 --border：后者在浅色下是实色浅灰，白底上看不见 */}
+        {session.projectName} <span className="text-muted-foreground/40">·</span>{" "}
         <span className="font-mono text-xs">{hostName}</span>
       </TableCell>
       <TableCell>

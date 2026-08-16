@@ -10,6 +10,15 @@ import type {
 import { toast as sonner } from "sonner";
 import { api, ApiRequestError } from "./api.js";
 import i18n from "./i18n.js";
+import {
+  applyTheme,
+  loadThemePref,
+  resolveTheme,
+  saveThemePref,
+  watchSystemTheme,
+  type ThemeMode,
+  type ThemePref,
+} from "./lib/theme.js";
 
 export type ActiveView = { kind: "overview" } | { kind: "terminal"; sessionId: string };
 
@@ -40,6 +49,8 @@ export interface MenuItemSpec {
   label: string;
   kbd?: string;
   danger?: boolean;
+  /** 单选组里当前生效的那一项，画一个勾（如主题） */
+  checked?: boolean;
   /** 上方画一条分隔线，危险项永远单独分组置底 */
   separated?: boolean;
   onSelect: () => void;
@@ -80,7 +91,7 @@ export interface InstallFailureRecord {
 }
 
 const WORKSPACE_KEY = "mojito.workspace";
-const DETACH_KEY = "mojito.detachEducated";
+const CLOSE_KILLS_KEY = "mojito.closeKillsEducated";
 const PENDING_PREFIX = "pending:";
 
 export function isPendingId(id: string): boolean {
@@ -127,10 +138,41 @@ function loadWorkspace(): PersistedWorkspace {
 }
 
 const initialWorkspace = loadWorkspace();
+const initialThemePref = loadThemePref();
 
 let pendingSeq = 0;
-/** 本次页面加载内只提示一次 Detach，"不再提示"才写 localStorage */
-let detachToastShown = false;
+/** 本次页面加载内只解释一次"关 tab 会结束会话"，"不再提示"才写 localStorage */
+let closeKillsToastShown = false;
+
+/**
+ * 关 tab 会杀掉会话——这是最容易让人措手不及的一步，头一次得说清楚，
+ * 顺带告诉用户想留后台跑该怎么关。说过一次就闭嘴，每次都念是噪音。
+ */
+function closeKillsHint(): Partial<
+  Pick<ToastSpec, "sticky" | "body" | "actionLabel" | "dismissLabel" | "onDismiss">
+> {
+  let educated = true;
+  try {
+    educated = localStorage.getItem(CLOSE_KILLS_KEY) === "1";
+  } catch {
+    educated = false;
+  }
+  if (educated || closeKillsToastShown) return {};
+  closeKillsToastShown = true;
+  return {
+    sticky: true,
+    body: i18n.t("toast.closeKillsBody"),
+    actionLabel: i18n.t("toast.gotIt"),
+    dismissLabel: i18n.t("toast.dontShowAgain"),
+    onDismiss: () => {
+      try {
+        localStorage.setItem(CLOSE_KILLS_KEY, "1");
+      } catch {
+        // 写不进去就下次再提示一遍，无害
+      }
+    },
+  };
+}
 
 interface AppState {
   authChecked: boolean;
@@ -139,10 +181,14 @@ interface AppState {
   projects: Project[];
   sessions: SessionWithProject[];
 
-  /** 打开的终端 tab（Detach 语义：关 tab 不杀会话），可能含 pending id */
+  /** 打开的终端 tab（手动关掉 = 结束会话，见 closeTab），可能含 pending id */
   tabs: string[];
   active: ActiveView;
   pending: PendingSession[];
+
+  /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
+  themePref: ThemePref;
+  theme: ThemeMode;
 
   /** 用户的侧栏偏好（持久化） */
   sidebarOpen: boolean;
@@ -175,14 +221,17 @@ interface AppState {
   refreshSessions(): Promise<void>;
 
   openSession(sessionId: string): void;
-  /** Detach：关 tab 不杀会话，首次会解释这件事 */
-  closeTab(id: string): void;
-  /** 只把 tab 摘掉，不做 Detach 引导——清除已丢失记录这类场景用它 */
+  /** 手动关 tab：Terminate，顺手结束会话，首次会解释这件事 */
+  closeTab(id: string): Promise<void>;
+  /** Detach：只收起 tab，会话留在后台继续跑（Shift+关闭） */
+  detachTab(id: string): void;
+  /** 只把 tab 摘掉，不碰会话、不做任何引导——清除已丢失记录这类场景用它 */
   dropTab(id: string): void;
   showOverview(): void;
   focusTabAt(index: number): void;
   cycleTab(delta: number): void;
 
+  setTheme(pref: ThemePref): void;
   toggleSidebar(): void;
   setSidebarAutoHidden(hidden: boolean): void;
   toggleProject(projectId: string): void;
@@ -246,6 +295,9 @@ export const useApp = create<AppState>((set, get) => {
     tabs: initialWorkspace.tabs,
     active: initialWorkspace.active,
     pending: [],
+
+    themePref: initialThemePref,
+    theme: resolveTheme(initialThemePref),
 
     sidebarOpen: initialWorkspace.sidebarOpen,
     sidebarAutoHidden: false,
@@ -342,35 +394,46 @@ export const useApp = create<AppState>((set, get) => {
       persist();
     },
 
-    closeTab(id) {
-      const wasReal = !isPendingId(id);
-      const session = get().sessions.find((s) => s.id === id);
+    /**
+     * 手动关 tab 直接结束会话——tab 就是会话，收起它等于不要它了。
+     * 想留着后台跑的用 detachTab（Shift+关闭）。
+     *
+     * 不弹确认：确认框挡在每一次关 tab 前面就成了噪音，用户会闭眼点。
+     * 代价是用一条事后 toast + 一次性说明来兜住"我不知道会杀掉"。
+     */
+    async closeTab(id) {
+      const session = isPendingId(id) ? undefined : get().sessions.find((s) => s.id === id);
       get().dropTab(id);
 
-      // 关 tab ≠ 杀会话，这是产品最容易被误解的语义，值得一次性引导
-      if (!wasReal || !session) return;
-      let educated = true;
+      // pending 还没有后端 id；dead 会话没什么可杀的，记录留着等用户自己清
+      if (!session || session.state === "dead") return;
+
       try {
-        educated = localStorage.getItem(DETACH_KEY) === "1";
-      } catch {
-        educated = false;
+        await api.terminateSession(session.id);
+        get().toast({
+          kind: "danger",
+          title: i18n.t("toast.terminated", { name: session.name }),
+          ...closeKillsHint(),
+        });
+      } catch (err) {
+        get().handleApiError(err);
+        get().toast({
+          kind: "danger",
+          title: i18n.t("toast.failed"),
+          body: (err as Error).message,
+        });
       }
-      if (educated || detachToastShown) return;
-      detachToastShown = true;
+      await get().refreshSessions();
+    },
+
+    detachTab(id) {
+      const session = isPendingId(id) ? undefined : get().sessions.find((s) => s.id === id);
+      get().dropTab(id);
+      if (!session || session.state === "dead") return;
       get().toast({
         kind: "info",
-        sticky: true,
         title: i18n.t("toast.detachTitle", { name: session.name }),
         body: i18n.t("toast.detachBody"),
-        actionLabel: i18n.t("toast.gotIt"),
-        dismissLabel: i18n.t("toast.dontShowAgain"),
-        onDismiss: () => {
-          try {
-            localStorage.setItem(DETACH_KEY, "1");
-          } catch {
-            // 写不进去就下次再提示一遍，无害
-          }
-        },
       });
     },
 
@@ -396,6 +459,14 @@ export const useApp = create<AppState>((set, get) => {
       const next = (current + delta + tabs.length * 2) % tabs.length;
       set({ active: { kind: "terminal", sessionId: tabs[next]! } });
       persist();
+    },
+
+    /** 主题偏好单独存一个 key：换主题不该把工作区布局也写回去一遍 */
+    setTheme(pref) {
+      const mode = resolveTheme(pref);
+      saveThemePref(pref);
+      applyTheme(mode);
+      set({ themePref: pref, theme: mode, menu: null, paletteOpen: false });
     },
 
     /** 显式开合永远以"现在看到的样子"为准，并解除窄屏的临时隐藏 */
@@ -608,4 +679,16 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
   };
+});
+
+// index.html 的内联脚本已经按同一份偏好写过 class 了，这里再落一次是为了兜住
+// 那段脚本读不到 localStorage 的情况——两边算出来的结果必须一致。
+applyTheme(useApp.getState().theme);
+
+// 跟随系统时才响应；选定了浅色/深色的用户不该因为系统入夜就被换掉主题
+watchSystemTheme((mode) => {
+  const { themePref, theme } = useApp.getState();
+  if (themePref !== "system" || theme === mode) return;
+  applyTheme(mode);
+  useApp.setState({ theme: mode });
 });

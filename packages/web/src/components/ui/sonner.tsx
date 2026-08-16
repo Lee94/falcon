@@ -7,12 +7,16 @@ import {
 } from "lucide-react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
 
-// 应用只交付暗色，不接 next-themes：主题写死，省一层 provider。
+import { useApp } from "@/store.js"
+
+// 不接 next-themes：明暗已经在 store 里了，再引一层 provider 只是重复一份状态。
 // description 用 pre-line —— 残留路径这类 body 是多行的，折行了才读得出来。
 const Toaster = ({ ...props }: ToasterProps) => {
+  const theme = useApp((s) => s.theme)
+
   return (
     <Sonner
-      theme="dark"
+      theme={theme}
       className="toaster group"
       position="bottom-right"
       icons={{

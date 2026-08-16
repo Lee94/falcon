@@ -95,7 +95,7 @@ export function App() {
         return;
       }
       case "closeTab":
-        if (s.active.kind === "terminal") s.closeTab(s.active.sessionId);
+        if (s.active.kind === "terminal") void s.closeTab(s.active.sessionId);
         return;
       case "reattach": {
         if (s.active.kind !== "terminal") return;

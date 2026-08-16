@@ -8,20 +8,10 @@ import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { connLabel } from "../lib/hostColor.js";
 import { chord, matchCommand } from "../lib/shortcuts.js";
+import { TERM_THEMES } from "../lib/theme.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Banner } from "./common/Banner.js";
-
-/**
- * xterm 只认具体颜色，读不了 CSS 变量，所以主题色在这里写死一次。
- * 取的是 shadcn neutral 暗色的 --background / --foreground 的 sRGB 值。
- */
-const TERM_THEME = {
-  background: "#0a0a0a",
-  foreground: "#fafafa",
-  cursor: "#fafafa",
-  selectionBackground: "#ffffff33",
-};
 
 interface ViewState {
   session: SessionState;
@@ -47,6 +37,7 @@ export function TerminalView({
   const project = useApp((s) => s.projects.find((p) => p.id === session?.projectId));
   const newTerminal = useApp((s) => s.newTerminal);
   const dropTab = useApp((s) => s.dropTab);
+  const theme = useApp((s) => s.theme);
 
   const [view, setView] = useState<ViewState>({
     session: "active",
@@ -60,7 +51,9 @@ export function TerminalView({
       fontFamily: '"Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace',
       fontSize: 13,
       scrollback: 5000,
-      theme: TERM_THEME,
+      // 这个 effect 不跟主题重建（重建 = 断 WS + 重放历史），初值直接读，
+      // 之后的切换交给下面那个 effect 就地改 options
+      theme: TERM_THEMES[useApp.getState().theme],
     });
     // 全局快捷键命中时把按键交给应用层：xterm 不处理，事件照样冒泡到 window。
     // Ctrl+C / Ctrl+R / Ctrl+W / Esc 不在快捷键表里，因此行为与原生终端一致。
@@ -153,6 +146,11 @@ export function TerminalView({
       termRef.current?.focus();
     }
   }, [visible]);
+
+  // 换主题时整套配色（含 ANSI 十六色）就地替换，已经打印出来的内容一并重绘
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = TERM_THEMES[theme];
+  }, [theme]);
 
   const manualReattach = async () => {
     setView((v) => ({ ...v, attachError: null }));

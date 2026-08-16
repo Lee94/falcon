@@ -8,7 +8,7 @@ import { StatusMark } from "./common/StatusMark.js";
 
 /**
  * 常驻渲染——从 0 个 tab 到 1 个 tab 主区不再上下跳。
- * 关闭按钮的 tooltip 必须说清 Detach 语义：关标签页 ≠ 终止会话。
+ * 关闭按钮的 tooltip 必须说清它会结束会话，以及 Shift 这条保留会话的出口。
  */
 export function TabBar() {
   const { t } = useTranslation();
@@ -22,7 +22,14 @@ export function TabBar() {
   const toggleSidebar = useApp((s) => s.toggleSidebar);
   const openSession = useApp((s) => s.openSession);
   const closeTab = useApp((s) => s.closeTab);
+  const detachTab = useApp((s) => s.detachTab);
   const newTerminal = useApp((s) => s.newTerminal);
+
+  /** Shift 是那条"只收起、别杀"的出口，鼠标的两种关法都认它 */
+  const close = (id: string, e: { shiftKey: boolean }) => {
+    if (e.shiftKey) detachTab(id);
+    else void closeTab(id);
+  };
 
   const activeId = active.kind === "terminal" ? active.sessionId : null;
 
@@ -98,7 +105,7 @@ export function TabBar() {
             onAuxClick={(e) => {
               if (e.button === 1) {
                 e.preventDefault();
-                closeTab(id);
+                close(id, e);
               }
             }}
           >
@@ -118,10 +125,10 @@ export function TabBar() {
             <button
               className="grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
               aria-label={t("tab.closeHint")}
-              title={t("tab.closeHint")}
+              title={`${t("tab.closeHint")}\n${t("tab.detachHint")}`}
               onClick={(e) => {
                 e.stopPropagation();
-                closeTab(id);
+                close(id, e);
               }}
             >
               <X className="size-3" />
