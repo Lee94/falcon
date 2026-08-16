@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mojito",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["packages/server/dist/index.js"],
+      "port": 4923
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev:web"],
+      "port": 5173
+    }
+  ]
+}

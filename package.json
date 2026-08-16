@@ -1,0 +1,15 @@
+{
+  "name": "mojito-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "pnpm --filter @mojito/shared build && pnpm --filter @mojito/server build && pnpm --filter @mojito/web build",
+    "dev:server": "pnpm --filter @mojito/server dev",
+    "dev:web": "pnpm --filter @mojito/web dev",
+    "start": "node packages/server/dist/index.js",
+    "update-zellij": "node scripts/update-zellij.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
