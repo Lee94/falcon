@@ -110,7 +110,7 @@ Mojito 的硬承诺是"关掉网页会话不死"，但现在的界面完全没�
 ### S13 · 术语与 i18n 有漏洞
 
 - 项目类型硬编码中文，绕过 i18n：`{p.type === "ssh" ? "SSH" : "本地"}`（[Sidebar.tsx:106](../../packages/web/src/components/Sidebar.tsx)、[SessionOverview.tsx:68](../../packages/web/src/components/SessionOverview.tsx)）；
-- tab 关闭按钮的 `title` 用了 `t("common.cancel")` → 显示"取消"（[App.tsx:63](../../packages/web/src/components/App.tsx)），语义错误，而这恰恰是最需要解释清楚的地方（关 tab ≠ 终止会话）；
+- tab 关闭按钮的 `title` 用了 `t("common.cancel")` → 显示"取消"（[App.tsx:63](../../packages/web/src/components/App.tsx)），语义错误，而这恰恰是最需要解释清楚的地方（关 tab 到底会不会终止会话）；
 - `i18n.ts` 里 `session.nonDurableHint` 等文案措辞偏系统日志，非人话。
 
 ---
@@ -154,7 +154,7 @@ Sidebar（项目树）        Main
 | 层 | 是什么 | 关闭它意味着 |
 | --- | --- | --- |
 | Sidebar 会话行 | **所有**会话的全集（存在性） | — |
-| Tab | 我**正在关注**的会话子集（工作台布局） | Detach，会话继续跑 |
+| Tab | 我**正在关注**的会话子集（工作台布局） | Terminate，会话一起结束（Shift+关闭才是 Detach） |
 | Stage | 当前**聚焦**的那一个 | — |
 
 这个三层关系要靠文案讲出来，见 §7.3。
@@ -245,8 +245,8 @@ SSH 项目在名称左侧显示一条 3px 竖色条，颜色由 `host:port:usern
 
 - **常驻渲染**，不再条件出现（解决 S7）。无 tab 时也保留高度，只显示「总览」和 `＋`。
 - 每个 tab：`[主机色条] [状态记号] [会话名] [×]`。
-- 关闭按钮的 tooltip 必须是 **「关闭标签页 · 会话继续运行」**（解决 S13 与 Detach 的认知问题）。
-- 中键点击关闭；`⌘W` 关闭当前；tab 可拖拽排序。
+- 关闭按钮的 tooltip 必须是 **「关闭标签页 · 结束会话」**，并带上第二行「按住 Shift 关闭 · 会话留在后台继续运行」（解决 S13 的认知问题）。
+- 中键点击关闭；`⌘W` 关闭当前；两者都认 Shift（只 Detach、不杀）；tab 可拖拽排序。
 - 溢出时横向滚动 + 两端渐隐遮罩，不做折叠菜单（tab 数量在这个产品里天然不多）。
 
 **实现约束（重要）**：非活动 pane 必须继续保持 `visibility: hidden` 而不是卸载（当前 [App.tsx:80-92](../../packages/web/src/components/App.tsx) 的做法是对的）。xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪。重构布局时**不要**改成条件挂载。
@@ -342,13 +342,14 @@ Banner 保留，但只用于**需要用户动作**的状态（unverified 待接�
 
 创建期间：tab 立刻出现并显示骨架 + "正在建立会话…"，而不是等 REST 返回后才出现。失败则该 tab 变为错误态并给「重试」，不再用 `alert`。
 
-### 7.3 Detach 教育（关 tab ≠ 杀会话）
+### 7.3 关 tab 教育（关 tab = 结束会话，Shift 才是 Detach）
 
-这是产品最容易被误解的语义，值得一次一次性引导：
+Tab 即会话：用户手动收起它就是不要它了，关 tab 默认 Terminate。留在后台跑是**另一条**动作，得让用户知道它存在：
 
-- tab 关闭按钮 tooltip：**「关闭标签页 · 会话继续运行」**
-- **首次**关闭 tab 时弹一条 toast：*"「dev server」仍在后台运行。要真正结束它，用会话菜单里的『终止』。"* 带一个「不再提示」。
-- 侧栏对应会话行短暂高亮 1.5s——让用户看到"它去哪了"。
+- tab 关闭按钮 tooltip：**「关闭标签页 · 结束会话」** + 「按住 Shift 关闭 · 会话留在后台继续运行」
+- **首次**关闭 tab 时，在「已终止「dev server」」这条 toast 上补一句：*"关闭标签页会结束会话。想让它继续在后台跑，按住 Shift 再关。"* 带一个「不再提示」。
+- 不弹确认框：确认框挡在每一次关 tab 前面就成了噪音，用户会闭眼点。代价用事后 toast 兜。
+- Shift 关闭（Detach）时弹一条 info toast：*"「dev server」仍在后台运行"*——让用户看到"它去哪了"。
 
 ### 7.4 持久会话授权与安装（重构 S8）
 
@@ -762,7 +763,7 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 | --- | --- | --- |
 | 命令面板 | `⌘K` | `Ctrl+Shift+P` |
 | 新建终端（当前项目） | `⌘T` | `Ctrl+Shift+T` |
-| 关闭当前 tab（Detach） | `⌘W` | `Ctrl+Shift+W` |
+| 关闭当前 tab（Terminate） | `⌘W` | `Ctrl+Shift+W` |
 | 下一个 / 上一个 tab | `⌘⇧]` / `⌘⇧[` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | 切到第 N 个 tab | `⌘1..9` | `Alt+1..9` |
 | 切到会话总览 | `⌘0` | `Alt+0` |
@@ -838,7 +839,7 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 3. `ConfirmDialog` 替换全部 `confirm()`，删除项目时列出受影响会话 → 解决 S3/S4
 4. `Toast` 替换全部 `alert()`
 5. 项目行操作收入 `⋯` 菜单，删除项目降级并远离 `＋` → 解决 S3
-6. tab 关闭 tooltip 与首次 Detach 提示 → 解决 S13 的语义错误
+6. tab 关闭 tooltip 与首次关 tab 提示 → 解决 S13 的语义错误
 7. `tabbar` 常驻渲染 → 解决 S7
 8. **主机抽屉「持久会话设置…」+ `⚠ 非持久` 徽标可点** → 解开 `authorized: false` 死锁（R3）。这是 bug 级问题，不该等到打磨批次
 
@@ -882,7 +883,7 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 11. 失败态能复制到一段直接可执行的手动安装命令，URL 已按远端 os/arch 拼好。（R2）
 12. 曾经点过「不安装」的主机，能纯从 UI 重新启用持久会话——不需要查文档，也不需要动数据库。（R3）
 13. 安装成功后，用户被明确告知**已存在的会话仍是非持久的**。（R4）
-14. 首次关闭 tab 时，用户被明确告知会话仍在运行。（Detach 语义）
+14. 首次关闭 tab 时，用户被明确告知会话已被结束，以及 Shift 可以让它继续跑。（§7.3）
 15. 无项目的新用户，在首屏就能读到"关掉网页也不会中断"这句承诺。（S1 的正向表达）
 
 ---

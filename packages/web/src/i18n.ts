@@ -122,7 +122,8 @@ const zh = {
     tab: {
       overview: "总览",
       creating: "新终端",
-      closeHint: "关闭标签页 · 会话继续运行",
+      closeHint: "关闭标签页 · 结束会话",
+      detachHint: "按住 Shift 关闭 · 会话留在后台继续运行",
       newHint: "新建终端 · {{kbd}}",
     },
     session: {
@@ -311,7 +312,8 @@ const zh = {
     },
     toast: {
       detachTitle: "「{{name}}」仍在后台运行",
-      detachBody: "关闭标签页只是 Detach。要真正结束它，用会话菜单里的「终止」。",
+      detachBody: "标签页收起来了，会话没停。随时可以从侧栏重新打开。",
+      closeKillsBody: "关闭标签页会结束会话。想让它继续在后台跑，按住 Shift 再关。",
       gotIt: "知道了",
       dontShowAgain: "不再提示",
       createFailed: "创建会话失败",
