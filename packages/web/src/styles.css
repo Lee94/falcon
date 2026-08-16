@@ -4,15 +4,22 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * shadcn/ui 默认暗色主题（base color: neutral）。
- * 应用只交付暗色：<html class="dark">，:root 的浅色块保留只为让 shadcn 组件
- * 源码里的 dark: 变体保持标准形态，不要在组件里写死颜色。
+ * shadcn/ui 主题（base color: neutral），两套都交付：`:root` 浅色，`.dark` 深色。
+ * 挂哪一套由 <html> 上有没有 .dark 决定，见 src/lib/theme.ts。组件里一律用语义
+ * token，不要写死颜色——写死的那一刻就有一个主题是坏的。
  *
  * --success / --warning 是 shadcn 没有、但这个产品必须有的语义色：
- * 会话三态（运行中 / 待接回 / 已丢失）必须能各自成色。
+ * 会话三态（运行中 / 待接回 / 已丢失）必须能各自成色。它们**只作前景色**用
+ * （text-success / text-warning 配一层 10% 的同色底），所以浅色那一套要比深色
+ * 深得多——深色下好看的 0.7 亮度黄绿，放到白底上是读不出来的。
+ *
+ * --host-s / --host-l 是主机身份色的饱和度与亮度：色相由 hostColor.ts 哈希出来，
+ * 明暗两套的深浅在这里定，色条才能在两个主题下都看得见。
  */
 
 :root {
+  color-scheme: light;
+
   --radius: 0.5rem;
 
   --background: oklch(1 0 0);
@@ -31,10 +38,10 @@
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
-  --success: oklch(0.62 0.14 152);
+  --success: oklch(0.53 0.13 152);
   --success-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.72 0.14 78);
-  --warning-foreground: oklch(0.205 0 0);
+  --warning: oklch(0.52 0.13 68);
+  --warning-foreground: oklch(0.985 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -47,9 +54,14 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  --host-s: 48%;
+  --host-l: 38%;
 }
 
 .dark {
+  color-scheme: dark;
+
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -82,6 +94,9 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+
+  --host-s: 34%;
+  --host-l: 56%;
 }
 
 @theme inline {
@@ -185,11 +200,13 @@
     width: 10px;
     height: 10px;
   }
+  /* 用 muted-foreground 的透明度而不是 --border：后者在浅色下是接近白的实色，
+     滚在白底上等于没有滚动条 */
   ::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-border;
+    @apply rounded-full bg-muted-foreground/25;
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-muted-foreground/40;
+    @apply bg-muted-foreground/45;
   }
   ::-webkit-scrollbar-track {
     background: transparent;

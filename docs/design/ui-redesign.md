@@ -544,9 +544,16 @@ authorized === null || (authorized === true && !installedVersion)
 
 ## 9. 视觉系统
 
-深色为默认且唯一交付主题。所有颜色以 token 定义，浅色主题预留结构，v1 不实现。
+深色为默认且唯一交付主题。所有颜色以 token 定义，浅色主题预留结构，v1 不实现。<br>
+（2026-08-16 起浅色已实现，见下方变更注记。）
 
 > **2026-08-15 变更**：token 的**命名与取值**已换成 shadcn/ui 的一套（`--background` / `--card` / `--popover` / `--primary` / `--muted` / `--destructive` / `--border` / `--ring`，base color: neutral，暗色由 `<html class="dark">` 固定），不再是下面 §9.1 的 `--surface-*` / `--text-*`。间距与圆角改用 Tailwind 的 scale。**下面 §9.1–9.4 保留为设计意图的记录，实际取值以 [`packages/web/src/styles.css`](../../packages/web/src/styles.css) 为准。** §9.5 的主机身份色算法未变，仍在 [`lib/hostColor.ts`](../../packages/web/src/lib/hostColor.ts)。
+
+> **2026-08-16 变更**：浅色主题已实现（§15 中原列为"不做"）。深色仍是设计基准，但两套都交付：偏好为跟随系统 / 浅色 / 深色三档，存在 `mojito.theme`，落到 DOM 上就是 `<html>` 有没有 `.dark`。逻辑集中在 [`lib/theme.ts`](../../packages/web/src/lib/theme.ts)，入口在侧栏底部与设置页（另有命令面板项）。三处必须一起看：
+>
+> - **首帧**由 `index.html` 的内联脚本决定，否则深色用户会被白闪一下；它与 `lib/theme.ts` 必须用同一个 key、同一套判定。
+> - **xterm 读不了 CSS 变量**，所以配色在 `TERM_THEMES` 里写死两份。浅色那份必须**整套**覆盖 ANSI 十六色（取 VS Code Light+ 的值）——xterm 默认的 white / brightWhite 接近纯白，在白底上直接消失。
+> - **`--success` / `--warning` 两套取值差得远**：它们只作前景色用，深色下好看的 0.7 亮度黄绿放到白底上读不出来，浅色那套压到 0.52 / 0.53 才过 AA。
 
 ### 9.1 颜色（历史取值，已由 shadcn 主题取代）
 
@@ -883,7 +890,7 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 ## 15. 明确不做
 
 - **移动端 / 响应式**：本次范围为桌面宽屏。窄于 1024px 时侧栏自动折叠即可，不做移动端交互。
-- **浅色主题**：token 结构预留，v1 不实现配色。
+- ~~**浅色主题**：token 结构预留，v1 不实现配色。~~ → **2026-08-16 已实现**（跟随系统 / 浅色 / 深色三档，见 §9 变更注记）。
 - **终端分屏 / 平铺布局**：Zellij 自己就能分屏，在 Web 层再做一套是重复建设，且会与 Zellij 的键位打架。
 - **主题自定义 / 终端配色方案切换**：v2 议题。
 - **多语言**：i18n 框架已就位，v1 仍只交付中文，但本次要修复硬编码使其可扩展。

@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { StatusMark } from "./common/StatusMark.js";
 import { menuAnchor } from "./common/Menu.js";
+import { ThemeButton } from "./common/ThemeToggle.js";
 
 export function Sidebar() {
   const { t } = useTranslation();
@@ -129,11 +130,14 @@ export function Sidebar() {
           <Settings />
           {t("sidebar.settings")}
         </Button>
-        {system?.version && (
-          <span className="ml-auto pr-1.5 font-mono text-[11px] text-muted-foreground/70">
-            v{system.version}
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-1">
+          {system?.version && (
+            <span className="font-mono text-[11px] text-muted-foreground/70">
+              v{system.version}
+            </span>
+          )}
+          <ThemeButton />
+        </span>
       </div>
     </aside>
   );

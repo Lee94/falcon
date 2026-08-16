@@ -10,6 +10,15 @@ import type {
 import { toast as sonner } from "sonner";
 import { api, ApiRequestError } from "./api.js";
 import i18n from "./i18n.js";
+import {
+  applyTheme,
+  loadThemePref,
+  resolveTheme,
+  saveThemePref,
+  watchSystemTheme,
+  type ThemeMode,
+  type ThemePref,
+} from "./lib/theme.js";
 
 export type ActiveView = { kind: "overview" } | { kind: "terminal"; sessionId: string };
 
@@ -40,6 +49,8 @@ export interface MenuItemSpec {
   label: string;
   kbd?: string;
   danger?: boolean;
+  /** 单选组里当前生效的那一项，画一个勾（如主题） */
+  checked?: boolean;
   /** 上方画一条分隔线，危险项永远单独分组置底 */
   separated?: boolean;
   onSelect: () => void;
@@ -127,6 +138,7 @@ function loadWorkspace(): PersistedWorkspace {
 }
 
 const initialWorkspace = loadWorkspace();
+const initialThemePref = loadThemePref();
 
 let pendingSeq = 0;
 /** 本次页面加载内只提示一次 Detach，"不再提示"才写 localStorage */
@@ -143,6 +155,10 @@ interface AppState {
   tabs: string[];
   active: ActiveView;
   pending: PendingSession[];
+
+  /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
+  themePref: ThemePref;
+  theme: ThemeMode;
 
   /** 用户的侧栏偏好（持久化） */
   sidebarOpen: boolean;
@@ -183,6 +199,7 @@ interface AppState {
   focusTabAt(index: number): void;
   cycleTab(delta: number): void;
 
+  setTheme(pref: ThemePref): void;
   toggleSidebar(): void;
   setSidebarAutoHidden(hidden: boolean): void;
   toggleProject(projectId: string): void;
@@ -246,6 +263,9 @@ export const useApp = create<AppState>((set, get) => {
     tabs: initialWorkspace.tabs,
     active: initialWorkspace.active,
     pending: [],
+
+    themePref: initialThemePref,
+    theme: resolveTheme(initialThemePref),
 
     sidebarOpen: initialWorkspace.sidebarOpen,
     sidebarAutoHidden: false,
@@ -396,6 +416,14 @@ export const useApp = create<AppState>((set, get) => {
       const next = (current + delta + tabs.length * 2) % tabs.length;
       set({ active: { kind: "terminal", sessionId: tabs[next]! } });
       persist();
+    },
+
+    /** 主题偏好单独存一个 key：换主题不该把工作区布局也写回去一遍 */
+    setTheme(pref) {
+      const mode = resolveTheme(pref);
+      saveThemePref(pref);
+      applyTheme(mode);
+      set({ themePref: pref, theme: mode, menu: null, paletteOpen: false });
     },
 
     /** 显式开合永远以"现在看到的样子"为准，并解除窄屏的临时隐藏 */
@@ -608,4 +636,16 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
   };
+});
+
+// index.html 的内联脚本已经按同一份偏好写过 class 了，这里再落一次是为了兜住
+// 那段脚本读不到 localStorage 的情况——两边算出来的结果必须一致。
+applyTheme(useApp.getState().theme);
+
+// 跟随系统时才响应；选定了浅色/深色的用户不该因为系统入夜就被换掉主题
+watchSystemTheme((mode) => {
+  const { themePref, theme } = useApp.getState();
+  if (themePref !== "system" || theme === mode) return;
+  applyTheme(mode);
+  useApp.setState({ theme: mode });
 });

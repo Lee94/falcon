@@ -1,10 +1,38 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
     <title>Mojito</title>
+    <!--
+      主题在解析到 <body> 之前就定下来：晚一帧就会白闪一下，深色用户在夜里
+      被闪到是很难受的。key 与取值必须与 src/lib/theme.ts 保持一致。
+      样式表是异步加载的，所以这里也顺带把 html 的底色兜住。
+    -->
+    <style>
+      html {
+        background: #ffffff;
+        color-scheme: light;
+      }
+      html.dark {
+        background: #0a0a0a;
+        color-scheme: dark;
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem("mojito.theme");
+          var dark =
+            pref === "dark" ||
+            (pref !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (e) {
+          // 读不到偏好就用浅色，等 React 起来后再由 store 纠正
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

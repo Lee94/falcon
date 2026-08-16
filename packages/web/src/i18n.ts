@@ -283,6 +283,12 @@ const zh = {
       idleHour: "{{n}} 小时",
       idleDay: "{{n}} 天",
     },
+    theme: {
+      label: "主题",
+      system: "跟随系统",
+      light: "浅色",
+      dark: "深色",
+    },
     palette: {
       placeholder: "搜索会话与命令 —— @ 会话 · # 项目 · > 命令",
       search: "搜索",
@@ -298,6 +304,7 @@ const zh = {
       toggleSidebarOn: "折叠侧栏",
       toggleSidebarOff: "展开侧栏",
       overview: "打开会话总览",
+      theme: "切换主题：{{name}}",
       setPassword: "设置访问密码…",
       logout: "退出登录",
       empty: "没有匹配项",
