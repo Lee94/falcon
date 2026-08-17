@@ -4,7 +4,7 @@ import type {
   ServerMessage,
   Session,
 } from "@mojito/shared";
-import type { Db, ProjectRow, SessionRow } from "../db.js";
+import type { Db, ProjectRow, SessionRow, SshHostRow } from "../db.js";
 import { Db as DbStatics } from "../db.js";
 import type { SecretBox } from "../crypto.js";
 import { RingBuffer } from "../ringbuffer.js";
@@ -57,8 +57,33 @@ interface ReconnectState {
 
 const RECONNECT_MAX_DELAY = 30_000;
 
+/** 浏览远端目录时把已保存主机构成一条假 ProjectRow，好复用 SshLink。 */
+export function hostAsProject(host: SshHostRow): ProjectRow {
+  return {
+    id: `host:${host.id}`,
+    name: host.name,
+    type: "ssh",
+    working_dir: null,
+    shell: null,
+    ssh_host: host.host,
+    ssh_port: host.port,
+    ssh_username: host.username,
+    ssh_auth_method: host.auth_method,
+    ssh_key_path: host.key_path,
+    ssh_secret_enc: host.secret_enc,
+    host_id: host.id,
+    created_at: host.created_at,
+    source_project_id: null,
+    worktree_branch: null,
+    worktree_repo_dir: null,
+    worktree_created_by_mojito: null,
+  };
+}
+
 export class SessionManager {
   private links = new Map<string, SshLink>();
+  /** 按 hostId 缓存，给还没有项目的「浏览远端目录」复用，避免每点一层就重连 */
+  private hostLinks = new Map<string, SshLink>();
   private entries = new Map<string, LiveEntry>();
   private reconnects = new Map<string, ReconnectState>();
   private lastTouch = new Map<string, number>();
@@ -151,6 +176,39 @@ export class SessionManager {
     const rec = this.reconnects.get(projectId);
     if (rec?.timer) clearTimeout(rec.timer);
     this.reconnects.delete(projectId);
+  }
+
+  /**
+   * 已保存主机的浏览链路。改凭据或删主机时必须 dispose，否则会拿着旧密钥连。
+   * 不挂 reconnect：浏览不是会话，断了下次点再连。
+   */
+  getHostLink(host: SshHostRow): SshLink {
+    let link = this.hostLinks.get(host.id);
+    if (!link) {
+      link = new SshLink(hostAsProject(host), this.db, this.secrets);
+      this.hostLinks.set(host.id, link);
+    } else {
+      link.updateProject(hostAsProject(host));
+    }
+    return link;
+  }
+
+  disposeHostLink(hostId: string) {
+    this.hostLinks.get(hostId)?.dispose();
+    this.hostLinks.delete(hostId);
+  }
+
+  /**
+   * 试连一组 SSH 凭据。用一次性链路，测完就拆——
+   * 表单里可能是还没保存的草稿，不能写进 hostLinks 污染浏览缓存。
+   */
+  async probeSsh(project: ProjectRow): Promise<{ kind: "posix" | "windows"; home: string }> {
+    const link = new SshLink(project, this.db, this.secrets);
+    try {
+      return await link.hostFacts();
+    } finally {
+      link.dispose();
+    }
   }
 
   // ---------- 会话生命周期 ----------

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Project, ProjectInput, ProjectType, SshAuthMethod } from "@mojito/shared";
+import type { Project, ProjectInput, ProjectType } from "@mojito/shared";
 import { api } from "../api.js";
-import { useApp } from "../store.js";
+import { sshConn } from "../lib/hostColor.js";
+import { useApp, type ProjectFormPreset } from "../store.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -14,34 +15,53 @@ import {
 } from "@/components/ui/select";
 import { AppDialog } from "./common/AppDialog.js";
 import { Field, Segmented } from "./common/Field.js";
+import { FolderPicker } from "./FolderPicker.js";
+import { SshFields, type SshFieldValues } from "./SshFields.js";
 
 export function ProjectForm({
   existing,
+  preset,
   onClose,
 }: {
   existing: Project | null;
+  preset?: ProjectFormPreset;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   const refreshProjects = useApp((s) => s.refreshProjects);
+  const refreshHosts = useApp((s) => s.refreshHosts);
+  const hosts = useApp((s) => s.hosts);
+  const openHostForm = useApp((s) => s.openHostForm);
 
-  const [type, setType] = useState<ProjectType>(existing?.type ?? "local");
+  const [type, setType] = useState<ProjectType>(existing?.type ?? preset?.type ?? "local");
   const [name, setName] = useState(existing?.name ?? "");
   const [workingDir, setWorkingDir] = useState(existing?.workingDir ?? "");
   const [shell, setShell] = useState(existing?.shell ?? "");
-  const [host, setHost] = useState(existing?.ssh?.host ?? "");
-  const [port, setPort] = useState(existing?.ssh?.port ?? 22);
-  const [username, setUsername] = useState(existing?.ssh?.username ?? "");
-  const [authMethod, setAuthMethod] = useState<SshAuthMethod>(
-    existing?.ssh?.authMethod ?? "key"
-  );
-  const [keyPath, setKeyPath] = useState(existing?.ssh?.keyPath ?? "");
-  const [secret, setSecret] = useState("");
+  const [hostId, setHostId] = useState(existing?.hostId ?? preset?.hostId ?? "");
+  const [ssh, setSsh] = useState<SshFieldValues>({
+    host: existing?.ssh?.host ?? "",
+    port: existing?.ssh?.port ?? 22,
+    username: existing?.ssh?.username ?? "",
+    authMethod: existing?.ssh?.authMethod ?? "key",
+    keyPath: existing?.ssh?.keyPath ?? "",
+    secret: "",
+  });
   const [pathHint, setPathHint] = useState<{ ok: boolean; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 从某台服务器进来：类型已定，直接选文件夹 */
+  const locked = Boolean(!existing && preset?.type);
+  const [picking, setPicking] = useState(locked);
+
+  // 存量项目没有 hostId：可以继续手写 ssh，也可以改绑到已保存主机
+  const legacy = Boolean(existing && !existing.hostId);
+  const usingSavedHost = type === "ssh" && (Boolean(hostId) || !legacy);
 
   const validatePath = async () => {
+    if (!workingDir.trim()) {
+      setPathHint(null);
+      return;
+    }
     try {
       const res = await api.validatePath(workingDir);
       setPathHint(
@@ -54,50 +74,122 @@ export function ProjectForm({
     }
   };
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const folderName = (dir: string) =>
+    dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? "";
+
+  const save = async (next: { name: string; workingDir: string }) => {
+    if (type === "ssh" && usingSavedHost && !hostId) {
+      setError(t("host.required"));
+      return;
+    }
     setBusy(true);
     setError(null);
     const input: ProjectInput = {
-      name,
+      name: next.name,
       type,
-      workingDir: workingDir || undefined,
+      workingDir: next.workingDir || undefined,
       shell: shell || undefined,
+      hostId: type === "ssh" && hostId ? hostId : undefined,
       ssh:
-        type === "ssh"
+        type === "ssh" && !hostId
           ? {
-              host,
-              port,
-              username,
-              authMethod,
-              keyPath: authMethod === "key" ? keyPath : undefined,
-              secret: secret || undefined,
+              host: ssh.host,
+              port: ssh.port,
+              username: ssh.username,
+              authMethod: ssh.authMethod,
+              keyPath: ssh.authMethod === "key" ? ssh.keyPath : undefined,
+              secret: ssh.secret || undefined,
             }
           : undefined,
     };
     try {
       if (existing) {
         await api.updateProject(existing.id, input);
+        await Promise.all([refreshProjects(), refreshHosts()]);
       } else {
-        await api.createProject(input);
+        const created = await api.createProject(input);
+        await Promise.all([refreshProjects(), refreshHosts()]);
+        useApp.getState().selectProject(created.id);
       }
-      await refreshProjects();
       onClose();
     } catch (err) {
       setError((err as Error).message);
+      setPicking(false);
     } finally {
       setBusy(false);
     }
   };
 
-  const secretLabel =
-    authMethod === "key" ? t("project.passphrase") : t("project.sshPassword");
+  const pickFolder = (dir: string) => {
+    if (busy) return;
+    const base = folderName(dir);
+    const nextName = name.trim() || base;
+    setWorkingDir(dir);
+    setPathHint({ ok: true, text: t("project.pathOk") });
+    if (!existing && !name.trim() && base) setName(base);
+    // 从服务器新建：选完目录就创建，不再问本机还是 SSH
+    if (locked && nextName) {
+      void save({ name: nextName, workingDir: dir });
+      return;
+    }
+    setPicking(false);
+  };
+
+  const closePicker = () => {
+    if (busy) return;
+    if (locked && !workingDir) onClose();
+    else setPicking(false);
+  };
+
+  const canBrowseRemote = Boolean(hostId || (existing && existing.type === "ssh"));
+  const openPicker = () => {
+    if (type === "ssh" && !canBrowseRemote) return;
+    setPicking(true);
+  };
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void save({ name, workingDir });
+  };
+
   const title = existing ? t("project.editTitle") : t("project.createTitle");
+  const selected = hosts.find((h) => h.id === hostId);
 
   return (
-    <AppDialog title={title} onClose={onClose} lockOverlay>
-      <form onSubmit={submit} className="grid gap-3">
-        {!existing && (
+    <AppDialog
+      title={
+        picking
+          ? type === "ssh"
+            ? t("project.pickRemoteTitle")
+            : t("project.pickTitle")
+          : title
+      }
+      onClose={picking ? closePicker : onClose}
+      lockOverlay
+      wide={picking}
+      className={picking ? "overflow-hidden" : undefined}
+    >
+      {picking ? (
+        <FolderPicker
+          initialPath={workingDir}
+          onSelect={pickFolder}
+          onClose={closePicker}
+          remote={type === "ssh"}
+          confirming={busy}
+          listDir={(dir) =>
+            api.listDir(
+              dir,
+              existing?.type === "ssh"
+                ? { projectId: existing.id }
+                : hostId
+                  ? { hostId }
+                  : undefined
+            )
+          }
+        />
+      ) : (
+        <form onSubmit={submit} className="grid gap-3">
+        {!existing && !locked && (
           <Segmented
             value={type}
             label={t("project.name")}
@@ -134,95 +226,95 @@ export function ProjectForm({
                   setWorkingDir(e.target.value);
                   setPathHint(null);
                 }}
+                onBlur={() => void validatePath()}
                 placeholder="D:\code\my-project"
               />
-              <Button
-                variant="outline"
-                type="button"
-                onClick={validatePath}
-                disabled={!workingDir}
-              >
-                {t("project.validate")}
+              <Button variant="outline" type="button" onClick={() => setPicking(true)}>
+                {t("project.browse")}
               </Button>
             </div>
           </Field>
         ) : (
           <>
-            <div className="flex gap-2.5">
-              <Field label={t("project.host")} htmlFor="ssh-host" className="flex-1">
-                <Input
-                  id="ssh-host"
-                  className="font-mono"
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                />
-              </Field>
-              <Field label={t("project.port")} htmlFor="ssh-port" className="w-22">
-                <Input
-                  id="ssh-port"
-                  className="font-mono"
-                  type="number"
-                  value={port}
-                  onChange={(e) => setPort(Number(e.target.value))}
-                />
-              </Field>
-            </div>
-            <Field label={t("project.username")} htmlFor="ssh-user">
-              <Input
-                id="ssh-user"
-                className="font-mono"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
-            </Field>
-            <Field label={t("project.authMethod")}>
-              <Select
-                value={authMethod}
-                onValueChange={(v) => setAuthMethod(v as SshAuthMethod)}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="key">{t("project.authKey")}</SelectItem>
-                  <SelectItem value="password">{t("project.authPassword")}</SelectItem>
-                  <SelectItem value="agent">{t("project.authAgent")}</SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
-            {authMethod === "key" && (
-              <Field label={t("project.keyPath")} htmlFor="ssh-key">
-                <Input
-                  id="ssh-key"
-                  className="font-mono"
-                  value={keyPath}
-                  onChange={(e) => setKeyPath(e.target.value)}
-                  placeholder="~/.ssh/id_ed25519"
-                />
-              </Field>
-            )}
-            {authMethod !== "agent" && (
+            {!locked && (
               <Field
-                label={secretLabel}
-                htmlFor="ssh-secret"
-                hint={existing?.ssh?.hasSecret ? t("project.secretKept") : undefined}
+                label={legacy && !hostId ? t("host.bind") : t("host.title")}
+                hint={
+                  hosts.length === 0
+                    ? t("host.emptyCreate")
+                    : selected
+                      ? sshConn(selected)
+                      : undefined
+                }
               >
-                <Input
-                  id="ssh-secret"
-                  type="password"
-                  value={secret}
-                  onChange={(e) => setSecret(e.target.value)}
-                />
+                {hosts.length === 0 ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => openHostForm(null, (h) => setHostId(h.id))}
+                  >
+                    {t("host.add")}
+                  </Button>
+                ) : (
+                  <div className="flex gap-2.5">
+                    <Select value={hostId || undefined} onValueChange={setHostId}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder={t("host.pick")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {hosts.map((h) => (
+                          <SelectItem key={h.id} value={h.id}>
+                            {h.name}
+                            <span className="ml-2 font-mono text-xs text-muted-foreground">
+                              {sshConn(h)}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => openHostForm(null, (h) => setHostId(h.id))}
+                    >
+                      {t("host.add")}
+                    </Button>
+                  </div>
+                )}
               </Field>
             )}
-            <Field label={t("project.remoteDir")} htmlFor="ssh-dir">
-              <Input
-                id="ssh-dir"
-                className="font-mono"
-                value={workingDir}
-                onChange={(e) => setWorkingDir(e.target.value)}
-                placeholder="/home/user/project"
-              />
+            {legacy && !hostId && (
+              <SshFields value={ssh} onChange={setSsh} hasSecret={existing?.ssh?.hasSecret} />
+            )}
+            <Field
+              label={t("project.remoteDir")}
+              htmlFor="ssh-dir"
+              hint={
+                pathHint?.text ??
+                (!canBrowseRemote ? t("project.pickNeedHost") : undefined)
+              }
+              tone={pathHint ? (pathHint.ok ? "ok" : "err") : undefined}
+            >
+              <div className="flex gap-2.5">
+                <Input
+                  id="ssh-dir"
+                  className="font-mono"
+                  value={workingDir}
+                  onChange={(e) => {
+                    setWorkingDir(e.target.value);
+                    setPathHint(null);
+                  }}
+                  placeholder="/home/user/project"
+                />
+                <Button
+                  variant="outline"
+                  type="button"
+                  disabled={!canBrowseRemote}
+                  onClick={openPicker}
+                >
+                  {t("project.browse")}
+                </Button>
+              </div>
             </Field>
           </>
         )}
@@ -243,11 +335,15 @@ export function ProjectForm({
           <Button variant="outline" type="button" onClick={onClose}>
             {t("common.cancel")}
           </Button>
-          <Button type="submit" disabled={busy || !name}>
+          <Button
+            type="submit"
+            disabled={busy || !name || (type === "ssh" && usingSavedHost && !hostId)}
+          >
             {existing ? t("project.save") : t("project.create")}
           </Button>
         </div>
-      </form>
+        </form>
+      )}
     </AppDialog>
   );
 }

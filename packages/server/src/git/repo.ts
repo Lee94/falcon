@@ -6,7 +6,15 @@
  * 所以这里判错一律显式查 res.code；只有 exec 本身 reject 才是链路故障。
  */
 
-import type { RepoBranch, RepoInfo, WorktreeFailure, WorktreeStatus } from "@mojito/shared";
+import type {
+  GitSnapshot,
+  GitUnavailableReason,
+  GitWorktreeRef,
+  RepoBranch,
+  RepoInfo,
+  WorktreeFailure,
+  WorktreeStatus,
+} from "@mojito/shared";
 import type { ExecResult } from "../zellij/install.js";
 import * as gc from "./command.js";
 import { WorktreeError, worktreeFailureText } from "./error.js";
@@ -258,6 +266,95 @@ export async function describeRepo(
   }));
 
   return { derivable: true, repoDir: main, headBranch, headSha, branches };
+}
+
+const GIT_FILE_CAP = 200;
+
+function blankSnapshot(partial: Partial<GitSnapshot> & Pick<GitSnapshot, "available">): GitSnapshot {
+  return {
+    remotes: [],
+    files: [],
+    fileCount: 0,
+    worktrees: [],
+    commits: [],
+    ...partial,
+  };
+}
+
+export function unavailableSnapshot(
+  reason: GitUnavailableReason,
+  detail?: string
+): GitSnapshot {
+  return blankSnapshot({ available: false, reason, detail });
+}
+
+/**
+ * 右侧 Git 面板的仓库快照。
+ *
+ * 跟 describeRepo 一样是探测：环境事实（没装 git、不是仓库）抛 WorktreeError，
+ * 由路由写成 200 + available:false。命令必须串行——SSH 一条连接默认
+ * MaxSessions=10，面板 9 条再加一个终端 PTY 就会 Channel open failure。
+ */
+export async function describeGit(
+  host: GitHost,
+  workingDir: string,
+  opts?: RunOpts
+): Promise<GitSnapshot> {
+  const root = await repoRoot(host, workingDir, opts);
+  const ro = gc.GIT_ENV_RO;
+  const git = host.git;
+
+  const headBranchRes = await probeGit(host, gc.headBranchArgs(git, root), ro, opts);
+  const headShaRes = await probeGit(host, gc.headShortShaArgs(git, root), ro, opts);
+  const upstreamRes = await probeGit(host, gc.upstreamArgs(git, root), ro, opts);
+  const aheadRes = await probeGit(host, gc.aheadArgs(git, root), ro, opts);
+  const behindRes = await probeGit(host, gc.behindArgs(git, root), ro, opts);
+  const statusRes = await probeGit(host, gc.statusArgs(git, root), ro, opts);
+  const remotesRes = await probeGit(host, gc.remoteVerboseArgs(git, root), ro, opts);
+  const logRes = await probeGit(host, gc.logArgs(git, root), ro, opts);
+  const wtRes = await probeGit(host, gc.worktreeListArgs(git, root), ro, opts);
+
+  const headRaw = headBranchRes.code === 0 ? headBranchRes.stdout.trim() : "";
+  const detached = !headRaw || headRaw === "HEAD";
+  const headBranch = detached ? undefined : headRaw;
+  const headSha = headShaRes.code === 0 ? headShaRes.stdout.trim() || undefined : undefined;
+
+  const upstreamRaw = upstreamRes.code === 0 ? upstreamRes.stdout.trim() : "";
+  const upstream = upstreamRaw && upstreamRaw !== "HEAD" ? upstreamRaw : undefined;
+
+  const countOrNull = (res: { code: number | null; stdout: string }): number | null =>
+    res.code === 0 && /^\d+$/.test(res.stdout.trim()) ? Number(res.stdout.trim()) : null;
+
+  const files = statusRes.code === 0 ? gc.parseStatusEntries(statusRes.stdout) : [];
+  const remotes = remotesRes.code === 0 ? gc.parseRemotes(remotesRes.stdout) : [];
+  const commits = logRes.code === 0 ? gc.parseLog(logRes.stdout) : [];
+
+  let worktrees: GitWorktreeRef[] = [];
+  if (wtRes.code === 0) {
+    worktrees = gc.parseWorktreeList(wtRes.stdout).map((e) => ({
+      path: normalizeSep(host.kind, e.path),
+      branch: e.branch,
+      head: e.head.slice(0, 7),
+      current: pathEq(host, e.path, root),
+    }));
+  }
+
+  return blankSnapshot({
+    available: true,
+    repoDir: root,
+    workDir: normalizeSep(host.kind, workingDir),
+    headBranch,
+    headSha,
+    detached,
+    upstream,
+    ahead: upstream ? countOrNull(aheadRes) : null,
+    behind: upstream ? countOrNull(behindRes) : null,
+    remotes,
+    files: files.slice(0, GIT_FILE_CAP),
+    fileCount: files.length,
+    worktrees,
+    commits,
+  });
 }
 
 /**

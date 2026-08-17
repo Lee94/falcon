@@ -8,7 +8,7 @@ import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { connLabel } from "../lib/hostColor.js";
 import { chord, matchCommand } from "../lib/shortcuts.js";
-import { TERM_THEMES } from "../lib/theme.js";
+import { resolveTermTheme, termFontStack } from "../lib/term.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Banner } from "./common/Banner.js";
@@ -38,6 +38,8 @@ export function TerminalView({
   const newTerminal = useApp((s) => s.newTerminal);
   const dropTab = useApp((s) => s.dropTab);
   const theme = useApp((s) => s.theme);
+  const termPref = useApp((s) => s.term);
+  const palette = resolveTermTheme(termPref.themeId, theme);
 
   const [view, setView] = useState<ViewState>({
     session: "active",
@@ -47,13 +49,17 @@ export function TerminalView({
   });
 
   useEffect(() => {
+    const pref = useApp.getState().term;
     const term = new Terminal({
-      fontFamily: '"Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace',
-      fontSize: 13,
+      fontFamily: termFontStack(pref),
+      fontSize: pref.fontSize,
+      lineHeight: pref.lineHeight,
+      cursorStyle: pref.cursorStyle,
+      cursorBlink: pref.cursorBlink,
       scrollback: 5000,
-      // 这个 effect 不跟主题重建（重建 = 断 WS + 重放历史），初值直接读，
+      // 这个 effect 不跟偏好重建（重建 = 断 WS + 重放历史），初值直接读，
       // 之后的切换交给下面那个 effect 就地改 options
-      theme: TERM_THEMES[useApp.getState().theme],
+      theme: resolveTermTheme(pref.themeId, useApp.getState().theme),
     });
     // 全局快捷键命中时把按键交给应用层：xterm 不处理，事件照样冒泡到 window。
     // Ctrl+C / Ctrl+R / Ctrl+W / Esc 不在快捷键表里，因此行为与原生终端一致。
@@ -129,8 +135,19 @@ export function TerminalView({
     });
     ro.observe(containerRef.current!);
 
+    // 字体还在下载时先按 fallback 量格子，加载完再 fit 一次，否则中文/图标会挤
+    const refitWhenReady = () => {
+      if (disposed) return;
+      if (containerRef.current && containerRef.current.offsetHeight > 0) {
+        fit.fit();
+      }
+    };
+    void document.fonts.ready.then(refitWhenReady);
+    document.fonts.addEventListener("loadingdone", refitWhenReady);
+
     return () => {
       disposed = true;
+      document.fonts.removeEventListener("loadingdone", refitWhenReady);
       ro.disconnect();
       ws.close();
       term.dispose();
@@ -147,10 +164,20 @@ export function TerminalView({
     }
   }, [visible]);
 
-  // 换主题时整套配色（含 ANSI 十六色）就地替换，已经打印出来的内容一并重绘
+  // 换字体 / 字号 / 主题时就地改 options，已经打印出来的内容一并重绘，不断 WS
   useEffect(() => {
-    if (termRef.current) termRef.current.options.theme = TERM_THEMES[theme];
-  }, [theme]);
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = termFontStack(termPref);
+    term.options.fontSize = termPref.fontSize;
+    term.options.lineHeight = termPref.lineHeight;
+    term.options.cursorStyle = termPref.cursorStyle;
+    term.options.cursorBlink = termPref.cursorBlink;
+    term.options.theme = palette;
+    if (visible && containerRef.current && containerRef.current.offsetHeight > 0) {
+      fitRef.current?.fit();
+    }
+  }, [termPref, palette, visible]);
 
   const manualReattach = async () => {
     setView((v) => ({ ...v, attachError: null }));
@@ -262,9 +289,10 @@ export function TerminalView({
       {/* 输入被禁用这件事要看得见 */}
       <div
         className={cn(
-          "terminal-host min-h-0 flex-1 bg-background py-1.5 pl-2 transition-opacity",
+          "terminal-host min-h-0 flex-1 py-1.5 pl-2 transition-opacity",
           view.session !== "active" && "opacity-55"
         )}
+        style={{ backgroundColor: palette.background ?? undefined }}
       >
         <div ref={containerRef} className="h-full" />
       </div>

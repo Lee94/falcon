@@ -212,12 +212,14 @@ export function buildPtyCommandLine(
  * 非交互的，环境里**没有 `$SHELL`**，而实测 Zellij 在 `$SHELL` 为空时 pane
  * 根本起不来（不是文档说的退到 /bin/sh），表现为会话建成了但屏幕全空。
  */
-export const POSIX_PROBE = [
+export const POSIX_PROBE_LINES = [
   'printf "%s\\n" "$HOME"',
   "uname -sm",
   'if command -v curl >/dev/null 2>&1; then echo curl; elif command -v wget >/dev/null 2>&1; then echo wget; else echo none; fi',
   'S="$SHELL"; [ -n "$S" ] || S=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7); [ -n "$S" ] || S=/bin/sh; printf "%s\\n" "$S"',
-].join("; ");
+];
+
+export const POSIX_PROBE = POSIX_PROBE_LINES.join("; ");
 
 export interface PosixProbe {
   home: string;
@@ -243,16 +245,16 @@ export function parsePosixProbe(stdout: string): PosixProbe | null {
  * Windows 探测。tar.exe 自 Windows 10 1803 起内置（bsdtar，能解 zip），
  * curl.exe 同期内置；老系统上两者可能缺失，据此降级。
  */
-export const WINDOWS_PROBE = encodePowerShell(
-  [
-    "$env:USERPROFILE",
-    "$env:PROCESSOR_ARCHITECTURE",
-    "if (Get-Command curl.exe -EA SilentlyContinue) { 'curl' } else { 'none' }",
-    "if (Get-Command tar.exe -EA SilentlyContinue) { 'tar' } else { 'none' }",
-    // 绝对路径而非裸名字：Zellij 在 Windows 上解析 shell 名有已知问题（#4964）
-    "$s = (Get-Command powershell.exe -EA SilentlyContinue).Source; if ($s) { $s } else { $env:COMSPEC }",
-  ].join("; ")
-);
+export const WINDOWS_PROBE_SCRIPT = [
+  "$env:USERPROFILE",
+  "$env:PROCESSOR_ARCHITECTURE",
+  "if (Get-Command curl.exe -EA SilentlyContinue) { 'curl' } else { 'none' }",
+  "if (Get-Command tar.exe -EA SilentlyContinue) { 'tar' } else { 'none' }",
+  // 绝对路径而非裸名字：Zellij 在 Windows 上解析 shell 名有已知问题（#4964）
+  "$s = (Get-Command powershell.exe -EA SilentlyContinue).Source; if ($s) { $s } else { $env:COMSPEC }",
+].join("\n");
+
+export const WINDOWS_PROBE = encodePowerShell(WINDOWS_PROBE_SCRIPT.replace(/\n/g, "; "));
 
 export interface WindowsProbe {
   home: string;

@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Ellipsis, ShieldCheck, TerminalIcon, TriangleAlert } from "lucide-react";
 import type { SessionState, SessionWithProject } from "@mojito/shared";
-import { api } from "../api.js";
 import { useApp, type OverviewFilter } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { durabilityHint } from "../lib/reason.js";
@@ -20,7 +19,6 @@ import {
 } from "@/components/ui/table";
 import { StatusMark } from "./common/StatusMark.js";
 import { menuAnchor } from "./common/Menu.js";
-import { ThemeChoice } from "./common/ThemeToggle.js";
 
 const CARD_STATES: SessionState[] = ["active", "unverified", "dead"];
 
@@ -29,8 +27,6 @@ export function SessionOverview() {
   const { t } = useTranslation();
   const sessions = useApp((s) => s.sessions);
   const projects = useApp((s) => s.projects);
-  const auth = useApp((s) => s.auth);
-  const system = useApp((s) => s.system);
   const filter = useApp((s) => s.overviewFilter);
   const projectFilter = useApp((s) => s.overviewProject);
   const selected = useApp((s) => s.selected);
@@ -42,8 +38,6 @@ export function SessionOverview() {
   const openMenu = useApp((s) => s.openMenu);
   const openDrawer = useApp((s) => s.openDrawer);
   const openProjectForm = useApp((s) => s.openProjectForm);
-  const setPasswordOpen = useApp((s) => s.setPasswordOpen);
-  const refreshAuth = useApp((s) => s.refreshAuth);
   const actions = useActions();
 
   const rows = sessions.filter(
@@ -54,11 +48,6 @@ export function SessionOverview() {
   const count = (state: SessionState) => sessions.filter((s) => s.state === state).length;
   const filteredProject = projects.find((p) => p.id === projectFilter);
   const allSelected = rows.length > 0 && rows.every((r) => selected.includes(r.id));
-
-  const logout = async () => {
-    await api.logout();
-    await refreshAuth();
-  };
 
   const resetFilter = () => {
     setFilter("all");
@@ -171,28 +160,6 @@ export function SessionOverview() {
           </Table>
         </div>
       )}
-
-      <h2 className="mt-8 mb-3 text-sm font-semibold text-muted-foreground">
-        {t("overview.settings")}
-      </h2>
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span>{t("theme.label")}</span>
-        <ThemeChoice />
-        <Button variant="outline" size="sm" onClick={() => setPasswordOpen(true)}>
-          {t("password.title")}
-        </Button>
-        {auth?.required && auth.authenticated && (
-          <Button variant="ghost" size="sm" onClick={() => void logout()}>
-            {t("common.logout")}
-          </Button>
-        )}
-        {system && (
-          <span>
-            {t("overview.version")} v{system.version} · {t("overview.platform")}{" "}
-            {system.platform}
-          </span>
-        )}
-      </div>
     </section>
   );
 }

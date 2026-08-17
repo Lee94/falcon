@@ -47,6 +47,17 @@ export function sshBar(project?: Project | null): string | undefined {
   return project?.type === "ssh" ? hostBar(project) : undefined;
 }
 
+/** 已保存主机的身份色，和引用它的项目同一条色带 */
+export function hostBarFromSsh(ssh: { username: string; host: string; port: number }): string {
+  const h = hostHue(sshConn(ssh));
+  return `hsl(${h} var(--host-s) var(--host-l))`;
+}
+
+/** user@host:port。主机列表和项目下拉共用，避免两处拼法漂移 */
+export function sshConn(ssh: { username: string; host: string; port: number }): string {
+  return `${ssh.username}@${ssh.host}:${ssh.port}`;
+}
+
 /** 连接串：SSH 为 user@host:port，本地为「本机 · 平台」 */
 export function connLabel(
   project: Project | undefined | null,
@@ -55,7 +66,7 @@ export function connLabel(
 ): string {
   if (!project) return "";
   if (project.type === "ssh" && project.ssh) {
-    return `${project.ssh.username}@${project.ssh.host}:${project.ssh.port}`;
+    return sshConn(project.ssh);
   }
   return system?.platform ? `${localWord} · ${system.platform}` : localWord;
 }

@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { Project, SessionWithProject } from "@mojito/shared";
+import type { Project, SessionWithProject, SshHost } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp, type MenuItemSpec } from "../store.js";
 import { connLabel } from "./hostColor.js";
@@ -144,7 +144,7 @@ export function useActions() {
 
   const finishDelete = async () => {
     const st = useApp.getState();
-    await Promise.all([st.refreshProjects(), st.refreshSessions()]);
+    await Promise.all([st.refreshProjects(), st.refreshSessions(), st.refreshHosts()]);
   };
 
   const deleteProject = (project: Project) => {
@@ -258,6 +258,56 @@ export function useActions() {
       },
     });
   };
+
+  const deleteHost = (host: SshHost) => {
+    const store = useApp.getState();
+    if (host.projectCount > 0) {
+      store.toast({
+        kind: "warning",
+        title: t("host.deleteInUse", { n: host.projectCount }),
+      });
+      return;
+    }
+    store.askConfirm({
+      title: t("host.deleteTitle", { name: host.name }),
+      body: t("host.deleteBody"),
+      confirmLabel: t("host.delete"),
+      onConfirm: async () => {
+        try {
+          await api.deleteHost(host.id);
+          await store.refreshHosts();
+          store.toast({ kind: "success", title: t("host.deleted", { name: host.name }) });
+        } catch (err) {
+          fail(err);
+        }
+      },
+    });
+  };
+
+  const hostMenuItems = (host: SshHost): MenuItemSpec[] => [
+    {
+      label: t("host.addProject"),
+      onSelect: () => useApp.getState().openProjectForm(null, { type: "ssh", hostId: host.id }),
+    },
+    {
+      label: t("host.edit"),
+      separated: true,
+      onSelect: () => useApp.getState().openHostForm(host),
+    },
+    {
+      label: t("host.delete"),
+      separated: true,
+      danger: true,
+      onSelect: () => deleteHost(host),
+    },
+  ];
+
+  const localServerMenuItems = (): MenuItemSpec[] => [
+    {
+      label: t("sidebar.newProject"),
+      onSelect: () => useApp.getState().openProjectForm(null, { type: "local" }),
+    },
+  ];
 
   const copyConn = async (project: Project) => {
     const store = useApp.getState();
@@ -375,8 +425,11 @@ export function useActions() {
     clearAllDead,
     deleteProject,
     deleteWorktreeProject,
+    deleteHost,
     copyConn,
     projectMenuItems,
+    hostMenuItems,
+    localServerMenuItems,
     sessionMenuItems,
   };
 }

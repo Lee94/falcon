@@ -1,12 +1,17 @@
 import type {
   AuthStatus,
   DeleteProjectResult,
+  FsListing,
+  GitSnapshot,
   HostZellijStatus,
   Project,
   ProjectInput,
   RepoInfo,
   Session,
   SessionWithProject,
+  SshHost,
+  SshHostInput,
+  SshProbeResult,
   SystemInfo,
   WorktreeInput,
   WorktreeStatus,
@@ -48,6 +53,29 @@ export const api = {
   system: () => request<SystemInfo>("GET", "/api/system"),
   validatePath: (path: string) =>
     request<{ ok: boolean; error?: string }>("POST", "/api/fs/validate", { path }),
+  /**
+   * `dir` 缺省为家目录；空字符串是 Windows 盘符列表。
+   * 传 hostId / projectId 则列远端，否则列后端本机。
+   */
+  listDir: (dir?: string, opts?: { hostId?: string; projectId?: string }) => {
+    const q = new URLSearchParams();
+    if (dir !== undefined) q.set("path", dir);
+    if (opts?.hostId) q.set("hostId", opts.hostId);
+    if (opts?.projectId) q.set("projectId", opts.projectId);
+    const qs = q.toString();
+    return request<FsListing>("GET", `/api/fs/list${qs ? `?${qs}` : ""}`);
+  },
+
+  listHosts: () => request<SshHost[]>("GET", "/api/hosts"),
+  createHost: (input: SshHostInput) => request<SshHost>("POST", "/api/hosts", input),
+  updateHost: (id: string, input: SshHostInput) =>
+    request<SshHost>("PUT", `/api/hosts/${id}`, input),
+  deleteHost: (id: string) => request<{ ok: true }>("DELETE", `/api/hosts/${id}`),
+  /** 已保存主机 */
+  testHost: (id: string) => request<SshProbeResult>("POST", `/api/hosts/${id}/test`),
+  /** 表单草稿。编辑已有主机时带 hostId，空 secret 沿用已保存的 */
+  testHostDraft: (input: SshHostInput & { hostId?: string }) =>
+    request<SshProbeResult>("POST", "/api/hosts/test", input),
 
   listProjects: () => request<Project[]>("GET", "/api/projects"),
   createProject: (input: ProjectInput) =>
@@ -59,6 +87,8 @@ export const api = {
 
   /** 源项目的仓库信息。环境事实写在 derivable/reason 里，不会抛 */
   repoInfo: (projectId: string) => request<RepoInfo>("GET", `/api/projects/${projectId}/repo`),
+  /** 右侧 Git 面板。源项目和附属项目都能问，环境事实写在 available/reason 里 */
+  gitSnapshot: (projectId: string) => request<GitSnapshot>("GET", `/api/projects/${projectId}/git`),
   createWorktree: (projectId: string, input: WorktreeInput) =>
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),
   worktreeStatus: (projectId: string) =>

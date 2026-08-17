@@ -206,6 +206,28 @@ export function aheadArgs(git: string, dir: string): string[] {
   return at(git, dir, "rev-list", "--count", "@{upstream}..HEAD");
 }
 
+/** 未拉取提交数。与 ahead 一样，没有 upstream 时退出码 128。 */
+export function behindArgs(git: string, dir: string): string[] {
+  return at(git, dir, "rev-list", "--count", "HEAD..@{upstream}");
+}
+
+/** 当前分支跟踪的远程。没有 upstream 时退出码 128。 */
+export function upstreamArgs(git: string, dir: string): string[] {
+  return at(git, dir, "rev-parse", "--abbrev-ref", "@{upstream}");
+}
+
+export function remoteVerboseArgs(git: string, dir: string): string[] {
+  return at(git, dir, "remote", "-v");
+}
+
+/**
+ * 最近提交。%at 是 unix 秒——相对时间在前端按界面语言格式化，
+ * 不拿 git 的 %ar（那会跟 LC_ALL=C 一起变成英文）。
+ */
+export function logArgs(git: string, dir: string, n = 12): string[] {
+  return at(git, dir, "log", "-n", String(n), "--format=%h%x09%an%x09%at%x09%s");
+}
+
 // ---------------- 命令行拼装 ----------------
 
 /**
@@ -400,11 +422,83 @@ export function parseBranchList(stdout: string, remotes: string[]): ParsedBranch
 
 /** git status --porcelain 的行数与前若干条路径（展示用，读不到不影响判断） */
 export function parseStatus(stdout: string, sample = 8): { count: number; files: string[] } {
-  const rows = lines(stdout).filter((l) => l.trim().length > 0);
-  const files = rows
-    .slice(0, sample)
-    .map((l) => unquoteCPath((l.slice(3).split(" -> ").pop() ?? l).trim()));
-  return { count: rows.length, files };
+  const entries = parseStatusEntries(stdout);
+  return { count: entries.length, files: entries.slice(0, sample).map((e) => e.path) };
+}
+
+export interface GitStatusEntry {
+  path: string;
+  origPath?: string;
+  index: string;
+  work: string;
+}
+
+/**
+ * 完整解析 `git status --porcelain`。
+ *
+ * 前两列永远是 XY，第三列是空格，后面才是路径。重命名 / 复制是
+ * `XY orig -> new`；只有 XY 里真有 R/C 才按箭头拆，免得路径里刚好有 ` -> `。
+ */
+export function parseStatusEntries(stdout: string): GitStatusEntry[] {
+  const out: GitStatusEntry[] = [];
+  for (const line of lines(stdout)) {
+    if (line.length < 3) continue;
+    const index = line[0] ?? " ";
+    const work = line[1] ?? " ";
+    const rest = unquoteCPath(line.slice(3).trim());
+    if (!rest) continue;
+    const renamed = index === "R" || index === "C" || work === "R" || work === "C";
+    const arrow = renamed ? rest.indexOf(" -> ") : -1;
+    if (arrow >= 0) {
+      out.push({
+        path: unquoteCPath(rest.slice(arrow + 4).trim()),
+        origPath: unquoteCPath(rest.slice(0, arrow).trim()),
+        index,
+        work,
+      });
+    } else {
+      out.push({ path: rest, index, work });
+    }
+  }
+  return out;
+}
+
+/** `git remote -v`：每个 remote 只取 fetch 那一行 */
+export function parseRemotes(stdout: string): { name: string; url: string }[] {
+  const seen = new Set<string>();
+  const out: { name: string; url: string }[] = [];
+  for (const line of lines(stdout)) {
+    const m = /^(\S+)\s+(\S+)\s+\((fetch|push)\)/.exec(line.trim());
+    if (!m || m[3] !== "fetch" || seen.has(m[1]!)) continue;
+    seen.add(m[1]!);
+    out.push({ name: m[1]!, url: m[2]! });
+  }
+  return out;
+}
+
+export interface GitLogEntry {
+  sha: string;
+  author: string;
+  authoredAt: number;
+  subject: string;
+}
+
+/** `git log --format=%h\\t%an\\t%at\\t%s`。subject 里可能有 TAB，只切前三列。 */
+export function parseLog(stdout: string): GitLogEntry[] {
+  const out: GitLogEntry[] = [];
+  for (const line of lines(stdout)) {
+    if (!line) continue;
+    const [sha, author, at, ...rest] = line.split("\t");
+    if (!sha || !author || !at) continue;
+    const sec = Number(at);
+    out.push({
+      sha,
+      author,
+      authoredAt: Number.isFinite(sec) ? sec * 1000 : 0,
+      subject: rest.join("\t"),
+    });
+  }
+  return out;
 }
 
 /** `status --porcelain --ignored=matching` 里 `!!` 开头的那些 */

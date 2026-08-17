@@ -11,6 +11,7 @@ import type {
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { reasonText } from "../lib/reason.js";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -71,6 +72,7 @@ export function ZellijInstallModal() {
   const [baseUrl, setBaseUrl] = useState("");
   const [savedUrl, setSavedUrl] = useState("");
   const [stage, setStage] = useState<ZellijInstallStage>("probing");
+  const [commands, setCommands] = useState<string[]>([]);
   const [failure, setFailure] = useState<NonDurableReason | undefined>();
   const [detail, setDetail] = useState<string | undefined>();
   /** 后端本轮自动重试到第几次；>1 时说明"还在转"是因为在重试，而不是卡住了 */
@@ -131,6 +133,7 @@ export function ZellijInstallModal() {
     setAttempt(1);
     setFailure(undefined);
     setDetail(undefined);
+    setCommands([]);
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws/install/${id}`);
     wsRef.current = ws;
@@ -146,6 +149,10 @@ export function ZellijInstallModal() {
       if (msg.type === "stage") {
         setStage(msg.stage);
         setAttempt(msg.attempt);
+        if (msg.command) {
+          const command = msg.command;
+          setCommands((prev) => (prev[prev.length - 1] === command ? prev : [...prev, command]));
+        }
       } else if (msg.type === "done") {
         settled = true;
         onInstalled(id);
@@ -313,6 +320,9 @@ export function ZellijInstallModal() {
               {t("zellij.autoRetrying", { n: attempt })}
             </p>
           )}
+          {commands.length > 0 && (
+            <CommandLog label={t("zellij.commandLog")} commands={commands} running />
+          )}
           <div className="flex justify-end">
             <Button variant="outline" data-autofocus onClick={cancelInstall}>
               {t("zellij.installCancel")}
@@ -334,6 +344,10 @@ export function ZellijInstallModal() {
               )}
             </div>
           </div>
+
+          {commands.length > 0 && (
+            <CommandLog label={t("zellij.commandLog")} commands={commands} />
+          )}
 
           {showUrlFix && (
             <Field label={t("zellij.sourceLabel")} htmlFor="zellij-url-retry">
@@ -435,6 +449,48 @@ function Disclosure({
       </CollapsibleTrigger>
       <CollapsibleContent>{children}</CollapsibleContent>
     </Collapsible>
+  );
+}
+
+/** 安装过程中远端实际跑过的命令。最新一条是正在执行或刚失败的那条。 */
+function CommandLog({
+  label,
+  commands,
+  running,
+}: {
+  label: string;
+  commands: string[];
+  running?: boolean;
+}) {
+  const end = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "nearest" });
+  }, [commands.length]);
+
+  return (
+    <div className="grid gap-1.5">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <div className="max-h-52 overflow-y-auto rounded-md border bg-background px-3 py-2 font-mono text-[11.5px] leading-relaxed">
+        {commands.map((cmd, i) => {
+          const last = i === commands.length - 1;
+          return (
+            <pre
+              key={`${i}-${cmd.slice(0, 24)}`}
+              className={cn(
+                "m-0 whitespace-pre-wrap break-all",
+                !last && "mb-2",
+                last ? "text-foreground" : "text-muted-foreground/70"
+              )}
+            >
+              <span className="select-none text-muted-foreground">$ </span>
+              {cmd}
+              {last && running ? " …" : ""}
+            </pre>
+          );
+        })}
+        <div ref={end} />
+      </div>
+    </div>
   );
 }
 

@@ -3,8 +3,10 @@ import type {
   AuthStatus,
   NonDurableReason,
   Project,
+  ProjectType,
   SessionState,
   SessionWithProject,
+  SshHost,
   SystemInfo,
 } from "@mojito/shared";
 import { toast as sonner } from "sonner";
@@ -19,16 +21,79 @@ import {
   type ThemeMode,
   type ThemePref,
 } from "./lib/theme.js";
+import {
+  DEFAULT_TERM_PREF,
+  loadTermPref,
+  saveTermPref,
+  sanitizeTermPref,
+  type TermPref,
+} from "./lib/term.js";
 
-export type ActiveView = { kind: "overview" } | { kind: "terminal"; sessionId: string };
+export type ActiveView =
+  | { kind: "overview" }
+  | { kind: "terminal"; sessionId: string }
+  /** 选中了项目但还没有可显示的终端 */
+  | { kind: "project" };
+
+export function tabProjectId(
+  tabId: string,
+  sessions: SessionWithProject[],
+  pending: PendingSession[]
+): string | undefined {
+  if (isPendingId(tabId)) return pending.find((p) => p.id === tabId)?.projectId;
+  return sessions.find((s) => s.id === tabId)?.projectId;
+}
+
+/** 右侧栏目前只有 Git 这一格；id 留下是为了以后加面板不用改持久化形状 */
+export type RightPanelId = "git";
+
+export const selectRightVisible = (s: { rightOpen: boolean }) => s.rightOpen;
+
+/** 侧栏选中项目时，主区 tab 只显示这个项目下的会话 */
+export function visibleTabs(s: {
+  tabs: string[];
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  selectedProjectId: string | null;
+}): string[] {
+  if (!s.selectedProjectId) return s.tabs;
+  return s.tabs.filter(
+    (id) => tabProjectId(id, s.sessions, s.pending) === s.selectedProjectId
+  );
+}
 
 export type OverviewFilter = "all" | SessionState;
+
+/** 设置弹窗左侧模块。打开时记住上次停在哪一格 */
+export type SettingsTab = "appearance" | "account" | "hosts" | "about";
 
 /** 还没拿到后端 id 的会话：tab 立刻出现并显示"正在建立会话…"，而不是等 REST 返回 */
 export interface PendingSession {
   id: string;
   projectId: string;
   error?: string;
+}
+
+/**
+ * Git 面板跟谁走：侧栏选中的项目优先，否则当前会话所属项目。
+ * 总览且没选项目时为 null——不要退回第一个项目，免得打开面板看到别人的仓库。
+ */
+export function selectFocusProjectId(s: {
+  selectedProjectId: string | null;
+  active: ActiveView;
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+}): string | null {
+  if (s.selectedProjectId) return s.selectedProjectId;
+  if (s.active.kind === "terminal") {
+    const id = s.active.sessionId;
+    return (
+      s.pending.find((p) => p.id === id)?.projectId ??
+      s.sessions.find((x) => x.id === id)?.projectId ??
+      null
+    );
+  }
+  return null;
 }
 
 export type ToastKind = "info" | "success" | "warning" | "danger";
@@ -90,6 +155,18 @@ export interface InstallFailureRecord {
   attempts: number;
 }
 
+/** 从某台服务器新建项目时预填类型 / 主机，编辑已有项目时不用 */
+export interface ProjectFormPreset {
+  type?: ProjectType;
+  hostId?: string;
+}
+
+/** 源项目工作区当前 HEAD，侧栏在没有 worktree 时用分支名代表默认仓库 */
+export interface ProjectHead {
+  branch?: string;
+  sha?: string;
+}
+
 const WORKSPACE_KEY = "mojito.workspace";
 const CLOSE_KILLS_KEY = "mojito.closeKillsEducated";
 const PENDING_PREFIX = "pending:";
@@ -108,7 +185,10 @@ interface PersistedWorkspace {
   tabs: string[];
   active: ActiveView;
   sidebarOpen: boolean;
+  rightOpen: boolean;
+  rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
+  selectedProjectId: string | null;
 }
 
 function loadWorkspace(): PersistedWorkspace {
@@ -116,7 +196,10 @@ function loadWorkspace(): PersistedWorkspace {
     tabs: [],
     active: { kind: "overview" },
     sidebarOpen: true,
+    rightOpen: false,
+    rightPanel: "git",
     collapsed: {},
+    selectedProjectId: null,
   };
   try {
     const raw = localStorage.getItem(WORKSPACE_KEY);
@@ -128,9 +211,15 @@ function loadWorkspace(): PersistedWorkspace {
       active:
         parsed.active?.kind === "terminal" && typeof parsed.active.sessionId === "string"
           ? parsed.active
-          : { kind: "overview" },
+          : parsed.active?.kind === "project"
+            ? { kind: "project" }
+            : { kind: "overview" },
       sidebarOpen: parsed.sidebarOpen !== false,
+      rightOpen: parsed.rightOpen === true,
+      rightPanel: parsed.rightPanel === "git" ? parsed.rightPanel : "git",
       collapsed: parsed.collapsed ?? {},
+      selectedProjectId:
+        typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
     };
   } catch {
     return fallback;
@@ -139,10 +228,41 @@ function loadWorkspace(): PersistedWorkspace {
 
 const initialWorkspace = loadWorkspace();
 const initialThemePref = loadThemePref();
+const initialTermPref = loadTermPref();
 
 let pendingSeq = 0;
 /** 本次页面加载内只解释一次"关 tab 会结束会话"，"不再提示"才写 localStorage */
 let closeKillsToastShown = false;
+
+/**
+ * 侧栏用分支名代表默认仓库，但 list projects 不跑 git。
+ * 只探源项目：附属项目的分支写在 worktree.branch 里，不必再问一次。
+ */
+async function refreshHeads(
+  set: (partial: { heads: Record<string, ProjectHead> }) => void,
+  get: () => { heads: Record<string, ProjectHead> },
+  projects: Project[]
+) {
+  const sources = projects.filter((p) => !p.worktree && p.workingDir);
+  const next: Record<string, ProjectHead> = { ...get().heads };
+  await Promise.all(
+    sources.map(async (p) => {
+      try {
+        const info = await api.repoInfo(p.id);
+        if (info.headBranch) next[p.id] = { branch: info.headBranch };
+        else if (info.headSha) next[p.id] = { sha: info.headSha };
+        else delete next[p.id];
+      } catch {
+        // 探不到就继续用项目名，侧栏不能因为一台 SSH 抖动整棵树空白
+      }
+    })
+  );
+  const alive = new Set(projects.map((p) => p.id));
+  for (const id of Object.keys(next)) {
+    if (!alive.has(id)) delete next[id];
+  }
+  set({ heads: next });
+}
 
 /**
  * 关 tab 会杀掉会话——这是最容易让人措手不及的一步，头一次得说清楚，
@@ -179,6 +299,7 @@ interface AppState {
   auth: AuthStatus | null;
   system: SystemInfo | null;
   projects: Project[];
+  hosts: SshHost[];
   sessions: SessionWithProject[];
 
   /** 打开的终端 tab（手动关掉 = 结束会话，见 closeTab），可能含 pending id */
@@ -189,12 +310,22 @@ interface AppState {
   /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
   themePref: ThemePref;
   theme: ThemeMode;
+  /** 终端画面偏好（字体 / 字号 / 主题），与界面主题分开存 */
+  term: TermPref;
 
   /** 用户的侧栏偏好（持久化） */
   sidebarOpen: boolean;
   /** 窄屏临时隐藏，不写回偏好——不然开一次窄窗口就把用户的设置改了 */
   sidebarAutoHidden: boolean;
+  /** 用户的右侧栏偏好（持久化）。默认关：第一次打开不该把终端挤窄 */
+  rightOpen: boolean;
+  /** 右侧打开的是哪一格。现在只有 git */
+  rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
+  /** 源项目 HEAD，按 projectId；附属项目用自己的 worktree.branch */
+  heads: Record<string, ProjectHead>;
+  /** 侧栏当前选中的项目；右侧只显示它下面的终端。null = 在总览 */
+  selectedProjectId: string | null;
 
   overviewFilter: OverviewFilter;
   /** 总览按项目筛选；null = 全部项目 */
@@ -210,14 +341,21 @@ interface AppState {
   install: InstallSpec | null;
   installFailures: Record<string, InstallFailureRecord>;
   /** null = 关闭；{ edit: null } = 新建 */
-  projectForm: { edit: Project | null } | null;
+  projectForm: { edit: Project | null; preset?: ProjectFormPreset } | null;
+  /**
+   * 远端主机表单。onSaved 给「从新建项目里顺手加一台」用：
+   * 存完之后把新主机选进项目表单，不用用户再点一次下拉框。
+   */
+  hostForm: { edit: SshHost | null; onSaved?: (host: SshHost) => void } | null;
   /** 正在从哪个源项目派生附属项目；null = 关闭 */
   worktreeFor: string | null;
-  passwordOpen: boolean;
+  settingsOpen: boolean;
+  settingsTab: SettingsTab;
 
   init(): Promise<void>;
   refreshAuth(): Promise<void>;
   refreshProjects(): Promise<void>;
+  refreshHosts(): Promise<void>;
   refreshSessions(): Promise<void>;
 
   openSession(sessionId: string): void;
@@ -227,23 +365,32 @@ interface AppState {
   detachTab(id: string): void;
   /** 只把 tab 摘掉，不碰会话、不做任何引导——清除已丢失记录这类场景用它 */
   dropTab(id: string): void;
+  selectProject(projectId: string): void;
   showOverview(): void;
   focusTabAt(index: number): void;
   cycleTab(delta: number): void;
 
   setTheme(pref: ThemePref): void;
+  setTerm(patch: Partial<TermPref>): void;
+  resetTerm(): void;
   toggleSidebar(): void;
   setSidebarAutoHidden(hidden: boolean): void;
-  toggleProject(projectId: string): void;
+  /** 点同一格再关；点另一格则切过去。现在只有 git */
+  toggleRightPanel(id?: RightPanelId): void;
+  toggleCollapsed(key: string): void;
   setFilter(filter: OverviewFilter): void;
   setProjectFilter(projectId: string | null): void;
   toggleSelected(id: string): void;
   setSelected(ids: string[]): void;
-  openProjectForm(edit: Project | null): void;
+  openProjectForm(edit: Project | null, preset?: ProjectFormPreset): void;
   closeProjectForm(): void;
+  openHostForm(edit: SshHost | null, onSaved?: (host: SshHost) => void): void;
+  closeHostForm(): void;
   openWorktreeForm(sourceProjectId: string): void;
   closeWorktreeForm(): void;
-  setPasswordOpen(open: boolean): void;
+  openSettings(tab?: SettingsTab): void;
+  closeSettings(): void;
+  setSettingsTab(tab: SettingsTab): void;
 
   toast(spec: ToastSpec): string;
   openMenu(spec: MenuSpec): void;
@@ -269,14 +416,21 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => {
   /** tabs / active / 侧栏状态写回 localStorage —— 刷新页面后工作台原样恢复 */
   const persist = () => {
-    const { tabs, active, sidebarOpen, collapsed } = get();
+    const { tabs, active, sidebarOpen, rightOpen, rightPanel, collapsed, selectedProjectId } =
+      get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
-      active: active.kind === "terminal" && isPendingId(active.sessionId)
-        ? { kind: "overview" }
-        : active,
+      active:
+        active.kind === "terminal" && isPendingId(active.sessionId)
+          ? selectedProjectId
+            ? { kind: "project" }
+            : { kind: "overview" }
+          : active,
       sidebarOpen,
+      rightOpen,
+      rightPanel,
       collapsed,
+      selectedProjectId,
     };
     try {
       localStorage.setItem(WORKSPACE_KEY, JSON.stringify(payload));
@@ -290,6 +444,7 @@ export const useApp = create<AppState>((set, get) => {
     auth: null,
     system: null,
     projects: [],
+    hosts: [],
     sessions: [],
 
     tabs: initialWorkspace.tabs,
@@ -298,17 +453,24 @@ export const useApp = create<AppState>((set, get) => {
 
     themePref: initialThemePref,
     theme: resolveTheme(initialThemePref),
+    term: initialTermPref,
 
     sidebarOpen: initialWorkspace.sidebarOpen,
     sidebarAutoHidden: false,
+    rightOpen: initialWorkspace.rightOpen,
+    rightPanel: initialWorkspace.rightPanel,
     collapsed: initialWorkspace.collapsed,
+    heads: {},
+    selectedProjectId: initialWorkspace.selectedProjectId,
 
     overviewFilter: "all",
     overviewProject: null,
     selected: [],
     projectForm: null,
+    hostForm: null,
     worktreeFor: null,
-    passwordOpen: false,
+    settingsOpen: false,
+    settingsTab: "appearance",
 
     menu: null,
     confirm: null,
@@ -325,9 +487,16 @@ export const useApp = create<AppState>((set, get) => {
         const [system] = await Promise.all([
           api.system(),
           get().refreshProjects(),
+          get().refreshHosts(),
           get().refreshSessions(),
         ]);
         set({ system });
+        const selected = get().selectedProjectId;
+        if (selected && get().projects.some((p) => p.id === selected)) {
+          get().selectProject(selected);
+        } else if (selected) {
+          set({ selectedProjectId: null });
+        }
       }
     },
 
@@ -342,7 +511,26 @@ export const useApp = create<AppState>((set, get) => {
 
     async refreshProjects() {
       try {
-        set({ projects: await api.listProjects() });
+        const projects = await api.listProjects();
+        const selected = get().selectedProjectId;
+        const still = selected != null && projects.some((p) => p.id === selected);
+        set({
+          projects,
+          selectedProjectId: still ? selected : null,
+          active:
+            !still && get().active.kind === "project"
+              ? { kind: "overview" }
+              : get().active,
+        });
+        void refreshHeads(set, get, projects);
+      } catch (err) {
+        get().handleApiError(err);
+      }
+    },
+
+    async refreshHosts() {
+      try {
+        set({ hosts: await api.listHosts() });
       } catch (err) {
         get().handleApiError(err);
       }
@@ -359,7 +547,9 @@ export const useApp = create<AppState>((set, get) => {
           tabs: state.tabs.filter(keep),
           active:
             state.active.kind === "terminal" && !keep(state.active.sessionId)
-              ? { kind: "overview" }
+              ? state.selectedProjectId
+                ? { kind: "project" }
+                : { kind: "overview" }
               : state.active,
           selected: state.selected.filter((id) => alive.has(id)),
         }));
@@ -370,26 +560,74 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     openSession(sessionId) {
-      set((state) => ({
-        tabs: state.tabs.includes(sessionId) ? state.tabs : [...state.tabs, sessionId],
-        active: { kind: "terminal", sessionId },
-        paletteOpen: false,
+      set((state) => {
+        const projectId =
+          tabProjectId(sessionId, state.sessions, state.pending) ?? state.selectedProjectId;
+        return {
+          tabs: state.tabs.includes(sessionId) ? state.tabs : [...state.tabs, sessionId],
+          active: { kind: "terminal" as const, sessionId },
+          selectedProjectId: projectId ?? state.selectedProjectId,
+          paletteOpen: false,
+          menu: null,
+        };
+      });
+      persist();
+    },
+
+    selectProject(projectId) {
+      const state = get();
+      if (!state.projects.some((p) => p.id === projectId)) return;
+      const extra = state.sessions
+        .filter((s) => s.projectId === projectId && !state.tabs.includes(s.id))
+        .sort((a, b) => a.lastActiveAt - b.lastActiveAt)
+        .map((s) => s.id);
+      const tabs = [...state.tabs, ...extra];
+      const mine = tabs.filter(
+        (id) => tabProjectId(id, state.sessions, state.pending) === projectId
+      );
+      let active: ActiveView;
+      if (state.active.kind === "terminal" && mine.includes(state.active.sessionId)) {
+        active = state.active;
+      } else {
+        const pendingMine = state.pending.filter((p) => p.projectId === projectId);
+        const newest = state.sessions
+          .filter((s) => s.projectId === projectId)
+          .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+        const pendingLast = pendingMine[pendingMine.length - 1];
+        active = pendingLast
+          ? { kind: "terminal", sessionId: pendingLast.id }
+          : newest
+            ? { kind: "terminal", sessionId: newest.id }
+            : { kind: "project" };
+      }
+      set({
+        selectedProjectId: projectId,
+        tabs,
+        active,
         menu: null,
-      }));
+        paletteOpen: false,
+      });
       persist();
     },
 
     dropTab(id) {
       set((state) => {
         const tabs = state.tabs.filter((t) => t !== id);
+        const pending = state.pending.filter((p) => p.id !== id);
         let active = state.active;
         if (active.kind === "terminal" && active.sessionId === id) {
-          active =
-            tabs.length > 0
-              ? { kind: "terminal", sessionId: tabs[tabs.length - 1]! }
+          const rest = visibleTabs({
+            ...state,
+            tabs,
+            pending,
+          });
+          active = rest.length
+            ? { kind: "terminal", sessionId: rest[rest.length - 1]! }
+            : state.selectedProjectId
+              ? { kind: "project" }
               : { kind: "overview" };
         }
-        return { tabs, active, pending: state.pending.filter((p) => p.id !== id) };
+        return { tabs, active, pending };
       });
       persist();
     },
@@ -438,12 +676,17 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     showOverview() {
-      set({ active: { kind: "overview" }, paletteOpen: false, menu: null });
+      set({
+        active: { kind: "overview" },
+        selectedProjectId: null,
+        paletteOpen: false,
+        menu: null,
+      });
       persist();
     },
 
     focusTabAt(index) {
-      const { tabs } = get();
+      const tabs = visibleTabs(get());
       const id = tabs[index];
       if (id) {
         set({ active: { kind: "terminal", sessionId: id } });
@@ -452,10 +695,11 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     cycleTab(delta) {
-      const { tabs, active } = get();
+      const state = get();
+      const tabs = visibleTabs(state);
       if (tabs.length === 0) return;
       const current =
-        active.kind === "terminal" ? tabs.indexOf(active.sessionId) : -1;
+        state.active.kind === "terminal" ? tabs.indexOf(state.active.sessionId) : -1;
       const next = (current + delta + tabs.length * 2) % tabs.length;
       set({ active: { kind: "terminal", sessionId: tabs[next]! } });
       persist();
@@ -469,6 +713,17 @@ export const useApp = create<AppState>((set, get) => {
       set({ themePref: pref, theme: mode, menu: null, paletteOpen: false });
     },
 
+    setTerm(patch) {
+      const term = sanitizeTermPref({ ...get().term, ...patch });
+      saveTermPref(term);
+      set({ term });
+    },
+
+    resetTerm() {
+      saveTermPref(DEFAULT_TERM_PREF);
+      set({ term: { ...DEFAULT_TERM_PREF } });
+    },
+
     /** 显式开合永远以"现在看到的样子"为准，并解除窄屏的临时隐藏 */
     toggleSidebar() {
       const visible = get().sidebarOpen && !get().sidebarAutoHidden;
@@ -480,9 +735,19 @@ export const useApp = create<AppState>((set, get) => {
       set({ sidebarAutoHidden: hidden });
     },
 
-    toggleProject(projectId) {
+    toggleRightPanel(id = "git") {
+      const { rightOpen, rightPanel } = get();
+      if (rightOpen && rightPanel === id) {
+        set({ rightOpen: false });
+      } else {
+        set({ rightOpen: true, rightPanel: id });
+      }
+      persist();
+    },
+
+    toggleCollapsed(key) {
       set((s) => ({
-        collapsed: { ...s.collapsed, [projectId]: !s.collapsed[projectId] },
+        collapsed: { ...s.collapsed, [key]: !s.collapsed[key] },
       }));
       persist();
     },
@@ -495,11 +760,17 @@ export const useApp = create<AppState>((set, get) => {
       set({ overviewProject: projectId, selected: [] });
     },
 
-    openProjectForm(edit) {
-      set({ projectForm: { edit }, menu: null, paletteOpen: false });
+    openProjectForm(edit, preset) {
+      set({ projectForm: { edit, preset }, menu: null, paletteOpen: false });
     },
     closeProjectForm() {
       set({ projectForm: null });
+    },
+    openHostForm(edit, onSaved) {
+      set({ hostForm: { edit, onSaved }, menu: null, paletteOpen: false });
+    },
+    closeHostForm() {
+      set({ hostForm: null });
     },
     openWorktreeForm(sourceProjectId) {
       set({ worktreeFor: sourceProjectId, menu: null, paletteOpen: false });
@@ -507,8 +778,19 @@ export const useApp = create<AppState>((set, get) => {
     closeWorktreeForm() {
       set({ worktreeFor: null });
     },
-    setPasswordOpen(open) {
-      set({ passwordOpen: open, menu: null, paletteOpen: false });
+    openSettings(tab) {
+      set({
+        settingsOpen: true,
+        settingsTab: tab ?? get().settingsTab,
+        menu: null,
+        paletteOpen: false,
+      });
+    },
+    closeSettings() {
+      set({ settingsOpen: false });
+    },
+    setSettingsTab(tab) {
+      set({ settingsTab: tab });
     },
 
     toggleSelected(id) {
@@ -618,6 +900,7 @@ export const useApp = create<AppState>((set, get) => {
         pending: [...s.pending, { id: pendingId, projectId }],
         tabs: [...s.tabs, pendingId],
         active: { kind: "terminal", sessionId: pendingId },
+        selectedProjectId: projectId,
         menu: null,
         paletteOpen: false,
       }));

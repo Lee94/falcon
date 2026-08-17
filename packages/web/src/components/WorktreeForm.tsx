@@ -50,6 +50,7 @@ export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose:
   const { t } = useTranslation();
   const sourceName = useApp((s) => s.projects.find((p) => p.id === sourceId)?.name ?? "");
   const refreshProjects = useApp((s) => s.refreshProjects);
+  const refreshHosts = useApp((s) => s.refreshHosts);
   const toast = useApp((s) => s.toast);
 
   const [info, setInfo] = useState<RepoInfo | null>(null);
@@ -126,7 +127,7 @@ export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose:
         name: name.trim() || undefined,
         dir: dirTouched ? dir.trim() || undefined : undefined,
       });
-      await refreshProjects();
+      await Promise.all([refreshProjects(), refreshHosts()]);
       toast({
         kind: "success",
         title: t("worktree.created", { name: created.name }),

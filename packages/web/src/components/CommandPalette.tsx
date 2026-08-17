@@ -4,6 +4,8 @@ import {
   CircleAlert,
   CircleDot,
   CircleX,
+  GitBranch,
+  LayoutDashboard,
   PanelLeft,
   Plus,
   Settings,
@@ -13,7 +15,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { api } from "../api.js";
-import { useApp, selectSidebarVisible } from "../store.js";
+import { useApp, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { chord } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
@@ -59,6 +61,7 @@ export function CommandPalette() {
   const active = useApp((s) => s.active);
   const auth = useApp((s) => s.auth);
   const sidebarVisible = useApp(selectSidebarVisible);
+  const rightVisible = useApp(selectRightVisible);
   const themePref = useApp((s) => s.themePref);
   const actions = useActions();
   const [query, setQuery] = useState("");
@@ -145,8 +148,14 @@ export function CommandPalette() {
       key: `>${t("palette.overview")}`,
       label: t("palette.overview"),
       meta: chord("overview"),
-      icon: Settings,
+      icon: LayoutDashboard,
       run: () => store.showOverview(),
+    });
+    actionItems.push({
+      key: `>${t("palette.openSettings")}`,
+      label: t("palette.openSettings"),
+      icon: Settings,
+      run: () => store.openSettings(),
     });
     actionItems.push({
       key: `>${t("palette.toggleSidebarOn")} ${t("palette.toggleSidebarOff")}`,
@@ -154,6 +163,13 @@ export function CommandPalette() {
       meta: chord("toggleSidebar"),
       icon: PanelLeft,
       run: () => store.toggleSidebar(),
+    });
+    actionItems.push({
+      key: `>${t("palette.toggleGitOn")} ${t("palette.toggleGitOff")}`,
+      label: rightVisible ? t("palette.toggleGitOn") : t("palette.toggleGitOff"),
+      meta: chord("toggleGitPanel"),
+      icon: GitBranch,
+      run: () => store.toggleRightPanel("git"),
     });
     THEME_PREFS.filter((pref) => pref !== store.themePref).forEach((pref) =>
       actionItems.push({
@@ -167,7 +183,13 @@ export function CommandPalette() {
       key: `>${t("palette.setPassword")}`,
       label: t("palette.setPassword"),
       icon: Settings,
-      run: () => store.setPasswordOpen(true),
+      run: () => store.openSettings("account"),
+    });
+    actionItems.push({
+      key: `>${t("palette.addHost")}`,
+      label: t("palette.addHost"),
+      icon: Plus,
+      run: () => store.openHostForm(null),
     });
     if (auth?.required && auth.authenticated) {
       actionItems.push({
@@ -187,7 +209,7 @@ export function CommandPalette() {
     ];
     // actions 每次渲染都是新对象，纳入依赖会让 memo 失效；它只读 store，不用跟
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sessions, projects, active, auth, sidebarVisible, themePref, t]);
+  }, [open, sessions, projects, active, auth, sidebarVisible, rightVisible, themePref, t]);
 
   const prefix = query.charAt(0);
   const needle = query.replace(/^[>@#]/, "").trim().toLowerCase();

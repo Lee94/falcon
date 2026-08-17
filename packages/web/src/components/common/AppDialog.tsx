@@ -26,6 +26,7 @@ export function AppDialog({
   wide,
   lockOverlay,
   hideTitle,
+  className,
 }: {
   title: string;
   description?: ReactNode;
@@ -36,6 +37,7 @@ export function AppDialog({
   lockOverlay?: boolean;
   /** 标题只留给读屏器（对话框自己在正文里另有标题时用） */
   hideTitle?: boolean;
+  className?: string;
 }) {
   const [shake, setShake] = useState(false);
 
@@ -57,7 +59,8 @@ export function AppDialog({
         className={cn(
           "max-h-[calc(100vh-5rem)] gap-4 overflow-y-auto",
           wide ? "sm:max-w-xl" : "sm:max-w-md",
-          shake && "animate-shake"
+          shake && "animate-shake",
+          className
         )}
         onEscapeKeyDown={(e) => e.preventDefault()}
         onOpenAutoFocus={(e) => {

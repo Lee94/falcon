@@ -61,9 +61,9 @@ export function registerWs(
     void manager
       .prepare(
         project,
-        (stage, attempt) => {
+        (stage, attempt, command) => {
           attempts = attempt;
-          send({ type: "stage", stage, attempt });
+          send({ type: "stage", stage, attempt, command });
         },
         controller.signal,
         { fresh: true }

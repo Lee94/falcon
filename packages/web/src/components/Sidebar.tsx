@@ -1,67 +1,157 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
   ChevronRight,
   Ellipsis,
+  Folder,
   GitBranch,
+  Monitor,
   PanelLeft,
   Plus,
+  Server,
   Settings,
-  X,
 } from "lucide-react";
-import type { Project, SessionWithProject } from "@mojito/shared";
-import { useApp } from "../store.js";
-import { hostLabel, sshBar } from "../lib/hostColor.js";
-import { reasonText } from "../lib/reason.js";
+import type { Project, SshHost } from "@mojito/shared";
+import { useApp, type ProjectHead } from "../store.js";
+import { hostBarFromSsh, sshBar, sshConn } from "../lib/hostColor.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { StatusMark } from "./common/StatusMark.js";
 import { menuAnchor } from "./common/Menu.js";
 import { ThemeButton } from "./common/ThemeToggle.js";
+
+/** 侧栏第一层：本机、已保存主机、以及没有绑定主机的存量 SSH */
+interface ServerGroup {
+  key: string;
+  kind: "local" | "host" | "legacy";
+  name: string;
+  conn?: string;
+  bar?: string;
+  host?: SshHost;
+  folders: FolderGroup[];
+}
+
+/** 侧栏第二层：一个源项目（文件夹）。第三层永远是当前检出 + 附属 worktree */
+interface FolderGroup {
+  project: Project;
+  worktrees: Project[];
+}
+
+function folderKey(projectId: string): string {
+  return `p:${projectId}`;
+}
+
+function checkoutLabel(project: Project, head?: ProjectHead): string {
+  if (project.worktree) return project.worktree.branch;
+  return head?.branch ?? head?.sha ?? project.name;
+}
+
+function groupServers(
+  projects: Project[],
+  hosts: SshHost[],
+  localName: string
+): ServerGroup[] {
+  const sources = projects.filter((p) => !p.worktree);
+  const sourceIds = new Set(sources.map((p) => p.id));
+  const kidsBySource = new Map<string, Project[]>();
+  const orphans: Project[] = [];
+  for (const p of projects) {
+    const src = p.worktree?.sourceProjectId;
+    if (!src) continue;
+    if (sourceIds.has(src)) {
+      const list = kidsBySource.get(src) ?? [];
+      list.push(p);
+      kidsBySource.set(src, list);
+    } else {
+      orphans.push(p);
+    }
+  }
+
+  const foldersOf = (match: (p: Project) => boolean): FolderGroup[] => [
+    ...sources.filter(match).map((project) => ({
+      project,
+      worktrees: kidsBySource.get(project.id) ?? [],
+    })),
+    ...orphans.filter(match).map((project) => ({ project, worktrees: [] })),
+  ];
+
+  const servers: ServerGroup[] = [
+    {
+      key: "s:local",
+      kind: "local",
+      name: localName,
+      folders: foldersOf((p) => p.type === "local"),
+    },
+  ];
+
+  for (const host of hosts) {
+    servers.push({
+      key: `s:host:${host.id}`,
+      kind: "host",
+      name: host.name,
+      conn: sshConn(host),
+      bar: hostBarFromSsh(host),
+      host,
+      folders: foldersOf((p) => p.type === "ssh" && p.hostId === host.id),
+    });
+  }
+
+  const seen = new Set<string>();
+  for (const p of projects) {
+    if (p.type !== "ssh" || p.hostId) continue;
+    const conn = p.ssh ? sshConn(p.ssh) : "ssh";
+    if (seen.has(conn)) continue;
+    seen.add(conn);
+    servers.push({
+      key: `s:legacy:${conn}`,
+      kind: "legacy",
+      name: p.ssh?.host ?? conn,
+      conn,
+      bar: sshBar(p),
+      folders: foldersOf(
+        (x) => x.type === "ssh" && !x.hostId && (x.ssh ? sshConn(x.ssh) : "ssh") === conn
+      ),
+    });
+  }
+
+  return servers;
+}
 
 export function Sidebar() {
   const { t } = useTranslation();
   const projects = useApp((s) => s.projects);
-  const sessions = useApp((s) => s.sessions);
-  const active = useApp((s) => s.active);
+  const hosts = useApp((s) => s.hosts);
+  const heads = useApp((s) => s.heads);
   const collapsed = useApp((s) => s.collapsed);
   const system = useApp((s) => s.system);
   const toggleSidebar = useApp((s) => s.toggleSidebar);
-  const toggleProject = useApp((s) => s.toggleProject);
+  const toggleCollapsed = useApp((s) => s.toggleCollapsed);
   const openProjectForm = useApp((s) => s.openProjectForm);
-  const openSession = useApp((s) => s.openSession);
+  const selectProject = useApp((s) => s.selectProject);
+  const selectedProjectId = useApp((s) => s.selectedProjectId);
   const showOverview = useApp((s) => s.showOverview);
+  const openSettings = useApp((s) => s.openSettings);
+  const settingsOpen = useApp((s) => s.settingsOpen);
   const openMenu = useApp((s) => s.openMenu);
   const actions = useActions();
-
-  const isOverview = active.kind === "overview";
-
-  /**
-   * 源项目 → 紧跟它的附属项目。
-   *
-   * 附属项目仍是**顶层节点**、不嵌进源项目的展开区：这样 collapsed[projectId]、
-   * 会话列表、⋯ 菜单全部零改动，父子关系靠缩进 + 分支图标表达。
-   * 源项目折叠时它的附属项目一并隐藏——与隐藏其会话是同一个心智。
-   */
-  const ordered = projects
-    .filter((p) => !p.worktree)
-    .flatMap((p) =>
-      collapsed[p.id]
-        ? [{ project: p, nested: false }]
-        : [
-            { project: p, nested: false },
-            ...projects
-              .filter((c) => c.worktree?.sourceProjectId === p.id)
-              .map((c) => ({ project: c, nested: true })),
-          ]
-    );
+  const servers = groupServers(projects, hosts, t("project.typeLocalShort")).filter(
+    (s) => s.kind !== "local" || s.folders.length > 0 || hosts.length === 0
+  );
+  const empty = projects.length === 0 && hosts.length === 0;
 
   return (
     <aside className="flex w-65 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b pr-2 pl-3">
-        <span className="text-base font-medium tracking-tight">{t("appName")}</span>
+        <button
+          type="button"
+          className="text-base font-medium tracking-tight outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          title={t("palette.overview")}
+          onClick={showOverview}
+        >
+          {t("appName")}
+        </button>
         <span className="flex-1" />
         <Button
           variant="ghost"
@@ -76,7 +166,7 @@ export function Sidebar() {
 
       <div className="mt-1 flex h-8 items-center pr-1.5 pl-3">
         <span className="text-[11px] tracking-wide text-muted-foreground">
-          {t("sidebar.projects")}
+          {t("sidebar.servers")}
         </span>
         <span className="flex-1" />
         <Button
@@ -91,26 +181,50 @@ export function Sidebar() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-2">
-        {projects.length === 0 && (
+        {empty && (
           <p className="px-3 pt-1.5 pb-2.5 text-xs leading-relaxed text-muted-foreground">
             {t("sidebar.empty")}
           </p>
         )}
-        {ordered.map(({ project, nested }) => (
-          <ProjectNode
-            key={project.id}
-            project={project}
-            nested={nested}
-            sessions={sessions.filter((s) => s.projectId === project.id)}
-            expanded={!collapsed[project.id]}
-            activeSessionId={active.kind === "terminal" ? active.sessionId : null}
-            onToggle={() => toggleProject(project.id)}
-            onOpenSession={openSession}
-            onMenu={(e) =>
+        {servers.map((server) => (
+          <ServerNode
+            key={server.key}
+            server={server}
+            heads={heads}
+            expanded={!collapsed[server.key]}
+            collapsed={collapsed}
+            onToggle={() => toggleCollapsed(server.key)}
+            onToggleKey={toggleCollapsed}
+            selectedProjectId={selectedProjectId}
+            onSelectProject={selectProject}
+            onNewProject={() =>
+              openProjectForm(
+                null,
+                server.kind === "host" && server.host
+                  ? { type: "ssh", hostId: server.host.id }
+                  : server.kind === "local"
+                    ? { type: "local" }
+                    : { type: "ssh" }
+              )
+            }
+            onMenu={
+              server.kind === "host" && server.host
+                ? (e) =>
+                    openMenu({
+                      ...menuAnchor(e),
+                      items: actions.hostMenuItems(server.host!),
+                    })
+                : server.kind === "local"
+                  ? (e) =>
+                      openMenu({
+                        ...menuAnchor(e),
+                        items: actions.localServerMenuItems(),
+                      })
+                  : undefined
+            }
+            onProjectMenu={(project, e) =>
               openMenu({ ...menuAnchor(e), items: actions.projectMenuItems(project) })
             }
-            onReattach={actions.reattach}
-            onClear={actions.clearDead}
           />
         ))}
       </div>
@@ -121,11 +235,11 @@ export function Sidebar() {
           size="sm"
           className={cn(
             "h-6.5 gap-2 px-2 text-xs font-normal text-muted-foreground",
-            isOverview && "bg-accent text-accent-foreground"
+            settingsOpen && "bg-accent text-accent-foreground"
           )}
           aria-label={t("sidebar.settingsTitle")}
           title={t("sidebar.settingsTitle")}
-          onClick={showOverview}
+          onClick={() => openSettings()}
         >
           <Settings />
           {t("sidebar.settings")}
@@ -143,155 +257,299 @@ export function Sidebar() {
   );
 }
 
-function ProjectNode({
-  project,
-  nested,
-  sessions,
+function ServerNode({
+  server,
+  heads,
   expanded,
-  activeSessionId,
+  collapsed,
   onToggle,
-  onOpenSession,
+  onToggleKey,
+  selectedProjectId,
+  onSelectProject,
+  onNewProject,
   onMenu,
-  onReattach,
-  onClear,
+  onProjectMenu,
 }: {
-  project: Project;
-  nested: boolean;
-  sessions: SessionWithProject[];
+  server: ServerGroup;
+  heads: Record<string, ProjectHead>;
   expanded: boolean;
-  activeSessionId: string | null;
+  collapsed: Record<string, boolean>;
   onToggle: () => void;
-  onOpenSession: (id: string) => void;
-  onMenu: (e: { currentTarget: HTMLElement }) => void;
-  onReattach: (s: SessionWithProject) => void;
-  onClear: (s: SessionWithProject) => void;
+  onToggleKey: (key: string) => void;
+  selectedProjectId: string | null;
+  onSelectProject: (id: string) => void;
+  onNewProject: () => void;
+  onMenu?: (e: { currentTarget: HTMLElement }) => void;
+  onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
 }) {
   const { t } = useTranslation();
-  const bar = sshBar(project);
-  const wt = project.worktree;
-  const sourceName = useApp((s) =>
-    wt ? (s.projects.find((p) => p.id === wt.sourceProjectId)?.name ?? "") : ""
-  );
+  const Icon = server.kind === "local" ? Monitor : Server;
 
   return (
-    /* 附属项目：缩进一级，表达"依附于上面那个源项目"。
-       刻意不做成真正的嵌套 DOM——那样 collapsed / 会话列表 / 菜单全要改 */
-    <div className={cn("mb-0.5", nested && "pl-3")}>
+    <div className="mb-0.5">
       <div className="group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent">
         <button
           className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          aria-label={t("sidebar.toggleProject")}
+          aria-label={t("sidebar.toggleServer")}
           aria-expanded={expanded}
           onClick={onToggle}
         >
           {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         </button>
-        {/* 有颜色 = 在别人的机器上；本地项目故意不给色条 */}
         <span
           className="h-4 w-[3px] shrink-0 rounded-full"
-          style={{ background: bar ?? "transparent" }}
+          style={{ background: server.bar ?? "transparent" }}
         />
-        {wt && <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />}
-        <span
-          className="min-w-0 flex-1 truncate pl-1 font-medium"
-          title={
-            wt
-              ? `${t("worktree.derivedFrom", { name: sourceName })} · ${project.workingDir ?? ""}`
-              : (project.workingDir ?? project.name)
-          }
-        >
-          {project.name}
-        </span>
-        {/* 附属项目显示分支：宿主机与源项目相同，分支信息价值高得多 */}
-        <span
-          className="max-w-24 truncate font-mono text-[11px] text-muted-foreground"
-          title={wt ? wt.branch : undefined}
-        >
-          {wt ? wt.branch : hostLabel(project, t("project.typeLocalShort"))}
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate pl-1 font-medium" title={server.conn}>
+          {server.name}
         </span>
         <Button
           variant="ghost"
           size="icon-xs"
-          className="text-muted-foreground"
-          aria-label={t("sidebar.projectMenu")}
-          title={t("common.more")}
-          onClick={onMenu}
+          className="text-muted-foreground opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+          aria-label={t("sidebar.newProject")}
+          title={t("sidebar.newProject")}
+          onClick={onNewProject}
         >
-          <Ellipsis />
+          <Plus />
         </Button>
+        {onMenu && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground"
+            aria-label={t("sidebar.serverMenu")}
+            title={t("common.more")}
+            onClick={onMenu}
+          >
+            <Ellipsis />
+          </Button>
+        )}
       </div>
 
       {expanded &&
-        sessions.map((session) => {
-          const dead = session.state === "dead";
-          const deadReason = session.deadReason
-            ? t(`session.deadReason_${session.deadReason.replace(/-/g, "_")}`)
-            : "";
-          return (
-            <div
-              key={session.id}
-              role="button"
-              tabIndex={0}
-              className={cn(
-                "flex h-6.5 w-full cursor-pointer items-center gap-2 pr-1.5 pl-7.5 text-left outline-none hover:bg-sidebar-accent focus-visible:ring-[3px] focus-visible:ring-ring/50",
-                activeSessionId === session.id && "bg-accent"
-              )}
-              title={
-                dead
-                  ? `${session.name} · ${deadReason}`
-                  : session.durable
-                    ? session.name
-                    : `${session.name} · ${reasonText(t, session.nonDurableReason)}`
+        (server.folders.length === 0 ? (
+          <p className="px-3 py-1 pl-8.5 text-[11px] text-muted-foreground">
+            {t("sidebar.emptyServer")}
+          </p>
+        ) : (
+          server.folders.map((folder) => (
+            <FolderNode
+              key={folder.project.id}
+              folder={folder}
+              heads={heads}
+              collapsed={collapsed}
+              selectedProjectId={selectedProjectId}
+              onSelectProject={onSelectProject}
+              onToggleKey={onToggleKey}
+              onProjectMenu={onProjectMenu}
+            />
+          ))
+        ))}
+    </div>
+  );
+}
+
+function FolderNode({
+  folder,
+  heads,
+  collapsed,
+  selectedProjectId,
+  onSelectProject,
+  onToggleKey,
+  onProjectMenu,
+}: {
+  folder: FolderGroup;
+  heads: Record<string, ProjectHead>;
+  collapsed: Record<string, boolean>;
+  selectedProjectId: string | null;
+  onSelectProject: (id: string) => void;
+  onToggleKey: (key: string) => void;
+  onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
+}) {
+  const { project, worktrees } = folder;
+  const head = heads[project.id];
+  // 未写过偏好 = 展开。第三层是分支 / worktree，默认要看见，不能让人再点一次。
+  const open = collapsed[folderKey(project.id)] !== true;
+
+  return (
+    <div>
+      <TreeRow
+        depth={1}
+        expanded={open}
+        icon={<Folder className="size-3.5 shrink-0 text-muted-foreground" />}
+        label={project.name}
+        title={project.workingDir ?? project.name}
+        toggleLabel="sidebar.toggleProject"
+        onToggle={() => onToggleKey(folderKey(project.id))}
+        onSelect={() => onSelectProject(project.id)}
+        onMenu={(e) => onProjectMenu(project, e)}
+      />
+      {open && (
+        <>
+          <CheckoutNode
+            project={project}
+            label={checkoutLabel(project, head)}
+            branched
+            depth={2}
+            selected={selectedProjectId === project.id}
+            onSelect={() => onSelectProject(project.id)}
+            onMenu={(e) => onProjectMenu(project, e)}
+          />
+          {worktrees.map((wt) => (
+            <CheckoutNode
+              key={wt.id}
+              project={wt}
+              label={checkoutLabel(wt)}
+              branched
+              depth={2}
+              selected={selectedProjectId === wt.id}
+              onSelect={() => onSelectProject(wt.id)}
+              onMenu={(e) => onProjectMenu(wt, e)}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CheckoutNode({
+  project,
+  label,
+  meta,
+  branched,
+  depth,
+  selected,
+  onSelect,
+  onMenu,
+}: {
+  project: Project;
+  label: string;
+  meta?: string;
+  branched?: boolean;
+  depth: number;
+  selected?: boolean;
+  onSelect?: () => void;
+  onMenu: (e: { currentTarget: HTMLElement }) => void;
+}) {
+  const { t } = useTranslation();
+  const sourceName = useApp((s) =>
+    project.worktree
+      ? (s.projects.find((p) => p.id === project.worktree?.sourceProjectId)?.name ?? "")
+      : ""
+  );
+  const title = project.worktree
+    ? `${t("worktree.derivedFrom", { name: sourceName })} · ${project.workingDir ?? ""}`
+    : (project.workingDir ?? project.name);
+
+  return (
+    <TreeRow
+      depth={depth}
+      icon={
+        branched ? (
+          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+        )
+      }
+      label={label}
+      meta={meta}
+      title={title}
+      selected={selected}
+      onSelect={onSelect}
+      onMenu={onMenu}
+    />
+  );
+}
+
+function TreeRow({
+  depth,
+  expanded,
+  icon,
+  label,
+  meta,
+  title,
+  toggleLabel,
+  onToggle,
+  selected,
+  onSelect,
+  onMenu,
+}: {
+  depth: number;
+  expanded?: boolean;
+  icon: ReactNode;
+  label: string;
+  meta?: string;
+  title?: string;
+  toggleLabel?: "sidebar.toggleServer" | "sidebar.toggleProject" | "sidebar.toggleWorktree";
+  onToggle?: () => void;
+  selected?: boolean;
+  onSelect?: () => void;
+  onMenu: (e: { currentTarget: HTMLElement }) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      role={onSelect ? "button" : undefined}
+      tabIndex={onSelect ? 0 : undefined}
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent",
+        onSelect && "cursor-pointer",
+        selected && "bg-accent"
+      )}
+      style={{ paddingLeft: 4 + depth * 12 }}
+      onClick={onSelect}
+      onKeyDown={
+        onSelect
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect();
               }
-              onClick={() => onOpenSession(session.id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onOpenSession(session.id);
-                }
-              }}
-            >
-              <StatusMark state={session.state} />
-              <span
-                className={cn(
-                  "min-w-0 flex-1 truncate",
-                  dead && "text-muted-foreground line-through"
-                )}
-              >
-                {session.name}
-              </span>
-              {/* 状态需要动作时，动作就在行内——不用先打开 tab 再找 banner */}
-              {session.state === "unverified" && (
-                <Button
-                  variant="warning"
-                  size="xs"
-                  className="h-5"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onReattach(session);
-                  }}
-                >
-                  {t("session.reattach")}
-                </Button>
-              )}
-              {dead && (
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  className="size-4.5 text-muted-foreground"
-                  aria-label={t("session.clearRecord")}
-                  title={t("session.clearRecordHint")}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClear(session);
-                  }}
-                >
-                  <X />
-                </Button>
-              )}
-            </div>
-          );
-        })}
+            }
+          : undefined
+      }
+    >
+      {onToggle && toggleLabel ? (
+        <button
+          className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          aria-label={t(toggleLabel)}
+          aria-expanded={expanded}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+        </button>
+      ) : (
+        <span className="size-4.5 shrink-0" />
+      )}
+      {icon}
+      <span className="min-w-0 flex-1 truncate pl-1 font-medium" title={title}>
+        {label}
+      </span>
+      {meta && (
+        <span className="max-w-24 truncate font-mono text-[11px] text-muted-foreground" title={meta}>
+          {meta}
+        </span>
+      )}
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        className="text-muted-foreground"
+        aria-label={t("sidebar.projectMenu")}
+        title={t("common.more")}
+        onClick={(e) => {
+          e.stopPropagation();
+          onMenu(e);
+        }}
+      >
+        <Ellipsis />
+      </Button>
     </div>
   );
 }

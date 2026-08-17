@@ -15,6 +15,45 @@ export interface SshConfig {
   hasSecret: boolean;
 }
 
+/**
+ * 预先保存的远端 SSH 主机。
+ *
+ * 项目创建时从这里选一台，连接配置复制到项目上——会话链路仍然读项目自己的
+ * ssh 字段，不按 hostId 解引用。改主机时再把连接配置刷回引用它的项目。
+ */
+export interface SshHost {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  keyPath?: string;
+  hasSecret: boolean;
+  /** 当前引用此主机的项目数（含附属项目） */
+  projectCount: number;
+  createdAt: number;
+}
+
+/** 创建 / 更新远端主机。secret 仅在写入方向出现。 */
+export interface SshHostInput {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  authMethod: SshAuthMethod;
+  keyPath?: string;
+  secret?: string;
+}
+
+/**
+ * SSH 连通性探测。形状与 RepoInfo 同源：环境事实写在 ok/error 里，不抛 4xx。
+ * 测的是「现在这组凭据能不能登上」，不是 Zellij / git 好不好用。
+ */
+export type SshProbeResult =
+  | { ok: true; kind: "posix" | "windows"; home: string }
+  | { ok: false; error: string };
+
 export interface Project {
   id: string;
   name: string;
@@ -24,6 +63,8 @@ export interface Project {
   /** 覆盖默认 shell，可选 */
   shell?: string;
   ssh?: SshConfig;
+  /** 创建时选中的已保存主机；存量项目或手写 ssh 字段的请求没有这项 */
+  hostId?: string;
   /** 存在 ⇔ 这是附属项目（工作目录是某个 git 仓库的 worktree） */
   worktree?: WorktreeInfo;
   createdAt: number;
@@ -35,6 +76,11 @@ export interface ProjectInput {
   type: ProjectType;
   workingDir?: string;
   shell?: string;
+  /**
+   * 已保存主机。有值时连接配置从该主机复制，忽略 ssh 字段。
+   * 新建 SSH 项目走这条；存量项目仍可用下面的 ssh 手写。
+   */
+  hostId?: string;
   ssh?: {
     host: string;
     port: number;
@@ -149,6 +195,69 @@ export interface WorktreeInput {
   startPoint?: string;
   /** 目标目录；缺省用服务端派生的同级平铺路径 */
   dir?: string;
+}
+
+/**
+ * 右侧 Git 面板的仓库快照。源项目和附属项目都能问。
+ *
+ * 与 RepoInfo 分开：那边是派生用的分支清单（建议目录、占用），这边是当前
+ * 工作区状态。环境事实同样不抛 4xx，写在 available / reason 里。
+ */
+export type GitUnavailableReason = Extract<
+  WorktreeFailure,
+  "git-missing" | "not-a-repo" | "no-working-dir" | "link-failed"
+>;
+
+export interface GitFileChange {
+  path: string;
+  /** 重命名 / 复制前的路径 */
+  origPath?: string;
+  /** porcelain X：暂存区状态，空格表示无 */
+  index: string;
+  /** porcelain Y：工作区状态，空格表示无 */
+  work: string;
+}
+
+export interface GitRemote {
+  name: string;
+  url: string;
+}
+
+export interface GitCommit {
+  sha: string;
+  author: string;
+  /** unix 毫秒 */
+  authoredAt: number;
+  subject: string;
+}
+
+export interface GitWorktreeRef {
+  path: string;
+  branch?: string;
+  head: string;
+  current: boolean;
+}
+
+export interface GitSnapshot {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  repoDir?: string;
+  /** 项目工作目录（可能是仓库里的子目录） */
+  workDir?: string;
+  headBranch?: string;
+  headSha?: string;
+  detached?: boolean;
+  upstream?: string;
+  /** 没有 upstream 时为 null */
+  ahead?: number | null;
+  behind?: number | null;
+  remotes: GitRemote[];
+  files: GitFileChange[];
+  /** 工作区改动总数；files 可能被截断 */
+  fileCount: number;
+  worktrees: GitWorktreeRef[];
+  commits: GitCommit[];
 }
 
 /** 附属项目的工作区状态，删除前的预检 */
@@ -299,7 +408,7 @@ export type InstallClientMessage = { type: "cancel" };
 
 export type InstallServerMessage =
   /** attempt 从 1 起；>1 表示后端在自动重试瞬时故障，UI 据此说明"为什么还在转" */
-  | { type: "stage"; stage: ZellijInstallStage; attempt: number }
+  | { type: "stage"; stage: ZellijInstallStage; attempt: number; command?: string }
   | { type: "done" }
   /** 失败原因用 NonDurableReason：除了安装本身失败，也可能是尚未授权 */
   | { type: "failed"; reason: NonDurableReason; detail?: string; attempts?: number };
@@ -320,6 +429,30 @@ export interface SystemInfo {
   /** localDurable=false 时的原因 */
   localDurableReason?: NonDurableReason;
   version: string;
+}
+
+/** 目录浏览里的一项，只含文件夹（含指向目录的符号链接） */
+export interface FsDirEntry {
+  name: string;
+  path: string;
+}
+
+/**
+ * 后端机器上某一层目录的列表。
+ *
+ * 给本地项目选工作目录用：浏览器拿不到后端的真实路径，
+ * `showDirectoryPicker` 也给不出服务端路径，只能后端自己列。
+ *
+ * `path === ""` 是 Windows 的盘符列表（虚拟层，不是真实目录）；
+ * POSIX 没有这一层，根就是 `/`。
+ */
+export interface FsListing {
+  path: string;
+  /** 上一级。POSIX 根为 null；Windows 盘符根的上一级是 ""（盘符列表） */
+  parent: string | null;
+  home: string;
+  roots: string[];
+  entries: FsDirEntry[];
 }
 
 export interface ApiError {

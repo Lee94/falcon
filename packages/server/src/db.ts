@@ -6,6 +6,7 @@ import type {
   Session,
   SessionState,
   SshAuthMethod,
+  SshHost,
 } from "@mojito/shared";
 
 export interface ProjectRow {
@@ -20,6 +21,8 @@ export interface ProjectRow {
   ssh_auth_method: string | null;
   ssh_key_path: string | null;
   ssh_secret_enc: string | null;
+  /** 已保存主机；存量项目与手写 ssh 的请求为 null */
+  host_id: string | null;
   created_at: number;
   // ---- 附属项目（git worktree）。四列全可空，普通项目一律为 null ----
   source_project_id: string | null;
@@ -40,6 +43,18 @@ export interface SessionRow {
   non_durable_reason: string | null;
   created_at: number;
   last_active_at: number;
+}
+
+export interface SshHostRow {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_method: string;
+  key_path: string | null;
+  secret_enc: string | null;
+  created_at: number;
 }
 
 export interface ZellijHostRow {
@@ -101,6 +116,17 @@ export class Db {
         fingerprint TEXT NOT NULL,
         PRIMARY KEY (host, port)
       );
+      CREATE TABLE IF NOT EXISTS ssh_hosts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        host TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        auth_method TEXT NOT NULL,
+        key_path TEXT,
+        secret_enc TEXT,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS zellij_hosts (
         host TEXT NOT NULL,
         port INTEGER NOT NULL,
@@ -128,14 +154,15 @@ export class Db {
     this.addColumn("projects", "worktree_branch", "TEXT");
     this.addColumn("projects", "worktree_repo_dir", "TEXT");
     this.addColumn("projects", "worktree_created_by_mojito", "INTEGER");
+    this.addColumn("projects", "host_id", "TEXT");
   }
 
   /**
-   * zellij_hosts 与 known_hosts 分表而非合并：
+   * zellij_hosts / known_hosts / ssh_hosts 三张表键不同，不合：
    * known_hosts 表达"这台机器的身份可信"（主机级事实，与登录用户无关，键是 host+port），
    * zellij_hosts 表达"这个账户下装了什么"（账户级事实，键必须含 username——
-   * alice@srv 授权过不代表 bob@srv 的 home 里也有二进制）。键不同，合表要动
-   * known_hosts 的主键，会把一个已经正确的安全模型搞乱。
+   * alice@srv 授权过不代表 bob@srv 的 home 里也有二进制），
+   * ssh_hosts 表达"用户预先保存的连接配置"（有别名、可改、被项目引用，键是自己的 id）。
    */
   private addColumn(table: string, column: string, type: string) {
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as {
@@ -183,6 +210,7 @@ export class Db {
               hasSecret: row.ssh_secret_enc != null,
             }
           : undefined,
+      hostId: row.host_id ?? undefined,
       worktree: row.source_project_id
         ? {
             sourceProjectId: row.source_project_id,
@@ -210,9 +238,9 @@ export class Db {
   insertProject(row: ProjectRow) {
     this.db
       .prepare(
-        `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, created_at,
+        `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
            source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito)
-         VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @created_at,
+         VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
            @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito)`
       )
       .run(row);
@@ -230,7 +258,8 @@ export class Db {
     this.db
       .prepare(
         `UPDATE projects SET name=@name, working_dir=@working_dir, shell=@shell, ssh_host=@ssh_host, ssh_port=@ssh_port,
-         ssh_username=@ssh_username, ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc
+         ssh_username=@ssh_username, ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc,
+         host_id=@host_id
          WHERE id=@id`
       )
       .run(row);
@@ -254,7 +283,8 @@ export class Db {
     this.db
       .prepare(
         `UPDATE projects SET ssh_host=@ssh_host, ssh_port=@ssh_port, ssh_username=@ssh_username,
-           ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc
+           ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc,
+           host_id=@host_id
          WHERE source_project_id=@source_id`
       )
       .run({
@@ -264,13 +294,115 @@ export class Db {
         ssh_auth_method: src.ssh_auth_method,
         ssh_key_path: src.ssh_key_path,
         ssh_secret_enc: src.ssh_secret_enc,
+        host_id: src.host_id,
         source_id: sourceId,
+      });
+  }
+
+  /**
+   * 已保存主机改了连接配置后，把五列刷到引用它的全部项目。
+   * 与 updateChildrenSsh 同构：项目上的 ssh_* 是复制，不是解引用。
+   */
+  updateProjectsFromHost(host: SshHostRow) {
+    this.db
+      .prepare(
+        `UPDATE projects SET ssh_host=@host, ssh_port=@port, ssh_username=@username,
+           ssh_auth_method=@auth_method, ssh_key_path=@key_path, ssh_secret_enc=@secret_enc
+         WHERE host_id=@id`
+      )
+      .run({
+        host: host.host,
+        port: host.port,
+        username: host.username,
+        auth_method: host.auth_method,
+        key_path: host.key_path,
+        secret_enc: host.secret_enc,
+        id: host.id,
       });
   }
 
   deleteProject(id: string) {
     this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
     this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+  }
+
+  // ---- saved SSH hosts ----
+
+  static toSshHost(row: SshHostRow, projectCount: number): SshHost {
+    return {
+      id: row.id,
+      name: row.name,
+      host: row.host,
+      port: row.port,
+      username: row.username,
+      authMethod: row.auth_method as SshAuthMethod,
+      keyPath: row.key_path ?? undefined,
+      hasSecret: row.secret_enc != null,
+      projectCount,
+      createdAt: row.created_at,
+    };
+  }
+
+  listHosts(): SshHost[] {
+    const rows = this.db
+      .prepare("SELECT * FROM ssh_hosts ORDER BY created_at ASC")
+      .all() as SshHostRow[];
+    const counts = this.db
+      .prepare(
+        "SELECT host_id AS id, COUNT(*) AS n FROM projects WHERE host_id IS NOT NULL GROUP BY host_id"
+      )
+      .all() as { id: string; n: number }[];
+    const byId = new Map(counts.map((c) => [c.id, c.n]));
+    return rows.map((row) => Db.toSshHost(row, byId.get(row.id) ?? 0));
+  }
+
+  getHost(id: string): SshHostRow | undefined {
+    return this.db.prepare("SELECT * FROM ssh_hosts WHERE id = ?").get(id) as
+      | SshHostRow
+      | undefined;
+  }
+
+  findHostByName(name: string, exceptId?: string): SshHostRow | undefined {
+    if (exceptId) {
+      return this.db
+        .prepare(
+          "SELECT * FROM ssh_hosts WHERE lower(name) = lower(?) AND id != ?"
+        )
+        .get(name, exceptId) as SshHostRow | undefined;
+    }
+    return this.db
+      .prepare("SELECT * FROM ssh_hosts WHERE lower(name) = lower(?)")
+      .get(name) as SshHostRow | undefined;
+  }
+
+  insertHost(row: SshHostRow) {
+    this.db
+      .prepare(
+        `INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
+         VALUES (@id, @name, @host, @port, @username, @auth_method, @key_path, @secret_enc, @created_at)`
+      )
+      .run(row);
+  }
+
+  updateHost(row: SshHostRow) {
+    this.db
+      .prepare(
+        `UPDATE ssh_hosts SET name=@name, host=@host, port=@port, username=@username,
+         auth_method=@auth_method, key_path=@key_path, secret_enc=@secret_enc
+         WHERE id=@id`
+      )
+      .run(row);
+  }
+
+  countProjectsByHost(hostId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM projects WHERE host_id = ?")
+      .get(hostId) as { n: number };
+    return row.n;
+  }
+
+  deleteHost(id: string) {
+    this.db.prepare("DELETE FROM ssh_hosts WHERE id = ?").run(id);
   }
 
   // ---- sessions ----

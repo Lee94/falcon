@@ -67,7 +67,7 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={on}
             className={cn(
-              "h-8 flex-1 text-[13px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
+              "h-8 flex-1 whitespace-nowrap px-3 text-[13px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
               on
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"

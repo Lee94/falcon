@@ -39,8 +39,8 @@ export type ExecFn = (
 /** 安装阶段，用于向前端报告进度。没有百分比——宿主机自己下载，后端看不到字节数。 */
 export type InstallStage = "probing" | "downloading" | "extracting" | "verifying";
 
-/** 阶段回调。attempt 从 1 起，>1 表示这一轮是自动重试。 */
-export type StageFn = (stage: InstallStage, attempt: number) => void;
+/** 阶段回调。attempt 从 1 起，>1 表示这一轮是自动重试。command 是可读的远端命令。 */
+export type StageFn = (stage: InstallStage, attempt: number, command?: string) => void;
 
 /** 与前端共用同一份定义，避免两边各改一处后悄悄漂移 */
 export type InstallFailure = ZellijInstallFailure;
@@ -105,10 +105,12 @@ export async function ensureZellij(
   const layout = hostLayout(opts.kind, opts.root, opts.target);
 
   // 目录与 layout 文件先就位——二进制装没装好都需要它们
-  await run(exec, ensureDirs(opts.kind, layout), "dir-not-writable", opts.signal);
+  const dirsCmd = ensureDirs(opts.kind, layout);
+  opts.onStage?.("verifying", 1, displayCmd(opts.kind, dirsCmd, ensureDirsScript(opts.kind, layout)));
+  await run(exec, dirsCmd, "dir-not-writable", opts.signal);
 
   // 已装或已预置：握手通过就直接用，省掉整个下载流程
-  opts.onStage?.("verifying", 1);
+  opts.onStage?.("verifying", 1, verifyDisplay(opts.kind, layout.bin));
   if (await verify(exec, opts.kind, layout.bin, opts.signal)) return layout;
 
   // 前置条件不随重试改变，放在重试循环外先挡掉
@@ -149,25 +151,36 @@ async function installOnce(
   const tmpDir = `${layout.binDir}${sep}.tmp-${crypto.randomUUID().slice(0, 8)}`;
 
   try {
-    opts.onStage?.("downloading", attempt);
-    await run(
-      exec,
-      download(opts.kind, tmpDir, url, downloader),
-      "download-failed",
-      opts.signal
+    const dl = download(opts.kind, tmpDir, url, downloader);
+    opts.onStage?.(
+      "downloading",
+      attempt,
+      displayCmd(opts.kind, dl, downloadScript(opts.kind, tmpDir, url, downloader))
     );
+    await run(exec, dl, "download-failed", opts.signal);
 
-    opts.onStage?.("extracting", attempt);
-    await run(exec, extract(opts.kind, tmpDir), "extract-failed", opts.signal);
+    const unpack = extract(opts.kind, tmpDir);
+    opts.onStage?.(
+      "extracting",
+      attempt,
+      displayCmd(opts.kind, unpack, extractScript(opts.kind, tmpDir))
+    );
+    await run(exec, unpack, "extract-failed", opts.signal);
 
     // 原子替换：先在临时目录里验证，通过了才 rename 到正式路径。
     // 半截文件、并发安装都不会污染正式路径（后到者覆盖，内容相同无害）。
-    opts.onStage?.("verifying", attempt);
     const staged = `${tmpDir}${sep}${opts.kind === "windows" ? "zellij.exe" : "zellij"}`;
+    opts.onStage?.("verifying", attempt, verifyDisplay(opts.kind, staged));
     if (!(await verify(exec, opts.kind, staged, opts.signal, true))) {
       throw new InstallError("verify-failed", failureText("verify-failed"));
     }
-    await run(exec, promote(opts.kind, staged, layout.bin), "extract-failed", opts.signal);
+    const move = promote(opts.kind, staged, layout.bin);
+    opts.onStage?.(
+      "verifying",
+      attempt,
+      displayCmd(opts.kind, move, promoteScript(opts.kind, staged, layout.bin))
+    );
+    await run(exec, move, "extract-failed", opts.signal);
   } finally {
     // 不带 signal：取消时更要清干净，否则临时目录会一直留在用户机器上
     await exec(cleanup(opts.kind, tmpDir)).catch(() => {});
@@ -302,20 +315,27 @@ function mkdirPS(dir: string): string {
   return `New-Item -ItemType Directory -Force -Path ${quotePowerShell(dir)} | Out-Null`;
 }
 
-function download(
+/** Windows 实际跑的是 -EncodedCommand；UI 展示未编码的脚本，才读得懂 */
+function displayCmd(kind: HostKind, encoded: string, script: string): string {
+  return kind === "windows" ? script.replace(/; /g, "\n") : encoded;
+}
+
+function verifyDisplay(kind: HostKind, bin: string): string {
+  return kind === "windows" ? `& ${quotePowerShell(bin)} --version` : `${quotePosix(bin)} --version`;
+}
+
+function downloadScript(
   kind: HostKind,
   tmpDir: string,
   url: string,
   downloader: "curl" | "wget"
 ): string {
   if (kind === "windows") {
-    return encodePowerShell(
-      [
-        mkdirPS(tmpDir),
-        `curl.exe -fsSL ${CURL_LIMITS} ${quotePowerShell(url)} -o ${quotePowerShell(`${tmpDir}\\a.zip`)}`,
-        `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
-      ].join("; ")
-    );
+    return [
+      mkdirPS(tmpDir),
+      `curl.exe -fsSL ${CURL_LIMITS} ${quotePowerShell(url)} -o ${quotePowerShell(`${tmpDir}\\a.zip`)}`,
+      `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
+    ].join("; ");
   }
   const dir = quotePosix(tmpDir);
   const out = quotePosix(`${tmpDir}/a.tar.gz`);
@@ -327,28 +347,43 @@ function download(
   return `mkdir -p ${dir} && ${fetch}`;
 }
 
-/** 包内只有单个可执行文件（POSIX 为 zellij，Windows 为 zellij.exe） */
-function extract(kind: HostKind, tmpDir: string): string {
+function download(
+  kind: HostKind,
+  tmpDir: string,
+  url: string,
+  downloader: "curl" | "wget"
+): string {
+  const script = downloadScript(kind, tmpDir, url, downloader);
+  return kind === "windows" ? encodePowerShell(script) : script;
+}
+
+function extractScript(kind: HostKind, tmpDir: string): string {
   if (kind === "windows") {
-    // tar.exe 是 bsdtar，能解 zip
-    return encodePowerShell(
-      [
-        `tar.exe -xf ${quotePowerShell(`${tmpDir}\\a.zip`)} -C ${quotePowerShell(tmpDir)}`,
-        `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
-      ].join("; ")
-    );
+    return [
+      `tar.exe -xf ${quotePowerShell(`${tmpDir}\\a.zip`)} -C ${quotePowerShell(tmpDir)}`,
+      `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
+    ].join("; ");
   }
   const dir = quotePosix(tmpDir);
   return `tar -xzf ${quotePosix(`${tmpDir}/a.tar.gz`)} -C ${dir} && chmod 700 ${quotePosix(`${tmpDir}/zellij`)}`;
 }
 
-function promote(kind: HostKind, staged: string, bin: string): string {
+/** 包内只有单个可执行文件（POSIX 为 zellij，Windows 为 zellij.exe） */
+function extract(kind: HostKind, tmpDir: string): string {
+  const script = extractScript(kind, tmpDir);
+  return kind === "windows" ? encodePowerShell(script) : script;
+}
+
+function promoteScript(kind: HostKind, staged: string, bin: string): string {
   if (kind === "windows") {
-    return encodePowerShell(
-      `Move-Item -Force -LiteralPath ${quotePowerShell(staged)} -Destination ${quotePowerShell(bin)}`
-    );
+    return `Move-Item -Force -LiteralPath ${quotePowerShell(staged)} -Destination ${quotePowerShell(bin)}`;
   }
   return `mv -f ${quotePosix(staged)} ${quotePosix(bin)}`;
+}
+
+function promote(kind: HostKind, staged: string, bin: string): string {
+  const script = promoteScript(kind, staged, bin);
+  return kind === "windows" ? encodePowerShell(script) : script;
 }
 
 function cleanup(kind: HostKind, tmpDir: string): string {
@@ -374,7 +409,7 @@ function cleanup(kind: HostKind, tmpDir: string): string {
  * 每次都跑（哪怕二进制已经装好）：成本是一次往返，换来的是用户误删
  * layout 文件后能自愈——少了它 Zellij 会直接以 IoError 退出。
  */
-export function ensureDirs(kind: HostKind, layout: HostLayout): string {
+function ensureDirsScript(kind: HostKind, layout: HostLayout): string {
   const dirs = [
     layout.binDir,
     layout.socketDir,
@@ -389,11 +424,16 @@ export function ensureDirs(kind: HostKind, layout: HostLayout): string {
       `Set-Content -LiteralPath ${quotePowerShell(layout.layoutFile)} -Value ${quotePowerShell(LAYOUT_BODY.trim())}`,
       `Set-Content -LiteralPath ${quotePowerShell(layout.configFile)} -Value ${quotePowerShell(CONFIG_BODY.trim())}`
     );
-    return encodePowerShell(mk.join("; "));
+    return mk.join("; ");
   }
   return (
     `mkdir -p ${dirs.map(quotePosix).join(" ")} && ` +
     `printf %s ${quotePosix(LAYOUT_BODY)} > ${quotePosix(layout.layoutFile)} && ` +
     `printf %s ${quotePosix(CONFIG_BODY)} > ${quotePosix(layout.configFile)}`
   );
+}
+
+export function ensureDirs(kind: HostKind, layout: HostLayout): string {
+  const script = ensureDirsScript(kind, layout);
+  return kind === "windows" ? encodePowerShell(script) : script;
 }

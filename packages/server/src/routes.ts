@@ -3,19 +3,26 @@ import type { FastifyInstance } from "fastify";
 import type {
   AuthStatus,
   DeleteProjectResult,
+  FsListing,
+  GitSnapshot,
+  GitUnavailableReason,
   HostZellijStatus,
   ProjectInput,
   RepoInfo,
   SessionWithProject,
+  SshHost,
+  SshHostInput,
+  SshProbeResult,
   SystemInfo,
   WorktreeFailure,
   WorktreeInput,
   WorktreeStatus,
 } from "@mojito/shared";
-import { Db, type ProjectRow } from "./db.js";
+import { Db, type ProjectRow, type SshHostRow } from "./db.js";
+import { listDirectories, listRemoteDirectories } from "./fs.js";
 import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
-import type { SessionManager } from "./sessions/manager.js";
+import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
 import { gitHostFor } from "./git/host.js";
 import { withRepoLock } from "./git/lock.js";
@@ -31,9 +38,11 @@ import {
 import { cleanupWorktree } from "./git/remove.js";
 import {
   addWorktree,
+  describeGit,
   describeRepo,
   pathExists,
   repoRoot,
+  unavailableSnapshot,
   worktreeStatus,
 } from "./git/repo.js";
 import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
@@ -44,6 +53,13 @@ import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
  * 环境事实与状态冲突一律 409（用户去改环境 / 换个分支就能过），
  * 只有"命令没跑起来"和"git 自己失败了"才是 502。
  */
+const GIT_UNAVAILABLE = new Set<WorktreeFailure>([
+  "git-missing",
+  "not-a-repo",
+  "no-working-dir",
+  "link-failed",
+]);
+
 const WORKTREE_STATUS: Record<WorktreeFailure, number> = {
   "git-missing": 409,
   "not-a-repo": 409,
@@ -145,7 +161,58 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
   });
 
+  /**
+   * 列子目录。不带 hostId/projectId 时列后端本机；带了就走 SSH 列远端。
+   * query 缺省是家目录；`path=` 空字符串是 Windows 盘符列表。
+   * 读失败回 400，不回 500——路径不存在或 SSH 连不上都是调用方能处理的。
+   */
+  app.get("/api/fs/list", async (req, reply): Promise<FsListing | void> => {
+    const { path: p, hostId, projectId } = req.query as {
+      path?: string;
+      hostId?: string;
+      projectId?: string;
+    };
+    try {
+      if (!hostId && !projectId) return await listDirectories(p);
+
+      const link = (() => {
+        if (projectId) {
+          const row = db.getProject(projectId);
+          if (!row) throw new Error("项目不存在");
+          if (row.type !== "ssh") throw new Error("只有 SSH 项目能浏览远端目录");
+          return manager.getLink(row);
+        }
+        const host = db.getHost(hostId!);
+        if (!host) throw new Error("主机不存在");
+        return manager.getHostLink(host);
+      })();
+
+      const facts = await link.hostFacts();
+      return await listRemoteDirectories(link.exec, facts.kind, facts.home, p);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
   // ---- projects ----
+
+  function validateSshFields(ssh: NonNullable<ProjectInput["ssh"]> | SshHostInput): string | null {
+    if (!ssh.host?.trim()) return "SSH 主机不能为空";
+    if (!ssh.username?.trim()) return "SSH 用户名不能为空";
+    if (ssh.port != null && (!Number.isInteger(ssh.port) || ssh.port < 1 || ssh.port > 65535)) {
+      return "端口无效";
+    }
+    if (ssh.authMethod === "key" && !ssh.keyPath?.trim()) return "密钥认证必须指定私钥路径";
+    if (ssh.authMethod !== "key" && ssh.authMethod !== "password" && ssh.authMethod !== "agent") {
+      return "未知认证方式";
+    }
+    return null;
+  }
+
+  function validateHostInput(input: SshHostInput): string | null {
+    if (!input.name?.trim()) return "主机名称不能为空";
+    return validateSshFields(input);
+  }
 
   function validateProjectInput(input: ProjectInput): string | null {
     if (!input.name?.trim()) return "项目名称不能为空";
@@ -157,14 +224,83 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         return "文件夹路径不存在或不可访问";
       }
     } else if (input.type === "ssh") {
-      if (!input.ssh?.host?.trim()) return "SSH 主机不能为空";
-      if (!input.ssh?.username?.trim()) return "SSH 用户名不能为空";
-      if (input.ssh.authMethod === "key" && !input.ssh.keyPath?.trim())
-        return "密钥认证必须指定私钥路径";
+      // 选了已保存主机时连接配置从主机复制，ssh 字段忽略
+      if (!input.hostId && !input.ssh) return "请选择一台已保存的远端主机";
+      if (!input.hostId && input.ssh) {
+        const sshErr = validateSshFields(input.ssh);
+        if (sshErr) return sshErr;
+      }
     } else {
       return "未知项目类型";
     }
     return null;
+  }
+
+  type ProjectSshCols = Pick<
+    ProjectRow,
+    | "host_id"
+    | "ssh_host"
+    | "ssh_port"
+    | "ssh_username"
+    | "ssh_auth_method"
+    | "ssh_key_path"
+    | "ssh_secret_enc"
+  >;
+
+  function sshFromHost(host: SshHostRow): ProjectSshCols {
+    return {
+      host_id: host.id,
+      ssh_host: host.host,
+      ssh_port: host.port,
+      ssh_username: host.username,
+      ssh_auth_method: host.auth_method,
+      ssh_key_path: host.key_path,
+      ssh_secret_enc: host.secret_enc,
+    };
+  }
+
+  function resolveProjectSsh(
+    input: ProjectInput,
+    existing?: ProjectRow
+  ): { ok: true; ssh: ProjectSshCols } | { ok: false; error: string } {
+    if (input.type !== "ssh") {
+      return {
+        ok: true,
+        ssh: {
+          host_id: null,
+          ssh_host: null,
+          ssh_port: null,
+          ssh_username: null,
+          ssh_auth_method: null,
+          ssh_key_path: null,
+          ssh_secret_enc: null,
+        },
+      };
+    }
+    if (input.hostId) {
+      const host = db.getHost(input.hostId);
+      if (!host) return { ok: false, error: "所选主机不存在" };
+      return { ok: true, ssh: sshFromHost(host) };
+    }
+    return {
+      ok: true,
+      ssh: {
+        host_id: null,
+        ssh_host: input.ssh?.host?.trim() ?? existing?.ssh_host ?? null,
+        ssh_port: input.ssh?.port ?? existing?.ssh_port ?? 22,
+        ssh_username: input.ssh?.username?.trim() ?? existing?.ssh_username ?? null,
+        ssh_auth_method: input.ssh?.authMethod ?? existing?.ssh_auth_method ?? null,
+        ssh_key_path:
+          input.ssh?.authMethod === "key"
+            ? (input.ssh?.keyPath?.trim() ?? existing?.ssh_key_path ?? null)
+            : input.ssh
+              ? null
+              : (existing?.ssh_key_path ?? null),
+        ssh_secret_enc: input.ssh?.secret
+          ? secrets.encrypt(input.ssh.secret)
+          : (existing?.ssh_secret_enc ?? null),
+      },
+    };
   }
 
   app.get("/api/projects", async () => {
@@ -176,18 +312,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const err = validateProjectInput(input);
     if (err) return reply.code(400).send({ error: err });
 
+    const ssh = resolveProjectSsh(input);
+    if (!ssh.ok) return reply.code(400).send({ error: ssh.error });
+
     const row: ProjectRow = {
       id: crypto.randomUUID(),
       name: input.name.trim(),
       type: input.type,
       working_dir: input.workingDir?.trim() || null,
       shell: input.shell?.trim() || null,
-      ssh_host: input.ssh?.host?.trim() ?? null,
-      ssh_port: input.ssh?.port ?? (input.type === "ssh" ? 22 : null),
-      ssh_username: input.ssh?.username?.trim() ?? null,
-      ssh_auth_method: input.ssh?.authMethod ?? null,
-      ssh_key_path: input.ssh?.keyPath?.trim() || null,
-      ssh_secret_enc: input.ssh?.secret ? secrets.encrypt(input.ssh.secret) : null,
+      ...ssh.ssh,
       created_at: Date.now(),
       // 普通项目：worktree 四列一律 null。附属项目只能经
       // POST /api/projects/:id/worktrees 创建，绝不从这个端点进来
@@ -219,22 +353,15 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const err = validateProjectInput(input);
     if (err) return reply.code(400).send({ error: err });
 
+    const ssh = resolveProjectSsh(input, existing);
+    if (!ssh.ok) return reply.code(400).send({ error: ssh.error });
+
     const row: ProjectRow = {
       ...existing,
       name: input.name.trim(),
       working_dir: input.workingDir?.trim() || null,
       shell: input.shell?.trim() || null,
-      ssh_host: input.ssh?.host?.trim() ?? existing.ssh_host,
-      ssh_port: input.ssh?.port ?? existing.ssh_port,
-      ssh_username: input.ssh?.username?.trim() ?? existing.ssh_username,
-      ssh_auth_method: input.ssh?.authMethod ?? existing.ssh_auth_method,
-      ssh_key_path:
-        input.ssh?.authMethod === "key"
-          ? (input.ssh?.keyPath?.trim() ?? existing.ssh_key_path)
-          : null,
-      ssh_secret_enc: input.ssh?.secret
-        ? secrets.encrypt(input.ssh.secret)
-        : existing.ssh_secret_enc,
+      ...ssh.ssh,
     };
     db.updateProject(row);
     // 附属项目的 ssh_* 是从源项目复制来的（让 SshLink / getLink / GET host 全都
@@ -305,6 +432,125 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     return warnings.length > 0 ? { ok: true, warnings } : { ok: true };
   });
 
+  // ---- saved SSH hosts ----
+
+  app.get("/api/hosts", async (): Promise<SshHost[]> => {
+    return db.listHosts();
+  });
+
+  app.post("/api/hosts", async (req, reply) => {
+    const input = (req.body ?? {}) as SshHostInput;
+    const err = validateHostInput(input);
+    if (err) return reply.code(400).send({ error: err });
+    const name = input.name.trim();
+    if (db.findHostByName(name)) {
+      return reply.code(409).send({ error: "已有同名主机" });
+    }
+    const row: SshHostRow = {
+      id: crypto.randomUUID(),
+      name,
+      host: input.host.trim(),
+      port: input.port || 22,
+      username: input.username.trim(),
+      auth_method: input.authMethod,
+      key_path: input.authMethod === "key" ? input.keyPath?.trim() || null : null,
+      secret_enc: input.secret ? secrets.encrypt(input.secret) : null,
+      created_at: Date.now(),
+    };
+    db.insertHost(row);
+    return Db.toSshHost(row, 0);
+  });
+
+  app.put("/api/hosts/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const existing = db.getHost(id);
+    if (!existing) return reply.code(404).send({ error: "主机不存在" });
+    const input = (req.body ?? {}) as SshHostInput;
+    const err = validateHostInput(input);
+    if (err) return reply.code(400).send({ error: err });
+    const name = input.name.trim();
+    if (db.findHostByName(name, id)) {
+      return reply.code(409).send({ error: "已有同名主机" });
+    }
+    const row: SshHostRow = {
+      ...existing,
+      name,
+      host: input.host.trim(),
+      port: input.port || 22,
+      username: input.username.trim(),
+      auth_method: input.authMethod,
+      key_path:
+        input.authMethod === "key"
+          ? (input.keyPath?.trim() || existing.key_path)
+          : null,
+      secret_enc: input.secret ? secrets.encrypt(input.secret) : existing.secret_enc,
+    };
+    db.updateHost(row);
+    db.updateProjectsFromHost(row);
+    // 凭据可能已经变了，丢掉浏览用的缓存连接
+    manager.disposeHostLink(id);
+    return Db.toSshHost(row, db.countProjectsByHost(id));
+  });
+
+  app.delete("/api/hosts/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const existing = db.getHost(id);
+    if (!existing) return reply.code(404).send({ error: "主机不存在" });
+    const n = db.countProjectsByHost(id);
+    if (n > 0) {
+      return reply.code(409).send({ error: `有 ${n} 个项目正在使用该主机，请先改绑或删除这些项目` });
+    }
+    db.deleteHost(id);
+    manager.disposeHostLink(id);
+    return { ok: true };
+  });
+
+  /**
+   * 试连一台已保存主机。连不上是环境事实，200 + ok:false，不 4xx。
+   */
+  app.post("/api/hosts/:id/test", async (req, reply): Promise<SshProbeResult | void> => {
+    const { id } = req.params as { id: string };
+    const host = db.getHost(id);
+    if (!host) return reply.code(404).send({ error: "主机不存在" });
+    return probeHost(host);
+  });
+
+  /**
+   * 试连表单里这组还没保存（或正在改）的凭据。
+   * 编辑已有主机时带 hostId：secret / keyPath 留空则沿用已保存的。
+   */
+  app.post("/api/hosts/test", async (req, reply): Promise<SshProbeResult | void> => {
+    const input = (req.body ?? {}) as SshHostInput & { hostId?: string };
+    const existing = input.hostId ? db.getHost(input.hostId) : null;
+    if (input.hostId && !existing) return reply.code(404).send({ error: "主机不存在" });
+    const err = validateSshFields(input);
+    if (err) return { ok: false, error: err };
+    const row: SshHostRow = {
+      id: existing?.id ?? `draft:${crypto.randomUUID()}`,
+      name: input.name?.trim() || existing?.name || "test",
+      host: input.host.trim(),
+      port: input.port || 22,
+      username: input.username.trim(),
+      auth_method: input.authMethod,
+      key_path:
+        input.authMethod === "key"
+          ? (input.keyPath?.trim() || existing?.key_path || null)
+          : null,
+      secret_enc: input.secret ? secrets.encrypt(input.secret) : (existing?.secret_enc ?? null),
+      created_at: existing?.created_at ?? Date.now(),
+    };
+    return probeHost(row);
+  });
+
+  async function probeHost(host: SshHostRow): Promise<SshProbeResult> {
+    try {
+      const facts = await manager.probeSsh(hostAsProject(host));
+      return { ok: true, kind: facts.kind, home: facts.home };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
   // ---- worktree（附属项目） ----
 
   /**
@@ -340,6 +586,30 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         detail: e.detail ?? e.message,
         branches: [],
       };
+    }
+  });
+
+  /**
+   * 右侧 Git 面板的仓库快照。
+   *
+   * 源项目和附属项目都能问（跟 GET /repo 不同，那边拒绝附属项目）。
+   * 环境事实写在 available/reason 里，不抛 4xx。
+   */
+  app.get("/api/projects/:id/git", async (req, reply): Promise<GitSnapshot | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.working_dir) {
+      return unavailableSnapshot("no-working-dir", worktreeFailureText("no-working-dir"));
+    }
+    try {
+      return await describeGit(await gitHostFor(row, manager), row.working_dir);
+    } catch (err) {
+      const e = err as WorktreeError;
+      const reason: GitUnavailableReason = GIT_UNAVAILABLE.has(e.reason)
+        ? (e.reason as GitUnavailableReason)
+        : "link-failed";
+      return unavailableSnapshot(reason, e.detail ?? e.message);
     }
   });
 
@@ -426,11 +696,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         type: src.type,
         working_dir: created,
         shell: src.shell,
-        // ssh_* 从源项目整行复制（含密文，同一个 SecretBox 能解，全程不碰明文）：
+        // ssh_* 与 host_id 从源项目整行复制（含密文，同一个 SecretBox 能解，全程不碰明文）：
         // SshLink 由 ProjectRow 构造、按 project.id 缓存，getLink / prepareZellij /
         // GET host 全部直接读 project.ssh_host。复制让这些点一处都不用改，也让
         // 删除清理不依赖源项目行还在不在。代价是源项目改配置时要手动传播
-        // （见 PUT 里的 updateChildrenSsh）。
+        // （见 PUT 里的 updateChildrenSsh）；已保存主机改配置走 updateProjectsFromHost。
         //
         // 顺带一个白捡的正确行为：Zellij 授权按 host+port+username 记，
         // 所以附属项目第一次开会话不会再弹一次安装授权。
@@ -440,6 +710,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         ssh_auth_method: src.ssh_auth_method,
         ssh_key_path: src.ssh_key_path,
         ssh_secret_enc: src.ssh_secret_enc,
+        host_id: src.host_id,
         created_at: Date.now(),
         source_project_id: src.id,
         worktree_branch: branch,

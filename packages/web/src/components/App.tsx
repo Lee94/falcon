@@ -1,16 +1,20 @@
 import { useEffect, useRef } from "react";
-import { useApp, isPendingId, selectSidebarVisible } from "../store.js";
+import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
 import { cn } from "@/lib/utils";
 import { Login } from "./Login.js";
 import { Sidebar } from "./Sidebar.js";
+import { RightBar } from "./RightBar.js";
+import { GitPanel } from "./GitPanel.js";
 import { TabBar } from "./TabBar.js";
 import { SessionOverview } from "./SessionOverview.js";
+import { ProjectEmpty } from "./ProjectEmpty.js";
 import { PendingPane, TerminalView } from "./TerminalView.js";
 import { ProjectForm } from "./ProjectForm.js";
+import { HostForm } from "./HostForm.js";
 import { WorktreeForm } from "./WorktreeForm.js";
-import { PasswordModal } from "./PasswordModal.js";
+import { SettingsModal } from "./SettingsModal.js";
 import { CommandPalette } from "./CommandPalette.js";
 import { HostDrawer } from "./HostDrawer.js";
 import { RenameDialog } from "./RenameDialog.js";
@@ -19,9 +23,10 @@ import { Menu } from "./common/Menu.js";
 import { ConfirmDialog } from "./common/ConfirmDialog.js";
 import { Toaster } from "@/components/ui/sonner";
 
-/** ⌘T / ＋ 建在当前会话所属的项目里；没有当前会话就用第一个项目 */
+/** ⌘T / ＋：侧栏选中的项目优先，否则当前会话所属项目，再否则第一个项目 */
 function currentProjectId(): string | null {
   const s = useApp.getState();
+  if (s.selectedProjectId) return s.selectedProjectId;
   if (s.active.kind === "terminal") {
     const id = s.active.sessionId;
     const pendingEntry = s.pending.find((p) => p.id === id);
@@ -38,14 +43,17 @@ export function App() {
   const tabs = useApp((s) => s.tabs);
   const active = useApp((s) => s.active);
   const sidebarVisible = useApp(selectSidebarVisible);
+  const rightVisible = useApp(selectRightVisible);
+  const rightPanel = useApp((s) => s.rightPanel);
   const projectForm = useApp((s) => s.projectForm);
+  const hostForm = useApp((s) => s.hostForm);
   const worktreeFor = useApp((s) => s.worktreeFor);
-  const passwordOpen = useApp((s) => s.passwordOpen);
+  const settingsOpen = useApp((s) => s.settingsOpen);
   const init = useApp((s) => s.init);
   const refreshSessions = useApp((s) => s.refreshSessions);
   const closeProjectForm = useApp((s) => s.closeProjectForm);
+  const closeHostForm = useApp((s) => s.closeHostForm);
   const closeWorktreeForm = useApp((s) => s.closeWorktreeForm);
-  const setPasswordOpen = useApp((s) => s.setPasswordOpen);
   const actions = useActions();
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
@@ -85,6 +93,9 @@ export function App() {
         return;
       case "toggleSidebar":
         s.toggleSidebar();
+        return;
+      case "toggleGitPanel":
+        s.toggleRightPanel("git");
         return;
       case "overview":
         s.showOverview();
@@ -132,9 +143,10 @@ export function App() {
         } else if (s.confirm) s.closeConfirm();
         else if (s.renameFor) s.closeRename();
         else if (s.worktreeFor) s.closeWorktreeForm();
+        else if (s.hostForm) s.closeHostForm();
         else if (s.projectForm) s.closeProjectForm();
-        else if (s.passwordOpen) s.setPasswordOpen(false);
         else if (s.paletteOpen) s.setPalette(false);
+        else if (s.settingsOpen) s.closeSettings();
         else if (s.drawerProjectId) s.closeDrawer();
         else if (s.menu) s.closeMenu();
         return;
@@ -168,6 +180,7 @@ export function App() {
             >
               <SessionOverview />
             </div>
+            {active.kind === "project" && <ProjectEmpty />}
             {/* 非活动 pane 只是 visibility:hidden，绝不卸载——
                 xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪 */}
             {tabs.map((id) => {
@@ -190,25 +203,36 @@ export function App() {
             })}
           </div>
         </main>
+        {rightVisible && rightPanel === "git" && <GitPanel />}
+        <RightBar />
       </div>
 
       <Menu />
-      <CommandPalette />
       <HostDrawer />
+      {settingsOpen && <SettingsModal />}
       <ConfirmDialog />
       <RenameDialog />
       <ZellijInstallModal />
       {projectForm && (
         <ProjectForm
-          key={projectForm.edit?.id ?? "new"}
+          key={`project-${projectForm.edit?.id ?? "new"}`}
           existing={projectForm.edit}
+          preset={projectForm.preset}
           onClose={closeProjectForm}
+        />
+      )}
+      {hostForm && (
+        <HostForm
+          key={`host-${hostForm.edit?.id ?? "new"}`}
+          existing={hostForm.edit}
+          onSaved={hostForm.onSaved}
+          onClose={closeHostForm}
         />
       )}
       {worktreeFor && (
         <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
       )}
-      {passwordOpen && <PasswordModal onClose={() => setPasswordOpen(false)} />}
+      <CommandPalette />
       <Toaster />
     </div>
   );

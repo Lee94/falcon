@@ -16,6 +16,7 @@ export type Command =
   | "newTerminal"
   | "closeTab"
   | "toggleSidebar"
+  | "toggleGitPanel"
   | "reattach"
   | "overview"
   | "nextTab"
@@ -40,6 +41,8 @@ export function chord(cmd: Command): string {
       return isMac ? "⌘W" : "Ctrl+Shift+W";
     case "toggleSidebar":
       return isMac ? "⌘B" : "Ctrl+Shift+B";
+    case "toggleGitPanel":
+      return isMac ? "⌘⇧G" : "Ctrl+Shift+G";
     case "reattach":
       return isMac ? "⌘R" : "Ctrl+Shift+R";
     case "overview":
@@ -62,6 +65,8 @@ export function altChord(cmd: Command): string | null {
       return "Alt+W";
     case "toggleSidebar":
       return "Alt+B";
+    case "toggleGitPanel":
+      return "Alt+G";
     case "reattach":
       return "Alt+R";
     case "palette":
@@ -79,6 +84,7 @@ const ALT_LETTERS: Record<string, Command> = {
   KeyT: "newTerminal",
   KeyW: "closeTab",
   KeyB: "toggleSidebar",
+  KeyG: "toggleGitPanel",
   KeyR: "reattach",
   KeyP: "palette",
 };
@@ -88,6 +94,7 @@ const MODSHIFT_LETTERS: Record<string, Command> = {
   KeyT: "newTerminal",
   KeyW: "closeTab",
   KeyB: "toggleSidebar",
+  KeyG: "toggleGitPanel",
   KeyR: "reattach",
 };
 
@@ -143,6 +150,7 @@ export function matchCommand(e: KeyboardEvent): Command | null {
     if (isMac) {
       if (code === "BracketRight") return "nextTab";
       if (code === "BracketLeft") return "prevTab";
+      if (code === "KeyG") return "toggleGitPanel";
       return null;
     }
     if (code === "Tab") return "prevTab";

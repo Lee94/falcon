@@ -13,10 +13,12 @@ import {
   parsePosixProbe,
   parseWindowsProbe,
   POSIX_PROBE,
+  POSIX_PROBE_LINES,
   quotePosix,
   quotePowerShell,
   remoteRoot,
   WINDOWS_PROBE,
+  WINDOWS_PROBE_SCRIPT,
   type HostKind,
   type HostLayout,
 } from "../zellij/host.js";
@@ -217,10 +219,11 @@ export class SshLink extends EventEmitter {
    * 本身出了问题（可重试），跟"系统认不出"（不可重试）混成一句"无法识别远端操作系统"
    * 会让用户查错方向。两者用 detail 区分。
    */
-  async probe(): Promise<RemoteProbe> {
+  async probe(onStage?: StageFn, attempt = 1): Promise<RemoteProbe> {
     if (this.probed) return this.probed;
 
     let linkError: string | undefined;
+    onStage?.("probing", attempt, POSIX_PROBE_LINES.join("\n"));
     const posix = await this.exec(POSIX_PROBE).catch((err: Error) => {
       linkError = err.message;
       return null;
@@ -238,6 +241,7 @@ export class SshLink extends EventEmitter {
       return this.probed;
     }
 
+    onStage?.("probing", attempt, WINDOWS_PROBE_SCRIPT);
     const win = await this.exec(WINDOWS_PROBE).catch((err: Error) => {
       linkError ??= err.message;
       return null;
@@ -282,8 +286,7 @@ export class SshLink extends EventEmitter {
     try {
       // 探测也走重试：这一步全靠 SSH 通道，抖一下就整个安装流程失败太亏
       const probe = await withInstallRetry((attempt) => {
-        onStage?.("probing", attempt);
-        return this.probe();
+        return this.probe(onStage, attempt);
       }, signal);
 
       if (!probe.target) {

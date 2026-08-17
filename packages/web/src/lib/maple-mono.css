@@ -1,0 +1,24 @@
+/*
+ * Maple Mono NL NF CN（v7.9）
+ * https://github.com/subframe7536/maple-font
+ * SIL Open Font License 1.1 — 全文见同目录 OFL.txt
+ *
+ * NL = 无连字（终端对齐不被 fi / != 吃掉）
+ * NF = Nerd Font 图标
+ * CN = 简体中文
+ */
+@font-face {
+  font-family: "Maple Mono NL NF CN";
+  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Maple Mono NL NF CN";
+  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}

@@ -7,7 +7,8 @@
     "dev:server": "pnpm --filter @mojito/server dev",
     "dev:web": "pnpm --filter @mojito/web dev",
     "start": "node packages/server/dist/index.js",
-    "update-zellij": "node scripts/update-zellij.mjs"
+    "update-zellij": "node scripts/update-zellij.mjs",
+    "vendor-maple-mono": "node scripts/vendor-maple-mono.mjs"
   },
   "engines": {
     "node": ">=20"
