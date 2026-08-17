@@ -454,7 +454,8 @@ const zh = {
       terminalTitle: "终端",
       terminalHint: "只改终端画面，不会动界面字体。",
       termFont: "字体",
-      termFontHint: "Maple Mono NL NF CN 已内置，中文和 Nerd Font 图标都能显示。没装的字体会自动回退。",
+      termFontHint:
+        "正文用 Maple Mono NL NF CN，图标用 Symbols Nerd Font Mono（内置）。没装的字体会自动回退。",
       termCustomFont: "自定义字体",
       termCustomFontPlaceholder: "例如 Sarasa Term SC",
       termFontSize: "字号",

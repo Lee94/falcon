@@ -1,0 +1,17 @@
+/*
+ * Symbols Nerd Font Mono（Nerd Fonts v3.5.0）
+ * https://github.com/ryanoasis/nerd-fonts
+ * SIL Open Font License 1.1 — 全文见同目录 LICENSE.txt
+ *
+ * 只含图标、严格 1em 宽。Maple 自带的 NF 是默认宽形，xterm 按 1 格画且
+ * 不对 Nerd Font 做 rescale， 这种六边形会被裁成方框。这套字体必须排在
+ * Maple 前面，专门接管 PUA 图标。
+ */
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  src: url("../assets/fonts/nerd-symbols/SymbolsNerdFontMono-Regular.woff2")
+    format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

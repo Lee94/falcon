@@ -82,8 +82,34 @@ export const TERM_FONT_IDS: TermFontId[] = FONT_IDS;
 /** 内置 Maple 的 CSS family 名，必须与 maple-mono.css 的 @font-face 一致 */
 export const MAPLE_FONT_FAMILY = "Maple Mono NL NF CN";
 
-const FALLBACK_STACK =
-  '"Cascadia Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK SC", monospace';
+/** 内置图标字体，必须与 nerd-symbols.css 的 @font-face 一致 */
+export const NERD_FONT_FAMILY = "Symbols Nerd Font Mono";
+
+/**
+ * Maple CN 不是全集：生僻字、假名、谚文、emoji 都不在字库里。
+ * xterm 的 canvas 会按 font-family 列表回退，但只回退「cmap 里没有」的码位，
+ * 所以后面必须挂上系统 CJK 和 emoji 字体，否则就是方框。
+ *
+ * 图标字体必须排第一：Maple 自带的 NF 是宽形，xterm 把 U+E000–F8FF
+ * 当成 1 格且拒绝 rescale，Node 的  会被裁掉。Symbols Mono 是 1em 宽。
+ */
+const FALLBACK_STACK = [
+  `"${NERD_FONT_FAMILY}"`,
+  '"Cascadia Mono"',
+  '"JetBrains Mono"',
+  '"SF Mono"',
+  "Menlo",
+  "Consolas",
+  '"Noto Sans Mono CJK SC"',
+  '"PingFang SC"',
+  '"Hiragino Sans GB"',
+  '"Microsoft YaHei UI"',
+  '"Noto Sans CJK SC"',
+  '"Apple Color Emoji"',
+  '"Segoe UI Emoji"',
+  '"Noto Color Emoji"',
+  "monospace",
+].join(", ");
 
 const NAMED_FONTS: Record<Exclude<TermFontId, "maple" | "system" | "custom">, string> = {
   jetbrains: "JetBrains Mono",
@@ -94,17 +120,18 @@ const NAMED_FONTS: Record<Exclude<TermFontId, "maple" | "system" | "custom">, st
 };
 
 export function termFontStack(pref: TermPref): string {
+  // 图标字体永远打头：换正文字体不该把  /  弄丢
   if (pref.fontId === "maple") {
-    return `"${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
+    return `"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
   }
   if (pref.fontId === "system") return FALLBACK_STACK;
   if (pref.fontId === "custom") {
     const custom = pref.customFamily.trim();
     return custom
-      ? `${quoteFamily(custom)}, "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`
-      : `"${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
+      ? `"${NERD_FONT_FAMILY}", ${quoteFamily(custom)}, "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`
+      : `"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
   }
-  return `"${NAMED_FONTS[pref.fontId]}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
+  return `"${NERD_FONT_FAMILY}", "${NAMED_FONTS[pref.fontId]}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
 }
 
 function quoteFamily(name: string): string {

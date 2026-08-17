@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import type { DeadReason, ServerMessage, SessionState } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { connLabel } from "../lib/hostColor.js";
 import { chord, matchCommand } from "../lib/shortcuts.js";
-import { resolveTermTheme, termFontStack } from "../lib/term.js";
+import { MAPLE_FONT_FAMILY, NERD_FONT_FAMILY, resolveTermTheme, termFontStack } from "../lib/term.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Banner } from "./common/Banner.js";
@@ -57,6 +58,10 @@ export function TerminalView({
       cursorStyle: pref.cursorStyle,
       cursorBlink: pref.cursorBlink,
       scrollback: 5000,
+      // unicode.activeVersion 是 proposed API；不打开会在设 11 时直接抛
+      allowProposedApi: true,
+      // 默认 Unicode 6 把大量 CJK / emoji / 图标当成 1 格，后一个字符会盖掉右半
+      rescaleOverlappingGlyphs: true,
       // 这个 effect 不跟偏好重建（重建 = 断 WS + 重放历史），初值直接读，
       // 之后的切换交给下面那个 effect 就地改 options
       theme: resolveTermTheme(pref.themeId, useApp.getState().theme),
@@ -69,6 +74,8 @@ export function TerminalView({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
     term.open(containerRef.current!);
     fit.fit();
     termRef.current = term;
@@ -135,19 +142,21 @@ export function TerminalView({
     });
     ro.observe(containerRef.current!);
 
-    // 字体还在下载时先按 fallback 量格子，加载完再 fit 一次，否则中文/图标会挤
-    const refitWhenReady = () => {
-      if (disposed) return;
-      if (containerRef.current && containerRef.current.offsetHeight > 0) {
-        fit.fit();
-      }
-    };
-    void document.fonts.ready.then(refitWhenReady);
-    document.fonts.addEventListener("loadingdone", refitWhenReady);
+    // Maple 还在下时回放已经进 atlas 了；字库到了之后碰一下字号，逼 xterm 丢掉旧字形。
+    // 已经加载完就不必再动——立刻改字号会撞上 Viewport 还没挂 dimensions。
+    const faces = [`${pref.fontSize}px "${MAPLE_FONT_FAMILY}"`, `${pref.fontSize}px "${NERD_FONT_FAMILY}"`];
+    if (faces.some((spec) => !document.fonts.check(spec))) {
+      void Promise.all(faces.map((spec) => document.fonts.load(spec))).then(() => {
+        requestAnimationFrame(() => {
+          if (disposed || term.rows <= 0) return;
+          rebuildTermAtlas(term, useApp.getState().term.fontSize);
+          if (containerRef.current && containerRef.current.offsetHeight > 0) fit.fit();
+        });
+      });
+    }
 
     return () => {
       disposed = true;
-      document.fonts.removeEventListener("loadingdone", refitWhenReady);
       ro.disconnect();
       ws.close();
       term.dispose();
@@ -298,6 +307,17 @@ export function TerminalView({
       </div>
     </>
   );
+}
+
+/** 同值改 fontFamily 不会清 atlas；字号微扰一次即可。renderer 没就绪时 swallow。 */
+function rebuildTermAtlas(term: Terminal, fontSize: number): void {
+  term.options.fontSize = fontSize + 0.01;
+  term.options.fontSize = fontSize;
+  try {
+    term.refresh(0, term.rows - 1);
+  } catch {
+    // Viewport 有时还没挂上 dimensions
+  }
 }
 
 /** 会话还没建起来时占住 tab：立刻有反馈，而不是等 REST 返回才出现 */

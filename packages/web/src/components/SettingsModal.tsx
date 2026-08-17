@@ -361,6 +361,10 @@ function TermPreview() {
         {"nothing to commit, working tree clean\n"}
         <span style={{ color: ansi(theme, "magenta") }}>$</span>
         {" echo 你好 · "}
+        <span style={{ color: ansi(theme, "green") }}>{"\ue718"}</span>
+        {" node\n"}
+        <span style={{ color: ansi(theme, "magenta") }}>$</span>
+        {" "}
         <span style={{ color: ansi(theme, "red") }}>{"\uf111"}</span>
         {" "}
         <span style={{ color: ansi(theme, "green") }}>{"\uf00c"}</span>
