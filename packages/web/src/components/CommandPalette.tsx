@@ -99,13 +99,16 @@ export function CommandPalette() {
       };
     });
 
-    const projectItems: PaletteItem[] = projects.map((project) => ({
-      key: `#${project.name} ${t("sidebar.newTerminal")}`,
-      label: t("palette.newTerminalIn", { name: project.name }),
-      meta: hostLabel(project, localWord),
-      icon: TerminalIcon,
-      run: () => void store.newTerminal(project.id),
-    }));
+    // 存档的项目不能开终端（到期会连目录一起删），不进面板
+    const projectItems: PaletteItem[] = projects
+      .filter((p) => !p.worktree?.archivedAt)
+      .map((project) => ({
+        key: `#${project.name} ${t("sidebar.newTerminal")}`,
+        label: t("palette.newTerminalIn", { name: project.name }),
+        meta: hostLabel(project, localWord),
+        icon: TerminalIcon,
+        run: () => void store.newTerminal(project.id),
+      }));
     projectItems.push({
       key: `#${t("palette.newProject")}`,
       label: t("palette.newProject"),
@@ -127,7 +130,7 @@ export function CommandPalette() {
         })
       );
     projects
-      .filter((p) => p.type === "ssh")
+      .filter((p) => p.type === "ssh" && !p.worktree?.archivedAt)
       .forEach((project) =>
         actionItems.push({
           key: `>${t("palette.enableDurable", { host: project.ssh?.host ?? project.name })} ${project.name}`,

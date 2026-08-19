@@ -32,6 +32,8 @@ export interface ProjectRow {
   worktree_repo_dir: string | null;
   /** 1 = mojito 建的目录，删除项目时才允许删它；null / 0 一律不删 */
   worktree_created_by_mojito: number | null;
+  /** 存档时间（unix 毫秒）。非 null ⇔ 已存档，到期由后台清扫删除；普通项目恒为 null */
+  worktree_archived_at: number | null;
 }
 
 export interface SessionRow {
@@ -182,6 +184,7 @@ export class Db {
     this.addColumn("projects", "worktree_branch", "TEXT");
     this.addColumn("projects", "worktree_repo_dir", "TEXT");
     this.addColumn("projects", "worktree_created_by_mojito", "INTEGER");
+    this.addColumn("projects", "worktree_archived_at", "INTEGER");
     this.addColumn("projects", "host_id", "TEXT");
 
     // 端口转发规则挂在项目上（走该项目的 SshLink），不是解引用主机。
@@ -262,6 +265,7 @@ export class Db {
             branch: row.worktree_branch ?? "",
             repoDir: row.worktree_repo_dir ?? "",
             createdByMojito: row.worktree_created_by_mojito === 1,
+            archivedAt: row.worktree_archived_at ?? undefined,
           }
         : undefined,
       createdAt: row.created_at,
@@ -284,9 +288,9 @@ export class Db {
     this.db
       .prepare(
         `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito)
+           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at)
          VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
-           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito)`
+           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito, @worktree_archived_at)`
       )
       .run(bindRow(row));
   }
@@ -308,6 +312,29 @@ export class Db {
          WHERE id=@id`
       )
       .run(bindRow(row));
+  }
+
+  /**
+   * 存档 / 恢复附属项目。ts=null 即恢复。
+   * 只动这一列：worktree 四列仍是删除护栏的只读判据（见 updateProject 的注释），
+   * 存档时间不参与任何路径判断，可写不构成攻击面。
+   */
+  setWorktreeArchived(id: string, ts: number | null) {
+    this.db
+      .prepare("UPDATE projects SET worktree_archived_at = ? WHERE id = ?")
+      .run(ts, id);
+  }
+
+  /** 存档已到期（archived_at ≤ archivedBefore）的附属项目，供后台清扫 */
+  listArchivedExpired(archivedBefore: number): ProjectRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM projects
+         WHERE source_project_id IS NOT NULL AND worktree_archived_at IS NOT NULL
+           AND worktree_archived_at <= ?
+         ORDER BY worktree_archived_at ASC`
+      )
+      .all(archivedBefore) as unknown as ProjectRow[];
   }
 
   /** 某源项目的全部附属项目。删除级联与确认框都要用。 */

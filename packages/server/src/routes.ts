@@ -382,6 +382,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       worktree_branch: null,
       worktree_repo_dir: null,
       worktree_created_by_mojito: null,
+      worktree_archived_at: null,
     };
     db.insertProject(row);
     return Db.toProject(row);
@@ -814,6 +815,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         worktree_branch: branch,
         worktree_repo_dir: main,
         worktree_created_by_mojito: 1,
+        worktree_archived_at: null,
       };
       db.insertProject(row);
       return Db.toProject(row);
@@ -853,6 +855,46 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         error: e.detail ?? e.message,
       };
     }
+  });
+
+  /**
+   * 存档附属项目：从侧栏隐藏，worktree 目录与分支原样保留，到期由后台清扫
+   * 自动删除（见 archive.ts）；此前随时可恢复。
+   *
+   * 会话与删除一样连坐——项目都收起来了，留着挂在上面的终端只会变成幽灵 tab。
+   * 终止失败就整体放弃，不存档：存档隐含"到期会删目录"的承诺，而带着活进程
+   * 删目录是唯一真会毁数据的操作。
+   */
+  app.post("/api/projects/:id/archive", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.source_project_id) {
+      return reply.code(400).send({ error: "只有附属项目能存档" });
+    }
+    if (row.worktree_archived_at) return Db.toProject(row); // 幂等
+    try {
+      for (const s of db.listSessionsByProject(id)) {
+        if (s.state === "dead") manager.deleteDead(s.id);
+        else await manager.terminate(s.id);
+      }
+    } catch (err) {
+      return reply
+        .code(502)
+        .send({ error: `终止会话失败，未存档：${(err as Error).message}` });
+    }
+    db.setWorktreeArchived(id, Date.now());
+    return Db.toProject(db.getProject(id)!);
+  });
+
+  /** 恢复已存档的附属项目。会话在存档时已经终止，恢复后按需新建。 */
+  app.post("/api/projects/:id/restore", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.worktree_archived_at) return Db.toProject(row); // 幂等
+    db.setWorktreeArchived(id, null);
+    return Db.toProject(db.getProject(id)!);
   });
 
   // ---- SSH 端口转发 ----
@@ -979,6 +1021,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { id } = req.params as { id: string };
     const project = db.getProject(id);
     if (!project) return reply.code(404).send({ error: "项目不存在" });
+    // 存档的项目到期会连目录一起删掉，不能再往里开终端
+    if (project.worktree_archived_at) {
+      return reply.code(409).send({ error: "项目已存档，请先恢复再新建终端" });
+    }
     const body = (req.body ?? {}) as {
       name?: string;
       appearance?: unknown;

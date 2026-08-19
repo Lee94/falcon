@@ -130,6 +130,9 @@ export const api = {
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),
   worktreeStatus: (projectId: string) =>
     request<WorktreeStatus>("GET", `/api/projects/${projectId}/worktree`),
+  /** 存档附属项目：隐藏并终止其会话，目录保留，到期由后端自动删除 */
+  archiveProject: (id: string) => request<Project>("POST", `/api/projects/${id}/archive`),
+  restoreProject: (id: string) => request<Project>("POST", `/api/projects/${id}/restore`),
 
   hostStatus: (projectId: string) =>
     request<HostZellijStatus>("GET", `/api/projects/${projectId}/host`),

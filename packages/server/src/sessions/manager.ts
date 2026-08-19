@@ -94,6 +94,7 @@ export function hostAsProject(host: SshHostRow): ProjectRow {
     worktree_branch: null,
     worktree_repo_dir: null,
     worktree_created_by_mojito: null,
+    worktree_archived_at: null,
   };
 }
 

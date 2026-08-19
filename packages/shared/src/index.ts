@@ -168,7 +168,19 @@ export interface WorktreeInfo {
   repoDir: string;
   /** 目录是不是 mojito 建的。false 时删除项目绝不删目录 */
   createdByMojito: boolean;
+  /**
+   * 存档时间（unix 毫秒）。存在 ⇔ 已存档：侧栏默认隐藏，worktree 目录原样保留，
+   * 到期（WORKTREE_ARCHIVE_TTL_MS）由后台清扫自动删除；此前随时可恢复。
+   */
+  archivedAt?: number;
 }
+
+/**
+ * 存档的附属项目多久后自动删除并清理 worktree 目录。
+ * 后端清扫与前端"还剩几天"的倒计时用同一个数，两边永远对得上。
+ */
+export const WORKTREE_ARCHIVE_TTL_DAYS = 7;
+export const WORKTREE_ARCHIVE_TTL_MS = WORKTREE_ARCHIVE_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 /**
  * worktree 操作的失败原因。与 ZellijInstallFailure 同构：闭集字符串联合，

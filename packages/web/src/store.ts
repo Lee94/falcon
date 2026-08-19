@@ -208,6 +208,8 @@ interface PersistedWorkspace {
   rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
   selectedProjectId: string | null;
+  /** 侧栏是否显示已存档的附属项目。默认藏起来，存档就是为了少占地方 */
+  showArchived: boolean;
 }
 
 function loadWorkspace(): PersistedWorkspace {
@@ -219,6 +221,7 @@ function loadWorkspace(): PersistedWorkspace {
     rightPanel: "git",
     collapsed: {},
     selectedProjectId: null,
+    showArchived: false,
   };
   try {
     const raw = localStorage.getItem(WORKSPACE_KEY);
@@ -239,6 +242,7 @@ function loadWorkspace(): PersistedWorkspace {
       collapsed: parsed.collapsed ?? {},
       selectedProjectId:
         typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
+      showArchived: parsed.showArchived === true,
     };
   } catch {
     return fallback;
@@ -267,7 +271,8 @@ async function refreshChanges(
   if (changesInFlight) return;
   changesInFlight = true;
   try {
-    const targets = projects.filter((p) => p.workingDir);
+    // 存档的附属项目不轮询：默认看不见，也不该为它跑 git status（SSH 上还是往返）
+    const targets = projects.filter((p) => p.workingDir && !p.worktree?.archivedAt);
     const next: Record<string, ProjectChanges> = {};
     await Promise.all(
       targets.map(async (p) => {
@@ -382,6 +387,8 @@ interface AppState {
   /** 右侧打开的是哪一格 */
   rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
+  /** 侧栏是否显示已存档的附属项目（持久化） */
+  showArchived: boolean;
   /** 源项目 HEAD，按 projectId；附属项目用自己的 worktree.branch */
   heads: Record<string, ProjectHead>;
   /** 工作区文件计数，按 projectId；干净的项目不在里面 */
@@ -447,6 +454,7 @@ interface AppState {
   /** 点同一格再关；点另一格则切过去 */
   toggleRightPanel(id?: RightPanelId): void;
   toggleCollapsed(key: string): void;
+  toggleShowArchived(): void;
   setFilter(filter: OverviewFilter): void;
   setProjectFilter(projectId: string | null): void;
   toggleSelected(id: string): void;
@@ -482,8 +490,16 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => {
   /** tabs / active / 侧栏状态写回 localStorage —— 刷新页面后工作台原样恢复 */
   const persist = () => {
-    const { tabs, active, sidebarOpen, rightOpen, rightPanel, collapsed, selectedProjectId } =
-      get();
+    const {
+      tabs,
+      active,
+      sidebarOpen,
+      rightOpen,
+      rightPanel,
+      collapsed,
+      selectedProjectId,
+      showArchived,
+    } = get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
       // pending id 与差异 tab 都活不过刷新，落成项目 / 总览视图
@@ -499,6 +515,7 @@ export const useApp = create<AppState>((set, get) => {
       rightPanel,
       collapsed,
       selectedProjectId,
+      showArchived,
     };
     try {
       localStorage.setItem(WORKSPACE_KEY, JSON.stringify(payload));
@@ -529,6 +546,7 @@ export const useApp = create<AppState>((set, get) => {
     rightOpen: initialWorkspace.rightOpen,
     rightPanel: initialWorkspace.rightPanel,
     collapsed: initialWorkspace.collapsed,
+    showArchived: initialWorkspace.showArchived,
     heads: {},
     changes: {},
     selectedProjectId: initialWorkspace.selectedProjectId,
@@ -581,7 +599,10 @@ export const useApp = create<AppState>((set, get) => {
       try {
         const projects = await api.listProjects();
         const selected = get().selectedProjectId;
-        const still = selected != null && projects.some((p) => p.id === selected);
+        // 被存档的项目不能保持选中：它已从侧栏消失，主区不能停在一个看不见的项目上
+        const still =
+          selected != null &&
+          projects.some((p) => p.id === selected && !p.worktree?.archivedAt);
         set({
           projects,
           selectedProjectId: still ? selected : null,
@@ -890,6 +911,11 @@ export const useApp = create<AppState>((set, get) => {
       set((s) => ({
         collapsed: { ...s.collapsed, [key]: !s.collapsed[key] },
       }));
+      persist();
+    },
+
+    toggleShowArchived() {
+      set((s) => ({ showArchived: !s.showArchived, menu: null }));
       persist();
     },
 

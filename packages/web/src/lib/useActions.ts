@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { Project, SessionWithProject, SshHost } from "@mojito/shared";
+import { WORKTREE_ARCHIVE_TTL_DAYS } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp, type MenuItemSpec } from "../store.js";
 import { connLabel } from "./hostColor.js";
@@ -262,6 +263,72 @@ export function useActions() {
     });
   };
 
+  /**
+   * 存档附属项目：隐藏而不是删除。目录与分支原样保留，到期后端自动清理；
+   * 会话与删除一样连坐，所以确认框把会被终止的会话摆出来。
+   */
+  const archiveWorktreeProject = (project: Project) => {
+    const store = useApp.getState();
+    const live = store.sessions.filter(
+      (s) => s.projectId === project.id && s.state !== "dead"
+    );
+    store.askConfirm({
+      title: t("worktree.archiveTitle", { name: project.name }),
+      body: [
+        t("worktree.archiveBody", {
+          days: WORKTREE_ARCHIVE_TTL_DAYS,
+          branch: project.worktree?.branch ?? "",
+        }),
+        live.length > 0 ? t("worktree.deleteBodySessions", { n: live.length }) : null,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      list: live.map((s) => ({
+        name: s.name,
+        state: s.state,
+        meta: idleText(t, s.lastActiveAt),
+      })),
+      footnote: t("worktree.archiveFootnote", { dir: project.workingDir ?? "" }),
+      confirmLabel: t("worktree.archiveConfirm"),
+      onConfirm: async () => {
+        try {
+          await api.archiveProject(project.id);
+          const st = useApp.getState();
+          // 项目从侧栏消失，选中态落回源项目，别让主区停在一个看不见的项目上
+          if (st.selectedProjectId === project.id) {
+            const srcId = project.worktree?.sourceProjectId;
+            if (srcId && st.projects.some((p) => p.id === srcId)) st.selectProject(srcId);
+            else st.showOverview();
+          }
+          st.toast({
+            kind: "info",
+            title: t("worktree.archivedToast", { name: project.name }),
+            body: t("worktree.archivedToastBody", { days: WORKTREE_ARCHIVE_TTL_DAYS }),
+            actionLabel: t("worktree.restore"),
+            onAction: () => void restoreWorktreeProject(project),
+          });
+        } catch (err) {
+          fail(err);
+        }
+        await finishDelete();
+      },
+    });
+  };
+
+  /** 恢复只是清掉存档标记，没有副作用——不需要确认框 */
+  const restoreWorktreeProject = async (project: Project) => {
+    try {
+      await api.restoreProject(project.id);
+      useApp.getState().toast({
+        kind: "success",
+        title: t("worktree.restored", { name: project.name }),
+      });
+    } catch (err) {
+      fail(err);
+    }
+    await useApp.getState().refreshProjects();
+  };
+
   const deleteHost = (host: SshHost) => {
     const store = useApp.getState();
     if (host.projectCount > 0) {
@@ -351,6 +418,21 @@ export function useActions() {
 
   const projectMenuItems = (project: Project): MenuItemSpec[] => {
     const store = useApp.getState();
+    // 已存档：只剩恢复与删除。其余动作（开终端、编辑）都以"项目还在服役"为前提
+    if (project.worktree?.archivedAt) {
+      return [
+        {
+          label: t("worktree.restore"),
+          onSelect: () => void restoreWorktreeProject(project),
+        },
+        {
+          label: t("worktree.deleteNow"),
+          separated: true,
+          danger: true,
+          onSelect: () => void deleteWorktreeProject(project),
+        },
+      ];
+    }
     const items: MenuItemSpec[] = [
       {
         label: t("sidebar.newTerminal"),
@@ -376,6 +458,24 @@ export function useActions() {
       items.push({
         label: t("project.derive"),
         onSelect: () => store.openWorktreeForm(project.id),
+      });
+      // 开关是全局的，但入口挂在有存档的源项目上——不然藏起来的东西无处发现。
+      // 开着的时候恒显示，用户才关得回去
+      const archivedKids = store.projects.filter(
+        (p) => p.worktree?.sourceProjectId === project.id && p.worktree.archivedAt
+      );
+      if (archivedKids.length > 0 || store.showArchived) {
+        items.push({
+          label: t("worktree.showArchived", { n: archivedKids.length }),
+          checked: store.showArchived,
+          onSelect: () => store.toggleShowArchived(),
+        });
+      }
+    } else {
+      items.push({
+        label: t("worktree.archive"),
+        separated: true,
+        onSelect: () => archiveWorktreeProject(project),
       });
     }
     items.push({
@@ -444,6 +544,8 @@ export function useActions() {
     clearAllDead,
     deleteProject,
     deleteWorktreeProject,
+    archiveWorktreeProject,
+    restoreWorktreeProject,
     deleteHost,
     copyConn,
     projectMenuItems,

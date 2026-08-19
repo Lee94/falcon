@@ -1,6 +1,7 @@
 import { useEffect, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Archive,
   ChevronDown,
   ChevronRight,
   Ellipsis,
@@ -13,6 +14,7 @@ import {
   Settings,
 } from "lucide-react";
 import type { Project, SshHost } from "@mojito/shared";
+import { WORKTREE_ARCHIVE_TTL_MS } from "@mojito/shared";
 import { useApp, type ProjectChanges, type ProjectHead } from "../store.js";
 import { hostBarFromSsh, sshBar, sshConn } from "../lib/hostColor.js";
 import { useActions } from "../lib/useActions.js";
@@ -53,13 +55,18 @@ function checkoutLabel(project: Project, head?: ProjectHead): string {
 function groupServers(
   projects: Project[],
   hosts: SshHost[],
-  localName: string
+  localName: string,
+  showArchived: boolean
 ): ServerGroup[] {
-  const sources = projects.filter((p) => !p.worktree);
+  // 存档的附属项目默认不占侧栏；开关一开就在原来的位置出现
+  const shown = showArchived
+    ? projects
+    : projects.filter((p) => !p.worktree?.archivedAt);
+  const sources = shown.filter((p) => !p.worktree);
   const sourceIds = new Set(sources.map((p) => p.id));
   const kidsBySource = new Map<string, Project[]>();
   const orphans: Project[] = [];
-  for (const p of projects) {
+  for (const p of shown) {
     const src = p.worktree?.sourceProjectId;
     if (!src) continue;
     if (sourceIds.has(src)) {
@@ -101,7 +108,7 @@ function groupServers(
   }
 
   const seen = new Set<string>();
-  for (const p of projects) {
+  for (const p of shown) {
     if (p.type !== "ssh" || p.hostId) continue;
     const conn = p.ssh ? sshConn(p.ssh) : "ssh";
     if (seen.has(conn)) continue;
@@ -139,10 +146,14 @@ export function Sidebar() {
   const settingsOpen = useApp((s) => s.settingsOpen);
   const openMenu = useApp((s) => s.openMenu);
   const refreshChanges = useApp((s) => s.refreshChanges);
+  const showArchived = useApp((s) => s.showArchived);
   const actions = useActions();
-  const servers = groupServers(projects, hosts, t("project.typeLocalShort")).filter(
-    (s) => s.kind !== "local" || s.folders.length > 0 || hosts.length === 0
-  );
+  const servers = groupServers(
+    projects,
+    hosts,
+    t("project.typeLocalShort"),
+    showArchived
+  ).filter((s) => s.kind !== "local" || s.folders.length > 0 || hosts.length === 0);
   const empty = projects.length === 0 && hosts.length === 0;
 
   useEffect(() => {
@@ -483,26 +494,46 @@ function CheckoutNode({
       ? (s.projects.find((p) => p.id === project.worktree?.sourceProjectId)?.name ?? "")
       : ""
   );
+  // 存档的附属项目：置灰、显示删除倒计时、点击不再选中（要恢复走右键菜单）
+  const archivedAt = project.worktree?.archivedAt;
+  const deadline = archivedAt ? archivedAt + WORKTREE_ARCHIVE_TTL_MS : 0;
+  const daysLeft = archivedAt ? Math.ceil((deadline - Date.now()) / 86_400_000) : 0;
+  const archivedNote = archivedAt
+    ? daysLeft >= 1
+      ? t("worktree.archivedMetaDays", { n: daysLeft })
+      : t("worktree.archivedMetaSoon")
+    : undefined;
   const title = project.worktree
-    ? `${t("worktree.derivedFrom", { name: sourceName })} · ${project.workingDir ?? ""}`
+    ? [
+        t("worktree.derivedFrom", { name: sourceName }),
+        archivedAt
+          ? t("worktree.archivedTitle", { date: new Date(deadline).toLocaleString() })
+          : null,
+        project.workingDir ?? "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : (project.workingDir ?? project.name);
 
   return (
     <TreeRow
       depth={depth}
       icon={
-        branched ? (
+        archivedAt ? (
+          <Archive className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : branched ? (
           <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
         ) : (
           <Folder className="size-3.5 shrink-0 text-muted-foreground" />
         )
       }
       label={label}
-      meta={meta}
-      changes={changes}
+      meta={archivedNote ?? meta}
+      changes={archivedAt ? undefined : changes}
       title={title}
+      muted={!!archivedAt}
       selected={selected}
-      onSelect={onSelect}
+      onSelect={archivedAt ? undefined : onSelect}
       onContextMenu={onContextMenu}
     />
   );
@@ -518,6 +549,7 @@ function TreeRow({
   title,
   toggleLabel,
   onToggle,
+  muted,
   selected,
   onSelect,
   onMenu,
@@ -532,6 +564,8 @@ function TreeRow({
   title?: string;
   toggleLabel?: "sidebar.toggleServer" | "sidebar.toggleProject" | "sidebar.toggleWorktree";
   onToggle?: () => void;
+  /** 存档行的置灰态 */
+  muted?: boolean;
   selected?: boolean;
   onSelect?: () => void;
   onMenu?: (e: { currentTarget: HTMLElement }) => void;
@@ -592,7 +626,13 @@ function TreeRow({
         <span className="size-4.5 shrink-0" />
       )}
       {icon}
-      <span className="min-w-0 flex-1 truncate pl-1 font-medium" title={title}>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate pl-1 font-medium",
+          muted && "text-muted-foreground"
+        )}
+        title={title}
+      >
         {label}
       </span>
       {meta && (

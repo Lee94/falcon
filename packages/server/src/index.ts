@@ -11,6 +11,7 @@ import { Db } from "./db.js";
 import { SecretBox } from "./crypto.js";
 import { Auth } from "./auth.js";
 import { SessionManager } from "./sessions/manager.js";
+import { startArchiveSweeper } from "./archive.js";
 import { registerRoutes } from "./routes.js";
 import { registerWs } from "./ws.js";
 import { ZELLIJ_VERSION } from "./zellij/version.js";
@@ -51,6 +52,9 @@ async function main() {
   registerRoutes(app, { db, auth, manager, secrets, version: VERSION, dataDir: config.dataDir });
   registerWs(app, { auth, manager, db });
 
+  // 存档到期的附属项目由后台清扫自动删除，不等用户下次打开界面
+  const stopArchiveSweeper = startArchiveSweeper(db, manager, app.log);
+
   // 托管 web 构建产物（存在时）；单文件发布时由 SEA bootstrap 解压后经环境变量指入
   const here = path.dirname(fileURLToPath(import.meta.url));
   const webDist = process.env.MOJITO_WEB_DIST ?? path.resolve(here, "../../web/dist");
@@ -83,6 +87,7 @@ async function main() {
   );
 
   const shutdown = async () => {
+    stopArchiveSweeper();
     // 会话在 DB 中保持 active，下次启动由 recoverSessionsOnStartup 归类
     await app.close();
     process.exit(0);
