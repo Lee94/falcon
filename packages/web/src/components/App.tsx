@@ -9,6 +9,7 @@ import { RightBar } from "./RightBar.js";
 import { GitPanel } from "./GitPanel.js";
 import { ForwardPanel } from "./ForwardPanel.js";
 import { TabBar } from "./TabBar.js";
+import { GitDiffView } from "./GitDiffView.js";
 import { SessionOverview } from "./SessionOverview.js";
 import { ProjectEmpty } from "./ProjectEmpty.js";
 import { PendingPane, TerminalView } from "./TerminalView.js";
@@ -117,6 +118,7 @@ export function App() {
       }
       case "closeTab":
         if (s.active.kind === "terminal") void s.closeTab(s.active.sessionId);
+        else if (s.active.kind === "diff") s.closeDiff();
         return;
       case "reattach": {
         if (s.active.kind !== "terminal") return;
@@ -190,6 +192,12 @@ export function App() {
               <SessionOverview />
             </div>
             {active.kind === "project" && <ProjectEmpty />}
+            {/* 差异视图没有 xterm 那种重连成本，切走即卸载，切回来重拉一份新的 */}
+            {active.kind === "diff" && (
+              <div className="absolute inset-0 flex flex-col">
+                <GitDiffView />
+              </div>
+            )}
             {/* 非活动 pane 只是 visibility:hidden，绝不卸载——
                 xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪 */}
             {tabs.map((id) => {

@@ -508,6 +508,13 @@ export class SshLink extends EventEmitter {
       .includes(zcmd.zellijSessionName(sessionId));
   }
 
+  /** 会话聚焦 pane 的前台命令；空闲或问不到时为 null。见 parseClientRunningCommand */
+  async foreground(layout: HostLayout, sessionId: string): Promise<string | null> {
+    const res = await this.zellijExec(layout, zcmd.listClientsArgs(layout, sessionId));
+    if (res.code !== 0) return null;
+    return zcmd.parseClientRunningCommand(res.stdout);
+  }
+
   async capture(layout: HostLayout, sessionId: string): Promise<string> {
     // 多一次往返换来的是接回时真能拿到内容，理由见 dumpScreenArgs
     const panes = await this.zellijExec(layout, zcmd.listPanesArgs(layout, sessionId));

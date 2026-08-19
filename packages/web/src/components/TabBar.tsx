@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { PanelLeft, Plus, X } from "lucide-react";
+import { FileDiff, PanelLeft, Plus, X } from "lucide-react";
 import { api } from "../api.js";
 import { useApp, isPendingId, selectSidebarVisible, visibleTabs } from "../store.js";
 import { connLabel, sshBar } from "../lib/hostColor.js";
@@ -109,6 +109,9 @@ export function TabBar() {
   const closeTab = useApp((s) => s.closeTab);
   const detachTab = useApp((s) => s.detachTab);
   const newTerminal = useApp((s) => s.newTerminal);
+  const diffTab = useApp((s) => s.diffTab);
+  const showDiff = useApp((s) => s.showDiff);
+  const closeDiff = useApp((s) => s.closeDiff);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -240,6 +243,54 @@ export function TabBar() {
           </div>
         );
       })}
+
+      {/* 差异 tab：单例、不代表会话，关掉只是收起视图。跟着所属项目一起被侧栏筛选 */}
+      {diffTab && (!selectedProjectId || diffTab.projectId === selectedProjectId) && (() => {
+        const on = active.kind === "diff";
+        const label = diffTab.file.path.split("/").pop() ?? diffTab.file.path;
+        const path = diffTab.file.origPath
+          ? `${diffTab.file.origPath} → ${diffTab.file.path}`
+          : diffTab.file.path;
+        return (
+          <div
+            role="tab"
+            aria-selected={on}
+            tabIndex={0}
+            className={cn(
+              "flex max-w-55 min-w-0 cursor-pointer items-center gap-2 border-t-2 border-r border-t-transparent px-2.5 text-xs outline-none select-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              on ? "border-t-primary bg-background text-foreground" : "text-muted-foreground hover:bg-accent/50"
+            )}
+            title={path}
+            onClick={showDiff}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                showDiff();
+              }
+            }}
+            onAuxClick={(e) => {
+              if (e.button === 1) {
+                e.preventDefault();
+                closeDiff();
+              }
+            }}
+          >
+            <FileDiff className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{label}</span>
+            <button
+              className="grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              aria-label={t("common.close")}
+              title={t("common.close")}
+              onClick={(e) => {
+                e.stopPropagation();
+                closeDiff();
+              }}
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+        );
+      })()}
 
       <button
         className={plain}

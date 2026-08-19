@@ -17,6 +17,7 @@ export function GitPanel() {
   const { t } = useTranslation();
   const projectId = useApp(selectFocusProjectId);
   const project = useApp((s) => s.projects.find((p) => p.id === selectFocusProjectId(s)));
+  const openDiff = useApp((s) => s.openDiff);
   const [snap, setSnap] = useState<GitSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -100,14 +101,20 @@ export function GitPanel() {
             )}
           </Hint>
         ) : (
-          <SnapshotBody snap={snap} />
+          <SnapshotBody snap={snap} onOpenFile={(file) => openDiff(projectId, file)} />
         )}
       </div>
     </aside>
   );
 }
 
-function SnapshotBody({ snap }: { snap: GitSnapshot }) {
+function SnapshotBody({
+  snap,
+  onOpenFile,
+}: {
+  snap: GitSnapshot;
+  onOpenFile: (file: GitFileChange) => void;
+}) {
   const { t } = useTranslation();
   const branch = snap.detached
     ? t("git.detached")
@@ -144,7 +151,11 @@ function SnapshotBody({ snap }: { snap: GitSnapshot }) {
         ) : (
           <ul className="flex max-h-64 flex-col gap-px overflow-y-auto">
             {snap.files.map((file) => (
-              <FileRow key={`${file.index}${file.work}:${file.path}`} file={file} />
+              <FileRow
+                key={`${file.index}${file.work}:${file.path}`}
+                file={file}
+                onOpen={() => onOpenFile(file)}
+              />
             ))}
           </ul>
         )}
@@ -228,22 +239,29 @@ function SnapshotBody({ snap }: { snap: GitSnapshot }) {
   );
 }
 
-function FileRow({ file }: { file: GitFileChange }) {
+function FileRow({ file, onOpen }: { file: GitFileChange; onOpen: () => void }) {
   const { t } = useTranslation();
   const code = `${file.index}${file.work}`;
   const label = statusLabel(file, t);
   const path = file.origPath ? `${file.origPath} → ${file.path}` : file.path;
   return (
-    <li className="flex min-w-0 items-baseline gap-1.5" title={`${label} · ${path}`}>
-      <span
-        className={cn(
-          "w-5 shrink-0 whitespace-pre font-mono text-[11px] leading-5",
-          statusTone(file.index, file.work)
-        )}
+    <li className="min-w-0">
+      <button
+        type="button"
+        onClick={onOpen}
+        title={`${label} · ${path} · ${t("git.viewDiff")}`}
+        className="flex w-full min-w-0 items-baseline gap-1.5 rounded-xs text-left hover:bg-accent hover:text-accent-foreground"
       >
-        {code}
-      </span>
-      <span className="min-w-0 truncate font-mono text-[11.5px]">{file.path}</span>
+        <span
+          className={cn(
+            "w-5 shrink-0 whitespace-pre font-mono text-[11px] leading-5",
+            statusTone(file.index, file.work)
+          )}
+        >
+          {code}
+        </span>
+        <span className="min-w-0 truncate font-mono text-[11.5px]">{file.path}</span>
+      </button>
     </li>
   );
 }
@@ -274,7 +292,7 @@ function Hint({ children }: { children: ReactNode }) {
   );
 }
 
-function reasonKey(reason?: GitUnavailableReason): string {
+export function reasonKey(reason?: GitUnavailableReason): string {
   switch (reason) {
     case "git-missing":
       return "git.reason_git_missing";
@@ -297,7 +315,7 @@ function statusTone(index: string, work: string): string {
   return "text-muted-foreground";
 }
 
-function statusLabel(file: GitFileChange, t: (key: string) => string): string {
+export function statusLabel(file: GitFileChange, t: (key: string) => string): string {
   const mark = file.index !== " " && file.index !== "?" ? file.index : file.work;
   switch (mark) {
     case "?":

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { countStatusChanges, parseStatusEntries } from "./command.js";
+import { countStatusChanges, parseStatusEntries, truncateDiff } from "./command.js";
 
 describe("countStatusChanges", () => {
   it("counts new and untracked files as added, deletions as deleted", () => {
@@ -24,5 +24,23 @@ describe("countStatusChanges", () => {
 
   it("returns zeros for a clean tree", () => {
     assert.deepEqual(countStatusChanges(parseStatusEntries("")), { added: 0, deleted: 0 });
+  });
+});
+
+describe("truncateDiff", () => {
+  it("passes short text through untouched", () => {
+    assert.deepEqual(truncateDiff("+a\n-b\n", 10), { text: "+a\n-b\n", truncated: false });
+  });
+
+  it("cuts at a line boundary, not mid-line", () => {
+    const { text, truncated } = truncateDiff("+aaaa\n+bbbb\n+cccc\n", 14);
+    assert.equal(text, "+aaaa\n+bbbb\n");
+    assert.equal(truncated, true);
+  });
+
+  it("keeps the raw cut when there is no newline to fall back to", () => {
+    const { text, truncated } = truncateDiff("x".repeat(20), 5);
+    assert.equal(text, "xxxxx");
+    assert.equal(truncated, true);
   });
 });

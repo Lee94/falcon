@@ -8,6 +8,7 @@
 
 import type {
   GitChangeCounts,
+  GitFileDiff,
   GitSnapshot,
   GitUnavailableReason,
   GitWorktreeRef,
@@ -291,6 +292,74 @@ export function unavailableSnapshot(
 
 export function unavailableChanges(): GitChangeCounts {
   return { available: false, added: 0, deleted: 0 };
+}
+
+export function unavailableDiff(reason: GitUnavailableReason, detail?: string): GitFileDiff {
+  return { available: false, reason, detail, diff: "", truncated: false };
+}
+
+export interface GitDiffTarget {
+  /** 仓库根相对路径，前端从快照原样带回 */
+  path: string;
+  /** 重命名 / 复制前的路径 */
+  origPath?: string;
+  /** porcelain 的 ?? —— 未跟踪文件走 --no-index 伪 diff */
+  untracked?: boolean;
+}
+
+/**
+ * Git 面板里单个文件的 diff。
+ *
+ * 与 describeGit 同一类探测：环境事实抛 WorktreeError，由路由写成 200 +
+ * available:false。基准取 HEAD（暂存 + 未暂存一起看）——面板列的是
+ * `status --porcelain` 的合并视图，点开看到的也该是同一份合并答案。
+ */
+export async function describeGitDiff(
+  host: GitHost,
+  workingDir: string,
+  target: GitDiffTarget,
+  opts?: RunOpts
+): Promise<GitFileDiff> {
+  const root = await repoRoot(host, workingDir, opts);
+  const ro = gc.GIT_ENV_RO;
+
+  let res: ExecResult;
+  if (target.untracked) {
+    res = await probeGit(host, gc.diffUntrackedArgs(host.git, root, target.path), ro, opts);
+    // 退出码 1 = 有差异，这就是预期答案；但"文件访问不了"也是 1，只是 stdout 为空
+    const failed =
+      (res.code !== 0 && res.code !== 1) ||
+      (res.code === 1 && !res.stdout.trim() && res.stderr.trim().length > 0);
+    if (failed) throw diffError(res);
+  } else {
+    res = await probeGit(
+      host,
+      gc.diffFileArgs(host.git, root, "HEAD", target.path, target.origPath),
+      ro,
+      opts
+    );
+    if (res.code !== 0) {
+      // 最常见的失败是空仓库没有 HEAD（bad revision）：退回与空树比
+      res = await probeGit(
+        host,
+        gc.diffFileArgs(host.git, root, gc.EMPTY_TREE, target.path, target.origPath),
+        ro,
+        opts
+      );
+      if (res.code !== 0) throw diffError(res);
+    }
+  }
+
+  const { text, truncated } = gc.truncateDiff(res.stdout);
+  return { available: true, diff: text, truncated };
+}
+
+function diffError(res: ExecResult): WorktreeError {
+  return new WorktreeError(
+    "link-failed",
+    "git diff 失败",
+    res.stderr.trim() || res.stdout.trim() || `退出码 ${res.code}`
+  );
 }
 
 /**

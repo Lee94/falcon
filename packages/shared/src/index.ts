@@ -317,6 +317,22 @@ export interface GitSnapshot {
 }
 
 /**
+ * Git 面板里单个文件的 diff。
+ *
+ * 基准一律是 HEAD（暂存 + 未暂存合在一起），未跟踪文件与空文件比对。
+ * 环境事实与命令失败同样不抛 4xx，写在 available / reason / detail 里。
+ */
+export interface GitFileDiff {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  /** unified diff 文本；没有差异（如空的未跟踪文件）时为空串 */
+  diff: string;
+  /** 超过上限时按行边界截断 */
+  truncated: boolean;
+}
+
+/**
  * 侧栏最后一层用的工作区文件计数。只跑 `status --porcelain`，不跑 numstat。
  *
  * +added = 新增 / 未跟踪 / 已修改 / 重命名（文件还在的改动）；
@@ -370,6 +386,17 @@ export interface Session {
 export interface SessionWithProject extends Session {
   projectName: string;
   projectType: ProjectType;
+}
+
+/**
+ * GET /api/sessions/:id/foreground 的返回：关 tab 前问"有没有程序在跑"。
+ * 侦测不到（非持久 SSH、链路不通、探测失败）时 busy 恒为 false——
+ * 它是道保险，自己坏了不能把关 tab 拦下来。
+ */
+export interface SessionForeground {
+  busy: boolean;
+  /** busy=true 时正在跑的命令行，供确认框展示 */
+  command: string | null;
 }
 
 /**

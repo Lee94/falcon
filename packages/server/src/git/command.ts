@@ -221,6 +221,41 @@ export function remoteVerboseArgs(git: string, dir: string): string[] {
 }
 
 /**
+ * git 内建的空树对象。仓库还没有任何提交（无 HEAD）时拿它当 diff 基准，
+ * 语义不变：工作区对比"一无所有"。
+ */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * 单个文件相对 base（HEAD 或空树）的 diff：暂存 + 未暂存合在一起看。
+ *
+ * 重命名要把新旧两个路径都传进 pathspec。实测 worktree↔tree 的 diff 不做
+ * rename 配对（那是 --cached 视图的事），出来的是删除 + 新增两段——两半都在，
+ * 这就是如实的答案；只传新路径会丢掉删除那一半。
+ */
+export function diffFileArgs(
+  git: string,
+  dir: string,
+  base: string,
+  path: string,
+  origPath?: string
+): string[] {
+  const paths = origPath ? [origPath, path] : [path];
+  return at(git, dir, "diff", base, "--", ...paths);
+}
+
+/**
+ * 未跟踪文件的伪 diff：与空文件比对。
+ *
+ * `/dev/null` 是 git 在 diff --no-index 里特判的字面量（当空输入），Windows 上
+ * 同样成立，不必换成 NUL。有差异时退出码 1——这是答案不是错误，调用方用 probeGit；
+ * 空的未跟踪文件两边相同，退出码 0、无输出。
+ */
+export function diffUntrackedArgs(git: string, dir: string, path: string): string[] {
+  return at(git, dir, "diff", "--no-index", "--", "/dev/null", path);
+}
+
+/**
  * 最近提交。%at 是 unix 秒——相对时间在前端按界面语言格式化，
  * 不拿 git 的 %ar（那会跟 LC_ALL=C 一起变成英文）。
  */
@@ -534,4 +569,18 @@ export function parseLog(stdout: string): GitLogEntry[] {
 /** `status --porcelain --ignored=matching` 里 `!!` 开头的那些 */
 export function countIgnored(stdout: string): number {
   return lines(stdout).filter((l) => l.startsWith("!!")).length;
+}
+
+/** diff 文本的上限。锁文件之类的 diff 可以到几十 MB，浏览器不该收这么多 */
+export const DIFF_CAP = 500_000;
+
+/** 超限时在行边界截断，别把最后一行剪成半句 */
+export function truncateDiff(
+  text: string,
+  cap = DIFF_CAP
+): { text: string; truncated: boolean } {
+  if (text.length <= cap) return { text, truncated: false };
+  const cut = text.slice(0, cap);
+  const nl = cut.lastIndexOf("\n");
+  return { text: nl > 0 ? cut.slice(0, nl + 1) : cut, truncated: true };
 }

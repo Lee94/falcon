@@ -4,6 +4,11 @@ export interface Backend {
   resize(cols: number, rows: number): void;
   /** 仅断开本端附着，不终止底层（用于持久会话链路重建前的清理） */
   destroy(): void;
+  /**
+   * tty 前台进程名。只有本地 POSIX PTY 提供（node-pty 原生能力）；
+   * 持久会话不走这里（外层 PTY 的前台永远是 Zellij 客户端），问 Zellij。
+   */
+  processName?(): string | undefined;
 }
 
 export interface BackendCallbacks {

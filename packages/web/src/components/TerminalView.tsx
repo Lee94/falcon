@@ -31,6 +31,8 @@ interface ViewState {
   deadReason?: DeadReason;
   reconnectAttempt: number;
   wsClosed: boolean;
+  /** 与后端 WS 的自动重连轮次；0 = 没在重连 */
+  wsRetry: number;
   attachError: string | null;
 }
 
@@ -62,8 +64,11 @@ export function TerminalView({
     session: "active",
     reconnectAttempt: 0,
     wsClosed: false,
+    wsRetry: 0,
     attachError: null,
   });
+  /** 断线横幅上的「立即重连」，由主 effect 填充 */
+  const retryNowRef = useRef<() => void>(() => undefined);
 
   /**
    * 图片上传到会话宿主机，把落盘路径粘进终端输入——Claude Code 等 TUI
@@ -102,7 +107,9 @@ export function TerminalView({
       lineHeight: pref.lineHeight,
       cursorStyle: pref.cursorStyle,
       cursorBlink: pref.cursorBlink,
-      scrollback: 5000,
+      // 与服务端 zellij scroll_buffer_size（10000）匹配：replay 重建时前端
+      // 缓冲会被整体替换，设得比远端小就白白丢历史
+      scrollback: 10000,
       // unicode.activeVersion 是 proposed API；不打开会在设 11 时直接抛
       allowProposedApi: true,
       // 默认 Unicode 6 把大量 CJK / emoji / 图标当成 1 格，后一个字符会盖掉右半
@@ -132,11 +139,15 @@ export function TerminalView({
     fitRef.current = fit;
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws/sessions/${sessionId}`);
+    const wsUrl = `${proto}://${location.host}/ws/sessions/${sessionId}`;
     /** 卸载后这条 socket 的收尾事件不许再改状态——否则自己关掉的连接会被当成"后端断了" */
     let disposed = false;
     /** 还没量出真实格子之前禁止把 80×24 默认值发给 PTY */
     let measured = false;
+    /** 断线自动重连：connect() 每次换新 socket，旧 socket 迟到的事件按 ws !== sock 丢弃 */
+    let ws: WebSocket;
+    let retries = 0;
+    let retryTimer: number | null = null;
 
     const sendResize = () => {
       if (!measured || ws.readyState !== WebSocket.OPEN) return;
@@ -172,48 +183,107 @@ export function TerminalView({
     };
     applySizeRef.current = applySize;
 
-    ws.onopen = () => {
-      sendResize();
-      sendAppearance();
+    const scheduleRetry = () => {
+      if (disposed || retryTimer != null) return;
+      // 1s 起步翻倍、15s 封顶：不打爆刚起来的后端，也不让用户干等太久
+      const delay = Math.min(15_000, 1000 * 2 ** Math.min(retries, 4));
+      retries++;
+      setView((v) => ({ ...v, wsRetry: retries }));
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        connect();
+      }, delay);
     };
-    ws.onclose = () => {
-      if (!disposed) setView((v) => ({ ...v, wsClosed: true }));
+
+    const connect = () => {
+      const sock = new WebSocket(wsUrl);
+      ws = sock;
+      sock.onopen = () => {
+        if (disposed || ws !== sock) return;
+        const reconnected = retries > 0;
+        retries = 0;
+        setView((v) => ({ ...v, wsClosed: false, wsRetry: 0 }));
+        // resize 顺带触发服务端对持久会话的懒惰接回（ensureAttached）
+        sendResize();
+        sendAppearance();
+        // 断开期间错过的会话状态变化不等 5s 轮询，立刻补一次
+        if (reconnected) void refreshSessions();
+      };
+      sock.onclose = (ev) => {
+        if (disposed || ws !== sock) return;
+        // 4401 = 认证没了（如后端重启丢掉内存 token）。重试只会无限 4401，
+        // 刷新认证状态让 App 落到登录页
+        if (ev.code === 4401) {
+          setView((v) => ({ ...v, wsClosed: true, wsRetry: 0 }));
+          void useApp.getState().refreshAuth();
+          return;
+        }
+        setView((v) => ({ ...v, wsClosed: true }));
+        scheduleRetry();
+      };
+      sock.onmessage = (ev) => {
+        if (disposed || ws !== sock) return;
+        let msg: ServerMessage;
+        try {
+          msg = JSON.parse(ev.data as string);
+        } catch {
+          return;
+        }
+        switch (msg.type) {
+          case "replay":
+            // dump-screen 是整屏快照，必须清掉断线前的 VT 状态再写
+            term.reset();
+            term.write(msg.data);
+            break;
+          case "output":
+            term.write(msg.data);
+            break;
+          case "state":
+            setView((v) => ({
+              ...v,
+              session: msg.state,
+              deadReason: msg.deadReason,
+              reconnectAttempt: msg.state === "active" ? 0 : v.reconnectAttempt,
+              attachError: msg.state === "active" ? null : v.attachError,
+            }));
+            useApp.getState().applySessionState(sessionId, msg.state, msg.deadReason);
+            break;
+          case "reconnecting":
+            setView((v) => ({ ...v, reconnectAttempt: msg.attempt }));
+            break;
+          case "error":
+            setView((v) => ({ ...v, attachError: msg.message }));
+            break;
+        }
+      };
     };
-    ws.onmessage = (ev) => {
-      if (disposed) return;
-      let msg: ServerMessage;
-      try {
-        msg = JSON.parse(ev.data as string);
-      } catch {
+
+    /** 「立即重连」按钮与浏览器 online 事件都不必等退避定时器 */
+    const retryNow = () => {
+      if (
+        disposed ||
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING
+      ) {
         return;
       }
-      switch (msg.type) {
-        case "replay":
-          // dump-screen 是整屏快照，必须清掉断线前的 VT 状态再写
-          term.reset();
-          term.write(msg.data);
-          break;
-        case "output":
-          term.write(msg.data);
-          break;
-        case "state":
-          setView((v) => ({
-            ...v,
-            session: msg.state,
-            deadReason: msg.deadReason,
-            reconnectAttempt: msg.state === "active" ? 0 : v.reconnectAttempt,
-            attachError: msg.state === "active" ? null : v.attachError,
-          }));
-          useApp.getState().applySessionState(sessionId, msg.state, msg.deadReason);
-          break;
-        case "reconnecting":
-          setView((v) => ({ ...v, reconnectAttempt: msg.attempt }));
-          break;
-        case "error":
-          setView((v) => ({ ...v, attachError: msg.message }));
-          break;
+      if (retryTimer != null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
       }
+      retries++;
+      setView((v) => ({ ...v, wsRetry: retries }));
+      connect();
     };
+    retryNowRef.current = retryNow;
+    window.addEventListener("online", retryNow);
+    // 后台标签页的定时器会被浏览器节流到分钟级；切回来时立刻补一次
+    const onVisible = () => {
+      if (document.visibilityState === "visible") retryNow();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    connect();
 
     term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -284,6 +354,10 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      window.removeEventListener("online", retryNow);
+      document.removeEventListener("visibilitychange", onVisible);
+      if (retryTimer != null) clearTimeout(retryTimer);
+      retryNowRef.current = () => undefined;
       document.fonts.removeEventListener("loadingdone", afterFonts);
       host.removeEventListener("mouseup", copySelection);
       host.removeEventListener("paste", onPasteCapture, true);
@@ -341,12 +415,21 @@ export function TerminalView({
         <Banner
           tone="error"
           state="dead"
-          title={t("session.connClosed")}
+          title={
+            view.wsRetry > 0
+              ? t("session.connReconnecting", { attempt: view.wsRetry })
+              : t("session.connClosed")
+          }
           body={t("session.connClosedBody")}
           actions={
-            <Button variant="outline" size="sm" onClick={() => location.reload()}>
-              {t("session.reload")}
-            </Button>
+            <>
+              <Button variant="outline" size="sm" onClick={() => retryNowRef.current()}>
+                {t("session.retryNow")}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => location.reload()}>
+                {t("session.reload")}
+              </Button>
+            </>
           }
         />
       );

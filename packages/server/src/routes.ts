@@ -5,6 +5,7 @@ import type {
   DeleteProjectResult,
   FsListing,
   GitChangeCounts,
+  GitFileDiff,
   GitSnapshot,
   GitUnavailableReason,
   HostZellijStatus,
@@ -59,10 +60,12 @@ import {
   addWorktree,
   describeGit,
   describeGitChanges,
+  describeGitDiff,
   describeRepo,
   pathExists,
   repoRoot,
   unavailableChanges,
+  unavailableDiff,
   unavailableSnapshot,
   worktreeStatus,
 } from "./git/repo.js";
@@ -680,6 +683,35 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   /**
+   * Git 面板里单个文件的 diff。path / origPath 由前端从快照原样带回
+   * （仓库根相对路径），untracked=1 表示走 --no-index 伪 diff。
+   * 环境事实与命令失败同样不抛 4xx，写在 available/reason/detail 里。
+   */
+  app.get("/api/projects/:id/git/diff", async (req, reply): Promise<GitFileDiff | void> => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { path?: string; origPath?: string; untracked?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!q.path) return reply.code(400).send({ error: "缺少 path 参数" });
+    if (!row.working_dir) {
+      return unavailableDiff("no-working-dir", worktreeFailureText("no-working-dir"));
+    }
+    try {
+      return await describeGitDiff(await gitHostFor(row, manager), row.working_dir, {
+        path: q.path,
+        origPath: q.origPath || undefined,
+        untracked: q.untracked === "1",
+      });
+    } catch (err) {
+      const e = err as WorktreeError;
+      const reason: GitUnavailableReason = GIT_UNAVAILABLE.has(e.reason)
+        ? (e.reason as GitUnavailableReason)
+        : "link-failed";
+      return unavailableDiff(reason, e.detail ?? e.message);
+    }
+  });
+
+  /**
    * 派生一个附属项目。
    *
    * 与 GET /repo 的分工：那边是探测，环境事实如实报告；这边是操作，同样的事实
@@ -975,6 +1007,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       if (row?.state === "dead") return Db.toSession(row);
       return reply.code(502).send({ error: `接回失败：${(err as Error).message}` });
     }
+  });
+
+  // 关 tab 前问一嘴前台有没有程序在跑。会话不存在也答"空闲"——
+  // 这条路径上前端接下来就是终止，404 只会让它多走一个错误分支
+  app.get("/api/sessions/:id/foreground", async (req) => {
+    const { id } = req.params as { id: string };
+    return manager.foreground(id);
   });
 
   app.post("/api/sessions/:id/terminate", async (req) => {

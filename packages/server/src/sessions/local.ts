@@ -143,6 +143,16 @@ export async function localCapture(
   return normalizeCaptured(res.stdout.replace(/\s+$/, "") + "\n");
 }
 
+/** 会话聚焦 pane 的前台命令；空闲或问不到时为 null。见 parseClientRunningCommand */
+export async function localForeground(
+  layout: HostLayout,
+  sessionId: string
+): Promise<string | null> {
+  const res = await zellij(layout, zcmd.listClientsArgs(layout, sessionId));
+  if (res.code !== 0) return null;
+  return zcmd.parseClientRunningCommand(res.stdout);
+}
+
 export async function localKill(layout: HostLayout, sessionId: string): Promise<void> {
   await zellij(layout, zcmd.deleteSessionArgs(layout, sessionId)).catch(() => {});
 }
@@ -218,6 +228,18 @@ export async function attachLocal(
 
   const backend: Backend = {
     write: (data) => proc.write(data),
+    // 仅非持久会话有意义：持久会话外层 PTY 的前台永远是 Zellij 客户端。
+    // Windows 的 IPty.process 是静态标题不是前台进程，报出去只会造成误弹确认。
+    processName:
+      !opts.durable && process.platform !== "win32"
+        ? () => {
+            try {
+              return proc.process || undefined;
+            } catch {
+              return undefined;
+            }
+          }
+        : undefined,
     resize: (cols, rows) => {
       try {
         proc.resize(cols, rows);

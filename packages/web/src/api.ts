@@ -3,6 +3,7 @@ import type {
   DeleteProjectResult,
   FsListing,
   GitChangeCounts,
+  GitFileDiff,
   GitSnapshot,
   HostZellijStatus,
   PasteImageResult,
@@ -13,6 +14,7 @@ import type {
   RepoInfo,
   CreateSessionRequest,
   Session,
+  SessionForeground,
   SessionWithProject,
   ShellsInfo,
   SshHost,
@@ -106,6 +108,16 @@ export const api = {
   /** 侧栏最后一层的 +N −M。读不到时 available=false，不抛 */
   gitChanges: (projectId: string) =>
     request<GitChangeCounts>("GET", `/api/projects/${projectId}/git/changes`),
+  /** Git 面板里单个文件的 diff。环境事实与命令失败写在 available/reason 里，不抛 */
+  gitFileDiff: (
+    projectId: string,
+    file: { path: string; origPath?: string; untracked?: boolean }
+  ) => {
+    const q = new URLSearchParams({ path: file.path });
+    if (file.origPath) q.set("origPath", file.origPath);
+    if (file.untracked) q.set("untracked", "1");
+    return request<GitFileDiff>("GET", `/api/projects/${projectId}/git/diff?${q}`);
+  },
   listForwards: (projectId: string) =>
     request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),
   createForward: (projectId: string, input: PortForwardInput) =>
@@ -130,6 +142,9 @@ export const api = {
   createSession: (projectId: string, body?: CreateSessionRequest) =>
     request<Session>("POST", `/api/projects/${projectId}/sessions`, body ?? {}),
   reattachSession: (id: string) => request<Session>("POST", `/api/sessions/${id}/reattach`),
+  /** 关 tab 前问一嘴前台有没有程序在跑；侦测不到的场景 busy 恒为 false */
+  sessionForeground: (id: string) =>
+    request<SessionForeground>("GET", `/api/sessions/${id}/foreground`),
   terminateSession: (id: string) => request("POST", `/api/sessions/${id}/terminate`),
   clearSession: (id: string) => request("DELETE", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>

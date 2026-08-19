@@ -3,6 +3,7 @@ import type {
   NonDurableReason,
   ServerMessage,
   Session,
+  SessionForeground,
   TermAppearance,
 } from "@mojito/shared";
 import { OscColorGate, isTermAppearance, parseHexRgb } from "@mojito/shared";
@@ -14,8 +15,10 @@ import type { HostLayout } from "../zellij/host.js";
 import type { StageFn } from "../zellij/install.js";
 import type { Backend } from "./backend.js";
 import { SessionGoneError } from "./backend.js";
+import { isShellCommand } from "../shells.js";
 import {
   attachLocal,
+  localForeground,
   localHasSession,
   localKill,
   peekLocalZellij,
@@ -411,6 +414,44 @@ export class SessionManager {
     }
     await entry.attaching;
     return this.db.getSession(sessionId)!;
+  }
+
+  /**
+   * 会话前台是否有程序在跑（关 tab 前的确认依据）。
+   *
+   * 持久会话问 Zellij（list-clients 的 RUNNING_COMMAND 就是聚焦 pane 的前台
+   * 命令）；非持久本地会话问 PTY 自己。侦测不到的场景一律按空闲放行：
+   * 非持久 SSH（channel 里问不到远端 shell 的进程树）、Windows 远端
+   * （Zellij 没有 /proc 可读，恒报 N/A）、unverified/断链（拿到的答案没有意义）。
+   * 这是道保险，探测失败不能把关 tab 拦下来，所以也不抛错。
+   */
+  async foreground(sessionId: string): Promise<SessionForeground> {
+    const idle: SessionForeground = { busy: false, command: null };
+    const row = this.db.getSession(sessionId);
+    if (!row || row.state !== "active") return idle;
+    const project = this.db.getProject(row.project_id);
+    if (!project) return idle;
+    const entry = this.entries.get(sessionId);
+
+    try {
+      let command: string | null = null;
+      if (row.durable !== 1) {
+        command = entry?.backend?.processName?.() ?? null;
+      } else if (entry?.layout) {
+        // 没有活的附着就没有 Zellij 客户端，list-clients 必为空，不必跑
+        if (project.type === "local") {
+          command = await localForeground(entry.layout, sessionId);
+        } else {
+          const link = this.links.get(project.id);
+          if (!link?.isConnected()) return idle; // 不为一次探测去重建链路
+          command = await link.foreground(entry.layout, sessionId);
+        }
+      }
+      if (!command || isShellCommand(command, project.shell)) return idle;
+      return { busy: true, command };
+    } catch {
+      return idle;
+    }
   }
 
   /**

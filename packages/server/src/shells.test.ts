@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   detectShells,
+  isShellCommand,
   mergeShells,
   parseShellList,
   POSIX_SHELLS_PROBE,
@@ -80,6 +81,40 @@ describe("mergeShells", () => {
   it("侦测结果为空时仍有默认项", () => {
     const info = mergeShells("posix", "/bin/sh", []);
     assert.deepEqual(info.shells, ["/bin/sh"]);
+  });
+});
+
+describe("isShellCommand", () => {
+  it("裸 shell 名与绝对路径都算空闲", () => {
+    assert.ok(isShellCommand("zsh"));
+    assert.ok(isShellCommand("/bin/bash"));
+    assert.ok(isShellCommand("fish"));
+  });
+
+  it("登录 shell 的 - 前缀与 Windows 的 .exe 后缀要归一化", () => {
+    assert.ok(isShellCommand("-zsh"));
+    assert.ok(isShellCommand("powershell.exe"));
+    assert.ok(isShellCommand("C:\\Program Files\\PowerShell\\7\\pwsh.exe"));
+  });
+
+  it("前台真在跑东西时不算空闲", () => {
+    assert.ok(!isShellCommand("vim main.rs"));
+    assert.ok(!isShellCommand("sleep 300"));
+    assert.ok(!isShellCommand("claude"));
+  });
+
+  it("shell 带参数是在跑脚本，不是在等输入", () => {
+    assert.ok(!isShellCommand("bash deploy.sh"));
+  });
+
+  it("会话配置的非常见 shell 也算空闲", () => {
+    assert.ok(!isShellCommand("myshell"));
+    assert.ok(isShellCommand("myshell", "/opt/bin/myshell"));
+  });
+
+  it("解析不出名字按空闲放行——侦测是保险，不该拦住关 tab", () => {
+    assert.ok(isShellCommand(""));
+    assert.ok(isShellCommand("   "));
   });
 });
 

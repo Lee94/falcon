@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   createBackgroundArgs,
+  parseClientRunningCommand,
   parseTerminalPaneId,
   zellijSessionName,
 } from "./command.js";
@@ -20,6 +21,30 @@ describe("parseTerminalPaneId", () => {
   it("returns null when there is no terminal pane", () => {
     assert.equal(parseTerminalPaneId("PANE_ID  TYPE  TITLE\n"), null);
     assert.equal(parseTerminalPaneId(""), null);
+  });
+});
+
+describe("parseClientRunningCommand", () => {
+  const header = "CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND";
+
+  it("命令行含空格时第三列起整段拼回", () => {
+    const stdout = [header, "1         terminal_0     sleep 300"].join("\n");
+    assert.equal(parseClientRunningCommand(stdout), "sleep 300");
+  });
+
+  it("空闲 shell 的 N/A 按'没有程序'处理", () => {
+    const stdout = [header, "1         terminal_0     N/A"].join("\n");
+    assert.equal(parseClientRunningCommand(stdout), null);
+  });
+
+  it("没有客户端连接时只有表头", () => {
+    assert.equal(parseClientRunningCommand(`${header}\n`), null);
+    assert.equal(parseClientRunningCommand(""), null);
+  });
+
+  it("聚焦在 plugin pane 上没有可言的前台命令", () => {
+    const stdout = [header, "1         plugin_3       zellij:configuration"].join("\n");
+    assert.equal(parseClientRunningCommand(stdout), null);
   });
 });
 

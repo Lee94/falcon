@@ -2,8 +2,10 @@ import { create } from "zustand";
 import type {
   AuthStatus,
   DeadReason,
+  GitFileChange,
   Project,
   ProjectType,
+  SessionForeground,
   SessionState,
   SessionWithProject,
   SshHost,
@@ -34,7 +36,19 @@ export type ActiveView =
   | { kind: "overview" }
   | { kind: "terminal"; sessionId: string }
   /** 选中了项目但还没有可显示的终端 */
-  | { kind: "project" };
+  | { kind: "project" }
+  /** Git 面板点开的文件差异（见 diffTab） */
+  | { kind: "diff" };
+
+/**
+ * 差异查看 tab 的目标。单例：再点别的文件就地替换内容，像编辑器的预览 tab——
+ * 每个文件各开一个 tab 只会让人在一排 tab 里找不到终端。不持久化：刷新后
+ * 工作区的 diff 早就变了，恢复一个过期视图没有意义。
+ */
+export interface DiffTabTarget {
+  projectId: string;
+  file: GitFileChange;
+}
 
 export function tabProjectId(
   tabId: string,
@@ -350,6 +364,8 @@ interface AppState {
   tabs: string[];
   active: ActiveView;
   pending: PendingSession[];
+  /** 差异查看 tab；null = 没开 */
+  diffTab: DiffTabTarget | null;
 
   /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
   themePref: ThemePref;
@@ -407,6 +423,11 @@ interface AppState {
   applySessionState(id: string, state: SessionState, deadReason?: DeadReason): void;
 
   openSession(sessionId: string): void;
+  /** 在差异 tab 里打开一个文件（就地替换上一个） */
+  openDiff(projectId: string, file: GitFileChange): void;
+  /** 切回已开的差异 tab */
+  showDiff(): void;
+  closeDiff(): void;
   /** 手动关 tab：Terminate，顺手结束会话，首次会解释这件事 */
   closeTab(id: string): Promise<void>;
   /** Detach：只收起 tab，会话留在后台继续跑（Shift+关闭） */
@@ -465,8 +486,10 @@ export const useApp = create<AppState>((set, get) => {
       get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
+      // pending id 与差异 tab 都活不过刷新，落成项目 / 总览视图
       active:
-        active.kind === "terminal" && isPendingId(active.sessionId)
+        active.kind === "diff" ||
+        (active.kind === "terminal" && isPendingId(active.sessionId))
           ? selectedProjectId
             ? { kind: "project" }
             : { kind: "overview" }
@@ -495,6 +518,7 @@ export const useApp = create<AppState>((set, get) => {
     tabs: initialWorkspace.tabs,
     active: initialWorkspace.active,
     pending: [],
+    diffTab: null,
 
     themePref: initialThemePref,
     theme: resolveTheme(initialThemePref),
@@ -637,6 +661,30 @@ export const useApp = create<AppState>((set, get) => {
       persist();
     },
 
+    openDiff(projectId, file) {
+      set({ diffTab: { projectId, file }, active: { kind: "diff" } });
+    },
+
+    showDiff() {
+      if (get().diffTab) set({ active: { kind: "diff" } });
+    },
+
+    closeDiff() {
+      set((state) => {
+        if (state.active.kind !== "diff") return { diffTab: null };
+        // 回退顺序与 dropTab 一致：最近的可见终端 → 项目空页 → 总览
+        const rest = visibleTabs(state);
+        return {
+          diffTab: null,
+          active: rest.length
+            ? { kind: "terminal" as const, sessionId: rest[rest.length - 1]! }
+            : state.selectedProjectId
+              ? { kind: "project" as const }
+              : { kind: "overview" as const },
+        };
+      });
+    },
+
     selectProject(projectId) {
       const state = get();
       if (!state.projects.some((p) => p.id === projectId)) return;
@@ -699,32 +747,62 @@ export const useApp = create<AppState>((set, get) => {
      * 手动关 tab 直接结束会话——tab 就是会话，收起它等于不要它了。
      * 想留着后台跑的用 detachTab（Shift+关闭）。
      *
-     * 不弹确认：确认框挡在每一次关 tab 前面就成了噪音，用户会闭眼点。
-     * 代价是用一条事后 toast + 一次性说明来兜住"我不知道会杀掉"。
+     * 空闲时不弹确认：确认框挡在每一次关 tab 前面就成了噪音，用户会闭眼点。
+     * 只在侦测到前台真有程序在跑时拦一道——这时杀掉的不再是一个空 shell。
+     * 侦测失败或超时按空闲处理（保底就是旧的直接关），
+     * "我不知道会杀掉"仍由事后 toast + 一次性说明兜住。
      */
     async closeTab(id) {
       const session = isPendingId(id) ? undefined : get().sessions.find((s) => s.id === id);
-      get().dropTab(id);
 
       // pending 还没有后端 id；dead 会话没什么可杀的，记录留着等用户自己清
-      if (!session || session.state === "dead") return;
-
-      try {
-        await api.terminateSession(session.id);
-        get().toast({
-          kind: "danger",
-          title: i18n.t("toast.terminated", { name: session.name }),
-          ...closeKillsHint(),
-        });
-      } catch (err) {
-        get().handleApiError(err);
-        get().toast({
-          kind: "danger",
-          title: i18n.t("toast.failed"),
-          body: (err as Error).message,
-        });
+      if (!session || session.state === "dead") {
+        get().dropTab(id);
+        return;
       }
-      await get().refreshSessions();
+
+      const terminate = async () => {
+        get().dropTab(id);
+        try {
+          await api.terminateSession(session.id);
+          get().toast({
+            kind: "danger",
+            title: i18n.t("toast.terminated", { name: session.name }),
+            ...closeKillsHint(),
+          });
+        } catch (err) {
+          get().handleApiError(err);
+          get().toast({
+            kind: "danger",
+            title: i18n.t("toast.failed"),
+            body: (err as Error).message,
+          });
+        }
+        await get().refreshSessions();
+      };
+
+      // SSH 上探测要过一次网络往返；它卡住不能连累关 tab，超时按空闲
+      let fg: SessionForeground | null = null;
+      try {
+        fg = await Promise.race([
+          api.sessionForeground(session.id),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+        ]);
+      } catch {
+        // 侦测是道保险，它自己坏了不挡关闭
+      }
+
+      if (!fg?.busy) {
+        await terminate();
+        return;
+      }
+      get().askConfirm({
+        title: i18n.t("tab.busyTitle", { name: session.name }),
+        body: i18n.t("tab.busyBody", { command: fg.command }),
+        footnote: i18n.t("tab.busyFootnote"),
+        confirmLabel: i18n.t("session.terminateConfirm"),
+        onConfirm: terminate,
+      });
     },
 
     detachTab(id) {

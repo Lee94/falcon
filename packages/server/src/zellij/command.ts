@@ -10,9 +10,13 @@ import { ZELLIJ_VERSION } from "./version.js";
 /**
  * 远端 scrollback 深度。dump-screen 没有 `-S -2000` 这类行数参数，
  * 只能全量或仅当前屏；把 buffer 本身设小，`--full` 就天然限行了。
- * 用户实际在 xterm.js 前端滚动，远端只需够重建。
+ *
+ * 注意这是断线重连后用户能上翻行数的**硬上限**：replay 会 term.reset()
+ * 整体替换前端缓冲，前端积累的历史保不住，能翻多少全看 dump 有多少。
+ * 取 zellij 默认值 10000，并与前端 xterm scrollback、服务端 RingBuffer
+ * 容量保持匹配（三者取最小生效）。
  */
-const SCROLL_BUFFER = 2000;
+const SCROLL_BUFFER = 10000;
 
 /**
  * sessionId（UUID）→ Zellij session 名。
@@ -87,6 +91,7 @@ pane_frames false
 simplified_ui true
 session_serialization false
 scroll_buffer_size ${SCROLL_BUFFER}
+mouse_mode false
 show_startup_tips false
 show_release_notes false
 keybinds clear-defaults=true {
@@ -139,6 +144,10 @@ function sessionOptions(
     "false",
     "--scroll-buffer-size",
     String(SCROLL_BUFFER),
+    // 关掉鼠标上报：开着的话 xterm.js 会把滚轮事件转发给 Zellij，
+    // 用户滚的就是远端那份受限 buffer 而不是前端 scrollback
+    "--mouse-mode",
+    "false",
     // 这两条是实测踩出来的：Zellij 默认会先显示一屏 "Zellij Tip #N" 启动提示，
     // 挡在 shell 前面等用户按键关闭。表现为会话建成了、hasSession 为真、
     // 但屏幕空白且输入毫无反应——不关掉整个终端就是废的。
@@ -245,6 +254,45 @@ export function parseTerminalPaneId(stdout: string): string | null {
   for (const line of stdout.split("\n")) {
     const [id, type] = line.trim().split(/\s+/);
     if (id && type === "terminal") return id;
+  }
+  return null;
+}
+
+/**
+ * 列出已连接客户端与其聚焦 pane 的前台命令。用于关 tab 前判断"有没有程序在跑"。
+ */
+export function listClientsArgs(paths: ZellijPaths, sessionId: string): string[] {
+  return [
+    ...globalArgs(paths),
+    "--session",
+    zellijSessionName(sessionId),
+    "action",
+    "list-clients",
+  ];
+}
+
+/**
+ * 从 `list-clients` 输出里取前台命令。
+ *
+ * 输出形如：
+ *   CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND
+ *   1         terminal_0     sleep 300
+ *
+ * 实测（macOS，0.44.3）：空闲 shell 时 RUNNING_COMMAND 是字面量 "N/A"，
+ * 有前台程序时是完整命令行；没有客户端连接时只有表头。命令行可能含空格，
+ * 所以第三列起要整段拼回。聚焦在 plugin pane 上（理论上 mojito 的单 pane
+ * layout 不会发生）没有可言的前台命令，同样按"不知道"处理。
+ */
+export function parseClientRunningCommand(stdout: string): string | null {
+  for (const line of stdout.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("CLIENT_ID")) continue;
+    const cols = t.split(/\s+/);
+    const paneId = cols[1];
+    if (!paneId?.startsWith("terminal")) continue;
+    const command = cols.slice(2).join(" ");
+    if (!command || command === "N/A") return null;
+    return command;
   }
   return null;
 }

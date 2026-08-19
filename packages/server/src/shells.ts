@@ -82,6 +82,43 @@ export function mergeShells(
   return { kind, default: def, shells };
 }
 
+/**
+ * 侦测候选之外也常见的交互 shell。isShellCommand 的判定集合要比表单候选宽：
+ * 表单漏列一个 shell 只是下拉里少一项，这里漏一个则每次关 tab 都误弹确认。
+ */
+const EXTRA_SHELLS = ["csh", "mksh", "ash", "elvish", "xonsh", "nushell", "powershell"];
+
+/**
+ * 判断一条前台命令是不是"就是 shell 自己在等输入"——关 tab 要不要拦的依据。
+ *
+ * 只有单个词、且 basename 是已知 shell（或该会话配置的 shell）才算空闲：
+ * 带参数的如 `bash deploy.sh` 是在跑东西，得拦。登录 shell 的 `-zsh` 前缀
+ * 与 Windows 的 `.exe` 后缀都要归一化掉。解析不出名字时按空闲放行——
+ * 这套侦测是道保险，宁可放过不可把关 tab 变成每次两步。
+ */
+export function isShellCommand(command: string, sessionShell?: string | null): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) return true;
+  const norm = (s: string) =>
+    (s.split(/[\\/]/).pop() ?? s).replace(/^-/, "").replace(/\.exe$/i, "").toLowerCase();
+  const known = new Set(
+    [...POSIX_CANDIDATES, ...WINDOWS_CANDIDATES, ...EXTRA_SHELLS].map(norm)
+  );
+  const isShell = (s: string) => {
+    const base = norm(s);
+    if (!base) return true;
+    if (known.has(base)) return true;
+    return sessionShell != null && norm(sessionShell) === base;
+  };
+  // Windows 全路径可能含空格（C:\Program Files\...\pwsh.exe），按词拆会误判成
+  // "带参数"。整串以 .exe 结尾时先按整条路径试——这只可能放行 shell，
+  // 不会把 `less /bin/bash` 这种真在跑的命令看漏。
+  if (/\.exe$/i.test(trimmed) && isShell(trimmed)) return true;
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length > 1) return false;
+  return isShell(tokens[0]);
+}
+
 /** 一次往返侦测宿主机上可用的 shell。探测失败不抛：至少还有默认项可选。 */
 export async function detectShells(
   exec: ExecFn,
