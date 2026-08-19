@@ -209,9 +209,12 @@ export function buildPtyCommandLine(
  * 经 WMI Win32_Process.Create 拉起的进程父进程是 WmiPrvSE，完全在 sshd 的
  * Job 之外，实测能熬过整条 SSH 连接的断开与重连。
  *
- * 内层命令套一层 -EncodedCommand：命令行里只有 A-Za-z0-9+/= 与空格，可以原样
- * 嵌进外层脚本的单引号字符串，不存在二次转义问题（这也是全项目统一用
- * EncodedCommand 的又一红利）。
+ * 内层用 `-Command "<脚本>"` 而**不是** `-EncodedCommand`：后者会把内层再做一次
+ * base64(UTF-16LE)，叠加外层的同样一层，整体膨胀约 7 倍——带上终端深浅那几个
+ * 环境变量后，最终命令行会顶穿远端 DefaultShell（cmd.exe）8191 字符的上限，
+ * 报 "The command line is too long."（实测踩到）。powerShellScript 产出的脚本
+ * 全部用单引号字面量、不含双引号，可整体塞进 `-Command "..."`，再作为字符串
+ * 嵌进外层的单引号（doubling 转义）——只有外层做一次编码，体积减半有余。
  *
  * 外层等内层进程退出并尽力转出退出码。两个实测出来的细节：
  * 1. Get-Process 拿到的对象要先摸一次 .Handle，进程退出后才读得到 ExitCode；
@@ -223,9 +226,9 @@ export function buildDetachedCommandLine(
   argv: string[],
   env: Record<string, string> = {}
 ): string {
-  const inner = encodePowerShell(powerShellScript(argv, env));
+  const innerCmd = `powershell -NoProfile -NonInteractive -Command "${powerShellScript(argv, env)}"`;
   const script = [
-    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${inner}' }`,
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${quotePowerShell(innerCmd)} }`,
     `if ($r.ReturnValue -ne 0) { Write-Error ('Win32_Process.Create failed: ' + $r.ReturnValue); exit 1 }`,
     `$p = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue`,
     // 60s 兜底：内层命令挂死时不能让 SSH exec 永远不返回
