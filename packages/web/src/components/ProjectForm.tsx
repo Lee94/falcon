@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Project, ProjectInput, ProjectType } from "@mojito/shared";
+import type { Project, ProjectInput, ProjectType, ShellsInfo } from "@mojito/shared";
 import { api } from "../api.js";
 import { sshConn } from "../lib/hostColor.js";
 import { useApp, type ProjectFormPreset } from "../store.js";
@@ -17,6 +17,10 @@ import { AppDialog } from "./common/AppDialog.js";
 import { Field, Segmented } from "./common/Field.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { SshFields, type SshFieldValues } from "./SshFields.js";
+
+/** shell 下拉的两个哨兵值：Radix Select 不接受空字符串当 value */
+const SHELL_AUTO = "__auto__";
+const SHELL_CUSTOM = "__custom__";
 
 export function ProjectForm({
   existing,
@@ -37,6 +41,8 @@ export function ProjectForm({
   const [name, setName] = useState(existing?.name ?? "");
   const [workingDir, setWorkingDir] = useState(existing?.workingDir ?? "");
   const [shell, setShell] = useState(existing?.shell ?? "");
+  const [shellCustom, setShellCustom] = useState(false);
+  const [shells, setShells] = useState<ShellsInfo | null>(null);
   const [hostId, setHostId] = useState(existing?.hostId ?? preset?.hostId ?? "");
   const [ssh, setSsh] = useState<SshFieldValues>({
     host: existing?.ssh?.host ?? "",
@@ -56,6 +62,52 @@ export function ProjectForm({
   // 存量项目没有 hostId：可以继续手写 ssh，也可以改绑到已保存主机
   const legacy = Boolean(existing && !existing.hostId);
   const usingSavedHost = type === "ssh" && (Boolean(hostId) || !legacy);
+
+  // 自动侦测宿主机可用的 shell：本地问后端本机；SSH 有目标（选了主机或编辑
+  // 已有 SSH 项目）就问远端。失败静默——表单退回"默认 + 自定义"，不打断创建。
+  const existingSshId = existing?.type === "ssh" ? existing.id : null;
+  useEffect(() => {
+    setShells(null);
+    const opts =
+      type === "local"
+        ? undefined
+        : hostId
+          ? { hostId }
+          : existingSshId
+            ? { projectId: existingSshId }
+            : null;
+    if (opts === null) return;
+    let stale = false;
+    api.listShells(opts).then(
+      (info) => {
+        if (!stale) setShells(info);
+      },
+      () => {}
+    );
+    return () => {
+      stale = true;
+    };
+  }, [type, hostId, existingSshId]);
+
+  // 下拉里必须包含当前值，哪怕侦测没跑完或它不在侦测结果里（存量项目手填过）
+  const shellOptions = (() => {
+    const opts = shells ? [...shells.shells] : [];
+    if (shell && !shellCustom && !opts.includes(shell)) opts.unshift(shell);
+    return opts;
+  })();
+  const shellValue = shellCustom ? SHELL_CUSTOM : shell ? shell : SHELL_AUTO;
+  const pickShell = (v: string) => {
+    if (v === SHELL_AUTO) {
+      setShell("");
+      setShellCustom(false);
+    } else if (v === SHELL_CUSTOM) {
+      setShellCustom(true);
+    } else {
+      setShell(v);
+      setShellCustom(false);
+    }
+  };
+  const shellBaseName = (s: string) => s.split(/[\\/]/).pop() ?? s;
 
   const validatePath = async () => {
     if (!workingDir.trim()) {
@@ -320,13 +372,36 @@ export function ProjectForm({
         )}
 
         <Field label={t("project.shell")} htmlFor="project-shell">
-          <Input
-            id="project-shell"
-            className="font-mono"
-            value={shell}
-            onChange={(e) => setShell(e.target.value)}
-            placeholder={type === "local" ? "pwsh.exe / zsh" : "zsh"}
-          />
+          <div className="grid gap-2">
+            <Select value={shellValue} onValueChange={pickShell}>
+              <SelectTrigger id="project-shell" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SHELL_AUTO}>
+                  {shells
+                    ? t("project.shellAutoDetected", {
+                        shell: shellBaseName(shells.default),
+                      })
+                    : t("project.shellAuto")}
+                </SelectItem>
+                {shellOptions.map((s) => (
+                  <SelectItem key={s} value={s} className="font-mono">
+                    {s}
+                  </SelectItem>
+                ))}
+                <SelectItem value={SHELL_CUSTOM}>{t("project.shellCustom")}</SelectItem>
+              </SelectContent>
+            </Select>
+            {shellCustom && (
+              <Input
+                className="font-mono"
+                value={shell}
+                onChange={(e) => setShell(e.target.value)}
+                placeholder={type === "local" ? "pwsh.exe / zsh" : "/usr/bin/zsh"}
+              />
+            )}
+          </div>
         </Field>
 
         {error && <p className="text-[13px] text-destructive">{error}</p>}

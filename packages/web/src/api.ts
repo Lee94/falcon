@@ -14,6 +14,7 @@ import type {
   CreateSessionRequest,
   Session,
   SessionWithProject,
+  ShellsInfo,
   SshHost,
   SshHostInput,
   SshProbeResult,
@@ -69,6 +70,14 @@ export const api = {
     if (opts?.projectId) q.set("projectId", opts.projectId);
     const qs = q.toString();
     return request<FsListing>("GET", `/api/fs/list${qs ? `?${qs}` : ""}`);
+  },
+  /** 侦测宿主机可用 shell。不带参数侦测后端本机，带 hostId/projectId 侦测远端 */
+  listShells: (opts?: { hostId?: string; projectId?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.hostId) q.set("hostId", opts.hostId);
+    if (opts?.projectId) q.set("projectId", opts.projectId);
+    const qs = q.toString();
+    return request<ShellsInfo>("GET", `/api/shells${qs ? `?${qs}` : ""}`);
   },
 
   listHosts: () => request<SshHost[]>("GET", "/api/hosts"),

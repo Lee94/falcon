@@ -275,12 +275,12 @@ export class SshLink extends EventEmitter {
   }
 
   /**
-   * 宿主机类型与家目录，供 git 层使用。
-   * probe() 自带缓存，重复调用不产生往返；RemoteProbe 本身不外泄，只给出这两项事实。
+   * 宿主机类型、家目录与默认 shell，供 git 层与 shell 侦测使用。
+   * probe() 自带缓存，重复调用不产生往返；RemoteProbe 本身不外泄，只给出这几项事实。
    */
-  async hostFacts(): Promise<{ kind: HostKind; home: string }> {
+  async hostFacts(): Promise<{ kind: HostKind; home: string; shell: string }> {
     const p = await this.probe();
-    return { kind: p.kind, home: p.home };
+    return { kind: p.kind, home: p.home, shell: p.shell };
   }
 
   // ---- 探测与安装 ----

@@ -13,6 +13,7 @@ import type {
   ProjectInput,
   RepoInfo,
   SessionWithProject,
+  ShellsInfo,
   SshHost,
   SshHostInput,
   SshProbeResult,
@@ -24,6 +25,9 @@ import type {
 import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@mojito/shared";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
+import { detectShells } from "./shells.js";
+import { defaultLocalShell } from "./sessions/local.js";
+import { localExec, localKind } from "./zellij/exec.js";
 import {
   imageExt,
   pasteDir,
@@ -192,6 +196,19 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * query 缺省是家目录；`path=` 空字符串是 Windows 盘符列表。
    * 读失败回 400，不回 500——路径不存在或 SSH 连不上都是调用方能处理的。
    */
+  /** hostId / projectId → 该远端的 SshLink。两个只读探查路由共用这段解析。 */
+  const resolveLink = (hostId?: string, projectId?: string) => {
+    if (projectId) {
+      const row = db.getProject(projectId);
+      if (!row) throw new Error("项目不存在");
+      if (row.type !== "ssh") throw new Error("只有 SSH 项目能访问远端");
+      return manager.getLink(row);
+    }
+    const host = db.getHost(hostId!);
+    if (!host) throw new Error("主机不存在");
+    return manager.getHostLink(host);
+  };
+
   app.get("/api/fs/list", async (req, reply): Promise<FsListing | void> => {
     const { path: p, hostId, projectId } = req.query as {
       path?: string;
@@ -200,21 +217,28 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     };
     try {
       if (!hostId && !projectId) return await listDirectories(p);
-
-      const link = (() => {
-        if (projectId) {
-          const row = db.getProject(projectId);
-          if (!row) throw new Error("项目不存在");
-          if (row.type !== "ssh") throw new Error("只有 SSH 项目能浏览远端目录");
-          return manager.getLink(row);
-        }
-        const host = db.getHost(hostId!);
-        if (!host) throw new Error("主机不存在");
-        return manager.getHostLink(host);
-      })();
-
+      const link = resolveLink(hostId, projectId);
       const facts = await link.hostFacts();
       return await listRemoteDirectories(link.exec, facts.kind, facts.home, p);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * 侦测宿主机上可用的 shell，供项目表单的 shell 选择。
+   * 不带 hostId/projectId 时侦测后端本机；带了就经 SSH 侦测远端。
+   * 探测命令本身失败不算错（至少有默认项），连不上远端才回 400。
+   */
+  app.get("/api/shells", async (req, reply): Promise<ShellsInfo | void> => {
+    const { hostId, projectId } = req.query as { hostId?: string; projectId?: string };
+    try {
+      if (!hostId && !projectId) {
+        return await detectShells(localExec, localKind(), defaultLocalShell());
+      }
+      const link = resolveLink(hostId, projectId);
+      const facts = await link.hostFacts();
+      return await detectShells(link.exec, facts.kind, facts.shell);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }

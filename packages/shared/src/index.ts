@@ -553,6 +553,19 @@ export interface FsListing {
   entries: FsDirEntry[];
 }
 
+/**
+ * 宿主机上可用 shell 的侦测结果（项目表单的 shell 选择用）。
+ *
+ * `default` 是不设覆盖时后端实际会用的 shell：POSIX 为探测到的登录 shell，
+ * Windows 一律 PowerShell；恒等于 shells[0]。
+ */
+export interface ShellsInfo {
+  kind: "posix" | "windows";
+  default: string;
+  /** 侦测到的可用 shell 绝对路径，去重后默认项排最前 */
+  shells: string[];
+}
+
 export interface ApiError {
   error: string;
 }
