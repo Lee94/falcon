@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ChevronDown,
@@ -13,14 +13,16 @@ import {
   Settings,
 } from "lucide-react";
 import type { Project, SshHost } from "@mojito/shared";
-import { useApp, type ProjectHead } from "../store.js";
+import { useApp, type ProjectChanges, type ProjectHead } from "../store.js";
 import { hostBarFromSsh, sshBar, sshConn } from "../lib/hostColor.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { menuAnchor } from "./common/Menu.js";
+import { menuAnchor, openContextMenu } from "./common/Menu.js";
 import { ThemeButton } from "./common/ThemeToggle.js";
+
+const CHANGES_POLL_MS = 8000;
 
 /** 侧栏第一层：本机、已保存主机、以及没有绑定主机的存量 SSH */
 interface ServerGroup {
@@ -124,6 +126,7 @@ export function Sidebar() {
   const projects = useApp((s) => s.projects);
   const hosts = useApp((s) => s.hosts);
   const heads = useApp((s) => s.heads);
+  const changes = useApp((s) => s.changes);
   const collapsed = useApp((s) => s.collapsed);
   const system = useApp((s) => s.system);
   const toggleSidebar = useApp((s) => s.toggleSidebar);
@@ -135,11 +138,18 @@ export function Sidebar() {
   const openSettings = useApp((s) => s.openSettings);
   const settingsOpen = useApp((s) => s.settingsOpen);
   const openMenu = useApp((s) => s.openMenu);
+  const refreshChanges = useApp((s) => s.refreshChanges);
   const actions = useActions();
   const servers = groupServers(projects, hosts, t("project.typeLocalShort")).filter(
     (s) => s.kind !== "local" || s.folders.length > 0 || hosts.length === 0
   );
   const empty = projects.length === 0 && hosts.length === 0;
+
+  useEffect(() => {
+    void refreshChanges();
+    const timer = setInterval(() => void refreshChanges(), CHANGES_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refreshChanges]);
 
   return (
     <aside className="flex w-65 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
@@ -191,6 +201,7 @@ export function Sidebar() {
             key={server.key}
             server={server}
             heads={heads}
+            changes={changes}
             expanded={!collapsed[server.key]}
             collapsed={collapsed}
             onToggle={() => toggleCollapsed(server.key)}
@@ -218,13 +229,24 @@ export function Sidebar() {
                   ? (e) =>
                       openMenu({
                         ...menuAnchor(e),
-                        items: actions.localServerMenuItems(),
+                        items: actions.serverMenuItems("local"),
                       })
                   : undefined
+            }
+            onContextMenu={(e) =>
+              openContextMenu(
+                e,
+                server.kind === "host" && server.host
+                  ? actions.hostMenuItems(server.host)
+                  : actions.serverMenuItems(server.kind === "local" ? "local" : "legacy")
+              )
             }
             onProjectMenu={(project, e) =>
               openMenu({ ...menuAnchor(e), items: actions.projectMenuItems(project) })
             }
+            onProjectContext={(project, e) => {
+              openContextMenu(e, actions.projectMenuItems(project));
+            }}
           />
         ))}
       </div>
@@ -260,6 +282,7 @@ export function Sidebar() {
 function ServerNode({
   server,
   heads,
+  changes,
   expanded,
   collapsed,
   onToggle,
@@ -268,10 +291,13 @@ function ServerNode({
   onSelectProject,
   onNewProject,
   onMenu,
+  onContextMenu,
   onProjectMenu,
+  onProjectContext,
 }: {
   server: ServerGroup;
   heads: Record<string, ProjectHead>;
+  changes: Record<string, ProjectChanges>;
   expanded: boolean;
   collapsed: Record<string, boolean>;
   onToggle: () => void;
@@ -280,14 +306,20 @@ function ServerNode({
   onSelectProject: (id: string) => void;
   onNewProject: () => void;
   onMenu?: (e: { currentTarget: HTMLElement }) => void;
+  onContextMenu: (e: MouseEvent) => void;
   onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
+  onProjectContext: (project: Project, e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
   const Icon = server.kind === "local" ? Monitor : Server;
 
   return (
     <div className="mb-0.5">
-      <div className="group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent">
+      <div
+        className="group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent"
+        title={`${server.conn ?? server.name} · ${t("sidebar.projectContext")}`}
+        onContextMenu={onContextMenu}
+      >
         <button
           className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           aria-label={t("sidebar.toggleServer")}
@@ -339,11 +371,13 @@ function ServerNode({
               key={folder.project.id}
               folder={folder}
               heads={heads}
+              changes={changes}
               collapsed={collapsed}
               selectedProjectId={selectedProjectId}
               onSelectProject={onSelectProject}
               onToggleKey={onToggleKey}
               onProjectMenu={onProjectMenu}
+              onProjectContext={onProjectContext}
             />
           ))
         ))}
@@ -354,19 +388,23 @@ function ServerNode({
 function FolderNode({
   folder,
   heads,
+  changes,
   collapsed,
   selectedProjectId,
   onSelectProject,
   onToggleKey,
   onProjectMenu,
+  onProjectContext,
 }: {
   folder: FolderGroup;
   heads: Record<string, ProjectHead>;
+  changes: Record<string, ProjectChanges>;
   collapsed: Record<string, boolean>;
   selectedProjectId: string | null;
   onSelectProject: (id: string) => void;
   onToggleKey: (key: string) => void;
   onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
+  onProjectContext: (project: Project, e: MouseEvent) => void;
 }) {
   const { project, worktrees } = folder;
   const head = heads[project.id];
@@ -385,28 +423,31 @@ function FolderNode({
         onToggle={() => onToggleKey(folderKey(project.id))}
         onSelect={() => onSelectProject(project.id)}
         onMenu={(e) => onProjectMenu(project, e)}
+        onContextMenu={(e) => onProjectContext(project, e)}
       />
       {open && (
         <>
           <CheckoutNode
             project={project}
             label={checkoutLabel(project, head)}
+            changes={changes[project.id]}
             branched
             depth={2}
             selected={selectedProjectId === project.id}
             onSelect={() => onSelectProject(project.id)}
-            onMenu={(e) => onProjectMenu(project, e)}
+            onContextMenu={(e) => onProjectContext(project, e)}
           />
           {worktrees.map((wt) => (
             <CheckoutNode
               key={wt.id}
               project={wt}
               label={checkoutLabel(wt)}
+              changes={changes[wt.id]}
               branched
               depth={2}
               selected={selectedProjectId === wt.id}
               onSelect={() => onSelectProject(wt.id)}
-              onMenu={(e) => onProjectMenu(wt, e)}
+              onContextMenu={(e) => onProjectContext(wt, e)}
             />
           ))}
         </>
@@ -419,20 +460,22 @@ function CheckoutNode({
   project,
   label,
   meta,
+  changes,
   branched,
   depth,
   selected,
   onSelect,
-  onMenu,
+  onContextMenu,
 }: {
   project: Project;
   label: string;
   meta?: string;
+  changes?: ProjectChanges;
   branched?: boolean;
   depth: number;
   selected?: boolean;
   onSelect?: () => void;
-  onMenu: (e: { currentTarget: HTMLElement }) => void;
+  onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
   const sourceName = useApp((s) =>
@@ -456,10 +499,11 @@ function CheckoutNode({
       }
       label={label}
       meta={meta}
+      changes={changes}
       title={title}
       selected={selected}
       onSelect={onSelect}
-      onMenu={onMenu}
+      onContextMenu={onContextMenu}
     />
   );
 }
@@ -470,31 +514,41 @@ function TreeRow({
   icon,
   label,
   meta,
+  changes,
   title,
   toggleLabel,
   onToggle,
   selected,
   onSelect,
   onMenu,
+  onContextMenu,
 }: {
   depth: number;
   expanded?: boolean;
   icon: ReactNode;
   label: string;
   meta?: string;
+  changes?: ProjectChanges;
   title?: string;
   toggleLabel?: "sidebar.toggleServer" | "sidebar.toggleProject" | "sidebar.toggleWorktree";
   onToggle?: () => void;
   selected?: boolean;
   onSelect?: () => void;
-  onMenu: (e: { currentTarget: HTMLElement }) => void;
+  onMenu?: (e: { currentTarget: HTMLElement }) => void;
+  onContextMenu?: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
+  const leaf = !onToggle;
   return (
     <div
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
       aria-current={selected ? "true" : undefined}
+      title={
+        onContextMenu
+          ? `${title ?? label} · ${t("sidebar.projectContext")}`
+          : title
+      }
       className={cn(
         "group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent",
         onSelect && "cursor-pointer",
@@ -502,6 +556,15 @@ function TreeRow({
       )}
       style={{ paddingLeft: 4 + depth * 12 }}
       onClick={onSelect}
+      onContextMenu={
+        onContextMenu
+          ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onContextMenu(e);
+            }
+          : undefined
+      }
       onKeyDown={
         onSelect
           ? (e) => {
@@ -537,19 +600,47 @@ function TreeRow({
           {meta}
         </span>
       )}
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        className="text-muted-foreground"
-        aria-label={t("sidebar.projectMenu")}
-        title={t("common.more")}
-        onClick={(e) => {
-          e.stopPropagation();
-          onMenu(e);
-        }}
-      >
-        <Ellipsis />
-      </Button>
+      {leaf ? (
+        <GitChangeBadge changes={changes} />
+      ) : (
+        onMenu && (
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            className="text-muted-foreground"
+            aria-label={t("sidebar.projectMenu")}
+            title={t("common.more")}
+            onClick={(e) => {
+              e.stopPropagation();
+              onMenu(e);
+            }}
+          >
+            <Ellipsis />
+          </Button>
+        )
+      )}
     </div>
+  );
+}
+
+function GitChangeBadge({ changes }: { changes?: ProjectChanges }) {
+  const { t } = useTranslation();
+  if (!changes || (changes.added <= 0 && changes.deleted <= 0)) return null;
+  const title =
+    changes.added > 0 && changes.deleted > 0
+      ? t("sidebar.changesTitle", { added: changes.added, deleted: changes.deleted })
+      : changes.added > 0
+        ? t("sidebar.changesAdded", { n: changes.added })
+        : t("sidebar.changesDeleted", { n: changes.deleted });
+  return (
+    <span
+      className="shrink-0 font-mono text-[11px] leading-none tabular-nums"
+      title={title}
+      aria-label={title}
+    >
+      {changes.added > 0 && <span className="text-success">+{changes.added}</span>}
+      {changes.added > 0 && changes.deleted > 0 && " "}
+      {changes.deleted > 0 && <span className="text-destructive">-{changes.deleted}</span>}
+    </span>
   );
 }

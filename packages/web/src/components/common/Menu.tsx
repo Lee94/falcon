@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import { Check } from "lucide-react";
-import { useApp } from "@/store.js";
+import { useApp, type MenuItemSpec } from "@/store.js";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,11 +37,12 @@ export function Menu() {
         />
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        align="end"
+        align={menu?.align ?? "end"}
         side="bottom"
-        sideOffset={4}
+        sideOffset={menu?.align === "start" ? 0 : 4}
         className="min-w-54"
         onEscapeKeyDown={(e) => e.preventDefault()}
+        onCloseAutoFocus={(e) => e.preventDefault()}
       >
         {menu?.items.map((item, i) => (
           <Fragment key={`${item.label}-${i}`}>
@@ -49,6 +50,7 @@ export function Menu() {
             {item.separated && i > 0 && <DropdownMenuSeparator />}
             <DropdownMenuItem
               variant={item.danger ? "destructive" : "default"}
+              disabled={item.disabled}
               onSelect={() => item.onSelect()}
             >
               <span className="flex-1">{item.label}</span>
@@ -66,4 +68,30 @@ export function Menu() {
 export function menuAnchor(e: { currentTarget: HTMLElement }): { x: number; y: number } {
   const r = e.currentTarget.getBoundingClientRect();
   return { x: Math.round(r.right), y: Math.round(r.bottom) };
+}
+
+/** 右键菜单锚点：从指针往右下展开 */
+export function menuAt(e: { clientX: number; clientY: number }): {
+  x: number;
+  y: number;
+  align: "start";
+} {
+  return { x: Math.round(e.clientX), y: Math.round(e.clientY), align: "start" };
+}
+
+/** 打开右键菜单并挡住浏览器自带那一层。已开着则先关再开，好让锚点跟着手标走。 */
+export function openContextMenu(
+  e: { clientX: number; clientY: number; preventDefault(): void; stopPropagation(): void },
+  items: MenuItemSpec[]
+): void {
+  e.preventDefault();
+  e.stopPropagation();
+  const spec = { ...menuAt(e), items };
+  const store = useApp.getState();
+  if (store.menu) {
+    store.closeMenu();
+    requestAnimationFrame(() => useApp.getState().openMenu(spec));
+    return;
+  }
+  store.openMenu(spec);
 }

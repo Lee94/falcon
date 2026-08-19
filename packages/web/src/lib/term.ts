@@ -6,6 +6,7 @@
  */
 
 import type { ITheme } from "@xterm/xterm";
+import { appearanceFromHex, type TermAppearance } from "@mojito/shared";
 import type { ThemeMode } from "./theme.js";
 
 export const TERM_PREF_KEY = "mojito.term";
@@ -578,6 +579,24 @@ const FIXED_THEMES: Record<Exclude<TermThemeId, "match">, ITheme> = {
 export function resolveTermTheme(themeId: TermThemeId, ui: ThemeMode): ITheme {
   if (themeId === "match") return MATCH_THEMES[ui];
   return FIXED_THEMES[themeId];
+}
+
+/** 按当前 xterm 底色判深浅，不是按界面主题。浅色 UI + 深色终端配色应报 dark。 */
+export function appearanceFromTheme(theme: ITheme): TermAppearance {
+  return appearanceFromHex(typeof theme.background === "string" ? theme.background : "#000000");
+}
+
+export function termColorHint(themeId: TermThemeId, ui: ThemeMode): {
+  appearance: TermAppearance;
+  background?: string;
+  foreground?: string;
+} {
+  const theme = resolveTermTheme(themeId, ui);
+  return {
+    appearance: appearanceFromTheme(theme),
+    background: theme.background,
+    foreground: theme.foreground,
+  };
 }
 
 export function clampFontSize(n: number): number {

@@ -49,15 +49,18 @@ export function useActions() {
   };
 
   const reattach = (session: SessionWithProject) =>
-    run(
-      () => api.reattachSession(session.id),
-      () =>
-        useApp.getState().toast({
-          kind: "success",
-          title: t("toast.reattached"),
-          body: t("toast.reattachedBody"),
-        })
-    );
+    run(async () => {
+      const row = await api.reattachSession(session.id);
+      useApp.getState().applySessionState(row.id, row.state, row.deadReason);
+      if (row.state !== "active") {
+        throw new Error(t("session.attachFailed"));
+      }
+      useApp.getState().toast({
+        kind: "success",
+        title: t("toast.reattached"),
+        body: t("toast.reattachedBody"),
+      });
+    });
 
   const terminate = (session: SessionWithProject) => {
     useApp.getState().askConfirm({
@@ -302,10 +305,36 @@ export function useActions() {
     },
   ];
 
-  const localServerMenuItems = (): MenuItemSpec[] => [
+  /** 侧栏第一层：本机 / 未绑定主机的存量 SSH。已保存主机走 hostMenuItems。 */
+  const serverMenuItems = (kind: "local" | "legacy"): MenuItemSpec[] => [
     {
       label: t("sidebar.newProject"),
-      onSelect: () => useApp.getState().openProjectForm(null, { type: "local" }),
+      onSelect: () =>
+        useApp.getState().openProjectForm(null, { type: kind === "local" ? "local" : "ssh" }),
+    },
+  ];
+
+  const termMenuItems = (opts: {
+    hasSelection: boolean;
+    canPaste: boolean;
+    onCopy: () => void;
+    onPaste: () => void;
+    onClear: () => void;
+  }): MenuItemSpec[] => [
+    {
+      label: t("term.copy"),
+      disabled: !opts.hasSelection,
+      onSelect: opts.onCopy,
+    },
+    {
+      label: t("term.paste"),
+      disabled: !opts.canPaste,
+      onSelect: opts.onPaste,
+    },
+    {
+      label: t("term.clear"),
+      separated: true,
+      onSelect: opts.onClear,
     },
   ];
 
@@ -350,10 +379,6 @@ export function useActions() {
       });
     }
     items.push({
-      label: t("project.durability"),
-      onSelect: () => store.openDrawer(project.id),
-    });
-    items.push({
       label: project.worktree ? t("worktree.deleteConfirm") : t("project.delete"),
       separated: true,
       danger: true,
@@ -394,12 +419,6 @@ export function useActions() {
         onSelect: () => store.openRename(session.id),
       });
     }
-    if (project) {
-      items.push({
-        label: t("project.durability"),
-        onSelect: () => store.openDrawer(project.id),
-      });
-    }
     if (session.state === "dead") {
       items.push({
         label: t("session.clearRecord"),
@@ -429,7 +448,8 @@ export function useActions() {
     copyConn,
     projectMenuItems,
     hostMenuItems,
-    localServerMenuItems,
+    serverMenuItems,
     sessionMenuItems,
+    termMenuItems,
   };
 }

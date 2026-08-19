@@ -3,7 +3,9 @@ import type {
   NonDurableReason,
   ServerMessage,
   Session,
+  TermAppearance,
 } from "@mojito/shared";
+import { OscColorGate, isTermAppearance, parseHexRgb } from "@mojito/shared";
 import type { Db, ProjectRow, SessionRow, SshHostRow } from "../db.js";
 import { Db as DbStatics } from "../db.js";
 import type { SecretBox } from "../crypto.js";
@@ -20,7 +22,13 @@ import {
   prepareLocalZellij,
   resetLocalZellij,
 } from "./local.js";
+import { ForwardManager } from "./forward.js";
 import { SshLink } from "./ssh.js";
+import {
+  decideViewerAttach,
+  fallbackTermSize,
+  parseStoredTermSize,
+} from "./termSize.js";
 
 export interface Viewer {
   send(msg: ServerMessage): void;
@@ -44,10 +52,16 @@ interface LiveEntry {
   backend: Backend | null;
   buffer: RingBuffer;
   viewers: Set<Viewer>;
-  cols: number;
-  rows: number;
+  /** null = 从未被 Viewer 量过；接回时不能用 80×24 顶替 */
+  cols: number | null;
+  rows: number | null;
   attaching: Promise<void> | null;
   terminating: boolean;
+  /** 当前 Viewer 报上来的终端深浅；接回后的内层 env 冻住了，只影响 OSC 答复和新会话 */
+  appearance?: TermAppearance;
+  background?: string;
+  foreground?: string;
+  osc: OscColorGate;
 }
 
 interface ReconnectState {
@@ -88,12 +102,18 @@ export class SessionManager {
   private reconnects = new Map<string, ReconnectState>();
   private lastTouch = new Map<string, number>();
 
+  readonly forwards: ForwardManager;
+
   constructor(
     private db: Db,
     private secrets: SecretBox,
     private dataDir: string
   ) {
     this.db.recoverSessionsOnStartup();
+    this.forwards = new ForwardManager(db, (projectId) => {
+      const project = this.db.getProject(projectId);
+      return project?.type === "ssh" ? this.getLink(project) : null;
+    });
   }
 
   /**
@@ -163,6 +183,7 @@ export class SessionManager {
     if (!link) {
       link = new SshLink(project, this.db, this.secrets);
       link.on("down", () => this.handleLinkDown(project.id));
+      link.on("up", () => void this.forwards.onLinkUp(project.id));
       this.links.set(project.id, link);
     } else {
       link.updateProject(project);
@@ -171,6 +192,7 @@ export class SessionManager {
   }
 
   disposeLink(projectId: string) {
+    this.forwards.stopAll(projectId);
     this.links.get(projectId)?.dispose();
     this.links.delete(projectId);
     const rec = this.reconnects.get(projectId);
@@ -213,7 +235,11 @@ export class SessionManager {
 
   // ---------- 会话生命周期 ----------
 
-  async createSession(project: ProjectRow, name: string): Promise<Session> {
+  async createSession(
+    project: ProjectRow,
+    name: string,
+    hint?: { appearance?: TermAppearance; background?: string; foreground?: string }
+  ): Promise<Session> {
     const id = crypto.randomUUID();
     const now = Date.now();
 
@@ -229,21 +255,19 @@ export class SessionManager {
       non_durable_reason: prep.durable ? null : (prep.reason ?? null),
       created_at: now,
       last_active_at: now,
+      cols: null,
+      rows: null,
     };
 
-    const entry: LiveEntry = {
+    const entry = this.liveEntry({
       sessionId: id,
       projectId: project.id,
       durable: prep.durable,
       layout: prep.layout ?? null,
-      backend: null,
-      buffer: new RingBuffer(),
-      viewers: new Set(),
-      cols: 80,
-      rows: 24,
-      attaching: null,
-      terminating: false,
-    };
+      appearance: hint?.appearance,
+      background: hint?.background,
+      foreground: hint?.foreground,
+    });
     this.entries.set(id, entry);
 
     try {
@@ -263,10 +287,18 @@ export class SessionManager {
     row: SessionRow,
     reattach: boolean
   ): Promise<void> {
+    let backend: Backend | null = entry.backend;
+    const queuedReplies: string[] = [];
     const cb = {
       onData: (data: string) => {
-        entry.buffer.append(data);
-        this.broadcast(entry, { type: "output", data });
+        const { visible, replies } = entry.osc.push(data);
+        for (const reply of replies) {
+          if (backend) backend.write(reply);
+          else queuedReplies.push(reply);
+        }
+        if (!visible) return;
+        entry.buffer.append(visible);
+        this.broadcast(entry, { type: "output", data: visible });
       },
       onExit: () => this.handleBackendExit(entry.sessionId),
     };
@@ -285,8 +317,12 @@ export class SessionManager {
       durable: entry.durable,
       layout: entry.layout ?? undefined,
       reattach,
-      cols: entry.cols,
-      rows: entry.rows,
+      ...fallbackTermSize(
+        entry.cols != null && entry.rows != null
+          ? { cols: entry.cols, rows: entry.rows }
+          : null
+      ),
+      appearance: entry.appearance,
     };
 
     const result =
@@ -294,7 +330,13 @@ export class SessionManager {
         ? await attachLocal(opts, cb)
         : await this.getLink(project).attachSession(opts, cb);
 
+    backend = result.backend;
     entry.backend = result.backend;
+    for (const reply of queuedReplies) backend.write(reply);
+    // attach 期间 Viewer 可能已经报了真实格子，按最新的再 resize 一次
+    if (entry.cols != null && entry.rows != null) {
+      backend.resize(entry.cols, entry.rows);
+    }
     if (reattach && result.capturedHistory != null) {
       entry.buffer.reset(result.capturedHistory);
     }
@@ -302,36 +344,52 @@ export class SessionManager {
 
   /**
    * 懒惰接回：确保会话有活的 backend。
-   * unverified 的持久会话在此被验证并恢复为 active；tmux 不在了则标记 dead。
+   * unverified 的持久会话在此被验证并恢复为 active；Zellij 不在了则标记 dead。
+   *
+   * force：用户点了「接回」。必须马上 attach 并把 DB 写成 active，
+   * 不能因为 Viewer 还在等格子就原样返回 unverified。
    */
-  async ensureAttached(sessionId: string): Promise<SessionRow> {
+  async ensureAttached(
+    sessionId: string,
+    opts?: { force?: boolean }
+  ): Promise<SessionRow> {
     const row = this.db.getSession(sessionId);
     if (!row) throw new NotFoundError("会话不存在");
     if (row.state === "dead") return row;
 
     let entry = this.entries.get(sessionId);
     if (!entry) {
-      entry = {
+      const size = parseStoredTermSize(row.cols, row.rows);
+      const created = this.liveEntry({
         sessionId,
         projectId: row.project_id,
         durable: row.durable === 1,
         layout: null,
-        backend: null,
-        buffer: new RingBuffer(),
-        viewers: new Set(),
-        cols: 80,
-        rows: 24,
-        attaching: null,
-        terminating: false,
-      };
-      this.entries.set(sessionId, entry);
+        cols: size?.cols ?? null,
+        rows: size?.rows ?? null,
+      });
+      this.entries.set(sessionId, created);
+      entry = created;
     }
-    if (entry.backend) return row;
+    if (entry.backend) {
+      // PTY 已挂上但 DB 还停在 unverified：点接回必须把状态扳回来
+      if (row.state !== "active") return this.markActive(entry);
+      return row;
+    }
 
     if (!entry.durable) {
       // 非持久会话丢了 backend 即死亡（理论上已在别处标记）
       this.markDead(entry, "backend-restart");
       return this.db.getSession(sessionId)!;
+    }
+
+    // 懒惰路径才等格子。用户点接回不能卡在 unverified。
+    if (
+      !opts?.force &&
+      (entry.cols == null || entry.rows == null) &&
+      entry.viewers.size > 0
+    ) {
+      return row;
     }
 
     if (!entry.attaching) {
@@ -340,8 +398,7 @@ export class SessionManager {
         if (!project) throw new NotFoundError("项目不存在");
         try {
           await this.attachBackend(entry!, project, row, true);
-          this.db.updateSessionState(sessionId, "active");
-          this.broadcast(entry!, { type: "state", state: "active" });
+          this.markActive(entry!, { replay: true });
         } catch (err) {
           if (err instanceof SessionGoneError) {
             this.markDead(entry!, "session-gone");
@@ -428,32 +485,43 @@ export class SessionManager {
       return;
     }
 
-    try {
-      await this.ensureAttached(sessionId);
-    } catch (err) {
-      const fresh = this.db.getSession(sessionId);
-      if (fresh?.state === "dead") {
-        viewer.send({
-          type: "state",
-          state: "dead",
-          deadReason: (fresh.dead_reason as DeadReason) ?? undefined,
-        });
-      } else {
-        viewer.send({ type: "error", message: `接回失败：${(err as Error).message}` });
-        viewer.send({ type: "state", state: "unverified" });
-        // 让自动重连接管（若是 SSH 链路问题）
-        const entry = this.entries.get(sessionId);
-        if (entry) {
-          entry.viewers.add(viewer);
-          this.scheduleReconnect(entry.projectId);
-        }
-        return;
-      }
+    let entry = this.entries.get(sessionId);
+    if (!entry) {
+      const size = parseStoredTermSize(row.cols, row.rows);
+      entry = this.liveEntry({
+        sessionId,
+        projectId: row.project_id,
+        durable: row.durable === 1,
+        layout: null,
+        cols: size?.cols ?? null,
+        rows: size?.rows ?? null,
+      });
+      this.entries.set(sessionId, entry);
+    }
+
+    const alreadyLive = !!entry.backend;
+    entry.viewers.add(viewer);
+
+    const gate = decideViewerAttach({
+      durable: entry.durable,
+      hasBackend: alreadyLive,
+    });
+
+    if (gate === "dead") {
+      this.markDead(entry, "backend-restart");
+      viewer.send({
+        type: "state",
+        state: "dead",
+        deadReason: "backend-restart",
+      });
       return;
     }
 
-    const entry = this.entries.get(sessionId)!;
-    entry.viewers.add(viewer);
+    if (gate === "wait-size") {
+      // 等这条连接自己的 resize 再 attach，见 decideViewerAttach
+      return;
+    }
+
     viewer.send({ type: "replay", data: entry.buffer.snapshot() });
     viewer.send({ type: "state", state: "active" });
     this.touch(sessionId, true);
@@ -474,13 +542,94 @@ export class SessionManager {
     if (!entry) return;
     entry.cols = cols;
     entry.rows = rows;
-    entry.backend?.resize(cols, rows);
+    this.db.updateSessionSize(sessionId, cols, rows);
+    if (entry.backend) {
+      entry.backend.resize(cols, rows);
+      return;
+    }
+    if (entry.durable && entry.viewers.size > 0 && !entry.terminating) {
+      void this.ensureAttached(sessionId).catch((err) => {
+        if (this.db.getSession(sessionId)?.state === "dead") return;
+        this.broadcast(entry, {
+          type: "error",
+          message: `接回失败：${(err as Error).message}`,
+        });
+        this.broadcast(entry, { type: "state", state: "unverified" });
+        this.scheduleReconnect(entry.projectId);
+      });
+    }
+  }
+
+  /**
+   * Viewer 报上来的终端深浅。接回已有 Zellij 会话改不了内层 env，
+   * 但 OSC 10/11/12 答复跟这份走，主题切换后新启动的查询能拿到新底色。
+   */
+  setAppearance(
+    sessionId: string,
+    appearance: TermAppearance,
+    colors?: { background?: string; foreground?: string }
+  ) {
+    if (!isTermAppearance(appearance)) return;
+    const entry = this.entries.get(sessionId);
+    if (!entry) return;
+    entry.appearance = appearance;
+    if (colors?.background && parseHexRgb(colors.background)) {
+      entry.background = colors.background;
+    }
+    if (colors?.foreground && parseHexRgb(colors.foreground)) {
+      entry.foreground = colors.foreground;
+    }
   }
 
   // ---------- 内部 ----------
 
+  private liveEntry(init: {
+    sessionId: string;
+    projectId: string;
+    durable: boolean;
+    layout: HostLayout | null;
+    cols?: number | null;
+    rows?: number | null;
+    appearance?: TermAppearance;
+    background?: string;
+    foreground?: string;
+  }): LiveEntry {
+    const entry: LiveEntry = {
+      sessionId: init.sessionId,
+      projectId: init.projectId,
+      durable: init.durable,
+      layout: init.layout,
+      backend: null,
+      buffer: new RingBuffer(),
+      viewers: new Set(),
+      cols: init.cols ?? null,
+      rows: init.rows ?? null,
+      attaching: null,
+      terminating: false,
+      appearance: init.appearance,
+      background: init.background,
+      foreground: init.foreground,
+      osc: null as unknown as OscColorGate,
+    };
+    entry.osc = new OscColorGate(() => ({
+      appearance: entry.appearance,
+      background: entry.background,
+      foreground: entry.foreground,
+    }));
+    return entry;
+  }
+
   private broadcast(entry: LiveEntry, msg: ServerMessage) {
     for (const v of entry.viewers) v.send(msg);
+  }
+
+  private markActive(entry: LiveEntry, opts?: { replay?: boolean }): SessionRow {
+    this.db.updateSessionState(entry.sessionId, "active");
+    if (opts?.replay) {
+      this.broadcast(entry, { type: "replay", data: entry.buffer.snapshot() });
+    }
+    this.broadcast(entry, { type: "state", state: "active" });
+    return this.db.getSession(entry.sessionId)!;
   }
 
   private markDead(entry: LiveEntry, reason: DeadReason) {
@@ -555,10 +704,13 @@ export class SessionManager {
         this.markDead(entry, "link-lost");
       }
     }
-    if (needReconnect) this.scheduleReconnect(projectId);
+    this.forwards.onLinkDown(projectId);
+    if (needReconnect || this.forwards.hasEnabled(projectId)) {
+      this.scheduleReconnect(projectId);
+    }
   }
 
-  /** SSH 断线自动重连：指数退避，只在还有 Viewer 观看时坚持 */
+  /** SSH 断线自动重连：指数退避。有人在看会话，或还有启用的端口转发，就坚持。 */
   private scheduleReconnect(projectId: string) {
     const existing = this.reconnects.get(projectId);
     if (existing?.timer) return;
@@ -575,11 +727,12 @@ export class SessionManager {
           e.viewers.size > 0 &&
           this.db.getSession(e.sessionId)?.state === "unverified"
       );
+    const wantsForward = () => this.forwards.hasEnabled(projectId);
 
     const tick = async () => {
       state.timer = null;
       const targets = watchers();
-      if (targets.length === 0) {
+      if (targets.length === 0 && !wantsForward()) {
         this.reconnects.delete(projectId);
         return;
       }

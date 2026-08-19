@@ -200,6 +200,41 @@ export function buildPtyCommandLine(
     : inner;
 }
 
+/**
+ * 把一条命令包成"生在 sshd 进程树之外"的调用。仅 Windows 需要也仅 Windows 可用。
+ *
+ * Win32-OpenSSH 在 exec 通道关闭时会终结该通道的整个进程树（Job Object），而
+ * Zellij 的 server 进程没有脱离父 Job 的能力（上游 PR #5195 未合并）。实测比
+ * 文档说的更严酷：不用等 SSH 断开，创建会话的那条 exec 通道一关 server 就被杀。
+ * 经 WMI Win32_Process.Create 拉起的进程父进程是 WmiPrvSE，完全在 sshd 的
+ * Job 之外，实测能熬过整条 SSH 连接的断开与重连。
+ *
+ * 内层命令套一层 -EncodedCommand：命令行里只有 A-Za-z0-9+/= 与空格，可以原样
+ * 嵌进外层脚本的单引号字符串，不存在二次转义问题（这也是全项目统一用
+ * EncodedCommand 的又一红利）。
+ *
+ * 外层等内层进程退出并尽力转出退出码。两个实测出来的细节：
+ * 1. Get-Process 拿到的对象要先摸一次 .Handle，进程退出后才读得到 ExitCode；
+ * 2. 进程在 Get-Process 之前就退掉的话既等不到也拿不到退出码，只能按 0 处理。
+ * 所以退出码只是尽力而为——调用方必须用 list-sessions 之类的事实核验结果，
+ * 不能只信退出码。WMI 本身的失败（DCOM 被禁、权限不足）会如实退非零。
+ */
+export function buildDetachedCommandLine(
+  argv: string[],
+  env: Record<string, string> = {}
+): string {
+  const inner = encodePowerShell(powerShellScript(argv, env));
+  const script = [
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${inner}' }`,
+    `if ($r.ReturnValue -ne 0) { Write-Error ('Win32_Process.Create failed: ' + $r.ReturnValue); exit 1 }`,
+    `$p = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue`,
+    // 60s 兜底：内层命令挂死时不能让 SSH exec 永远不返回
+    `if ($p) { $null = $p.Handle; if (-not $p.WaitForExit(60000)) { exit 124 }; exit $p.ExitCode }`,
+    `exit 0`,
+  ].join("; ");
+  return encodePowerShell(script);
+}
+
 // ---------------- 探测 ----------------
 
 /**

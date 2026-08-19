@@ -64,7 +64,6 @@ export function ZellijInstallModal() {
   const closeInstall = useApp((s) => s.closeInstall);
   const createSessionNow = useApp((s) => s.createSessionNow);
   const newTerminal = useApp((s) => s.newTerminal);
-  const noteInstallFailure = useApp((s) => s.noteInstallFailure);
   const toast = useApp((s) => s.toast);
 
   const [phase, setPhase] = useState<Phase>("loading");
@@ -162,11 +161,6 @@ export function ZellijInstallModal() {
         setDetail(msg.detail);
         setAttempt(msg.attempts ?? 1);
         setPhase("failed");
-        noteInstallFailure(id, {
-          reason: msg.reason,
-          detail: msg.detail,
-          attempts: msg.attempts ?? 1,
-        });
       }
     };
     ws.onerror = () => {
@@ -207,7 +201,7 @@ export function ZellijInstallModal() {
     startInstall(spec!.projectId);
   }
 
-  /** 显式拒绝会写库；措辞里把可逆性说出来，反悔的入口在项目 ⋯ →「持久会话设置」 */
+  /** 显式拒绝会写库；措辞里把可逆性说出来，反悔的入口在命令面板 */
   async function deny() {
     await api.setHostAuthorization(spec!.projectId, { authorized: false });
     toast({

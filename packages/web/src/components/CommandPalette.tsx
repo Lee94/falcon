@@ -4,6 +4,8 @@ import {
   CircleAlert,
   CircleDot,
   CircleX,
+  Download,
+  ArrowLeftRight,
   GitBranch,
   LayoutDashboard,
   PanelLeft,
@@ -19,6 +21,7 @@ import { useApp, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { chord } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
+import { useInstall } from "../lib/useInstall.js";
 import { THEME_ICONS, THEME_PREFS } from "./common/ThemeToggle.js";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -62,8 +65,10 @@ export function CommandPalette() {
   const auth = useApp((s) => s.auth);
   const sidebarVisible = useApp(selectSidebarVisible);
   const rightVisible = useApp(selectRightVisible);
+  const rightPanel = useApp((s) => s.rightPanel);
   const themePref = useApp((s) => s.themePref);
   const actions = useActions();
+  const { canInstall, standalone, promptInstall } = useInstall();
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -125,11 +130,11 @@ export function CommandPalette() {
       .filter((p) => p.type === "ssh")
       .forEach((project) =>
         actionItems.push({
-          key: `>${t("project.durability")} ${project.name} ${project.ssh?.host ?? ""}`,
+          key: `>${t("palette.enableDurable", { host: project.ssh?.host ?? project.name })} ${project.name}`,
           label: t("palette.enableDurable", { host: project.ssh?.host ?? project.name }),
           meta: project.name,
           icon: ShieldCheck,
-          run: () => store.openDrawer(project.id),
+          run: () => store.openInstall({ projectId: project.id, thenCreate: false }),
         })
       );
     if (active.kind === "terminal") {
@@ -164,12 +169,21 @@ export function CommandPalette() {
       icon: PanelLeft,
       run: () => store.toggleSidebar(),
     });
+    const gitOn = rightVisible && rightPanel === "git";
+    const forwardOn = rightVisible && rightPanel === "forward";
     actionItems.push({
       key: `>${t("palette.toggleGitOn")} ${t("palette.toggleGitOff")}`,
-      label: rightVisible ? t("palette.toggleGitOn") : t("palette.toggleGitOff"),
+      label: gitOn ? t("palette.toggleGitOn") : t("palette.toggleGitOff"),
       meta: chord("toggleGitPanel"),
       icon: GitBranch,
       run: () => store.toggleRightPanel("git"),
+    });
+    actionItems.push({
+      key: `>${t("palette.toggleForwardOn")} ${t("palette.toggleForwardOff")}`,
+      label: forwardOn ? t("palette.toggleForwardOn") : t("palette.toggleForwardOff"),
+      meta: chord("toggleForwardPanel"),
+      icon: ArrowLeftRight,
+      run: () => store.toggleRightPanel("forward"),
     });
     THEME_PREFS.filter((pref) => pref !== store.themePref).forEach((pref) =>
       actionItems.push({
@@ -191,6 +205,16 @@ export function CommandPalette() {
       icon: Plus,
       run: () => store.openHostForm(null),
     });
+    if (canInstall && !standalone) {
+      actionItems.push({
+        key: `>${t("palette.installApp")}`,
+        label: t("palette.installApp"),
+        icon: Download,
+        run: () => {
+          void promptInstall();
+        },
+      });
+    }
     if (auth?.required && auth.authenticated) {
       actionItems.push({
         key: `>${t("palette.logout")}`,
@@ -209,7 +233,7 @@ export function CommandPalette() {
     ];
     // actions 每次渲染都是新对象，纳入依赖会让 memo 失效；它只读 store，不用跟
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sessions, projects, active, auth, sidebarVisible, rightVisible, themePref, t]);
+  }, [open, sessions, projects, active, auth, sidebarVisible, rightVisible, rightPanel, themePref, canInstall, standalone, promptInstall, t]);
 
   const prefix = query.charAt(0);
   const needle = query.replace(/^[>@#]/, "").trim().toLowerCase();

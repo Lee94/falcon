@@ -7,6 +7,7 @@ import { Login } from "./Login.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightBar } from "./RightBar.js";
 import { GitPanel } from "./GitPanel.js";
+import { ForwardPanel } from "./ForwardPanel.js";
 import { TabBar } from "./TabBar.js";
 import { SessionOverview } from "./SessionOverview.js";
 import { ProjectEmpty } from "./ProjectEmpty.js";
@@ -16,7 +17,6 @@ import { HostForm } from "./HostForm.js";
 import { WorktreeForm } from "./WorktreeForm.js";
 import { SettingsModal } from "./SettingsModal.js";
 import { CommandPalette } from "./CommandPalette.js";
-import { HostDrawer } from "./HostDrawer.js";
 import { RenameDialog } from "./RenameDialog.js";
 import { ZellijInstallModal } from "./ZellijInstallModal.js";
 import { Menu } from "./common/Menu.js";
@@ -62,6 +62,13 @@ export function App() {
     void init();
   }, [init]);
 
+  // 整页关掉浏览器自带右键菜单；自定义菜单各自用 openContextMenu 开。
+  useEffect(() => {
+    const block = (e: Event) => e.preventDefault();
+    document.addEventListener("contextmenu", block);
+    return () => document.removeEventListener("contextmenu", block);
+  }, []);
+
   const authed = auth && (!auth.required || auth.authenticated);
 
   useEffect(() => {
@@ -96,6 +103,9 @@ export function App() {
         return;
       case "toggleGitPanel":
         s.toggleRightPanel("git");
+        return;
+      case "toggleForwardPanel":
+        s.toggleRightPanel("forward");
         return;
       case "overview":
         s.showOverview();
@@ -147,7 +157,6 @@ export function App() {
         else if (s.projectForm) s.closeProjectForm();
         else if (s.paletteOpen) s.setPalette(false);
         else if (s.settingsOpen) s.closeSettings();
-        else if (s.drawerProjectId) s.closeDrawer();
         else if (s.menu) s.closeMenu();
         return;
       }
@@ -204,11 +213,11 @@ export function App() {
           </div>
         </main>
         {rightVisible && rightPanel === "git" && <GitPanel />}
+        {rightVisible && rightPanel === "forward" && <ForwardPanel />}
         <RightBar />
       </div>
 
       <Menu />
-      <HostDrawer />
       {settingsOpen && <SettingsModal />}
       <ConfirmDialog />
       <RenameDialog />

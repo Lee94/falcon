@@ -16,6 +16,10 @@ Web 端持久化终端工作台：以项目为单位管理终端会话，**会�
 
 SSH 连接可以在设置里预先保存成远端主机，新建 SSH 项目时直接选择，不用每次重填主机、端口和凭据。
 
+SSH 项目的右侧面板可以加端口转发：本地转发把远端服务映射到本机端口，远端转发把本机能到达的地址暴露给远端。规则跟着项目走，隧道走同一条 SSH 链路；没有打开的终端也可以保持转发。启用中的转发在 SSH 断线后会跟着自动重连。
+
+终端里可以直接粘贴截图或拖入图片文件——包括 SSH 远端的会话。图片会写到会话宿主机的 `<mojito 根>/paste/`（远端为 `~/.mojito/paste/`），终端输入框里出现的是它的落盘路径；Claude Code 等 TUI 认输入框里的图片路径，效果等同把文件拖进原生终端。剪贴板同时有文本和位图时贴文本（Excel / 网页复制的常态），旧图 24 小时后自动清理。
+
 首次在某台远端主机上创建会话时会询问一次授权——这会往你的服务器写入可执行文件。授权按主机记（host + port + username），同一台机器上的后续项目不再询问。
 
 装的过程会失败——远端网络抖动、镜像抽风、SSH 通道半路断开都很常见。因此：探测 / 下载 / 解压这类瞬时故障会**自动重试 3 次**（退避 1.5s、4s，进度条上会说明"正在第几次重试"）；下载带连接与停滞超时，连上却一个字节不来的黑洞路由不会让进度条转到天荒地老；三次都失败则给出远端的原始报错（如 `curl: (28) ...`）和一个**重试**按钮。跑不起来（`noexec`、架构不符）、缺 curl、缺 tar 这类稳定的环境事实不做自动重试——先去改环境，改完再点重试。
@@ -24,7 +28,7 @@ SSH 连接可以在设置里预先保存成远端主机，新建 SSH 项目时�
 
 - **内网 / 无出网的远端**：宿主机下不到二进制时，手动把 [Zellij](https://github.com/zellij-org/zellij/releases) 的 `no-web` 二进制放到远端 `~/.mojito/bin/zellij-<版本>` 即可（版本号见安装失败提示）。
 - **Windows 本地宿主**：若 mojito 后端进程处于 Job Object 中（被某些进程管理器或 IDE 拉起时常见），Zellij server 会随后端退出被杀。mojito 启动时会实测并诚实降级为非持久，而不是让你以为会话持久。
-- **Windows 远端**：Zellij 的原生 Windows 支持是 0.44.0 才加入的，会话可靠性仍有未修复的已知问题。mojito 会在首次使用时做一次真实断线验证，验证不通过则标注为非持久。
+- **Windows 远端**：Zellij 的 server 进程无法脱离 Win32-OpenSSH 的 Job Object（上游未修复），普通方式拉起的会话活不过 SSH 通道关闭。mojito 改经 WMI（`Win32_Process.Create`）把 server 生到 sshd 进程树之外，因此依赖宿主机允许本用户做 WMI 进程创建（默认允许）。首次使用时仍会做一次真实断线验证，验证不通过则标注为非持久。
 - Windows 无官方 ARM64 构建，靠 x64 模拟运行，能否跑起来由安装时的 `--version` 握手裁决。
 - **派生超大仓库**：`git worktree add` 要物化整个工作区，几 GB 的仓库可能要几十秒。派生走的是普通 REST 请求（没有分阶段进度可报，加一套 WebSocket 只会多一层协议），放在反向代理后面时请确认 idle timeout 够长。
 - **Windows 上的派生路径长度**：目标路径超过 200 字符会被拒绝创建。建得出来却因为 `MAX_PATH` 删不掉，比一开始就说不行更糟。
@@ -81,6 +85,76 @@ pnpm dev:web
 ```
 
 前端开发服务器在 5173 端口，`/api` 与 `/ws` 代理到 4923。
+
+## 单文件发布
+
+```bash
+pnpm build:bin                              # 打当前平台
+pnpm build:bin --target linux-x64,linux-arm64   # 交叉打包（或 --target all）
+```
+
+产物在 `release/mojito-v<版本>-<平台>`，单个可执行文件，不依赖已安装的 Node：
+
+```bash
+./mojito-v0.1.0-linux-x64 --port 8080
+```
+
+原理：esbuild 把 server 打成单个 bundle，与 node-pty 原生扩展、web 静态资源一起
+封进 Node SEA（Single Executable Application）blob，注入 nodejs.org 官方 Node
+二进制。首次运行把原生扩展与静态资源解压到 `<dataDir>/runtime/<内容哈希>/`，
+版本升级后旧目录自动清理。
+
+注意事项：
+
+- 体积约 150–170 MB，Node 运行时占大头，是所有 Node 单文件方案的固有成本。
+- 构建机需能访问 nodejs.org 与 registry.npmjs.org（下载缓存在 `build/cache/`）。
+- macOS 产物必须在 macOS 上构建（注入后要重新 ad-hoc 签名，`codesign` 只有 macOS 有）；
+  Linux 产物在任意平台都能构建。
+- 不支持 Windows 目标：服务本身依赖 Zellij 与 POSIX shell。
+- Homebrew 等发行版的 Node 编译时可能禁用了 SEA，所以生成 blob 也用下载的官方 Node，
+  本机 Node 版本不影响产物。
+
+### 常驻运行（守护）
+
+```bash
+./mojito-v0.1.0-linux-x64 service install --host 0.0.0.0 --port 4923
+./mojito-v0.1.0-linux-x64 service status     # 也有 start / stop / uninstall
+```
+
+`service install` 把 mojito 注册成系统服务：macOS 用 launchd（用户级 LaunchAgent），
+Linux 用 systemd（root 装 system 级，普通用户装 user 级）。崩溃自动拉起、开机自启，
+启动参数在 install 时指定并原样写进服务配置。单文件发布时会先把当前二进制拷到
+`<dataDir>/bin/mojito`，服务永远跑这个固定路径——活动监视器 / `ps` 里进程名是
+`mojito`，不是带版本号的下载文件名。
+
+- 日志：Linux 看 `journalctl -u mojito -f`（user 级加 `--user`）；macOS 在
+  `<dataDir>/logs/mojito.log`。
+- Linux 普通用户安装后需执行一次 `sudo loginctl enable-linger <用户名>`，
+  否则登出即停、开机不起。
+- 绑非 localhost 前先在 localhost 启动并设好访问密码（数据目录一致），
+  否则服务会反复启动失败。
+- 没有 systemd 的环境（容器等）：`service install` 会打印 unit 内容，
+  自行接到所用的 init；容器里通常直接前台跑，交给容器编排重启即可。
+
+### 更新
+
+两种方式任选：
+
+```bash
+# 方式一：用新二进制重跑 install，覆盖 <dataDir>/bin/mojito 并重启
+./mojito-v0.2.0-linux-x64 service install --host 0.0.0.0 --port 4923
+
+# 方式二：手动替换后再 restart（必须 mv，不要 cp）
+mv mojito.new ~/.mojito/bin/mojito && ~/.mojito/bin/mojito service restart
+```
+
+替换文件必须用 `mv`（先传到同盘临时名再改名），**不要 `cp` 原地覆盖**：
+macOS 上覆盖正在运行的二进制会令代码签名失效、相关进程被内核直接 SIGKILL，
+Linux 上则会报 ETXTBSY。`mv` 换的是目录项与 inode，两个平台都安全。
+
+数据无需干预：DB 迁移在启动时自动执行；`runtime/<哈希>` 目录按新版本重新解压，
+旧目录自动清理。回滚就是用旧二进制重跑 `service install`——但若新版本做过
+DB 迁移，旧代码不一定认识新库，降级前先备份数据目录里的 `mojito.db`。
 
 ## 安全说明
 

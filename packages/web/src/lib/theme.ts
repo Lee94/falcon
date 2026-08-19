@@ -11,6 +11,12 @@ export type ThemeMode = "light" | "dark";
 
 export const THEME_KEY = "mojito.theme";
 
+/** 安装后的标题栏 / 状态栏颜色，必须与 index.html 内联脚本用同一组值 */
+export const THEME_META_COLOR: Record<ThemeMode, string> = {
+  light: "#ffffff",
+  dark: "#0a0a0a",
+};
+
 const darkQuery =
   typeof window !== "undefined" && window.matchMedia
     ? window.matchMedia("(prefers-color-scheme: dark)")
@@ -45,6 +51,14 @@ export function resolveTheme(pref: ThemePref): ThemeMode {
  */
 export function applyTheme(mode: ThemeMode): void {
   document.documentElement.classList.toggle("dark", mode === "dark");
+  const color = THEME_META_COLOR[mode];
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.setAttribute("name", "theme-color");
+    document.head.appendChild(meta);
+  }
+  meta.setAttribute("content", color);
 }
 
 /** 仅在偏好为 system 时有意义：系统切换明暗时回调 */

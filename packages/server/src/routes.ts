@@ -4,9 +4,12 @@ import type {
   AuthStatus,
   DeleteProjectResult,
   FsListing,
+  GitChangeCounts,
   GitSnapshot,
   GitUnavailableReason,
   HostZellijStatus,
+  PortForward,
+  PortForwardInput,
   ProjectInput,
   RepoInfo,
   SessionWithProject,
@@ -18,10 +21,20 @@ import type {
   WorktreeInput,
   WorktreeStatus,
 } from "@mojito/shared";
+import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@mojito/shared";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
+import {
+  imageExt,
+  pasteDir,
+  pasteFileName,
+  posixWriteCommand,
+  windowsWriteCommand,
+  writeLocalPasteFile,
+} from "./paste.js";
 import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
+import { ForwardConflictError } from "./sessions/forward.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
 import { gitHostFor } from "./git/host.js";
@@ -31,17 +44,21 @@ import {
   isAbsolute,
   isAncestor,
   isUnc,
+  joinPath,
   pathDepth,
   siblingWorktreePath,
   vetoTargetDir,
 } from "./git/path.js";
+import { remoteRoot } from "./zellij/host.js";
 import { cleanupWorktree } from "./git/remove.js";
 import {
   addWorktree,
   describeGit,
+  describeGitChanges,
   describeRepo,
   pathExists,
   repoRoot,
+  unavailableChanges,
   unavailableSnapshot,
   worktreeStatus,
 } from "./git/repo.js";
@@ -81,10 +98,19 @@ export interface RouteDeps {
   manager: SessionManager;
   secrets: SecretBox;
   version: string;
+  /** mojito 数据目录，本地会话的粘贴图片落在 <dataDir>/paste */
+  dataDir: string;
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   const { db, auth, manager, secrets } = deps;
+
+  // 粘贴图片的请求体是原始图片字节。fastify 默认只认 JSON，这里按原样收成 Buffer
+  app.addContentTypeParser(
+    /^image\//,
+    { parseAs: "buffer", bodyLimit: PASTE_IMAGE_MAX_BYTES },
+    (_req, body, done) => done(null, body)
+  );
 
   app.addHook("onRequest", async (req, reply) => {
     const url = req.url;
@@ -614,6 +640,22 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   /**
+   * 侧栏最后一层的 +N −M。源项目和附属项目都能问。
+   * 比 GET /git 轻一个数量级（一条 status），环境事实同样不抛 4xx。
+   */
+  app.get("/api/projects/:id/git/changes", async (req, reply): Promise<GitChangeCounts | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.working_dir) return unavailableChanges();
+    try {
+      return await describeGitChanges(await gitHostFor(row, manager), row.working_dir);
+    } catch {
+      return unavailableChanges();
+    }
+  });
+
+  /**
    * 派生一个附属项目。
    *
    * 与 GET /repo 的分工：那边是探测，环境事实如实报告；这边是操作，同样的事实
@@ -757,6 +799,61 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
   });
 
+  // ---- SSH 端口转发 ----
+
+  /**
+   * 规则挂在项目上，隧道走该项目的 SshLink。
+   * 本地项目 400；环境事实（连不上、端口占用）写在每条规则的 state/error 里，
+   * 列表本身不因某条隧道失败而 5xx。
+   */
+  app.get("/api/projects/:id/forwards", async (req, reply): Promise<PortForward[] | void> => {
+    const { id } = req.params as { id: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    if (project.type !== "ssh") return reply.code(400).send({ error: "只有 SSH 项目能做端口转发" });
+    return manager.forwards.list(id);
+  });
+
+  app.post("/api/projects/:id/forwards", async (req, reply): Promise<PortForward | void> => {
+    const { id } = req.params as { id: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      return await manager.forwards.create(project, (req.body ?? {}) as PortForwardInput);
+    } catch (err) {
+      if (err instanceof ForwardConflictError) return reply.code(409).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.patch("/api/projects/:id/forwards/:fwdId", async (req, reply): Promise<PortForward | void> => {
+    const { id, fwdId } = req.params as { id: string; fwdId: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      return await manager.forwards.update(project, fwdId, (req.body ?? {}) as Partial<PortForwardInput>);
+    } catch (err) {
+      if (err instanceof ForwardConflictError) return reply.code(409).send({ error: err.message });
+      const msg = (err as Error).message;
+      if (msg === "转发规则不存在") return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.delete("/api/projects/:id/forwards/:fwdId", async (req, reply) => {
+    const { id, fwdId } = req.params as { id: string; fwdId: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      await manager.forwards.remove(project, fwdId);
+      return { ok: true };
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "转发规则不存在") return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
   // ---- 宿主机 Zellij 状态 ----
 
   /**
@@ -826,12 +923,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { id } = req.params as { id: string };
     const project = db.getProject(id);
     if (!project) return reply.code(404).send({ error: "项目不存在" });
-    const { name } = (req.body ?? {}) as { name?: string };
+    const body = (req.body ?? {}) as {
+      name?: string;
+      appearance?: unknown;
+      background?: unknown;
+      foreground?: unknown;
+    };
     const count = db.listSessionsByProject(id).length;
     try {
       return await manager.createSession(
         project,
-        name?.trim() || `Terminal ${count + 1}`
+        body.name?.trim() || `Terminal ${count + 1}`,
+        sanitizeColorHint(body)
       );
     } catch (err) {
       return reply.code(502).send({ error: `创建会话失败：${(err as Error).message}` });
@@ -841,7 +944,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.post("/api/sessions/:id/reattach", async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
-      const row = await manager.ensureAttached(id);
+      const row = await manager.ensureAttached(id, { force: true });
       return Db.toSession(row);
     } catch (err) {
       const row = db.getSession(id);
@@ -871,5 +974,45 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!db.getSession(id)) return reply.code(404).send({ error: "会话不存在" });
     db.renameSession(id, name.trim());
     return { ok: true };
+  });
+
+  /**
+   * 粘贴图片：写进会话宿主机的 <mojito 根>/paste，返回绝对路径。
+   * 前端把路径粘进终端输入——Claude Code 认输入框里的图片路径，
+   * 拖拽文件进原生终端就是同一个机制。
+   */
+  app.post("/api/sessions/:id/paste-image", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = db.getSession(id);
+    if (!row) return reply.code(404).send({ error: "会话不存在" });
+    const project = db.getProject(row.project_id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+
+    const ext = imageExt(req.headers["content-type"]);
+    if (!ext) return reply.code(415).send({ error: "不支持的图片类型" });
+    const data = req.body as Buffer;
+    if (!Buffer.isBuffer(data) || data.length === 0) {
+      return reply.code(400).send({ error: "图片内容为空" });
+    }
+
+    try {
+      if (project.type === "local") {
+        return { path: await writeLocalPasteFile(deps.dataDir, ext, data) };
+      }
+      const link = manager.getLink(project);
+      const facts = await link.hostFacts();
+      const dir = pasteDir(facts.kind, remoteRoot(facts.kind, facts.home));
+      const file = joinPath(facts.kind, dir, pasteFileName(ext));
+      const res =
+        facts.kind === "windows"
+          ? await link.execWithInput(windowsWriteCommand(dir, file), data.toString("base64"))
+          : await link.execWithInput(posixWriteCommand(dir, file), data);
+      if (res.code !== 0) {
+        throw new Error(res.stderr.trim() || `远端写入失败（exit ${res.code}）`);
+      }
+      return { path: file };
+    } catch (err) {
+      return reply.code(502).send({ error: `图片上传失败：${(err as Error).message}` });
+    }
   });
 }

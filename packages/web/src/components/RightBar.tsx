@@ -1,15 +1,21 @@
 import { useTranslation } from "react-i18next";
-import { GitBranch } from "lucide-react";
+import { ArrowLeftRight, GitBranch } from "lucide-react";
 import { useApp, selectRightVisible, type RightPanelId } from "../store.js";
-import { chord } from "../lib/shortcuts.js";
+import { chord, type Command } from "../lib/shortcuts.js";
 import { cn } from "@/lib/utils";
 
-const ITEMS: { id: RightPanelId; icon: typeof GitBranch; label: string }[] = [
-  { id: "git", icon: GitBranch, label: "git.panel" },
+const ITEMS: {
+  id: RightPanelId;
+  icon: typeof GitBranch;
+  label: string;
+  shortcut: Command;
+}[] = [
+  { id: "git", icon: GitBranch, label: "git.panel", shortcut: "toggleGitPanel" },
+  { id: "forward", icon: ArrowLeftRight, label: "forward.panel", shortcut: "toggleForwardPanel" },
 ];
 
 /**
- * 右侧活动栏。现在只有 Git 一格；点同一格关面板，以后加格只在 ITEMS 里加一行。
+ * 右侧活动栏。点同一格关面板，点另一格切过去。
  */
 export function RightBar() {
   const { t } = useTranslation();
@@ -20,7 +26,7 @@ export function RightBar() {
   return (
     <aside
       className="flex w-9 shrink-0 flex-col items-center border-l bg-sidebar py-1.5 text-sidebar-foreground"
-      aria-label={t("git.title")}
+      aria-label={t("rightbar.label")}
     >
       {ITEMS.map((item) => {
         const on = visible && panel === item.id;
@@ -34,7 +40,7 @@ export function RightBar() {
             )}
             aria-label={label}
             aria-pressed={on}
-            title={`${label} · ${chord("toggleGitPanel")}`}
+            title={`${label} · ${chord(item.shortcut)}`}
             onClick={() => toggleRightPanel(item.id)}
           >
             <item.icon className="size-3.5" />

@@ -18,6 +18,13 @@ import { ZELLIJ_VERSION } from "./zellij/version.js";
 const VERSION = "0.1.0";
 
 async function main() {
+  // `mojito service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
+  if (process.argv[2] === "service") {
+    const { runServiceCli } = await import("./service.js");
+    runServiceCli(process.argv.slice(3));
+    return;
+  }
+
   const config = parseArgs(process.argv.slice(2));
   const loopback = isLoopback(config.host);
 
@@ -34,19 +41,29 @@ async function main() {
   }
 
   const manager = new SessionManager(db, secrets, config.dataDir);
+  // 启用中的转发是服务，后端重启后应自己把隧道拉起来，不等用户再开一次面板
+  void manager.forwards.restoreEnabled();
 
   const app = Fastify({ logger: { level: "info" } });
   await app.register(fastifyCookie);
   await app.register(fastifyWebsocket, { options: { maxPayload: 1024 * 1024 } });
 
-  registerRoutes(app, { db, auth, manager, secrets, version: VERSION });
+  registerRoutes(app, { db, auth, manager, secrets, version: VERSION, dataDir: config.dataDir });
   registerWs(app, { auth, manager, db });
 
-  // 托管 web 构建产物（存在时）
+  // 托管 web 构建产物（存在时）；单文件发布时由 SEA bootstrap 解压后经环境变量指入
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const webDist = path.resolve(here, "../../web/dist");
+  const webDist = process.env.MOJITO_WEB_DIST ?? path.resolve(here, "../../web/dist");
   if (fs.existsSync(path.join(webDist, "index.html"))) {
-    await app.register(fastifyStatic, { root: webDist });
+    await app.register(fastifyStatic, {
+      root: webDist,
+      setHeaders(res, filePath) {
+        // mime-db 不一定带 .webmanifest；Chrome 认这个类型才把清单当 PWA 清单
+        if (filePath.endsWith(".webmanifest")) {
+          res.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+        }
+      },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (
         req.method === "GET" &&

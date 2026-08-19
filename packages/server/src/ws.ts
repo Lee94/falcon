@@ -5,6 +5,7 @@ import type {
   InstallServerMessage,
   ServerMessage,
 } from "@mojito/shared";
+import { sanitizeColorHint } from "@mojito/shared";
 import type { Auth } from "./auth.js";
 import type { Db } from "./db.js";
 import { InstallError } from "./zellij/install.js";
@@ -123,6 +124,9 @@ export function registerWs(
         msg.rows > 0
       ) {
         manager.resize(id, msg.cols, msg.rows);
+      } else if (msg.type === "appearance") {
+        const hint = sanitizeColorHint(msg);
+        if (hint.appearance) manager.setAppearance(id, hint.appearance, hint);
       }
     });
 

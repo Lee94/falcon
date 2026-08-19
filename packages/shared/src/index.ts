@@ -1,3 +1,19 @@
+import type { TermAppearance } from "./termEnv.js";
+
+export type { OscColorHint, TermAppearance } from "./termEnv.js";
+export {
+  appearanceFromHex,
+  applyTermPtyEnv,
+  hexLuminance,
+  hexToOscRgb,
+  isTermAppearance,
+  OscColorGate,
+  oscColorReplies,
+  parseHexRgb,
+  sanitizeColorHint,
+  termPtyEnv,
+} from "./termEnv.js";
+
 // ============ Project ============
 
 export type ProjectType = "local" | "ssh";
@@ -53,6 +69,46 @@ export interface SshHostInput {
 export type SshProbeResult =
   | { ok: true; kind: "posix" | "windows"; home: string }
   | { ok: false; error: string };
+
+// ============ Port Forward（SSH 端口转发） ============
+
+/**
+ * 挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink。
+ *
+ * local：在 mojito 后端监听，经 SSH 打到远端能到达的地址（ssh -L）。
+ * remote：在远端监听，打回后端能到达的地址（ssh -R）。
+ */
+export type ForwardKind = "local" | "remote";
+
+/** 运行时状态。规则本身用 enabled 表示「该不该跑」，state 是此刻的事实。 */
+export type ForwardState = "stopped" | "starting" | "active" | "error";
+
+export interface PortForward {
+  id: string;
+  projectId: string;
+  /** 可选备注，如 vite / postgres */
+  name?: string;
+  kind: ForwardKind;
+  /** 监听地址。local = 后端本机，remote = 远端 */
+  bindHost: string;
+  bindPort: number;
+  destHost: string;
+  destPort: number;
+  enabled: boolean;
+  state: ForwardState;
+  error?: string;
+  createdAt: number;
+}
+
+export interface PortForwardInput {
+  name?: string;
+  kind: ForwardKind;
+  bindHost?: string;
+  bindPort: number;
+  destHost?: string;
+  destPort: number;
+  enabled?: boolean;
+}
 
 export interface Project {
   id: string;
@@ -260,6 +316,18 @@ export interface GitSnapshot {
   commits: GitCommit[];
 }
 
+/**
+ * 侧栏最后一层用的工作区文件计数。只跑 `status --porcelain`，不跑 numstat。
+ *
+ * +added = 新增 / 未跟踪 / 已修改 / 重命名（文件还在的改动）；
+ * -deleted = 删除。环境事实写在 available 里，不抛 4xx。
+ */
+export interface GitChangeCounts {
+  available: boolean;
+  added: number;
+  deleted: number;
+}
+
 /** 附属项目的工作区状态，删除前的预检 */
 export interface WorktreeStatus {
   /** 目录还在不在（用户可能手工删了） */
@@ -302,6 +370,29 @@ export interface Session {
 export interface SessionWithProject extends Session {
   projectName: string;
   projectType: ProjectType;
+}
+
+/**
+ * 粘贴图片的大小上限。Retina 全屏截图的 PNG 能到 10 MB 上下，取 20 MB；
+ * 前端超限时不发请求直接提示，后端的 bodyLimit 用同一个数兜底。
+ */
+export const PASTE_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+/** POST /api/sessions/:id/paste-image 的返回：图片在会话宿主机上的绝对路径 */
+export interface PasteImageResult {
+  path: string;
+}
+
+/**
+ * 创建会话。appearance 是当前 xterm 配色的深浅，不是界面主题——
+ * 用户可以浅色 UI + Solarized Dark。后端据此写 COLORFGBG / GROK_APPEARANCE。
+ */
+export interface CreateSessionRequest {
+  name?: string;
+  appearance?: TermAppearance;
+  /** #rrggbb，给 OSC 11 用；缺省按 appearance 给黑 / 白 */
+  background?: string;
+  foreground?: string;
 }
 
 // ============ Zellij 安装 ============
@@ -389,7 +480,14 @@ export interface HostZellijStatus {
 
 export type ClientMessage =
   | { type: "input"; data: string }
-  | { type: "resize"; cols: number; rows: number };
+  | { type: "resize"; cols: number; rows: number }
+  /** 当前 Viewer 的终端深浅；主题切换时再推一次，供 OSC 10/11/12 答复 */
+  | {
+      type: "appearance";
+      appearance: TermAppearance;
+      background?: string;
+      foreground?: string;
+    };
 
 export type ServerMessage =
   /** 附着成功后首先回放的历史输出 */

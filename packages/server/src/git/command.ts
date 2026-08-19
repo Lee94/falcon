@@ -434,6 +434,36 @@ export interface GitStatusEntry {
 }
 
 /**
+ * 侧栏 +N −M：文件还在的改动算 added，工作树里消失的算 deleted。
+ *
+ * 删了又加回来（AD）或重命名（R/C）不算删除——人看见的是一个还在的文件。
+ */
+export function countStatusChanges(entries: GitStatusEntry[]): {
+  added: number;
+  deleted: number;
+} {
+  let added = 0;
+  let deleted = 0;
+  for (const e of entries) {
+    if (isStatusDeleted(e)) deleted++;
+    else added++;
+  }
+  return { added, deleted };
+}
+
+function isStatusDeleted(e: GitStatusEntry): boolean {
+  if (e.index !== "D" && e.work !== "D") return false;
+  return (
+    e.index !== "A" &&
+    e.work !== "A" &&
+    e.index !== "R" &&
+    e.work !== "R" &&
+    e.index !== "C" &&
+    e.work !== "C"
+  );
+}
+
+/**
  * 完整解析 `git status --porcelain`。
  *
  * 前两列永远是 XY，第三列是空格，后面才是路径。重命名 / 复制是

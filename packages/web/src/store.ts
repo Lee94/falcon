@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type {
   AuthStatus,
-  NonDurableReason,
+  DeadReason,
   Project,
   ProjectType,
   SessionState,
@@ -26,6 +26,7 @@ import {
   loadTermPref,
   saveTermPref,
   sanitizeTermPref,
+  termColorHint,
   type TermPref,
 } from "./lib/term.js";
 
@@ -44,8 +45,8 @@ export function tabProjectId(
   return sessions.find((s) => s.id === tabId)?.projectId;
 }
 
-/** 右侧栏目前只有 Git 这一格；id 留下是为了以后加面板不用改持久化形状 */
-export type RightPanelId = "git";
+/** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
+export type RightPanelId = "git" | "forward";
 
 export const selectRightVisible = (s: { rightOpen: boolean }) => s.rightOpen;
 
@@ -118,12 +119,16 @@ export interface MenuItemSpec {
   checked?: boolean;
   /** 上方画一条分隔线，危险项永远单独分组置底 */
   separated?: boolean;
+  /** 无选区时的「复制」这类：看得见，点不了 */
+  disabled?: boolean;
   onSelect: () => void;
 }
 
 export interface MenuSpec {
   x: number;
   y: number;
+  /** 右键菜单从指针展开（start）；按钮菜单贴着触发器右缘（end，默认） */
+  align?: "start" | "end";
   items: MenuItemSpec[];
 }
 
@@ -149,12 +154,6 @@ export interface InstallSpec {
   thenCreate: boolean;
 }
 
-export interface InstallFailureRecord {
-  reason: NonDurableReason;
-  detail?: string;
-  attempts: number;
-}
-
 /** 从某台服务器新建项目时预填类型 / 主机，编辑已有项目时不用 */
 export interface ProjectFormPreset {
   type?: ProjectType;
@@ -165,6 +164,12 @@ export interface ProjectFormPreset {
 export interface ProjectHead {
   branch?: string;
   sha?: string;
+}
+
+/** 侧栏最后一层的 +N −M。只给脏工作区留条目，干净的不占位置 */
+export interface ProjectChanges {
+  added: number;
+  deleted: number;
 }
 
 const WORKSPACE_KEY = "mojito.workspace";
@@ -216,7 +221,7 @@ function loadWorkspace(): PersistedWorkspace {
             : { kind: "overview" },
       sidebarOpen: parsed.sidebarOpen !== false,
       rightOpen: parsed.rightOpen === true,
-      rightPanel: parsed.rightPanel === "git" ? parsed.rightPanel : "git",
+      rightPanel: parsed.rightPanel === "forward" || parsed.rightPanel === "git" ? parsed.rightPanel : "git",
       collapsed: parsed.collapsed ?? {},
       selectedProjectId:
         typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
@@ -233,6 +238,45 @@ const initialTermPref = loadTermPref();
 let pendingSeq = 0;
 /** 本次页面加载内只解释一次"关 tab 会结束会话"，"不再提示"才写 localStorage */
 let closeKillsToastShown = false;
+
+let changesInFlight = false;
+
+/**
+ * 侧栏最后一层的文件计数。附属项目也要问——它们各有自己的工作区。
+ * 探不到就沿用上次的数：SSH 抖一下不该让徽标闪没。
+ */
+async function refreshChanges(
+  set: (partial: { changes: Record<string, ProjectChanges> }) => void,
+  get: () => { changes: Record<string, ProjectChanges> },
+  projects: Project[]
+) {
+  if (changesInFlight) return;
+  changesInFlight = true;
+  try {
+    const targets = projects.filter((p) => p.workingDir);
+    const next: Record<string, ProjectChanges> = {};
+    await Promise.all(
+      targets.map(async (p) => {
+        try {
+          const c = await api.gitChanges(p.id);
+          if (c.available && (c.added > 0 || c.deleted > 0)) {
+            next[p.id] = { added: c.added, deleted: c.deleted };
+          }
+        } catch {
+          const prev = get().changes[p.id];
+          if (prev) next[p.id] = prev;
+        }
+      })
+    );
+    const alive = new Set(projects.map((p) => p.id));
+    for (const id of Object.keys(next)) {
+      if (!alive.has(id)) delete next[id];
+    }
+    set({ changes: next });
+  } finally {
+    changesInFlight = false;
+  }
+}
 
 /**
  * 侧栏用分支名代表默认仓库，但 list projects 不跑 git。
@@ -319,11 +363,13 @@ interface AppState {
   sidebarAutoHidden: boolean;
   /** 用户的右侧栏偏好（持久化）。默认关：第一次打开不该把终端挤窄 */
   rightOpen: boolean;
-  /** 右侧打开的是哪一格。现在只有 git */
+  /** 右侧打开的是哪一格 */
   rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
   /** 源项目 HEAD，按 projectId；附属项目用自己的 worktree.branch */
   heads: Record<string, ProjectHead>;
+  /** 工作区文件计数，按 projectId；干净的项目不在里面 */
+  changes: Record<string, ProjectChanges>;
   /** 侧栏当前选中的项目；右侧只显示它下面的终端。null = 在总览 */
   selectedProjectId: string | null;
 
@@ -337,9 +383,7 @@ interface AppState {
   /** 就地重命名的会话 id，替代 prompt() */
   renameFor: string | null;
   paletteOpen: boolean;
-  drawerProjectId: string | null;
   install: InstallSpec | null;
-  installFailures: Record<string, InstallFailureRecord>;
   /** null = 关闭；{ edit: null } = 新建 */
   projectForm: { edit: Project | null; preset?: ProjectFormPreset } | null;
   /**
@@ -357,6 +401,10 @@ interface AppState {
   refreshProjects(): Promise<void>;
   refreshHosts(): Promise<void>;
   refreshSessions(): Promise<void>;
+  /** 侧栏打开时轮询工作区 +N −M */
+  refreshChanges(): Promise<void>;
+  /** WS 推过来的状态立刻写进列表，不等 5s 轮询——否则接回后仍显示「待接回」 */
+  applySessionState(id: string, state: SessionState, deadReason?: DeadReason): void;
 
   openSession(sessionId: string): void;
   /** 手动关 tab：Terminate，顺手结束会话，首次会解释这件事 */
@@ -375,7 +423,7 @@ interface AppState {
   resetTerm(): void;
   toggleSidebar(): void;
   setSidebarAutoHidden(hidden: boolean): void;
-  /** 点同一格再关；点另一格则切过去。现在只有 git */
+  /** 点同一格再关；点另一格则切过去 */
   toggleRightPanel(id?: RightPanelId): void;
   toggleCollapsed(key: string): void;
   setFilter(filter: OverviewFilter): void;
@@ -400,11 +448,8 @@ interface AppState {
   openRename(sessionId: string): void;
   closeRename(): void;
   setPalette(open: boolean): void;
-  openDrawer(projectId: string): void;
-  closeDrawer(): void;
   openInstall(spec: InstallSpec): void;
   closeInstall(): void;
-  noteInstallFailure(projectId: string, record: InstallFailureRecord): void;
 
   newTerminal(projectId: string): Promise<void>;
   createSessionNow(projectId: string): Promise<void>;
@@ -461,6 +506,7 @@ export const useApp = create<AppState>((set, get) => {
     rightPanel: initialWorkspace.rightPanel,
     collapsed: initialWorkspace.collapsed,
     heads: {},
+    changes: {},
     selectedProjectId: initialWorkspace.selectedProjectId,
 
     overviewFilter: "all",
@@ -476,9 +522,7 @@ export const useApp = create<AppState>((set, get) => {
     confirm: null,
     renameFor: null,
     paletteOpen: false,
-    drawerProjectId: null,
     install: null,
-    installFailures: {},
 
     async init() {
       await get().refreshAuth();
@@ -523,9 +567,14 @@ export const useApp = create<AppState>((set, get) => {
               : get().active,
         });
         void refreshHeads(set, get, projects);
+        void refreshChanges(set, get, projects);
       } catch (err) {
         get().handleApiError(err);
       }
+    },
+
+    async refreshChanges() {
+      await refreshChanges(set, get, get().projects);
     },
 
     async refreshHosts() {
@@ -534,6 +583,20 @@ export const useApp = create<AppState>((set, get) => {
       } catch (err) {
         get().handleApiError(err);
       }
+    },
+
+    applySessionState(id, state, deadReason) {
+      set((s) => ({
+        sessions: s.sessions.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                state,
+                deadReason: state === "dead" ? (deadReason ?? x.deadReason) : undefined,
+              }
+            : x
+        ),
+      }));
     },
 
     async refreshSessions() {
@@ -853,25 +916,16 @@ export const useApp = create<AppState>((set, get) => {
     setPalette(open) {
       set({ paletteOpen: open, menu: null });
     },
-    openDrawer(projectId) {
-      set({ drawerProjectId: projectId, menu: null, paletteOpen: false });
-    },
-    closeDrawer() {
-      set({ drawerProjectId: null });
-    },
     openInstall(spec) {
-      set({ install: spec, menu: null, paletteOpen: false, drawerProjectId: null });
+      set({ install: spec, menu: null, paletteOpen: false });
     },
     closeInstall() {
       set({ install: null });
     },
-    noteInstallFailure(projectId, record) {
-      set((s) => ({ installFailures: { ...s.installFailures, [projectId]: record } }));
-    },
 
     /**
      * 新建终端。SSH 项目首次用时先走授权 + 安装；
-     * 已拒绝过的主机不再打扰（撤销/重新启用走「持久会话设置」），直接建非持久会话。
+     * 已拒绝过的主机不再打扰，直接建非持久会话。重新启用走命令面板。
      */
     async newTerminal(projectId) {
       const project = get().projects.find((p) => p.id === projectId);
@@ -905,7 +959,7 @@ export const useApp = create<AppState>((set, get) => {
         paletteOpen: false,
       }));
       try {
-        const session = await api.createSession(projectId);
+        const session = await api.createSession(projectId, termColorHint(get().term.themeId, get().theme));
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
@@ -935,7 +989,10 @@ export const useApp = create<AppState>((set, get) => {
         ),
       }));
       try {
-        const session = await api.createSession(entry.projectId);
+        const session = await api.createSession(
+          entry.projectId,
+          termColorHint(get().term.themeId, get().theme)
+        );
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),

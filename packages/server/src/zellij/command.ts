@@ -175,6 +175,27 @@ export function attachArgs(
 }
 
 /**
+ * 后台建一个 detached 会话（无需 PTY）。Windows 远端专用：会话级 options 只在
+ * 创建时生效，所以这里必须带全 sessionOptions——后续 PTY attach 时的同名参数
+ * 对已存在的会话是无效的，真正决定 layout / shell / cwd 的是这一条。
+ *
+ * 不幂等：会话已存在时退出码为 1（实测），调用方要先用 hasSession 挡一道。
+ */
+export function createBackgroundArgs(
+  paths: ZellijPaths,
+  sessionId: string,
+  opts: { cwd?: string; shell?: string }
+): string[] {
+  return [
+    ...globalArgs(paths),
+    "attach",
+    zellijSessionName(sessionId),
+    "--create-background",
+    ...sessionOptions(paths, opts),
+  ];
+}
+
+/**
  * 列出会话。用 `--no-formatting` 而不是 `--short`：
  * short 模式**不区分死活**，只打名字；要判断存活必须看
  * `(EXITED - attach to resurrect)` 后缀。

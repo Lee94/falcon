@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mojito</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="mojito" />
     <!--
       主题在解析到 <body> 之前就定下来：晚一帧就会白闪一下，深色用户在夜里
       被闪到是很难受的。key 与取值必须与 src/lib/theme.ts 保持一致。
@@ -28,6 +35,8 @@
             (pref !== "light" &&
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           if (dark) document.documentElement.classList.add("dark");
+          var theme = document.querySelector('meta[name="theme-color"]');
+          if (theme) theme.setAttribute("content", dark ? "#0a0a0a" : "#ffffff");
         } catch (e) {
           // 读不到偏好就用浅色，等 React 起来后再由 store 纠正
         }

@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Ellipsis, ShieldCheck, TerminalIcon, TriangleAlert } from "lucide-react";
 import type { SessionState, SessionWithProject } from "@mojito/shared";
@@ -18,7 +19,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusMark } from "./common/StatusMark.js";
-import { menuAnchor } from "./common/Menu.js";
+import { menuAnchor, openContextMenu } from "./common/Menu.js";
 
 const CARD_STATES: SessionState[] = ["active", "unverified", "dead"];
 
@@ -36,7 +37,6 @@ export function SessionOverview() {
   const setSelected = useApp((s) => s.setSelected);
   const openSession = useApp((s) => s.openSession);
   const openMenu = useApp((s) => s.openMenu);
-  const openDrawer = useApp((s) => s.openDrawer);
   const openProjectForm = useApp((s) => s.openProjectForm);
   const actions = useActions();
 
@@ -147,12 +147,14 @@ export function SessionOverview() {
                   onOpen={() => openSession(session.id)}
                   onReattach={() => void actions.reattach(session)}
                   onClear={() => void actions.clearDead(session)}
-                  onDurability={() => openDrawer(session.projectId)}
                   onMenu={(e) =>
                     openMenu({
                       ...menuAnchor(e),
                       items: actions.sessionMenuItems(session),
                     })
+                  }
+                  onContextMenu={(e) =>
+                    openContextMenu(e, actions.sessionMenuItems(session))
                   }
                 />
               ))}
@@ -172,8 +174,8 @@ function Row({
   onOpen,
   onReattach,
   onClear,
-  onDurability,
   onMenu,
+  onContextMenu,
 }: {
   session: SessionWithProject;
   selected: boolean;
@@ -182,8 +184,8 @@ function Row({
   onOpen: () => void;
   onReattach: () => void;
   onClear: () => void;
-  onDurability: () => void;
   onMenu: (e: { currentTarget: HTMLElement }) => void;
+  onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
   const dead = session.state === "dead";
@@ -196,7 +198,7 @@ function Row({
         : { label: t("session.open"), variant: "outline" as const, run: onOpen };
 
   return (
-    <TableRow>
+    <TableRow onContextMenu={onContextMenu}>
       <TableCell>
         <Checkbox
           checked={selected}
@@ -222,20 +224,16 @@ function Row({
         <span className="font-mono text-xs">{hostName}</span>
       </TableCell>
       <TableCell>
-        {/* 看到问题的地方就是解决问题的地方：徽标直达主机的持久会话设置 */}
-        <Button
-          variant="ghost"
-          size="xs"
+        <span
           className={cn(
-            "font-normal",
+            "inline-flex h-6 items-center gap-1 rounded-md px-2 text-xs",
             session.durable ? "text-muted-foreground" : "bg-warning/10 text-warning"
           )}
           title={durabilityHint(t, session.durable, session.nonDurableReason)}
-          onClick={onDurability}
         >
-          {session.durable ? <ShieldCheck /> : <TriangleAlert />}
+          {session.durable ? <ShieldCheck className="size-3.5" /> : <TriangleAlert className="size-3.5" />}
           {session.durable ? t("session.durable") : t("session.nonDurable")}
-        </Button>
+        </span>
       </TableCell>
       <TableCell
         className="text-xs text-muted-foreground"

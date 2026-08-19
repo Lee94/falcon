@@ -1,5 +1,5 @@
 import * as pty from "@lydell/node-pty";
-import type { NonDurableReason } from "@mojito/shared";
+import { applyTermPtyEnv, type NonDurableReason, type TermAppearance } from "@mojito/shared";
 import * as zcmd from "../zellij/command.js";
 import {
   isProcessInJob,
@@ -102,12 +102,11 @@ export function resetLocalZellij() {
 
 // ---- Zellij 操作 ----
 
-function env(layout: HostLayout): Record<string, string> {
-  return {
-    ...(process.env as Record<string, string>),
-    ...zcmd.zellijEnv(layout),
-    TERM: "xterm-256color",
-  };
+function env(layout: HostLayout, appearance?: TermAppearance): Record<string, string> {
+  return applyTermPtyEnv(
+    { ...(process.env as Record<string, string | undefined>), ...zcmd.zellijEnv(layout) },
+    appearance
+  );
 }
 
 async function zellij(layout: HostLayout, args: string[]) {
@@ -170,6 +169,8 @@ export interface LocalAttachOptions {
   reattach?: boolean;
   cols: number;
   rows: number;
+  /** 当前 Viewer 的终端深浅；接回时内层 shell 的 env 已经冻住，只影响新会话 */
+  appearance?: TermAppearance;
 }
 
 export async function attachLocal(
@@ -199,7 +200,7 @@ export async function attachLocal(
         name: "xterm-256color",
         cols: opts.cols,
         rows: opts.rows,
-        env: env(layout),
+        env: env(layout, opts.appearance),
       }
     );
   } else {
@@ -208,7 +209,7 @@ export async function attachLocal(
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
+      env: applyTermPtyEnv(process.env, opts.appearance),
     });
   }
 

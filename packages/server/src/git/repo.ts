@@ -7,6 +7,7 @@
  */
 
 import type {
+  GitChangeCounts,
   GitSnapshot,
   GitUnavailableReason,
   GitWorktreeRef,
@@ -286,6 +287,25 @@ export function unavailableSnapshot(
   detail?: string
 ): GitSnapshot {
   return blankSnapshot({ available: false, reason, detail });
+}
+
+export function unavailableChanges(): GitChangeCounts {
+  return { available: false, added: 0, deleted: 0 };
+}
+
+/**
+ * 侧栏最后一层的 +N −M。只跑一条 status，SSH 上每棵检出都问一次也扛得住。
+ * 读不到就 available:false，徽标不画——侧栏不能因为一台主机抖动整列空白。
+ */
+export async function describeGitChanges(
+  host: GitHost,
+  workingDir: string,
+  opts?: RunOpts
+): Promise<GitChangeCounts> {
+  const res = await probeGit(host, gc.statusArgs(host.git, workingDir), gc.GIT_ENV_RO, opts);
+  if (res.code !== 0) return unavailableChanges();
+  const { added, deleted } = gc.countStatusChanges(gc.parseStatusEntries(res.stdout));
+  return { available: true, added, deleted };
 }
 
 /**

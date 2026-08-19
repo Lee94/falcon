@@ -1,13 +1,14 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
-import { Client, type ClientChannel } from "ssh2";
+import { Client, type ClientChannel, type TcpConnectionDetails } from "ssh2";
 import type { ProjectRow } from "../db.js";
 import type { Db } from "../db.js";
 import type { SecretBox } from "../crypto.js";
 import * as zcmd from "../zellij/command.js";
 import {
   buildCommandLine,
+  buildDetachedCommandLine,
   buildPtyCommandLine,
   encodePowerShell,
   parsePosixProbe,
@@ -37,6 +38,7 @@ import {
   ZELLIJ_VERSION,
   type ZellijTarget,
 } from "../zellij/version.js";
+import { applyTermPtyEnv, type TermAppearance } from "@mojito/shared";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
 import type { NonDurableReason } from "./local.js";
@@ -80,6 +82,14 @@ export class SshLink extends EventEmitter {
   private hostKeyMismatch = false;
   private probed: RemoteProbe | null = null;
   private zellij: RemoteZellij | null = null;
+  /**
+   * 远端转发按监听端口分发。同一条链路上端口不能重复（校验层已经挡住），
+   * 用端口当键而不是 destIP：sshd 回报的 destIP 可能是 127.0.0.1 / 0.0.0.0 / 实际网卡。
+   */
+  private remoteAcceptors = new Map<
+    number,
+    (info: TcpConnectionDetails, accept: () => ClientChannel, reject: () => void) => void
+  >();
 
   constructor(
     private project: ProjectRow,
@@ -130,7 +140,16 @@ export class SshLink extends EventEmitter {
       client.on("ready", () => {
         ready = true;
         this.client = client;
+        this.emit("up");
         resolve(client);
+      });
+      client.on("tcp connection", (info, accept, reject) => {
+        const fn = this.remoteAcceptors.get(info.destPort);
+        if (!fn) {
+          reject();
+          return;
+        }
+        fn(info, accept, reject);
       });
       client.on("error", (err) => {
         if (!ready) {
@@ -175,7 +194,46 @@ export class SshLink extends EventEmitter {
   dispose() {
     const c = this.client;
     this.client = null;
+    this.remoteAcceptors.clear();
     c?.end();
+  }
+
+  /**
+   * 远端监听 bindHost:bindPort，进来的连接交给 onStream。
+   * 必须先登记 acceptor 再 forwardIn，否则握手窗口里的连接会被拒。
+   */
+  async addRemoteForward(
+    bindHost: string,
+    bindPort: number,
+    onStream: (stream: ClientChannel) => void
+  ): Promise<void> {
+    const client = await this.getClient();
+    this.remoteAcceptors.set(bindPort, (_info, accept, reject) => {
+      try {
+        onStream(accept());
+      } catch {
+        reject();
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      client.forwardIn(bindHost, bindPort, (err) => {
+        if (err) {
+          this.remoteAcceptors.delete(bindPort);
+          reject(err);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
+  async removeRemoteForward(bindHost: string, bindPort: number): Promise<void> {
+    this.remoteAcceptors.delete(bindPort);
+    const client = this.client;
+    if (!client) return;
+    await new Promise<void>((resolve) => {
+      client.unforwardIn(bindHost, bindPort, () => resolve());
+    });
   }
 
   // ---- 远端命令 ----
@@ -199,6 +257,22 @@ export class SshLink extends EventEmitter {
           });
         })
     );
+
+  /** 同 exec，但把 input 写进远端命令的 stdin（粘贴图片等场景），写完即 EOF */
+  async execWithInput(commandLine: string, input: Buffer | string): Promise<ExecResult> {
+    const client = await this.getClient();
+    return new Promise<ExecResult>((resolve, reject) => {
+      client.exec(commandLine, (err, stream) => {
+        if (err) return reject(err);
+        let stdout = "";
+        let stderr = "";
+        stream.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
+        stream.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+        stream.on("close", (code: number | null) => resolve({ code, stdout, stderr }));
+        stream.end(input);
+      });
+    });
+  }
 
   /**
    * 宿主机类型与家目录，供 git 层使用。
@@ -309,11 +383,16 @@ export class SshLink extends EventEmitter {
         installed_version: ZELLIJ_VERSION,
       });
 
-      // Windows 远端：装好不等于能持久。Zellij 在 Windows 上还没有让 server
-      // 脱离父进程 Job 的能力（PR #5195 未合并），而 sshd 断开时会清理会话进程树——
-      // 会话很可能随 SSH 断开一起消失。这个问题只能实测，不能靠文档判断。
+      // Windows 远端：装好不等于能持久。Zellij server 没有脱离父 Job 的能力
+      // （PR #5195 未合并），sshd 在 exec 通道关闭时就会清掉整个进程树，所以我们
+      // 经 WMI 把 server 生到 sshd 树之外（见 buildDetachedCommandLine）。这条路
+      // 依赖宿主机的 DCOM/WMI 权限，只能实测，不能靠文档判断。
+      //
+      // 判定只在"当前锁定版本"上有效：换过 Zellij 版本（或检测手段变了）之后，
+      // 旧的"非持久"结论不该把主机永远钉死在非持久上。
       if (probe.kind === "windows") {
-        let ok = saved?.verified_durable;
+        let ok =
+          saved?.installed_version === ZELLIJ_VERSION ? saved?.verified_durable : null;
         if (ok == null) {
           ok = (await this.verifyDurability(layout)) ? 1 : 0;
           this.db.upsertZellijHost(host, port, user, { verified_durable: ok });
@@ -322,7 +401,8 @@ export class SshLink extends EventEmitter {
           this.zellij = {
             durable: false,
             reason: "verify-failed",
-            detail: "Zellij 会话没能熬过 SSH 断开（Windows 远端的已知限制），重试无用",
+            detail:
+              "后台 Zellij 会话没能熬过 SSH 断开（宿主机可能限制了 WMI 进程创建）",
             kind: probe.kind,
           };
           return this.zellij;
@@ -345,10 +425,21 @@ export class SshLink extends EventEmitter {
     return this.zellij;
   }
 
-  /** 重试安装前清掉缓存的判定 */
+  /**
+   * 重试安装前清掉缓存的判定。
+   *
+   * verified_durable 必须连 DB 一起清：它是持久化的，只清内存的话用户点一百次
+   * 重试都是同一个秒回的旧结论——比如修好了 WMI 权限之后仍被钉在"非持久"上。
+   */
   resetZellij() {
     this.zellij = null;
     this.probed = null;
+    const p = this.project;
+    if (p.ssh_host && p.ssh_username) {
+      this.db.upsertZellijHost(p.ssh_host, p.ssh_port ?? 22, p.ssh_username, {
+        verified_durable: null,
+      });
+    }
   }
 
   /**
@@ -356,6 +447,10 @@ export class SshLink extends EventEmitter {
    *
    * 这是唯一能回答"这台机器上的会话到底能不能熬过断线"的办法。只在每台主机上
    * 跑一次，结果持久化到 zellij_hosts。
+   *
+   * 创建走 WMI（buildDetachedCommandLine），与真实会话的创建路径完全一致——
+   * 验证的就是这条路本身：普通 exec 拉起的 server 会随 exec 通道关闭被 sshd
+   * 连坐杀掉，根本活不到断线那一步。
    */
   private async verifyDurability(layout: HostLayout): Promise<boolean> {
     const probe = this.probed!;
@@ -364,14 +459,13 @@ export class SshLink extends EventEmitter {
     const run = (args: string[]) =>
       this.exec(buildCommandLine(probe.kind, [layout.bin, ...args], env));
 
-    // -b/--create-background：不存在则后台建一个 detached session，无需 PTY
-    const created = await run([
-      "--data-dir",
-      layout.dataDir,
-      "attach",
-      name,
-      "--create-background",
-    ]).catch(() => null);
+    // 后台建一个 detached session，无需 PTY；经 WMI 生到 sshd 进程树之外
+    const created = await this.exec(
+      buildDetachedCommandLine(
+        [layout.bin, "--data-dir", layout.dataDir, "attach", name, "--create-background"],
+        env
+      )
+    ).catch(() => null);
     if (!created || created.code !== 0) return false;
 
     this.dispose();
@@ -454,6 +548,7 @@ export class SshLink extends EventEmitter {
       reattach?: boolean;
       cols: number;
       rows: number;
+      appearance?: TermAppearance;
     },
     cb: BackendCallbacks
   ): Promise<AttachResult> {
@@ -468,6 +563,38 @@ export class SshLink extends EventEmitter {
     }
 
     const ptyOpts = { rows: opts.rows, cols: opts.cols, term: "xterm-256color" };
+    const termEnv = applyTermPtyEnv({}, opts.appearance);
+
+    // Windows 持久会话：server 必须生在 sshd 进程树之外，否则创建它的 PTY 通道
+    // 一关（关标签、断网）server 就被 sshd 连坐杀掉，"持久"名存实亡。先经 WMI
+    // 后台建好——带全部会话级 options，它们只在创建时生效——下面的 PTY attach
+    // 就是纯附着，attach 客户端死掉不影响 server。reattach 时会话已存在
+    // （上面刚用 hasSession 验过），跳过。
+    if (opts.durable && kind === "windows" && !opts.reattach) {
+      const layout = opts.layout!;
+      if (!(await this.hasSession(layout, opts.sessionId))) {
+        const created = await this.exec(
+          buildDetachedCommandLine(
+            [
+              layout.bin,
+              ...zcmd.createBackgroundArgs(layout, opts.sessionId, {
+                cwd: opts.cwd,
+                shell: opts.shell ?? this.probed?.shell,
+              }),
+            ],
+            { ...zcmd.zellijEnv(layout), ...termEnv }
+          )
+        );
+        // WMI 的退出码只是尽力而为（见 buildDetachedCommandLine），
+        // 会话真建出来没有以 hasSession 的事实为准
+        if (!(await this.hasSession(layout, opts.sessionId))) {
+          throw new Error(
+            `无法在 Windows 远端后台创建 Zellij 会话（退出码 ${created.code}）：` +
+              (created.stderr.trim() || created.stdout.trim() || "无输出")
+          );
+        }
+      }
+    }
 
     const stream = await new Promise<ClientChannel>((resolve, reject) => {
       if (opts.durable) {
@@ -482,28 +609,31 @@ export class SshLink extends EventEmitter {
               shell: opts.shell ?? this.probed?.shell,
             }),
           ],
-          zcmd.zellijEnv(layout),
+          { ...zcmd.zellijEnv(layout), ...termEnv },
           // 包一层登录 shell，否则 ~/.profile 里的 PATH 全丢——详见 buildPtyCommandLine
           this.probed?.shell
         );
         client.exec(cmd, { pty: ptyOpts }, (err, s) => (err ? reject(err) : resolve(s)));
-      } else if (opts.cwd || opts.shell) {
-        // 非持久会话：直接起 shell，不经 Zellij
+      } else {
+        // 非持久：直接起 shell。一律走 exec + env，不能用 client.shell()——
+        // ssh2 的 shell() 塞不进 COLORFGBG / COLORTERM。
         let cmd: string;
         if (kind === "windows") {
-          const parts: string[] = [];
+          const parts: string[] = [
+            ...Object.entries(termEnv).map(([k, v]) => `$env:${k} = ${quotePowerShell(v)}`),
+          ];
           if (opts.cwd) parts.push(`Set-Location -LiteralPath ${quotePowerShell(opts.cwd)}`);
           parts.push(opts.shell ? `& ${quotePowerShell(opts.shell)}` : "powershell");
           cmd = encodePowerShell(parts.join("; "));
         } else {
           // 非持久会话同样要走登录 shell，否则 PATH 与持久会话不一致
+          const assigns = Object.entries(termEnv).map(([k, v]) => `${k}=${quotePosix(v)}`);
+          const prefix = assigns.length ? `env ${assigns.join(" ")} ` : "";
           const cd = opts.cwd ? `cd ${quotePosix(opts.cwd)} && ` : "";
           const sh = quotePosix(opts.shell ?? this.probed?.shell ?? "/bin/sh");
-          cmd = `${cd}exec ${sh} -l`;
+          cmd = `${cd}exec ${prefix}${sh} -l`;
         }
         client.exec(cmd, { pty: ptyOpts }, (err, s) => (err ? reject(err) : resolve(s)));
-      } else {
-        client.shell(ptyOpts, (err, s) => (err ? reject(err) : resolve(s)));
       }
     });
 

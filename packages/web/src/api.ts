@@ -2,11 +2,16 @@ import type {
   AuthStatus,
   DeleteProjectResult,
   FsListing,
+  GitChangeCounts,
   GitSnapshot,
   HostZellijStatus,
+  PasteImageResult,
+  PortForward,
+  PortForwardInput,
   Project,
   ProjectInput,
   RepoInfo,
+  CreateSessionRequest,
   Session,
   SessionWithProject,
   SshHost,
@@ -89,6 +94,17 @@ export const api = {
   repoInfo: (projectId: string) => request<RepoInfo>("GET", `/api/projects/${projectId}/repo`),
   /** 右侧 Git 面板。源项目和附属项目都能问，环境事实写在 available/reason 里 */
   gitSnapshot: (projectId: string) => request<GitSnapshot>("GET", `/api/projects/${projectId}/git`),
+  /** 侧栏最后一层的 +N −M。读不到时 available=false，不抛 */
+  gitChanges: (projectId: string) =>
+    request<GitChangeCounts>("GET", `/api/projects/${projectId}/git/changes`),
+  listForwards: (projectId: string) =>
+    request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),
+  createForward: (projectId: string, input: PortForwardInput) =>
+    request<PortForward>("POST", `/api/projects/${projectId}/forwards`, input),
+  updateForward: (projectId: string, id: string, patch: Partial<PortForwardInput>) =>
+    request<PortForward>("PATCH", `/api/projects/${projectId}/forwards/${id}`, patch),
+  deleteForward: (projectId: string, id: string) =>
+    request<{ ok: true }>("DELETE", `/api/projects/${projectId}/forwards/${id}`),
   createWorktree: (projectId: string, input: WorktreeInput) =>
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),
   worktreeStatus: (projectId: string) =>
@@ -102,11 +118,28 @@ export const api = {
   ) => request("POST", `/api/projects/${projectId}/host`, patch),
 
   listSessions: () => request<SessionWithProject[]>("GET", "/api/sessions"),
-  createSession: (projectId: string, name?: string) =>
-    request<Session>("POST", `/api/projects/${projectId}/sessions`, { name }),
+  createSession: (projectId: string, body?: CreateSessionRequest) =>
+    request<Session>("POST", `/api/projects/${projectId}/sessions`, body ?? {}),
   reattachSession: (id: string) => request<Session>("POST", `/api/sessions/${id}/reattach`),
   terminateSession: (id: string) => request("POST", `/api/sessions/${id}/terminate`),
   clearSession: (id: string) => request("DELETE", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
     request("PATCH", `/api/sessions/${id}`, { name }),
+  /** 图片按原始字节直传，Content-Type 就是图片类型，不走 JSON 包装 */
+  pasteImage: async (id: string, blob: Blob): Promise<PasteImageResult> => {
+    const res = await fetch(`/api/sessions/${id}/paste-image`, {
+      method: "POST",
+      headers: { "Content-Type": blob.type },
+      body: blob,
+      credentials: "same-origin",
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new ApiRequestError(
+        (data as { error?: string }).error ?? `HTTP ${res.status}`,
+        res.status
+      );
+    }
+    return data as PasteImageResult;
+  },
 };

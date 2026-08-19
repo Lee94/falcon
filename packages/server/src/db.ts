@@ -1,7 +1,8 @@
-import Database from "better-sqlite3";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import path from "node:path";
 import type {
   DeadReason,
+  ForwardKind,
   Project,
   Session,
   SessionState,
@@ -43,6 +44,9 @@ export interface SessionRow {
   non_durable_reason: string | null;
   created_at: number;
   last_active_at: number;
+  /** 上次 Viewer 量到的格子；null = 从未量过，接回时不能当 80×24 用 */
+  cols: number | null;
+  rows: number | null;
 }
 
 export interface SshHostRow {
@@ -54,6 +58,19 @@ export interface SshHostRow {
   auth_method: string;
   key_path: string | null;
   secret_enc: string | null;
+  created_at: number;
+}
+
+export interface SshForwardRow {
+  id: string;
+  project_id: string;
+  name: string | null;
+  kind: string;
+  bind_host: string;
+  bind_port: number;
+  dest_host: string;
+  dest_port: number;
+  enabled: number;
   created_at: number;
 }
 
@@ -71,12 +88,21 @@ export interface ZellijHostRow {
   updated_at: number;
 }
 
+/** 行接口是封闭类型，node:sqlite 的命名参数要求带索引签名的 Record，这里统一收窄 */
+const bindRow = (row: object) => row as Record<string, SQLInputValue>;
+
 export class Db {
-  private db: Database.Database;
+  private db: DatabaseSync;
 
   constructor(dataDir: string) {
-    this.db = new Database(path.join(dataDir, "mojito.db"));
-    this.db.pragma("journal_mode = WAL");
+    // node:sqlite 默认开外键约束；本仓库从未启用过（级联在应用层手写），显式关掉保持语义不变。
+    // UPDATE 走 bindRow 传整行，SQL 用不到 created_at 等列；better-sqlite3 会忽略多余命名参数，
+    // node:sqlite 默认抛 ERR_INVALID_STATE，这里显式放开。
+    this.db = new DatabaseSync(path.join(dataDir, "mojito.db"), {
+      enableForeignKeyConstraints: false,
+      allowUnknownNamedParameters: true,
+    });
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.migrate();
   }
 
@@ -140,6 +166,8 @@ export class Db {
       );
     `);
     this.addColumn("sessions", "non_durable_reason", "TEXT");
+    this.addColumn("sessions", "cols", "INTEGER");
+    this.addColumn("sessions", "rows", "INTEGER");
     // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
     this.db
       .prepare("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'")
@@ -155,6 +183,23 @@ export class Db {
     this.addColumn("projects", "worktree_repo_dir", "TEXT");
     this.addColumn("projects", "worktree_created_by_mojito", "INTEGER");
     this.addColumn("projects", "host_id", "TEXT");
+
+    // 端口转发规则挂在项目上（走该项目的 SshLink），不是解引用主机。
+    // 不写 REFERENCES：本仓库外键从未开启，级联在应用层手写。
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ssh_forwards (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT,
+        kind TEXT NOT NULL,
+        bind_host TEXT NOT NULL,
+        bind_port INTEGER NOT NULL,
+        dest_host TEXT NOT NULL,
+        dest_port INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
   }
 
   /**
@@ -226,7 +271,7 @@ export class Db {
   listProjects(): ProjectRow[] {
     return this.db
       .prepare("SELECT * FROM projects ORDER BY created_at ASC")
-      .all() as ProjectRow[];
+      .all() as unknown as ProjectRow[];
   }
 
   getProject(id: string): ProjectRow | undefined {
@@ -243,7 +288,7 @@ export class Db {
          VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
            @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito)`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 
   /**
@@ -262,14 +307,14 @@ export class Db {
          host_id=@host_id
          WHERE id=@id`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 
   /** 某源项目的全部附属项目。删除级联与确认框都要用。 */
   listWorktreeChildren(sourceId: string): ProjectRow[] {
     return this.db
       .prepare("SELECT * FROM projects WHERE source_project_id = ? ORDER BY created_at ASC")
-      .all(sourceId) as ProjectRow[];
+      .all(sourceId) as unknown as ProjectRow[];
   }
 
   /**
@@ -322,8 +367,100 @@ export class Db {
   }
 
   deleteProject(id: string) {
+    this.db.prepare("DELETE FROM ssh_forwards WHERE project_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
     this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+  }
+
+  // ---- SSH port forwards ----
+
+  listForwards(projectId: string): SshForwardRow[] {
+    return this.db
+      .prepare("SELECT * FROM ssh_forwards WHERE project_id = ? ORDER BY created_at ASC")
+      .all(projectId) as unknown as SshForwardRow[];
+  }
+
+  listEnabledForwardProjectIds(): string[] {
+    const rows = this.db
+      .prepare("SELECT DISTINCT project_id FROM ssh_forwards WHERE enabled = 1")
+      .all() as { project_id: string }[];
+    return rows.map((r) => r.project_id);
+  }
+
+  getForward(id: string): SshForwardRow | undefined {
+    return this.db.prepare("SELECT * FROM ssh_forwards WHERE id = ?").get(id) as
+      | SshForwardRow
+      | undefined;
+  }
+
+  findForwardBind(
+    projectId: string,
+    kind: ForwardKind,
+    bindHost: string,
+    bindPort: number,
+    exceptId?: string
+  ): SshForwardRow | undefined {
+    if (exceptId) {
+      return this.db
+        .prepare(
+          `SELECT * FROM ssh_forwards
+           WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ? AND id != ?`
+        )
+        .get(projectId, kind, bindHost, bindPort, exceptId) as SshForwardRow | undefined;
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM ssh_forwards
+         WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ?`
+      )
+      .get(projectId, kind, bindHost, bindPort) as SshForwardRow | undefined;
+  }
+
+  /** 本地转发绑在后端本机上，跨项目也不能抢同一个回环端口。 */
+  findLocalBindConflict(
+    bindHost: string,
+    bindPort: number,
+    exceptId?: string
+  ): SshForwardRow | undefined {
+    if (exceptId) {
+      return this.db
+        .prepare(
+          `SELECT * FROM ssh_forwards
+           WHERE kind = 'local' AND bind_host = ? AND bind_port = ? AND id != ?`
+        )
+        .get(bindHost, bindPort, exceptId) as SshForwardRow | undefined;
+    }
+    return this.db
+      .prepare(
+        `SELECT * FROM ssh_forwards
+         WHERE kind = 'local' AND bind_host = ? AND bind_port = ?`
+      )
+      .get(bindHost, bindPort) as SshForwardRow | undefined;
+  }
+
+  insertForward(row: SshForwardRow) {
+    this.db
+      .prepare(
+        `INSERT INTO ssh_forwards
+           (id, project_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
+         VALUES
+           (@id, @project_id, @name, @kind, @bind_host, @bind_port, @dest_host, @dest_port, @enabled, @created_at)`
+      )
+      .run(bindRow(row));
+  }
+
+  updateForward(row: SshForwardRow) {
+    this.db
+      .prepare(
+        `UPDATE ssh_forwards SET name=@name, kind=@kind, bind_host=@bind_host, bind_port=@bind_port,
+           dest_host=@dest_host, dest_port=@dest_port, enabled=@enabled
+         WHERE id=@id`
+      )
+      .run(bindRow(row));
+  }
+
+  deleteForward(id: string) {
+    this.db.prepare("DELETE FROM ssh_forwards WHERE id = ?").run(id);
   }
 
   // ---- saved SSH hosts ----
@@ -346,7 +483,7 @@ export class Db {
   listHosts(): SshHost[] {
     const rows = this.db
       .prepare("SELECT * FROM ssh_hosts ORDER BY created_at ASC")
-      .all() as SshHostRow[];
+      .all() as unknown as SshHostRow[];
     const counts = this.db
       .prepare(
         "SELECT host_id AS id, COUNT(*) AS n FROM projects WHERE host_id IS NOT NULL GROUP BY host_id"
@@ -381,7 +518,7 @@ export class Db {
         `INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
          VALUES (@id, @name, @host, @port, @username, @auth_method, @key_path, @secret_enc, @created_at)`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 
   updateHost(row: SshHostRow) {
@@ -391,7 +528,7 @@ export class Db {
          auth_method=@auth_method, key_path=@key_path, secret_enc=@secret_enc
          WHERE id=@id`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 
   countProjectsByHost(hostId: string): number {
@@ -425,13 +562,13 @@ export class Db {
   listSessions(): SessionRow[] {
     return this.db
       .prepare("SELECT * FROM sessions ORDER BY created_at ASC")
-      .all() as SessionRow[];
+      .all() as unknown as SessionRow[];
   }
 
   listSessionsByProject(projectId: string): SessionRow[] {
     return this.db
       .prepare("SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at ASC")
-      .all(projectId) as SessionRow[];
+      .all(projectId) as unknown as SessionRow[];
   }
 
   getSession(id: string): SessionRow | undefined {
@@ -443,10 +580,10 @@ export class Db {
   insertSession(row: SessionRow) {
     this.db
       .prepare(
-        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at)
-         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at)`
+        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows)
+         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows)`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 
   updateSessionState(id: string, state: SessionState, deadReason?: DeadReason) {
@@ -461,6 +598,10 @@ export class Db {
 
   touchSession(id: string, ts: number) {
     this.db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(ts, id);
+  }
+
+  updateSessionSize(id: string, cols: number, rows: number) {
+    this.db.prepare("UPDATE sessions SET cols = ?, rows = ? WHERE id = ?").run(cols, rows, id);
   }
 
   deleteSession(id: string) {
@@ -512,7 +653,12 @@ export class Db {
       .get(host, port, username) as ZellijHostRow | undefined;
   }
 
-  /** 部分更新：只写传入的字段，其余保持原值 */
+  /**
+   * 部分更新：只写传入的字段，其余保持原值。
+   *
+   * 判据是"键在不在 patch 里"而不是 `??`：显式传 null 表示**清空该字段**
+   * （作废安装记录、作废持久性判定），用 `??` 会被旧值顶回去、清空静默失效。
+   */
   upsertZellijHost(
     host: string,
     port: number,
@@ -525,14 +671,16 @@ export class Db {
     >
   ) {
     const cur = this.getZellijHost(host, port, username);
+    const pick = <K extends keyof typeof patch>(key: K): ZellijHostRow[K] =>
+      (key in patch ? patch[key] : cur?.[key]) ?? null;
     const row: ZellijHostRow = {
       host,
       port,
       username,
-      authorized: patch.authorized ?? cur?.authorized ?? null,
-      installed_version: patch.installed_version ?? cur?.installed_version ?? null,
-      base_url: patch.base_url ?? cur?.base_url ?? null,
-      verified_durable: patch.verified_durable ?? cur?.verified_durable ?? null,
+      authorized: pick("authorized"),
+      installed_version: pick("installed_version"),
+      base_url: pick("base_url"),
+      verified_durable: pick("verified_durable"),
       updated_at: Date.now(),
     };
     this.db
@@ -546,6 +694,6 @@ export class Db {
            verified_durable = excluded.verified_durable,
            updated_at = excluded.updated_at`
       )
-      .run(row);
+      .run(bindRow(row));
   }
 }

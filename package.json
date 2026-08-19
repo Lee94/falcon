@@ -4,14 +4,20 @@
   "version": "0.1.0",
   "scripts": {
     "build": "pnpm --filter @mojito/shared build && pnpm --filter @mojito/server build && pnpm --filter @mojito/web build",
+    "build:bin": "node scripts/build-binary.mjs",
     "dev:server": "pnpm --filter @mojito/server dev",
     "dev:web": "pnpm --filter @mojito/web dev",
     "start": "node packages/server/dist/index.js",
     "update-zellij": "node scripts/update-zellij.mjs",
     "vendor-maple-mono": "node scripts/vendor-maple-mono.mjs",
-    "vendor-nerd-symbols": "node scripts/vendor-nerd-symbols.mjs"
+    "vendor-nerd-symbols": "node scripts/vendor-nerd-symbols.mjs",
+    "gen-icons": "node scripts/gen-icons.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "1.0.0-alpha.6"
   }
 }

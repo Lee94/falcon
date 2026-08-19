@@ -224,7 +224,7 @@
   }
 }
 
-/* xterm 自带的容器不认 Tailwind 的盒模型，只能在这里兜一下高度 */
-.terminal-host > .terminal {
+/* xterm 挂在 .terminal-host 里的套子上，不是直接子节点 */
+.terminal-host .xterm {
   height: 100%;
 }

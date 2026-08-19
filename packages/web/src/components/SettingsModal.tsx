@@ -25,6 +25,7 @@ import {
   type TermThemeId,
 } from "../lib/term.js";
 import { useActions } from "../lib/useActions.js";
+import { useInstall } from "../lib/useInstall.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -519,6 +520,18 @@ function HostsPane() {
 function AboutPane() {
   const { t } = useTranslation();
   const system = useApp((s) => s.system);
+  const { standalone, canInstall, promptInstall } = useInstall();
+  const [installing, setInstalling] = useState(false);
+
+  const install = async () => {
+    setInstalling(true);
+    try {
+      await promptInstall();
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   return (
     <SettingSection title={t("settings.aboutTitle")}>
       <SettingRow label={t("overview.version")}>
@@ -530,6 +543,19 @@ function AboutPane() {
         <span className="font-mono text-sm text-muted-foreground">
           {system?.platform ?? "—"}
         </span>
+      </SettingRow>
+      <SettingRow label={t("settings.installApp")} hint={t("settings.installAppHint")}>
+        {standalone ? (
+          <span className="text-sm text-muted-foreground">{t("settings.installed")}</span>
+        ) : canInstall ? (
+          <Button size="sm" disabled={installing} onClick={() => void install()}>
+            {t("settings.installAppAction")}
+          </Button>
+        ) : (
+          <span className="max-w-xs text-right text-xs text-muted-foreground">
+            {t("settings.installUnavailable")}
+          </span>
+        )}
       </SettingRow>
     </SettingSection>
   );
