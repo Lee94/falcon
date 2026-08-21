@@ -10,10 +10,11 @@
   },
   "dependencies": {
     "@mojito/shared": "workspace:*",
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/addon-unicode11": "0.8.0",
-    "@xterm/addon-web-links": "^0.11.0",
-    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "0.12.0-beta.299",
+    "@xterm/addon-unicode11": "0.10.0-beta.299",
+    "@xterm/addon-web-links": "0.13.0-beta.299",
+    "@xterm/addon-webgl": "0.20.0-beta.298",
+    "@xterm/xterm": "6.1.0-beta.302",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -24,6 +25,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-i18next": "^15.0.0",
+    "rioterm": "^0.1.8",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0",
     "zustand": "^5.0.0"

@@ -180,8 +180,9 @@ function holdBack(s: string): { emit: string; hold: string } {
  * 从 PTY 输出里抽出 OSC 10/11/12 查询，自己答、不转给 viewer。
  *
  * 交给 xterm.js 答有两个坑：回放历史会再答一次（键入一串 ESC 垃圾），
- * 多个 Viewer 会每人答一次。Zellij 持久会话里查询通常到不了外层，
- * 那时这段是空跑，深浅靠 env。
+ * 多个 Viewer 会每人答一次。Zellij 0.44 实测会把 pane 里的查询实时
+ * 转发到外层并把答复带回，所以这里的答复就是内层程序看到的底色；
+ * zellij client 自己 attach 时也会查一次。
  *
  * appearance 还没到时原样放过，让 xterm.js 兜底。
  */
@@ -199,6 +200,17 @@ export class OscColorGate {
     }
 
     const combined = this.pending + data;
+    // 快路径：查询极罕见（Zellij 持久会话里通常到不了外层），而这段跑在
+    // PTY 输出的热路径上，不该让每个 chunk 都过一遍正则。所有查询前缀都以
+    // \x1b] 开头，唯一不含 \x1b] 的"可能是前缀"的形态是结尾的孤立 ESC
+    // （下个 chunk 可能以 ] 续上），这两种都没有时直接原样放行。
+    if (
+      !combined.includes("\x1b]") &&
+      combined.charCodeAt(combined.length - 1) !== 0x1b
+    ) {
+      this.pending = "";
+      return { visible: combined, replies: [] };
+    }
     const { emit, hold } = holdBack(combined);
     this.pending = hold;
 

@@ -95,6 +95,8 @@ const bindRow = (row: object) => row as Record<string, SQLInputValue>;
 
 export class Db {
   private db: DatabaseSync;
+  /** prepare 的语句缓存：node:sqlite 不缓存，热路径上每次现场编译 SQL 白费 */
+  private stmts = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
 
   constructor(dataDir: string) {
     // node:sqlite 默认开外键约束；本仓库从未启用过（级联在应用层手写），显式关掉保持语义不变。
@@ -105,7 +107,19 @@ export class Db {
       allowUnknownNamedParameters: true,
     });
     this.db.exec("PRAGMA journal_mode = WAL");
+    // WAL 下默认仍是 synchronous=FULL（每条隐式事务一次 fsync，且全同步 API 阻塞事件循环）。
+    // NORMAL 在 WAL 下不会损坏数据库，最坏掉电丢最后几笔——对本库存的数据完全可接受。
+    this.db.exec("PRAGMA synchronous = NORMAL");
     this.migrate();
+  }
+
+  private stmt(sql: string) {
+    let s = this.stmts.get(sql);
+    if (!s) {
+      s = this.db.prepare(sql);
+      this.stmts.set(sql, s);
+    }
+    return s;
   }
 
   private migrate() {
@@ -171,8 +185,7 @@ export class Db {
     this.addColumn("sessions", "cols", "INTEGER");
     this.addColumn("sessions", "rows", "INTEGER");
     // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
-    this.db
-      .prepare("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'")
+    this.stmt("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'")
       .run();
 
     // 附属项目（git worktree）。四列全可空，存量行天然是"普通项目"。
@@ -224,15 +237,13 @@ export class Db {
   // ---- settings ----
 
   getSetting(key: string): string | undefined {
-    const row = this.db
-      .prepare("SELECT value FROM settings WHERE key = ?")
+    const row = this.stmt("SELECT value FROM settings WHERE key = ?")
       .get(key) as { value: string } | undefined;
     return row?.value;
   }
 
   setSetting(key: string, value: string) {
-    this.db
-      .prepare(
+    this.stmt(
         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
       )
       .run(key, value);
@@ -273,20 +284,18 @@ export class Db {
   }
 
   listProjects(): ProjectRow[] {
-    return this.db
-      .prepare("SELECT * FROM projects ORDER BY created_at ASC")
+    return this.stmt("SELECT * FROM projects ORDER BY created_at ASC")
       .all() as unknown as ProjectRow[];
   }
 
   getProject(id: string): ProjectRow | undefined {
-    return this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as
+    return this.stmt("SELECT * FROM projects WHERE id = ?").get(id) as
       | ProjectRow
       | undefined;
   }
 
   insertProject(row: ProjectRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
            source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at)
          VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
@@ -304,8 +313,7 @@ export class Db {
    * ProjectInput 里也没有对应字段，所以这条从类型层面就够不到。
    */
   updateProject(row: ProjectRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `UPDATE projects SET name=@name, working_dir=@working_dir, shell=@shell, ssh_host=@ssh_host, ssh_port=@ssh_port,
          ssh_username=@ssh_username, ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc,
          host_id=@host_id
@@ -320,15 +328,13 @@ export class Db {
    * 存档时间不参与任何路径判断，可写不构成攻击面。
    */
   setWorktreeArchived(id: string, ts: number | null) {
-    this.db
-      .prepare("UPDATE projects SET worktree_archived_at = ? WHERE id = ?")
+    this.stmt("UPDATE projects SET worktree_archived_at = ? WHERE id = ?")
       .run(ts, id);
   }
 
   /** 存档已到期（archived_at ≤ archivedBefore）的附属项目，供后台清扫 */
   listArchivedExpired(archivedBefore: number): ProjectRow[] {
-    return this.db
-      .prepare(
+    return this.stmt(
         `SELECT * FROM projects
          WHERE source_project_id IS NOT NULL AND worktree_archived_at IS NOT NULL
            AND worktree_archived_at <= ?
@@ -339,8 +345,7 @@ export class Db {
 
   /** 某源项目的全部附属项目。删除级联与确认框都要用。 */
   listWorktreeChildren(sourceId: string): ProjectRow[] {
-    return this.db
-      .prepare("SELECT * FROM projects WHERE source_project_id = ? ORDER BY created_at ASC")
+    return this.stmt("SELECT * FROM projects WHERE source_project_id = ? ORDER BY created_at ASC")
       .all(sourceId) as unknown as ProjectRow[];
   }
 
@@ -352,8 +357,7 @@ export class Db {
    * project.ssh_host。复制让这些点一处都不用改，代价就是这条手动传播。
    */
   updateChildrenSsh(sourceId: string, src: ProjectRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `UPDATE projects SET ssh_host=@ssh_host, ssh_port=@ssh_port, ssh_username=@ssh_username,
            ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc,
            host_id=@host_id
@@ -376,8 +380,7 @@ export class Db {
    * 与 updateChildrenSsh 同构：项目上的 ssh_* 是复制，不是解引用。
    */
   updateProjectsFromHost(host: SshHostRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `UPDATE projects SET ssh_host=@host, ssh_port=@port, ssh_username=@username,
            ssh_auth_method=@auth_method, ssh_key_path=@key_path, ssh_secret_enc=@secret_enc
          WHERE host_id=@id`
@@ -394,28 +397,26 @@ export class Db {
   }
 
   deleteProject(id: string) {
-    this.db.prepare("DELETE FROM ssh_forwards WHERE project_id = ?").run(id);
-    this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
-    this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    this.stmt("DELETE FROM ssh_forwards WHERE project_id = ?").run(id);
+    this.stmt("DELETE FROM sessions WHERE project_id = ?").run(id);
+    this.stmt("DELETE FROM projects WHERE id = ?").run(id);
   }
 
   // ---- SSH port forwards ----
 
   listForwards(projectId: string): SshForwardRow[] {
-    return this.db
-      .prepare("SELECT * FROM ssh_forwards WHERE project_id = ? ORDER BY created_at ASC")
+    return this.stmt("SELECT * FROM ssh_forwards WHERE project_id = ? ORDER BY created_at ASC")
       .all(projectId) as unknown as SshForwardRow[];
   }
 
   listEnabledForwardProjectIds(): string[] {
-    const rows = this.db
-      .prepare("SELECT DISTINCT project_id FROM ssh_forwards WHERE enabled = 1")
+    const rows = this.stmt("SELECT DISTINCT project_id FROM ssh_forwards WHERE enabled = 1")
       .all() as { project_id: string }[];
     return rows.map((r) => r.project_id);
   }
 
   getForward(id: string): SshForwardRow | undefined {
-    return this.db.prepare("SELECT * FROM ssh_forwards WHERE id = ?").get(id) as
+    return this.stmt("SELECT * FROM ssh_forwards WHERE id = ?").get(id) as
       | SshForwardRow
       | undefined;
   }
@@ -428,15 +429,13 @@ export class Db {
     exceptId?: string
   ): SshForwardRow | undefined {
     if (exceptId) {
-      return this.db
-        .prepare(
+      return this.stmt(
           `SELECT * FROM ssh_forwards
            WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ? AND id != ?`
         )
         .get(projectId, kind, bindHost, bindPort, exceptId) as SshForwardRow | undefined;
     }
-    return this.db
-      .prepare(
+    return this.stmt(
         `SELECT * FROM ssh_forwards
          WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ?`
       )
@@ -450,15 +449,13 @@ export class Db {
     exceptId?: string
   ): SshForwardRow | undefined {
     if (exceptId) {
-      return this.db
-        .prepare(
+      return this.stmt(
           `SELECT * FROM ssh_forwards
            WHERE kind = 'local' AND bind_host = ? AND bind_port = ? AND id != ?`
         )
         .get(bindHost, bindPort, exceptId) as SshForwardRow | undefined;
     }
-    return this.db
-      .prepare(
+    return this.stmt(
         `SELECT * FROM ssh_forwards
          WHERE kind = 'local' AND bind_host = ? AND bind_port = ?`
       )
@@ -466,8 +463,7 @@ export class Db {
   }
 
   insertForward(row: SshForwardRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO ssh_forwards
            (id, project_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
          VALUES
@@ -477,8 +473,7 @@ export class Db {
   }
 
   updateForward(row: SshForwardRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `UPDATE ssh_forwards SET name=@name, kind=@kind, bind_host=@bind_host, bind_port=@bind_port,
            dest_host=@dest_host, dest_port=@dest_port, enabled=@enabled
          WHERE id=@id`
@@ -487,7 +482,7 @@ export class Db {
   }
 
   deleteForward(id: string) {
-    this.db.prepare("DELETE FROM ssh_forwards WHERE id = ?").run(id);
+    this.stmt("DELETE FROM ssh_forwards WHERE id = ?").run(id);
   }
 
   // ---- saved SSH hosts ----
@@ -508,11 +503,9 @@ export class Db {
   }
 
   listHosts(): SshHost[] {
-    const rows = this.db
-      .prepare("SELECT * FROM ssh_hosts ORDER BY created_at ASC")
+    const rows = this.stmt("SELECT * FROM ssh_hosts ORDER BY created_at ASC")
       .all() as unknown as SshHostRow[];
-    const counts = this.db
-      .prepare(
+    const counts = this.stmt(
         "SELECT host_id AS id, COUNT(*) AS n FROM projects WHERE host_id IS NOT NULL GROUP BY host_id"
       )
       .all() as { id: string; n: number }[];
@@ -521,27 +514,24 @@ export class Db {
   }
 
   getHost(id: string): SshHostRow | undefined {
-    return this.db.prepare("SELECT * FROM ssh_hosts WHERE id = ?").get(id) as
+    return this.stmt("SELECT * FROM ssh_hosts WHERE id = ?").get(id) as
       | SshHostRow
       | undefined;
   }
 
   findHostByName(name: string, exceptId?: string): SshHostRow | undefined {
     if (exceptId) {
-      return this.db
-        .prepare(
+      return this.stmt(
           "SELECT * FROM ssh_hosts WHERE lower(name) = lower(?) AND id != ?"
         )
         .get(name, exceptId) as SshHostRow | undefined;
     }
-    return this.db
-      .prepare("SELECT * FROM ssh_hosts WHERE lower(name) = lower(?)")
+    return this.stmt("SELECT * FROM ssh_hosts WHERE lower(name) = lower(?)")
       .get(name) as SshHostRow | undefined;
   }
 
   insertHost(row: SshHostRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
          VALUES (@id, @name, @host, @port, @username, @auth_method, @key_path, @secret_enc, @created_at)`
       )
@@ -549,8 +539,7 @@ export class Db {
   }
 
   updateHost(row: SshHostRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `UPDATE ssh_hosts SET name=@name, host=@host, port=@port, username=@username,
          auth_method=@auth_method, key_path=@key_path, secret_enc=@secret_enc
          WHERE id=@id`
@@ -559,14 +548,13 @@ export class Db {
   }
 
   countProjectsByHost(hostId: string): number {
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM projects WHERE host_id = ?")
+    const row = this.stmt("SELECT COUNT(*) AS n FROM projects WHERE host_id = ?")
       .get(hostId) as { n: number };
     return row.n;
   }
 
   deleteHost(id: string) {
-    this.db.prepare("DELETE FROM ssh_hosts WHERE id = ?").run(id);
+    this.stmt("DELETE FROM ssh_hosts WHERE id = ?").run(id);
   }
 
   // ---- sessions ----
@@ -587,26 +575,23 @@ export class Db {
   }
 
   listSessions(): SessionRow[] {
-    return this.db
-      .prepare("SELECT * FROM sessions ORDER BY created_at ASC")
+    return this.stmt("SELECT * FROM sessions ORDER BY created_at ASC")
       .all() as unknown as SessionRow[];
   }
 
   listSessionsByProject(projectId: string): SessionRow[] {
-    return this.db
-      .prepare("SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at ASC")
+    return this.stmt("SELECT * FROM sessions WHERE project_id = ? ORDER BY created_at ASC")
       .all(projectId) as unknown as SessionRow[];
   }
 
   getSession(id: string): SessionRow | undefined {
-    return this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as
+    return this.stmt("SELECT * FROM sessions WHERE id = ?").get(id) as
       | SessionRow
       | undefined;
   }
 
   insertSession(row: SessionRow) {
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows)
          VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows)`
       )
@@ -614,36 +599,33 @@ export class Db {
   }
 
   updateSessionState(id: string, state: SessionState, deadReason?: DeadReason) {
-    this.db
-      .prepare("UPDATE sessions SET state = ?, dead_reason = ? WHERE id = ?")
+    this.stmt("UPDATE sessions SET state = ?, dead_reason = ? WHERE id = ?")
       .run(state, deadReason ?? null, id);
   }
 
   renameSession(id: string, name: string) {
-    this.db.prepare("UPDATE sessions SET name = ? WHERE id = ?").run(name, id);
+    this.stmt("UPDATE sessions SET name = ? WHERE id = ?").run(name, id);
   }
 
   touchSession(id: string, ts: number) {
-    this.db.prepare("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(ts, id);
+    this.stmt("UPDATE sessions SET last_active_at = ? WHERE id = ?").run(ts, id);
   }
 
   updateSessionSize(id: string, cols: number, rows: number) {
-    this.db.prepare("UPDATE sessions SET cols = ?, rows = ? WHERE id = ?").run(cols, rows, id);
+    this.stmt("UPDATE sessions SET cols = ?, rows = ? WHERE id = ?").run(cols, rows, id);
   }
 
   deleteSession(id: string) {
-    this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.stmt("DELETE FROM sessions WHERE id = ?").run(id);
   }
 
   /** 启动恢复：上次仍 active 的会话，持久 → unverified，非持久 → dead */
   recoverSessionsOnStartup() {
-    this.db
-      .prepare(
+    this.stmt(
         "UPDATE sessions SET state = 'unverified' WHERE state = 'active' AND durable = 1"
       )
       .run();
-    this.db
-      .prepare(
+    this.stmt(
         "UPDATE sessions SET state = 'dead', dead_reason = 'backend-restart' WHERE state = 'active' AND durable = 0"
       )
       .run();
@@ -652,15 +634,13 @@ export class Db {
   // ---- known hosts (TOFU) ----
 
   getKnownHost(host: string, port: number): string | undefined {
-    const row = this.db
-      .prepare("SELECT fingerprint FROM known_hosts WHERE host = ? AND port = ?")
+    const row = this.stmt("SELECT fingerprint FROM known_hosts WHERE host = ? AND port = ?")
       .get(host, port) as { fingerprint: string } | undefined;
     return row?.fingerprint;
   }
 
   saveKnownHost(host: string, port: number, fingerprint: string) {
-    this.db
-      .prepare(
+    this.stmt(
         "INSERT INTO known_hosts (host, port, fingerprint) VALUES (?, ?, ?) ON CONFLICT(host, port) DO UPDATE SET fingerprint = excluded.fingerprint"
       )
       .run(host, port, fingerprint);
@@ -673,8 +653,7 @@ export class Db {
     port: number,
     username: string
   ): ZellijHostRow | undefined {
-    return this.db
-      .prepare(
+    return this.stmt(
         "SELECT * FROM zellij_hosts WHERE host = ? AND port = ? AND username = ?"
       )
       .get(host, port, username) as ZellijHostRow | undefined;
@@ -710,8 +689,7 @@ export class Db {
       verified_durable: pick("verified_durable"),
       updated_at: Date.now(),
     };
-    this.db
-      .prepare(
+    this.stmt(
         `INSERT INTO zellij_hosts (host, port, username, authorized, installed_version, base_url, verified_durable, updated_at)
          VALUES (@host, @port, @username, @authorized, @installed_version, @base_url, @verified_durable, @updated_at)
          ON CONFLICT(host, port, username) DO UPDATE SET

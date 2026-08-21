@@ -90,6 +90,58 @@ export async function probeGit(
   return execRaw(host, gc.buildGitCommandLine(host.kind, argv, env), opts);
 }
 
+/**
+ * 一次 exec 跑多条 git 命令（见 batchGitCommandLine），返回与入参同序的
+ * 结果与整批的 stderr。SSH 上一条 exec 就是一次 channel 往返，快照类探测
+ * 的往返数直接决定面板延迟。
+ */
+export async function batchGit(
+  host: GitHost,
+  argvs: string[][],
+  env: Record<string, string> = gc.GIT_ENV_RO,
+  opts?: RunOpts
+): Promise<{ results: gc.BatchGitResult[]; stderr: string }> {
+  const res = await execRaw(host, gc.batchGitCommandLine(host.kind, argvs, env), opts);
+  return { results: gc.parseGitBatch(res.stdout, argvs.length), stderr: res.stderr };
+}
+
+type ProbeLike = { code: number | null; stdout: string };
+
+/**
+ * `git --version` 握手成功的缓存（key 是宿主机标识，只缓存成功）。
+ * 握手的意义在区分"没装 git"与"不是仓库"，一台宿主机隔几分钟验一次足够，
+ * 不必每个 repoRoot 都多付一个往返。
+ */
+const versionOkUntil = new Map<string, number>();
+const VERSION_TTL_MS = 5 * 60_000;
+
+function ensureVersion(host: GitHost, res: ProbeLike, stderr: string): void {
+  if (res.code === 0 && /git version/i.test(res.stdout)) {
+    versionOkUntil.set(host.key, Date.now() + VERSION_TTL_MS);
+    return;
+  }
+  throw new WorktreeError(
+    "git-missing",
+    worktreeFailureText("git-missing"),
+    stderr.trim() || res.stdout.trim() || `退出码 ${res.code}`
+  );
+}
+
+function rootFrom(host: GitHost, res: ProbeLike, stderr: string): string {
+  if (res.code !== 0) {
+    throw new WorktreeError(
+      "not-a-repo",
+      worktreeFailureText("not-a-repo"),
+      stderr.trim() || `退出码 ${res.code}`
+    );
+  }
+  const root = normalizeSep(host.kind, res.stdout.trim());
+  if (!root || !isAbsolute(host.kind, root)) {
+    throw new WorktreeError("not-a-repo", "无法解析仓库根", res.stdout.trim());
+  }
+  return root;
+}
+
 /** 跑一条 git 命令，非零退出码翻译成带 reason 的 WorktreeError */
 export async function runGit(
   host: GitHost,
@@ -143,27 +195,12 @@ async function pathsExist(host: GitHost, paths: string[]): Promise<boolean[]> {
  * 仓库"对派生来说与"不是仓库"是同一件事。
  */
 export async function repoRoot(host: GitHost, dir: string, opts?: RunOpts): Promise<string> {
-  const ver = await probeGit(host, gc.versionArgs(host.git), gc.GIT_ENV, opts);
-  if (ver.code !== 0 || !/git version/i.test(ver.stdout)) {
-    throw new WorktreeError(
-      "git-missing",
-      worktreeFailureText("git-missing"),
-      ver.stderr.trim() || ver.stdout.trim() || `退出码 ${ver.code}`
-    );
+  if ((versionOkUntil.get(host.key) ?? 0) < Date.now()) {
+    const ver = await probeGit(host, gc.versionArgs(host.git), gc.GIT_ENV, opts);
+    ensureVersion(host, ver, ver.stderr);
   }
   const res = await probeGit(host, gc.repoRootArgs(host.git, dir), gc.GIT_ENV_RO, opts);
-  if (res.code !== 0) {
-    throw new WorktreeError(
-      "not-a-repo",
-      worktreeFailureText("not-a-repo"),
-      res.stderr.trim() || `退出码 ${res.code}`
-    );
-  }
-  const root = normalizeSep(host.kind, res.stdout.trim());
-  if (!root || !isAbsolute(host.kind, root)) {
-    throw new WorktreeError("not-a-repo", "无法解析仓库根", res.stdout.trim());
-  }
-  return root;
+  return rootFrom(host, res, res.stderr);
 }
 
 export async function listWorktrees(
@@ -210,34 +247,59 @@ export async function describeRepo(
   workingDir: string,
   opts?: RunOpts
 ): Promise<RepoInfo> {
-  const root = await repoRoot(host, workingDir, opts);
-  const entries = await listWorktrees(host, root, opts);
+  // 第一批：握手 + 仓库根 + worktree 列表。后续命令要以主 worktree（列表第一条）
+  // 为基准（headBranch 问的是主 worktree 的 HEAD，不一定等于 workingDir 的），
+  // 所以拆成两批——两个往返，仍远好于原先的 7+。
+  const git = host.git;
+  const first = await batchGit(
+    host,
+    [gc.versionArgs(git), gc.repoRootArgs(git, workingDir), gc.worktreeListArgs(git, workingDir)],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [verRes, rootRes, wtRes] = first.results;
+  ensureVersion(host, verRes, first.stderr);
+  const root = rootFrom(host, rootRes, first.stderr);
+  if (wtRes.code !== 0) {
+    throw new WorktreeError(
+      "worktree-add-failed",
+      worktreeFailureText("worktree-add-failed"),
+      first.stderr.trim() || `退出码 ${wtRes.code}`
+    );
+  }
+  const entries = gc.parseWorktreeList(wtRes.stdout);
   const main = mainWorktreeOf(entries, root);
   const checkedOut = checkedOutMap(entries);
 
-  const remotesRes = await probeGit(host, gc.remoteListArgs(host.git, main), gc.GIT_ENV_RO, opts);
+  const second = await batchGit(
+    host,
+    [
+      gc.remoteListArgs(git, main),
+      gc.branchListArgs(git, main),
+      gc.headBranchArgs(git, main),
+      gc.headShortShaArgs(git, main),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [remotesRes, branchRes, headRes, shaRes] = second.results;
   const remotes = remotesRes.stdout
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const branchRes = await runGit(
-    host,
-    gc.branchListArgs(host.git, main),
-    "worktree-add-failed",
-    gc.GIT_ENV_RO,
-    opts
-  );
+  if (branchRes.code !== 0) {
+    throw new WorktreeError(
+      "worktree-add-failed",
+      worktreeFailureText("worktree-add-failed"),
+      second.stderr.trim() || branchRes.stdout.trim() || `命令退出码 ${branchRes.code}`
+    );
+  }
   const parsed = gc.parseBranchList(branchRes.stdout, remotes);
 
-  const headRes = await probeGit(host, gc.headBranchArgs(host.git, main), gc.GIT_ENV_RO, opts);
   const headRaw = headRes.code === 0 ? headRes.stdout.trim() : "";
   const headBranch = headRaw && headRaw !== "HEAD" ? headRaw : undefined;
-  let headSha: string | undefined;
-  if (!headBranch) {
-    const shaRes = await probeGit(host, gc.headShortShaArgs(host.git, main), gc.GIT_ENV_RO, opts);
-    headSha = shaRes.code === 0 ? shaRes.stdout.trim() || undefined : undefined;
-  }
+  const headSha = !headBranch && shaRes.code === 0 ? shaRes.stdout.trim() || undefined : undefined;
 
   // 远程分支的本地名：剥掉最长匹配的 remote 前缀（origin/feat/x → feat/x）
   const localNameOf = (name: string): string => {
@@ -378,30 +440,83 @@ export async function describeGitChanges(
 }
 
 /**
+ * 同一台宿主机上多棵检出的 +N −M，一次 exec 全拿。
+ * 侧栏轮询按主机分组后调它：同主机 N 个项目从 N 条 SSH channel 压成 1 条。
+ * 任何一条失败只影响自己那格（unavailable），不拖累同批的其他项目。
+ */
+export async function describeGitChangesMany(
+  host: GitHost,
+  dirs: string[],
+  opts?: RunOpts
+): Promise<GitChangeCounts[]> {
+  if (dirs.length === 0) return [];
+  const { results } = await batchGit(
+    host,
+    dirs.map((d) => gc.statusArgs(host.git, d)),
+    gc.GIT_ENV_RO,
+    opts
+  );
+  return results.map((res) => {
+    if (res.code !== 0) return unavailableChanges();
+    const { added, deleted } = gc.countStatusChanges(gc.parseStatusEntries(res.stdout));
+    return { available: true, added, deleted };
+  });
+}
+
+/**
  * 右侧 Git 面板的仓库快照。
  *
  * 跟 describeRepo 一样是探测：环境事实（没装 git、不是仓库）抛 WorktreeError，
- * 由路由写成 200 + available:false。命令必须串行——SSH 一条连接默认
- * MaxSessions=10，面板 9 条再加一个终端 PTY 就会 Channel open failure。
+ * 由路由写成 200 + available:false。
+ *
+ * 全部命令批成**一次** exec：SSH 一条连接默认 MaxSessions=10，逐条串行虽然
+ * 躲开了并发上限，但 100ms RTT 的链路上十来条就是 1.5s+，而这个快照每 5 秒
+ * 轮询一次。批量后既没有并发压力也没有串行延迟。所有命令用 -C workingDir
+ * 而不是先等仓库根：porcelain / rev-parse / log / worktree list 在仓库内
+ * 任何目录下答案都一样（porcelain 路径本就相对仓库根），根从批里那条
+ * rev-parse 拿。
  */
 export async function describeGit(
   host: GitHost,
   workingDir: string,
   opts?: RunOpts
 ): Promise<GitSnapshot> {
-  const root = await repoRoot(host, workingDir, opts);
-  const ro = gc.GIT_ENV_RO;
   const git = host.git;
 
-  const headBranchRes = await probeGit(host, gc.headBranchArgs(git, root), ro, opts);
-  const headShaRes = await probeGit(host, gc.headShortShaArgs(git, root), ro, opts);
-  const upstreamRes = await probeGit(host, gc.upstreamArgs(git, root), ro, opts);
-  const aheadRes = await probeGit(host, gc.aheadArgs(git, root), ro, opts);
-  const behindRes = await probeGit(host, gc.behindArgs(git, root), ro, opts);
-  const statusRes = await probeGit(host, gc.statusArgs(git, root), ro, opts);
-  const remotesRes = await probeGit(host, gc.remoteVerboseArgs(git, root), ro, opts);
-  const logRes = await probeGit(host, gc.logArgs(git, root), ro, opts);
-  const wtRes = await probeGit(host, gc.worktreeListArgs(git, root), ro, opts);
+  const { results, stderr } = await batchGit(
+    host,
+    [
+      gc.versionArgs(git),
+      gc.repoRootArgs(git, workingDir),
+      gc.headBranchArgs(git, workingDir),
+      gc.headShortShaArgs(git, workingDir),
+      gc.upstreamArgs(git, workingDir),
+      gc.aheadArgs(git, workingDir),
+      gc.behindArgs(git, workingDir),
+      gc.statusArgs(git, workingDir),
+      gc.remoteVerboseArgs(git, workingDir),
+      gc.logArgs(git, workingDir),
+      gc.worktreeListArgs(git, workingDir),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [
+    verRes,
+    rootRes,
+    headBranchRes,
+    headShaRes,
+    upstreamRes,
+    aheadRes,
+    behindRes,
+    statusRes,
+    remotesRes,
+    logRes,
+    wtRes,
+  ] = results;
+
+  ensureVersion(host, verRes, stderr);
+  const root = rootFrom(host, rootRes, stderr);
 
   const headRaw = headBranchRes.code === 0 ? headBranchRes.stdout.trim() : "";
   const detached = !headRaw || headRaw === "HEAD";

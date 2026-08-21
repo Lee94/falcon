@@ -108,6 +108,9 @@ export const api = {
   /** 侧栏最后一层的 +N −M。读不到时 available=false，不抛 */
   gitChanges: (projectId: string) =>
     request<GitChangeCounts>("GET", `/api/projects/${projectId}/git/changes`),
+  /** 侧栏轮询的批量版：服务端按宿主机分组，同主机的所有检出一次 exec 拿全 */
+  gitChangesBatch: (projectIds: string[]) =>
+    request<Record<string, GitChangeCounts>>("POST", "/api/git/changes", { ids: projectIds }),
   /** Git 面板里单个文件的 diff。环境事实与命令失败写在 available/reason 里，不抛 */
   gitFileDiff: (
     projectId: string,

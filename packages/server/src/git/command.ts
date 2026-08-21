@@ -324,6 +324,83 @@ export function existsManyCommand(kind: HostKind, paths: string[]): string {
 /** 单批最多探测多少条路径。超出的分片发送，别把命令行撑爆。 */
 export const EXISTS_BATCH = 60;
 
+// ---------------- 批量 git ----------------
+
+/**
+ * 哨兵行前缀。git 的输出不可能撞上它：porcelain / rev-parse / log 的每种
+ * 格式都不会产出这种行；就算路径里被人恶意塞进这个串，status 行有 "XY " 前缀、
+ * diff 行有 +/- 前缀，都不会整行等于哨兵。
+ */
+const BATCH_MARK = "__MOJITO_GIT_";
+
+/**
+ * 把多条 git 命令拼成**一次** exec：每条命令后打一行 `__MOJITO_GIT_<i>_<code>__`
+ * 哨兵，带序号与真实退出码。SSH 上一条 exec 就是一次 channel open/close 往返，
+ * Git 面板一轮快照要跑十来条命令，逐条发就是十来个往返——与 existsManyCommand
+ * 是同一笔账。
+ *
+ * 退出码的取法两边不同但语义一致：POSIX 直接 `$?`；PowerShell 沿用
+ * powerShellScript 的预置哨兵 127（命令没跑起来时 $LASTEXITCODE 不会被赋值，
+ * 见那边的注释），跑起来了就被真实退出码覆盖。
+ */
+export function batchGitCommandLine(
+  kind: HostKind,
+  argvs: string[][],
+  env: Record<string, string> = GIT_ENV
+): string {
+  if (kind === "windows") {
+    const lines = [
+      ...GIT_UNSET.map((k) => `$env:${k} = $null`),
+      ...Object.entries(env).map(([k, v]) => `$env:${k} = ${quotePowerShell(v)}`),
+    ];
+    argvs.forEach((argv, i) => {
+      const [exe, ...rest] = argv;
+      lines.push("$LASTEXITCODE = 127");
+      lines.push([`& ${quotePowerShell(exe!)}`, ...rest.map(quotePowerShell)].join(" "));
+      // [char]10 前导换行：命令输出不带结尾换行时，哨兵不能黏在同一行上
+      lines.push(`Write-Output ([char]10 + '${BATCH_MARK}${i}_' + $LASTEXITCODE + '__')`);
+    });
+    return encodePowerShell(lines.join("; "));
+  }
+  const parts = [
+    `unset ${GIT_UNSET.join(" ")}`,
+    ...Object.entries(env).map(([k, v]) => `export ${k}=${quotePosix(v)}`),
+  ];
+  argvs.forEach((argv, i) => {
+    parts.push(argv.map(quotePosix).join(" "));
+    // 前导 \n 同 PowerShell 侧；$? 在 printf 求值时仍指向上一条命令
+    parts.push(`printf '\\n${BATCH_MARK}${i}_%s__\\n' "$?"`);
+  });
+  return parts.join("; ");
+}
+
+export interface BatchGitResult {
+  /** null = 没找到这条命令的哨兵（整批被掐断 / 环境异常） */
+  code: number | null;
+  stdout: string;
+}
+
+/** 按哨兵切分整批输出。哨兵缺失的命令按 code:null 处理，调用方视同失败。 */
+export function parseGitBatch(stdout: string, count: number): BatchGitResult[] {
+  const out: BatchGitResult[] = Array.from({ length: count }, () => ({
+    code: null,
+    stdout: "",
+  }));
+  const re = new RegExp(`^${BATCH_MARK}(\\d+)_(\\d+)__$`);
+  let cur: string[] = [];
+  for (const line of lines(stdout)) {
+    const m = re.exec(line.trim());
+    if (!m) {
+      cur.push(line);
+      continue;
+    }
+    const i = Number(m[1]);
+    if (i >= 0 && i < count) out[i] = { code: Number(m[2]), stdout: cur.join("\n") };
+    cur = [];
+  }
+  return out;
+}
+
 export function parseExistsMany(stdout: string): boolean[] {
   return lines(stdout)
     .map((l) => l.trim())

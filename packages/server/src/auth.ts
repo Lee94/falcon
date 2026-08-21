@@ -8,14 +8,27 @@ const TOKEN_TTL_MS = 30 * 24 * 3600 * 1000;
 
 export class Auth {
   private tokens = new Map<string, number>();
+  /**
+   * password_hash 的内存缓存（undefined = 还没读过）。每个 HTTP 请求和
+   * WS 建连都要过 required()，不该每次都打一遍 SQLite；唯一的写入方是
+   * setPassword，同步更新缓存即可。
+   */
+  private hashCache: string | null | undefined;
 
   constructor(
     private db: Db,
     private loopback: boolean
   ) {}
 
+  private passwordHash(): string | null {
+    if (this.hashCache === undefined) {
+      this.hashCache = this.db.getSetting("password_hash") ?? null;
+    }
+    return this.hashCache;
+  }
+
   passwordSet(): boolean {
-    return this.db.getSetting("password_hash") != null;
+    return this.passwordHash() != null;
   }
 
   /** 需要认证 = 设置过密码，或对外绑定 */
@@ -24,7 +37,7 @@ export class Auth {
   }
 
   login(password: string): string | null {
-    const stored = this.db.getSetting("password_hash");
+    const stored = this.passwordHash();
     if (!stored || !verifyPassword(password, stored)) return null;
     const token = crypto.randomBytes(32).toString("hex");
     this.tokens.set(token, Date.now() + TOKEN_TTL_MS);
@@ -36,9 +49,11 @@ export class Auth {
   }
 
   setPassword(next: string, current?: string): boolean {
-    const stored = this.db.getSetting("password_hash");
+    const stored = this.passwordHash();
     if (stored && (!current || !verifyPassword(current, stored))) return false;
-    this.db.setSetting("password_hash", hashPassword(next));
+    const hash = hashPassword(next);
+    this.db.setSetting("password_hash", hash);
+    this.hashCache = hash;
     return true;
   }
 

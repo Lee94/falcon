@@ -6,7 +6,13 @@ import type {
   SessionForeground,
   TermAppearance,
 } from "@mojito/shared";
-import { OscColorGate, isTermAppearance, parseHexRgb } from "@mojito/shared";
+import {
+  OscColorGate,
+  TERM_FRAME_OUTPUT,
+  TERM_FRAME_REPLAY,
+  isTermAppearance,
+  parseHexRgb,
+} from "@mojito/shared";
 import type { Db, ProjectRow, SessionRow, SshHostRow } from "../db.js";
 import { Db as DbStatics } from "../db.js";
 import type { SecretBox } from "../crypto.js";
@@ -32,10 +38,35 @@ import {
   fallbackTermSize,
   parseStoredTermSize,
 } from "./termSize.js";
+import { TermModeTracker } from "./termModes.js";
 
 export interface Viewer {
+  /** 控制类消息（state / reconnecting / error），JSON 文本帧 */
   send(msg: ServerMessage): void;
+  /**
+   * 终端数据帧（TERM_FRAME_*，二进制）。返回 false 表示对端发送缓冲
+   * 已堆积到阈值、本帧被丢弃——数据都在 RingBuffer 里，调用方据此把
+   * Viewer 标记为落后，等 drained() 后用 replay 重新同步。
+   */
+  sendBytes(frame: Uint8Array): boolean;
+  /** 发送缓冲已排空到可以重新同步 */
+  drained(): boolean;
 }
+
+/** 终端数据帧：1 字节类型 + UTF-8 载荷，广播前只序列化一次 */
+function encodeTermFrame(kind: number, data: string): Buffer {
+  const frame = Buffer.allocUnsafe(1 + Buffer.byteLength(data));
+  frame[0] = kind;
+  frame.write(data, 1, "utf8");
+  return frame;
+}
+
+/**
+ * 输出合并窗口。node-pty / ssh channel 在高吞吐下（`yes`、构建日志）每秒
+ * 触发上千次 onData，逐 chunk 一帧就是每秒上千次序列化 + syscall。窗口内
+ * 攒起来一次发，把帧率封在 ~60/s，肉眼无感知延迟。
+ */
+const OUTPUT_FLUSH_MS = 16;
 
 /** 某个项目的宿主机能否提供持久会话 */
 export interface DurableState {
@@ -55,6 +86,9 @@ interface LiveEntry {
   backend: Backend | null;
   buffer: RingBuffer;
   viewers: Set<Viewer>;
+  /** 合并窗口内攒下的输出（已过 OSC 网关、已进 RingBuffer），flush 时一次广播 */
+  pendingOut: string[];
+  flushTimer: NodeJS.Timeout | null;
   /** null = 从未被 Viewer 量过；接回时不能用 80×24 顶替 */
   cols: number | null;
   rows: number | null;
@@ -65,6 +99,8 @@ interface LiveEntry {
   background?: string;
   foreground?: string;
   osc: OscColorGate;
+  /** 输出流里的 VT 模式跟踪，replay 时重建（模式序列早被 RingBuffer 挤掉了） */
+  modes: TermModeTracker;
 }
 
 interface ReconnectState {
@@ -105,6 +141,8 @@ export class SessionManager {
   private entries = new Map<string, LiveEntry>();
   private reconnects = new Map<string, ReconnectState>();
   private lastTouch = new Map<string, number>();
+  /** resize 落库的合并窗口：拖窗时前端逐帧发 resize，不能每次都同步 fsync */
+  private sizeFlush = new Map<string, NodeJS.Timeout>();
 
   readonly forwards: ForwardManager;
 
@@ -301,8 +339,9 @@ export class SessionManager {
           else queuedReplies.push(reply);
         }
         if (!visible) return;
+        entry.modes.track(visible);
         entry.buffer.append(visible);
-        this.broadcast(entry, { type: "output", data: visible });
+        this.queueOutput(entry, visible);
       },
       onExit: () => this.handleBackendExit(entry.sessionId),
     };
@@ -496,6 +535,7 @@ export class SessionManager {
 
     if (entry) {
       this.broadcast(entry, { type: "state", state: "dead", deadReason: "exited" });
+      this.dropOutput(entry);
       this.entries.delete(sessionId);
     }
     this.db.deleteSession(sessionId);
@@ -505,6 +545,8 @@ export class SessionManager {
   deleteDead(sessionId: string): boolean {
     const row = this.db.getSession(sessionId);
     if (!row || row.state !== "dead") return false;
+    const entry = this.entries.get(sessionId);
+    if (entry) this.dropOutput(entry);
     this.entries.delete(sessionId);
     this.db.deleteSession(sessionId);
     return true;
@@ -542,6 +584,9 @@ export class SessionManager {
     }
 
     const alreadyLive = !!entry.backend;
+    // 先冲掉旧 Viewer 的合并窗口再加入新人：pending 里的数据已经进了
+    // RingBuffer，不冲的话新 Viewer 会在 replay 之后再收到重复段
+    this.flushOutput(entry);
     entry.viewers.add(viewer);
 
     const gate = decideViewerAttach({
@@ -564,13 +609,14 @@ export class SessionManager {
       return;
     }
 
-    viewer.send({ type: "replay", data: entry.buffer.snapshot() });
+    this.sendReplay(entry, viewer);
     viewer.send({ type: "state", state: "active" });
     this.touch(sessionId, true);
   }
 
   removeViewer(sessionId: string, viewer: Viewer) {
     this.entries.get(sessionId)?.viewers.delete(viewer);
+    this.lagged.delete(viewer);
   }
 
   input(sessionId: string, data: string) {
@@ -582,11 +628,15 @@ export class SessionManager {
   resize(sessionId: string, cols: number, rows: number) {
     const entry = this.entries.get(sessionId);
     if (!entry) return;
+    // 尺寸没变时只跳过落库与 backend.resize，attach 分支必须照走：
+    // decideViewerAttach 的 wait-size 门控靠这条 resize 触发接回，
+    // 而重连的 Viewer 报上来的尺寸很可能与存量一致。
+    const changed = entry.cols !== cols || entry.rows !== rows;
     entry.cols = cols;
     entry.rows = rows;
-    this.db.updateSessionSize(sessionId, cols, rows);
+    if (changed) this.scheduleSizePersist(sessionId);
     if (entry.backend) {
-      entry.backend.resize(cols, rows);
+      if (changed) entry.backend.resize(cols, rows);
       return;
     }
     if (entry.durable && entry.viewers.size > 0 && !entry.terminating) {
@@ -605,6 +655,11 @@ export class SessionManager {
   /**
    * Viewer 报上来的终端深浅。接回已有 Zellij 会话改不了内层 env，
    * 但 OSC 10/11/12 答复跟这份走，主题切换后新启动的查询能拿到新底色。
+   *
+   * 深浅真的翻转且流里见过 DECSET 2031 订阅时，再注入 CSI ?997;1/2 n：
+   * Claude Code 这类 auto 主题程序运行中只认这个通知。Zellij client 自己
+   * 就会订并把通知转发给订阅的 pane（0.44 实测）；没人订阅时绝不能注入，
+   * 这串字节会被前台程序当键盘输入吃掉。
    */
   setAppearance(
     sessionId: string,
@@ -614,12 +669,16 @@ export class SessionManager {
     if (!isTermAppearance(appearance)) return;
     const entry = this.entries.get(sessionId);
     if (!entry) return;
+    const flipped = entry.appearance !== undefined && entry.appearance !== appearance;
     entry.appearance = appearance;
     if (colors?.background && parseHexRgb(colors.background)) {
       entry.background = colors.background;
     }
     if (colors?.foreground && parseHexRgb(colors.foreground)) {
       entry.foreground = colors.foreground;
+    }
+    if (flipped && entry.modes.themeNotify) {
+      entry.backend?.write(appearance === "light" ? "\x1b[?997;2n" : "\x1b[?997;1n");
     }
   }
 
@@ -644,6 +703,8 @@ export class SessionManager {
       backend: null,
       buffer: new RingBuffer(),
       viewers: new Set(),
+      pendingOut: [],
+      flushTimer: null,
       cols: init.cols ?? null,
       rows: init.rows ?? null,
       attaching: null,
@@ -652,6 +713,7 @@ export class SessionManager {
       background: init.background,
       foreground: init.foreground,
       osc: null as unknown as OscColorGate,
+      modes: new TermModeTracker(),
     };
     entry.osc = new OscColorGate(() => ({
       appearance: entry.appearance,
@@ -661,14 +723,71 @@ export class SessionManager {
     return entry;
   }
 
+  /** sendBytes 因背压丢过帧的 Viewer：等它排空后用 replay 整体重同步 */
+  private lagged = new WeakSet<Viewer>();
+
+  private queueOutput(entry: LiveEntry, data: string) {
+    entry.pendingOut.push(data);
+    if (entry.flushTimer) return;
+    entry.flushTimer = setTimeout(() => {
+      entry.flushTimer = null;
+      this.flushOutput(entry);
+    }, OUTPUT_FLUSH_MS);
+  }
+
+  private flushOutput(entry: LiveEntry) {
+    if (entry.flushTimer) {
+      clearTimeout(entry.flushTimer);
+      entry.flushTimer = null;
+    }
+    if (entry.pendingOut.length === 0) return;
+    const data =
+      entry.pendingOut.length === 1 ? entry.pendingOut[0]! : entry.pendingOut.join("");
+    entry.pendingOut = [];
+    // 序列化一次，N 个 Viewer 共享同一个帧——不再是每人一份 JSON.stringify
+    const frame = encodeTermFrame(TERM_FRAME_OUTPUT, data);
+    for (const v of entry.viewers) {
+      if (this.lagged.has(v)) {
+        // 落后的 Viewer 不追增量（那正是它堆积的原因），排空后整体重放对齐
+        if (v.drained()) this.sendReplay(entry, v);
+        continue;
+      }
+      if (!v.sendBytes(frame)) this.lagged.add(v);
+    }
+  }
+
+  private dropOutput(entry: LiveEntry) {
+    if (entry.flushTimer) {
+      clearTimeout(entry.flushTimer);
+      entry.flushTimer = null;
+    }
+    entry.pendingOut = [];
+  }
+
   private broadcast(entry: LiveEntry, msg: ServerMessage) {
+    // 控制消息与输出保持时序：先把合并窗口里的输出冲出去
+    this.flushOutput(entry);
     for (const v of entry.viewers) v.send(msg);
+  }
+
+  private sendReplay(entry: LiveEntry, viewer: Viewer) {
+    // 前端对 replay 帧先 term.reset() 再写入，reset 会清掉全部 VT 模式；
+    // 快照里往往已没有当初的模式序列（4MB 环挤掉了），这里用跟踪到的
+    // 当前模式作前缀重建，否则重连后的 Viewer 永久丢失 mouse tracking
+    // （滚轮失效）和 bracketed paste（多行粘贴被逐行执行）。
+    const payload = entry.modes.prefix() + entry.buffer.snapshot();
+    if (!viewer.sendBytes(encodeTermFrame(TERM_FRAME_REPLAY, payload))) {
+      this.lagged.add(viewer);
+    } else {
+      this.lagged.delete(viewer);
+    }
   }
 
   private markActive(entry: LiveEntry, opts?: { replay?: boolean }): SessionRow {
     this.db.updateSessionState(entry.sessionId, "active");
     if (opts?.replay) {
-      this.broadcast(entry, { type: "replay", data: entry.buffer.snapshot() });
+      this.flushOutput(entry);
+      for (const v of entry.viewers) this.sendReplay(entry, v);
     }
     this.broadcast(entry, { type: "state", state: "active" });
     return this.db.getSession(entry.sessionId)!;
@@ -676,6 +795,12 @@ export class SessionManager {
 
   private markDead(entry: LiveEntry, reason: DeadReason) {
     entry.backend = null;
+    // 先把还没广播的尾巴发出去（shell 的告别输出），再释放
+    this.flushOutput(entry);
+    // dead 会话不可能再回放（addViewer 对 dead 行早退），立刻释放
+    // Scrollback——每个会话最多占 4MB 字节（V8 里最高 8MB 堆）
+    entry.buffer.reset();
+    this.lastTouch.delete(entry.sessionId);
     this.db.updateSessionState(entry.sessionId, "dead", reason);
     this.broadcast(entry, { type: "state", state: "dead", deadReason: reason });
   }
@@ -807,6 +932,25 @@ export class SessionManager {
     };
 
     state.timer = setTimeout(tick, 1000);
+  }
+
+  /**
+   * 500ms 合并窗口内最多落库一次，到点时取 entry 上的最新值，
+   * 所以窗口内的后续变化不丢——只是推迟。进程退出最多丢 500ms 内
+   * 的最后一次尺寸，对 cols/rows 这种数据完全可接受（unref 保证
+   * 不阻塞退出）。
+   */
+  private scheduleSizePersist(sessionId: string) {
+    if (this.sizeFlush.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.sizeFlush.delete(sessionId);
+      const entry = this.entries.get(sessionId);
+      if (entry && entry.cols != null && entry.rows != null) {
+        this.db.updateSessionSize(sessionId, entry.cols, entry.rows);
+      }
+    }, 500);
+    timer.unref?.();
+    this.sizeFlush.set(sessionId, timer);
   }
 
   private touch(sessionId: string, force: boolean) {

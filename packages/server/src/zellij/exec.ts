@@ -23,17 +23,22 @@ export function localKind(): HostKind {
  */
 export const localExec: ExecFn = (commandLine, signal) =>
   new Promise<ExecResult>((resolve) => {
-    let stdout = "";
-    let stderr = "";
+    // 攒 Buffer、结束时一次解码：逐 chunk toString 会切坏跨包的 UTF-8 多字节字符
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    const out = () => ({
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    });
     const proc = spawn(commandLine, {
       shell: true,
       signal,
       windowsHide: true,
     });
-    proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-    proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
-    proc.on("error", (err) => resolve({ code: null, stdout, stderr: String(err) }));
-    proc.on("close", (code) => resolve({ code, stdout, stderr }));
+    proc.stdout?.on("data", (d: Buffer) => stdout.push(d));
+    proc.stderr?.on("data", (d: Buffer) => stderr.push(d));
+    proc.on("error", (err) => resolve({ code: null, stdout: out().stdout, stderr: String(err) }));
+    proc.on("close", (code) => resolve({ code, ...out() }));
   });
 
 /** 本地是否有可用的下载工具 */

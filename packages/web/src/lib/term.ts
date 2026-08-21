@@ -28,6 +28,9 @@ export type TermFontId =
 
 export type TermCursorStyle = "block" | "bar" | "underline";
 
+/** 终端渲染引擎。rio = 实验性的 rioterm(Rust VT 核心编译成 WASM) */
+export type TermEngine = "xterm" | "rio";
+
 export type TermThemeId =
   | "match"
   | "campbell"
@@ -55,6 +58,7 @@ export interface TermPref {
   themeId: TermThemeId;
   cursorStyle: TermCursorStyle;
   cursorBlink: boolean;
+  engine: TermEngine;
 }
 
 export const DEFAULT_TERM_PREF: TermPref = {
@@ -65,6 +69,7 @@ export const DEFAULT_TERM_PREF: TermPref = {
   themeId: "match",
   cursorStyle: "block",
   cursorBlink: true,
+  engine: "xterm",
 };
 
 const FONT_IDS: TermFontId[] = [
@@ -649,5 +654,6 @@ export function sanitizeTermPref(raw: Partial<TermPref>): TermPref {
     themeId,
     cursorStyle,
     cursorBlink: raw.cursorBlink !== false,
+    engine: raw.engine === "rio" ? "rio" : "xterm",
   };
 }

@@ -1,28 +1,49 @@
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
-import { cn } from "@/lib/utils";
+import { cn, pollWhileVisible } from "@/lib/utils";
 import { Login } from "./Login.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightBar } from "./RightBar.js";
 import { GitPanel } from "./GitPanel.js";
 import { ForwardPanel } from "./ForwardPanel.js";
 import { TabBar } from "./TabBar.js";
-import { GitDiffView } from "./GitDiffView.js";
 import { SessionOverview } from "./SessionOverview.js";
 import { ProjectEmpty } from "./ProjectEmpty.js";
-import { PendingPane, TerminalView } from "./TerminalView.js";
-import { ProjectForm } from "./ProjectForm.js";
-import { HostForm } from "./HostForm.js";
-import { WorktreeForm } from "./WorktreeForm.js";
-import { SettingsModal } from "./SettingsModal.js";
-import { CommandPalette } from "./CommandPalette.js";
 import { RenameDialog } from "./RenameDialog.js";
-import { ZellijInstallModal } from "./ZellijInstallModal.js";
 import { Menu } from "./common/Menu.js";
 import { ConfirmDialog } from "./common/ConfirmDialog.js";
 import { Toaster } from "@/components/ui/sonner";
+
+// 浮层与重组件按需加载：首屏（登录页 / 总览）不需要 xterm、cmdk、表单和
+// 设置页，切出去能把入口 chunk 砍掉一半以上。都是本地静态资源，首次打开
+// 时的加载只有几毫秒，fallback 给 null 就够了。
+const TerminalView = lazy(() =>
+  import("./TerminalView.js").then((m) => ({ default: m.TerminalView }))
+);
+const PendingPane = lazy(() =>
+  import("./TerminalView.js").then((m) => ({ default: m.PendingPane }))
+);
+const GitDiffView = lazy(() =>
+  import("./GitDiffView.js").then((m) => ({ default: m.GitDiffView }))
+);
+const ProjectForm = lazy(() =>
+  import("./ProjectForm.js").then((m) => ({ default: m.ProjectForm }))
+);
+const HostForm = lazy(() => import("./HostForm.js").then((m) => ({ default: m.HostForm })));
+const WorktreeForm = lazy(() =>
+  import("./WorktreeForm.js").then((m) => ({ default: m.WorktreeForm }))
+);
+const SettingsModal = lazy(() =>
+  import("./SettingsModal.js").then((m) => ({ default: m.SettingsModal }))
+);
+const CommandPalette = lazy(() =>
+  import("./CommandPalette.js").then((m) => ({ default: m.CommandPalette }))
+);
+const ZellijInstallModal = lazy(() =>
+  import("./ZellijInstallModal.js").then((m) => ({ default: m.ZellijInstallModal }))
+);
 
 /** ⌘T / ＋：侧栏选中的项目优先，否则当前会话所属项目，再否则第一个项目 */
 function currentProjectId(): string | null {
@@ -50,6 +71,8 @@ export function App() {
   const hostForm = useApp((s) => s.hostForm);
   const worktreeFor = useApp((s) => s.worktreeFor);
   const settingsOpen = useApp((s) => s.settingsOpen);
+  const installOpen = useApp((s) => s.install != null);
+  const paletteOpen = useApp((s) => s.paletteOpen);
   const init = useApp((s) => s.init);
   const refreshSessions = useApp((s) => s.refreshSessions);
   const closeProjectForm = useApp((s) => s.closeProjectForm);
@@ -74,15 +97,19 @@ export function App() {
 
   useEffect(() => {
     if (!authed) return;
-    const timer = setInterval(() => void refreshSessions(), 5000);
-    return () => clearInterval(timer);
+    // 页面不可见时停掉轮询，回到前台立刻补一次
+    return pollWhileVisible(() => void refreshSessions(), 5000);
   }, [authed, refreshSessions]);
 
   // 窄屏临时收起侧栏；这是设计里唯一的"响应式"，不做移动端交互。
   // 只影响显示，不改用户偏好——显式开合会解除它。
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 1023px)");
-    const apply = () => useApp.getState().setSidebarAutoHidden(mq.matches);
+    const apply = () => {
+      // resize 每帧都进来，值没变就别打扰 store（130 个 selector 会全跑一遍）
+      const s = useApp.getState();
+      if (s.sidebarAutoHidden !== mq.matches) s.setSidebarAutoHidden(mq.matches);
+    };
     apply();
     mq.addEventListener("change", apply);
     // resize 兜底：部分环境（远程桌面、devtools 的设备模拟）不补发 mq 的 change
@@ -183,23 +210,27 @@ export function App() {
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           <TabBar />
           <div className="relative min-h-0 flex-1">
-            <div
-              className={cn(
-                "absolute inset-0 flex flex-col",
-                active.kind === "overview" ? "" : "invisible"
-              )}
-            >
-              <SessionOverview />
-            </div>
+            {/* 总览没有终端那种"卸载=重连"的成本，切走直接卸载，省掉后台轮询时的整表重渲 */}
+            {active.kind === "overview" && (
+              <div className="absolute inset-0 flex flex-col">
+                <SessionOverview />
+              </div>
+            )}
             {active.kind === "project" && <ProjectEmpty />}
             {/* 差异视图没有 xterm 那种重连成本，切走即卸载，切回来重拉一份新的 */}
             {active.kind === "diff" && (
               <div className="absolute inset-0 flex flex-col">
-                <GitDiffView />
+                <Suspense fallback={null}>
+                  <GitDiffView />
+                </Suspense>
               </div>
             )}
-            {/* 非活动 pane 只是 visibility:hidden，绝不卸载——
-                xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪 */}
+            {/* 非活动 pane 只是移出视口，绝不卸载——
+                xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪。
+                用 translate 而不是 visibility:hidden：xterm 靠 IntersectionObserver
+                的几何相交判定是否暂停渲染，hidden 不改几何、后台 tab 会照常全速刷
+                DOM；移出视口（被根节点 overflow-hidden 裁掉）才会真正暂停，切回时
+                xterm 自动做一次全量刷新。transform 不影响布局尺寸，fit 测量不受影响 */}
             {tabs.map((id) => {
               const isActive = active.kind === "terminal" && active.sessionId === id;
               return (
@@ -207,14 +238,16 @@ export function App() {
                   key={id}
                   className={cn(
                     "absolute inset-0 flex flex-col",
-                    isActive ? "" : "invisible"
+                    isActive ? "" : "invisible -translate-x-[200%]"
                   )}
                 >
-                  {isPendingId(id) ? (
-                    <PendingPane pendingId={id} />
-                  ) : (
-                    <TerminalView sessionId={id} visible={isActive} />
-                  )}
+                  <Suspense fallback={null}>
+                    {isPendingId(id) ? (
+                      <PendingPane pendingId={id} />
+                    ) : (
+                      <TerminalView sessionId={id} visible={isActive} />
+                    )}
+                  </Suspense>
                 </div>
               );
             })}
@@ -226,30 +259,32 @@ export function App() {
       </div>
 
       <Menu />
-      {settingsOpen && <SettingsModal />}
       <ConfirmDialog />
       <RenameDialog />
-      <ZellijInstallModal />
-      {projectForm && (
-        <ProjectForm
-          key={`project-${projectForm.edit?.id ?? "new"}`}
-          existing={projectForm.edit}
-          preset={projectForm.preset}
-          onClose={closeProjectForm}
-        />
-      )}
-      {hostForm && (
-        <HostForm
-          key={`host-${hostForm.edit?.id ?? "new"}`}
-          existing={hostForm.edit}
-          onSaved={hostForm.onSaved}
-          onClose={closeHostForm}
-        />
-      )}
-      {worktreeFor && (
-        <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
-      )}
-      <CommandPalette />
+      <Suspense fallback={null}>
+        {settingsOpen && <SettingsModal />}
+        {installOpen && <ZellijInstallModal />}
+        {projectForm && (
+          <ProjectForm
+            key={`project-${projectForm.edit?.id ?? "new"}`}
+            existing={projectForm.edit}
+            preset={projectForm.preset}
+            onClose={closeProjectForm}
+          />
+        )}
+        {hostForm && (
+          <HostForm
+            key={`host-${hostForm.edit?.id ?? "new"}`}
+            existing={hostForm.edit}
+            onSaved={hostForm.onSaved}
+            onClose={closeHostForm}
+          />
+        )}
+        {worktreeFor && (
+          <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
+        )}
+        {paletteOpen && <CommandPalette />}
+      </Suspense>
       <Toaster />
     </div>
   );

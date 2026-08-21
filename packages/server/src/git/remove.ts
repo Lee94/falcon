@@ -179,13 +179,17 @@ function windowsRemoveCommand(dir: string): string {
 /**
  * 本地删除**不走 shell**。
  *
- * fs.rmSync 不跟随符号链接与 junction（走 lstat + unlink）、没有通配展开、
+ * fs.rm 不跟随符号链接与 junction（走 lstat + unlink）、没有通配展开、
  * 没有退出码传播问题，长路径也比 rd 好。只有 SSH 才需要命令行那一套——
  * 这一条把 Windows 本地的整类风险直接归零。
  *
+ * 必须用异步版：worktree 里常有 node_modules（十万级文件），同步递归删除会把
+ * 事件循环冻住几秒到几十秒，期间所有终端 WS 与 HTTP 全部停摆——而且每小时的
+ * 存档清扫会在用户无感知时触发这条路径。
+ *
  * maxRetries 是给 Windows 的：杀毒软件 / 索引服务偶尔会短暂持有句柄。
  */
-function removeLocalDir(dir: string): string | null {
+async function removeLocalDir(dir: string): Promise<string | null> {
   try {
     const st = fs.lstatSync(dir);
     if (st.isSymbolicLink()) return `目标是符号链接，未删除：${dir}`;
@@ -194,7 +198,7 @@ function removeLocalDir(dir: string): string | null {
     return null; // 已经不在了
   }
   try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
   } catch (err) {
     return `删除目录失败：${dir}（${(err as Error).message}）`;
   }
@@ -275,7 +279,7 @@ export async function cleanupWorktree(
   if (stillThere) {
     usedFallback = true;
     const problem =
-      host.key === "local" ? removeLocalDir(dir) : await removeRemoteDir(host, dir);
+      host.key === "local" ? await removeLocalDir(dir) : await removeRemoteDir(host, dir);
     if (problem) warn.push(problem);
   }
 

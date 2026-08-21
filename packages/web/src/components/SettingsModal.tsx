@@ -20,6 +20,7 @@ import {
   resolveTermTheme,
   termFontStack,
   type TermCursorStyle,
+  type TermEngine,
   type TermFontId,
   type TermPref,
   type TermThemeId,
@@ -300,6 +301,22 @@ function AppearancePane() {
           <TermPreview />
         </div>
       </SettingSection>
+      <SettingSection
+        title={t("settings.experimentalTitle")}
+        description={t("settings.experimentalHint")}
+      >
+        <SettingRow label={t("settings.termEngine")} hint={t("settings.termEngineHint")}>
+          <Segmented<TermEngine>
+            label={t("settings.termEngine")}
+            value={term.engine}
+            onChange={(engine) => setTerm({ engine })}
+            options={[
+              { value: "xterm", label: "xterm.js" },
+              { value: "rio", label: "Rio (WASM)" },
+            ]}
+          />
+        </SettingRow>
+      </SettingSection>
     </>
   );
 }
@@ -382,7 +399,8 @@ function termIsDefault(term: TermPref): boolean {
     term.lineHeight === DEFAULT_TERM_PREF.lineHeight &&
     term.themeId === DEFAULT_TERM_PREF.themeId &&
     term.cursorStyle === DEFAULT_TERM_PREF.cursorStyle &&
-    term.cursorBlink === DEFAULT_TERM_PREF.cursorBlink
+    term.cursorBlink === DEFAULT_TERM_PREF.cursorBlink &&
+    term.engine === DEFAULT_TERM_PREF.engine
   );
 }
 

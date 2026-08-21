@@ -260,6 +260,42 @@ let closeKillsToastShown = false;
 let changesInFlight = false;
 
 /**
+ * 轮询刷新的常态是"没变"。无条件 set 新引用会让所有订阅该字段的组件
+ * （每个 TerminalView、TabBar、整棵侧栏）每个周期白白重渲一遍，
+ * 这里比对内容，真有变化才换引用。只适用于平坦对象（API 返回的 JSON 行）。
+ */
+function shallowEqualFlat(a: object, b: object): boolean {
+  if (a === b) return true;
+  const ka = Object.keys(a) as (keyof typeof a)[];
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.is(a[k], (b as typeof a)[k])) return false;
+  }
+  return true;
+}
+
+function sameFlatArray<T extends object>(a: readonly T[], b: readonly T[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!shallowEqualFlat(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function sameFlatRecord<T extends object>(
+  a: Record<string, T>,
+  b: Record<string, T>
+): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) {
+    if (!(k in b) || !shallowEqualFlat(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+/**
  * 侧栏最后一层的文件计数。附属项目也要问——它们各有自己的工作区。
  * 探不到就沿用上次的数：SSH 抖一下不该让徽标闪没。
  */
@@ -274,24 +310,27 @@ async function refreshChanges(
     // 存档的附属项目不轮询：默认看不见，也不该为它跑 git status（SSH 上还是往返）
     const targets = projects.filter((p) => p.workingDir && !p.worktree?.archivedAt);
     const next: Record<string, ProjectChanges> = {};
-    await Promise.all(
-      targets.map(async (p) => {
-        try {
-          const c = await api.gitChanges(p.id);
-          if (c.available && (c.added > 0 || c.deleted > 0)) {
-            next[p.id] = { added: c.added, deleted: c.deleted };
-          }
-        } catch {
-          const prev = get().changes[p.id];
-          if (prev) next[p.id] = prev;
+    try {
+      // 一个批量请求代替 N 个并发 GET：服务端按宿主机分组，同主机一次 exec 拿全
+      const counts = await api.gitChangesBatch(targets.map((p) => p.id));
+      for (const p of targets) {
+        const c = counts[p.id];
+        if (c?.available && (c.added > 0 || c.deleted > 0)) {
+          next[p.id] = { added: c.added, deleted: c.deleted };
         }
-      })
-    );
+      }
+    } catch {
+      // 整个请求失败（网络抖动）沿用上次的数：徽标不该因为一次超时闪没
+      for (const p of targets) {
+        const prev = get().changes[p.id];
+        if (prev) next[p.id] = prev;
+      }
+    }
     const alive = new Set(projects.map((p) => p.id));
     for (const id of Object.keys(next)) {
       if (!alive.has(id)) delete next[id];
     }
-    set({ changes: next });
+    if (!sameFlatRecord(get().changes, next)) set({ changes: next });
   } finally {
     changesInFlight = false;
   }
@@ -324,7 +363,7 @@ async function refreshHeads(
   for (const id of Object.keys(next)) {
     if (!alive.has(id)) delete next[id];
   }
-  set({ heads: next });
+  if (!sameFlatRecord(get().heads, next)) set({ heads: next });
 }
 
 /**
@@ -487,6 +526,8 @@ interface AppState {
   handleApiError(err: unknown): void;
 }
 
+let lastPersistedWorkspace = "";
+
 export const useApp = create<AppState>((set, get) => {
   /** tabs / active / 侧栏状态写回 localStorage —— 刷新页面后工作台原样恢复 */
   const persist = () => {
@@ -517,8 +558,12 @@ export const useApp = create<AppState>((set, get) => {
       selectedProjectId,
       showArchived,
     };
+    const json = JSON.stringify(payload);
+    // localStorage.setItem 是同步阻塞 API，轮询周期里内容多半没变，别白写
+    if (json === lastPersistedWorkspace) return;
+    lastPersistedWorkspace = json;
     try {
-      localStorage.setItem(WORKSPACE_KEY, JSON.stringify(payload));
+      localStorage.setItem(WORKSPACE_KEY, json);
     } catch {
       // 隐私模式下写不进去，不影响本次会话
     }
@@ -647,6 +692,9 @@ export const useApp = create<AppState>((set, get) => {
     async refreshSessions() {
       try {
         const sessions = await api.listSessions();
+        // 内容没变就整个跳过：sessions 没变则 alive 集合没变，tabs/active/selected
+        // 在上一轮已经收敛，不会有需要清理的残留
+        if (sameFlatArray(get().sessions, sessions)) return;
         const alive = new Set(sessions.map((s) => s.id));
         // dead 会话仍在列表里，因此恢复出来的 tab 不会被静默丢弃，只是显示为已丢失
         const keep = (id: string) => isPendingId(id) || alive.has(id);

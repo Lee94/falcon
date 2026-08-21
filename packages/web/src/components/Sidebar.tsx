@@ -19,7 +19,7 @@ import { useApp, type ProjectChanges, type ProjectHead } from "../store.js";
 import { hostBarFromSsh, sshBar, sshConn } from "../lib/hostColor.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
-import { cn } from "@/lib/utils";
+import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { menuAnchor, openContextMenu } from "./common/Menu.js";
 import { ThemeButton } from "./common/ThemeToggle.js";
@@ -158,8 +158,7 @@ export function Sidebar() {
 
   useEffect(() => {
     void refreshChanges();
-    const timer = setInterval(() => void refreshChanges(), CHANGES_POLL_MS);
-    return () => clearInterval(timer);
+    return pollWhileVisible(() => void refreshChanges(), CHANGES_POLL_MS);
   }, [refreshChanges]);
 
   return (

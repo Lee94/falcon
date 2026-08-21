@@ -4,7 +4,7 @@ import { GitBranch, RefreshCw } from "lucide-react";
 import type { GitFileChange, GitSnapshot, GitUnavailableReason } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp, selectFocusProjectId } from "../store.js";
-import { cn } from "@/lib/utils";
+import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 const POLL_MS = 5000;
@@ -50,10 +50,10 @@ export function GitPanel() {
       }
     };
     void load();
-    const timer = setInterval(() => void load(), POLL_MS);
+    const stop = pollWhileVisible(() => void load(), POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
     };
   }, [projectId, tick]);
 

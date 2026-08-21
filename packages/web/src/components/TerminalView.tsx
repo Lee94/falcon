@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
 import type { DeadReason, ServerMessage, SessionState } from "@mojito/shared";
-import { PASTE_IMAGE_MAX_BYTES } from "@mojito/shared";
+import { PASTE_IMAGE_MAX_BYTES, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { connLabel } from "../lib/hostColor.js";
@@ -15,10 +11,9 @@ import {
   NERD_FONT_FAMILY,
   resolveTermTheme,
   termColorHint,
-  termFontStack,
 } from "../lib/term.js";
-import { isUsableTermSize } from "../lib/termFit.js";
-import { osc52ClipboardText, writeBrowserClipboard } from "../lib/osc52.js";
+import { createTermAdapter, type TermAdapter } from "../lib/termAdapter.js";
+import { writeBrowserClipboard } from "../lib/osc52.js";
 import { imageFromClipboard, imagesFromDrop, quoteForPrompt } from "../lib/pasteImage.js";
 import { useActions } from "../lib/useActions.js";
 import { cn } from "@/lib/utils";
@@ -45,8 +40,7 @@ export function TerminalView({
 }) {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const termRef = useRef<TermAdapter | null>(null);
   const applySizeRef = useRef<(rebuild?: boolean) => boolean>(() => false);
   const sendAppearanceRef = useRef<() => void>(() => undefined);
   const refreshSessions = useApp((s) => s.refreshSessions);
@@ -57,6 +51,9 @@ export function TerminalView({
   const toast = useApp((s) => s.toast);
   const theme = useApp((s) => s.theme);
   const termPref = useApp((s) => s.term);
+  // 引擎切换必须整体重建（终端实例 + WS 重连拿服务端 replay 恢复内容），
+  // 单独订阅避免其余偏好变化也触发重建
+  const termEngine = useApp((s) => s.term.engine);
   const actions = useActions();
   const palette = resolveTermTheme(termPref.themeId, theme);
 
@@ -101,61 +98,60 @@ export function TerminalView({
 
   useEffect(() => {
     const pref = useApp.getState().term;
-    const term = new Terminal({
-      fontFamily: termFontStack(pref),
-      fontSize: pref.fontSize,
-      lineHeight: pref.lineHeight,
-      cursorStyle: pref.cursorStyle,
-      cursorBlink: pref.cursorBlink,
-      // 与服务端 zellij scroll_buffer_size（10000）匹配：replay 重建时前端
-      // 缓冲会被整体替换，设得比远端小就白白丢历史
-      scrollback: 10000,
-      // unicode.activeVersion 是 proposed API；不打开会在设 11 时直接抛
-      allowProposedApi: true,
-      // 默认 Unicode 6 把大量 CJK / emoji / 图标当成 1 格，后一个字符会盖掉右半
-      rescaleOverlappingGlyphs: true,
-      // 这个 effect 不跟偏好重建（重建 = 断 WS + 重放历史），初值直接读，
-      // 之后的切换交给下面那个 effect 就地改 options
-      theme: resolveTermTheme(pref.themeId, useApp.getState().theme),
-    });
-    // 全局快捷键命中时把按键交给应用层：xterm 不处理，事件照样冒泡到 window。
-    // Ctrl+C / Ctrl+R / Ctrl+W / Esc 不在快捷键表里，因此行为与原生终端一致。
-    term.attachCustomKeyEventHandler(
-      (e) => e.type !== "keydown" || matchCommand(e) === null
-    );
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = "11";
-    // Claude Code / vim 选中即复制走 OSC 52；xterm.js 默认丢弃。只写不读。
-    term.parser.registerOscHandler(52, (data) => {
-      const text = osc52ClipboardText(data);
-      if (text !== undefined) void writeBrowserClipboard(text).catch(() => undefined);
-      return true;
-    });
-    term.open(containerRef.current!);
-    termRef.current = term;
-    fitRef.current = fit;
-
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = `${proto}://${location.host}/ws/sessions/${sessionId}`;
     /** 卸载后这条 socket 的收尾事件不许再改状态——否则自己关掉的连接会被当成"后端断了" */
     let disposed = false;
     /** 还没量出真实格子之前禁止把 80×24 默认值发给 PTY */
     let measured = false;
     /** 断线自动重连：connect() 每次换新 socket，旧 socket 迟到的事件按 ws !== sock 丢弃 */
-    let ws: WebSocket;
+    let ws: WebSocket | null = null;
     let retries = 0;
     let retryTimer: number | null = null;
 
-    const sendResize = () => {
-      if (!measured || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    // 引擎、初始外观都在这里定死；之后的外观切换交给下面那个 effect 走
+    // applyAppearance（xterm 就地改 options，rio 内部重建），不断 WS
+    const adapter = createTermAdapter({
+      pref,
+      theme: resolveTermTheme(pref.themeId, useApp.getState().theme),
+      // 与服务端 zellij scroll_buffer_size（10000）匹配：replay 重建时前端
+      // 缓冲会被整体替换，设得比远端小就白白丢历史
+      scrollback: 10000,
+      hooks: {
+        onData: (data) => {
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input", data }));
+          }
+        },
+        onResize: () => sendResize(),
+        // rio 引擎异步就绪（wasm 首次加载 / 换肤重建）；好了再补量一次尺寸
+        onReady: () => {
+          applySize();
+        },
+        isGlobalKey: (e) => matchCommand(e) !== null,
+        onEngineError: (message) =>
+          useApp.getState().toast({ kind: "warning", title: t("term.engineFailed"), body: message }),
+      },
+    });
+    adapter.open(containerRef.current!);
+    termRef.current = adapter;
+
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const wsUrl = `${proto}://${location.host}/ws/sessions/${sessionId}`;
+
+    /** 这条 socket 上最后一次发出的尺寸；拖窗时 ResizeObserver 逐帧触发，
+     *  格子数没变就不打扰服务端（服务端每条 resize 都有落库逻辑）。
+     *  换新 socket 必须强发一次：服务端拿它当持久会话的懒惰接回信号。 */
+    let sentCols = -1;
+    let sentRows = -1;
+    const sendResize = (force = false) => {
+      if (!measured || ws?.readyState !== WebSocket.OPEN) return;
+      if (!force && adapter.cols === sentCols && adapter.rows === sentRows) return;
+      sentCols = adapter.cols;
+      sentRows = adapter.rows;
+      ws.send(JSON.stringify({ type: "resize", cols: adapter.cols, rows: adapter.rows }));
     };
 
     const sendAppearance = () => {
-      if (ws.readyState !== WebSocket.OPEN) return;
+      if (ws?.readyState !== WebSocket.OPEN) return;
       const { theme: ui, term: pref } = useApp.getState();
       ws.send(JSON.stringify({ type: "appearance", ...termColorHint(pref.themeId, ui) }));
     };
@@ -163,20 +159,8 @@ export function TerminalView({
 
     const applySize = (rebuild = false): boolean => {
       if (disposed) return false;
-      const box = containerRef.current;
-      if (rebuild && term.rows > 0) {
-        rebuildTermAtlas(term, useApp.getState().term.fontSize);
-      }
-      const proposed = fit.proposeDimensions();
-      if (
-        !isUsableTermSize(proposed, {
-          width: box?.offsetWidth ?? 0,
-          height: box?.offsetHeight ?? 0,
-        })
-      ) {
-        return false;
-      }
-      fit.fit();
+      if (rebuild) adapter.refreshMetrics();
+      if (!adapter.fit()) return false;
       measured = true;
       sendResize();
       return true;
@@ -197,6 +181,9 @@ export function TerminalView({
 
     const connect = () => {
       const sock = new WebSocket(wsUrl);
+      // 终端数据走二进制帧（1 字节类型 + UTF-8 载荷），Uint8Array 直接喂
+      // xterm.write，绕开 JSON 转义与解析；控制消息仍是 JSON 文本帧
+      sock.binaryType = "arraybuffer";
       ws = sock;
       sock.onopen = () => {
         if (disposed || ws !== sock) return;
@@ -204,7 +191,7 @@ export function TerminalView({
         retries = 0;
         setView((v) => ({ ...v, wsClosed: false, wsRetry: 0 }));
         // resize 顺带触发服务端对持久会话的懒惰接回（ensureAttached）
-        sendResize();
+        sendResize(true);
         sendAppearance();
         // 断开期间错过的会话状态变化不等 5s 轮询，立刻补一次
         if (reconnected) void refreshSessions();
@@ -223,6 +210,18 @@ export function TerminalView({
       };
       sock.onmessage = (ev) => {
         if (disposed || ws !== sock) return;
+        if (ev.data instanceof ArrayBuffer) {
+          const frame = new Uint8Array(ev.data);
+          if (frame.length < 1) return;
+          if (frame[0] === TERM_FRAME_REPLAY) {
+            // 回放是整份快照，必须清掉断线前的 VT 状态再写
+            adapter.reset();
+          } else if (frame[0] !== TERM_FRAME_OUTPUT) {
+            return;
+          }
+          adapter.write(frame.subarray(1));
+          return;
+        }
         let msg: ServerMessage;
         try {
           msg = JSON.parse(ev.data as string);
@@ -230,14 +229,6 @@ export function TerminalView({
           return;
         }
         switch (msg.type) {
-          case "replay":
-            // dump-screen 是整屏快照，必须清掉断线前的 VT 状态再写
-            term.reset();
-            term.write(msg.data);
-            break;
-          case "output":
-            term.write(msg.data);
-            break;
           case "state":
             setView((v) => ({
               ...v,
@@ -262,6 +253,7 @@ export function TerminalView({
     const retryNow = () => {
       if (
         disposed ||
+        !ws ||
         ws.readyState === WebSocket.OPEN ||
         ws.readyState === WebSocket.CONNECTING
       ) {
@@ -285,22 +277,22 @@ export function TerminalView({
 
     connect();
 
-    term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "input", data }));
-      }
-    });
-    term.onResize(() => sendResize());
-
+    // rAF 合并：applySize 里的 proposeDimensions/fit 会强制同步回流，
+    // 拖窗时逐帧 × N 个 tab 会叠出可感知的掉帧
+    let sizeRaf: number | null = null;
     const ro = new ResizeObserver(() => {
-      applySize();
+      if (sizeRaf != null) return;
+      sizeRaf = requestAnimationFrame(() => {
+        sizeRaf = null;
+        applySize();
+      });
     });
     ro.observe(containerRef.current!);
 
     // 终端自己的选区（没被 TUI 鼠标协议吃掉时）松手即复制，对齐 iTerm。
     const host = containerRef.current!;
     const copySelection = () => {
-      const text = term.getSelection();
+      const text = adapter.getSelection();
       if (text) void writeBrowserClipboard(text).catch(() => undefined);
     };
     host.addEventListener("mouseup", copySelection);
@@ -363,16 +355,16 @@ export function TerminalView({
       host.removeEventListener("paste", onPasteCapture, true);
       host.removeEventListener("dragover", onDragOver);
       host.removeEventListener("drop", onDrop);
+      if (sizeRaf != null) cancelAnimationFrame(sizeRaf);
       ro.disconnect();
-      ws.close();
-      term.dispose();
+      ws?.close();
+      adapter.dispose();
       termRef.current = null;
       applySizeRef.current = () => false;
       sendAppearanceRef.current = () => undefined;
-      // fit addon 跟着 term 一起作废，留着会让 visible 分支对已 dispose 的实例调 fit()
-      fitRef.current = null;
     };
-  }, [sessionId, refreshSessions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, refreshSessions, termEngine]);
 
   useEffect(() => {
     if (visible) {
@@ -381,16 +373,12 @@ export function TerminalView({
     }
   }, [visible]);
 
-  // 换字体 / 字号 / 主题时就地改 options，已经打印出来的内容一并重绘，不断 WS
+  // 换字体 / 字号 / 主题时热改外观（xterm 就地改 options 并重绘已打印内容；
+  // rio 在适配器内部重建实例），不断 WS。没变化时适配器自行去重
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.fontFamily = termFontStack(termPref);
-    term.options.fontSize = termPref.fontSize;
-    term.options.lineHeight = termPref.lineHeight;
-    term.options.cursorStyle = termPref.cursorStyle;
-    term.options.cursorBlink = termPref.cursorBlink;
-    term.options.theme = palette;
+    term.applyAppearance(termPref, palette);
     // 改 options 本身会重测格子；不要在这里 nudge 字号——刚 open 时 Viewport 可能还没挂
     if (visible) applySizeRef.current();
     sendAppearanceRef.current();
@@ -583,17 +571,6 @@ export function TerminalView({
       </div>
     </>
   );
-}
-
-/** 同值改 fontFamily 不会清 atlas；字号微扰一次即可。renderer 没就绪时 swallow。 */
-function rebuildTermAtlas(term: Terminal, fontSize: number): void {
-  term.options.fontSize = fontSize + 0.01;
-  term.options.fontSize = fontSize;
-  try {
-    term.refresh(0, term.rows - 1);
-  } catch {
-    // Viewport 有时还没挂上 dimensions
-  }
 }
 
 /** 会话还没建起来时占住 tab：立刻有反馈，而不是等 REST 返回才出现 */

@@ -42,7 +42,7 @@ import type { Auth } from "./auth.js";
 import { ForwardConflictError } from "./sessions/forward.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
-import { gitHostFor } from "./git/host.js";
+import { gitHostFor, hostKeyOf } from "./git/host.js";
 import { withRepoLock } from "./git/lock.js";
 import {
   canonKey,
@@ -60,6 +60,7 @@ import {
   addWorktree,
   describeGit,
   describeGitChanges,
+  describeGitChangesMany,
   describeGitDiff,
   describeRepo,
   pathExists,
@@ -681,6 +682,49 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     } catch {
       return unavailableChanges();
     }
+  });
+
+  /**
+   * 侧栏轮询的批量版：一次拿全部项目的 +N −M。
+   *
+   * 按宿主机分组，同主机的所有检出批成一次 exec——N 个项目逐个 GET 就是
+   * N 条 SSH channel，每 8 秒一轮，弱网上会持续排队。主机之间并行互不拖累；
+   * 任何一台失败只让它自己的项目 unavailable，形状与单个端点一致。
+   */
+  app.post("/api/git/changes", async (req, reply): Promise<Record<string, GitChangeCounts> | void> => {
+    const ids = (req.body as { ids?: unknown } | null)?.ids;
+    if (!Array.isArray(ids) || ids.length > 500 || ids.some((x) => typeof x !== "string")) {
+      return reply.code(400).send({ error: "ids 必须是字符串数组" });
+    }
+    const out: Record<string, GitChangeCounts> = {};
+    const groups = new Map<string, ProjectRow[]>();
+    for (const id of ids as string[]) {
+      const row = db.getProject(id);
+      if (!row) continue; // 轮询窗口里刚被删掉的项目，跳过即可
+      if (!row.working_dir) {
+        out[id] = unavailableChanges();
+        continue;
+      }
+      const key = hostKeyOf(row);
+      groups.get(key)?.push(row) ?? groups.set(key, [row]);
+    }
+    await Promise.all(
+      [...groups.values()].map(async (rows) => {
+        try {
+          const host = await gitHostFor(rows[0]!, manager);
+          const counts = await describeGitChangesMany(
+            host,
+            rows.map((r) => r.working_dir!)
+          );
+          rows.forEach((r, i) => {
+            out[r.id] = counts[i] ?? unavailableChanges();
+          });
+        } catch {
+          for (const r of rows) out[r.id] = unavailableChanges();
+        }
+      })
+    );
+    return out;
   });
 
   /**

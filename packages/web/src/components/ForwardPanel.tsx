@@ -4,7 +4,7 @@ import { ArrowLeftRight, Plus, Trash2 } from "lucide-react";
 import type { ForwardKind, ForwardState, PortForward } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp, selectFocusProjectId } from "../store.js";
-import { cn } from "@/lib/utils";
+import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Segmented } from "./common/Field.js";
@@ -53,10 +53,10 @@ export function ForwardPanel() {
       }
     };
     void load();
-    const timer = setInterval(() => void load(), POLL_MS);
+    const stop = pollWhileVisible(() => void load(), POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stop();
     };
   }, [projectId, project?.type, tick]);
 

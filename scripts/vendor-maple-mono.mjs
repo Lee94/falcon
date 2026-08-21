@@ -23,9 +23,11 @@ const VERSION = "v7.9";
 const ZIP_URL = `https://github.com/subframe7536/maple-font/releases/download/${VERSION}/MapleMonoNL-NF-CN-unhinted.zip`;
 const OFL_URL = `https://raw.githubusercontent.com/subframe7536/maple-font/${VERSION}/OFL.txt`;
 
+// 只要 Regular：Bold 由浏览器合成（等宽字体的合成粗体不改变字符步进），
+// 省一份 6.3MB 的下载。Regular 本身也不直接进页面——vendor 完还要跑
+// scripts/subset-maple-mono.mjs 切成 Latin / CJK 两片，CSS 引用的是那两片。
 const WANTED = [
   { match: /MapleMonoNL-NF-CN-Regular\.ttf$/i, out: "MapleMonoNL-NF-CN-Regular.woff2" },
-  { match: /MapleMonoNL-NF-CN-Bold\.ttf$/i, out: "MapleMonoNL-NF-CN-Bold.woff2" },
 ];
 
 async function download(url, dest) {
@@ -77,6 +79,10 @@ async function main() {
       console.log(`  ${kb} KB`);
     }
     console.log(`已写入 ${OUT_DIR}`);
+    console.log("切子集");
+    execFileSync("node", [path.join(ROOT, "scripts/subset-maple-mono.mjs")], {
+      stdio: "inherit",
+    });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

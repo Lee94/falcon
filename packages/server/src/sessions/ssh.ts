@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { Client, type ClientChannel, type TcpConnectionDetails } from "ssh2";
 import type { ProjectRow } from "../db.js";
 import type { Db } from "../db.js";
@@ -244,15 +245,21 @@ export class SshLink extends EventEmitter {
         new Promise<ExecResult>((resolve, reject) => {
           client.exec(commandLine, (err, stream) => {
             if (err) return reject(err);
-            let stdout = "";
-            let stderr = "";
+            // 攒 Buffer、close 时一次解码：逐 chunk toString 会把跨包的
+            // UTF-8 多字节序列切成 U+FFFD（中文路径 / dump-screen 必踩）
+            const stdout: Buffer[] = [];
+            const stderr: Buffer[] = [];
             const abort = () => stream.close();
             signal?.addEventListener("abort", abort, { once: true });
-            stream.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-            stream.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+            stream.on("data", (d: Buffer) => stdout.push(d));
+            stream.stderr.on("data", (d: Buffer) => stderr.push(d));
             stream.on("close", (code: number | null) => {
               signal?.removeEventListener("abort", abort);
-              resolve({ code, stdout, stderr });
+              resolve({
+                code,
+                stdout: Buffer.concat(stdout).toString("utf8"),
+                stderr: Buffer.concat(stderr).toString("utf8"),
+              });
             });
           });
         })
@@ -264,11 +271,17 @@ export class SshLink extends EventEmitter {
     return new Promise<ExecResult>((resolve, reject) => {
       client.exec(commandLine, (err, stream) => {
         if (err) return reject(err);
-        let stdout = "";
-        let stderr = "";
-        stream.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-        stream.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
-        stream.on("close", (code: number | null) => resolve({ code, stdout, stderr }));
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        stream.on("data", (d: Buffer) => stdout.push(d));
+        stream.stderr.on("data", (d: Buffer) => stderr.push(d));
+        stream.on("close", (code: number | null) =>
+          resolve({
+            code,
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+          })
+        );
         stream.end(input);
       });
     });
@@ -644,8 +657,13 @@ export class SshLink extends EventEmitter {
       }
     });
 
-    stream.on("data", (d: Buffer) => cb.onData(d.toString("utf8")));
-    stream.stderr.on("data", (d: Buffer) => cb.onData(d.toString("utf8")));
+    // 流式安全解码：TCP 分包会把 UTF-8 多字节字符切开，直接 toString 会产生
+    // U+FFFD——终端里大量中文输出时表现为偶发乱码。StringDecoder 把跨包的
+    // 半个字符留到下一个 chunk。
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
+    stream.on("data", (d: Buffer) => cb.onData(outDecoder.write(d)));
+    stream.stderr.on("data", (d: Buffer) => cb.onData(errDecoder.write(d)));
     stream.on("close", () => cb.onExit());
 
     const backend: Backend = {

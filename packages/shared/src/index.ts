@@ -528,10 +528,18 @@ export type ClientMessage =
       foreground?: string;
     };
 
+/**
+ * 终端数据走二进制帧，不走 JSON：1 字节类型头 + UTF-8 载荷。
+ * JSON 文本帧对 ANSI 密集数据的转义（\x1b → ）会把线上字节膨胀
+ * 1.3~1.7 倍，且每帧多一次全量转义扫描；二进制帧还让前端能把 Uint8Array
+ * 直接喂给 xterm.write，省一轮 UTF-8 → UTF-16 → UTF-8。
+ */
+export const TERM_FRAME_OUTPUT = 0x01;
+/** 回放帧：前端先 reset 再写入 */
+export const TERM_FRAME_REPLAY = 0x02;
+
 export type ServerMessage =
-  /** 附着成功后首先回放的历史输出 */
-  | { type: "replay"; data: string }
-  | { type: "output"; data: string }
+  /** 控制类消息仍走 JSON 文本帧；output / replay 见 TERM_FRAME_* 二进制帧 */
   | { type: "state"; state: SessionState; deadReason?: DeadReason }
   /** SSH 断线自动重连中 */
   | { type: "reconnecting"; attempt: number }

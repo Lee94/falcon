@@ -99,11 +99,26 @@ export function registerWs(
     }
     const { id } = req.params as { id: string };
 
+    // 背压阈值：ws 的发送队列没有上限，慢客户端（手机弱网开着 `cat 大文件`）
+    // 会让 bufferedAmount 无限堆积直至进程 OOM。超过高水位就丢输出帧——
+    // 数据都在服务端 Scrollback 里，manager 会在低水位后用 replay 重新同步。
+    const BACKPRESSURE_HIGH = 4 * 1024 * 1024;
+    const BACKPRESSURE_LOW = 256 * 1024;
+
     const viewer: Viewer = {
       send(msg: ServerMessage) {
         if (socket.readyState === socket.OPEN) {
           socket.send(JSON.stringify(msg));
         }
+      },
+      sendBytes(frame: Uint8Array) {
+        if (socket.readyState !== socket.OPEN) return true; // socket 已死，无所谓丢不丢
+        if (socket.bufferedAmount > BACKPRESSURE_HIGH) return false;
+        socket.send(frame, { binary: true });
+        return true;
+      },
+      drained() {
+        return socket.readyState === socket.OPEN && socket.bufferedAmount < BACKPRESSURE_LOW;
       },
     };
 

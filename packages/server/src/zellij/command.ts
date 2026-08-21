@@ -91,7 +91,7 @@ pane_frames false
 simplified_ui true
 session_serialization false
 scroll_buffer_size ${SCROLL_BUFFER}
-mouse_mode false
+mouse_mode true
 show_startup_tips false
 show_release_notes false
 keybinds clear-defaults=true {
@@ -144,10 +144,13 @@ function sessionOptions(
     "false",
     "--scroll-buffer-size",
     String(SCROLL_BUFFER),
-    // 关掉鼠标上报：开着的话 xterm.js 会把滚轮事件转发给 Zellij，
-    // 用户滚的就是远端那份受限 buffer 而不是前端 scrollback
-    "--mouse-mode",
-    "false",
+    // 鼠标上报**只能**由 config.kdl 的 mouse_mode true 开启，这里绝不能传
+    // --mouse-mode。实测（0.44.3）：CLI 传 --mouse-mode true 时客户端反而
+    // 永远不发 ?1000h（与传 false 同效，疑似上游 bug）；不传时每次 attach
+    // 都按 config 开启。开鼠标的动机：Zellij 常驻备用屏（无 scrollback），
+    // xterm.js 对"备用屏 + 无鼠标上报"的滚轮会降级成 ↑/↓ 方向键——在 shell
+    // 提示符下滚轮变成翻命令历史。开启后滚轮交给 Zellij 滚它自己的 scroll
+    // buffer（上限 SCROLL_BUFFER 行）。代价：前端本地选区需按住 Shift 拖拽。
     // 这两条是实测踩出来的：Zellij 默认会先显示一屏 "Zellij Tip #N" 启动提示，
     // 挡在 shell 前面等用户按键关闭。表现为会话建成了、hasSession 为真、
     // 但屏幕空白且输入毫无反应——不关掉整个终端就是废的。

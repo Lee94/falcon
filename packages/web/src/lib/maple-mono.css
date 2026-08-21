@@ -1,24 +1,39 @@
 /*
- * Maple Mono NL NF CN（v7.9）
+ * Maple Mono NL NF CN（v7.9），经 scripts/subset-maple-mono.mjs 子集化
  * https://github.com/subframe7536/maple-font
  * SIL Open Font License 1.1 — 全文见同目录 OFL.txt
  *
  * NL = 无连字（终端对齐不被 fi / != 吃掉）
- * NF = Nerd Font 图标
+ * NF = Nerd Font 图标（已从子集中剔除：termFontStack 里 Symbols Nerd Font Mono
+ *      排在 Maple 前面，Maple 内嵌的宽形图标从未被用到）
  * CN = 简体中文
+ *
+ * 按 unicode-range 分两片：拉丁片 ~40KB 首屏就位；CJK 片 ~5MB 只有终端真的
+ * 输出中文时浏览器才拉，且到达后 TerminalView 的 fonts loadingdone 监听会
+ * 重建 atlas。range 必须与 subset-maple-mono.mjs 里的表保持一致。
+ *
+ * 不带 Bold face：终端 ANSI 粗体由浏览器从 Regular 合成，等宽字体的合成粗体
+ * 不改变字符步进，省下再一份 6.3MB 的下载。
  */
 @font-face {
   font-family: "Maple Mono NL NF CN";
-  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-Regular.woff2") format("woff2");
+  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-Latin.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0000-024F, U+0250-02AF, U+0370-03FF, U+0400-04FF, U+1E00-1EFF,
+    U+2000-206F, U+2070-209F, U+20A0-20CF, U+2100-218F, U+2190-21FF, U+2200-22FF,
+    U+2300-23FF, U+2400-243F, U+2500-257F, U+2580-259F, U+25A0-25FF, U+2600-27BF,
+    U+2B00-2BFF, U+FB00-FB4F, U+FFFD;
 }
 
 @font-face {
   font-family: "Maple Mono NL NF CN";
-  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-Bold.woff2") format("woff2");
-  font-weight: 700;
+  src: url("../assets/fonts/maple-mono/MapleMonoNL-NF-CN-CJK.woff2") format("woff2");
+  font-weight: 400;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+2E80-303F, U+3040-30FF, U+3100-312F, U+31C0-31EF, U+3200-33FF,
+    U+3400-4DBF, U+4E00-9FFF, U+F900-FAFF, U+FE10-FE1F, U+FE30-FE4F, U+FF00-FFEF,
+    U+20000-2FA1F;
 }

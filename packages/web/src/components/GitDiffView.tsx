@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Columns2, FileDiff, RefreshCw, Rows3 } from "lucide-react";
 import type { GitFileDiff } from "@mojito/shared";
@@ -226,16 +226,100 @@ function bPathOf(line: string): string {
   return at >= 0 ? rest.slice(at + 3) : rest;
 }
 
+// ---------------- 行窗口虚拟化 ----------------
+//
+// DIFF_CAP（500KB）的 diff 有上万行，全量渲染是几万个 DOM 节点、秒级卡死。
+// 行高按 kind 固定（正文 = leading-5.5 = 22px），用前缀偏移 + 二分把渲染
+// 限制在视口附近。小 diff 不启用，行为与虚拟化之前完全一致（含 sticky 文件头）。
+
+const VIRTUAL_THRESHOLD = 500;
+const OVERSCAN = 24;
+/** 首屏渲染的行数（还没收到 scroll 事件时），得盖住最高的屏幕 */
+const INITIAL_ROWS = 140;
+
+function rowHeight(kind: string): number {
+  // 22 = 正文行（leading-5.5）；file/hunk/note 在此基础上加各自的 padding 与边框
+  return kind === "file" ? 36 : kind === "hunk" ? 30 : kind === "note" ? 26 : 22;
+}
+
+/** offsets 里最后一个 <= y 的下标 */
+function offsetIndex(offsets: number[], y: number): number {
+  let lo = 0;
+  let hi = offsets.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsets[mid]! <= y) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+function useRowWindow(rows: readonly { kind: string }[]) {
+  const enabled = rows.length > VIRTUAL_THRESHOLD;
+  const offsets = useMemo(() => {
+    if (!enabled) return null;
+    const arr: number[] = new Array(rows.length + 1);
+    let acc = 0;
+    for (let i = 0; i < rows.length; i++) {
+      arr[i] = acc;
+      acc += rowHeight(rows[i]!.kind);
+    }
+    arr[rows.length] = acc;
+    return arr;
+  }, [rows, enabled]);
+
+  const [win, setWin] = useState({ start: 0, end: INITIAL_ROWS });
+  useEffect(() => {
+    setWin({ start: 0, end: INITIAL_ROWS });
+  }, [rows]);
+
+  if (!enabled || !offsets) {
+    return { start: 0, end: rows.length, topPad: 0, bottomPad: 0, update: () => undefined };
+  }
+  const start = Math.min(win.start, rows.length);
+  const end = Math.min(win.end, rows.length);
+  return {
+    start,
+    end,
+    topPad: offsets[start]!,
+    bottomPad: offsets[rows.length]! - offsets[end]!,
+    update: (el: HTMLElement) => {
+      const nextStart = Math.max(0, offsetIndex(offsets, el.scrollTop) - OVERSCAN);
+      const nextEnd = Math.min(
+        rows.length,
+        offsetIndex(offsets, el.scrollTop + el.clientHeight) + 1 + OVERSCAN
+      );
+      setWin((w) => (w.start === nextStart && w.end === nextEnd ? w : { start: nextStart, end: nextEnd }));
+    },
+  };
+}
+
+function PadRow({ height, colSpan }: { height: number; colSpan: number }) {
+  if (height <= 0) return null;
+  return (
+    <tr aria-hidden>
+      <td colSpan={colSpan} style={{ height, padding: 0 }} />
+    </tr>
+  );
+}
+
 function DiffTable({ text }: { text: string }) {
-  const rows = parseDiff(text);
-  // 单文件段时不重复画文件名条——header 里已经有了；重命名等多段 diff 才需要分隔
-  const fileCount = rows.filter((r) => r.kind === "file").length;
-  const shown = fileCount > 1 ? rows : rows.filter((r) => r.kind !== "file");
+  // 解析结果跟着 text 走：切视图模式 / 父组件重渲不该重新解析上万行
+  const shown = useMemo(() => {
+    const rows = parseDiff(text);
+    // 单文件段时不重复画文件名条——header 里已经有了；重命名等多段 diff 才需要分隔
+    const fileCount = rows.filter((r) => r.kind === "file").length;
+    return fileCount > 1 ? rows : rows.filter((r) => r.kind !== "file");
+  }, [text]);
+  const win = useRowWindow(shown);
 
   return (
+    <div className="h-full overflow-auto" onScroll={(e) => win.update(e.currentTarget)}>
     <table className="w-full border-separate border-spacing-0 font-mono text-xs leading-5.5">
       <tbody>
-        {shown.map((row, i) => {
+        <PadRow height={win.topPad} colSpan={3} />
+        {shown.slice(win.start, win.end).map((row, offset) => {
+          const i = win.start + offset;
           if (row.kind === "file") {
             return (
               <tr key={i}>
@@ -301,8 +385,10 @@ function DiffTable({ text }: { text: string }) {
             </tr>
           );
         })}
+        <PadRow height={win.bottomPad} colSpan={3} />
       </tbody>
     </table>
+    </div>
   );
 }
 
@@ -368,47 +454,61 @@ function SideCells({ line }: { line: SideLine | null }) {
       : line?.kind === "add"
         ? "bg-success/10"
         : undefined;
+  // 行号栏横向滚动时要盖住滑到底下的代码，底色必须不透明：
+  // 先铺 bg-background，再用 ::before 叠半透明色调
   const gutterTone =
     line?.kind === "del"
-      ? "text-destructive bg-destructive/10"
+      ? "text-destructive before:bg-destructive/10"
       : line?.kind === "add"
-        ? "text-success bg-success/10"
+        ? "text-success before:bg-success/10"
         : "text-muted-foreground/60";
   return (
     <>
-      <td className={cn("w-10 min-w-10 pr-2 text-right align-top tabular-nums select-none", gutterTone)}>
-        {line?.no ?? ""}
-      </td>
       <td
         className={cn(
-          "w-[calc(50%-2.5rem)] pr-3 pl-1.5 align-top break-words whitespace-pre-wrap",
-          tone,
-          !line && "bg-muted/40"
+          "sticky left-0 w-10 min-w-10 bg-background pr-2 text-right align-top tabular-nums select-none before:absolute before:inset-0",
+          gutterTone
         )}
       >
-        {line?.text ?? ""}
+        {line?.no ?? ""}
+      </td>
+      <td className={cn("w-full pr-3 pl-1.5 align-top whitespace-pre", tone, !line && "bg-muted/40")}>
+        {/* 空行也得占满一行高，否则该行在本栏塌缩，两栏行对不齐 */}
+        {line?.text || " "}
       </td>
     </>
   );
 }
 
-function SplitDiffTable({ text }: { text: string }) {
-  const rows = toSplitRows(parseDiff(text));
-  const fileCount = rows.filter((r) => r.kind === "file").length;
-  const shown = fileCount > 1 ? rows : rows.filter((r) => r.kind !== "file");
-
+/** 单栏内容：占位行（file/hunk/note）两栏都画一份，保证行高一致、上下对齐 */
+function SidePane({
+  rows,
+  side,
+  start,
+  topPad,
+  bottomPad,
+}: {
+  rows: SplitRow[];
+  side: "left" | "right";
+  /** 窗口首行在全量行里的下标，用作稳定 key */
+  start: number;
+  topPad: number;
+  bottomPad: number;
+}) {
   return (
-    <table className="w-full table-fixed border-separate border-spacing-0 font-mono text-xs leading-5.5">
+    <table className="w-max min-w-full border-separate border-spacing-0 font-mono text-xs leading-5.5">
       <tbody>
-        {shown.map((row, i) => {
+        <PadRow height={topPad} colSpan={2} />
+        {rows.map((row, offset) => {
+          const i = start + offset;
           if (row.kind === "file") {
             return (
               <tr key={i}>
                 <td
-                  colSpan={4}
-                  className="sticky top-0 border-y bg-muted px-3 py-1.5 font-medium text-foreground"
+                  colSpan={2}
+                  className="sticky top-0 z-10 border-y bg-muted px-3 py-1.5 font-medium whitespace-pre text-foreground"
                 >
-                  {row.label}
+                  <span className="sticky left-3 inline-block">{row.label}</span>
                 </td>
               </tr>
             );
@@ -416,8 +516,11 @@ function SplitDiffTable({ text }: { text: string }) {
           if (row.kind === "hunk") {
             return (
               <tr key={i}>
-                <td colSpan={4} className="bg-accent/40 px-3 py-1 text-muted-foreground select-none">
-                  {row.text}
+                <td
+                  colSpan={2}
+                  className="bg-accent/40 px-3 py-1 whitespace-pre text-muted-foreground select-none"
+                >
+                  <span className="sticky left-3 inline-block">{row.text}</span>
                 </td>
               </tr>
             );
@@ -425,20 +528,83 @@ function SplitDiffTable({ text }: { text: string }) {
           if (row.kind === "note") {
             return (
               <tr key={i}>
-                <td colSpan={4} className="px-3 py-0.5 text-muted-foreground italic select-none">
-                  {row.text}
+                <td
+                  colSpan={2}
+                  className="px-3 py-0.5 whitespace-pre text-muted-foreground italic select-none"
+                >
+                  <span className="sticky left-3 inline-block">{row.text}</span>
                 </td>
               </tr>
             );
           }
           return (
             <tr key={i}>
-              <SideCells line={row.left} />
-              <SideCells line={row.right} />
+              <SideCells line={side === "left" ? row.left : row.right} />
             </tr>
           );
         })}
+        <PadRow height={bottomPad} colSpan={2} />
       </tbody>
     </table>
+  );
+}
+
+function SplitDiffTable({ text }: { text: string }) {
+  const shown = useMemo(() => {
+    const rows = toSplitRows(parseDiff(text));
+    const fileCount = rows.filter((r) => r.kind === "file").length;
+    return fileCount > 1 ? rows : rows.filter((r) => r.kind !== "file");
+  }, [text]);
+  const win = useRowWindow(shown);
+  const windowed = shown.slice(win.start, win.end);
+
+  const leftRef = useRef<HTMLDivElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const lockSide = useRef<"left" | "right" | null>(null);
+  const lockTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(lockTimer.current), []);
+
+  // 双向同步滚动：谁先动谁做主，对侧短时间内的 scroll 事件当回声忽略——
+  // 两栏内容宽度不同时 clamp 会触发对侧事件，不忽略就会互相拉扯
+  const onScroll = (side: "left" | "right") => (e: UIEvent<HTMLDivElement>) => {
+    if (lockSide.current && lockSide.current !== side) return;
+    lockSide.current = side;
+    window.clearTimeout(lockTimer.current);
+    lockTimer.current = window.setTimeout(() => {
+      lockSide.current = null;
+    }, 120);
+    const to = side === "left" ? rightRef.current : leftRef.current;
+    if (to) {
+      to.scrollTop = e.currentTarget.scrollTop;
+      to.scrollLeft = e.currentTarget.scrollLeft;
+    }
+    win.update(e.currentTarget);
+  };
+
+  return (
+    <div className="flex h-full min-h-0">
+      <div ref={leftRef} className="min-w-0 flex-1 overflow-auto" onScroll={onScroll("left")}>
+        <SidePane
+          rows={windowed}
+          side="left"
+          start={win.start}
+          topPad={win.topPad}
+          bottomPad={win.bottomPad}
+        />
+      </div>
+      <div
+        ref={rightRef}
+        className="min-w-0 flex-1 overflow-auto border-l"
+        onScroll={onScroll("right")}
+      >
+        <SidePane
+          rows={windowed}
+          side="right"
+          start={win.start}
+          topPad={win.topPad}
+          bottomPad={win.bottomPad}
+        />
+      </div>
+    </div>
   );
 }
