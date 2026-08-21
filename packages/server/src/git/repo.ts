@@ -8,9 +8,17 @@
 
 import type {
   GitChangeCounts,
+  GitCommitDetail,
+  GitCommitInput,
   GitFileDiff,
+  GitLogCommit,
+  GitLogPage,
+  GitRefsInfo,
   GitSnapshot,
+  GitSyncResult,
   GitUnavailableReason,
+  GitWorkingChanges,
+  GitWorkingFile,
   GitWorktreeRef,
   RepoBranch,
   RepoInfo,
@@ -559,6 +567,427 @@ export async function describeGit(
     worktrees,
     commits,
   });
+}
+
+// ---------------- History 面板 ----------------
+
+/**
+ * pull / push 的超时。比读操作宽得多——网络慢的时候一次 push 走几十秒是常事，
+ * 但仍必须有：卡住的 git 会让请求永远不返回（见 TIMEOUT_READ 的注释）。
+ */
+export const TIMEOUT_SYNC = 120_000;
+
+/** git 输出给用户看的上限。一次 pull 的输出可以很长，面板上放不下也没人读 */
+const SYNC_OUTPUT_CAP = 4_000;
+
+export function unavailableLog(reason: GitUnavailableReason, detail?: string): GitLogPage {
+  return { available: false, reason, detail, commits: [], hasMore: false };
+}
+
+export function unavailableRefs(reason: GitUnavailableReason, detail?: string): GitRefsInfo {
+  return { available: false, reason, detail, branches: [], authors: [] };
+}
+
+export function unavailableCommit(
+  reason: GitUnavailableReason,
+  detail?: string
+): GitCommitDetail {
+  return {
+    available: false,
+    reason,
+    detail,
+    sha: "",
+    short: "",
+    author: "",
+    authorEmail: "",
+    authoredAt: 0,
+    committer: "",
+    committedAt: 0,
+    parents: [],
+    refs: [],
+    message: "",
+    files: [],
+    fileCount: 0,
+  };
+}
+
+/**
+ * History 列表的一页。
+ *
+ * 与 describeGit 一样批成一次 exec：远程名单是解析 %D 所必需的（要判断
+ * origin/main 是远程分支还是一条叫 "origin/main" 的本地分支），单发一条就是
+ * 白白多一个 SSH 往返，而翻页 / 改筛选都会重跑这个查询。
+ */
+export async function describeGitLog(
+  host: GitHost,
+  workingDir: string,
+  query: gc.LogQuery,
+  opts?: RunOpts
+): Promise<GitLogPage> {
+  const git = host.git;
+  const limit = query.limit ?? gc.LOG_PAGE;
+  const { results, stderr } = await batchGit(
+    host,
+    [
+      gc.versionArgs(git),
+      gc.remoteListArgs(git, workingDir),
+      gc.logPageArgs(git, workingDir, { ...query, limit }),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [verRes, remotesRes, logRes] = results;
+  ensureVersion(host, verRes, stderr);
+  if (logRes.code !== 0) {
+    // 空仓库（还没有任何提交）也走这里：log 在没有 HEAD 时退出码 128。
+    // 那不是错误，是"还没有历史"，所以给一页空的而不是抛 not-a-repo。
+    if (/does not have any commits|bad default revision|unknown revision/i.test(stderr)) {
+      return { available: true, commits: [], hasMore: false };
+    }
+    throw new WorktreeError(
+      "not-a-repo",
+      worktreeFailureText("not-a-repo"),
+      stderr.trim() || `退出码 ${logRes.code}`
+    );
+  }
+
+  const remotes = remotesRes.code === 0 ? remoteNames(remotesRes.stdout) : [];
+  const parsed = gc.parseLogPage(logRes.stdout);
+  const hasMore = parsed.length > limit;
+  const commits: GitLogCommit[] = parsed.slice(0, limit).map((c) => ({
+    sha: c.sha,
+    short: c.short,
+    author: c.author,
+    authorEmail: c.authorEmail,
+    authoredAt: c.authoredAt,
+    subject: c.subject,
+    parents: c.parents,
+    refs: gc.parseRefLabels(c.decoration, remotes),
+  }));
+  return { available: true, commits, hasMore };
+}
+
+/** Branch / User 下拉的候选值。面板挂载时取一次，不参与轮询 */
+export async function describeGitRefs(
+  host: GitHost,
+  workingDir: string,
+  opts?: RunOpts
+): Promise<GitRefsInfo> {
+  const git = host.git;
+  const { results, stderr } = await batchGit(
+    host,
+    [
+      gc.versionArgs(git),
+      gc.remoteListArgs(git, workingDir),
+      gc.branchListArgs(git, workingDir),
+      gc.logAuthorsArgs(git, workingDir),
+      gc.configUserNameArgs(git, workingDir),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [verRes, remotesRes, branchRes, authorRes, meRes] = results;
+  ensureVersion(host, verRes, stderr);
+
+  const remotes = remotesRes.code === 0 ? remoteNames(remotesRes.stdout) : [];
+  const branches =
+    branchRes.code === 0
+      ? gc.parseBranchList(branchRes.stdout, remotes).map((b) => ({
+          name: b.name,
+          remote: b.remote,
+          head: b.head,
+          upstream: b.upstream,
+        }))
+      : [];
+  const authors = authorRes.code === 0 ? gc.rankAuthors(authorRes.stdout) : [];
+  // 没配 user.name 时 git config 退出码 1，那是正常状态不是错误
+  const me = meRes.code === 0 ? meRes.stdout.trim() || undefined : undefined;
+  return { available: true, branches, authors, me };
+}
+
+/** `git remote` 的输出：一行一个远程名 */
+function remoteNames(stdout: string): string[] {
+  return stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+export function unavailableWorking(
+  reason: GitUnavailableReason,
+  detail?: string
+): GitWorkingChanges {
+  return { available: false, reason, detail, files: [], fileCount: 0 };
+}
+
+/**
+ * 「修改」面板：工作区里全部未提交的改动，带增删行数。
+ *
+ * 两轮 exec，第二轮只在有未跟踪文件时才发：
+ * 1. version + 仓库根 + status + numstat(HEAD)；
+ * 2. 每个未跟踪文件一条 `diff --no-index --numstat`。
+ *
+ * 行数与状态**按路径配对**而不是按下标：status 会列出未跟踪文件而 numstat
+ * 不会，两边条数本来就对不上。配不上的记 null（"未知"），不记 0——
+ * "改了但不知道多少行"和"一行没改"在界面上是两回事。
+ */
+export async function describeWorkingChanges(
+  host: GitHost,
+  workingDir: string,
+  opts?: RunOpts
+): Promise<GitWorkingChanges> {
+  const git = host.git;
+  const { results, stderr } = await batchGit(
+    host,
+    [
+      gc.versionArgs(git),
+      gc.repoRootArgs(git, workingDir),
+      gc.statusAllArgs(git, workingDir),
+      gc.workingNumstatArgs(git, workingDir, "HEAD"),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [verRes, rootRes, statusRes, numstatRes] = results;
+  ensureVersion(host, verRes, stderr);
+  const root = rootFrom(host, rootRes, stderr);
+
+  if (statusRes.code !== 0) {
+    throw new WorktreeError(
+      "not-a-repo",
+      worktreeFailureText("not-a-repo"),
+      stderr.trim() || `退出码 ${statusRes.code}`
+    );
+  }
+  const entries = gc.parseStatusEntries(statusRes.stdout);
+
+  // 空仓库没有 HEAD，numstat 会失败；退回与空树比，语义不变
+  let numstat =
+    numstatRes.code === 0 ? gc.parseNumstatMap(numstatRes.stdout) : new Map();
+  if (numstatRes.code !== 0) {
+    const retry = await probeGit(
+      host,
+      gc.workingNumstatArgs(git, root, gc.EMPTY_TREE),
+      gc.GIT_ENV_RO,
+      opts
+    );
+    if (retry.code === 0) numstat = gc.parseNumstatMap(retry.stdout);
+  }
+
+  // 未跟踪文件不在 diff 里，逐个与空文件比，批成一次 exec
+  const untracked = entries.filter((e) => e.index === "?").slice(0, gc.UNTRACKED_NUMSTAT_CAP);
+  if (untracked.length > 0) {
+    const { results: ures } = await batchGit(
+      host,
+      untracked.map((e) => gc.untrackedNumstatArgs(git, root, e.path)),
+      gc.GIT_ENV_RO,
+      opts
+    );
+    ures.forEach((res, i) => {
+      // --no-index 有差异时退出码 1，那是答案不是错误
+      if (res.code !== 0 && res.code !== 1) return;
+      const one = gc.parseNumstatMap(res.stdout);
+      const path = untracked[i]!.path;
+      // 输出里的路径是 git 自己拼的，未必与入参逐字相同（比如 ./ 前缀），
+      // 一条命令只可能有一个结果，直接取它
+      const first = [...one.values()][0];
+      if (first) numstat.set(path, first);
+    });
+  }
+
+  const files: GitWorkingFile[] = entries.map((e) => {
+    const n = numstat.get(e.path);
+    return {
+      path: e.path,
+      origPath: e.origPath,
+      index: e.index,
+      work: e.work,
+      added: n?.added ?? null,
+      deleted: n?.deleted ?? null,
+    };
+  });
+
+  return {
+    available: true,
+    repoName: baseName(host, root),
+    files: files.slice(0, gc.WORKING_FILE_CAP),
+    fileCount: files.length,
+  };
+}
+
+/** 路径最后一段。不用 node:path——后端可能跑在 Windows 上为 Linux 远端算路径 */
+function baseName(host: GitHost, p: string): string {
+  const parts = normalizeSep(host.kind, p).split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
+/**
+ * 选中提交的详情。元数据 / 提交信息 / 改动文件三条命令批成一次 exec——
+ * 用户在列表里上下点，每一下都是一轮往返，SSH 上尤其明显。
+ */
+export async function describeCommit(
+  host: GitHost,
+  workingDir: string,
+  sha: string,
+  opts?: RunOpts
+): Promise<GitCommitDetail> {
+  const git = host.git;
+  const { results, stderr } = await batchGit(
+    host,
+    [
+      gc.versionArgs(git),
+      gc.remoteListArgs(git, workingDir),
+      gc.commitMetaArgs(git, workingDir, sha),
+      gc.commitMessageArgs(git, workingDir, sha),
+      gc.commitFilesArgs(git, workingDir, sha),
+    ],
+    gc.GIT_ENV_RO,
+    opts
+  );
+  const [verRes, remotesRes, metaRes, msgRes, filesRes] = results;
+  ensureVersion(host, verRes, stderr);
+
+  const meta = metaRes.code === 0 ? gc.parseCommitMeta(metaRes.stdout) : null;
+  if (!meta) {
+    // 最常见的是提交在这一侧不存在（面板还停在旧数据上，而分支已经被强推重写）
+    throw new WorktreeError(
+      "not-a-repo",
+      "读不到这条提交",
+      stderr.trim() || `退出码 ${metaRes.code}`
+    );
+  }
+
+  const remotes = remotesRes.code === 0 ? remoteNames(remotesRes.stdout) : [];
+  const files = filesRes.code === 0 ? gc.parseCommitFiles(filesRes.stdout) : [];
+  return {
+    available: true,
+    sha: meta.sha,
+    short: meta.short,
+    author: meta.author,
+    authorEmail: meta.authorEmail,
+    authoredAt: meta.authoredAt,
+    committer: meta.committer,
+    committedAt: meta.committedAt,
+    parents: meta.parents,
+    refs: gc.parseRefLabels(meta.decoration, remotes),
+    // %B 结尾恒带一个换行，去掉它免得详情区多出一行空白
+    message: msgRes.code === 0 ? msgRes.stdout.replace(/\r?\n$/, "") : "",
+    files: files.slice(0, gc.COMMIT_FILE_CAP),
+    fileCount: files.length,
+  };
+}
+
+/** 某条提交里单个文件的 diff。与工作区那份共用 GitFileDiff 形状 */
+export async function describeCommitDiff(
+  host: GitHost,
+  workingDir: string,
+  sha: string,
+  target: { path: string; origPath?: string },
+  opts?: RunOpts
+): Promise<GitFileDiff> {
+  const res = await probeGit(
+    host,
+    gc.commitFileDiffArgs(host.git, workingDir, sha, target.path, target.origPath),
+    gc.GIT_ENV_RO,
+    opts
+  );
+  if (res.code !== 0) throw diffError(res);
+  const { text, truncated } = gc.truncateDiff(res.stdout);
+  return { available: true, diff: text, truncated };
+}
+
+/**
+ * pull / push。
+ *
+ * **失败不抛**：凭据不对、非快进、远端拒绝都是仓库的正常状态，把 git 说的话
+ * 原样回给前端。GIT_ENV（不是 RO）——这两条是写操作，本来就要拿锁；用
+ * GIT_OPTIONAL_LOCKS=0 反而会让 pull 在需要更新 index 时行为古怪。
+ */
+export async function syncGit(
+  host: GitHost,
+  workingDir: string,
+  action: "pull" | "push",
+  opts?: RunOpts
+): Promise<GitSyncResult> {
+  const argv =
+    action === "pull"
+      ? gc.pullArgs(host.git, workingDir)
+      : gc.pushArgs(host.git, workingDir);
+  const res = await probeGit(host, argv, gc.GIT_ENV, {
+    timeoutMs: TIMEOUT_SYNC,
+    ...opts,
+  });
+  // git 把进度写 stderr、结果写 stdout，成功时该看的是后者，失败时是前者；
+  // 两边都空只剩一个退出码时至少说清是哪一步（三级兜底同 runGit）
+  const text = (res.code === 0 ? res.stdout || res.stderr : res.stderr || res.stdout).trim();
+  return {
+    ok: res.code === 0,
+    detail: (text || `git ${action} 退出码 ${res.code}`).slice(0, SYNC_OUTPUT_CAP),
+  };
+}
+
+/**
+ * 提交。与 syncGit 一样，**失败不抛**——没配 user.name、pre-commit 钩子拒绝、
+ * 没有可提交的改动，都是仓库的正常状态，把 git 的原话回给前端。
+ *
+ * 两条路径见 GitCommitInput 的注释。未跟踪文件必须先 add：实测
+ * `git commit -- newfile` 直接报 "pathspec did not match any file(s) known to git"。
+ */
+export async function commitWorking(
+  host: GitHost,
+  workingDir: string,
+  input: GitCommitInput,
+  opts?: RunOpts
+): Promise<GitSyncResult> {
+  const git = host.git;
+  const message = input.message.trim();
+  if (!message) return { ok: false, detail: "提交信息不能为空" };
+
+  const run = (argv: string[]) =>
+    probeGit(host, argv, gc.GIT_ENV, { timeoutMs: TIMEOUT_SYNC, ...opts });
+  const fail = (res: ExecResult, fallback: string): GitSyncResult => ({
+    ok: false,
+    detail: (res.stderr.trim() || res.stdout.trim() || fallback).slice(0, SYNC_OUTPUT_CAP),
+  });
+
+  let commitArgv: string[];
+  if (input.all) {
+    const add = await run(gc.addAllArgs(git, workingDir));
+    if (add.code !== 0) return fail(add, `git add 退出码 ${add.code}`);
+    commitArgv = gc.commitArgs(git, workingDir, message);
+  } else {
+    const paths = (input.paths ?? []).filter(Boolean);
+    if (paths.length === 0) return { ok: false, detail: "没有选中任何文件" };
+    if (gc.pathspecTooLong(paths)) {
+      return {
+        ok: false,
+        detail: "选中的文件太多，路径拼不进一条命令行。改用全选提交，或者分两次提交。",
+      };
+    }
+    // **只** add 未跟踪的那些。已跟踪文件（含删除）pathspec commit 会直接取
+    // 工作区，不需要进 index；对它们多跑一次 add 看着无害，但只要 commit 被
+    // pre-commit 钩子挡下来，用户原本没暂存的改动就凭空变成已暂存了——
+    // 那种"我什么都没做它自己变了"的意外最难排查。多一次 status 换掉它。
+    const st = await probeGit(host, gc.statusAllArgs(git, workingDir), gc.GIT_ENV_RO, opts);
+    if (st.code === 0) {
+      const untracked = new Set(
+        gc.parseStatusEntries(st.stdout).filter((e) => e.index === "?").map((e) => e.path)
+      );
+      const toAdd = paths.filter((p) => untracked.has(p));
+      if (toAdd.length > 0) {
+        const add = await run(gc.addPathsArgs(git, workingDir, toAdd));
+        if (add.code !== 0) return fail(add, `git add 退出码 ${add.code}`);
+      }
+    }
+    commitArgv = gc.commitArgs(git, workingDir, message, paths);
+  }
+
+  const res = await run(commitArgv);
+  if (res.code !== 0) return fail(res, `git commit 退出码 ${res.code}`);
+  return {
+    ok: true,
+    detail: (res.stdout.trim() || res.stderr.trim()).slice(0, SYNC_OUTPUT_CAP),
+  };
 }
 
 /**

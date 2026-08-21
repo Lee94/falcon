@@ -47,17 +47,24 @@ export function GitDiffView() {
   };
 
   const file = target?.file;
+  const commit = target?.commit;
   useEffect(() => {
     setResult(null);
     setError(null);
     if (!target || !file) return;
     let cancelled = false;
-    api
-      .gitFileDiff(target.projectId, {
-        path: file.path,
-        origPath: file.origPath,
-        untracked: file.index === "?",
-      })
+    // 带 commit = History 里点进来的，看的是那一次改动；否则是工作区现状
+    const load = commit
+      ? api.gitCommitDiff(target.projectId, commit.sha, {
+          path: file.path,
+          origPath: file.origPath,
+        })
+      : api.gitFileDiff(target.projectId, {
+          path: file.path,
+          origPath: file.origPath,
+          untracked: file.index === "?",
+        });
+    load
       .then((next) => {
         if (cancelled) return;
         setResult(next);
@@ -74,7 +81,15 @@ export function GitDiffView() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target?.projectId, file?.path, file?.origPath, file?.index, file?.work, tick]);
+  }, [
+    target?.projectId,
+    file?.path,
+    file?.origPath,
+    file?.index,
+    file?.work,
+    commit?.sha,
+    tick,
+  ]);
 
   if (!target || !file) return null;
   const path = file.origPath ? `${file.origPath} → ${file.path}` : file.path;
@@ -89,6 +104,16 @@ export function GitDiffView() {
         <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px text-[11px] text-muted-foreground">
           {statusLabel(file, t)}
         </span>
+        {commit && (
+          // 看的是哪一次提交必须写在标题上：同一个文件在不同提交里的 diff
+          // 长得可以很像，只凭内容分不出来
+          <span
+            className="shrink-0 truncate text-[11px] text-muted-foreground"
+            title={commit.subject}
+          >
+            <span className="font-mono">{commit.short}</span> {commit.subject}
+          </span>
+        )}
         {result?.truncated && (
           <span className="shrink-0 text-[11px] text-warning">{t("git.diffTruncated")}</span>
         )}

@@ -344,6 +344,164 @@ export interface GitFileDiff {
   truncated: boolean;
 }
 
+// ---------------- History 面板 ----------------
+
+/** 提交上挂的 ref 标签。同一条提交可能同时有本地分支、远程分支、标签 */
+export interface GitRefLabel {
+  /** 去掉 refs/heads/ refs/remotes/ refs/tags/ 前缀后的短名 */
+  name: string;
+  kind: "local" | "remote" | "tag";
+  /** HEAD 指向的那条本地分支（%D 里的 `HEAD -> x`） */
+  head?: boolean;
+}
+
+/**
+ * History 列表里的一条提交。
+ *
+ * sha 是**完整**的 40 位：提交图要靠它与 parents 对应，短 sha 在大仓库里
+ * 有撞的可能，而撞一次画出来的线就整个错位。展示用短 sha 走 short 字段。
+ */
+export interface GitLogCommit {
+  sha: string;
+  short: string;
+  author: string;
+  authorEmail: string;
+  /** unix 毫秒 */
+  authoredAt: number;
+  subject: string;
+  /** 完整 sha，按 git 的顺序（第一个是 first parent） */
+  parents: string[];
+  refs: GitRefLabel[];
+}
+
+/** History 列表的一页。环境事实同样不抛 4xx，写在 available / reason 里 */
+export interface GitLogPage {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  commits: GitLogCommit[];
+  /** 还有下一页（服务端多取一条探出来的，不做 count） */
+  hasMore: boolean;
+}
+
+/**
+ * History 的 Branch 筛选项。刻意不复用 RepoBranch——那边的 suggestedDir /
+ * dirOccupied 是派生用的，每次都要多跑一轮路径存在性探测，一个筛选下拉不值这个价。
+ */
+export interface GitBranchRef {
+  /** 短名。本地为 main，远程为 origin/main */
+  name: string;
+  remote: boolean;
+  head: boolean;
+  /** 本地分支跟踪的远程分支（origin/main）；没有跟踪关系时 undefined */
+  upstream?: string;
+}
+
+/** Branch / User 两个筛选下拉的候选值 */
+export interface GitRefsInfo {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  branches: GitBranchRef[];
+  /** 近若干条提交里出现过的作者名，按出现次数降序 */
+  authors: string[];
+  /** 这台机器上 git 配的 user.name，作者下拉里的「我」。没配则 undefined */
+  me?: string;
+}
+
+/**
+ * 「修改」面板里的一个工作区改动文件。
+ *
+ * 比 GitFileChange 多了增删行数：porcelain 只说"改了"，不说改了多少。
+ */
+export interface GitWorkingFile extends GitFileChange {
+  /** 二进制文件、或算不出来时为 null（与 GitCommitFile 同一个约定） */
+  added: number | null;
+  deleted: number | null;
+}
+
+/**
+ * 工作区里全部未提交的改动。基准是 HEAD，暂存与未暂存合在一起看——
+ * 面板不区分暂存区，它回答的是"我这次动了什么"。
+ */
+export interface GitWorkingChanges {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  /** 仓库根目录名，目录树视图拿它当根节点 */
+  repoName?: string;
+  files: GitWorkingFile[];
+  /** 改动总数；files 可能被截断 */
+  fileCount: number;
+}
+
+/** 提交详情里的一个改动文件 */
+export interface GitCommitFile {
+  path: string;
+  /** 重命名 / 复制前的路径 */
+  origPath?: string;
+  /** raw diff 的状态字母：A M D R C T */
+  status: string;
+  /** 二进制文件为 null（numstat 那两列是 `-`） */
+  added: number | null;
+  deleted: number | null;
+}
+
+/**
+ * 选中提交的详情：完整提交信息 + 改动文件。
+ *
+ * 合并提交按 first-parent 取 diff——不加 --diff-merges 的话 `git show` 对合并
+ * 提交一个文件都不输出，面板上看着就像"这次合并什么都没改"。
+ */
+export interface GitCommitDetail {
+  available: boolean;
+  reason?: GitUnavailableReason;
+  detail?: string;
+  sha: string;
+  short: string;
+  author: string;
+  authorEmail: string;
+  authoredAt: number;
+  committer: string;
+  committedAt: number;
+  parents: string[];
+  refs: GitRefLabel[];
+  /** 完整提交信息（含标题行） */
+  message: string;
+  files: GitCommitFile[];
+  /** 改动文件总数；files 可能被截断 */
+  fileCount: number;
+}
+
+/**
+ * 提交请求。
+ *
+ * all 与 paths 是两条不同的实现路径，不是同一件事的两种写法：
+ * - all=true 走 `git add -A` + 无 pathspec 的 commit，命令行长度恒定，
+ *   所以"提交全部改动"不受文件数限制；
+ * - 否则按 pathspec 提交选中的那些，路径要拼进命令行，有长度上限
+ *   （Windows 远端尤其紧，见服务端的 COMMIT_PATHSPEC_BUDGET）。
+ */
+export interface GitCommitInput {
+  message: string;
+  all: boolean;
+  /** all=false 时必填。重命名要同时给新旧两个路径 */
+  paths?: string[];
+}
+
+/**
+ * pull / push 的结果。
+ *
+ * 失败**不抛 4xx**：凭据不对、有冲突、远端拒绝都是仓库的正常状态，
+ * 前端要原样把 git 说的话给用户看，而不是一句"操作失败"。
+ */
+export interface GitSyncResult {
+  ok: boolean;
+  reason?: GitUnavailableReason;
+  /** git 的输出（成功时是 stdout，失败时优先 stderr），已截断到可读长度 */
+  detail: string;
+}
+
 /**
  * 侧栏最后一层用的工作区文件计数。只跑 `status --porcelain`，不跑 numstat。
  *
@@ -599,6 +757,60 @@ export interface FsListing {
   roots: string[];
   entries: FsDirEntry[];
 }
+
+// ---------------- 项目文件浏览 ----------------
+
+/**
+ * 项目工作目录里的一项。
+ *
+ * `path` 是**工作目录相对**、一律以 `/` 分隔的路径——Windows 远端也是这样，
+ * 平台分隔符只在后端拼绝对路径时才出现。前端拿它当 React key 与展开状态的键，
+ * 不需要知道宿主机是什么平台。
+ */
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  /** 指向目录的符号链接算 dir——用户点它期待的是进去 */
+  kind: "file" | "dir";
+}
+
+/** 工作目录下某一层的列表。目录在前、文件在后，各自按名字排 */
+export interface WorkspaceListing {
+  /** 工作目录相对路径；`""` 是工作目录本身 */
+  path: string;
+  entries: WorkspaceEntry[];
+  /** 条目数超过 WORKSPACE_LIST_CAP，只给了前面一批（node_modules 这种） */
+  truncated: boolean;
+}
+
+/** 一层目录最多列多少条。超过就截断——几万条目的列表画出来也没人看 */
+export const WORKSPACE_LIST_CAP = 2000;
+
+/**
+ * 查看单个文件的上限。base64 传输会膨胀 1/3，2MB 的文件已经是 2.7MB 的响应，
+ * 再大就不是"查看"而是"下载"了。
+ */
+export const WORKSPACE_FILE_CAP = 2 * 1024 * 1024;
+
+/**
+ * 查看一个文件的结果。
+ *
+ * 类型判定在后端做（要看字节，前端只有 base64 会更啰嗦）：
+ * text 直接给解好的 UTF-8 文本，image 给 base64 让前端拼 data URL，
+ * 剩下的一律 binary，前端只报"这是二进制文件"。
+ */
+export type FilePreview =
+  | {
+      kind: "text";
+      /** UTF-8 解码后的文本；超过上限时按字节截断（末尾可能缺半行） */
+      text: string;
+      size: number;
+      truncated: boolean;
+    }
+  | { kind: "image"; mime: string; base64: string; size: number }
+  | { kind: "binary"; size: number }
+  /** 超过 WORKSPACE_FILE_CAP 且不是文本（文本会截断显示），只报大小 */
+  | { kind: "too-large"; size: number };
 
 /**
  * 宿主机上可用 shell 的侦测结果（项目表单的 shell 选择用）。

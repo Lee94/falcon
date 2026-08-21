@@ -3,11 +3,18 @@ import type { FastifyInstance } from "fastify";
 import type {
   AuthStatus,
   DeleteProjectResult,
+  FilePreview,
   FsListing,
   GitChangeCounts,
+  GitCommitDetail,
+  GitCommitInput,
   GitFileDiff,
+  GitLogPage,
+  GitRefsInfo,
   GitSnapshot,
+  GitSyncResult,
   GitUnavailableReason,
+  GitWorkingChanges,
   HostZellijStatus,
   PortForward,
   PortForwardInput,
@@ -22,10 +29,12 @@ import type {
   WorktreeFailure,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceListing,
 } from "@mojito/shared";
 import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@mojito/shared";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
+import { listWorkspace, readWorkspaceFile, type FileHost } from "./files.js";
 import { detectShells } from "./shells.js";
 import { defaultLocalShell } from "./sessions/local.js";
 import { localExec, localKind } from "./zellij/exec.js";
@@ -58,16 +67,27 @@ import { remoteRoot } from "./zellij/host.js";
 import { cleanupWorktree } from "./git/remove.js";
 import {
   addWorktree,
+  commitWorking,
+  describeCommit,
+  describeCommitDiff,
   describeGit,
   describeGitChanges,
   describeGitChangesMany,
   describeGitDiff,
+  describeGitLog,
+  describeGitRefs,
   describeRepo,
+  describeWorkingChanges,
   pathExists,
   repoRoot,
+  syncGit,
   unavailableChanges,
+  unavailableCommit,
   unavailableDiff,
+  unavailableLog,
+  unavailableRefs,
   unavailableSnapshot,
+  unavailableWorking,
   worktreeStatus,
 } from "./git/repo.js";
 import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
@@ -84,6 +104,17 @@ const GIT_UNAVAILABLE = new Set<WorktreeFailure>([
   "no-working-dir",
   "link-failed",
 ]);
+
+/**
+ * 探测类端点共用：把 WorktreeError 的 reason 收敛到面板认识的那四种。
+ * 派生专属的失败（branch-in-use 之类）在这些端点上根本不该出现，出现了
+ * 也只能当"命令没跑起来"报出去。
+ */
+function gitReasonOf(err: WorktreeError): GitUnavailableReason {
+  return GIT_UNAVAILABLE.has(err.reason)
+    ? (err.reason as GitUnavailableReason)
+    : "link-failed";
+}
 
 const WORKTREE_STATUS: Record<WorktreeFailure, number> = {
   "git-missing": 409,
@@ -661,10 +692,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       return await describeGit(await gitHostFor(row, manager), row.working_dir);
     } catch (err) {
       const e = err as WorktreeError;
-      const reason: GitUnavailableReason = GIT_UNAVAILABLE.has(e.reason)
-        ? (e.reason as GitUnavailableReason)
-        : "link-failed";
-      return unavailableSnapshot(reason, e.detail ?? e.message);
+      return unavailableSnapshot(gitReasonOf(e), e.detail ?? e.message);
     }
   });
 
@@ -749,10 +777,270 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       });
     } catch (err) {
       const e = err as WorktreeError;
-      const reason: GitUnavailableReason = GIT_UNAVAILABLE.has(e.reason)
-        ? (e.reason as GitUnavailableReason)
-        : "link-failed";
-      return unavailableDiff(reason, e.detail ?? e.message);
+      return unavailableDiff(gitReasonOf(e), e.detail ?? e.message);
+    }
+  });
+
+  /**
+   * 「修改」面板：工作区里全部未提交的改动，带每个文件的 +N −M。
+   *
+   * 比 GET /git/changes 重（多一条 numstat，未跟踪文件还要各来一条），
+   * 所以那个轻量端点留给侧栏轮询，这个只在面板打开时问。
+   */
+  app.get(
+    "/api/projects/:id/git/working",
+    async (req, reply): Promise<GitWorkingChanges | void> => {
+      const { id } = req.params as { id: string };
+      const row = db.getProject(id);
+      if (!row) return reply.code(404).send({ error: "项目不存在" });
+      if (!row.working_dir) {
+        return unavailableWorking("no-working-dir", worktreeFailureText("no-working-dir"));
+      }
+      try {
+        return await describeWorkingChanges(await gitHostFor(row, manager), row.working_dir);
+      } catch (err) {
+        const e = err as WorktreeError;
+        return unavailableWorking(gitReasonOf(e), e.detail ?? e.message);
+      }
+    }
+  );
+
+  /**
+   * History 列表的一页。
+   *
+   * 筛选与分页全在 query 里：branch / author / q / skip。与 GET /git 同一条
+   * 规矩，环境事实不抛 4xx。
+   */
+  app.get("/api/projects/:id/git/log", async (req, reply): Promise<GitLogPage | void> => {
+    const { id } = req.params as { id: string };
+    const q = req.query as {
+      branch?: string;
+      author?: string;
+      q?: string;
+      skip?: string;
+    };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.working_dir) {
+      return unavailableLog("no-working-dir", worktreeFailureText("no-working-dir"));
+    }
+    const skip = Number(q.skip);
+    try {
+      return await describeGitLog(await gitHostFor(row, manager), row.working_dir, {
+        rev: q.branch || undefined,
+        author: q.author || undefined,
+        grep: q.q || undefined,
+        skip: Number.isFinite(skip) && skip > 0 ? Math.floor(skip) : 0,
+      });
+    } catch (err) {
+      const e = err as WorktreeError;
+      return unavailableLog(gitReasonOf(e), e.detail ?? e.message);
+    }
+  });
+
+  /** Branch / User 两个筛选下拉的候选值。面板挂载时取一次，不参与轮询 */
+  app.get("/api/projects/:id/git/refs", async (req, reply): Promise<GitRefsInfo | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.working_dir) {
+      return unavailableRefs("no-working-dir", worktreeFailureText("no-working-dir"));
+    }
+    try {
+      return await describeGitRefs(await gitHostFor(row, manager), row.working_dir);
+    } catch (err) {
+      const e = err as WorktreeError;
+      return unavailableRefs(gitReasonOf(e), e.detail ?? e.message);
+    }
+  });
+
+  /** 选中提交的详情：完整提交信息 + 改动文件 */
+  app.get(
+    "/api/projects/:id/git/commit",
+    async (req, reply): Promise<GitCommitDetail | void> => {
+      const { id } = req.params as { id: string };
+      const { sha } = req.query as { sha?: string };
+      const row = db.getProject(id);
+      if (!row) return reply.code(404).send({ error: "项目不存在" });
+      // 只认十六进制：sha 要作为 rev 传给 git，形状先钉死，别指望下游转义
+      if (!sha || !/^[0-9a-f]{4,40}$/i.test(sha)) {
+        return reply.code(400).send({ error: "sha 参数不合法" });
+      }
+      if (!row.working_dir) {
+        return unavailableCommit("no-working-dir", worktreeFailureText("no-working-dir"));
+      }
+      try {
+        return await describeCommit(await gitHostFor(row, manager), row.working_dir, sha);
+      } catch (err) {
+        const e = err as WorktreeError;
+        return unavailableCommit(gitReasonOf(e), e.detail ?? e.message);
+      }
+    }
+  );
+
+  /** 某条提交里单个文件的 diff。path / origPath 由前端从详情原样带回 */
+  app.get(
+    "/api/projects/:id/git/commit/diff",
+    async (req, reply): Promise<GitFileDiff | void> => {
+      const { id } = req.params as { id: string };
+      const q = req.query as { sha?: string; path?: string; origPath?: string };
+      const row = db.getProject(id);
+      if (!row) return reply.code(404).send({ error: "项目不存在" });
+      if (!q.sha || !/^[0-9a-f]{4,40}$/i.test(q.sha)) {
+        return reply.code(400).send({ error: "sha 参数不合法" });
+      }
+      if (!q.path) return reply.code(400).send({ error: "缺少 path 参数" });
+      if (!row.working_dir) {
+        return unavailableDiff("no-working-dir", worktreeFailureText("no-working-dir"));
+      }
+      try {
+        return await describeCommitDiff(
+          await gitHostFor(row, manager),
+          row.working_dir,
+          q.sha,
+          { path: q.path, origPath: q.origPath || undefined }
+        );
+      } catch (err) {
+        const e = err as WorktreeError;
+        return unavailableDiff(gitReasonOf(e), e.detail ?? e.message);
+      }
+    }
+  );
+
+  /**
+   * 提交工作区改动。
+   *
+   * 路径写在 `:action` 那条之前只是为了读起来顺——Fastify 静态段本来就优先于
+   * 参数段，`POST .../git/commit` 不会掉进 `:action` 里。
+   *
+   * 与 pull/push 同样两条规矩：走 withRepoLock（键是宿主机 + 仓库根），
+   * 失败不是 4xx（没配 user.name、pre-commit 钩子拒绝、没有可提交的改动，
+   * 都是仓库的正常状态，git 的原话比"操作失败"有用得多）。
+   */
+  app.post("/api/projects/:id/git/commit", async (req, reply): Promise<GitSyncResult | void> => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as Partial<GitCommitInput>;
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (typeof body.message !== "string" || !body.message.trim()) {
+      return reply.code(400).send({ error: "缺少提交信息" });
+    }
+    const all = body.all === true;
+    const paths = Array.isArray(body.paths) ? body.paths : [];
+    if (!all && (paths.length === 0 || paths.some((p) => typeof p !== "string" || !p))) {
+      return reply.code(400).send({ error: "paths 必须是非空字符串数组" });
+    }
+    if (!row.working_dir) {
+      return {
+        ok: false,
+        reason: "no-working-dir",
+        detail: worktreeFailureText("no-working-dir"),
+      };
+    }
+    try {
+      const host = await gitHostFor(row, manager);
+      const root = await repoRoot(host, row.working_dir);
+      return await withRepoLock(`${host.key}:${canonKey(host.kind, root)}`, () =>
+        commitWorking(host, root, { message: body.message!, all, paths })
+      );
+    } catch (err) {
+      const e = err as WorktreeError;
+      return { ok: false, reason: gitReasonOf(e), detail: e.detail ?? e.message };
+    }
+  });
+
+  /**
+   * Pull / Push。
+   *
+   * 唯一两个会往远端写、也会动工作区的 git 端点：
+   * - 走 withRepoLock，键是「宿主机 + 仓库根」（不是 projectId——同一个仓库
+   *   完全可能挂着好几个 Project，按 id 加锁等于没加）。同一棵检出上并发
+   *   pull 会争 index.lock，报出来的错对用户毫无意义。
+   * - 失败**不是 4xx**：凭据不对、非快进、远端拒绝都是仓库的正常状态，
+   *   把 git 的原话回给前端展示，那比一句"操作失败"有用得多。
+   */
+  app.post("/api/projects/:id/git/:action", async (req, reply): Promise<GitSyncResult | void> => {
+    const { id, action } = req.params as { id: string; action: string };
+    if (action !== "pull" && action !== "push") {
+      return reply.code(404).send({ error: "未知操作" });
+    }
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!row.working_dir) {
+      return {
+        ok: false,
+        reason: "no-working-dir",
+        detail: worktreeFailureText("no-working-dir"),
+      };
+    }
+    try {
+      const host = await gitHostFor(row, manager);
+      const root = await repoRoot(host, row.working_dir);
+      return await withRepoLock(`${host.key}:${canonKey(host.kind, root)}`, () =>
+        syncGit(host, root, action)
+      );
+    } catch (err) {
+      const e = err as WorktreeError;
+      return { ok: false, reason: gitReasonOf(e), detail: e.detail ?? e.message };
+    }
+  });
+
+  // ---- 项目文件 ----
+
+  /**
+   * 文件面板的执行环境。
+   *
+   * 不经 gitHostFor：文件面板与 git 无关，为了列个目录去探测一遍 git 的绝对路径
+   * 既慢又会让"没装 git 的机器"平白打不开文件树。SSH 侧复用 SessionManager 已有
+   * 的链路，与 /api/fs/list 同一条路子。
+   *
+   * SSH 项目的工作目录可以留空（表单里就是可选的），那时以远端家目录为根——
+   * 和会话启动时的行为一致。
+   */
+  const fileHostFor = async (row: ProjectRow): Promise<{ host: FileHost; root: string }> => {
+    if (row.type === "local") {
+      if (!row.working_dir) throw new Error(worktreeFailureText("no-working-dir"));
+      return { host: { local: true, kind: localKind() }, root: row.working_dir };
+    }
+    const link = manager.getLink(row);
+    const facts = await link.hostFacts();
+    return {
+      host: { local: false, kind: facts.kind, exec: link.exec },
+      root: row.working_dir || facts.home,
+    };
+  };
+
+  /**
+   * 列工作目录里的一层。`path` 是工作目录相对路径，缺省为工作目录本身。
+   *
+   * 读失败回 400 而不是 500：路径不存在、没权限、SSH 连不上，都是调用方能处理
+   * 并且该向用户如实转述的事实。
+   */
+  app.get("/api/projects/:id/files", async (req, reply): Promise<WorkspaceListing | void> => {
+    const { id } = req.params as { id: string };
+    const { path: p } = req.query as { path?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await listWorkspace(host, root, p);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  /** 读一个文件供查看 tab 渲染。二进制 / 超大文件也回 200，形状里写清是什么 */
+  app.get("/api/projects/:id/file", async (req, reply): Promise<FilePreview | void> => {
+    const { id } = req.params as { id: string };
+    const { path: p } = req.query as { path?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!p) return reply.code(400).send({ error: "缺少文件路径" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await readWorkspaceFile(host, root, p);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
     }
   });
 

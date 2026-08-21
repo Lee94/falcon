@@ -106,13 +106,18 @@ export function remoteListArgs(git: string, repo: string): string[] {
 /**
  * 分支列表。字段分隔用 %09（TAB）：git check-ref-format 禁止分支名含 ASCII
  * 控制字符，所以 TAB 是安全分隔符，而空格不是（分支名可以含空格）。
+ *
+ * 末列 %(symref) 是用来认出 origin/HEAD 的。不能按名字认：
+ * `refs/remotes/origin/HEAD` 的 `%(refname:short)` 是 **origin**（git 取的是
+ * 最短无歧义名），不是 origin/HEAD——于是下拉里会冒出一条叫 "origin" 的
+ * 假分支，检出它必然失败。symref 只有符号引用才非空，判据是准的。
  */
 export function branchListArgs(git: string, repo: string): string[] {
   return at(
     git,
     repo,
     "for-each-ref",
-    "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)",
+    "--format=%(refname:short)%09%(upstream:short)%09%(HEAD)%09%(symref)",
     "refs/heads",
     "refs/remotes"
   );
@@ -194,6 +199,20 @@ export function statusArgs(git: string, dir: string): string[] {
 }
 
 /**
+ * 同上，但把未跟踪**目录**展开成一个个文件。
+ *
+ * 默认的 porcelain 会把整个未跟踪目录折叠成一条 `?? sub/`：那既算不出行数，
+ * 在目录树视图里也会变成一个名字带斜杠的假"文件"。
+ *
+ * 侧栏那条轮询（describeGitChanges）**不用**这个：它每 8 秒问一遍所有项目，
+ * 而展开一个巨大的未跟踪目录（漏进来的 node_modules 之类）要枚举几万条。
+ * 代价是面板的文件数可能比侧栏徽标大，那是面板更准确，不是它算错了。
+ */
+export function statusAllArgs(git: string, dir: string): string[] {
+  return at(git, dir, "status", "--porcelain", "--untracked-files=all");
+}
+
+/**
  * 被 .gitignore 忽略的条目。必须单独取：status --porcelain 默认不含它们，
  * 但 .env、本地 sqlite、上传目录会跟着一起被删——.env 通常是全世界唯一一份。
  */
@@ -261,6 +280,236 @@ export function diffUntrackedArgs(git: string, dir: string, path: string): strin
  */
 export function logArgs(git: string, dir: string, n = 12): string[] {
   return at(git, dir, "log", "-n", String(n), "--format=%h%x09%an%x09%at%x09%s");
+}
+
+// ---------------- History 面板 ----------------
+
+/**
+ * 只看这三类 ref，**不用 `--all`**。
+ *
+ * --all 会把 refs/ 下的一切都算进来，包括 IDE 写的私有 ref——JetBrains 的
+ * Local History 就挂在 refs/jb/* 下，每按几下保存就是一条提交。实测本仓库
+ * `git log --all` 的头几条全是 "Local History"，把真实历史挤到了看不见的地方。
+ * refs/stash 同理。
+ */
+const HISTORY_REFS = ["--branches", "--remotes", "--tags"];
+
+/** History 每页条数与作者聚合的采样深度 */
+export const LOG_PAGE = 60;
+export const AUTHOR_SAMPLE = 400;
+
+export interface LogQuery {
+  /** 只看某条分支（Branch 下拉）。缺省看 HISTORY_REFS */
+  rev?: string;
+  /** 提交信息搜索（字面量，不是正则） */
+  grep?: string;
+  /** 作者筛选（字面量） */
+  author?: string;
+  skip?: number;
+  limit?: number;
+}
+
+/**
+ * History 列表。
+ *
+ * `-F`（--fixed-strings）对 --grep 与 --author 同时生效，把用户在搜索框里
+ * 敲的东西一律当字面量——不加它，一个 `(` 就够 git 报 "Unmatched ( or \("
+ * 然后整页空白。`-i` 对固定字符串同样生效。
+ *
+ * rev 走 `<rev> --` 的位置参数：分支名以 `-` 开头时（git 允许 `--` 之后的
+ * refname 长这样）不加终结符会被当成选项解析。
+ */
+export function logPageArgs(git: string, dir: string, q: LogQuery = {}): string[] {
+  const limit = q.limit ?? LOG_PAGE;
+  const args = [
+    "log",
+    // %P 空 = 根提交；%D 空 = 这条上没有任何 ref。subject 放最后一列，
+    // 它是唯一可能含 TAB 的字段（ref 名与作者名都禁止控制字符）
+    "--format=%H%x09%h%x09%an%x09%ae%x09%at%x09%P%x09%D%x09%s",
+    // 多取一条探"还有没有下一页"，比 rev-list --count 便宜得多
+    "-n",
+    String(limit + 1),
+  ];
+  if (q.skip) args.push(`--skip=${q.skip}`);
+  if (q.grep || q.author) args.push("--fixed-strings", "--regexp-ignore-case");
+  if (q.grep) args.push(`--grep=${q.grep}`);
+  if (q.author) args.push(`--author=${q.author}`);
+  // 指定了分支就只看它，否则看全部分支/远程/标签——两者都要 --date-order，
+  // 不然多分支并行时提交会按拓扑挤成一坨，画出来的图与时间轴对不上
+  args.push("--date-order");
+  if (q.rev) args.push(q.rev, "--");
+  else args.push(...HISTORY_REFS);
+  return at(git, dir, ...args);
+}
+
+/** 作者下拉的候选：采样近若干条提交的 %an，去重与排序在解析侧做 */
+export function logAuthorsArgs(git: string, dir: string, n = AUTHOR_SAMPLE): string[] {
+  return at(git, dir, "log", "-n", String(n), "--format=%an", ...HISTORY_REFS);
+}
+
+/**
+ * 作者下拉里「我」是谁。没配 user.name 时退出码 1、无输出——那是正常状态
+ * （这台机器上还没设过身份），不是错误。
+ */
+export function configUserNameArgs(git: string, dir: string): string[] {
+  return at(git, dir, "config", "--get", "user.name");
+}
+
+/**
+ * 合并提交的 diff 取 first-parent。
+ *
+ * 不加这个的话 `git show <merge>` 一个文件都不输出（默认 --diff-merges=off），
+ * 面板上看起来就像"这次合并什么都没改"。git ≥ 2.31，与 --path-format=absolute
+ * 是同一代要求。
+ */
+const FIRST_PARENT = "--diff-merges=first-parent";
+
+/** 提交元数据（一行）。字段顺序与 parseCommitMeta 一一对应 */
+export function commitMetaArgs(git: string, dir: string, sha: string): string[] {
+  return at(
+    git,
+    dir,
+    "show",
+    "-s",
+    "--format=%H%x09%h%x09%an%x09%ae%x09%at%x09%cn%x09%ct%x09%P%x09%D",
+    sha,
+    "--"
+  );
+}
+
+/** 完整提交信息。单独一条命令：%B 含换行，塞不进上面那种一行多列的格式 */
+export function commitMessageArgs(git: string, dir: string, sha: string): string[] {
+  return at(git, dir, "show", "-s", "--format=%B", sha, "--");
+}
+
+/**
+ * 改动文件：一条命令同时要 --raw 与 --numstat。
+ *
+ * 两段都要是因为各缺一半：--raw 给状态字母与**未压缩**的新旧路径（重命名是
+ * `R100\told\tnew` 两列），--numstat 给增删行数但重命名路径会被压成
+ * `dir/{old => new}/f` 这种紧凑形式。git 对两段用的是同一个 diff queue，
+ * 文件顺序一致，所以按下标配对——解析侧对不上时退化成"数字未知"，见 parseCommitFiles。
+ */
+export function commitFilesArgs(git: string, dir: string, sha: string): string[] {
+  return at(git, dir, "show", "--format=", FIRST_PARENT, "--raw", "--numstat", sha, "--");
+}
+
+/** 某条提交里单个文件的 diff */
+export function commitFileDiffArgs(
+  git: string,
+  dir: string,
+  sha: string,
+  path: string,
+  origPath?: string
+): string[] {
+  const paths = origPath ? [origPath, path] : [path];
+  return at(git, dir, "show", "--format=", FIRST_PARENT, sha, "--", ...paths);
+}
+
+/**
+ * 工作区已跟踪文件的增删行数，基准 HEAD（暂存 + 未暂存一起看）。
+ *
+ * 与 statusArgs 是同一个视角，两者的结果按路径配对——不能按下标配，
+ * status 会列出未跟踪文件而 numstat 不会，两边条数本来就不一样。
+ */
+export function workingNumstatArgs(git: string, dir: string, base: string): string[] {
+  return at(git, dir, "diff", "--numstat", base);
+}
+
+/**
+ * 未跟踪文件的行数：与空文件比。
+ *
+ * 只能一个文件一条命令（--no-index 恰好收两个路径），所以调用方要把它们
+ * 批成一次 exec，并且限个数——见 UNTRACKED_NUMSTAT_CAP。
+ *
+ * 不用 `git add -N` 那个更省事的办法：那会写 index，而这个面板是只读的，
+ * 用户的暂存区不该因为看了一眼就被动过。
+ */
+export function untrackedNumstatArgs(git: string, dir: string, path: string): string[] {
+  return at(git, dir, "diff", "--numstat", "--no-index", "--", "/dev/null", path);
+}
+
+/**
+ * 最多为多少个未跟踪文件算行数。
+ *
+ * 新建一个装满文件的目录就能有几百个未跟踪文件，每个都要一条命令，
+ * 命令行会被撑爆（Windows 上尤其紧）。超出的显示成"未知"，不是 0。
+ */
+export const UNTRACKED_NUMSTAT_CAP = 80;
+
+/** 「修改」面板最多列多少个文件 */
+export const WORKING_FILE_CAP = 500;
+
+// ---------------- 提交 ----------------
+
+/** 把选中的未跟踪文件放进 index。已跟踪的不用——pathspec commit 直接取工作区 */
+export function addPathsArgs(git: string, dir: string, paths: string[]): string[] {
+  return at(git, dir, "add", "--", ...paths);
+}
+
+/** 提交全部改动前的那一步。-A 含未跟踪文件与删除 */
+export function addAllArgs(git: string, dir: string): string[] {
+  return at(git, dir, "add", "-A");
+}
+
+/**
+ * 提交。
+ *
+ * 带 pathspec 时 git **忽略 index**，直接拿这些路径的工作区内容成提交——
+ * 实测过：index 里别人暂存的东西不会被顺带提交走，未选中的文件也不动。
+ * 这正是面板要的语义（它显示的就是暂存+未暂存的合并视图）。
+ *
+ * 不加 --no-verify：pre-commit 钩子是用户自己配的，面板没有资格跳过它。
+ * 钩子可能很慢，所以调用方要给足超时（TIMEOUT_SYNC）。
+ */
+export function commitArgs(
+  git: string,
+  dir: string,
+  message: string,
+  paths?: string[]
+): string[] {
+  const args = ["commit", "-m", message];
+  if (paths && paths.length > 0) args.push("--", ...paths);
+  return at(git, dir, ...args);
+}
+
+/**
+ * pathspec 拼进命令行的字符预算。
+ *
+ * 卡得这么死是因为 Windows 远端：命令走 `powershell -EncodedCommand`，载荷先
+ * 转 UTF-16LE 再 base64（长度 ×8/3），而 cmd.exe 的命令行上限是 8191。
+ * 留出 git 参数与 env 前缀后，路径部分能用的也就两千出头。
+ *
+ * 超了不是截断——截断会**悄悄少提交几个文件**，那是最糟的一种失败。
+ * 服务端直接拒绝，让用户改用"全选"（走 add -A，不拼路径）或者分两次提交。
+ */
+export const COMMIT_PATHSPEC_BUDGET = 2000;
+
+export function pathspecTooLong(paths: string[]): boolean {
+  // +3 给引号与分隔符留的余量，宁可保守
+  return paths.reduce((n, p) => n + p.length + 3, 0) > COMMIT_PATHSPEC_BUDGET;
+}
+
+/**
+ * Pull。--ff-only 是刻意的：能快进就快进，不能就停下报错。
+ *
+ * 面板上一个按钮不该在用户看不见的地方造出合并提交，更不该把工作区搅成冲突
+ * 状态——那之后所有会话里的 shell 都在一个半挂的仓库里干活。真要合并/变基，
+ * 用户在终端里做，那是他清楚自己在做什么的地方。
+ */
+export function pullArgs(git: string, dir: string): string[] {
+  return at(git, dir, "pull", "--ff-only");
+}
+
+/**
+ * Push 当前分支到它的 upstream。
+ *
+ * 不传 refspec 也不加 --set-upstream：没有 upstream 时 git 会直接报错并把
+ * 该敲的命令印在 stderr 里，那比我们替他猜一个远程分支名要好。
+ * 绝不加 --force——按钮点下去要么是安全的，要么就失败。
+ */
+export function pushArgs(git: string, dir: string): string[] {
+  return at(git, dir, "push");
 }
 
 // ---------------- 命令行拼装 ----------------
@@ -522,11 +771,12 @@ export function parseBranchList(stdout: string, remotes: string[]): ParsedBranch
   const res: ParsedBranch[] = [];
   for (const line of lines(stdout)) {
     if (!line.trim()) continue;
-    const [name, upstream, head] = line.split("\t");
+    const [name, upstream, head, symref] = line.split("\t");
     if (!name) continue;
+    // 指向默认分支的 symref（origin/HEAD）不是可检出的目标，列出来只会误导。
+    // 它跟自己指向的那条分支永远同时出现，丢掉不会少任何一个选项
+    if (symref) continue;
     const remote = remotes.some((r) => name === r || name.startsWith(`${r}/`));
-    // origin/HEAD 是指向默认分支的 symref，不是可检出的目标，列出来只会误导
-    if (remote && name.endsWith("/HEAD")) continue;
     res.push({ name, remote, upstream: upstream || undefined, head: head === "*" });
   }
   return res;
@@ -639,6 +889,215 @@ export function parseLog(stdout: string): GitLogEntry[] {
       authoredAt: Number.isFinite(sec) ? sec * 1000 : 0,
       subject: rest.join("\t"),
     });
+  }
+  return out;
+}
+
+// ---------------- History 面板的解析 ----------------
+
+/**
+ * 解析 %D（decoration）。
+ *
+ * 形如 `HEAD -> main, origin/main, tag: v1.0, origin/HEAD`。
+ * - `HEAD -> x` 里的 x 是当前分支，标 head:true；
+ * - 光杆 `HEAD`（detached）不是 ref，丢掉；
+ * - `origin/HEAD` 是指向默认分支的 symref，与 parseBranchList 同一个理由丢掉——
+ *   它跟 origin/main 永远同时出现在同一条提交上，列出来就是重复一格。
+ */
+export function parseRefLabels(
+  decoration: string,
+  remotes: string[]
+): { name: string; kind: "local" | "remote" | "tag"; head?: boolean }[] {
+  const out: { name: string; kind: "local" | "remote" | "tag"; head?: boolean }[] = [];
+  for (const raw of decoration.split(",")) {
+    let name = raw.trim();
+    if (!name) continue;
+    if (name.startsWith("tag: ")) {
+      out.push({ name: name.slice(5).trim(), kind: "tag" });
+      continue;
+    }
+    let head = false;
+    const arrow = name.indexOf(" -> ");
+    if (arrow >= 0) {
+      // 左边必然是字面量 HEAD，右边才是分支名
+      name = name.slice(arrow + 4).trim();
+      head = true;
+    }
+    if (!name || name === "HEAD") continue;
+    const remote = remotes.some((r) => name === r || name.startsWith(`${r}/`));
+    if (remote && name.endsWith("/HEAD")) continue;
+    out.push({ name, kind: remote ? "remote" : "local", ...(head ? { head } : {}) });
+  }
+  return out;
+}
+
+export interface ParsedLogCommit {
+  sha: string;
+  short: string;
+  author: string;
+  authorEmail: string;
+  authoredAt: number;
+  subject: string;
+  parents: string[];
+  decoration: string;
+}
+
+/** 解析 logPageArgs 的输出。列不齐的行直接丢——宁可少一条也不要画错的图 */
+export function parseLogPage(stdout: string): ParsedLogCommit[] {
+  const out: ParsedLogCommit[] = [];
+  for (const line of lines(stdout)) {
+    if (!line.trim()) continue;
+    const cols = line.split("\t");
+    if (cols.length < 8) continue;
+    const [sha, short, author, authorEmail, at, parents, decoration, ...rest] = cols;
+    if (!sha || !short) continue;
+    const sec = Number(at);
+    out.push({
+      sha,
+      short,
+      author: author ?? "",
+      authorEmail: authorEmail ?? "",
+      authoredAt: Number.isFinite(sec) ? sec * 1000 : 0,
+      parents: (parents ?? "").split(" ").filter(Boolean),
+      decoration: decoration ?? "",
+      // subject 是最后一列，里面的 TAB 要原样拼回去
+      subject: rest.join("\t"),
+    });
+  }
+  return out;
+}
+
+/** 作者采样：按出现次数降序，同次数按首次出现的顺序（log 是新→旧，即最近活跃优先） */
+export function rankAuthors(stdout: string): string[] {
+  const counts = new Map<string, number>();
+  for (const line of lines(stdout)) {
+    const name = line.trim();
+    if (!name) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts.keys()].sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0));
+}
+
+export interface ParsedCommitMeta {
+  sha: string;
+  short: string;
+  author: string;
+  authorEmail: string;
+  authoredAt: number;
+  committer: string;
+  committedAt: number;
+  parents: string[];
+  decoration: string;
+}
+
+/** 解析 commitMetaArgs 的一行输出。列不齐返回 null，调用方当"读不到这条提交" */
+export function parseCommitMeta(stdout: string): ParsedCommitMeta | null {
+  const line = lines(stdout).find((l) => l.trim());
+  if (!line) return null;
+  const cols = line.split("\t");
+  if (cols.length < 8) return null;
+  const [sha, short, author, authorEmail, aAt, committer, cAt, parents, decoration] = cols;
+  if (!sha || !short) return null;
+  const aSec = Number(aAt);
+  const cSec = Number(cAt);
+  return {
+    sha,
+    short,
+    author: author ?? "",
+    authorEmail: authorEmail ?? "",
+    authoredAt: Number.isFinite(aSec) ? aSec * 1000 : 0,
+    committer: committer ?? "",
+    committedAt: Number.isFinite(cSec) ? cSec * 1000 : 0,
+    parents: (parents ?? "").split(" ").filter(Boolean),
+    decoration: decoration ?? "",
+  };
+}
+
+export interface ParsedCommitFile {
+  path: string;
+  origPath?: string;
+  status: string;
+  added: number | null;
+  deleted: number | null;
+}
+
+/**
+ * 解析 commitFilesArgs 的两段输出。
+ *
+ * raw 段每行以 `:` 开头：`:<旧模式> <新模式> <旧sha> <新sha> <状态>\t<路径>[\t<新路径>]`。
+ * 状态可能带相似度数字（R100 / C85），只取首字母。
+ *
+ * numstat 段是 `<增>\t<删>\t<路径>`，二进制文件两列都是 `-`（记 null，不是 0——
+ * "改了但不知道多少行"和"一行没改"在界面上是两回事）。
+ *
+ * 两段的文件顺序由 git 的同一个 diff queue 决定，一致，所以按下标配对。
+ * 条数对不上（不该发生，但输出被 profile 之类污染过就会）时宁可丢掉全部数字，
+ * 也不要把 A 文件的行数记到 B 文件头上。
+ */
+export function parseCommitFiles(stdout: string): ParsedCommitFile[] {
+  const raw: { path: string; origPath?: string; status: string }[] = [];
+  const nums: { added: number | null; deleted: number | null }[] = [];
+  for (const line of lines(stdout)) {
+    if (!line.trim()) continue;
+    if (line.startsWith(":")) {
+      // 状态与路径之间是 TAB，前面那截模式/sha 用空格分隔
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const head = line.slice(0, tab).trim().split(/\s+/);
+      const status = (head[head.length - 1] ?? "").charAt(0);
+      const paths = line
+        .slice(tab + 1)
+        .split("\t")
+        .map((p) => unquoteCPath(p.trim()))
+        .filter(Boolean);
+      if (!status || paths.length === 0) continue;
+      // R / C 有两个路径：先旧后新
+      if (paths.length > 1) raw.push({ status, origPath: paths[0], path: paths[1]! });
+      else raw.push({ status, path: paths[0]! });
+      continue;
+    }
+    const cols = line.split("\t");
+    if (cols.length < 3) continue;
+    const [a, d] = cols;
+    const num = (s: string | undefined): number | null => {
+      if (!s || s === "-") return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    nums.push({ added: num(a), deleted: num(d) });
+  }
+  const aligned = nums.length === raw.length;
+  return raw.map((f, i) => ({
+    ...f,
+    added: aligned ? (nums[i]?.added ?? null) : null,
+    deleted: aligned ? (nums[i]?.deleted ?? null) : null,
+  }));
+}
+
+/** 提交详情里最多列多少个文件。改了几千个文件的提交不该把面板撑爆 */
+export const COMMIT_FILE_CAP = 300;
+
+/**
+ * 解析 `diff --numstat`：`<增>\t<删>\t<路径>`，按路径索引。
+ *
+ * 重命名在这里是紧凑形式（`dir/{old => new}/f`），解析回两个路径太脆，
+ * 而调用方手上已经有 porcelain 给的准确新旧路径——所以这里只认能直接
+ * 用的那些，配不上的按"未知行数"处理，见 parseNumstatMap 的调用点。
+ */
+export function parseNumstatMap(stdout: string): Map<string, { added: number | null; deleted: number | null }> {
+  const out = new Map<string, { added: number | null; deleted: number | null }>();
+  for (const line of lines(stdout)) {
+    if (!line.trim()) continue;
+    const cols = line.split("\t");
+    if (cols.length < 3) continue;
+    const num = (s: string | undefined): number | null => {
+      if (!s || s === "-") return null; // 二进制文件两列都是 -
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    };
+    // 路径可能含 TAB，后面的列拼回去
+    const path = unquoteCPath(cols.slice(2).join("\t").trim());
+    if (path) out.set(path, { added: num(cols[0]), deleted: num(cols[1]) });
   }
   return out;
 }

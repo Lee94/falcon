@@ -1,10 +1,17 @@
 import type {
   AuthStatus,
   DeleteProjectResult,
+  FilePreview,
   FsListing,
   GitChangeCounts,
+  GitCommitDetail,
+  GitCommitInput,
   GitFileDiff,
+  GitLogPage,
+  GitRefsInfo,
   GitSnapshot,
+  GitSyncResult,
+  GitWorkingChanges,
   HostZellijStatus,
   PasteImageResult,
   PortForward,
@@ -23,6 +30,7 @@ import type {
   SystemInfo,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceListing,
 } from "@mojito/shared";
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -121,6 +129,71 @@ export const api = {
     if (file.untracked) q.set("untracked", "1");
     return request<GitFileDiff>("GET", `/api/projects/${projectId}/git/diff?${q}`);
   },
+
+  /**
+   * 「修改」面板：工作区全部未提交改动，带每个文件的 +N −M。
+   * 比 gitChanges 重（多一条 numstat），只在面板打开时问。
+   */
+  gitWorking: (projectId: string) =>
+    request<GitWorkingChanges>("GET", `/api/projects/${projectId}/git/working`),
+  /** History 列表的一页。筛选与分页都在 query 里，环境事实写在 available 里 */
+  gitLog: (
+    projectId: string,
+    opts: { branch?: string; author?: string; q?: string; skip?: number } = {}
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.branch) q.set("branch", opts.branch);
+    if (opts.author) q.set("author", opts.author);
+    if (opts.q) q.set("q", opts.q);
+    if (opts.skip) q.set("skip", String(opts.skip));
+    return request<GitLogPage>("GET", `/api/projects/${projectId}/git/log?${q}`);
+  },
+  /** Branch / User 两个筛选下拉的候选值 */
+  gitRefs: (projectId: string) =>
+    request<GitRefsInfo>("GET", `/api/projects/${projectId}/git/refs`),
+  /** 选中提交的详情：完整提交信息 + 改动文件 */
+  gitCommit: (projectId: string, sha: string) =>
+    request<GitCommitDetail>(
+      "GET",
+      `/api/projects/${projectId}/git/commit?sha=${encodeURIComponent(sha)}`
+    ),
+  /** 某条提交里单个文件的 diff */
+  gitCommitDiff: (
+    projectId: string,
+    sha: string,
+    file: { path: string; origPath?: string }
+  ) => {
+    const q = new URLSearchParams({ sha, path: file.path });
+    if (file.origPath) q.set("origPath", file.origPath);
+    return request<GitFileDiff>("GET", `/api/projects/${projectId}/git/commit/diff?${q}`);
+  },
+  /**
+   * 提交工作区改动。失败不抛——没配 user.name、pre-commit 钩子拒绝、
+   * 没有可提交的改动都写在 ok/detail 里。
+   */
+  gitCommitChanges: (projectId: string, input: GitCommitInput) =>
+    request<GitSyncResult>("POST", `/api/projects/${projectId}/git/commit`, input),
+  /**
+   * Pull / Push。失败不抛——凭据不对、非快进、远端拒绝都写在 ok/detail 里，
+   * 面板要把 git 的原话给用户看。
+   */
+  gitSync: (projectId: string, action: "pull" | "push") =>
+    request<GitSyncResult>("POST", `/api/projects/${projectId}/git/${action}`),
+  /**
+   * 文件面板：工作目录里的一层。`path` 缺省为工作目录本身。
+   * 与 git 无关——未跟踪、被 ignore 的文件同样在里面。
+   */
+  listFiles: (projectId: string, path?: string) => {
+    const q = path ? `?path=${encodeURIComponent(path)}` : "";
+    return request<WorkspaceListing>("GET", `/api/projects/${projectId}/files${q}`);
+  },
+  /** 查看 tab：读一个文件。二进制与超大文件也是 200，形状里写清了是什么 */
+  readFile: (projectId: string, path: string) =>
+    request<FilePreview>(
+      "GET",
+      `/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`
+    ),
+
   listForwards: (projectId: string) =>
     request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),
   createForward: (projectId: string, input: PortForwardInput) =>

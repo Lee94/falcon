@@ -7,6 +7,8 @@ import { Login } from "./Login.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightBar } from "./RightBar.js";
 import { GitPanel } from "./GitPanel.js";
+import { ChangesPanel } from "./ChangesPanel.js";
+import { FilesPanel } from "./FilesPanel.js";
 import { ForwardPanel } from "./ForwardPanel.js";
 import { TabBar } from "./TabBar.js";
 import { SessionOverview } from "./SessionOverview.js";
@@ -28,6 +30,7 @@ const PendingPane = lazy(() =>
 const GitDiffView = lazy(() =>
   import("./GitDiffView.js").then((m) => ({ default: m.GitDiffView }))
 );
+const FileView = lazy(() => import("./FileView.js").then((m) => ({ default: m.FileView })));
 const ProjectForm = lazy(() =>
   import("./ProjectForm.js").then((m) => ({ default: m.ProjectForm }))
 );
@@ -132,8 +135,14 @@ export function App() {
       case "toggleGitPanel":
         s.toggleRightPanel("git");
         return;
+      case "toggleChangesPanel":
+        s.toggleRightPanel("changes");
+        return;
       case "toggleForwardPanel":
         s.toggleRightPanel("forward");
+        return;
+      case "toggleFilesPanel":
+        s.toggleRightPanel("files");
         return;
       case "overview":
         s.showOverview();
@@ -146,6 +155,7 @@ export function App() {
       case "closeTab":
         if (s.active.kind === "terminal") void s.closeTab(s.active.sessionId);
         else if (s.active.kind === "diff") s.closeDiff();
+        else if (s.active.kind === "file") s.closeFile();
         return;
       case "reattach": {
         if (s.active.kind !== "terminal") return;
@@ -225,6 +235,14 @@ export function App() {
                 </Suspense>
               </div>
             )}
+            {/* 查看 tab 与差异 tab 同理：切走即卸载，切回来重读一次文件 */}
+            {active.kind === "file" && (
+              <div className="absolute inset-0 flex flex-col">
+                <Suspense fallback={null}>
+                  <FileView />
+                </Suspense>
+              </div>
+            )}
             {/* 非活动 pane 只是移出视口，绝不卸载——
                 xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪。
                 用 translate 而不是 visibility:hidden：xterm 靠 IntersectionObserver
@@ -253,6 +271,8 @@ export function App() {
             })}
           </div>
         </main>
+        {rightVisible && rightPanel === "files" && <FilesPanel />}
+        {rightVisible && rightPanel === "changes" && <ChangesPanel />}
         {rightVisible && rightPanel === "git" && <GitPanel />}
         {rightVisible && rightPanel === "forward" && <ForwardPanel />}
         <RightBar />

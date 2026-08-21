@@ -17,7 +17,9 @@ export type Command =
   | "closeTab"
   | "toggleSidebar"
   | "toggleGitPanel"
+  | "toggleChangesPanel"
   | "toggleForwardPanel"
+  | "toggleFilesPanel"
   | "reattach"
   | "overview"
   | "nextTab"
@@ -44,8 +46,12 @@ export function chord(cmd: Command): string {
       return isMac ? "⌘B" : "Ctrl+Shift+B";
     case "toggleGitPanel":
       return isMac ? "⌘⇧G" : "Ctrl+Shift+G";
+    case "toggleChangesPanel":
+      return isMac ? "⌘⇧U" : "Ctrl+Shift+U";
     case "toggleForwardPanel":
       return isMac ? "⌘⇧F" : "Ctrl+Shift+F";
+    case "toggleFilesPanel":
+      return isMac ? "⌘⇧E" : "Ctrl+Shift+E";
     case "reattach":
       return isMac ? "⌘R" : "Ctrl+Shift+R";
     case "overview":
@@ -70,8 +76,12 @@ export function altChord(cmd: Command): string | null {
       return "Alt+B";
     case "toggleGitPanel":
       return "Alt+G";
+    case "toggleChangesPanel":
+      return "Alt+U";
     case "toggleForwardPanel":
       return "Alt+F";
+    case "toggleFilesPanel":
+      return "Alt+E";
     case "reattach":
       return "Alt+R";
     case "palette":
@@ -90,7 +100,9 @@ const ALT_LETTERS: Record<string, Command> = {
   KeyW: "closeTab",
   KeyB: "toggleSidebar",
   KeyG: "toggleGitPanel",
+  KeyU: "toggleChangesPanel",
   KeyF: "toggleForwardPanel",
+  KeyE: "toggleFilesPanel",
   KeyR: "reattach",
   KeyP: "palette",
 };
@@ -101,7 +113,9 @@ const MODSHIFT_LETTERS: Record<string, Command> = {
   KeyW: "closeTab",
   KeyB: "toggleSidebar",
   KeyG: "toggleGitPanel",
+  KeyU: "toggleChangesPanel",
   KeyF: "toggleForwardPanel",
+  KeyE: "toggleFilesPanel",
   KeyR: "reattach",
 };
 
@@ -158,7 +172,9 @@ export function matchCommand(e: KeyboardEvent): Command | null {
       if (code === "BracketRight") return "nextTab";
       if (code === "BracketLeft") return "prevTab";
       if (code === "KeyG") return "toggleGitPanel";
+      if (code === "KeyU") return "toggleChangesPanel";
       if (code === "KeyF") return "toggleForwardPanel";
+      if (code === "KeyE") return "toggleFilesPanel";
       return null;
     }
     if (code === "Tab") return "prevTab";

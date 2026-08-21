@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowLeftRight, Plus, Trash2 } from "lucide-react";
+import { ArrowLeftRight, ArrowRight, Plus, Trash2 } from "lucide-react";
 import type { ForwardKind, ForwardState, PortForward } from "@mojito/shared";
 import { api } from "../api.js";
 import { useApp, selectFocusProjectId } from "../store.js";
@@ -190,12 +190,14 @@ function ForwardRow({
   );
 }
 
+/**
+ * 只填两个端口。监听地址与目标地址一律走后端默认的 127.0.0.1——
+ * 面板窄，而绑 0.0.0.0 / 具体网卡是少数派需求，真要改可以直接调 API。
+ */
 function AddForwardForm({ projectId, onCreated }: { projectId: string; onCreated: () => void }) {
   const { t } = useTranslation();
   const [kind, setKind] = useState<ForwardKind>("local");
-  const [bindHost, setBindHost] = useState("127.0.0.1");
   const [bindPort, setBindPort] = useState("");
-  const [destHost, setDestHost] = useState("127.0.0.1");
   const [destPort, setDestPort] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -219,9 +221,7 @@ function AddForwardForm({ projectId, onCreated }: { projectId: string; onCreated
       await api.createForward(projectId, {
         kind,
         name: name.trim() || undefined,
-        bindHost: bindHost.trim() || "127.0.0.1",
         bindPort: listen,
-        destHost: destHost.trim() || "127.0.0.1",
         destPort: target,
       });
       setBindPort("");
@@ -236,10 +236,16 @@ function AddForwardForm({ projectId, onCreated }: { projectId: string; onCreated
     }
   };
 
+  const localLabel = t("forward.localPort");
+  const remoteLabel = t("forward.remotePort");
+
   return (
     <form className="border-t px-3 py-2.5" onSubmit={(e) => void submit(e)}>
-      <div className="mb-2 text-[11px] tracking-wide text-muted-foreground">{t("forward.add")}</div>
+      <div className="mb-1.5 text-[11px] tracking-wide text-muted-foreground">
+        {t("forward.add")}
+      </div>
       <Segmented
+        dense
         label={t("forward.kind")}
         value={kind}
         onChange={setKind}
@@ -251,38 +257,32 @@ function AddForwardForm({ projectId, onCreated }: { projectId: string; onCreated
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
         {t(kind === "local" ? "forward.hint_local" : "forward.hint_remote")}
       </p>
-      <div className="mt-2 grid gap-1.5">
-        <EndpointRow
-          tag={kind === "local" ? t("forward.tag_local") : t("forward.tag_remote")}
-          hostLabel={t("forward.bindHost")}
-          portLabel={kind === "local" ? t("forward.localPort") : t("forward.remotePort")}
-          host={bindHost}
-          port={bindPort}
-          onHost={setBindHost}
-          onPort={(value) => {
+      <div className="mt-1.5 flex items-center gap-1">
+        <PortInput
+          label={kind === "local" ? localLabel : remoteLabel}
+          value={bindPort}
+          // 目标端口没被单独改过就跟着监听端口走，两边同号是常态
+          onChange={(value) => {
             setBindPort(value);
             if (destPort === "" || destPort === bindPort) setDestPort(value);
           }}
         />
-        <EndpointRow
-          tag={kind === "local" ? t("forward.tag_remote") : t("forward.tag_local")}
-          hostLabel={t("forward.destHost")}
-          portLabel={t("forward.destPort")}
-          host={destHost}
-          port={destPort}
-          onHost={setDestHost}
-          onPort={setDestPort}
+        <ArrowRight className="size-3 shrink-0 text-muted-foreground" />
+        <PortInput
+          label={kind === "local" ? remoteLabel : localLabel}
+          value={destPort}
+          onChange={setDestPort}
         />
       </div>
-      <div className="mt-1.5 flex gap-1.5">
+      <div className="mt-1 flex gap-1">
         <Input
-          className="h-8 text-[13px]"
+          className="h-7 px-2 text-xs"
           placeholder={t("forward.namePlaceholder")}
           aria-label={t("forward.name")}
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
-        <Button type="submit" size="sm" className="h-8 shrink-0" disabled={busy || !bindPort}>
+        <Button type="submit" size="xs" className="h-7 shrink-0" disabled={busy || !bindPort}>
           <Plus />
           {t("forward.addAction")}
         </Button>
@@ -292,52 +292,40 @@ function AddForwardForm({ projectId, onCreated }: { projectId: string; onCreated
   );
 }
 
-function EndpointRow({
-  tag,
-  hostLabel,
-  portLabel,
-  host,
-  port,
-  onHost,
-  onPort,
+/**
+ * 端口输入。用 text + inputMode 而不是 type=number：窄栏里 number 的上下箭头
+ * 会吃掉一截宽度，而且非数字字符在这里没有任何意义，直接过滤更省事。
+ */
+function PortInput({
+  label,
+  value,
+  onChange,
 }: {
-  tag: string;
-  hostLabel: string;
-  portLabel: string;
-  host: string;
-  port: string;
-  onHost: (value: string) => void;
-  onPort: (value: string) => void;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
 }) {
   return (
-    <div className="grid grid-cols-[1.75rem_1fr_4.5rem] items-center gap-1">
-      <span className="text-[11px] text-muted-foreground">{tag}</span>
-      <Input
-        className="h-8 font-mono text-[13px]"
-        placeholder="127.0.0.1"
-        aria-label={hostLabel}
-        value={host}
-        onChange={(e) => onHost(e.target.value)}
-      />
-      <Input
-        type="number"
-        min={1}
-        max={65535}
-        inputMode="numeric"
-        className="h-8 px-1.5 font-mono text-[13px]"
-        placeholder={portLabel}
-        aria-label={portLabel}
-        value={port}
-        onChange={(e) => onPort(e.target.value)}
-      />
-    </div>
+    <Input
+      inputMode="numeric"
+      maxLength={5}
+      className="h-7 min-w-0 flex-1 px-2 font-mono text-xs"
+      placeholder={label}
+      aria-label={label}
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
+    />
   );
 }
 
+/** 回环地址是默认值，显示出来只是噪音；非默认的（老规则或直接调 API 建的）才带上。 */
 function routeLabel(row: PortForward): string {
-  const bind = `${row.bindHost}:${row.bindPort}`;
-  const dest = `${row.destHost}:${row.destPort}`;
-  return `${bind} → ${dest}`;
+  return `${endpointLabel(row.bindHost, row.bindPort)} → ${endpointLabel(row.destHost, row.destPort)}`;
+}
+
+function endpointLabel(host: string, port: number): string {
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return loopback ? String(port) : `${host}:${port}`;
 }
 
 function StateDot({ state }: { state: ForwardState }) {

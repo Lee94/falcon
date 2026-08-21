@@ -50,11 +50,14 @@ export function Segmented<T extends string>({
   options,
   onChange,
   label,
+  dense,
 }: {
   value: T;
   options: { value: T; label: string }[];
   onChange: (next: T) => void;
   label?: string;
+  /** 侧边栏那种窄容器里用，和同处的 h-7 输入框对齐 */
+  dense?: boolean;
 }) {
   return (
     <div role="radiogroup" aria-label={label} className="flex overflow-hidden rounded-md border">
@@ -67,7 +70,8 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={on}
             className={cn(
-              "h-8 flex-1 whitespace-nowrap px-3 text-[13px] outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
+              "flex-1 whitespace-nowrap outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
+              dense ? "h-7 px-2 text-xs" : "h-8 px-3 text-[13px]",
               on
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"

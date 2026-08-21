@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { ArrowLeftRight, GitBranch } from "lucide-react";
+import { ArrowLeftRight, FileDiff, Folder, GitBranch } from "lucide-react";
 import { useApp, selectRightVisible, type RightPanelId } from "../store.js";
 import { chord, type Command } from "../lib/shortcuts.js";
 import { cn } from "@/lib/utils";
@@ -10,6 +10,8 @@ const ITEMS: {
   label: string;
   shortcut: Command;
 }[] = [
+  { id: "files", icon: Folder, label: "files.panel", shortcut: "toggleFilesPanel" },
+  { id: "changes", icon: FileDiff, label: "changes.panel", shortcut: "toggleChangesPanel" },
   { id: "git", icon: GitBranch, label: "git.panel", shortcut: "toggleGitPanel" },
   { id: "forward", icon: ArrowLeftRight, label: "forward.panel", shortcut: "toggleForwardPanel" },
 ];

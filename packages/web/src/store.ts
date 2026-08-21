@@ -38,7 +38,9 @@ export type ActiveView =
   /** 选中了项目但还没有可显示的终端 */
   | { kind: "project" }
   /** Git 面板点开的文件差异（见 diffTab） */
-  | { kind: "diff" };
+  | { kind: "diff" }
+  /** 文件面板点开的文件（见 fileTab） */
+  | { kind: "file" };
 
 /**
  * 差异查看 tab 的目标。单例：再点别的文件就地替换内容，像编辑器的预览 tab——
@@ -48,6 +50,11 @@ export type ActiveView =
 export interface DiffTabTarget {
   projectId: string;
   file: GitFileChange;
+  /**
+   * 从 History 的提交详情点进来时带上这条提交，diff 就取那一次改动；
+   * 不带就是「修改」面板点进来的，看工作区现状。
+   */
+  commit?: { sha: string; short: string; subject: string };
 }
 
 export function tabProjectId(
@@ -59,8 +66,23 @@ export function tabProjectId(
   return sessions.find((s) => s.id === tabId)?.projectId;
 }
 
+/**
+ * 文件查看 tab 的目标。与 diffTab 同样是单例、同样不持久化：
+ * 点另一个文件就地替换，像编辑器的预览 tab。
+ */
+export interface FileTabTarget {
+  projectId: string;
+  /** 工作目录相对路径，一律 `/` 分隔（见 WorkspaceEntry） */
+  path: string;
+}
+
 /** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
-export type RightPanelId = "git" | "forward";
+export type RightPanelId = "git" | "changes" | "forward" | "files";
+
+/** 持久化的布局可能来自旧版本，认不出的面板名一律退回默认 */
+function isRightPanelId(v: unknown): v is RightPanelId {
+  return v === "git" || v === "changes" || v === "forward" || v === "files";
+}
 
 export const selectRightVisible = (s: { rightOpen: boolean }) => s.rightOpen;
 
@@ -77,6 +99,21 @@ export function visibleTabs(s: {
   );
 }
 
+/**
+ * 关掉一个不代表会话的 tab（diff / file）之后落到哪。
+ * 顺序与 dropTab 一致：最近的可见终端 → 项目空页 → 总览。
+ */
+function fallbackActive(s: {
+  tabs: string[];
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  selectedProjectId: string | null;
+}): ActiveView {
+  const rest = visibleTabs(s);
+  if (rest.length) return { kind: "terminal", sessionId: rest[rest.length - 1]! };
+  return s.selectedProjectId ? { kind: "project" } : { kind: "overview" };
+}
+
 export type OverviewFilter = "all" | SessionState;
 
 /** 设置弹窗左侧模块。打开时记住上次停在哪一格 */
@@ -90,14 +127,20 @@ export interface PendingSession {
 }
 
 /**
- * Git 面板跟谁走：侧栏选中的项目优先，否则当前会话所属项目。
+ * 右侧各面板跟谁走：侧栏选中的项目优先，否则当前 tab 所属项目。
  * 总览且没选项目时为 null——不要退回第一个项目，免得打开面板看到别人的仓库。
+ *
+ * 两个查看 tab（diff / file）也要认：从文件面板点开一个文件，active 就从
+ * terminal 变成 file，这时若不看 fileTab，面板会当场塌回"选一个项目"——
+ * 用户刚从那棵树里点的文件。
  */
 export function selectFocusProjectId(s: {
   selectedProjectId: string | null;
   active: ActiveView;
   sessions: SessionWithProject[];
   pending: PendingSession[];
+  diffTab: DiffTabTarget | null;
+  fileTab: FileTabTarget | null;
 }): string | null {
   if (s.selectedProjectId) return s.selectedProjectId;
   if (s.active.kind === "terminal") {
@@ -108,6 +151,8 @@ export function selectFocusProjectId(s: {
       null
     );
   }
+  if (s.active.kind === "file") return s.fileTab?.projectId ?? null;
+  if (s.active.kind === "diff") return s.diffTab?.projectId ?? null;
   return null;
 }
 
@@ -238,7 +283,7 @@ function loadWorkspace(): PersistedWorkspace {
             : { kind: "overview" },
       sidebarOpen: parsed.sidebarOpen !== false,
       rightOpen: parsed.rightOpen === true,
-      rightPanel: parsed.rightPanel === "forward" || parsed.rightPanel === "git" ? parsed.rightPanel : "git",
+      rightPanel: isRightPanelId(parsed.rightPanel) ? parsed.rightPanel : "git",
       collapsed: parsed.collapsed ?? {},
       selectedProjectId:
         typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
@@ -410,6 +455,8 @@ interface AppState {
   pending: PendingSession[];
   /** 差异查看 tab；null = 没开 */
   diffTab: DiffTabTarget | null;
+  /** 文件查看 tab；null = 没开 */
+  fileTab: FileTabTarget | null;
 
   /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
   themePref: ThemePref;
@@ -469,11 +516,16 @@ interface AppState {
   applySessionState(id: string, state: SessionState, deadReason?: DeadReason): void;
 
   openSession(sessionId: string): void;
-  /** 在差异 tab 里打开一个文件（就地替换上一个） */
-  openDiff(projectId: string, file: GitFileChange): void;
+  /** 在差异 tab 里打开一个文件（就地替换上一个）。带 commit 则看那次提交的改动 */
+  openDiff(projectId: string, file: GitFileChange, commit?: DiffTabTarget["commit"]): void;
   /** 切回已开的差异 tab */
   showDiff(): void;
   closeDiff(): void;
+  /** 在查看 tab 里打开工作目录里的一个文件（就地替换上一个） */
+  openFile(projectId: string, path: string): void;
+  /** 切回已开的查看 tab */
+  showFile(): void;
+  closeFile(): void;
   /** 手动关 tab：Terminate，顺手结束会话，首次会解释这件事 */
   closeTab(id: string): Promise<void>;
   /** Detach：只收起 tab，会话留在后台继续跑（Shift+关闭） */
@@ -543,9 +595,10 @@ export const useApp = create<AppState>((set, get) => {
     } = get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
-      // pending id 与差异 tab 都活不过刷新，落成项目 / 总览视图
+      // pending id 与两个查看 tab（diff / file）都活不过刷新，落成项目 / 总览视图
       active:
         active.kind === "diff" ||
+        active.kind === "file" ||
         (active.kind === "terminal" && isPendingId(active.sessionId))
           ? selectedProjectId
             ? { kind: "project" }
@@ -581,6 +634,7 @@ export const useApp = create<AppState>((set, get) => {
     active: initialWorkspace.active,
     pending: [],
     diffTab: null,
+    fileTab: null,
 
     themePref: initialThemePref,
     theme: resolveTheme(initialThemePref),
@@ -730,8 +784,8 @@ export const useApp = create<AppState>((set, get) => {
       persist();
     },
 
-    openDiff(projectId, file) {
-      set({ diffTab: { projectId, file }, active: { kind: "diff" } });
+    openDiff(projectId, file, commit) {
+      set({ diffTab: { projectId, file, commit }, active: { kind: "diff" } });
     },
 
     showDiff() {
@@ -739,19 +793,25 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     closeDiff() {
-      set((state) => {
-        if (state.active.kind !== "diff") return { diffTab: null };
-        // 回退顺序与 dropTab 一致：最近的可见终端 → 项目空页 → 总览
-        const rest = visibleTabs(state);
-        return {
-          diffTab: null,
-          active: rest.length
-            ? { kind: "terminal" as const, sessionId: rest[rest.length - 1]! }
-            : state.selectedProjectId
-              ? { kind: "project" as const }
-              : { kind: "overview" as const },
-        };
-      });
+      set((state) => ({
+        diffTab: null,
+        ...(state.active.kind === "diff" ? { active: fallbackActive(state) } : null),
+      }));
+    },
+
+    openFile(projectId, path) {
+      set({ fileTab: { projectId, path }, active: { kind: "file" } });
+    },
+
+    showFile() {
+      if (get().fileTab) set({ active: { kind: "file" } });
+    },
+
+    closeFile() {
+      set((state) => ({
+        fileTab: null,
+        ...(state.active.kind === "file" ? { active: fallbackActive(state) } : null),
+      }));
     },
 
     selectProject(projectId) {

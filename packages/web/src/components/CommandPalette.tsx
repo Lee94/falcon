@@ -6,6 +6,8 @@ import {
   CircleX,
   Download,
   ArrowLeftRight,
+  FileDiff,
+  Folder,
   GitBranch,
   LayoutDashboard,
   PanelLeft,
@@ -172,8 +174,24 @@ export function CommandPalette() {
       icon: PanelLeft,
       run: () => store.toggleSidebar(),
     });
+    const filesOn = rightVisible && rightPanel === "files";
+    const changesOn = rightVisible && rightPanel === "changes";
     const gitOn = rightVisible && rightPanel === "git";
     const forwardOn = rightVisible && rightPanel === "forward";
+    actionItems.push({
+      key: `>${t("palette.toggleFilesOn")} ${t("palette.toggleFilesOff")}`,
+      label: filesOn ? t("palette.toggleFilesOn") : t("palette.toggleFilesOff"),
+      meta: chord("toggleFilesPanel"),
+      icon: Folder,
+      run: () => store.toggleRightPanel("files"),
+    });
+    actionItems.push({
+      key: `>${t("palette.toggleChangesOn")} ${t("palette.toggleChangesOff")}`,
+      label: changesOn ? t("palette.toggleChangesOn") : t("palette.toggleChangesOff"),
+      meta: chord("toggleChangesPanel"),
+      icon: FileDiff,
+      run: () => store.toggleRightPanel("changes"),
+    });
     actionItems.push({
       key: `>${t("palette.toggleGitOn")} ${t("palette.toggleGitOff")}`,
       label: gitOn ? t("palette.toggleGitOn") : t("palette.toggleGitOff"),
