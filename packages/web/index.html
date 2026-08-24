@@ -2,7 +2,17 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover：移动壳把安全区染成顶栏底色，不留白边；
+      interactive-widget=resizes-content：Android 软键盘压缩 layout viewport，
+      键位条随之上移（iOS 不认这个字段，由 MobileShell 里的 visualViewport 兜）；
+      maximum-scale=1：阻止 iOS 聚焦 xterm 隐藏输入框时的自动放大——Safari
+      只拿它挡自动缩放，双指捏合仍然有效。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <title>Mojito</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />

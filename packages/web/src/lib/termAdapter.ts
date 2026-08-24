@@ -16,6 +16,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import type { OpenOptions as RioOpenOptions, RioTermHandle, Theme as RioTheme } from "rioterm";
 import { termFontStack, type TermPref } from "./term.js";
 import { isUsableTermSize } from "./termFit.js";
+import { deleteSeq } from "./termInput.js";
 import { osc52ClipboardText, writeBrowserClipboard } from "./osc52.js";
 
 export interface TermAdapterHooks {
@@ -52,6 +53,8 @@ export interface TermAdapter {
   refreshMetrics(): void;
   /** 热改外观。rio 引擎内部会重建实例，调用方无感知 */
   applyAppearance(pref: TermPref, theme: ITheme): void;
+  /** DECCKM 应用光标键模式是否开着；移动端键位条据此决定方向键发 SS3 还是 CSI */
+  appCursorKeys(): boolean;
   focus(): void;
   paste(text: string): void;
   getSelection(): string;
@@ -68,10 +71,12 @@ class XtermAdapter implements TermAdapter {
   private fitAddon: FitAddon;
   private host: HTMLElement | null = null;
   private pref: TermPref;
+  private hooks: TermAdapterHooks;
 
   constructor(init: TermAdapterInit) {
     const { pref, theme, scrollback, hooks } = init;
     this.pref = pref;
+    this.hooks = hooks;
     const term = new Terminal({
       fontFamily: termFontStack(pref),
       fontSize: pref.fontSize,
@@ -115,6 +120,10 @@ class XtermAdapter implements TermAdapter {
   open(host: HTMLElement): void {
     this.host = host;
     this.term.open(host);
+    // 触屏才需要软键盘退格连删的哨兵（桌面硬键盘的 keydown 自带重复）
+    if (navigator.maxTouchPoints > 0 || "ontouchstart" in window) {
+      this.wireSoftKeyRepeat(host);
+    }
     // WebGL 渲染器：高吞吐输出（构建日志、TUI 全屏重绘）下吞吐比默认的
     // DOM 渲染器高一个数量级。WebGL2 不可用或上下文被回收（GPU 重置、
     // 开的 tab 超过浏览器上下文上限时最老的会被丢）就回落 DOM 渲染器。
@@ -125,6 +134,78 @@ class XtermAdapter implements TermAdapter {
     } catch {
       // 软渲染 / 老 GPU 环境，DOM 渲染器兜底
     }
+  }
+
+  /**
+   * 软键盘长按退格连删。
+   *
+   * 机制：软键盘长按退格不重复发 keydown，只对"有内容的输入框"重复发
+   * deleteContentBackward 编辑事件；而 xterm 的隐藏 textarea 恒为空、
+   * _inputEvent 只认 insertText（读 6.1.0-beta.302 源码确认），于是只有
+   * 首击那记 keydown 变成退格。这里往 textarea 里养一段空格哨兵，让长按
+   * 能持续产生删除事件，拦下来转成退格发给 PTY，preventDefault 保住哨兵。
+   *
+   * 与 xterm 的三处既有逻辑不打架（都读过对应源码）：
+   * - 首击去重：xterm 处理过的 Backspace keydown 会 preventDefault，正常
+   *   不会再产生编辑事件；个别内核仍产生的，落在 35ms 窗口内被跳过；
+   * - IME：CompositionHelper 按 compositionstart 时的 selection 偏移截取
+   *   组合文本，哨兵在偏移之前不会混进去；组合期间绝不动 value，补哨兵
+   *   一律推迟到 setTimeout(0)，排在 xterm 自己读值的 timeout 之后；
+   * - Android 229 路径的 _handleAnyTextareaChanges 按"值变短发一个 \x7f"
+   *   兜底，与 preventDefault 后值不变的哨兵互不重复。
+   *
+   * 监听器随 textarea 被 term.dispose() 移出 DOM 一起失效，不需要显式清理
+   * （与 RioAdapter.wireIme 同一套生命周期约定）。rio 引擎的 textarea 由
+   * Rust 侧接管，同样的 iOS 长按问题留待 rio 侧解决。
+   */
+  private wireSoftKeyRepeat(host: HTMLElement): void {
+    const textarea = host.querySelector("textarea");
+    if (!textarea) return;
+    // 4 个空格：连 word-delete 一次吃掉整段也只折算一个退格，随后立刻补回
+    const SENTINEL = "    ";
+    let lastBackspaceDown = -1;
+    let composing = false;
+
+    const refill = () => {
+      if (composing) return;
+      if (textarea.value !== SENTINEL) textarea.value = SENTINEL;
+      textarea.selectionStart = textarea.selectionEnd = SENTINEL.length;
+    };
+    const refillSoon = () => {
+      window.setTimeout(refill, 0);
+    };
+
+    textarea.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    textarea.addEventListener("compositionend", () => {
+      composing = false;
+      refillSoon();
+    });
+    textarea.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key === "Backspace") lastBackspaceDown = e.timeStamp;
+      },
+      true
+    );
+    textarea.addEventListener(
+      "beforeinput",
+      (e) => {
+        if (composing || e.isComposing) return;
+        const seq = deleteSeq(e.inputType);
+        if (seq === null) return;
+        e.preventDefault();
+        // 首击的 keydown 已经由 xterm 发过 \x7f，同一击派生的编辑事件跳过
+        if (e.timeStamp - lastBackspaceDown < 35) return;
+        this.hooks.onData(seq);
+      },
+      true
+    );
+    // 没被吊销的删除（个别内核）与普通输入之后，把哨兵养回去
+    textarea.addEventListener("input", refillSoon);
+    textarea.addEventListener("focus", refill);
+    refill();
   }
 
   write(data: Uint8Array): void {
@@ -166,6 +247,10 @@ class XtermAdapter implements TermAdapter {
     o.cursorStyle = pref.cursorStyle;
     o.cursorBlink = pref.cursorBlink;
     o.theme = theme;
+  }
+
+  appCursorKeys(): boolean {
+    return this.term.modes.applicationCursorKeysMode;
   }
 
   focus(): void {
@@ -310,6 +395,11 @@ class RioAdapter implements TermAdapter {
     this.pref = pref;
     this.theme = theme;
     if (!same) this.scheduleRebuild();
+  }
+
+  appCursorKeys(): boolean {
+    // 重建间隙 handle 为空，按普通模式给：CSI 形态的兼容面更广
+    return this.handle?.terminal.modes().applicationCursorKeys ?? false;
   }
 
   focus(): void {

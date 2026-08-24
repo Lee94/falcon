@@ -593,6 +593,13 @@ const zh = {
       cursor_bar: "竖线",
       cursor_underline: "下划线",
     },
+    mobile: {
+      switchTitle: "切换会话",
+      openSwitcher: "切换项目与会话",
+      emptyTitle: "没有打开的终端",
+      emptyBody: "从切换面板选择一个会话，或新建一个终端。",
+      keyCtrl: "Ctrl · 点亮后对下一个按键生效",
+    },
     common: {
       error: "出错了",
       confirm: "确定",

@@ -238,7 +238,14 @@ if (seaMode) {
       fs.rmSync(path.join(runtimeRoot, e), { recursive: true, force: true });
     }
   }
-  process.env.MOJITO_WEB_DIST ??= path.join(runtimeDir, "web");
+  // 这个 env 会随 PTY 传给会话里的 shell：从 mojito 终端里再启一个 mojito 时，
+  // 子实例会继承父实例的 MOJITO_WEB_DIST。父实例升级后旧 runtime 已被上面的
+  // 清理删掉，继承值指向不存在的目录，web UI 会静默 404。显式 override 仍然
+  // 尊重，但指向的目录必须真有 index.html，否则视为陈旧继承、换成自己的。
+  const inheritedWebDist = process.env.MOJITO_WEB_DIST;
+  if (!inheritedWebDist || !fs.existsSync(path.join(inheritedWebDist, "index.html"))) {
+    process.env.MOJITO_WEB_DIST = path.join(runtimeDir, "web");
+  }
   anchor = path.join(runtimeDir, "sea-loader.cjs");
 } else {
   // 未注入 SEA 时直接 node 运行本文件：按仓库布局解析，用于打包产物的快速自检

@@ -78,6 +78,10 @@ async function main() {
       }
       return reply.code(404).send({ error: "Not Found" });
     });
+  } else {
+    // 静默跳过会让"UI 404"极难排查（多半是 MOJITO_WEB_DIST 指了不存在的目录，
+    // 比如从 mojito 终端里继承来的陈旧值），启动时明说
+    app.log.warn(`web 静态资源目录不存在，未托管 UI: ${webDist}`);
   }
 
   await app.listen({ host: config.host, port: config.port });

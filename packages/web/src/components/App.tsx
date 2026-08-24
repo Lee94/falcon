@@ -2,8 +2,10 @@ import { lazy, Suspense, useEffect, useRef } from "react";
 import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
+import { useIsMobile } from "../lib/useIsMobile.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { Login } from "./Login.js";
+import { MobileShell } from "./MobileShell.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightBar } from "./RightBar.js";
 import { GitPanel } from "./GitPanel.js";
@@ -84,6 +86,7 @@ export function App() {
   const actions = useActions();
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     void init();
@@ -214,7 +217,11 @@ export function App() {
   if (auth && auth.required && !auth.authenticated) return <Login />;
 
   return (
-    <div className="flex h-full min-w-[820px] flex-col overflow-hidden">
+    // 移动端只换主区骨架；浮层（菜单 / 确认 / 表单 / 设置 / toast）两端共用
+    <div className={cn("flex h-full flex-col overflow-hidden", !isMobile && "min-w-[820px]")}>
+      {isMobile ? (
+        <MobileShell />
+      ) : (
       <div className="flex min-h-0 flex-1">
         {sidebarVisible && <Sidebar />}
         <main className="flex min-w-0 flex-1 flex-col bg-background">
@@ -277,6 +284,7 @@ export function App() {
         {rightVisible && rightPanel === "forward" && <ForwardPanel />}
         <RightBar />
       </div>
+      )}
 
       <Menu />
       <ConfirmDialog />

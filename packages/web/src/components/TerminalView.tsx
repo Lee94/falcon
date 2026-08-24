@@ -13,6 +13,12 @@ import {
   termColorHint,
 } from "../lib/term.js";
 import { createTermAdapter, type TermAdapter } from "../lib/termAdapter.js";
+import {
+  mouseReportCoord,
+  registerTermInput,
+  repairMouseReport,
+  takeStickyCtrl,
+} from "../lib/termInput.js";
 import { writeBrowserClipboard } from "../lib/osc52.js";
 import { imageFromClipboard, imagesFromDrop, quoteForPrompt } from "../lib/pasteImage.js";
 import { useActions } from "../lib/useActions.js";
@@ -106,6 +112,8 @@ export function TerminalView({
     let ws: WebSocket | null = null;
     let retries = 0;
     let retryTimer: number | null = null;
+    /** 最近一次有效 SGR 鼠标报文的坐标，触摸惯性期的 NaN 报文靠它修 */
+    let lastMouseCoord: string | null = null;
 
     // 引擎、初始外观都在这里定死；之后的外观切换交给下面那个 effect 走
     // applyAppearance（xterm 就地改 options，rio 内部重建），不断 WS
@@ -117,9 +125,15 @@ export function TerminalView({
       scrollback: 10000,
       hooks: {
         onData: (data) => {
-          if (ws?.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "input", data }));
-          }
+          if (ws?.readyState !== WebSocket.OPEN) return;
+          // 触摸惯性滚动的 NaN 坐标鼠标报文在这里修（见 repairMouseReport 注释），
+          // 修不了的直接丢——发出去就是往 shell 里打乱码
+          const repaired = repairMouseReport(data, lastMouseCoord);
+          if (repaired === null) return;
+          lastMouseCoord = mouseReportCoord(repaired) ?? lastMouseCoord;
+          // 移动端键位条的粘滞 Ctrl 在这里落地：点亮后下一个字符转控制字节。
+          // 桌面端 Ctrl 永远不点亮，等于恒等变换
+          ws.send(JSON.stringify({ type: "input", data: takeStickyCtrl(repaired) }));
         },
         onResize: () => sendResize(),
         // rio 引擎异步就绪（wasm 首次加载 / 换肤重建）；好了再补量一次尺寸
@@ -133,6 +147,16 @@ export function TerminalView({
     });
     adapter.open(containerRef.current!);
     termRef.current = adapter;
+
+    // 移动端键位条从这里把 Esc / 方向键等序列注入本会话（见 lib/termInput.ts）
+    const unregisterInput = registerTermInput(sessionId, {
+      send: (data) => {
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "input", data }));
+        }
+      },
+      appCursorKeys: () => adapter.appCursorKeys(),
+    });
 
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const wsUrl = `${proto}://${location.host}/ws/sessions/${sessionId}`;
@@ -346,6 +370,7 @@ export function TerminalView({
 
     return () => {
       disposed = true;
+      unregisterInput();
       window.removeEventListener("online", retryNow);
       document.removeEventListener("visibilitychange", onVisible);
       if (retryTimer != null) clearTimeout(retryTimer);
