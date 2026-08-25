@@ -6,10 +6,11 @@
  */
 
 import type { ITheme } from "@xterm/xterm";
-import { appearanceFromHex, type TermAppearance } from "@mojito/shared";
+import { appearanceFromHex, type TermAppearance } from "@falcon/shared";
 import type { ThemeMode } from "./theme.js";
 
-export const TERM_PREF_KEY = "mojito.term";
+export const TERM_PREF_KEY = "falcon.term";
+const TERM_PREF_KEY_LEGACY = "mojito.term";
 
 export const TERM_FONT_SIZE_MIN = 10;
 export const TERM_FONT_SIZE_MAX = 24;
@@ -617,7 +618,7 @@ export function clampLineHeight(n: number): number {
 
 export function loadTermPref(): TermPref {
   try {
-    const raw = localStorage.getItem(TERM_PREF_KEY);
+    const raw = localStorage.getItem(TERM_PREF_KEY) ?? localStorage.getItem(TERM_PREF_KEY_LEGACY);
     if (!raw) return { ...DEFAULT_TERM_PREF };
     const parsed = JSON.parse(raw) as Partial<TermPref>;
     return sanitizeTermPref(parsed);

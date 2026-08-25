@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 更新 mojito 锁定的 Zellij 版本。
+ * 更新 falcon 锁定的 Zellij 版本。
  *
  *   node scripts/update-zellij.mjs 0.44.4
  *   node scripts/update-zellij.mjs --latest

@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { SshAuthMethod } from "@mojito/shared";
+import type { SshAuthMethod } from "@falcon/shared";
 import { Input } from "@/components/ui/input";
 import {
   Select,

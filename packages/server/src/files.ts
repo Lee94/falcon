@@ -11,8 +11,13 @@
  */
 
 import fs from "node:fs";
-import type { FilePreview, WorkspaceEntry, WorkspaceListing } from "@mojito/shared";
-import { WORKSPACE_FILE_CAP, WORKSPACE_LIST_CAP } from "@mojito/shared";
+import type {
+  FilePreview,
+  WorkspaceEntry,
+  WorkspaceIndex,
+  WorkspaceListing,
+} from "@falcon/shared";
+import { WORKSPACE_FILE_CAP, WORKSPACE_INDEX_CAP, WORKSPACE_LIST_CAP } from "@falcon/shared";
 import { isAncestor, joinPath, normalizeSep, samePath } from "./git/path.js";
 import { encodePowerShell, quotePosix, quotePowerShell, type HostKind } from "./zellij/host.js";
 import type { ExecFn } from "./zellij/install.js";
@@ -180,6 +185,161 @@ export async function listWorkspace(
     throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "无法读取该目录");
   }
   return capEntries(parseEntries(res.stdout, relPath), relPath);
+}
+
+// ---------------- 文件索引（Quick Open） ----------------
+
+/**
+ * 目录遍历时跳过的名字。git 仓库走 ls-files（尊重 gitignore），只有非 git
+ * 项目才落到这里——node_modules / dist 那种生成物会把索引撑爆，列出来也搜不到。
+ */
+export const INDEX_SKIP_DIRS: readonly string[] = [
+  "node_modules",
+  ".git",
+  ".svn",
+  ".hg",
+  "dist",
+  "build",
+  "out",
+  ".next",
+  ".nuxt",
+  ".output",
+  "target",
+  "vendor",
+  "__pycache__",
+  ".venv",
+  "venv",
+  "coverage",
+  ".cache",
+  ".turbo",
+];
+
+const INDEX_TIMEOUT_MS = 20_000;
+const INDEX_TRUNCATED = "__TRUNCATED__";
+
+function capIndex(paths: string[], truncated = false): WorkspaceIndex {
+  if (paths.length <= WORKSPACE_INDEX_CAP) return { paths, truncated };
+  return { paths: paths.slice(0, WORKSPACE_INDEX_CAP), truncated: true };
+}
+
+/**
+ * 把宿主机绝对路径收成工作目录相对、一律 `/` 分隔。对不上前缀的行丢掉
+ * （find 偶尔会打一条警告到 stdout 混进来）。
+ */
+export function relativizeIndexLine(line: string, root: string, kind: HostKind): string | null {
+  const raw = line.replace(/\r$/, "");
+  if (!raw || raw === INDEX_TRUNCATED) return null;
+  const full = normalizeSep(kind, raw);
+  const base = normalizeSep(kind, root).replace(/[\\/]+$/, "");
+  if (kind === "windows") {
+    const fullL = full.toLowerCase();
+    const baseL = base.toLowerCase();
+    if (fullL === baseL) return null;
+    if (!fullL.startsWith(`${baseL}\\`)) return null;
+    return full.slice(base.length + 1).replaceAll("\\", "/");
+  }
+  if (full === base) return null;
+  if (!full.startsWith(`${base}/`)) return null;
+  return full.slice(base.length + 1);
+}
+
+export function parseIndexLines(stdout: string, root: string, kind: HostKind): WorkspaceIndex {
+  const skip = new Set<string>(INDEX_SKIP_DIRS);
+  const paths: string[] = [];
+  let truncated = stdout.includes(INDEX_TRUNCATED);
+  for (const raw of stdout.split(/\r?\n/)) {
+    const rel = relativizeIndexLine(raw, root, kind);
+    if (!rel) continue;
+    if (rel.split("/").some((seg) => skip.has(seg))) continue;
+    paths.push(rel);
+    if (paths.length >= WORKSPACE_INDEX_CAP) {
+      truncated = true;
+      break;
+    }
+  }
+  return { paths, truncated };
+}
+
+/** 远端遍历。`-prune` 掉 INDEX_SKIP_DIRS，避免在 node_modules 里转一圈 */
+export function indexCommand(kind: HostKind, dir: string): string {
+  if (kind === "windows") {
+    const skipMap = INDEX_SKIP_DIRS.map((n) => `'${n}' = 1`).join("; ");
+    return encodePowerShell(
+      [
+        `$d = ${quotePowerShell(dir)}`,
+        `if (-not (Test-Path -LiteralPath $d -PathType Container)) { Write-Output 'ENOENT'; exit 1 }`,
+        `$skip = @{ ${skipMap} }`,
+        `$n = 0`,
+        `$cap = ${WORKSPACE_INDEX_CAP}`,
+        `function Walk($p) {`,
+        `  if ($script:n -ge $cap) { return }`,
+        `  Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | ForEach-Object {`,
+        `    if ($script:n -ge $cap) { return }`,
+        `    if ($_.PSIsContainer) {`,
+        `      if (-not $skip.ContainsKey($_.Name)) { Walk $_.FullName }`,
+        `    } else {`,
+        `      Write-Output $_.FullName`,
+        `      $script:n++`,
+        `    }`,
+        `  }`,
+        `}`,
+        `Walk $d`,
+        `if ($n -ge $cap) { Write-Output '${INDEX_TRUNCATED}' }`,
+      ].join("; ")
+    );
+  }
+  const d = quotePosix(dir);
+  const prune = INDEX_SKIP_DIRS.map((n) => `-name ${quotePosix(n)}`).join(" -o ");
+  return [
+    `d=${d}`,
+    `if [ ! -d "$d" ]; then printf '%s\\n' ENOENT; exit 1; fi`,
+    `if [ ! -r "$d" ]; then printf '%s\\n' EACCES; exit 1; fi`,
+    `find "$d" \\( -type d \\( ${prune} \\) \\) -prune -o -type f -print` +
+      ` | awk -v cap=${WORKSPACE_INDEX_CAP} 'NR<=cap{print} NR==cap+1{print "${INDEX_TRUNCATED}"; exit}'`,
+  ].join("; ");
+}
+
+async function indexLocal(kind: HostKind, root: string): Promise<WorkspaceIndex> {
+  const skip = new Set<string>(INDEX_SKIP_DIRS);
+  const paths: string[] = [];
+  const stack: string[] = [""];
+  while (stack.length) {
+    const rel = stack.pop()!;
+    const dir = rel ? joinPath(kind, root, ...rel.split("/")) : root;
+    let dirents: fs.Dirent[];
+    try {
+      dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of dirents) {
+      if (ent.isSymbolicLink()) continue;
+      if (skip.has(ent.name)) continue;
+      const child = relJoin(rel, ent.name);
+      if (ent.isDirectory()) {
+        stack.push(child);
+        continue;
+      }
+      paths.push(child);
+      if (paths.length >= WORKSPACE_INDEX_CAP) return { paths, truncated: true };
+    }
+  }
+  return { paths, truncated: false };
+}
+
+/** 非 git 项目的兜底：遍历工作目录，跳过 INDEX_SKIP_DIRS */
+export async function indexWorkspace(host: FileHost, root: string): Promise<WorkspaceIndex> {
+  const dir = resolveInside(host.kind, root, "");
+  if (host.local) return indexLocal(host.kind, dir);
+  const res = await execTimed(host.exec, indexCommand(host.kind, dir), INDEX_TIMEOUT_MS);
+  if (res.code !== 0) {
+    throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "无法读取该目录");
+  }
+  return parseIndexLines(res.stdout, dir, host.kind);
+}
+
+export function capFileIndex(paths: string[]): WorkspaceIndex {
+  return capIndex(paths);
 }
 
 // ---------------- 读文件 ----------------

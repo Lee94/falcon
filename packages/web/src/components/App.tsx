@@ -47,6 +47,9 @@ const SettingsModal = lazy(() =>
 const CommandPalette = lazy(() =>
   import("./CommandPalette.js").then((m) => ({ default: m.CommandPalette }))
 );
+const FileQuickOpen = lazy(() =>
+  import("./FileQuickOpen.js").then((m) => ({ default: m.FileQuickOpen }))
+);
 const ZellijInstallModal = lazy(() =>
   import("./ZellijInstallModal.js").then((m) => ({ default: m.ZellijInstallModal }))
 );
@@ -79,6 +82,7 @@ export function App() {
   const settingsOpen = useApp((s) => s.settingsOpen);
   const installOpen = useApp((s) => s.install != null);
   const paletteOpen = useApp((s) => s.paletteOpen);
+  const quickOpen = useApp((s) => s.quickOpen);
   const init = useApp((s) => s.init);
   const refreshSessions = useApp((s) => s.refreshSessions);
   const closeProjectForm = useApp((s) => s.closeProjectForm);
@@ -132,6 +136,9 @@ export function App() {
     switch (cmd) {
       case "palette":
         s.setPalette(!s.paletteOpen);
+        return;
+      case "quickOpen":
+        s.setQuickOpen(!s.quickOpen);
         return;
       case "toggleSidebar":
         s.toggleSidebar();
@@ -199,6 +206,7 @@ export function App() {
         else if (s.hostForm) s.closeHostForm();
         else if (s.projectForm) s.closeProjectForm();
         else if (s.paletteOpen) s.setPalette(false);
+        else if (s.quickOpen) s.setQuickOpen(false);
         else if (s.settingsOpen) s.closeSettings();
         else if (s.menu) s.closeMenu();
         return;
@@ -321,6 +329,7 @@ export function App() {
           <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
         )}
         {paletteOpen && <CommandPalette />}
+        {quickOpen && <FileQuickOpen />}
       </Suspense>
       <Toaster />
     </div>

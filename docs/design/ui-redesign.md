@@ -1,4 +1,4 @@
-# Mojito UI / 交互重设计方案
+# Falcon UI / 交互重设计方案
 
 > 状态：提案（2026-08-14） · 范围：`packages/web` 全部界面 · 目标形态：桌面宽屏，深色优先
 >
@@ -20,7 +20,7 @@
 
 **把「会话是活的、跑在某台具体的机器上」变成界面的主角。**
 
-Mojito 的硬承诺是"关掉网页会话不死"，但现在的界面完全没有表达它：首屏是一张空表格，持久性只在出问题时以一个黄色 `非持久` 徽标出现，终端满屏黑底里看不出自己连的是哪台机器。产品最贵的能力在 UI 上是隐形的，而最危险的信息（我在 prod 上）也是隐形的。
+Falcon 的硬承诺是"关掉网页会话不死"，但现在的界面完全没有表达它：首屏是一张空表格，持久性只在出问题时以一个黄色 `非持久` 徽标出现，终端满屏黑底里看不出自己连的是哪台机器。产品最贵的能力在 UI 上是隐形的，而最危险的信息（我在 prod 上）也是隐形的。
 
 ### 三条原则
 
@@ -81,7 +81,7 @@ Mojito 的硬承诺是"关掉网页会话不死"，但现在的界面完全没�
 
 ### S8 · Zellij 授权弹窗打断了错误的时刻，且拒绝之后没有回头路
 
-用户点「新建终端」时的意图是"开个终端"，此刻却被要求做一个安全决策："允许 mojito 往我的服务器写可执行文件吗"（[ZellijInstallModal.tsx:147-170](../../packages/web/src/components/ZellijInstallModal.tsx)）。心智不匹配，用户倾向于随便点一个把弹窗消掉。
+用户点「新建终端」时的意图是"开个终端"，此刻却被要求做一个安全决策："允许 falcon 往我的服务器写可执行文件吗"（[ZellijInstallModal.tsx:147-170](../../packages/web/src/components/ZellijInstallModal.tsx)）。心智不匹配，用户倾向于随便点一个把弹窗消掉。
 
 而"随便点一个"是有代价的：点「不安装」会写入 `authorized: false`，此后 `Sidebar` 的 `needsSetup` 判断（[Sidebar.tsx:45-47](../../packages/web/src/components/Sidebar.tsx)）两个分支都不再成立，弹窗永不再现，**UI 上没有任何地方能反悔**。这台主机就此只能开非持久会话。
 
@@ -140,7 +140,7 @@ Sidebar（项目树）        Main
 ├──────────────────────┴────────────────────────────────────┤
 │ StatusBar（22px）：链路 · 尺寸 · Viewer 数 · 持久性来源    │
 └────────────────────────────────────────────────────────────┘
-                 CommandPalette（⌘K，覆盖层）
+                 CommandPalette（⌘⇧P，覆盖层）
 ```
 
 三个结构性变化：
@@ -167,13 +167,13 @@ Sidebar（项目树）        Main
 
 ```
 ┌────────────────────────────────────┐
-│ 🍹 Mojito                    ⌘K  ⚙ │  40px header
+│ Falcon                       ⌘⇧P ⚙ │  40px header
 ├────────────────────────────────────┤
 │  ⦿ 5 运行中 · ◐ 1 待接回 · ○ 2 丢失│  全局摘要，点击 → 总览 tab
 ├────────────────────────────────────┤
 │ 项目                            ＋ │  section label + 新建项目
 │                                    │
-│ ▾  mojito                本地  ⋯  │  ← 项目行（hover 出 ＋ 和 ⋯）
+│ ▾  falcon                本地  ⋯  │  ← 项目行（hover 出 ＋ 和 ⋯）
 │      ⦿ dev server                  │
 │      ⦿ build                       │
 │                                    │
@@ -300,7 +300,7 @@ Banner 保留，但只用于**需要用户动作**的状态（unverified 待接�
 
 □ │ 状态   │ 会话        │ 项目 · 宿主机          │ 持久性      │ 空闲    │
 ──┼────────┼─────────────┼────────────────────────┼─────────────┼─────────┤
-□ │ ⦿ 运行 │ dev server  │ mojito · 本机          │ ⛨ 持久      │ 活跃中  │ ⋯
+□ │ ⦿ 运行 │ dev server  │ falcon · 本机          │ ⛨ 持久      │ 活跃中  │ ⋯
 □ │ ◐ 待接回│ migrate    │ prod-api · 10.0.3.12   │ ⛨ 持久      │ 12 分钟 │ 接回 ⋯
 □ │ ○ 丢失 │ old-shell   │ staging · 10.0.4.9     │ ⚠ 非持久    │ 3 天    │ 清除 ⋯
 ```
@@ -326,7 +326,7 @@ Banner 保留，但只用于**需要用户动作**的状态（unverified 待接�
 | 有项目无会话 | 空表格 | 总览显示项目卡片列表，每张卡一个「新建终端」主按钮 |
 | 有会话 | 空表格（tab 全丢） | **恢复上次的 tab 集合与聚焦项**（解决 S2）；被恢复的会话若已 dead，tab 保留但显示 dead 态，不静默丢弃 |
 
-布局持久化：`localStorage["mojito.workspace"] = { tabs: string[], active, sidebarWidth, sidebarCollapsed }`。恢复时按当前会话列表过滤掉已不存在的 id（`refreshSessions` 里已有类似逻辑，[store.ts:69-77](../../packages/web/src/store.ts)）。
+布局持久化：`localStorage["falcon.workspace"] = { tabs: string[], active, sidebarWidth, sidebarCollapsed }`。恢复时按当前会话列表过滤掉已不存在的 id（`refreshSessions` 里已有类似逻辑，[store.ts:69-77](../../packages/web/src/store.ts)）。
 
 ### 7.2 新建会话
 
@@ -363,11 +363,11 @@ Tab 即会话：用户手动收起它就是不要它了，关 tab 默认 Termina
 │ ☑ 在这台主机上启用持久会话                            │
 │                                                       │
 │   会在 10.0.3.12 上安装 Zellij 0.44.4（约 14 MB，由该 │
-│   主机自行下载到 ~/.mojito/bin/）。启用后，SSH 断线或 │
-│   mojito 重启都不会中断会话。                          │
+│   主机自行下载到 ~/.falcon/bin/）。启用后，SSH 断线或 │
+│   falcon 重启都不会中断会话。                          │
 │                                                       │
 │   下载地址  [https://github.com/zellij-org/…      ]   │
-│   ⚠ mojito 会执行从此地址下载的二进制且不校验完整性， │
+│   ⚠ falcon 会执行从此地址下载的二进制且不校验完整性， │
 │      请确保地址可信。                                  │
 │                                                       │
 │   授权按主机记（host + 端口 + 用户名），同一台机器上   │
@@ -428,15 +428,15 @@ Tab 即会话：用户手动收起它就是不要它了，关 tab 默认 Termina
 
 **R2 · 手动安装指引要能复制**
 
-`zellij.manualHint` 现在是一句无法执行的散文："也可手动将 Zellij {version} 二进制放到宿主机的 ~/.mojito/bin/"。这是内网 / 无出网远端用户唯一的出路，却要他自己去 releases 页面猜文件名、猜路径、猜要不要 `chmod`。
+`zellij.manualHint` 现在是一句无法执行的散文："也可手动将 Zellij {version} 二进制放到宿主机的 ~/.falcon/bin/"。这是内网 / 无出网远端用户唯一的出路，却要他自己去 releases 页面猜文件名、猜路径、猜要不要 `chmod`。
 
 展开后给按远端实际 os/arch 拼好的命令 + 一个「复制」按钮：
 
 ```
-mkdir -p ~/.mojito/bin
-curl -L <按探测到的 target 拼好的完整 URL> | tar xz -C ~/.mojito/bin
-mv ~/.mojito/bin/zellij ~/.mojito/bin/zellij-0.44.4
-chmod +x ~/.mojito/bin/zellij-0.44.4
+mkdir -p ~/.falcon/bin
+curl -L <按探测到的 target 拼好的完整 URL> | tar xz -C ~/.falcon/bin
+mv ~/.falcon/bin/zellij ~/.falcon/bin/zellij-0.44.4
+chmod +x ~/.falcon/bin/zellij-0.44.4
 ```
 
 下方一行「装好后点这里重新检测」——`ensureZellij` 开头就是 `--version` 握手，已装好会直接返回（[install.ts:110-112](../../packages/server/src/zellij/install.ts)），所以「重新检测」复用同一条安装 WS 即可，**不需要新接口**。
@@ -498,7 +498,7 @@ authorized === null || (authorized === true && !installedVersion)
     ⦿ migrate       活跃 2 小时
     ⦿ log-tail      活跃 3 天
 
-  远端 ~/.mojito/ 不会被清理。
+  远端 ~/.falcon/ 不会被清理。
   ```
 - 主按钮是危险色且**默认焦点在取消上**；Enter = 取消，需要显式点击或 Tab 后 Enter 才能确认。
 - Dead 会话的「清除」**不需要确认**——它只删一条记录，没有副作用。今天它和终止用了同一套心智，是过度确认。
@@ -519,8 +519,8 @@ authorized === null || (authorized === true && !installedVersion)
 
 | 情形 | 标签 | 解释 |
 | --- | --- | --- |
-| durable | ⛨ 持久 | 断线或 mojito 重启后都能接回来。 |
-| 非持久（有原因） | ⚠ 非持久 | 关掉网页没事，但链路断开或 mojito 重启后会丢。**原因：** {具体原因} |
+| durable | ⛨ 持久 | 断线或 falcon 重启后都能接回来。 |
+| 非持久（有原因） | ⚠ 非持久 | 关掉网页没事，但链路断开或 falcon 重启后会丢。**原因：** {具体原因} |
 
 `nonDurableHint` 当前文案"仅保证页面关闭不影响，不具备断线/重启存活能力"改为上表的说法：先说保住了什么，再说丢了什么。
 
@@ -550,7 +550,7 @@ authorized === null || (authorized === true && !installedVersion)
 
 > **2026-08-15 变更**：token 的**命名与取值**已换成 shadcn/ui 的一套（`--background` / `--card` / `--popover` / `--primary` / `--muted` / `--destructive` / `--border` / `--ring`，base color: neutral，暗色由 `<html class="dark">` 固定），不再是下面 §9.1 的 `--surface-*` / `--text-*`。间距与圆角改用 Tailwind 的 scale。**下面 §9.1–9.4 保留为设计意图的记录，实际取值以 [`packages/web/src/styles.css`](../../packages/web/src/styles.css) 为准。** §9.5 的主机身份色算法未变，仍在 [`lib/hostColor.ts`](../../packages/web/src/lib/hostColor.ts)。
 
-> **2026-08-16 变更**：浅色主题已实现（§15 中原列为"不做"）。深色仍是设计基准，但两套都交付：偏好为跟随系统 / 浅色 / 深色三档，存在 `mojito.theme`，落到 DOM 上就是 `<html>` 有没有 `.dark`。逻辑集中在 [`lib/theme.ts`](../../packages/web/src/lib/theme.ts)，入口在侧栏底部与设置页（另有命令面板项）。三处必须一起看：
+> **2026-08-16 变更**：浅色主题已实现（§15 中原列为"不做"）。深色仍是设计基准，但两套都交付：偏好为跟随系统 / 浅色 / 深色三档，存在 `falcon.theme`，落到 DOM 上就是 `<html>` 有没有 `.dark`。逻辑集中在 [`lib/theme.ts`](../../packages/web/src/lib/theme.ts)，入口在侧栏底部与设置页（另有命令面板项）。三处必须一起看：
 >
 > - **首帧**由 `index.html` 的内联脚本决定，否则深色用户会被白闪一下；它与 `lib/theme.ts` 必须用同一个 key、同一套判定。
 > - **xterm 读不了 CSS 变量**，所以配色在 `TERM_THEMES` 里写死两份。浅色那份必须**整套**覆盖 ANSI 十六色（取 VS Code Light+ 的值）——xterm 默认的 white / brightWhite 接近纯白，在白底上直接消失。
@@ -761,7 +761,8 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 
 | 动作 | macOS | Win / Linux |
 | --- | --- | --- |
-| 命令面板 | `⌘K` | `Ctrl+Shift+P` |
+| 命令面板 | `⌘⇧P` / `F1` | `Ctrl+Shift+P` / `F1` |
+| 转到文件 | `⌘P` | `Alt+P` |
 | 新建终端（当前项目） | `⌘T` | `Ctrl+Shift+T` |
 | 关闭当前 tab（Terminate） | `⌘W` | `Ctrl+Shift+W` |
 | 下一个 / 上一个 tab | `⌘⇧]` / `⌘⇧[` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
@@ -777,7 +778,8 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 
 | 命令 | Alt 别名 |
 | --- | --- |
-| 命令面板 | `Ctrl/⌘+K` |
+| 命令面板 | `⌘/Ctrl+K`、`F1` |
+| 转到文件 | `Alt+P` |
 | 新建终端 / 关闭 tab | `Alt+T` / `Alt+W` |
 | 折叠侧栏 / 接回 | `Alt+B` / `Alt+R` |
 | 下一个 / 上一个 tab | `Alt+]` / `Alt+[` |
@@ -787,17 +789,17 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 
 ### 11.3 命令面板
 
-`⌘K` 唤起，模糊匹配，分组结果：
+`⌘⇧P` / `Ctrl+Shift+P` 唤起（VS Code 同键；另有 `F1` 与旧的 `⌘K`），模糊匹配，分组结果：
 
 ```
 ┌────────────────────────────────────────────┐
 │ >                                          │
 ├────────────────────────────────────────────┤
 │ 跳转到会话                                  │
-│   ⦿ dev server        mojito · 本机        │
+│   ⦿ dev server        falcon · 本机        │
 │   ◐ migrate           prod-api · 10.0.3.12 │
 │ 项目                                        │
-│   ＋ 在 mojito 中新建终端                   │
+│   ＋ 在 falcon 中新建终端                   │
 │   ＋ 新建项目…                              │
 │ 操作                                        │
 │   接回「migrate」                           │

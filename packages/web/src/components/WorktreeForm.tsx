@@ -1,9 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { RepoBranch, RepoInfo, WorktreeInput } from "@mojito/shared";
-import { api } from "../api.js";
+import type {
+  MultiDeriveError,
+  MultiRepoProbe,
+  Project,
+  RepoBranch,
+  RepoInfo,
+  WorktreeInput,
+} from "@falcon/shared";
+import { api, ApiRequestError } from "../api.js";
 import { useApp } from "../store.js";
 import { worktreeReasonText } from "../lib/reason.js";
+import {
+  actionBlocksSubmit,
+  commonLocalBranches,
+  evaluateMember,
+  memberBasename,
+  type MultiMode,
+} from "../lib/multiDerive.js";
+import { previewDir, previewMultiDir } from "../lib/worktreePath.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,35 +33,14 @@ import {
 import { AppDialog } from "./common/AppDialog.js";
 import { Field, Segmented } from "./common/Field.js";
 
-/**
- * 目标目录的**预览**。
- *
- * 权威实现在后端 git/path.ts（siblingWorktreePath + branchSlug），这里只是让用户
- * 在敲分支名时看得见结果。因此提交时只有用户**手动改过**目录才把 dir 发上去，
- * 没改就留空由服务端自己算——预览与真实值万一漂移，也绝不会让我们建到别处去。
- */
-function previewDir(repoDir: string, branch: string): string {
-  if (!repoDir || !branch) return "";
-  const sep = repoDir.includes("\\") ? "\\" : "/";
-  const root = repoDir.replace(/[\\/]+$/, "");
-  const i = Math.max(root.lastIndexOf("\\"), root.lastIndexOf("/"));
-  const parent = i <= 0 ? root : root.slice(0, i);
-  const base = root.slice(i + 1);
-  const slug =
-    Array.from(
-      branch
-        .replace(/[/"<>|\s]+/g, "-")
-        .replace(/-{2,}/g, "-")
-        .replace(/^[-.]+/, "")
-        .replace(/[-.]+$/, "")
-    )
-      .slice(0, 48)
-      .join("")
-      .replace(/[-.]+$/, "") || "wt";
-  return `${parent}${sep}${base}-${slug}`;
+export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
+  const project = useApp((s) => s.projects.find((p) => p.id === sourceId));
+  // 多仓库容器走批量派生表单；单仓库路径与从前一字不差
+  if (project?.multi) return <MultiWorktreeForm project={project} onClose={onClose} />;
+  return <SingleWorktreeForm sourceId={sourceId} onClose={onClose} />;
 }
 
-export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
+function SingleWorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
   const { t } = useTranslation();
   const sourceName = useApp((s) => s.projects.find((p) => p.id === sourceId)?.name ?? "");
   const refreshProjects = useApp((s) => s.refreshProjects);
@@ -299,6 +293,259 @@ export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose:
               {t("common.cancel")}
             </Button>
             <Button type="submit" disabled={busy || !effectiveBranch}>
+              {busy ? t("worktree.creating") : t("worktree.create")}
+            </Button>
+          </div>
+        </form>
+      )}
+    </AppDialog>
+  );
+}
+
+/**
+ * 多仓库容器的批量派生表单。
+ *
+ * 与单仓库表单刻意分开：探测形状（逐成员 RepoInfo）、模式集合（多一个 auto）、
+ * 失败展示（成员归因 + 回滚残留）都不同，塞进一个组件只会互相绊脚。
+ * 提交不带 dir——集中目录由服务端算，这里只渲染只读预览（漂移无害）。
+ */
+function MultiWorktreeForm({ project, onClose }: { project: Project; onClose: () => void }) {
+  const { t } = useTranslation();
+  const refreshProjects = useApp((s) => s.refreshProjects);
+  const refreshHosts = useApp((s) => s.refreshHosts);
+  const toast = useApp((s) => s.toast);
+
+  const [probe, setProbe] = useState<MultiRepoProbe | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mode, setMode] = useState<MultiMode>("auto");
+  const [branchText, setBranchText] = useState("");
+  const [pickedRef, setPickedRef] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .repoInfoMulti(project.id)
+      .then((r) => alive && setProbe(r))
+      .catch((err) => alive && setLoadError((err as Error).message));
+    return () => {
+      alive = false;
+    };
+  }, [project.id]);
+
+  const branch = (mode === "existing-branch" ? pickedRef : branchText).trim();
+  const common = useMemo(() => (probe ? commonLocalBranches(probe.members) : []), [probe]);
+  const evals = useMemo(
+    () =>
+      (probe?.members ?? []).map((m) => ({
+        ...m,
+        action: branch ? evaluateMember(m.info, mode, branch) : null,
+      })),
+    [probe, mode, branch]
+  );
+  const blockedCount = evals.filter((m) =>
+    m.action ? actionBlocksSubmit(m.action) : !m.info.derivable
+  ).length;
+  const central = previewMultiDir(probe?.baseDir ?? "", project.name, branch);
+
+  const memberLine = (m: (typeof evals)[number]): { text: string; err: boolean } => {
+    if (!m.action) {
+      return m.info.derivable
+        ? {
+            text: t("multi.memberOk", {
+              head: m.info.headBranch ?? m.info.headSha ?? "?",
+            }),
+            err: false,
+          }
+        : {
+            text:
+              worktreeReasonText(t, m.info.reason) +
+              (m.info.detail ? ` · ${m.info.detail}` : ""),
+            err: true,
+          };
+    }
+    switch (m.action.kind) {
+      case "blocked":
+        return {
+          text:
+            worktreeReasonText(t, m.action.reason) +
+            (m.action.detail ? ` · ${m.action.detail}` : ""),
+          err: true,
+        };
+      case "create":
+        return { text: t("multi.willCreate"), err: false };
+      case "checkout":
+        return { text: t("multi.willCheckout"), err: false };
+      case "branch-exists":
+        return { text: t("multi.memberBranchExists"), err: true };
+      case "branch-missing":
+        return { text: t("multi.memberBranchMissing"), err: true };
+      case "branch-in-use":
+        return { text: t("worktree.inUse", { path: m.action.at }), err: true };
+    }
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!branch || blockedCount > 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.createWorktree(project.id, {
+        mode,
+        branch,
+        name: name.trim() || undefined,
+      });
+      await Promise.all([refreshProjects(), refreshHosts()]);
+      toast({
+        kind: "success",
+        title: t("worktree.created", { name: created.name }),
+        body: t("multi.createdBody", {
+          dir: created.workingDir ?? "",
+          n: created.multi?.repos.length ?? evals.length,
+          branch: created.worktree?.branch ?? branch,
+        }),
+      });
+      onClose();
+    } catch (err) {
+      // 服务端的成员归因错误体优先；读不出结构就原样显示 error 字符串
+      const body =
+        err instanceof ApiRequestError ? (err.body as Partial<MultiDeriveError> | undefined) : undefined;
+      if (body?.member) {
+        setError(
+          t("multi.memberFailed", {
+            repo: memberBasename(body.member.dir),
+            reason: worktreeReasonText(t, body.member.reason),
+          }) + (body.member.detail ? ` · ${body.member.detail}` : "")
+        );
+      } else {
+        setError((err as Error).message);
+      }
+      if (body?.leftover?.length) {
+        toast({
+          kind: "warning",
+          sticky: true,
+          title: t("worktree.leftoverTitle"),
+          body: body.leftover.join("\n"),
+        });
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <AppDialog title={t("multi.deriveTitle", { name: project.name })} onClose={onClose} lockOverlay>
+      {!probe && !loadError && (
+        <p className="text-xs text-muted-foreground">{t("worktree.probing")}</p>
+      )}
+      {loadError && <p className="text-[13px] text-destructive">{loadError}</p>}
+
+      {probe && (
+        <form onSubmit={submit} className="grid gap-3">
+          <p className="text-xs text-muted-foreground">
+            {t("multi.intro", { n: probe.members.length })}
+          </p>
+
+          <div className="grid max-h-48 gap-1 overflow-y-auto rounded-md border p-2">
+            {evals.map((m) => {
+              const line = memberLine(m);
+              return (
+                <div key={m.dir} className="flex items-baseline justify-between gap-3 text-[13px]">
+                  <span className="shrink-0 font-mono" title={m.dir}>
+                    {memberBasename(m.info.repoDir ?? m.dir)}
+                  </span>
+                  <span
+                    className={`truncate text-right text-xs ${
+                      line.err ? "text-destructive" : "text-muted-foreground"
+                    }`}
+                    title={line.text}
+                  >
+                    {line.text}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          <Segmented
+            value={mode}
+            label={t("worktree.branch")}
+            onChange={setMode}
+            options={[
+              { value: "auto", label: t("multi.modeAuto") },
+              { value: "new-branch", label: t("worktree.modeNew") },
+              { value: "existing-branch", label: t("worktree.modeExisting") },
+            ]}
+          />
+
+          {mode === "existing-branch" ? (
+            <Field
+              label={t("worktree.pickBranch")}
+              hint={common.length === 0 ? t("multi.noCommonBranch") : undefined}
+            >
+              <Select value={pickedRef} onValueChange={setPickedRef}>
+                <SelectTrigger className="w-full" data-autofocus>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {common.map((b) => (
+                    <SelectItem key={b.name} value={b.name} disabled={!!b.usedAt}>
+                      {b.usedAt ? `${b.name} · ${t("worktree.inUse", { path: b.usedAt })}` : b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+          ) : (
+            <Field label={t("worktree.branch")} htmlFor="mwt-branch">
+              <Input
+                id="mwt-branch"
+                className="font-mono"
+                value={branchText}
+                data-autofocus
+                onChange={(e) => setBranchText(e.target.value)}
+                placeholder={t("worktree.branchPlaceholder")}
+              />
+            </Field>
+          )}
+
+          {central && (
+            <Field label={t("multi.dirPreview")} hint={t("multi.dirPreviewHint")}>
+              <div className="rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs">
+                <div className="truncate" title={central}>
+                  {central}
+                </div>
+                {evals.map((m) => (
+                  <div key={m.dir} className="truncate pl-4 text-muted-foreground">
+                    {memberBasename(m.info.repoDir ?? m.dir)}/
+                  </div>
+                ))}
+              </div>
+            </Field>
+          )}
+
+          <Field label={t("worktree.name")} htmlFor="mwt-name">
+            <Input
+              id="mwt-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={branch || t("worktree.namePlaceholder")}
+            />
+          </Field>
+
+          {blockedCount > 0 && branch && (
+            <p className="text-[13px] text-destructive">{t("multi.blockedBy", { n: blockedCount })}</p>
+          )}
+          {error && <p className="text-[13px] text-destructive">{error}</p>}
+
+          <div className="mt-1 flex justify-end gap-2">
+            <Button variant="outline" type="button" onClick={onClose}>
+              {t("common.cancel")}
+            </Button>
+            <Button type="submit" disabled={busy || !branch || blockedCount > 0}>
               {busy ? t("worktree.creating") : t("worktree.create")}
             </Button>
           </div>

@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   AuthStatus,
   DeleteProjectResult,
@@ -16,6 +16,9 @@ import type {
   GitUnavailableReason,
   GitWorkingChanges,
   HostZellijStatus,
+  MultiDeriveError,
+  MultiRepoProbe,
+  MultiWorktreeInput,
   PortForward,
   PortForwardInput,
   ProjectInput,
@@ -29,12 +32,13 @@ import type {
   WorktreeFailure,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceIndex,
   WorkspaceListing,
-} from "@mojito/shared";
-import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@mojito/shared";
+} from "@falcon/shared";
+import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@falcon/shared";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
-import { listWorkspace, readWorkspaceFile, type FileHost } from "./files.js";
+import { capFileIndex, indexWorkspace, listWorkspace, readWorkspaceFile, type FileHost } from "./files.js";
 import { detectShells } from "./shells.js";
 import { defaultLocalShell } from "./sessions/local.js";
 import { localExec, localKind } from "./zellij/exec.js";
@@ -52,9 +56,16 @@ import { ForwardConflictError } from "./sessions/forward.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
 import { gitHostFor, hostKeyOf } from "./git/host.js";
-import { withRepoLock } from "./git/lock.js";
+import { repoLockKey, withRepoLock } from "./git/lock.js";
 import {
-  canonKey,
+  deriveMultiWorktrees,
+  MultiVetoError,
+  MultiWorktreeError,
+  validateMemberList,
+} from "./git/multi.js";
+import {
+  basenameOf,
+  dirnameOf,
   isAbsolute,
   isAncestor,
   isUnc,
@@ -63,7 +74,7 @@ import {
   siblingWorktreePath,
   vetoTargetDir,
 } from "./git/path.js";
-import { remoteRoot } from "./zellij/host.js";
+
 import { cleanupWorktree } from "./git/remove.js";
 import {
   addWorktree,
@@ -78,6 +89,7 @@ import {
   describeGitRefs,
   describeRepo,
   describeWorkingChanges,
+  listRepoFiles,
   pathExists,
   repoRoot,
   syncGit,
@@ -137,7 +149,7 @@ export interface RouteDeps {
   manager: SessionManager;
   secrets: SecretBox;
   version: string;
-  /** mojito 数据目录，本地会话的粘贴图片落在 <dataDir>/paste */
+  /** falcon 数据目录，本地会话的粘贴图片落在 <dataDir>/paste */
   dataDir: string;
 }
 
@@ -299,14 +311,47 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     return validateSshFields(input);
   }
 
-  function validateProjectInput(input: ProjectInput): string | null {
+  /**
+   * 成员仓库清单的校验 + 归一化。repos: null 表示请求里没带（不是多仓库容器 /
+   * 编辑时成员不变）。local 逐成员 stat；ssh 成员刻意不预检——与 ssh 项目的
+   * workingDir 零校验同理，连通性与"是不是仓库"都是派生时的事。
+   */
+  function resolveRepos(
+    input: ProjectInput
+  ): { ok: true; repos: string[] | null } | { ok: false; error: string } {
+    if (input.repos == null) return { ok: true, repos: null };
+    const parsed = validateMemberList(input.repos);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    if (input.type === "local") {
+      for (const dir of parsed.repos) {
+        // statSync 会把相对路径解析到后端进程的 cwd 上，必须先拦绝对性
+        if (!isAbsolute(localKind(), dir)) {
+          return { ok: false, error: `成员仓库必须是绝对路径：${dir}` };
+        }
+        try {
+          if (!fs.statSync(dir).isDirectory()) {
+            return { ok: false, error: `成员路径不是文件夹：${dir}` };
+          }
+        } catch {
+          return { ok: false, error: `成员文件夹不存在或不可访问：${dir}` };
+        }
+      }
+    }
+    return { ok: true, repos: parsed.repos };
+  }
+
+  /** container = 多仓库容器：workingDir 只是可选的会话 cwd（留空 = 家目录，ssh 先例） */
+  function validateProjectInput(input: ProjectInput, container = false): string | null {
     if (!input.name?.trim()) return "项目名称不能为空";
     if (input.type === "local") {
-      if (!input.workingDir?.trim()) return "本地项目必须指定文件夹路径";
-      try {
-        if (!fs.statSync(input.workingDir).isDirectory()) return "路径不是文件夹";
-      } catch {
-        return "文件夹路径不存在或不可访问";
+      if (!input.workingDir?.trim()) {
+        if (!container) return "本地项目必须指定文件夹路径";
+      } else {
+        try {
+          if (!fs.statSync(input.workingDir).isDirectory()) return "路径不是文件夹";
+        } catch {
+          return "文件夹路径不存在或不可访问";
+        }
       }
     } else if (input.type === "ssh") {
       // 选了已保存主机时连接配置从主机复制，ssh 字段忽略
@@ -394,7 +439,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   app.post("/api/projects", async (req, reply) => {
     const input = req.body as ProjectInput;
-    const err = validateProjectInput(input);
+    const repos = resolveRepos(input);
+    if (!repos.ok) return reply.code(400).send({ error: repos.error });
+    const err = validateProjectInput(input, repos.repos != null);
     if (err) return reply.code(400).send({ error: err });
 
     const ssh = resolveProjectSsh(input);
@@ -415,6 +462,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       worktree_repo_dir: null,
       worktree_created_by_mojito: null,
       worktree_archived_at: null,
+      // repos 有值 ⇒ 多仓库容器。派生产物的 multi_repos（带 repoDir 的那种）
+      // 同样只能经 worktrees 端点进来
+      multi_repos: repos.repos ? JSON.stringify(repos.repos.map((dir) => ({ dir }))) : null,
     };
     db.insertProject(row);
     return Db.toProject(row);
@@ -436,7 +486,21 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     ) {
       return reply.code(400).send({ error: "附属项目的工作目录由 worktree 决定，不可修改" });
     }
-    const err = validateProjectInput(input);
+    // 成员清单的写入护栏，与 working_dir 同构：派生行的成员是删除目标，显式拒绝
+    // 是第一道防线（updateMultiRepos 的 SQL 条件是第二道）；普通项目也不能凭空
+    // 变成容器——判别式在创建时定死，与 worktree 同一条规矩。
+    if (input.repos !== undefined) {
+      if (existing.source_project_id) {
+        return reply.code(400).send({ error: "附属项目的成员由派生决定，不可修改" });
+      }
+      if (existing.multi_repos == null) {
+        return reply.code(400).send({ error: "普通项目不能改成多仓库项目" });
+      }
+    }
+    const repos = resolveRepos(input);
+    if (!repos.ok) return reply.code(400).send({ error: repos.error });
+    const container = existing.multi_repos != null && !existing.source_project_id;
+    const err = validateProjectInput(input, container);
     if (err) return reply.code(400).send({ error: err });
 
     const ssh = resolveProjectSsh(input, existing);
@@ -450,6 +514,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       ...ssh.ssh,
     };
     db.updateProject(row);
+    if (container && repos.repos) {
+      db.updateMultiRepos(row.id, repos.repos.map((dir) => ({ dir })));
+      row.multi_repos = JSON.stringify(repos.repos.map((dir) => ({ dir })));
+    }
     // 附属项目的 ssh_* 是从源项目复制来的（让 SshLink / getLink / GET host 全都
     // 不用改），代价就是这条手动传播。本地项目没有可传播的东西。
     if (row.type === "ssh") db.updateChildrenSsh(row.id, row);
@@ -493,15 +561,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
 
     const doomed = new Set(targets.map((p) => p.id));
+    // guardDirsOf 除 working_dir 外还收多仓库项目的成员路径——容器的成员是
+    // 用户的真仓库，别的删除不许踩上去
     const otherDirs = db
       .listProjects()
       .filter((p) => !doomed.has(p.id))
-      .map((p) => p.working_dir)
-      .filter((d): d is string => !!d);
+      .flatMap((p) => Db.guardDirsOf(p));
 
     const warnings: string[] = [];
     for (const row of targets) {
-      // 只有附属项目才碰文件系统。源项目的目录不是 mojito 建的，永远不动
+      // 只有附属项目才碰文件系统。源项目的目录不是 falcon 建的，永远不动
       if (row.source_project_id) {
         try {
           warnings.push(...(await cleanupWorktree(row, await gitHostFor(row, manager), otherDirs)));
@@ -654,6 +723,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (row.source_project_id) {
       return reply.code(400).send({ error: "附属项目不能再派生" });
     }
+    if (row.multi_repos != null) {
+      return reply.code(400).send({ error: "多仓库项目请用批量派生（GET /repos）" });
+    }
     if (!row.working_dir) {
       return {
         derivable: false,
@@ -676,20 +748,103 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   /**
-   * 右侧 Git 面板的仓库快照。
-   *
-   * 源项目和附属项目都能问（跟 GET /repo 不同，那边拒绝附属项目）。
-   * 环境事实写在 available/reason 里，不抛 4xx。
+   * 多仓库容器的派生前探测：逐成员的 RepoInfo。与 GET /repo 同一条规矩——
+   * 环境事实（没装 git、不是仓库、连不上）永不 4xx，写在每个成员的
+   * derivable/reason 里，前端据此逐行渲染、任一成员不可派生就禁用提交。
    */
-  app.get("/api/projects/:id/git", async (req, reply): Promise<GitSnapshot | void> => {
+  app.get("/api/projects/:id/repos", async (req, reply): Promise<MultiRepoProbe | void> => {
     const { id } = req.params as { id: string };
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
-    if (!row.working_dir) {
+    const members = Db.parseMultiRepos(row);
+    if (!members || row.source_project_id) {
+      return reply.code(400).send({ error: "不是多仓库容器" });
+    }
+
+    const unavailable = (reason: WorktreeFailure, detail?: string): RepoInfo => ({
+      derivable: false,
+      reason,
+      detail,
+      branches: [],
+    });
+
+    try {
+      const host = await gitHostFor(row, manager);
+      const out: MultiRepoProbe = { members: [] };
+      // 成员间串行：describeRepo 内部已是批量往返，一个探测端点不值得并发压宿主机
+      for (const m of members) {
+        try {
+          const info = await describeRepo(host, m.dir);
+          out.members.push({ dir: m.dir, info });
+          // 集中目录默认建在第一个成员仓库根的父目录下，给前端预览用
+          if (out.baseDir == null && info.repoDir) {
+            out.baseDir = dirnameOf(host.kind, info.repoDir);
+          }
+        } catch (err) {
+          const e = err as WorktreeError;
+          out.members.push({
+            dir: m.dir,
+            info: unavailable(e.reason ?? "link-failed", e.detail ?? e.message),
+          });
+        }
+      }
+      return out;
+    } catch (err) {
+      // 链路 / git 探测失败：所有成员同一个答案，不用逐个再试
+      const e = err as WorktreeError;
+      return {
+        members: members.map((m) => ({
+          dir: m.dir,
+          info: unavailable(e.reason ?? "link-failed", e.detail ?? e.message),
+        })),
+      };
+    }
+  });
+
+  /**
+   * git 面板端点的目标目录解析。
+   *
+   * 非多仓库行忽略 repo 参数，照旧用 working_dir。多仓库行的 working_dir 不是
+   * 仓库（容器 = 可选会话 cwd，派生行 = 集中目录），git 目标是某个成员：
+   * repo 给了必须**精确等于**某个成员 dir——前端从 project.multi.repos 原样带回，
+   * 不需要归一化比较，不匹配就是请求造错了（400）；repo 缺省时读端点回退第一个
+   * 成员（面板至少有东西看），写端点（commit / pull / push）拒绝——写操作不猜。
+   */
+  function gitTargetOf(
+    row: ProjectRow,
+    repo: string | undefined,
+    write = false
+  ): { dir: string } | { badRequest: string } | { noWorkingDir: true } {
+    const members = Db.parseMultiRepos(row);
+    if (!members) {
+      return row.working_dir ? { dir: row.working_dir } : { noWorkingDir: true };
+    }
+    if (repo) {
+      const hit = members.find((m) => m.dir === repo);
+      return hit ? { dir: hit.dir } : { badRequest: "repo 不是该项目的成员仓库" };
+    }
+    if (write) return { badRequest: "多仓库项目必须指定 repo 参数" };
+    return members.length > 0 ? { dir: members[0]!.dir } : { noWorkingDir: true };
+  }
+
+  /**
+   * 右侧 Git 面板的仓库快照。
+   *
+   * 源项目和附属项目都能问（跟 GET /repo 不同，那边拒绝附属项目）。
+   * 环境事实写在 available/reason 里，不抛 4xx。多仓库项目带 ?repo=<成员dir>。
+   */
+  app.get("/api/projects/:id/git", async (req, reply): Promise<GitSnapshot | void> => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { repo?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    const t = gitTargetOf(row, q.repo);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return unavailableSnapshot("no-working-dir", worktreeFailureText("no-working-dir"));
     }
     try {
-      return await describeGit(await gitHostFor(row, manager), row.working_dir);
+      return await describeGit(await gitHostFor(row, manager), t.dir);
     } catch (err) {
       const e = err as WorktreeError;
       return unavailableSnapshot(gitReasonOf(e), e.detail ?? e.message);
@@ -762,15 +917,17 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    */
   app.get("/api/projects/:id/git/diff", async (req, reply): Promise<GitFileDiff | void> => {
     const { id } = req.params as { id: string };
-    const q = req.query as { path?: string; origPath?: string; untracked?: string };
+    const q = req.query as { path?: string; origPath?: string; untracked?: string; repo?: string };
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
     if (!q.path) return reply.code(400).send({ error: "缺少 path 参数" });
-    if (!row.working_dir) {
+    const t = gitTargetOf(row, q.repo);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return unavailableDiff("no-working-dir", worktreeFailureText("no-working-dir"));
     }
     try {
-      return await describeGitDiff(await gitHostFor(row, manager), row.working_dir, {
+      return await describeGitDiff(await gitHostFor(row, manager), t.dir, {
         path: q.path,
         origPath: q.origPath || undefined,
         untracked: q.untracked === "1",
@@ -791,13 +948,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     "/api/projects/:id/git/working",
     async (req, reply): Promise<GitWorkingChanges | void> => {
       const { id } = req.params as { id: string };
+      const q = req.query as { repo?: string };
       const row = db.getProject(id);
       if (!row) return reply.code(404).send({ error: "项目不存在" });
-      if (!row.working_dir) {
+      const t = gitTargetOf(row, q.repo);
+      if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+      if ("noWorkingDir" in t) {
         return unavailableWorking("no-working-dir", worktreeFailureText("no-working-dir"));
       }
       try {
-        return await describeWorkingChanges(await gitHostFor(row, manager), row.working_dir);
+        return await describeWorkingChanges(await gitHostFor(row, manager), t.dir);
       } catch (err) {
         const e = err as WorktreeError;
         return unavailableWorking(gitReasonOf(e), e.detail ?? e.message);
@@ -818,15 +978,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       author?: string;
       q?: string;
       skip?: string;
+      repo?: string;
     };
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
-    if (!row.working_dir) {
+    const t = gitTargetOf(row, q.repo);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return unavailableLog("no-working-dir", worktreeFailureText("no-working-dir"));
     }
     const skip = Number(q.skip);
     try {
-      return await describeGitLog(await gitHostFor(row, manager), row.working_dir, {
+      return await describeGitLog(await gitHostFor(row, manager), t.dir, {
         rev: q.branch || undefined,
         author: q.author || undefined,
         grep: q.q || undefined,
@@ -841,13 +1004,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   /** Branch / User 两个筛选下拉的候选值。面板挂载时取一次，不参与轮询 */
   app.get("/api/projects/:id/git/refs", async (req, reply): Promise<GitRefsInfo | void> => {
     const { id } = req.params as { id: string };
+    const q = req.query as { repo?: string };
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
-    if (!row.working_dir) {
+    const t = gitTargetOf(row, q.repo);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return unavailableRefs("no-working-dir", worktreeFailureText("no-working-dir"));
     }
     try {
-      return await describeGitRefs(await gitHostFor(row, manager), row.working_dir);
+      return await describeGitRefs(await gitHostFor(row, manager), t.dir);
     } catch (err) {
       const e = err as WorktreeError;
       return unavailableRefs(gitReasonOf(e), e.detail ?? e.message);
@@ -859,18 +1025,20 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     "/api/projects/:id/git/commit",
     async (req, reply): Promise<GitCommitDetail | void> => {
       const { id } = req.params as { id: string };
-      const { sha } = req.query as { sha?: string };
+      const { sha, repo } = req.query as { sha?: string; repo?: string };
       const row = db.getProject(id);
       if (!row) return reply.code(404).send({ error: "项目不存在" });
       // 只认十六进制：sha 要作为 rev 传给 git，形状先钉死，别指望下游转义
       if (!sha || !/^[0-9a-f]{4,40}$/i.test(sha)) {
         return reply.code(400).send({ error: "sha 参数不合法" });
       }
-      if (!row.working_dir) {
+      const t = gitTargetOf(row, repo);
+      if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+      if ("noWorkingDir" in t) {
         return unavailableCommit("no-working-dir", worktreeFailureText("no-working-dir"));
       }
       try {
-        return await describeCommit(await gitHostFor(row, manager), row.working_dir, sha);
+        return await describeCommit(await gitHostFor(row, manager), t.dir, sha);
       } catch (err) {
         const e = err as WorktreeError;
         return unavailableCommit(gitReasonOf(e), e.detail ?? e.message);
@@ -883,20 +1051,22 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     "/api/projects/:id/git/commit/diff",
     async (req, reply): Promise<GitFileDiff | void> => {
       const { id } = req.params as { id: string };
-      const q = req.query as { sha?: string; path?: string; origPath?: string };
+      const q = req.query as { sha?: string; path?: string; origPath?: string; repo?: string };
       const row = db.getProject(id);
       if (!row) return reply.code(404).send({ error: "项目不存在" });
       if (!q.sha || !/^[0-9a-f]{4,40}$/i.test(q.sha)) {
         return reply.code(400).send({ error: "sha 参数不合法" });
       }
       if (!q.path) return reply.code(400).send({ error: "缺少 path 参数" });
-      if (!row.working_dir) {
+      const t = gitTargetOf(row, q.repo);
+      if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+      if ("noWorkingDir" in t) {
         return unavailableDiff("no-working-dir", worktreeFailureText("no-working-dir"));
       }
       try {
         return await describeCommitDiff(
           await gitHostFor(row, manager),
-          row.working_dir,
+          t.dir,
           q.sha,
           { path: q.path, origPath: q.origPath || undefined }
         );
@@ -930,7 +1100,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!all && (paths.length === 0 || paths.some((p) => typeof p !== "string" || !p))) {
       return reply.code(400).send({ error: "paths 必须是非空字符串数组" });
     }
-    if (!row.working_dir) {
+    // 写操作对多仓库项目必须显式指定成员，不猜
+    const t = gitTargetOf(row, (req.query as { repo?: string }).repo, true);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return {
         ok: false,
         reason: "no-working-dir",
@@ -939,8 +1112,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
     try {
       const host = await gitHostFor(row, manager);
-      const root = await repoRoot(host, row.working_dir);
-      return await withRepoLock(`${host.key}:${canonKey(host.kind, root)}`, () =>
+      const root = await repoRoot(host, t.dir);
+      return await withRepoLock(repoLockKey(host, root), () =>
         commitWorking(host, root, { message: body.message!, all, paths })
       );
     } catch (err) {
@@ -966,7 +1139,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
-    if (!row.working_dir) {
+    // 写操作对多仓库项目必须显式指定成员，不猜
+    const t = gitTargetOf(row, (req.query as { repo?: string }).repo, true);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
       return {
         ok: false,
         reason: "no-working-dir",
@@ -975,8 +1151,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
     try {
       const host = await gitHostFor(row, manager);
-      const root = await repoRoot(host, row.working_dir);
-      return await withRepoLock(`${host.key}:${canonKey(host.kind, root)}`, () =>
+      const root = await repoRoot(host, t.dir);
+      return await withRepoLock(repoLockKey(host, root), () =>
         syncGit(host, root, action)
       );
     } catch (err) {
@@ -1029,6 +1205,30 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
   });
 
+  /**
+   * Quick Open 的文件路径清单。git 仓库走 ls-files（尊重 gitignore），
+   * 否则遍历工作目录并跳过 node_modules 之类。失败回 400，与列目录同一套。
+   */
+  app.get("/api/projects/:id/files/index", async (req, reply): Promise<WorkspaceIndex | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      try {
+        const gitHost = await gitHostFor(row, manager);
+        const listed = await listRepoFiles(gitHost, root);
+        if (listed) return capFileIndex(listed);
+      } catch (err) {
+        // git 缺失 / 不是仓库：改走遍历。链路挂了就别假装能列文件
+        if (err instanceof WorktreeError && err.reason === "link-failed") throw err;
+      }
+      return await indexWorkspace(host, root);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
   /** 读一个文件供查看 tab 渲染。二进制 / 超大文件也回 200，形状里写清是什么 */
   app.get("/api/projects/:id/file", async (req, reply): Promise<FilePreview | void> => {
     const { id } = req.params as { id: string };
@@ -1050,6 +1250,89 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * 与 GET /repo 的分工：那边是探测，环境事实如实报告；这边是操作，同样的事实
    * 一律当状态冲突（409）。
    */
+  /**
+   * 多仓库容器的批量派生分支：统一分支名、逐成员建树、**全有或全无**。
+   * 成功产出**一个**多仓库附属项目（multi 与 worktree 同时存在）；任一成员失败
+   * 由 deriveMultiWorktrees 回滚，这里只负责翻译三类错误：
+   * 容器级校验 → 409 纯文本；成员级失败 → 按 reason 映射 + member 归因
+   * （回滚有残留 ⇒ 一律 502 + leftover 路径原样列出）；其余 → 502。
+   */
+  async function handleMultiDerive(
+    reply: FastifyReply,
+    src: ProjectRow,
+    members: NonNullable<ReturnType<typeof Db.parseMultiRepos>>,
+    body: unknown
+  ) {
+    if (members.length === 0) return reply.code(409).send({ error: "容器没有成员仓库" });
+    const input = (body ?? {}) as MultiWorktreeInput;
+    if (input.mode !== "new-branch" && input.mode !== "existing-branch" && input.mode !== "auto") {
+      return reply.code(400).send({ error: "未知的派生方式" });
+    }
+    if ((input as { startPoint?: unknown }).startPoint != null) {
+      return reply
+        .code(400)
+        .send({ error: "批量派生不支持指定基点，每个成员以各自的 HEAD 为基点" });
+    }
+    const branch = input.branch?.trim();
+    if (!branch) return reply.code(400).send({ error: "分支名不能为空" });
+
+    try {
+      const host = await gitHostFor(src, manager);
+      const outcome = await deriveMultiWorktrees(
+        host,
+        { name: src.name, members },
+        { ...input, branch }
+      );
+      const row: ProjectRow = {
+        id: crypto.randomUUID(),
+        name: input.name?.trim() || branch,
+        type: src.type,
+        working_dir: outcome.centralDir,
+        shell: src.shell,
+        // ssh_* 与 host_id 从容器整行复制，理由与单派生完全相同（见下面那段注释）
+        ssh_host: src.ssh_host,
+        ssh_port: src.ssh_port,
+        ssh_username: src.ssh_username,
+        ssh_auth_method: src.ssh_auth_method,
+        ssh_key_path: src.ssh_key_path,
+        ssh_secret_enc: src.ssh_secret_enc,
+        host_id: src.host_id,
+        created_at: Date.now(),
+        source_project_id: src.id,
+        worktree_branch: branch,
+        // 单值列对多仓库无意义：逐成员的仓库根在 multi_repos 里
+        worktree_repo_dir: null,
+        worktree_created_by_mojito: 1,
+        worktree_archived_at: null,
+        multi_repos: JSON.stringify(outcome.members),
+      };
+      db.insertProject(row);
+      return Db.toProject(row);
+    } catch (err) {
+      if (err instanceof MultiVetoError) {
+        return reply.code(409).send({ error: err.message });
+      }
+      if (err instanceof MultiWorktreeError) {
+        // 回滚有残留 ⇒ 一律 502：不管起因是什么，宿主机上已经躺着要人收拾的目录
+        const status = err.leftover.length > 0 ? 502 : WORKTREE_STATUS[err.reason];
+        const out: MultiDeriveError = {
+          error: `成员 ${err.memberDir} 派生失败：${
+            err.detail ? `${err.message}：${gitErrorLine(err.detail)}` : err.message
+          }`,
+          member: { dir: err.memberDir, reason: err.reason, detail: err.detail },
+        };
+        if (err.leftover.length > 0) out.leftover = err.leftover;
+        return reply.code(status).send(out);
+      }
+      if (err instanceof WorktreeError) {
+        return reply
+          .code(WORKTREE_STATUS[err.reason])
+          .send({ error: err.detail ? `${err.message}：${gitErrorLine(err.detail)}` : err.message });
+      }
+      return reply.code(502).send({ error: `派生失败：${(err as Error).message}` });
+    }
+  }
+
   app.post("/api/projects/:id/worktrees", async (req, reply) => {
     const { id } = req.params as { id: string };
     const src = db.getProject(id);
@@ -1058,10 +1341,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     // 禁止二级派生。git 本身允许（从 linked worktree 建的 worktree 仍属同一仓库），
     // 但侧栏的两级树会变成任意深度、删除级联要递归，而收益是零——从源项目派生
     // 完全等价。将来若要放开：把 source 取成 `row.source_project_id ?? row.id`
-    // 重新挂到根即可，树仍是两级。
+    // 重新挂到根即可，树仍是两级。多仓库派生行也带 source_project_id，天然被挡。
     if (src.source_project_id) {
       return reply.code(409).send({ error: "附属项目不能再派生，请从它的源项目派生" });
     }
+    // 多仓库容器在 working_dir 检查之前分叉：容器允许没有工作目录
+    const srcMembers = Db.parseMultiRepos(src);
+    if (srcMembers) return handleMultiDerive(reply, src, srcMembers, req.body);
     if (!src.working_dir) {
       return reply.code(409).send({ error: worktreeFailureText("no-working-dir") });
     }
@@ -1102,7 +1388,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         });
       }
 
-      const created = await withRepoLock(`${host.key}::${canonKey(host.kind, main)}`, async () => {
+      const created = await withRepoLock(repoLockKey(host, main), async () => {
         // 锁内再查一次占用：预检与创建之间用户可能刚建了同名目录。
         // 空目录也拒绝——git 的 add 只在非空时 die，但"接管一个已存在的空目录"
         // 不是用户要的语义，也不该继承"删项目会删这个目录"的承诺
@@ -1148,6 +1434,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         worktree_repo_dir: main,
         worktree_created_by_mojito: 1,
         worktree_archived_at: null,
+        multi_repos: null,
       };
       db.insertProject(row);
       return Db.toProject(row);
@@ -1174,8 +1461,32 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!row.source_project_id || !row.working_dir) {
       return reply.code(400).send({ error: "不是附属项目" });
     }
+    const members = Db.parseMultiRepos(row);
     try {
-      return await worktreeStatus(await gitHostFor(row, manager), row.working_dir);
+      const host = await gitHostFor(row, manager);
+      if (!members) return await worktreeStatus(host, row.working_dir);
+
+      // 多仓库派生行：逐成员汇总成同一个 WorktreeStatus 形状，确认框零改动。
+      // 样例路径带 <成员目录名>/ 前缀，用户一眼能看出脏文件在哪棵 worktree 里
+      const merged: WorktreeStatus = {
+        present: false,
+        dirtyCount: 0,
+        dirtySample: [],
+        ignoredCount: 0,
+        ahead: null,
+      };
+      for (const m of members) {
+        const s = await worktreeStatus(host, m.dir);
+        const base = basenameOf(host.kind, m.dir);
+        merged.present ||= s.present;
+        merged.dirtyCount += s.dirtyCount;
+        merged.ignoredCount += s.ignoredCount;
+        if (s.ahead != null) merged.ahead = (merged.ahead ?? 0) + s.ahead;
+        for (const f of s.dirtySample) merged.dirtySample.push(`${base}/${f}`);
+        if (s.error) merged.error = merged.error ? `${merged.error}；${s.error}` : s.error;
+      }
+      merged.dirtySample = merged.dirtySample.slice(0, 8);
+      return merged;
     } catch (err) {
       const e = err as WorktreeError;
       return {
@@ -1418,7 +1729,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   /**
-   * 粘贴图片：写进会话宿主机的 <mojito 根>/paste，返回绝对路径。
+   * 粘贴图片：写进会话宿主机的 <falcon 根>/paste，返回绝对路径。
    * 前端把路径粘进终端输入——Claude Code 认输入框里的图片路径，
    * 拖拽文件进原生终端就是同一个机制。
    */
@@ -1442,7 +1753,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       }
       const link = manager.getLink(project);
       const facts = await link.hostFacts();
-      const dir = pasteDir(facts.kind, remoteRoot(facts.kind, facts.home));
+      const dir = pasteDir(facts.kind, facts.root);
       const file = joinPath(facts.kind, dir, pasteFileName(ext));
       const res =
         facts.kind === "windows"

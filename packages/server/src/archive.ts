@@ -9,8 +9,8 @@
  * 能看到具体原因。绝不静默地把目录变成孤儿。
  */
 
-import { WORKTREE_ARCHIVE_TTL_MS } from "@mojito/shared";
-import type { Db, ProjectRow } from "./db.js";
+import { WORKTREE_ARCHIVE_TTL_MS } from "@falcon/shared";
+import { Db, type ProjectRow } from "./db.js";
 import { cleanupWorktree } from "./git/remove.js";
 import { gitHostFor } from "./git/host.js";
 import { pathExists, TIMEOUT_REMOVE } from "./git/repo.js";
@@ -69,11 +69,11 @@ export function startArchiveSweeper(
       const expired = db.listArchivedExpired(Date.now() - WORKTREE_ARCHIVE_TTL_MS);
       if (expired.length === 0) return;
       const doomed = new Set(expired.map((p) => p.id));
+      // guardDirsOf：与手动删除同一份"别删到我"清单（含多仓库项目的成员路径）
       const otherDirs = db
         .listProjects()
         .filter((p) => !doomed.has(p.id))
-        .map((p) => p.working_dir)
-        .filter((d): d is string => !!d);
+        .flatMap((p) => Db.guardDirsOf(p));
       for (const row of expired) {
         try {
           await sweepOne(row, otherDirs);

@@ -24,7 +24,7 @@ import type {
   RepoInfo,
   WorktreeFailure,
   WorktreeStatus,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import type { ExecResult } from "../zellij/install.js";
 import * as gc from "./command.js";
 import { WorktreeError, worktreeFailureText } from "./error.js";
@@ -123,7 +123,8 @@ type ProbeLike = { code: number | null; stdout: string };
 const versionOkUntil = new Map<string, number>();
 const VERSION_TTL_MS = 5 * 60_000;
 
-function ensureVersion(host: GitHost, res: ProbeLike, stderr: string): void {
+/** 导出给 multi.ts 的批量探测复用（batch 里第一条就是 version，往返已省，缓存无所谓） */
+export function ensureVersion(host: GitHost, res: ProbeLike, stderr: string): void {
   if (res.code === 0 && /git version/i.test(res.stdout)) {
     versionOkUntil.set(host.key, Date.now() + VERSION_TTL_MS);
     return;
@@ -135,7 +136,7 @@ function ensureVersion(host: GitHost, res: ProbeLike, stderr: string): void {
   );
 }
 
-function rootFrom(host: GitHost, res: ProbeLike, stderr: string): string {
+export function rootFrom(host: GitHost, res: ProbeLike, stderr: string): string {
   if (res.code !== 0) {
     throw new WorktreeError(
       "not-a-repo",
@@ -177,7 +178,7 @@ export async function pathExists(host: GitHost, p: string, opts?: RunOpts): Prom
 }
 
 /** 分片批量探测，返回与入参同序的布尔数组。任何一片失败就整体退化为"未知（false）" */
-async function pathsExist(host: GitHost, paths: string[]): Promise<boolean[]> {
+export async function pathsExist(host: GitHost, paths: string[]): Promise<boolean[]> {
   const out: boolean[] = [];
   for (let i = 0; i < paths.length; i += gc.EXISTS_BATCH) {
     const slice = paths.slice(i, i + gc.EXISTS_BATCH);
@@ -242,6 +243,22 @@ export function checkedOutMap(entries: gc.GitWorktreeEntry[]): Map<string, strin
   const m = new Map<string, string>();
   for (const e of entries) if (e.branch) m.set(e.branch, e.path);
   return m;
+}
+
+/**
+ * Quick Open 用的文件清单。不是仓库或 git 报错时返回 null，由调用方改走目录遍历——
+ * 没装 git 的项目仍然要能 ⌘P。
+ *
+ * 非零退出码是正常返回（ExecFn 铁律），这里不 throw。
+ */
+export async function listRepoFiles(
+  host: GitHost,
+  dir: string,
+  opts?: RunOpts
+): Promise<string[] | null> {
+  const res = await probeGit(host, gc.lsFilesIndexArgs(host.git, dir), gc.GIT_ENV_RO, opts);
+  if (res.code !== 0) return null;
+  return gc.parseLsFiles(res.stdout);
 }
 
 /**

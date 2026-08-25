@@ -1,4 +1,4 @@
-import type { Project, SystemInfo } from "@mojito/shared";
+import type { Project, SystemInfo } from "@falcon/shared";
 
 /**
  * 主机身份色。

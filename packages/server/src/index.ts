@@ -19,7 +19,7 @@ import { ZELLIJ_VERSION } from "./zellij/version.js";
 const VERSION = "0.1.0";
 
 async function main() {
-  // `mojito service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
+  // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
   if (process.argv[2] === "service") {
     const { runServiceCli } = await import("./service.js");
     runServiceCli(process.argv.slice(3));
@@ -44,6 +44,8 @@ async function main() {
   const manager = new SessionManager(db, secrets, config.dataDir);
   // 启用中的转发是服务，后端重启后应自己把隧道拉起来，不等用户再开一次面板
   void manager.forwards.restoreEnabled();
+  // 持久会话在 DB 里被标成 unverified：自动接回，不要等用户挨个点
+  void manager.resumeUnverified();
 
   const app = Fastify({ logger: { level: "info" } });
   await app.register(fastifyCookie);
@@ -57,7 +59,10 @@ async function main() {
 
   // 托管 web 构建产物（存在时）；单文件发布时由 SEA bootstrap 解压后经环境变量指入
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const webDist = process.env.MOJITO_WEB_DIST ?? path.resolve(here, "../../web/dist");
+  const webDist =
+    process.env.FALCON_WEB_DIST ??
+    process.env.MOJITO_WEB_DIST ??
+    path.resolve(here, "../../web/dist");
   if (fs.existsSync(path.join(webDist, "index.html"))) {
     await app.register(fastifyStatic, {
       root: webDist,
@@ -79,14 +84,14 @@ async function main() {
       return reply.code(404).send({ error: "Not Found" });
     });
   } else {
-    // 静默跳过会让"UI 404"极难排查（多半是 MOJITO_WEB_DIST 指了不存在的目录，
-    // 比如从 mojito 终端里继承来的陈旧值），启动时明说
+    // 静默跳过会让"UI 404"极难排查（多半是 FALCON_WEB_DIST 指了不存在的目录，
+    // 比如从 falcon 终端里继承来的陈旧值），启动时明说
     app.log.warn(`web 静态资源目录不存在，未托管 UI: ${webDist}`);
   }
 
   await app.listen({ host: config.host, port: config.port });
   app.log.info(
-    `mojito 已启动: http://${loopback ? "localhost" : config.host}:${config.port}` +
+    `falcon 已启动: http://${loopback ? "localhost" : config.host}:${config.port}` +
       `（数据目录 ${config.dataDir}，Zellij ${ZELLIJ_VERSION}）`
   );
 

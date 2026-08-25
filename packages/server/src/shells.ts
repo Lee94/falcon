@@ -7,7 +7,7 @@
  * （见 WINDOWS_PROBE_SCRIPT / defaultLocalShell）——选"默认"就等于不设覆盖。
  */
 
-import type { ShellsInfo } from "@mojito/shared";
+import type { ShellsInfo } from "@falcon/shared";
 import { encodePowerShell, type HostKind } from "./zellij/host.js";
 import type { ExecFn } from "./zellij/install.js";
 

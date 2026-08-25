@@ -1,17 +1,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  branchExistsArgs,
   countStatusChanges,
   logPageArgs,
+  lsFilesIndexArgs,
   parseCommitFiles,
   parseBranchList,
   parseCommitMeta,
   parseLogPage,
+  parseLsFiles,
   parseRefLabels,
   parseStatusEntries,
   rankAuthors,
   truncateDiff,
 } from "./command.js";
+
+describe("lsFilesIndexArgs", () => {
+  it("lists cached + others, excludes gitignore, stays relative to -C", () => {
+    const argv = lsFilesIndexArgs("/usr/bin/git", "/home/u/repo");
+    assert.deepEqual(argv.slice(-3), ["ls-files", "-co", "--exclude-standard"]);
+    assert.equal(argv[argv.indexOf("-C") + 1], "/home/u/repo");
+  });
+});
+
+describe("parseLsFiles", () => {
+  it("drops empty lines and normalizes backslashes", () => {
+    assert.deepEqual(parseLsFiles("src/a.ts\r\n\nREADME.md\npackages\\web\\x.ts\n"), [
+      "src/a.ts",
+      "README.md",
+      "packages/web/x.ts",
+    ]);
+  });
+});
 
 describe("countStatusChanges", () => {
   it("counts new and untracked files as added, deletions as deleted", () => {
@@ -232,5 +253,13 @@ describe("parseBranchList", () => {
     assert.deepEqual(out, [
       { name: "main", remote: false, upstream: "origin/main", head: true },
     ]);
+  });
+});
+
+describe("branchExistsArgs", () => {
+  it("verifies refs/heads/<branch> quietly, anchored to -C <repo>", () => {
+    const argv = branchExistsArgs("/usr/bin/git", "/home/u/repo", "feat/x");
+    assert.deepEqual(argv.slice(-4), ["rev-parse", "--verify", "--quiet", "refs/heads/feat/x"]);
+    assert.equal(argv[argv.indexOf("-C") + 1], "/home/u/repo");
   });
 });

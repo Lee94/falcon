@@ -3,11 +3,40 @@ import { describe, it } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Db } from "./db.js";
+import { Db, type ProjectRow } from "./db.js";
+
+function tmpDb(): Db {
+  return new Db(fs.mkdtempSync(path.join(os.tmpdir(), "falcon-db-")));
+}
+
+function projectRow(overrides: Partial<ProjectRow> = {}): ProjectRow {
+  return {
+    id: "p1",
+    name: "p",
+    type: "local",
+    working_dir: "/w",
+    shell: null,
+    ssh_host: null,
+    ssh_port: null,
+    ssh_username: null,
+    ssh_auth_method: null,
+    ssh_key_path: null,
+    ssh_secret_enc: null,
+    host_id: null,
+    created_at: 1,
+    source_project_id: null,
+    worktree_branch: null,
+    worktree_repo_dir: null,
+    worktree_created_by_mojito: null,
+    worktree_archived_at: null,
+    multi_repos: null,
+    ...overrides,
+  };
+}
 
 describe("upsertZellijHost", () => {
   it("keeps omitted fields but clears fields explicitly set to null", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mojito-db-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-db-"));
     const db = new Db(dir);
 
     db.upsertZellijHost("h", 22, "u", {
@@ -35,5 +64,66 @@ describe("upsertZellijHost", () => {
     assert.equal(row.installed_version, null);
     assert.equal(row.base_url, null);
     assert.equal(row.authorized, 1);
+  });
+});
+
+describe("parseMultiRepos", () => {
+  it("parses a healthy member list and round-trips through insert/select", () => {
+    const db = tmpDb();
+    const members = [{ dir: "/a/web" }, { dir: "/c/app-x/web", repoDir: "/a/web" }];
+    db.insertProject(projectRow({ multi_repos: JSON.stringify(members) }));
+    const row = db.getProject("p1")!;
+    assert.deepEqual(Db.parseMultiRepos(row), members);
+    assert.deepEqual(Db.toProject(row).multi, { repos: members });
+  });
+
+  it("returns null on broken JSON or wrong shapes (degrades to plain-project look)", () => {
+    assert.equal(Db.parseMultiRepos({ multi_repos: "not json" }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: "{}" }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: '["a"]' }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: '[{"dir":""}]' }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: '[{"dir":1}]' }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: '[{"dir":"/a","repoDir":2}]' }), null);
+    assert.equal(Db.parseMultiRepos({ multi_repos: null }), null);
+  });
+});
+
+describe("updateMultiRepos", () => {
+  it("updates a container row", () => {
+    const db = tmpDb();
+    db.insertProject(projectRow({ multi_repos: JSON.stringify([{ dir: "/a" }]) }));
+    db.updateMultiRepos("p1", [{ dir: "/a" }, { dir: "/b" }]);
+    assert.deepEqual(Db.parseMultiRepos(db.getProject("p1")!), [{ dir: "/a" }, { dir: "/b" }]);
+  });
+
+  it("cannot reach a derived row — the SQL guard, not the route, is the proof", () => {
+    const db = tmpDb();
+    const stored = [{ dir: "/c/app-x/web", repoDir: "/a/web" }];
+    db.insertProject(
+      projectRow({
+        source_project_id: "src",
+        worktree_created_by_mojito: 1,
+        multi_repos: JSON.stringify(stored),
+      })
+    );
+    db.updateMultiRepos("p1", [{ dir: "/tmp/evil" }]);
+    assert.deepEqual(Db.parseMultiRepos(db.getProject("p1")!), stored);
+  });
+});
+
+describe("guardDirsOf", () => {
+  it("collects working_dir plus member dirs and repo roots", () => {
+    const derived = projectRow({
+      working_dir: "/c/app-x",
+      source_project_id: "src",
+      multi_repos: JSON.stringify([{ dir: "/c/app-x/web", repoDir: "/a/web" }]),
+    });
+    assert.deepEqual(Db.guardDirsOf(derived), ["/c/app-x", "/c/app-x/web", "/a/web"]);
+  });
+
+  it("plain projects contribute just their working_dir; broken JSON contributes nothing extra", () => {
+    assert.deepEqual(Db.guardDirsOf(projectRow()), ["/w"]);
+    assert.deepEqual(Db.guardDirsOf(projectRow({ working_dir: null })), []);
+    assert.deepEqual(Db.guardDirsOf(projectRow({ multi_repos: "broken" })), ["/w"]);
   });
 });

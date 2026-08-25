@@ -7,6 +7,7 @@ import {
   Download,
   ArrowLeftRight,
   FileDiff,
+  FileText,
   Folder,
   GitBranch,
   LayoutDashboard,
@@ -51,7 +52,7 @@ interface PaletteGroup {
 }
 
 /**
- * ⌘K 命令面板。前缀语法：@ 会话、# 项目、> 命令。
+ * 命令面板（⌘⇧P / Ctrl+Shift+P，跟 VS Code 一样）。前缀语法：@ 会话、# 项目、> 命令。
  * 所有功能都能纯键盘走完——这是"键盘操作接近于零"的解药。
  *
  * cmdk 只用来做列表与键盘遍历（shouldFilter=false）：前缀语义是这个产品自己的，
@@ -154,6 +155,13 @@ export function CommandPalette() {
         });
       }
     }
+    actionItems.push({
+      key: `>${t("palette.goToFile")}`,
+      label: t("palette.goToFile"),
+      meta: chord("quickOpen"),
+      icon: FileText,
+      run: () => store.setQuickOpen(true),
+    });
     actionItems.push({
       key: `>${t("palette.overview")}`,
       label: t("palette.overview"),

@@ -2,7 +2,7 @@
  * 粘贴图片：把浏览器剪贴板里的图片写到会话宿主机上，返回绝对路径。
  * 前端随后把路径粘进终端输入——Claude Code 等 TUI 认"输入框里的图片路径"。
  *
- * 落脚点统一是 mojito 根目录下的 paste/（本地 = --data-dir，远端 = ~/.mojito），
+ * 落脚点统一是 falcon 根目录下的 paste/（本地 = --data-dir，远端 = ~/.falcon），
  * 与 Zellij 布局同根，卸载时一并带走。SSH 侧不走 SFTP（理由同 fs.ts）：
  * POSIX 用 `cat > file` 收 stdin 原始字节；Windows 的 exec 通道对二进制
  * 不可靠，改收 base64 再在 PowerShell 里解码。
@@ -35,7 +35,7 @@ export function imageExt(contentType: string | undefined): string | null {
   return IMAGE_EXTENSIONS[mime] ?? null;
 }
 
-/** root 是宿主机上的 mojito 根目录（remoteRoot 或本地 dataDir） */
+/** root 是宿主机上的 falcon 根目录（remoteRoot 或本地 dataDir） */
 export function pasteDir(kind: HostKind, root: string): string {
   return joinPath(kind, root, "paste");
 }

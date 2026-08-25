@@ -1,5 +1,5 @@
 {
-  "name": "@mojito/web",
+  "name": "@falcon/web",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@mojito/shared": "workspace:*",
+    "@falcon/shared": "workspace:*",
     "@xterm/addon-fit": "0.12.0-beta.299",
     "@xterm/addon-unicode11": "0.10.0-beta.299",
     "@xterm/addon-web-links": "0.13.0-beta.299",
@@ -27,6 +27,7 @@
     "react-dom": "^19.2.8",
     "react-i18next": "^15.0.0",
     "rioterm": "^0.1.8",
+    "shiki": "^4.4.3",
     "sonner": "^2.0.8",
     "tailwind-merge": "^3.6.0",
     "zustand": "^5.0.0"

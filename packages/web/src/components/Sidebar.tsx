@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Ellipsis,
   Folder,
+  Folders,
   GitBranch,
   Monitor,
   PanelLeft,
@@ -13,8 +14,8 @@ import {
   Server,
   Settings,
 } from "lucide-react";
-import type { Project } from "@mojito/shared";
-import { WORKTREE_ARCHIVE_TTL_MS } from "@mojito/shared";
+import type { Project } from "@falcon/shared";
+import { WORKTREE_ARCHIVE_TTL_MS } from "@falcon/shared";
 import { useApp, type ProjectChanges, type ProjectHead } from "../store.js";
 import {
   checkoutLabel,
@@ -23,6 +24,7 @@ import {
   type FolderGroup,
   type ServerGroup,
 } from "../lib/projectTree.js";
+import { memberBasename } from "../lib/multiDerive.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
@@ -70,10 +72,11 @@ export function Sidebar() {
       <div className="flex h-11 shrink-0 items-center gap-2 border-b pr-2 pl-3">
         <button
           type="button"
-          className="text-base font-medium tracking-tight outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="flex items-center gap-2 text-base font-medium tracking-tight outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           title={t("palette.overview")}
           onClick={showOverview}
         >
+          <img src="/favicon.svg" alt="" width={20} height={20} className="rounded-[4.5px]" />
           {t("appName")}
         </button>
         <span className="flex-1" />
@@ -320,19 +323,29 @@ function FolderNode({
   onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
   onProjectContext: (project: Project, e: MouseEvent) => void;
 }) {
+  const { t } = useTranslation();
   const { project, worktrees } = folder;
   const head = heads[project.id];
   // 未写过偏好 = 展开。第三层是分支 / worktree，默认要看见，不能让人再点一次。
   const open = collapsed[folderKey(project.id)] !== true;
+  // 多仓库容器：文件夹行换 Folders 图标，tooltip 列成员名（成员不占独立行，
+  // 它们不是项目，点了没有去处）
+  const memberNames = project.multi?.repos.map((r) => memberBasename(r.dir)) ?? [];
 
   return (
     <div>
       <TreeRow
         depth={1}
         expanded={open}
-        icon={<Folder className="size-3.5 shrink-0 text-muted-foreground" />}
+        icon={
+          project.multi ? (
+            <Folders className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+          )
+        }
         label={project.name}
-        title={project.workingDir ?? project.name}
+        title={project.multi ? memberNames.join(" · ") : (project.workingDir ?? project.name)}
         toggleLabel="sidebar.toggleProject"
         onToggle={() => onToggleKey(folderKey(project.id))}
         onSelect={() => onSelectProject(project.id)}
@@ -343,7 +356,12 @@ function FolderNode({
         <>
           <CheckoutNode
             project={project}
-            label={checkoutLabel(project, head)}
+            label={
+              project.multi
+                ? t("multi.repoCount", { n: memberNames.length })
+                : checkoutLabel(project, head)
+            }
+            meta={project.multi ? memberNames.slice(0, 3).join(" · ") : undefined}
             changes={changes[project.id]}
             branched
             depth={2}
@@ -424,6 +442,8 @@ function CheckoutNode({
       icon={
         archivedAt ? (
           <Archive className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : project.multi && !project.worktree ? (
+          <Folders className="size-3.5 shrink-0 text-muted-foreground" />
         ) : branched ? (
           <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
         ) : (

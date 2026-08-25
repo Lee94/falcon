@@ -1,14 +1,16 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import fs from "node:fs";
 import path from "node:path";
 import type {
   DeadReason,
   ForwardKind,
+  MultiRepoMember,
   Project,
   Session,
   SessionState,
   SshAuthMethod,
   SshHost,
-} from "@mojito/shared";
+} from "@falcon/shared";
 
 export interface ProjectRow {
   id: string;
@@ -30,10 +32,16 @@ export interface ProjectRow {
   worktree_branch: string | null;
   /** 派生时记录的仓库根。删除护栏拿它比对，不读 working_dir */
   worktree_repo_dir: string | null;
-  /** 1 = mojito 建的目录，删除项目时才允许删它；null / 0 一律不删 */
+  /** 1 = falcon 建的目录，删除项目时才允许删它；null / 0 一律不删 */
   worktree_created_by_mojito: number | null;
   /** 存档时间（unix 毫秒）。非 null ⇔ 已存档，到期由后台清扫删除；普通项目恒为 null */
   worktree_archived_at: number | null;
+  /**
+   * 多仓库项目的成员清单（JSON 的 MultiRepoMember[]）。非 null ⇔ 多仓库项目；
+   * 容器与派生产物共用这一列，语义由 source_project_id 判别（见 shared 的注释）。
+   * 派生行上它是删除目标清单——写入路径与 worktree 四列同样必须不可达。
+   */
+  multi_repos: string | null;
 }
 
 export interface SessionRow {
@@ -93,6 +101,14 @@ export interface ZellijHostRow {
 /** 行接口是封闭类型，node:sqlite 的命名参数要求带索引签名的 Record，这里统一收窄 */
 const bindRow = (row: object) => row as Record<string, SQLInputValue>;
 
+/** 新库名 falcon.db；旧安装只有 mojito.db 时接着用，避免改名后打开空库。 */
+function dbFile(dataDir: string): string {
+  const next = path.join(dataDir, "falcon.db");
+  const prev = path.join(dataDir, "mojito.db");
+  if (!fs.existsSync(next) && fs.existsSync(prev)) return prev;
+  return next;
+}
+
 export class Db {
   private db: DatabaseSync;
   /** prepare 的语句缓存：node:sqlite 不缓存，热路径上每次现场编译 SQL 白费 */
@@ -102,7 +118,7 @@ export class Db {
     // node:sqlite 默认开外键约束；本仓库从未启用过（级联在应用层手写），显式关掉保持语义不变。
     // UPDATE 走 bindRow 传整行，SQL 用不到 created_at 等列；better-sqlite3 会忽略多余命名参数，
     // node:sqlite 默认抛 ERR_INVALID_STATE，这里显式放开。
-    this.db = new DatabaseSync(path.join(dataDir, "mojito.db"), {
+    this.db = new DatabaseSync(dbFile(dataDir), {
       enableForeignKeyConstraints: false,
       allowUnknownNamedParameters: true,
     });
@@ -199,6 +215,8 @@ export class Db {
     this.addColumn("projects", "worktree_created_by_mojito", "INTEGER");
     this.addColumn("projects", "worktree_archived_at", "INTEGER");
     this.addColumn("projects", "host_id", "TEXT");
+    // 多仓库项目的成员清单（JSON）。容器与派生产物共用，语义由 source_project_id 判别
+    this.addColumn("projects", "multi_repos", "TEXT");
 
     // 端口转发规则挂在项目上（走该项目的 SshLink），不是解引用主机。
     // 不写 REFERENCES：本仓库外键从未开启，级联在应用层手写。
@@ -251,7 +269,32 @@ export class Db {
 
   // ---- projects ----
 
+  /**
+   * 解析 multi_repos。损坏的 JSON / 形状不对一律返回 null：toProject 侧降级成
+   * "看起来是普通项目"（普通项目永不删目录，方向安全）；删除侧拿到 null 直接
+   * veto（见 remove.ts 的 vetoMultiRemoval），最坏是拒删并告警，不会删错。
+   */
+  static parseMultiRepos(row: Pick<ProjectRow, "multi_repos">): MultiRepoMember[] | null {
+    if (row.multi_repos == null) return null;
+    try {
+      const parsed: unknown = JSON.parse(row.multi_repos);
+      if (!Array.isArray(parsed)) return null;
+      const members: MultiRepoMember[] = [];
+      for (const item of parsed) {
+        if (typeof item !== "object" || item === null) return null;
+        const { dir, repoDir } = item as { dir?: unknown; repoDir?: unknown };
+        if (typeof dir !== "string" || dir.length === 0) return null;
+        if (repoDir !== undefined && typeof repoDir !== "string") return null;
+        members.push(repoDir === undefined ? { dir } : { dir, repoDir });
+      }
+      return members;
+    } catch {
+      return null;
+    }
+  }
+
   static toProject(row: ProjectRow): Project {
+    const members = Db.parseMultiRepos(row);
     return {
       id: row.id,
       name: row.name,
@@ -275,10 +318,11 @@ export class Db {
             sourceProjectId: row.source_project_id,
             branch: row.worktree_branch ?? "",
             repoDir: row.worktree_repo_dir ?? "",
-            createdByMojito: row.worktree_created_by_mojito === 1,
+            createdByFalcon: row.worktree_created_by_mojito === 1,
             archivedAt: row.worktree_archived_at ?? undefined,
           }
         : undefined,
+      multi: members ? { repos: members } : undefined,
       createdAt: row.created_at,
     };
   }
@@ -297,20 +341,21 @@ export class Db {
   insertProject(row: ProjectRow) {
     this.stmt(
         `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at)
+           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos)
          VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
-           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito, @worktree_archived_at)`
+           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito, @worktree_archived_at, @multi_repos)`
       )
       .run(bindRow(row));
   }
 
   /**
-   * 刻意不更新 source_project_id / worktree_* 四列。
+   * 刻意不更新 source_project_id / worktree_* 四列，也不更新 multi_repos。
    *
-   * 它们是删除护栏的判据（"这个目录是 mojito 建的、属于那个仓库"）。一旦能从
-   * PUT /api/projects/:id 改写，护栏就等于不存在——攻击面是"改一行 JSON 让 mojito
+   * 它们是删除护栏的判据（"这个目录是 falcon 建的、属于那个仓库"）。一旦能从
+   * PUT /api/projects/:id 改写，护栏就等于不存在——攻击面是"改一行 JSON 让 falcon
    * 去 rm -rf 任意路径"。附属项目的这些属性在创建时定死，此后只读；
    * ProjectInput 里也没有对应字段，所以这条从类型层面就够不到。
+   * multi_repos 在派生行上是删除目标清单，同罪；容器改成员走 updateMultiRepos。
    */
   updateProject(row: ProjectRow) {
     this.stmt(
@@ -320,6 +365,37 @@ export class Db {
          WHERE id=@id`
       )
       .run(bindRow(row));
+  }
+
+  /**
+   * 替换多仓库**容器**的成员清单。
+   *
+   * SQL 里的 `source_project_id IS NULL` 不是防御式编程，是护栏本体：派生行的
+   * multi_repos 是删除目标清单，写入路径必须不可达——即使路由层将来写错，
+   * 这条 UPDATE 也够不到派生行（与 updateProject 刻意不更新 worktree 四列同理）。
+   */
+  updateMultiRepos(id: string, repos: MultiRepoMember[]) {
+    this.stmt(
+        "UPDATE projects SET multi_repos = ? WHERE id = ? AND source_project_id IS NULL"
+      )
+      .run(JSON.stringify(repos), id);
+  }
+
+  /**
+   * 一行项目贡献给"别删到我"清单（otherDirs）的全部路径：working_dir、
+   * 容器成员的仓库路径、派生产物成员的 worktree 路径与仓库根。
+   * 容器的成员是用户的真仓库，必须能挡住别的删除踩上去。
+   * worktree_repo_dir 维持现状不收——单仓库附属项目的仓库根本来就没进过这个清单，
+   * 这里只为新增的多仓库形态补齐，不悄悄改既有语义。
+   */
+  static guardDirsOf(row: ProjectRow): string[] {
+    const dirs: string[] = [];
+    if (row.working_dir) dirs.push(row.working_dir);
+    for (const m of Db.parseMultiRepos(row) ?? []) {
+      dirs.push(m.dir);
+      if (m.repoDir) dirs.push(m.repoDir);
+    }
+    return dirs;
   }
 
   /**

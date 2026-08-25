@@ -13,6 +13,8 @@ import type {
   GitSyncResult,
   GitWorkingChanges,
   HostZellijStatus,
+  MultiRepoProbe,
+  MultiWorktreeInput,
   PasteImageResult,
   PortForward,
   PortForwardInput,
@@ -30,8 +32,9 @@ import type {
   SystemInfo,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceIndex,
   WorkspaceListing,
-} from "@mojito/shared";
+} from "@falcon/shared";
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -44,7 +47,8 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   if (!res.ok) {
     throw new ApiRequestError(
       (data as { error?: string }).error ?? `HTTP ${res.status}`,
-      res.status
+      res.status,
+      data
     );
   }
   return data as T;
@@ -53,10 +57,17 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 export class ApiRequestError extends Error {
   constructor(
     message: string,
-    public status: number
+    public status: number,
+    /** 服务端返回的完整错误体（如批量派生的 MultiDeriveError），调用方按需收窄 */
+    public body?: unknown
   ) {
     super(message);
   }
+}
+
+/** 多仓库项目的 git 端点统一带 ?repo=<成员dir>（取自 project.multi.repos，原样带回） */
+function repoQuery(repo?: string): string {
+  return repo ? `?repo=${encodeURIComponent(repo)}` : "";
 }
 
 export const api = {
@@ -111,8 +122,12 @@ export const api = {
 
   /** 源项目的仓库信息。环境事实写在 derivable/reason 里，不会抛 */
   repoInfo: (projectId: string) => request<RepoInfo>("GET", `/api/projects/${projectId}/repo`),
+  /** 多仓库容器的派生前探测：逐成员 RepoInfo，环境事实同样不抛 */
+  repoInfoMulti: (projectId: string) =>
+    request<MultiRepoProbe>("GET", `/api/projects/${projectId}/repos`),
   /** 右侧 Git 面板。源项目和附属项目都能问，环境事实写在 available/reason 里 */
-  gitSnapshot: (projectId: string) => request<GitSnapshot>("GET", `/api/projects/${projectId}/git`),
+  gitSnapshot: (projectId: string, opts?: { repo?: string }) =>
+    request<GitSnapshot>("GET", `/api/projects/${projectId}/git${repoQuery(opts?.repo)}`),
   /** 侧栏最后一层的 +N −M。读不到时 available=false，不抛 */
   gitChanges: (projectId: string) =>
     request<GitChangeCounts>("GET", `/api/projects/${projectId}/git/changes`),
@@ -122,11 +137,13 @@ export const api = {
   /** Git 面板里单个文件的 diff。环境事实与命令失败写在 available/reason 里，不抛 */
   gitFileDiff: (
     projectId: string,
-    file: { path: string; origPath?: string; untracked?: boolean }
+    file: { path: string; origPath?: string; untracked?: boolean },
+    opts?: { repo?: string }
   ) => {
     const q = new URLSearchParams({ path: file.path });
     if (file.origPath) q.set("origPath", file.origPath);
     if (file.untracked) q.set("untracked", "1");
+    if (opts?.repo) q.set("repo", opts.repo);
     return request<GitFileDiff>("GET", `/api/projects/${projectId}/git/diff?${q}`);
   },
 
@@ -134,51 +151,64 @@ export const api = {
    * 「修改」面板：工作区全部未提交改动，带每个文件的 +N −M。
    * 比 gitChanges 重（多一条 numstat），只在面板打开时问。
    */
-  gitWorking: (projectId: string) =>
-    request<GitWorkingChanges>("GET", `/api/projects/${projectId}/git/working`),
+  gitWorking: (projectId: string, opts?: { repo?: string }) =>
+    request<GitWorkingChanges>(
+      "GET",
+      `/api/projects/${projectId}/git/working${repoQuery(opts?.repo)}`
+    ),
   /** History 列表的一页。筛选与分页都在 query 里，环境事实写在 available 里 */
   gitLog: (
     projectId: string,
-    opts: { branch?: string; author?: string; q?: string; skip?: number } = {}
+    opts: { branch?: string; author?: string; q?: string; skip?: number; repo?: string } = {}
   ) => {
     const q = new URLSearchParams();
     if (opts.branch) q.set("branch", opts.branch);
     if (opts.author) q.set("author", opts.author);
     if (opts.q) q.set("q", opts.q);
     if (opts.skip) q.set("skip", String(opts.skip));
+    if (opts.repo) q.set("repo", opts.repo);
     return request<GitLogPage>("GET", `/api/projects/${projectId}/git/log?${q}`);
   },
   /** Branch / User 两个筛选下拉的候选值 */
-  gitRefs: (projectId: string) =>
-    request<GitRefsInfo>("GET", `/api/projects/${projectId}/git/refs`),
+  gitRefs: (projectId: string, opts?: { repo?: string }) =>
+    request<GitRefsInfo>("GET", `/api/projects/${projectId}/git/refs${repoQuery(opts?.repo)}`),
   /** 选中提交的详情：完整提交信息 + 改动文件 */
-  gitCommit: (projectId: string, sha: string) =>
-    request<GitCommitDetail>(
-      "GET",
-      `/api/projects/${projectId}/git/commit?sha=${encodeURIComponent(sha)}`
-    ),
+  gitCommit: (projectId: string, sha: string, opts?: { repo?: string }) => {
+    const q = new URLSearchParams({ sha });
+    if (opts?.repo) q.set("repo", opts.repo);
+    return request<GitCommitDetail>("GET", `/api/projects/${projectId}/git/commit?${q}`);
+  },
   /** 某条提交里单个文件的 diff */
   gitCommitDiff: (
     projectId: string,
     sha: string,
-    file: { path: string; origPath?: string }
+    file: { path: string; origPath?: string },
+    opts?: { repo?: string }
   ) => {
     const q = new URLSearchParams({ sha, path: file.path });
     if (file.origPath) q.set("origPath", file.origPath);
+    if (opts?.repo) q.set("repo", opts.repo);
     return request<GitFileDiff>("GET", `/api/projects/${projectId}/git/commit/diff?${q}`);
   },
   /**
    * 提交工作区改动。失败不抛——没配 user.name、pre-commit 钩子拒绝、
-   * 没有可提交的改动都写在 ok/detail 里。
+   * 没有可提交的改动都写在 ok/detail 里。多仓库项目必须带 repo（写操作服务端不猜）。
    */
-  gitCommitChanges: (projectId: string, input: GitCommitInput) =>
-    request<GitSyncResult>("POST", `/api/projects/${projectId}/git/commit`, input),
+  gitCommitChanges: (projectId: string, input: GitCommitInput, opts?: { repo?: string }) =>
+    request<GitSyncResult>(
+      "POST",
+      `/api/projects/${projectId}/git/commit${repoQuery(opts?.repo)}`,
+      input
+    ),
   /**
    * Pull / Push。失败不抛——凭据不对、非快进、远端拒绝都写在 ok/detail 里，
-   * 面板要把 git 的原话给用户看。
+   * 面板要把 git 的原话给用户看。多仓库项目必须带 repo。
    */
-  gitSync: (projectId: string, action: "pull" | "push") =>
-    request<GitSyncResult>("POST", `/api/projects/${projectId}/git/${action}`),
+  gitSync: (projectId: string, action: "pull" | "push", opts?: { repo?: string }) =>
+    request<GitSyncResult>(
+      "POST",
+      `/api/projects/${projectId}/git/${action}${repoQuery(opts?.repo)}`
+    ),
   /**
    * 文件面板：工作目录里的一层。`path` 缺省为工作目录本身。
    * 与 git 无关——未跟踪、被 ignore 的文件同样在里面。
@@ -187,6 +217,9 @@ export const api = {
     const q = path ? `?path=${encodeURIComponent(path)}` : "";
     return request<WorkspaceListing>("GET", `/api/projects/${projectId}/files${q}`);
   },
+  /** Quick Open：工作目录里的文件路径清单（git 仓库走 ls-files） */
+  indexFiles: (projectId: string) =>
+    request<WorkspaceIndex>("GET", `/api/projects/${projectId}/files/index`),
   /** 查看 tab：读一个文件。二进制与超大文件也是 200，形状里写清了是什么 */
   readFile: (projectId: string, path: string) =>
     request<FilePreview>(
@@ -202,7 +235,8 @@ export const api = {
     request<PortForward>("PATCH", `/api/projects/${projectId}/forwards/${id}`, patch),
   deleteForward: (projectId: string, id: string) =>
     request<{ ok: true }>("DELETE", `/api/projects/${projectId}/forwards/${id}`),
-  createWorktree: (projectId: string, input: WorktreeInput) =>
+  /** 派生：单仓库项目吃 WorktreeInput，多仓库容器吃 MultiWorktreeInput（服务端按项目分流） */
+  createWorktree: (projectId: string, input: WorktreeInput | MultiWorktreeInput) =>
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),
   worktreeStatus: (projectId: string) =>
     request<WorktreeStatus>("GET", `/api/projects/${projectId}/worktree`),

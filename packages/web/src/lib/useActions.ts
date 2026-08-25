@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
-import type { Project, SessionWithProject, SshHost } from "@mojito/shared";
-import { WORKTREE_ARCHIVE_TTL_DAYS } from "@mojito/shared";
+import type { Project, SessionWithProject, SshHost } from "@falcon/shared";
+import { WORKTREE_ARCHIVE_TTL_DAYS } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, type MenuItemSpec } from "../store.js";
 import { connLabel } from "./hostColor.js";
@@ -231,6 +231,10 @@ export function useActions() {
       ],
       footnote:
         [
+          // 多仓库派生行：说明整目录下 N 棵 worktree 一并移除（分支照例保留）
+          project.multi
+            ? t("multi.deleteFootnote", { n: project.multi.repos.length })
+            : null,
           st == null || st.error ? t("worktree.deleteStatusUnknown") : null,
           st && !st.present ? t("worktree.deleteMissing") : null,
           st && st.dirtyCount > st.dirtySample.length
@@ -456,7 +460,8 @@ export function useActions() {
     // 附属项目不能再派生：树永远只有两级，删除级联也就不必递归
     if (!project.worktree) {
       items.push({
-        label: t("project.derive"),
+        // 多仓库容器同一个入口，WorktreeForm 内部按 project.multi 分流成批量派生
+        label: project.multi ? t("multi.derive") : t("project.derive"),
         onSelect: () => store.openWorktreeForm(project.id),
       });
       // 开关是全局的，但入口挂在有存档的源项目上——不然藏起来的东西无处发现。

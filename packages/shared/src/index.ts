@@ -75,7 +75,7 @@ export type SshProbeResult =
 /**
  * 挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink。
  *
- * local：在 mojito 后端监听，经 SSH 打到远端能到达的地址（ssh -L）。
+ * local：在 falcon 后端监听，经 SSH 打到远端能到达的地址（ssh -L）。
  * remote：在远端监听，打回后端能到达的地址（ssh -R）。
  */
 export type ForwardKind = "local" | "remote";
@@ -123,6 +123,8 @@ export interface Project {
   hostId?: string;
   /** 存在 ⇔ 这是附属项目（工作目录是某个 git 仓库的 worktree） */
   worktree?: WorktreeInfo;
+  /** 存在 ⇔ 这是多仓库项目（容器或批量派生的产物），见 MultiRepoInfo */
+  multi?: MultiRepoInfo;
   createdAt: number;
 }
 
@@ -145,6 +147,12 @@ export interface ProjectInput {
     keyPath?: string;
     secret?: string;
   };
+  /**
+   * 多仓库容器的成员仓库路径。创建时带上 ⇒ 建的是容器；编辑容器时带上 ⇒ 替换成员清单。
+   * 判别式在创建时定死：普通项目带 repos、或附属项目改 repos，一律 400——
+   * 派生产物的成员清单是删除目标，写入路径必须不可达（与 worktree 四列同罪）。
+   */
+  repos?: string[];
 }
 
 // ============ Worktree（附属项目） ============
@@ -166,8 +174,8 @@ export interface WorktreeInfo {
    * 源项目行还可能已被删，而护栏必须拿创建那一刻记下的值去比对。
    */
   repoDir: string;
-  /** 目录是不是 mojito 建的。false 时删除项目绝不删目录 */
-  createdByMojito: boolean;
+  /** 目录是不是 falcon 建的。false 时删除项目绝不删目录 */
+  createdByFalcon: boolean;
   /**
    * 存档时间（unix 毫秒）。存在 ⇔ 已存档：侧栏默认隐藏，worktree 目录原样保留，
    * 到期（WORKTREE_ARCHIVE_TTL_MS）由后台清扫自动删除；此前随时可恢复。
@@ -263,6 +271,75 @@ export interface WorktreeInput {
   startPoint?: string;
   /** 目标目录；缺省用服务端派生的同级平铺路径 */
   dir?: string;
+}
+
+// ============ 多仓库项目 ============
+
+/**
+ * 多仓库项目的一个成员。存在于两种行上，dir 的语义不同：
+ * - 容器：用户选的路径（可以是仓库子目录，派生时才 rev-parse 出仓库根）。
+ * - 派生产物：该成员 worktree 的绝对路径——git 自己报的，删除护栏拿它比对。
+ */
+export interface MultiRepoMember {
+  dir: string;
+  /**
+   * 仅派生产物有值：成员所属仓库根（主 worktree 路径），删除取证用。
+   * 容器成员没有——与 WorktreeInfo.repoDir 同理，判据必须是创建那一刻记下的值。
+   */
+  repoDir?: string;
+}
+
+/**
+ * 存在 ⇔ 多仓库项目。与 worktree != null ⇔ 附属项目 是同一个判别式模式：
+ * 「多仓库」与「local/ssh」正交（成员全在容器自己的宿主机上），与「容器/附属」
+ * 也正交——multi 与 worktree 同时存在 = 批量派生出的多仓库附属项目。
+ * 不给 ProjectType 加第三个值的理由见 WorktreeInfo 的注释。
+ */
+export interface MultiRepoInfo {
+  repos: MultiRepoMember[];
+}
+
+/** 容器成员数上限。批量派生逐仓库串行，每条 add 最长 2 分钟，上限同时是耗时上限 */
+export const MULTI_REPO_MAX = 16;
+
+/**
+ * 批量派生请求。与 WorktreeInput 刻意分开：没有 startPoint——每个成员的基点
+ * 恒为**各自的** HEAD，跨成员挑一个共同基点没有意义；多一个 auto 模式，
+ * 因为统一分支名跨 N 个仓库时"有的仓库已有这条分支、有的没有"是常态，
+ * 没有 auto，全有或全无的语义会让混合状态永远派生不出来。
+ */
+export interface MultiWorktreeInput {
+  /** 留空则用分支名 */
+  name?: string;
+  /** auto：分支存在则检出、不存在则从各自 HEAD 新建 */
+  mode: "new-branch" | "existing-branch" | "auto";
+  /** 目标分支的**本地**名，对全部成员统一 */
+  branch: string;
+  /** 集中目录；缺省 = 第一个成员仓库根的父目录 + <容器名slug>-<分支slug> */
+  dir?: string;
+}
+
+/**
+ * 多仓库容器的派生前探测（GET /api/projects/:id/repos）。
+ * 与 RepoInfo 同哲学：环境事实不报错，逐成员写在 derivable / reason 里。
+ */
+export interface MultiRepoProbe {
+  /** 与容器成员同序；dir 是容器里配置的成员路径 */
+  members: { dir: string; info: RepoInfo }[];
+  /** 集中目录会建在哪个父目录下（第一个成员仓库根的父目录），供前端预览 */
+  baseDir?: string;
+}
+
+/**
+ * 批量派生的失败响应体。error 仍是一句可以直接展示的话，
+ * member / leftover 供前端标明"哪个仓库、什么原因、回滚剩了什么"。
+ */
+export interface MultiDeriveError {
+  error: string;
+  /** 第一个失败的成员（全有或全无 ⇒ 至多一个）。dir 是容器里配置的成员路径 */
+  member?: { dir: string; reason: WorktreeFailure; detail?: string };
+  /** 回滚后仍残留在磁盘上的绝对路径；缺省/空 = 回滚干净。非空 ⇒ HTTP 502 */
+  leftover?: string[];
 }
 
 /**
@@ -669,7 +746,7 @@ export interface HostZellijStatus {
   verifiedDurable: boolean | null;
   /** 官方默认下载源，供 UI 显示占位 */
   defaultBaseUrl: string;
-  /** mojito 锁定的 Zellij 版本 */
+  /** falcon 锁定的 Zellij 版本 */
   requiredVersion: string;
 }
 
@@ -785,6 +862,18 @@ export interface WorkspaceListing {
 
 /** 一层目录最多列多少条。超过就截断——几万条目的列表画出来也没人看 */
 export const WORKSPACE_LIST_CAP = 2000;
+
+/**
+ * ⌘P 文件索引的上限。git ls-files 对中型仓库很快，但把整份 node_modules
+ * 塞进前端没有意义——Quick Open 也只会显示前几十条匹配。
+ */
+export const WORKSPACE_INDEX_CAP = 8000;
+
+/** 工作目录下的文件路径清单，给 Quick Open 用。路径一律 `/` 分隔 */
+export interface WorkspaceIndex {
+  paths: string[];
+  truncated: boolean;
+}
 
 /**
  * 查看单个文件的上限。base64 传输会膨胀 1/3，2MB 的文件已经是 2.7MB 的响应，

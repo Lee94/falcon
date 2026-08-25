@@ -52,18 +52,18 @@ const FALLBACK: Record<TermAppearance, { bg: string; fg: string }> = {
 /**
  * 写入 PTY 的环境。
  *
- * TERM_PROGRAM=mojito 是实话，不冒充 vscode——grok 对 vscode 的键盘特例
+ * TERM_PROGRAM=falcon 是实话，不冒充 vscode——grok 对 vscode 的键盘特例
  * 不该被我们误触发。COLORTERM 与 TERM 分开：TERM 仍是 xterm-256color
  * （terminfo 最稳的名字），truecolor 靠 COLORTERM 声明。
  *
  * appearance 缺省时不写 COLORFGBG / GROK_*：调用方必须先清掉宿主进程
- * 带来的同名变量，否则会继承「启动 mojito 的那个 iTerm」的深浅。
+ * 带来的同名变量，否则会继承「启动 falcon 的那个 iTerm」的深浅。
  */
 export function termPtyEnv(appearance?: TermAppearance): Record<string, string> {
   const env: Record<string, string> = {
     TERM: "xterm-256color",
     COLORTERM: "truecolor",
-    TERM_PROGRAM: "mojito",
+    TERM_PROGRAM: "falcon",
   };
   if (appearance === "light") {
     env.COLORFGBG = "0;15";

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowLeftRight, ArrowRight, Plus, Trash2 } from "lucide-react";
-import type { ForwardKind, ForwardState, PortForward } from "@mojito/shared";
+import type { ForwardKind, ForwardState, PortForward } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, selectFocusProjectId } from "../store.js";
 import { cn, pollWhileVisible } from "@/lib/utils";

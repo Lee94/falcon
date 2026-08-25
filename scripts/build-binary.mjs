@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 把 mojito 打包成单个可执行文件（Node SEA，Single Executable Application）。
+ * 把 falcon 打包成单个可执行文件（Node SEA，Single Executable Application）。
  *
  *   pnpm build:bin                          # 打当前平台
  *   pnpm build:bin --target linux-x64      # 交叉打包（可逗号分隔或传 all）
@@ -30,7 +30,8 @@ const CACHE = path.join(BUILD, "cache");
 const RELEASE = path.join(ROOT, "release");
 
 /** 发布产物内嵌的 Node 运行时版本（官方 nodejs.org 分发，ICU 内置、无动态库依赖） */
-const NODE_VERSION = process.env.MOJITO_NODE_VERSION ?? process.version.slice(1);
+const NODE_VERSION =
+  process.env.FALCON_NODE_VERSION ?? process.env.MOJITO_NODE_VERSION ?? process.version.slice(1);
 const SEA_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 const KNOWN_TARGETS = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"];
 
@@ -196,7 +197,7 @@ for (const target of targets) {
     files: assets.map((a) => ({ key: a.key, mode: a.mode })),
   };
   const prelude = `"use strict";
-// mojito SEA bootstrap —— 由 scripts/build-binary.mjs 生成，勿手改
+// falcon SEA bootstrap —— 由 scripts/build-binary.mjs 生成，勿手改
 const MANIFEST = ${JSON.stringify(manifest)};
 const fs = require("node:fs");
 const os = require("node:os");
@@ -209,8 +210,13 @@ try { seaMode = require("node:sea").isSea(); } catch {}
 let anchor; // bundle 以此文件为基准解析磁盘上的依赖
 if (seaMode) {
   const sea = require("node:sea");
-  // data dir 的解析须与 packages/server/src/config.ts parseArgs 一致
-  let dataDir = process.env.MOJITO_DATA_DIR ?? path.join(os.homedir(), ".mojito");
+  // data dir 的解析须与 packages/server/src/config.ts parseArgs / defaultDataDir 一致
+  let dataDir = process.env.FALCON_DATA_DIR ?? process.env.MOJITO_DATA_DIR;
+  if (!dataDir) {
+    const next = path.join(os.homedir(), ".falcon");
+    const prev = path.join(os.homedir(), ".mojito");
+    dataDir = (!fs.existsSync(next) && fs.existsSync(prev)) ? prev : next;
+  }
   const i = process.argv.indexOf("--data-dir");
   if (i !== -1 && process.argv[i + 1]) dataDir = process.argv[i + 1];
 
@@ -238,13 +244,13 @@ if (seaMode) {
       fs.rmSync(path.join(runtimeRoot, e), { recursive: true, force: true });
     }
   }
-  // 这个 env 会随 PTY 传给会话里的 shell：从 mojito 终端里再启一个 mojito 时，
-  // 子实例会继承父实例的 MOJITO_WEB_DIST。父实例升级后旧 runtime 已被上面的
+  // 这个 env 会随 PTY 传给会话里的 shell：从 falcon 终端里再启一个 falcon 时，
+  // 子实例会继承父实例的 FALCON_WEB_DIST。父实例升级后旧 runtime 已被上面的
   // 清理删掉，继承值指向不存在的目录，web UI 会静默 404。显式 override 仍然
   // 尊重，但指向的目录必须真有 index.html，否则视为陈旧继承、换成自己的。
-  const inheritedWebDist = process.env.MOJITO_WEB_DIST;
+  const inheritedWebDist = process.env.FALCON_WEB_DIST ?? process.env.MOJITO_WEB_DIST;
   if (!inheritedWebDist || !fs.existsSync(path.join(inheritedWebDist, "index.html"))) {
-    process.env.MOJITO_WEB_DIST = path.join(runtimeDir, "web");
+    process.env.FALCON_WEB_DIST = path.join(runtimeDir, "web");
   }
   anchor = path.join(runtimeDir, "sea-loader.cjs");
 } else {
@@ -276,7 +282,7 @@ const __seaModule = { exports: {} };
 
   // 3d. 官方 Node 二进制 + postject 注入
   const nodeBin = await fetchNodeBinary(target);
-  const outBin = path.join(RELEASE, `mojito-v${VERSION}-${target}`);
+  const outBin = path.join(RELEASE, `falcon-v${VERSION}-${target}`);
   fs.copyFileSync(nodeBin, outBin);
   fs.chmodSync(outBin, 0o755);
   const isDarwin = target.startsWith("darwin");

@@ -11,37 +11,96 @@ import { binaryName, type ZellijTarget } from "./version.js";
 
 export type HostKind = "posix" | "windows";
 
-/** mojito 在宿主机上的全部落脚点，删掉它即完成卸载（macOS 的 Zellij cache 除外） */
-const ROOT = ".mojito";
+/** falcon 在宿主机上的全部落脚点，删掉它即完成卸载（macOS 的 Zellij cache 除外） */
+const ROOT = ".falcon";
+/** 产品曾名 Mojito 时的根目录。远端探测时若新目录还不在，会尝试改名过来。 */
+const LEGACY_ROOT = ".mojito";
 
 // ---------------- 路径 ----------------
 
 export interface HostLayout extends ZellijPaths {
   /** 二进制所在目录 */
   binDir: string;
-  /** mojito 根目录 */
+  /** falcon 根目录 */
   root: string;
   /** layout 文件所在目录 */
   layoutDir: string;
 }
 
+function joinHome(kind: HostKind, home: string, name: string): string {
+  const sep = kind === "windows" ? "\\" : "/";
+  return `${home.replace(/[\\/]+$/, "")}${sep}${name}`;
+}
+
 /**
- * 远端的 mojito 根目录：宿主机 home 下的 .mojito。
+ * 远端的 falcon 根目录：宿主机 home 下的 .falcon。
  *
  * 一律用探测阶段拿到的**真实 home 绝对路径**，不用 `~` 或 `$HOME`：
  * 让 shell 展开变量意味着路径不能整体加引号，含空格的用户名（Windows 上很常见）
  * 会直接把命令行拆散。
  */
 export function remoteRoot(kind: HostKind, home: string): string {
-  const sep = kind === "windows" ? "\\" : "/";
-  return `${home.replace(/[\\/]+$/, "")}${sep}${ROOT}`;
+  return joinHome(kind, home, ROOT);
+}
+
+export function legacyRemoteRoot(kind: HostKind, home: string): string {
+  return joinHome(kind, home, LEGACY_ROOT);
 }
 
 /**
- * 基于 mojito 根目录的绝对路径构造。
+ * 把旧的 `~/.mojito` 迁到 `~/.falcon`。打印最终该用的根目录（一行）。
  *
- * 远端的 root 是 `<home>/.mojito`（见 remoteRoot），本地的 root 是后端的
- * `--data-dir`——本地不该硬编码 home，用户指定了数据目录就该落在那儿。
+ * 逻辑：新目录还不在而旧目录是个文件夹时尝试 `mv`；无论成败，再按「新的在就用新的，
+ * 否则旧的在就用旧的，否则用新路径」选取。并发两次探测时只有一个 mv 能成功，
+ * 失败者会看到新目录已经在，不会退到一个已经搬走的旧路径。
+ *
+ * 本机不能这么做：后端自己的 SQLite 开在数据目录里，进程还活着就 mv 会把库从
+ * 自己脚下抽走。远端根目录里没有后端打开的文件，Zellij 的 socket 跟着目录一起
+ * 改名，客户端按新路径 connect 仍是同一个 inode。
+ */
+export function posixMigrateRootScript(next: string, prev: string): string {
+  const n = quotePosix(next);
+  const p = quotePosix(prev);
+  return (
+    `n=${n}; p=${p}; ` +
+    `if [ ! -e "$n" ] && [ -d "$p" ]; then mv "$p" "$n" || true; fi; ` +
+    `if [ -d "$n" ]; then printf '%s\\n' "$n"; ` +
+    `elif [ -d "$p" ]; then printf '%s\\n' "$p"; ` +
+    `else printf '%s\\n' "$n"; fi`
+  );
+}
+
+export function windowsMigrateRootScript(next: string, prev: string): string {
+  const n = quotePowerShell(next);
+  const p = quotePowerShell(prev);
+  return (
+    `$n = ${n}; $p = ${p}; ` +
+    `if (-not (Test-Path -LiteralPath $n) -and (Test-Path -LiteralPath $p -PathType Container)) { ` +
+    `try { Move-Item -LiteralPath $p -Destination $n -ErrorAction Stop } catch {} }; ` +
+    `if (Test-Path -LiteralPath $n -PathType Container) { $n } ` +
+    `elseif (Test-Path -LiteralPath $p -PathType Container) { $p } ` +
+    `else { $n }`
+  );
+}
+
+export function migrateRemoteRootCommand(kind: HostKind, next: string, prev: string): string {
+  return kind === "windows"
+    ? encodePowerShell(windowsMigrateRootScript(next, prev))
+    : posixMigrateRootScript(next, prev);
+}
+
+/** 迁移脚本的 stdout：取第一行非空路径。 */
+export function parseMigratedRoot(stdout: string): string | null {
+  const line = stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0);
+  return line || null;
+}
+
+/**
+ * 基于 falcon 根目录的绝对路径构造。
+ *
+ * 远端的 root 是探测后解析出来的路径（优先 `<home>/.falcon`，必要时从
+ * `.mojito` 迁过来），本地的 root 是后端的 `--data-dir`——本地不该硬编码
+ * home，用户指定了数据目录就该落在那儿。
  */
 export function hostLayout(
   kind: HostKind,
@@ -62,7 +121,7 @@ export function hostLayout(
     dataDir: j(zellij, "data"),
     cacheDir: j(zellij, "cache"),
     layoutDir: j(zellij, "layouts"),
-    layoutFile: j(zellij, "layouts", "mojito.kdl"),
+    layoutFile: j(zellij, "layouts", "falcon.kdl"),
   };
 }
 

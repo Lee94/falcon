@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowUp, Folder, HardDrive, House } from "lucide-react";
-import type { FsListing } from "@mojito/shared";
+import type { FsListing } from "@falcon/shared";
 import { api } from "../api.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";

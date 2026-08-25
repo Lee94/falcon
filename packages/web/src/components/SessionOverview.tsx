@@ -1,7 +1,7 @@
 import type { MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Ellipsis, ShieldCheck, TerminalIcon, TriangleAlert } from "lucide-react";
-import type { SessionState, SessionWithProject } from "@mojito/shared";
+import type { SessionState, SessionWithProject } from "@falcon/shared";
 import { useApp, type OverviewFilter } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { durabilityHint } from "../lib/reason.js";

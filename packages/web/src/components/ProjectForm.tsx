@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Project, ProjectInput, ProjectType, ShellsInfo } from "@mojito/shared";
+import type { Project, ProjectInput, ProjectType, ShellsInfo } from "@falcon/shared";
+import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { api } from "../api.js";
 import { sshConn } from "../lib/hostColor.js";
+import { commonParentDir } from "../lib/multiPath.js";
 import { useApp, type ProjectFormPreset } from "../store.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +23,14 @@ import { SshFields, type SshFieldValues } from "./SshFields.js";
 /** shell 下拉的两个哨兵值：Radix Select 不接受空字符串当 value */
 const SHELL_AUTO = "__auto__";
 const SHELL_CUSTOM = "__custom__";
+/** 多仓库档「位置」下拉的本机哨兵，理由同上 */
+const MULTI_LOCAL = "__local__";
+
+/**
+ * 表单的第三档「多仓库」是**纯 UI 概念**：shared 层的 type 仍只有 local/ssh，
+ * 提交时映射成 type + repos（选了主机 ⇒ ssh，否则 local）。
+ */
+type FormKind = ProjectType | "multi";
 
 export function ProjectForm({
   existing,
@@ -37,9 +47,17 @@ export function ProjectForm({
   const hosts = useApp((s) => s.hosts);
   const openHostForm = useApp((s) => s.openHostForm);
 
-  const [type, setType] = useState<ProjectType>(existing?.type ?? preset?.type ?? "local");
+  const [kind, setKind] = useState<FormKind>(
+    existing ? (existing.multi ? "multi" : existing.type) : (preset?.type ?? "local")
+  );
   const [name, setName] = useState(existing?.name ?? "");
   const [workingDir, setWorkingDir] = useState(existing?.workingDir ?? "");
+  /** 多仓库档的成员清单（成员路径原文，可手改可从选择器追加） */
+  const [repos, setRepos] = useState<string[]>(
+    existing?.multi?.repos.map((r) => r.dir) ?? []
+  );
+  /** 派生产物的成员由派生决定：只读展示，提交不带 repos（PUT 会拒） */
+  const reposReadonly = Boolean(existing?.multi && existing.worktree);
   const [shell, setShell] = useState(existing?.shell ?? "");
   const [shellCustom, setShellCustom] = useState(false);
   const [shells, setShells] = useState<ShellsInfo | null>(null);
@@ -58,6 +76,13 @@ export function ProjectForm({
   /** 从某台服务器进来：类型已定，直接选文件夹 */
   const locked = Boolean(!existing && preset?.type);
   const [picking, setPicking] = useState(locked);
+  /** 多仓库档「添加仓库」的选择器（与 picking 互斥地打开） */
+  const [pickingRepo, setPickingRepo] = useState(false);
+
+  // 多仓库档映射回 shared 的 type：编辑时跟 existing 走（PUT 不许改类型），
+  // 新建时看有没有选主机
+  const type: ProjectType =
+    kind === "multi" ? (existing ? existing.type : hostId ? "ssh" : "local") : kind;
 
   // 存量项目没有 hostId：可以继续手写 ssh，也可以改绑到已保存主机
   const legacy = Boolean(existing && !existing.hostId);
@@ -134,6 +159,11 @@ export function ProjectForm({
       setError(t("host.required"));
       return;
     }
+    const cleanRepos = repos.map((r) => r.trim()).filter(Boolean);
+    if (kind === "multi" && !reposReadonly && cleanRepos.length === 0) {
+      setError(t("multi.needRepo"));
+      return;
+    }
     setBusy(true);
     setError(null);
     const input: ProjectInput = {
@@ -141,6 +171,8 @@ export function ProjectForm({
       type,
       workingDir: next.workingDir || undefined,
       shell: shell || undefined,
+      // 派生产物的成员由派生决定，不上送（PUT 会拒）；容器每次全量替换
+      repos: kind === "multi" && !reposReadonly ? cleanRepos : undefined,
       hostId: type === "ssh" && hostId ? hostId : undefined,
       ssh:
         type === "ssh" && !hostId
@@ -193,6 +225,21 @@ export function ProjectForm({
     else setPicking(false);
   };
 
+  /** 多仓库档「添加仓库」：选中即追加，不关外层表单；重复选中静默去重 */
+  const pickRepoFolder = (dir: string) => {
+    if (busy) return;
+    setRepos((prev) => (prev.includes(dir) ? prev : [...prev, dir]));
+    setPickingRepo(false);
+  };
+  const parentOf = (p: string) => {
+    const s = p.replace(/[\\/]+$/, "");
+    const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+    return i > 0 ? s.slice(0, i) : s;
+  };
+  // 连续添加同级仓库是常态：选择器从上一个成员的父目录开起
+  const lastRepo = repos.filter((r) => r.trim()).pop();
+  const repoInitial = lastRepo ? parentOf(lastRepo) : "";
+
   const canBrowseRemote = Boolean(hostId || (existing && existing.type === "ssh"));
   const openPicker = () => {
     if (type === "ssh" && !canBrowseRemote) return;
@@ -207,25 +254,26 @@ export function ProjectForm({
   const title = existing ? t("project.editTitle") : t("project.createTitle");
   const selected = hosts.find((h) => h.id === hostId);
 
+  const anyPicking = picking || pickingRepo;
   return (
     <AppDialog
       title={
-        picking
+        anyPicking
           ? type === "ssh"
             ? t("project.pickRemoteTitle")
             : t("project.pickTitle")
           : title
       }
-      onClose={picking ? closePicker : onClose}
+      onClose={picking ? closePicker : pickingRepo ? () => setPickingRepo(false) : onClose}
       lockOverlay
-      wide={picking}
-      className={picking ? "overflow-hidden" : undefined}
+      wide={anyPicking}
+      className={anyPicking ? "overflow-hidden" : undefined}
     >
-      {picking ? (
+      {anyPicking ? (
         <FolderPicker
-          initialPath={workingDir}
-          onSelect={pickFolder}
-          onClose={closePicker}
+          initialPath={pickingRepo ? repoInitial : workingDir}
+          onSelect={pickingRepo ? pickRepoFolder : pickFolder}
+          onClose={pickingRepo ? () => setPickingRepo(false) : closePicker}
           remote={type === "ssh"}
           confirming={busy}
           listDir={(dir) =>
@@ -243,12 +291,13 @@ export function ProjectForm({
         <form onSubmit={submit} className="grid gap-3">
         {!existing && !locked && (
           <Segmented
-            value={type}
+            value={kind}
             label={t("project.name")}
-            onChange={setType}
+            onChange={setKind}
             options={[
               { value: "local", label: t("project.typeLocal") },
               { value: "ssh", label: t("project.typeSsh") },
+              { value: "multi", label: t("multi.typeMulti") },
             ]}
           />
         )}
@@ -262,7 +311,145 @@ export function ProjectForm({
           />
         </Field>
 
-        {type === "local" ? (
+        {kind === "multi" ? (
+          <>
+            {!existing && (
+              <Field
+                label={t("multi.location")}
+                hint={selected ? sshConn(selected) : undefined}
+              >
+                <div className="flex gap-2.5">
+                  <Select
+                    value={hostId || MULTI_LOCAL}
+                    onValueChange={(v) => setHostId(v === MULTI_LOCAL ? "" : v)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={MULTI_LOCAL}>{t("multi.locationLocal")}</SelectItem>
+                      {hosts.map((h) => (
+                        <SelectItem key={h.id} value={h.id}>
+                          {h.name}
+                          <span className="ml-2 font-mono text-xs text-muted-foreground">
+                            {sshConn(h)}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => openHostForm(null, (h) => setHostId(h.id))}
+                  >
+                    {t("host.add")}
+                  </Button>
+                </div>
+              </Field>
+            )}
+
+            <Field
+              label={t("multi.repos")}
+              hint={reposReadonly ? t("multi.reposReadonly") : undefined}
+            >
+              <div className="grid gap-1.5">
+                {repos.map((r, i) => (
+                  <div key={i} className="flex items-center gap-1">
+                    <Input
+                      className="flex-1 font-mono"
+                      value={r}
+                      readOnly={reposReadonly}
+                      onChange={(e) =>
+                        setRepos((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))
+                      }
+                    />
+                    {!reposReadonly && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("multi.moveUp")}
+                          disabled={i === 0}
+                          onClick={() =>
+                            setRepos((prev) => {
+                              const next = [...prev];
+                              [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
+                              return next;
+                            })
+                          }
+                        >
+                          <ArrowUp className="size-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("multi.moveDown")}
+                          disabled={i === repos.length - 1}
+                          onClick={() =>
+                            setRepos((prev) => {
+                              const next = [...prev];
+                              [next[i], next[i + 1]] = [next[i + 1]!, next[i]!];
+                              return next;
+                            })
+                          }
+                        >
+                          <ArrowDown className="size-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t("multi.removeRepo")}
+                          onClick={() => setRepos((prev) => prev.filter((_, j) => j !== i))}
+                        >
+                          <X className="size-4" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                ))}
+                {!reposReadonly && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={type === "ssh" && !canBrowseRemote}
+                    onClick={() => setPickingRepo(true)}
+                  >
+                    {t("multi.addRepo")}
+                  </Button>
+                )}
+              </div>
+            </Field>
+
+            {!reposReadonly && (
+              <Field
+                label={t("project.workingDir")}
+                htmlFor="multi-cwd"
+                hint={t("multi.workingDirHint")}
+              >
+                <div className="flex gap-2.5">
+                  <Input
+                    id="multi-cwd"
+                    className="font-mono"
+                    value={workingDir}
+                    onChange={(e) => setWorkingDir(e.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={repos.every((r) => !r.trim())}
+                    onClick={() => setWorkingDir(commonParentDir(repos))}
+                  >
+                    {t("multi.useCommonParent")}
+                  </Button>
+                </div>
+              </Field>
+            )}
+          </>
+        ) : type === "local" ? (
           <Field
             label={t("project.workingDir")}
             htmlFor="project-dir"

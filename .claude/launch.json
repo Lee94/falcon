@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "mojito",
+      "name": "falcon",
       "runtimeExecutable": "node",
       "runtimeArgs": ["packages/server/dist/index.js"],
       "port": 4923

@@ -128,7 +128,7 @@ export function deleteSeq(inputType: string): string | null {
  * CSI 解析在 'N' 处中断，剩余字节当普通输入落进 pane——触摸滚动就往终端里
  * 打出 "NaN;NaNM" 乱码。
  *
- * 发给 PTY 前用最近一次有效报文的坐标修复（惯性滚动因此保住；对 mojito 的
+ * 发给 PTY 前用最近一次有效报文的坐标修复（惯性滚动因此保住；对 falcon 的
  * zellij 单 pane 布局，滚轮坐标本就不影响落点），无坐标可用时整条丢弃。
  * xterm 修掉之后这两个函数可以整体删除。
  */

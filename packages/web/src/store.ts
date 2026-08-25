@@ -10,7 +10,7 @@ import type {
   SessionWithProject,
   SshHost,
   SystemInfo,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import { toast as sonner } from "sonner";
 import { api, ApiRequestError } from "./api.js";
 import i18n from "./i18n.js";
@@ -40,8 +40,8 @@ export type ActiveView =
   | { kind: "project" }
   /** Git 面板点开的文件差异（见 diffTab） */
   | { kind: "diff" }
-  /** 文件面板点开的文件（见 fileTab） */
-  | { kind: "file" };
+  /** 文件查看 tab（见 fileTabs）；path 用来区分同时打开的多个文件 */
+  | { kind: "file"; projectId: string; path: string };
 
 /**
  * 差异查看 tab 的目标。单例：再点别的文件就地替换内容，像编辑器的预览 tab——
@@ -56,6 +56,8 @@ export interface DiffTabTarget {
    * 不带就是「修改」面板点进来的，看工作区现状。
    */
   commit?: { sha: string; short: string; subject: string };
+  /** 多仓库项目：diff 属于哪个成员仓库（成员 dir 原文），随面板的成员选择带过来 */
+  repo?: string;
 }
 
 export function tabProjectId(
@@ -68,13 +70,27 @@ export function tabProjectId(
 }
 
 /**
- * 文件查看 tab 的目标。与 diffTab 同样是单例、同样不持久化：
- * 点另一个文件就地替换，像编辑器的预览 tab。
+ * 文件查看 tab 的目标。不持久化：刷新后工作区的文件可能已经变了。
+ *
+ * 与 diffTab 不同——差异仍是单例预览，文件可以同时开多个（⌘P / 文件面板点开
+ * 都是新增 tab；同一文件再点一次只是聚焦）。关掉只是收起视图，不碰会话。
  */
 export interface FileTabTarget {
   projectId: string;
   /** 工作目录相对路径，一律 `/` 分隔（见 WorkspaceEntry） */
   path: string;
+}
+
+export function sameFile(a: FileTabTarget, b: FileTabTarget): boolean {
+  return a.projectId === b.projectId && a.path === b.path;
+}
+
+export function visibleFileTabs(s: {
+  fileTabs: FileTabTarget[];
+  selectedProjectId: string | null;
+}): FileTabTarget[] {
+  if (!s.selectedProjectId) return s.fileTabs;
+  return s.fileTabs.filter((f) => f.projectId === s.selectedProjectId);
 }
 
 /** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
@@ -102,17 +118,56 @@ export function visibleTabs(s: {
 
 /**
  * 关掉一个不代表会话的 tab（diff / file）之后落到哪。
- * 顺序与 dropTab 一致：最近的可见终端 → 项目空页 → 总览。
+ * 顺序：最近的可见终端 → 还开着的文件 tab → 差异 tab → 项目空页 → 总览。
  */
 function fallbackActive(s: {
   tabs: string[];
   sessions: SessionWithProject[];
   pending: PendingSession[];
   selectedProjectId: string | null;
+  fileTabs: FileTabTarget[];
+  diffTab: DiffTabTarget | null;
 }): ActiveView {
   const rest = visibleTabs(s);
   if (rest.length) return { kind: "terminal", sessionId: rest[rest.length - 1]! };
+  const files = visibleFileTabs(s);
+  if (files.length) {
+    const f = files[files.length - 1]!;
+    return { kind: "file", projectId: f.projectId, path: f.path };
+  }
+  if (s.diffTab && (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)) {
+    return { kind: "diff" };
+  }
   return s.selectedProjectId ? { kind: "project" } : { kind: "overview" };
+}
+
+function sameActive(a: ActiveView, b: ActiveView): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "terminal" && b.kind === "terminal") return a.sessionId === b.sessionId;
+  if (a.kind === "file" && b.kind === "file") return a.projectId === b.projectId && a.path === b.path;
+  return true;
+}
+
+/** 主区 tab 栏从左到右：会话 → 文件 → 差异。切 tab 快捷键按这个顺序走 */
+function viewTabs(s: {
+  tabs: string[];
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  selectedProjectId: string | null;
+  fileTabs: FileTabTarget[];
+  diffTab: DiffTabTarget | null;
+}): ActiveView[] {
+  const sessions = visibleTabs(s).map((id) => ({ kind: "terminal" as const, sessionId: id }));
+  const files = visibleFileTabs(s).map((f) => ({
+    kind: "file" as const,
+    projectId: f.projectId,
+    path: f.path,
+  }));
+  const diffs =
+    s.diffTab && (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)
+      ? [{ kind: "diff" as const }]
+      : [];
+  return [...sessions, ...files, ...diffs];
 }
 
 export type OverviewFilter = "all" | SessionState;
@@ -132,8 +187,8 @@ export interface PendingSession {
  * 总览且没选项目时为 null——不要退回第一个项目，免得打开面板看到别人的仓库。
  *
  * 两个查看 tab（diff / file）也要认：从文件面板点开一个文件，active 就从
- * terminal 变成 file，这时若不看 fileTab，面板会当场塌回"选一个项目"——
- * 用户刚从那棵树里点的文件。
+ * terminal 变成 file，这时若不看 file tab 的 projectId，面板会当场塌回
+ * "选一个项目"——用户刚从那棵树里点的文件。
  */
 export function selectFocusProjectId(s: {
   selectedProjectId: string | null;
@@ -141,7 +196,6 @@ export function selectFocusProjectId(s: {
   sessions: SessionWithProject[];
   pending: PendingSession[];
   diffTab: DiffTabTarget | null;
-  fileTab: FileTabTarget | null;
 }): string | null {
   if (s.selectedProjectId) return s.selectedProjectId;
   if (s.active.kind === "terminal") {
@@ -152,9 +206,24 @@ export function selectFocusProjectId(s: {
       null
     );
   }
-  if (s.active.kind === "file") return s.fileTab?.projectId ?? null;
+  if (s.active.kind === "file") return s.active.projectId;
   if (s.active.kind === "diff") return s.diffTab?.projectId ?? null;
   return null;
+}
+
+/**
+ * 多仓库项目在 Git / 修改面板里当前看的成员仓库；没选过（或选的成员已被
+ * 编辑掉）就退回第一个成员。非多仓库项目返回 undefined——调用方原样把它
+ * 传给 api 的 repo 参数即可，单仓库路径不受影响。
+ */
+export function selectMultiRepoDir(
+  s: { multiRepo: Record<string, string> },
+  project: Project | null | undefined
+): string | undefined {
+  if (!project?.multi) return undefined;
+  const picked = s.multiRepo[project.id];
+  if (picked && project.multi.repos.some((m) => m.dir === picked)) return picked;
+  return project.multi.repos[0]?.dir;
 }
 
 export type ToastKind = "info" | "success" | "warning" | "danger";
@@ -232,8 +301,10 @@ export interface ProjectChanges {
   deleted: number;
 }
 
-const WORKSPACE_KEY = "mojito.workspace";
-const CLOSE_KILLS_KEY = "mojito.closeKillsEducated";
+const WORKSPACE_KEY = "falcon.workspace";
+const WORKSPACE_KEY_LEGACY = "mojito.workspace";
+const CLOSE_KILLS_KEY = "falcon.closeKillsEducated";
+const CLOSE_KILLS_KEY_LEGACY = "mojito.closeKillsEducated";
 const PENDING_PREFIX = "pending:";
 
 export function isPendingId(id: string): boolean {
@@ -274,7 +345,7 @@ function loadWorkspace(): PersistedWorkspace {
     rightWidth: PANEL_WIDTH_DEFAULT,
   };
   try {
-    const raw = localStorage.getItem(WORKSPACE_KEY);
+    const raw = localStorage.getItem(WORKSPACE_KEY) ?? localStorage.getItem(WORKSPACE_KEY_LEGACY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<PersistedWorkspace>;
     return {
@@ -359,8 +430,10 @@ async function refreshChanges(
   if (changesInFlight) return;
   changesInFlight = true;
   try {
-    // 存档的附属项目不轮询：默认看不见，也不该为它跑 git status（SSH 上还是往返）
-    const targets = projects.filter((p) => p.workingDir && !p.worktree?.archivedAt);
+    // 存档的附属项目不轮询：默认看不见，也不该为它跑 git status（SSH 上还是往返）。
+    // 多仓库项目（容器与派生行）也不轮询——刻意降级：一个 id 对 N 个仓库，
+    // 求和徽标说不清是哪个仓库脏，误导大于信息；按 (id, repo) 键控留给将来
+    const targets = projects.filter((p) => p.workingDir && !p.worktree?.archivedAt && !p.multi);
     const next: Record<string, ProjectChanges> = {};
     try {
       // 一个批量请求代替 N 个并发 GET：服务端按宿主机分组，同主机一次 exec 拿全
@@ -397,7 +470,8 @@ async function refreshHeads(
   get: () => { heads: Record<string, ProjectHead> },
   projects: Project[]
 ) {
-  const sources = projects.filter((p) => !p.worktree && p.workingDir);
+  // 多仓库容器没有单一 HEAD（/repo 对它 400），侧栏用「N 个仓库」代替分支名
+  const sources = projects.filter((p) => !p.worktree && !p.multi && p.workingDir);
   const next: Record<string, ProjectHead> = { ...get().heads };
   await Promise.all(
     sources.map(async (p) => {
@@ -427,7 +501,9 @@ function closeKillsHint(): Partial<
 > {
   let educated = true;
   try {
-    educated = localStorage.getItem(CLOSE_KILLS_KEY) === "1";
+    educated =
+      localStorage.getItem(CLOSE_KILLS_KEY) === "1" ||
+      localStorage.getItem(CLOSE_KILLS_KEY_LEGACY) === "1";
   } catch {
     educated = false;
   }
@@ -462,8 +538,8 @@ interface AppState {
   pending: PendingSession[];
   /** 差异查看 tab；null = 没开 */
   diffTab: DiffTabTarget | null;
-  /** 文件查看 tab；null = 没开 */
-  fileTab: FileTabTarget | null;
+  /** 已打开的文件查看 tab，从左到右 */
+  fileTabs: FileTabTarget[];
 
   /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
   themePref: ThemePref;
@@ -489,6 +565,12 @@ interface AppState {
   heads: Record<string, ProjectHead>;
   /** 工作区文件计数，按 projectId；干净的项目不在里面 */
   changes: Record<string, ProjectChanges>;
+  /**
+   * 多仓库项目在 Git / 修改面板里当前看的成员（projectId → 成员 dir）。
+   * 内存态不持久化；放 store 而不放组件本地，是因为两个面板 + diff tab
+   * 必须看同一个成员，各存一份必然漂移。
+   */
+  multiRepo: Record<string, string>;
   /** 侧栏当前选中的项目；右侧只显示它下面的终端。null = 在总览 */
   selectedProjectId: string | null;
 
@@ -502,6 +584,8 @@ interface AppState {
   /** 就地重命名的会话 id，替代 prompt() */
   renameFor: string | null;
   paletteOpen: boolean;
+  /** ⌘P 文件搜索，与命令面板互斥 */
+  quickOpen: boolean;
   install: InstallSpec | null;
   /** null = 关闭；{ edit: null } = 新建 */
   projectForm: { edit: Project | null; preset?: ProjectFormPreset } | null;
@@ -527,15 +611,21 @@ interface AppState {
 
   openSession(sessionId: string): void;
   /** 在差异 tab 里打开一个文件（就地替换上一个）。带 commit 则看那次提交的改动 */
-  openDiff(projectId: string, file: GitFileChange, commit?: DiffTabTarget["commit"]): void;
+  openDiff(
+    projectId: string,
+    file: GitFileChange,
+    commit?: DiffTabTarget["commit"],
+    repo?: string
+  ): void;
+  /** 多仓库项目：切换 Git / 修改面板正在看的成员仓库 */
+  setMultiRepo(projectId: string, dir: string): void;
   /** 切回已开的差异 tab */
   showDiff(): void;
   closeDiff(): void;
-  /** 在查看 tab 里打开工作目录里的一个文件（就地替换上一个） */
+  /** 打开工作目录里的一个文件：已开则聚焦，否则新增 tab */
   openFile(projectId: string, path: string): void;
-  /** 切回已开的查看 tab */
-  showFile(): void;
-  closeFile(): void;
+  /** 关掉一个文件 tab；不传则关当前正在看的那个 */
+  closeFile(target?: FileTabTarget): void;
   /** 手动关 tab：Terminate，顺手结束会话，首次会解释这件事 */
   closeTab(id: string): Promise<void>;
   /** Detach：只收起 tab，会话留在后台继续跑（Shift+关闭） */
@@ -582,6 +672,7 @@ interface AppState {
   openRename(sessionId: string): void;
   closeRename(): void;
   setPalette(open: boolean): void;
+  setQuickOpen(open: boolean): void;
   openInstall(spec: InstallSpec): void;
   closeInstall(): void;
 
@@ -652,7 +743,7 @@ export const useApp = create<AppState>((set, get) => {
     active: initialWorkspace.active,
     pending: [],
     diffTab: null,
-    fileTab: null,
+    fileTabs: [],
 
     themePref: initialThemePref,
     theme: resolveTheme(initialThemePref),
@@ -668,6 +759,7 @@ export const useApp = create<AppState>((set, get) => {
     showArchived: initialWorkspace.showArchived,
     heads: {},
     changes: {},
+    multiRepo: {},
     selectedProjectId: initialWorkspace.selectedProjectId,
 
     overviewFilter: "all",
@@ -682,7 +774,7 @@ export const useApp = create<AppState>((set, get) => {
     menu: null,
     confirm: null,
     renameFor: null,
-    paletteOpen: false,
+    paletteOpen: false, quickOpen: false,
     install: null,
 
     async init() {
@@ -797,15 +889,19 @@ export const useApp = create<AppState>((set, get) => {
           tabs: state.tabs.includes(sessionId) ? state.tabs : [...state.tabs, sessionId],
           active: { kind: "terminal" as const, sessionId },
           selectedProjectId: projectId ?? state.selectedProjectId,
-          paletteOpen: false,
+          paletteOpen: false, quickOpen: false,
           menu: null,
         };
       });
       persist();
     },
 
-    openDiff(projectId, file, commit) {
-      set({ diffTab: { projectId, file, commit }, active: { kind: "diff" } });
+    openDiff(projectId, file, commit, repo) {
+      set({ diffTab: { projectId, file, commit, repo }, active: { kind: "diff" } });
+    },
+
+    setMultiRepo(projectId, dir) {
+      set((state) => ({ multiRepo: { ...state.multiRepo, [projectId]: dir } }));
     },
 
     showDiff() {
@@ -815,23 +911,42 @@ export const useApp = create<AppState>((set, get) => {
     closeDiff() {
       set((state) => ({
         diffTab: null,
-        ...(state.active.kind === "diff" ? { active: fallbackActive(state) } : null),
+        ...(state.active.kind === "diff"
+          ? { active: fallbackActive({ ...state, diffTab: null }) }
+          : null),
       }));
     },
 
     openFile(projectId, path) {
-      set({ fileTab: { projectId, path }, active: { kind: "file" } });
+      set((state) => {
+        const next = { projectId, path };
+        const exists = state.fileTabs.some((f) => sameFile(f, next));
+        return {
+          fileTabs: exists ? state.fileTabs : [...state.fileTabs, next],
+          active: { kind: "file" as const, projectId, path },
+          paletteOpen: false,
+          quickOpen: false,
+          menu: null,
+        };
+      });
     },
 
-    showFile() {
-      if (get().fileTab) set({ active: { kind: "file" } });
-    },
-
-    closeFile() {
-      set((state) => ({
-        fileTab: null,
-        ...(state.active.kind === "file" ? { active: fallbackActive(state) } : null),
-      }));
+    closeFile(target) {
+      set((state) => {
+        const closing =
+          target ??
+          (state.active.kind === "file"
+            ? { projectId: state.active.projectId, path: state.active.path }
+            : null);
+        if (!closing) return state;
+        const fileTabs = state.fileTabs.filter((f) => !sameFile(f, closing));
+        const wasActive =
+          state.active.kind === "file" && sameFile(state.active, closing);
+        return {
+          fileTabs,
+          ...(wasActive ? { active: fallbackActive({ ...state, fileTabs }) } : null),
+        };
+      });
     },
 
     selectProject(projectId) {
@@ -865,7 +980,7 @@ export const useApp = create<AppState>((set, get) => {
         tabs,
         active,
         menu: null,
-        paletteOpen: false,
+        paletteOpen: false, quickOpen: false,
       });
       persist();
     },
@@ -876,16 +991,7 @@ export const useApp = create<AppState>((set, get) => {
         const pending = state.pending.filter((p) => p.id !== id);
         let active = state.active;
         if (active.kind === "terminal" && active.sessionId === id) {
-          const rest = visibleTabs({
-            ...state,
-            tabs,
-            pending,
-          });
-          active = rest.length
-            ? { kind: "terminal", sessionId: rest[rest.length - 1]! }
-            : state.selectedProjectId
-              ? { kind: "project" }
-              : { kind: "overview" };
+          active = fallbackActive({ ...state, tabs, pending });
         }
         return { tabs, active, pending };
       });
@@ -969,7 +1075,7 @@ export const useApp = create<AppState>((set, get) => {
       set({
         active: { kind: "overview" },
         selectedProjectId: null,
-        paletteOpen: false,
+        paletteOpen: false, quickOpen: false,
         menu: null,
       });
       persist();
@@ -986,12 +1092,12 @@ export const useApp = create<AppState>((set, get) => {
 
     cycleTab(delta) {
       const state = get();
-      const tabs = visibleTabs(state);
-      if (tabs.length === 0) return;
-      const current =
-        state.active.kind === "terminal" ? tabs.indexOf(state.active.sessionId) : -1;
-      const next = (current + delta + tabs.length * 2) % tabs.length;
-      set({ active: { kind: "terminal", sessionId: tabs[next]! } });
+      const items = viewTabs(state);
+      if (items.length === 0) return;
+      const current = items.findIndex((v) => sameActive(v, state.active));
+      const from = current < 0 ? (delta > 0 ? -1 : 0) : current;
+      const next = items[(from + delta + items.length) % items.length]!;
+      set({ active: next });
       persist();
     },
 
@@ -1000,7 +1106,7 @@ export const useApp = create<AppState>((set, get) => {
       const mode = resolveTheme(pref);
       saveThemePref(pref);
       applyTheme(mode);
-      set({ themePref: pref, theme: mode, menu: null, paletteOpen: false });
+      set({ themePref: pref, theme: mode, menu: null, paletteOpen: false, quickOpen: false });
     },
 
     setTerm(patch) {
@@ -1072,19 +1178,19 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     openProjectForm(edit, preset) {
-      set({ projectForm: { edit, preset }, menu: null, paletteOpen: false });
+      set({ projectForm: { edit, preset }, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeProjectForm() {
       set({ projectForm: null });
     },
     openHostForm(edit, onSaved) {
-      set({ hostForm: { edit, onSaved }, menu: null, paletteOpen: false });
+      set({ hostForm: { edit, onSaved }, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeHostForm() {
       set({ hostForm: null });
     },
     openWorktreeForm(sourceProjectId) {
-      set({ worktreeFor: sourceProjectId, menu: null, paletteOpen: false });
+      set({ worktreeFor: sourceProjectId, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeWorktreeForm() {
       set({ worktreeFor: null });
@@ -1094,7 +1200,7 @@ export const useApp = create<AppState>((set, get) => {
         settingsOpen: true,
         settingsTab: tab ?? get().settingsTab,
         menu: null,
-        paletteOpen: false,
+        paletteOpen: false, quickOpen: false,
       });
     },
     closeSettings() {
@@ -1150,22 +1256,25 @@ export const useApp = create<AppState>((set, get) => {
       set({ menu: null });
     },
     askConfirm(spec) {
-      set({ confirm: spec, menu: null, paletteOpen: false });
+      set({ confirm: spec, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeConfirm() {
       set({ confirm: null });
     },
     openRename(sessionId) {
-      set({ renameFor: sessionId, menu: null, paletteOpen: false });
+      set({ renameFor: sessionId, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeRename() {
       set({ renameFor: null });
     },
     setPalette(open) {
-      set({ paletteOpen: open, menu: null });
+      set({ paletteOpen: open, quickOpen: false, menu: null });
+    },
+    setQuickOpen(open) {
+      set({ quickOpen: open, paletteOpen: false, menu: null });
     },
     openInstall(spec) {
-      set({ install: spec, menu: null, paletteOpen: false });
+      set({ install: spec, menu: null, paletteOpen: false, quickOpen: false });
     },
     closeInstall() {
       set({ install: null });
@@ -1178,7 +1287,7 @@ export const useApp = create<AppState>((set, get) => {
     async newTerminal(projectId) {
       const project = get().projects.find((p) => p.id === projectId);
       if (!project) return;
-      set({ menu: null, paletteOpen: false });
+      set({ menu: null, paletteOpen: false, quickOpen: false });
       if (project.type === "ssh") {
         try {
           const status = await api.hostStatus(projectId);
@@ -1204,7 +1313,7 @@ export const useApp = create<AppState>((set, get) => {
         active: { kind: "terminal", sessionId: pendingId },
         selectedProjectId: projectId,
         menu: null,
-        paletteOpen: false,
+        paletteOpen: false, quickOpen: false,
       }));
       try {
         const session = await api.createSession(projectId, termColorHint(get().term.themeId, get().theme));

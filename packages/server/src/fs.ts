@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { FsDirEntry, FsListing } from "@mojito/shared";
+import type { FsDirEntry, FsListing } from "@falcon/shared";
 import {
   dirnameOf,
   isAbsolute,

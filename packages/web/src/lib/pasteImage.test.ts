@@ -61,10 +61,10 @@ describe("imagesFromDrop", () => {
 
 describe("quoteForPrompt", () => {
   it("quotes only when the path contains whitespace", () => {
-    assert.equal(quoteForPrompt("/home/u/.mojito/paste/img-1.png"), "/home/u/.mojito/paste/img-1.png");
+    assert.equal(quoteForPrompt("/home/u/.falcon/paste/img-1.png"), "/home/u/.falcon/paste/img-1.png");
     assert.equal(
-      quoteForPrompt("C:\\Users\\a b\\.mojito\\paste\\i.png"),
-      '"C:\\Users\\a b\\.mojito\\paste\\i.png"'
+      quoteForPrompt("C:\\Users\\a b\\.falcon\\paste\\i.png"),
+      '"C:\\Users\\a b\\.falcon\\paste\\i.png"'
     );
   });
 });

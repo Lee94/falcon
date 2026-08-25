@@ -17,20 +17,20 @@ pnpm build:bin      # Node SEA 单文件，产物在 release/（详见 README）
 仓库没有 ESLint / Prettier / Biome，唯一的静态门禁是 `tsc`：
 
 ```bash
-pnpm --filter @mojito/server typecheck
-pnpm --filter @mojito/web typecheck     # web 的 build 也会先跑一遍 --noEmit
+pnpm --filter @falcon/server typecheck
+pnpm --filter @falcon/web typecheck     # web 的 build 也会先跑一遍 --noEmit
 ```
 
 测试用 `node:test`，但**必须经 tsx 跑**——源码里的相对 import 一律带 `.js` 后缀，`node --test` 不会把 `./x.js` 解析到 `x.ts`，会 `ERR_MODULE_NOT_FOUND`。只有 server 声明了 tsx 依赖，从它那里一次跑全仓：
 
 ```bash
-pnpm --filter @mojito/server exec tsx --test "src/**/*.test.ts" \
+pnpm --filter @falcon/server exec tsx --test "src/**/*.test.ts" \
   "../shared/src/**/*.test.ts" "../web/src/**/*.test.ts"
 
 # 单文件
-pnpm --filter @mojito/server exec tsx --test src/zellij/command.test.ts
+pnpm --filter @falcon/server exec tsx --test src/zellij/command.test.ts
 # 单用例
-pnpm --filter @mojito/server exec tsx --test --test-name-pattern "dump-screen" src/zellij/command.test.ts
+pnpm --filter @falcon/server exec tsx --test --test-name-pattern "dump-screen" src/zellij/command.test.ts
 ```
 
 测试只覆盖纯函数层（命令构造、路径运算、模式跟踪、DB 行合并）。会话 / SSH / Zellij 的端到端路径没有自动化测试，改动那些要在真机上验。
@@ -72,4 +72,4 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - 相对 import 一律带 `.js` 后缀（server / shared 是 NodeNext 的硬要求，web 也保持同一风格；web 另有 `@/` 指向 `src/`）。
 - 术语以 [CONTEXT.md](./CONTEXT.md) 为准，包括 _Avoid_ 列表——那里写的不只是命名偏好，Detach/Terminate、源项目/附属项目、宿主机/远端主机这些区分直接对应代码里的分支。
 - 注释解释的是"为什么"和踩过的坑（多半是实测出来、文档里查不到的），密度偏高是刻意的；改动附近代码时保持同样的说明力度，注释与代码不符时先修注释。
-- 架构决策写在 `docs/adr/`：0001 是持久会话为什么选 Zellij 及一长串实现要点，0002 是附属项目与删除护栏。做相关改动前先读对应 ADR。
+- 架构决策写在 `docs/adr/`：0001 是持久会话为什么选 Zellij 及一长串实现要点，0002 是附属项目与删除护栏，0003 是多仓库项目与批量派生（含回滚与包围盒断言）。做相关改动前先读对应 ADR。

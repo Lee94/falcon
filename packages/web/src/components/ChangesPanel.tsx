@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
-import type { GitWorkingChanges } from "@mojito/shared";
+import type { GitWorkingChanges } from "@falcon/shared";
 import { api } from "../api.js";
-import { useApp, selectFocusProjectId } from "../store.js";
+import { selectFocusProjectId, selectMultiRepoDir, useApp } from "../store.js";
+import { MultiRepoSelect } from "./common/MultiRepoSelect.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { isMac } from "../lib/shortcuts.js";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,12 @@ export function ChangesPanel() {
   const { t } = useTranslation();
   const projectId = useApp(selectFocusProjectId);
   const openDiff = useApp((s) => s.openDiff);
+  const project = useApp((s) =>
+    projectId ? s.projects.find((p) => p.id === projectId) : undefined
+  );
+  const multiRepo = useApp((s) => s.multiRepo);
+  // 多仓库项目：所有 git 请求打到当前选中的成员；单仓库项目恒为 undefined
+  const repoDir = selectMultiRepoDir({ multiRepo }, project);
 
   const [data, setData] = useState<GitWorkingChanges | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +77,7 @@ export function ChangesPanel() {
     setError(null);
     setExcluded(new Set());
     setMessage("");
-  }, [projectId]);
+  }, [projectId, repoDir]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -80,7 +87,7 @@ export function ChangesPanel() {
       if (inFlight) return;
       inFlight = true;
       try {
-        const next = await api.gitWorking(projectId);
+        const next = await api.gitWorking(projectId, { repo: repoDir });
         if (cancelled) return;
         setData(next);
         setError(null);
@@ -99,7 +106,7 @@ export function ChangesPanel() {
       cancelled = true;
       stop();
     };
-  }, [projectId, tick]);
+  }, [projectId, repoDir, tick]);
 
   const files: FileChangeItem[] = useMemo(
     () =>
@@ -135,14 +142,18 @@ export function ChangesPanel() {
       // 全选时走 all（服务端用 git add -A + 无 pathspec 的 commit）：命令行长度
       // 恒定，所以"提交全部改动"不受文件数限制。列表被 CAP 截断时更是只能走它
       const all = allSelected;
-      const res = await api.gitCommitChanges(projectId, {
-        message: message.trim(),
-        all,
-        // 重命名要把新旧两个路径都给 git，只给新路径会丢掉删除那一半
-        paths: all
-          ? undefined
-          : selected.flatMap((f) => (f.origPath ? [f.origPath, f.path] : [f.path])),
-      });
+      const res = await api.gitCommitChanges(
+        projectId,
+        {
+          message: message.trim(),
+          all,
+          // 重命名要把新旧两个路径都给 git，只给新路径会丢掉删除那一半
+          paths: all
+            ? undefined
+            : selected.flatMap((f) => (f.origPath ? [f.origPath, f.path] : [f.path])),
+        },
+        { repo: repoDir }
+      );
       useApp.getState().toast({
         kind: res.ok ? "success" : "danger",
         title: t("changes.commit"),
@@ -169,6 +180,7 @@ export function ChangesPanel() {
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
           {t("changes.title")}
         </span>
+        <MultiRepoSelect project={project} />
         <FileViewToggle mode={mode} onChange={switchMode} />
         <Button
           variant="ghost"
@@ -233,13 +245,18 @@ export function ChangesPanel() {
                 toggle,
               }}
               onOpen={(file) =>
-                openDiff(projectId, {
-                  path: file.path,
-                  origPath: file.origPath,
-                  // GitDiffView 靠 index === "?" 判断走不走 --no-index 伪 diff
-                  index: file.status,
-                  work: " ",
-                })
+                openDiff(
+                  projectId,
+                  {
+                    path: file.path,
+                    origPath: file.origPath,
+                    // GitDiffView 靠 index === "?" 判断走不走 --no-index 伪 diff
+                    index: file.status,
+                    work: " ",
+                  },
+                  undefined,
+                  repoDir
+                )
               }
             />
             {data.fileCount > data.files.length && (

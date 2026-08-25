@@ -12,6 +12,9 @@ import {
   buildDetachedCommandLine,
   buildPtyCommandLine,
   encodePowerShell,
+  legacyRemoteRoot,
+  migrateRemoteRootCommand,
+  parseMigratedRoot,
   parsePosixProbe,
   parseWindowsProbe,
   POSIX_PROBE,
@@ -39,7 +42,7 @@ import {
   ZELLIJ_VERSION,
   type ZellijTarget,
 } from "../zellij/version.js";
-import { applyTermPtyEnv, type TermAppearance } from "@mojito/shared";
+import { applyTermPtyEnv, type TermAppearance } from "@falcon/shared";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
 import type { NonDurableReason } from "./local.js";
@@ -56,6 +59,8 @@ export class HostKeyMismatchError extends Error {
 interface RemoteProbe {
   kind: HostKind;
   home: string;
+  /** 远端 falcon 根目录（已把 ~/.mojito 迁到 ~/.falcon，迁不了则仍是旧路径） */
+  root: string;
   target: ZellijTarget | null;
   downloader: "curl" | "wget" | "none";
   hasTar: boolean;
@@ -291,9 +296,9 @@ export class SshLink extends EventEmitter {
    * 宿主机类型、家目录与默认 shell，供 git 层与 shell 侦测使用。
    * probe() 自带缓存，重复调用不产生往返；RemoteProbe 本身不外泄，只给出这几项事实。
    */
-  async hostFacts(): Promise<{ kind: HostKind; home: string; shell: string }> {
+  async hostFacts(): Promise<{ kind: HostKind; home: string; shell: string; root: string }> {
     const p = await this.probe();
-    return { kind: p.kind, home: p.home, shell: p.shell };
+    return { kind: p.kind, home: p.home, shell: p.shell, root: p.root };
   }
 
   // ---- 探测与安装 ----
@@ -320,6 +325,7 @@ export class SshLink extends EventEmitter {
       this.probed = {
         kind: "posix",
         home: p.home,
+        root: await this.resolveRemoteRoot("posix", p.home),
         target: targetFromUname(p.uname),
         downloader: p.downloader,
         hasTar: true,
@@ -338,6 +344,7 @@ export class SshLink extends EventEmitter {
       this.probed = {
         kind: "windows",
         home: w.home,
+        root: await this.resolveRemoteRoot("windows", w.home),
         target: targetFromWindowsArch(w.arch),
         downloader: w.downloader,
         hasTar: w.hasTar,
@@ -351,6 +358,21 @@ export class SshLink extends EventEmitter {
       failureText("probe-failed"),
       linkError ?? "远端既不是 POSIX 也不是 Windows，或探测命令被 shell 改写"
     );
+  }
+
+  /**
+   * 把远端 ~/.mojito 迁到 ~/.falcon。探测拿到真实 home 之后再跑，路径整体加引号。
+   * 迁不了（被占用、没权限）就沿用旧目录，绝不指向一个空的新路径把会话弄丢。
+   */
+  private async resolveRemoteRoot(kind: HostKind, home: string): Promise<string> {
+    const next = remoteRoot(kind, home);
+    const prev = legacyRemoteRoot(kind, home);
+    try {
+      const res = await this.exec(migrateRemoteRootCommand(kind, next, prev));
+      return parseMigratedRoot(res.stdout) ?? next;
+    } catch {
+      return next;
+    }
   }
 
   /**
@@ -383,7 +405,7 @@ export class SshLink extends EventEmitter {
 
       const layout = await ensureZellij(this.exec, {
         kind: probe.kind,
-        root: remoteRoot(probe.kind, probe.home),
+        root: probe.root,
         target: probe.target,
         baseUrl: saved?.base_url ?? undefined,
         downloader: probe.downloader,
@@ -549,11 +571,11 @@ export class SshLink extends EventEmitter {
     );
   }
 
-  /** 该主机上所有 mojito 建的会话名（孤儿会话检测用） */
-  async listMojitoSessions(layout: HostLayout): Promise<string[]> {
+  /** 该主机上所有 falcon 建的会话名（孤儿会话检测用） */
+  async listFalconSessions(layout: HostLayout): Promise<string[]> {
     const res = await this.zellijExec(layout, zcmd.listArgs(layout));
     if (res.code !== 0) return [];
-    return zcmd.parseLiveSessions(res.stdout).filter(zcmd.isMojitoSession);
+    return zcmd.parseLiveSessions(res.stdout).filter(zcmd.isFalconSession);
   }
 
   // ---- 附着 ----

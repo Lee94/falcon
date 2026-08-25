@@ -23,34 +23,36 @@ const SCROLL_BUFFER = 10000;
  *
  * 截断到 16 个 hex 是为了绕开 socket 路径长度限制：socket 路径为
  * `$ZELLIJ_SOCKET_DIR/contract_version_1/<name>`，而上限在 macOS 只有 104 字符
- * （Linux 108 / Windows 256）。完整 `mojito-<uuid>` 是 43 字符，叠加 home 路径后
+ * （Linux 108 / Windows 256）。完整 `falcon-<uuid>` 是 43 字符，叠加 home 路径后
  * 在用户名稍长的 macOS 上就会触顶。64 bit 随机在单个 socket 目录内足够。
  *
  * 单向派生：总是从 sessionId 算出会话名，不做反解。
+ *
+ * 前缀保持 `mj-`：产品曾名 Mojito，改前缀会让已有持久会话接不回去。
  */
 export function zellijSessionName(sessionId: string): string {
   return `mj-${sessionId.replace(/-/g, "").slice(0, 16)}`;
 }
 
-/** 判断一个 Zellij session 名是否由 mojito 创建（孤儿会话检测用） */
-export function isMojitoSession(name: string): boolean {
+/** 判断一个 Zellij session 名是否由 falcon 创建（孤儿会话检测用） */
+export function isFalconSession(name: string): boolean {
   return /^mj-[0-9a-f]{16}$/.test(name);
 }
 
 export interface ZellijPaths {
   /** 二进制完整路径 */
   bin: string;
-  /** ~/.mojito/zellij/config/config.kdl —— 见 CONFIG_BODY */
+  /** ~/.falcon/zellij/config/config.kdl —— 见 CONFIG_BODY */
   configFile: string;
-  /** ~/.mojito/zellij/sock */
+  /** ~/.falcon/zellij/sock */
   socketDir: string;
-  /** ~/.mojito/zellij/config —— 保持为空目录即可保证零配置文件运行 */
+  /** ~/.falcon/zellij/config —— 保持为空目录即可保证零配置文件运行 */
   configDir: string;
-  /** ~/.mojito/zellij/data */
+  /** ~/.falcon/zellij/data */
   dataDir: string;
-  /** ~/.mojito/zellij/cache —— 仅 Linux 生效（XDG_CACHE_HOME） */
+  /** ~/.falcon/zellij/cache —— 仅 Linux 生效（XDG_CACHE_HOME） */
   cacheDir: string;
-  /** ~/.mojito/zellij/layouts/mojito.kdl —— 见 LAYOUT_BODY */
+  /** ~/.falcon/zellij/layouts/falcon.kdl —— 见 LAYOUT_BODY */
   layoutFile: string;
 }
 
@@ -84,7 +86,7 @@ export const LAYOUT_BODY = `layout
  * keybinds clear-defaults 是纵深防御：万一模式没设上，至少所有键位都是空的，
  * 用户按 Ctrl+p / Ctrl+n 不会莫名掉进 pane 模式。
  *
- * 目录是 mojito 独占的，不会读到用户自己的 Zellij 配置。
+ * 目录是 falcon 独占的，不会读到用户自己的 Zellij 配置。
  */
 export const CONFIG_BODY = `default_mode "locked"
 pane_frames false
@@ -101,7 +103,7 @@ keybinds clear-defaults=true {
 /**
  * 运行时环境变量。
  *
- * 四处写入目标全部指进 ~/.mojito/zellij/，让"删掉 ~/.mojito 即完全卸载"尽量成立。
+ * 四处写入目标全部指进 ~/.falcon/zellij/，让"删掉 ~/.falcon 即完全卸载"尽量成立。
  * 注意 cache 只有 Linux 能靠 XDG_CACHE_HOME 收拢——macOS/Windows 的 cache 路径
  * 由 directories crate 硬编码，无法重定向，会有残留（已在 README 注明）。
  */
@@ -283,7 +285,7 @@ export function listClientsArgs(paths: ZellijPaths, sessionId: string): string[]
  *
  * 实测（macOS，0.44.3）：空闲 shell 时 RUNNING_COMMAND 是字面量 "N/A"，
  * 有前台程序时是完整命令行；没有客户端连接时只有表头。命令行可能含空格，
- * 所以第三列起要整段拼回。聚焦在 plugin pane 上（理论上 mojito 的单 pane
+ * 所以第三列起要整段拼回。聚焦在 plugin pane 上（理论上 falcon 的单 pane
  * layout 不会发生）没有可言的前台命令，同样按"不知道"处理。
  */
 export function parseClientRunningCommand(stdout: string): string | null {

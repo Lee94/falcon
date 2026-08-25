@@ -28,9 +28,10 @@ import type {
   GitRefsInfo,
   GitSnapshot,
   GitUnavailableReason,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import { api } from "../api.js";
-import { useApp, selectFocusProjectId } from "../store.js";
+import { selectFocusProjectId, selectMultiRepoDir, useApp } from "../store.js";
+import { MultiRepoSelect } from "./common/MultiRepoSelect.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { laneColor, layoutCommitGraph, type GraphRow } from "@/lib/gitGraph";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,12 @@ export function GitPanel() {
   const { t } = useTranslation();
   const projectId = useApp(selectFocusProjectId);
   const openDiff = useApp((s) => s.openDiff);
+  const project = useApp((s) =>
+    projectId ? s.projects.find((p) => p.id === projectId) : undefined
+  );
+  const multiRepo = useApp((s) => s.multiRepo);
+  // 多仓库项目：所有 git 请求打到当前选中的成员；单仓库项目恒为 undefined
+  const repoDir = selectMultiRepoDir({ multiRepo }, project);
 
   const [snap, setSnap] = useState<GitSnapshot | null>(null);
   const [refs, setRefs] = useState<GitRefsInfo | null>(null);
@@ -104,8 +111,9 @@ export function GitPanel() {
     setBranch(null);
     setAuthor(null);
   };
-  // 换项目 = 换仓库，筛选条件跟着清掉；留着上一个仓库的分支名只会得到空列表
-  useEffect(reset, [projectId]);
+  // 换项目 = 换仓库，筛选条件跟着清掉；留着上一个仓库的分支名只会得到空列表。
+  // 多仓库项目切成员同理
+  useEffect(reset, [projectId, repoDir]);
 
   // 头部计数：只有它轮询
   useEffect(() => {
@@ -116,7 +124,7 @@ export function GitPanel() {
       if (inFlight) return;
       inFlight = true;
       try {
-        const next = await api.gitSnapshot(projectId);
+        const next = await api.gitSnapshot(projectId, { repo: repoDir });
         if (!cancelled) setSnap(next);
       } catch (err) {
         if (!cancelled) useApp.getState().handleApiError(err);
@@ -130,20 +138,20 @@ export function GitPanel() {
       cancelled = true;
       stop();
     };
-  }, [projectId, tick]);
+  }, [projectId, repoDir, tick]);
 
   // 筛选下拉的候选值。跟着 tick 刷新，新建的分支才会出现在下拉里
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
     api
-      .gitRefs(projectId)
+      .gitRefs(projectId, { repo: repoDir })
       .then((next) => !cancelled && setRefs(next))
       .catch((err) => !cancelled && useApp.getState().handleApiError(err));
     return () => {
       cancelled = true;
     };
-  }, [projectId, tick]);
+  }, [projectId, repoDir, tick]);
 
   // 列表：筛选变化或手动刷新时重取第一页
   useEffect(() => {
@@ -155,6 +163,7 @@ export function GitPanel() {
         branch: branch ?? undefined,
         author: author ?? undefined,
         q: deferredQuery.trim() || undefined,
+        repo: repoDir,
       })
       .then((page) => {
         if (cancelled) return;
@@ -176,7 +185,7 @@ export function GitPanel() {
     return () => {
       cancelled = true;
     };
-  }, [projectId, branch, author, deferredQuery, tick, t]);
+  }, [projectId, repoDir, branch, author, deferredQuery, tick, t]);
 
   const loadMore = useCallback(async () => {
     if (!projectId || loadingMore) return;
@@ -187,6 +196,7 @@ export function GitPanel() {
         author: author ?? undefined,
         q: deferredQuery.trim() || undefined,
         skip: commits.length,
+        repo: repoDir,
       });
       // 去重后再接，而且要拿**更新函数里的** cur 去比：翻页这一趟里若有
       // 新提交进来，skip 会让同一条出现两次，而 React 的 key 撞车会直接
@@ -201,13 +211,13 @@ export function GitPanel() {
     } finally {
       setLoadingMore(false);
     }
-  }, [projectId, branch, author, deferredQuery, commits, loadingMore]);
+  }, [projectId, repoDir, branch, author, deferredQuery, commits, loadingMore]);
 
   const sync = async (action: "pull" | "push") => {
     if (!projectId || syncing) return;
     setSyncing(action);
     try {
-      const res = await api.gitSync(projectId, action);
+      const res = await api.gitSync(projectId, action, { repo: repoDir });
       // 成功也要出提示：一次 --ff-only 的 pull 常常什么都不发生
       // （Already up to date），没有回声的话按钮像是没反应。
       // 失败的 body 是 git 的原话——"为什么被拒"只有它说得清，而且往往
@@ -283,6 +293,7 @@ export function GitPanel() {
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
           {t("git.history")}
         </span>
+        <MultiRepoSelect project={project} />
         <SyncButton
           icon={<ArrowDown />}
           label={t("git.pull")}
@@ -419,7 +430,8 @@ export function GitPanel() {
             <CommitDetail
               projectId={projectId}
               sha={selected}
-              onOpenFile={(file, commit) => openDiff(projectId, file, commit)}
+              repo={repoDir}
+              onOpenFile={(file, commit) => openDiff(projectId, file, commit, repoDir)}
               onClose={() => setSelected(null)}
             />
           )}
@@ -764,11 +776,14 @@ function RefBadge({ refLabel }: { refLabel: GitRefLabel }) {
 function CommitDetail({
   projectId,
   sha,
+  repo,
   onOpenFile,
   onClose,
 }: {
   projectId: string;
   sha: string;
+  /** 多仓库项目：详情属于哪个成员仓库 */
+  repo?: string;
   onOpenFile: (file: GitFileChange, commit: { sha: string; short: string; subject: string }) => void;
   onClose: () => void;
 }) {
@@ -787,7 +802,7 @@ function CommitDetail({
     setError(null);
     setExpanded(false);
     api
-      .gitCommit(projectId, sha)
+      .gitCommit(projectId, sha, { repo })
       .then((next) => {
         if (cancelled) return;
         if (next.available) setDetail(next);
@@ -801,7 +816,7 @@ function CommitDetail({
     return () => {
       cancelled = true;
     };
-  }, [projectId, sha, t]);
+  }, [projectId, sha, repo, t]);
 
   useEffect(
     () => () => {

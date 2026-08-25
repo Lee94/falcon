@@ -3,10 +3,14 @@ import test from "node:test";
 import {
   classify,
   extOf,
+  indexCommand,
+  INDEX_SKIP_DIRS,
   listCommand,
   parseEntries,
+  parseIndexLines,
   parseRead,
   readCommand,
+  relativizeIndexLine,
   relSegments,
   resolveInside,
   sortEntries,
@@ -56,6 +60,51 @@ test("parseEntries 认 d/f 前缀，忽略杂行", () => {
   ]);
   // 根目录下不带前缀
   assert.equal(parseEntries("f a.txt\n", "")[0]!.path, "a.txt");
+});
+
+test("relativizeIndexLine 收成工作目录相对路径", () => {
+  assert.equal(relativizeIndexLine("/home/u/repo/src/a.ts", "/home/u/repo", "posix"), "src/a.ts");
+  assert.equal(relativizeIndexLine("/home/u/repo", "/home/u/repo", "posix"), null);
+  assert.equal(relativizeIndexLine("/etc/passwd", "/home/u/repo", "posix"), null);
+  assert.equal(
+    relativizeIndexLine("C:\\code\\repo\\src\\a.ts", "C:\\code\\repo", "windows"),
+    "src/a.ts"
+  );
+  // Windows 大小写不敏感
+  assert.equal(
+    relativizeIndexLine("c:\\code\\repo\\b.ts", "C:\\code\\repo", "windows"),
+    "b.ts"
+  );
+});
+
+test("parseIndexLines 丢掉越界行，跳过 node_modules 段", () => {
+  const { paths, truncated } = parseIndexLines(
+    [
+      "/home/u/repo/src/a.ts",
+      "/home/u/repo/node_modules/x/index.js",
+      "/etc/passwd",
+      "/home/u/repo/README.md",
+      "__TRUNCATED__",
+    ].join("\n"),
+    "/home/u/repo",
+    "posix"
+  );
+  assert.deepEqual(paths, ["src/a.ts", "README.md"]);
+  assert.equal(truncated, true);
+});
+
+test("indexCommand：posix 用 find prune，windows 走 EncodedCommand", () => {
+  const posix = indexCommand("posix", "/home/u/re po");
+  assert.match(posix, /find "\$d"/);
+  assert.match(posix, /-name 'node_modules'/);
+  assert.match(posix, /__TRUNCATED__/);
+
+  const win = indexCommand("windows", "C:\\code\\repo");
+  assert.match(win, /-EncodedCommand /);
+  const script = Buffer.from(win.split(" ").pop()!, "base64").toString("utf16le");
+  assert.match(script, /Get-ChildItem -LiteralPath \$p/);
+  assert.match(script, /node_modules/);
+  assert.ok(INDEX_SKIP_DIRS.includes("node_modules"));
 });
 
 test("sortEntries 目录在前，点开头的不沉底", () => {

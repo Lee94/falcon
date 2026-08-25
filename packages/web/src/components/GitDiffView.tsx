@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Columns2, FileDiff, RefreshCw, Rows3 } from "lucide-react";
-import type { GitFileDiff } from "@mojito/shared";
+import type { GitFileDiff } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { cn } from "@/lib/utils";
@@ -10,7 +10,7 @@ import { reasonKey, statusLabel } from "./GitPanel.js";
 
 type ViewMode = "split" | "unified";
 
-const VIEW_KEY = "mojito.diffView";
+const VIEW_KEY = "falcon.diffView";
 
 function loadViewMode(): ViewMode {
   try {
@@ -53,17 +53,20 @@ export function GitDiffView() {
     setError(null);
     if (!target || !file) return;
     let cancelled = false;
-    // 带 commit = History 里点进来的，看的是那一次改动；否则是工作区现状
+    // 带 commit = History 里点进来的，看的是那一次改动；否则是工作区现状。
+    // repo 是多仓库项目打开 diff 时面板选中的成员，随 diffTab 一起带过来
     const load = commit
-      ? api.gitCommitDiff(target.projectId, commit.sha, {
-          path: file.path,
-          origPath: file.origPath,
-        })
-      : api.gitFileDiff(target.projectId, {
-          path: file.path,
-          origPath: file.origPath,
-          untracked: file.index === "?",
-        });
+      ? api.gitCommitDiff(
+          target.projectId,
+          commit.sha,
+          { path: file.path, origPath: file.origPath },
+          { repo: target.repo }
+        )
+      : api.gitFileDiff(
+          target.projectId,
+          { path: file.path, origPath: file.origPath, untracked: file.index === "?" },
+          { repo: target.repo }
+        );
     load
       .then((next) => {
         if (cancelled) return;
@@ -83,6 +86,7 @@ export function GitDiffView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     target?.projectId,
+    target?.repo,
     file?.path,
     file?.origPath,
     file?.index,

@@ -1,17 +1,19 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Code2, Eye, FileText, RefreshCw } from "lucide-react";
-import type { FilePreview } from "@mojito/shared";
+import type { FilePreview } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
+import { langForPath, splitCodeLines, useHighlight } from "../lib/highlight.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { CodeLine } from "@/components/common/CodeLine";
 
 // Markdown 渲染要拉进 marked，只有真的打开 .md 时才值得付这个 chunk
 const Markdown = lazy(() => import("./Markdown.js").then((m) => ({ default: m.Markdown })));
 
 /**
- * 文件查看 tab 的主区。目标来自 store.fileTab。
+ * 文件查看 tab 的主区。目标来自 store.active（kind === "file"）。
  *
  * 打开 / 换文件 / 手动刷新时拉一次，不轮询——正看着的文件在眼皮底下换掉，
  * 比看到旧内容更让人困惑（要新的按刷新就是了）。
@@ -20,7 +22,8 @@ const Markdown = lazy(() => import("./Markdown.js").then((m) => ({ default: m.Ma
  */
 export function FileView() {
   const { t } = useTranslation();
-  const target = useApp((s) => s.fileTab);
+  const active = useApp((s) => s.active);
+  const target = active.kind === "file" ? active : null;
   const openFile = useApp((s) => s.openFile);
   const [result, setResult] = useState<FilePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -151,7 +154,7 @@ export function FileView() {
             </Suspense>
           </div>
         ) : (
-          <CodePane text={result.text} />
+          <CodePane text={result.text} path={path} />
         )}
       </div>
     </div>
@@ -160,7 +163,7 @@ export function FileView() {
 
 type ViewMode = "preview" | "source";
 
-const VIEW_KEY = "mojito.fileViewMode";
+const VIEW_KEY = "falcon.fileViewMode";
 
 function loadViewMode(): ViewMode {
   try {
@@ -215,14 +218,18 @@ function ImagePane({ mime, base64, name }: { mime: string; base64: string; name:
 // 上限 2MB 的文件能有好几万行，全量渲染是几万个 DOM 节点、秒级卡死。
 // 行高恒定（leading-5.5 = 22px，不换行），所以窗口位置直接由 scrollTop 算得出，
 // 不需要 GitDiffView 那套按行类型累加的前缀偏移。
+//
+// 语法高亮（lib/highlight.ts）是逐行 token、异步渐进到位：token 没到的行
+// 先按纯文本画，到了再上色。行结构与虚拟窗口完全不因高亮而改变。
 
 const LINE_H = 22;
 const OVERSCAN = 30;
 /** 还没收到 scroll 事件时先渲染这么多行，得盖住最高的屏幕 */
 const INITIAL_ROWS = 140;
 
-function CodePane({ text }: { text: string }) {
-  const lines = useMemo(() => text.replace(/\n$/, "").split("\n"), [text]);
+function CodePane({ text, path }: { text: string; path: string }) {
+  const lines = useMemo(() => splitCodeLines(text), [text]);
+  const hl = useHighlight(text, langForPath(path));
   const [win, setWin] = useState({ start: 0, end: INITIAL_ROWS });
 
   useEffect(() => {
@@ -242,7 +249,7 @@ function CodePane({ text }: { text: string }) {
 
   return (
     <div className="h-full overflow-auto" onScroll={(e) => onScroll(e.currentTarget)}>
-      <table className="w-max min-w-full border-separate border-spacing-0 font-mono text-xs leading-5.5">
+      <table className="code-hl w-max min-w-full border-separate border-spacing-0 font-mono text-xs leading-5.5">
         <tbody>
           {start > 0 && (
             <tr aria-hidden>
@@ -255,7 +262,10 @@ function CodePane({ text }: { text: string }) {
               <td className="sticky left-0 w-12 min-w-12 bg-background pr-3 text-right align-top tabular-nums text-muted-foreground/60 select-none">
                 {start + offset + 1}
               </td>
-              <td className="w-full pr-6 pl-1 align-top whitespace-pre">{line || " "}</td>
+              <td className="w-full pr-6 pl-1 align-top whitespace-pre">
+                {/* 空行给个空格兜底，行高不塌（空行的 token 数组也是空的，会走纯文本分支） */}
+                <CodeLine text={line || " "} tokens={hl?.[start + offset]} />
+              </td>
             </tr>
           ))}
           {end < lines.length && (

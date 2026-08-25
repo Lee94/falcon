@@ -6,13 +6,13 @@ import { describe, it } from "node:test";
 import { installServiceBinary, serviceBinPath } from "./service.js";
 
 describe("serviceBinPath", () => {
-  it("is always <dataDir>/bin/mojito — never the versioned download name", () => {
-    assert.equal(serviceBinPath("/tmp/data"), path.join("/tmp/data", "bin", "mojito"));
+  it("is always <dataDir>/bin/falcon — never the versioned download name", () => {
+    assert.equal(serviceBinPath("/tmp/data"), path.join("/tmp/data", "bin", "falcon"));
   });
 });
 
 function withTmp(fn: (dir: string) => void) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mojito-svc-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-svc-"));
   try {
     fn(dir);
   } finally {
@@ -21,15 +21,15 @@ function withTmp(fn: (dir: string) => void) {
 }
 
 describe("installServiceBinary", () => {
-  it("copies src to dest named mojito and makes it executable", () => {
+  it("copies src to dest named falcon and makes it executable", () => {
     withTmp((dir) => {
-      const src = path.join(dir, "mojito-v0.1.0-darwin-arm64");
+      const src = path.join(dir, "falcon-v0.1.0-darwin-arm64");
       const dest = serviceBinPath(path.join(dir, "data"));
       fs.writeFileSync(src, "fake-bin");
       fs.chmodSync(src, 0o644);
 
       assert.equal(installServiceBinary(src, dest), dest);
-      assert.equal(path.basename(dest), "mojito");
+      assert.equal(path.basename(dest), "falcon");
       assert.equal(fs.readFileSync(dest, "utf8"), "fake-bin");
       assert.equal(fs.statSync(dest).mode & 0o111, 0o111);
       assert.equal(fs.existsSync(src), true);
@@ -38,7 +38,7 @@ describe("installServiceBinary", () => {
 
   it("replaces an existing dest via rename so a running service can be upgraded", () => {
     withTmp((dir) => {
-      const src = path.join(dir, "mojito-v0.2.0-darwin-arm64");
+      const src = path.join(dir, "falcon-v0.2.0-darwin-arm64");
       const dest = serviceBinPath(path.join(dir, "data"));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, "old");
@@ -46,8 +46,8 @@ describe("installServiceBinary", () => {
 
       installServiceBinary(src, dest);
       assert.equal(fs.readFileSync(dest, "utf8"), "new");
-      assert.equal(fs.readdirSync(path.dirname(dest)).includes("mojito"), true);
-      assert.ok(!fs.readdirSync(path.dirname(dest)).some((n) => n.startsWith("mojito.new-")));
+      assert.equal(fs.readdirSync(path.dirname(dest)).includes("falcon"), true);
+      assert.ok(!fs.readdirSync(path.dirname(dest)).some((n) => n.startsWith("falcon.new-")));
     });
   });
 

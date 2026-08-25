@@ -10,7 +10,7 @@
  * 在一个没有测试框架、唯一门禁是 tsc 的仓库里，可审查性比复用度重要。
  */
 
-import type { WorktreeFailure } from "@mojito/shared";
+import type { WorktreeFailure } from "@falcon/shared";
 import type { HostKind } from "../zellij/host.js";
 
 export function sepFor(kind: HostKind): string {
@@ -90,8 +90,8 @@ export function joinPath(kind: HostKind, ...parts: string[]): string {
 /**
  * 路径相等。windows 上**大小写不敏感**，尾分隔符不计。
  *
- * 必须有：git 在 Windows 上返回正斜杠（D:/code/mojito），而 DB 里存的是用户输入的
- * D:\code\mojito，直接 === 恒不成立。真正的危险不是功能不工作，而是有人为了让它
+ * 必须有：git 在 Windows 上返回正斜杠（D:/code/falcon），而 DB 里存的是用户输入的
+ * D:\code\falcon，直接 === 恒不成立。真正的危险不是功能不工作，而是有人为了让它
  * 工作去放宽断言——所以归一化集中在这里一处，断言只比归一化后的形式。
  */
 export function samePath(kind: HostKind, a: string, b: string): boolean {
@@ -160,6 +160,75 @@ export function siblingWorktreePath(
 ): string {
   const root = normalizeSep(kind, repoRoot).replace(/[\\/]+$/, "");
   return joinPath(kind, dirnameOf(kind, root), `${basenameOf(kind, root)}-${branchSlug(branch)}`);
+}
+
+/**
+ * 容器名 → 集中目录名的前半段。比 branchSlug 更狠：分支名有 git 的
+ * check-ref-format 兜底（空格、`~ ^ : ? * [`、反斜杠、控制字符都进不来），
+ * 而容器名是任意用户字符串，什么都可能有——所以 POSIX/Windows 两边的非法与
+ * 危险字符（`/ \ : * ? " < > |`、空白、控制字符）全部替换成 -。
+ * 尾部 . 与空格必须去掉、截断按码点，理由同 branchSlug（Windows 静默吞字符、
+ * 代理对别劈成两半）。空了兜底 "multi"。
+ */
+export function nameSlug(name: string): string {
+  const cleaned = name
+    .replace(/[/\\:*?"<>|\s\u0000-\u001f]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+/, "")
+    .replace(/[-.]+$/, "");
+  const s = Array.from(cleaned)
+    .slice(0, 48)
+    .join("")
+    .replace(/[-.]+$/, "");
+  return s || "multi";
+}
+
+/**
+ * 批量派生的集中目录默认位置：<第一个成员仓库根的父目录>/<容器名slug>-<分支slug>。
+ * 基准取仓库根而不是成员配置的路径，与 siblingWorktreePath 的理由相同。
+ */
+export function multiCentralPath(
+  kind: HostKind,
+  firstRepoRoot: string,
+  containerName: string,
+  branch: string
+): string {
+  const root = normalizeSep(kind, firstRepoRoot).replace(/[\\/]+$/, "");
+  return joinPath(kind, dirnameOf(kind, root), `${nameSlug(containerName)}-${branchSlug(branch)}`);
+}
+
+/** 成员 worktree 的落点：<集中目录>/<仓库根 basename>。basename 不做 slug——它已经是一个真实存在的目录名 */
+export function memberWorktreePath(kind: HostKind, centralDir: string, repoRoot: string): string {
+  return joinPath(kind, centralDir, basenameOf(kind, repoRoot));
+}
+
+/**
+ * 批量派生前对 N 个已解析出的仓库根做的容器级否决。返回给用户看的一句话，null = 通过。
+ *
+ * - 仓库判重按 canonKey：两个成员配置成同一仓库的不同子目录、或 Windows 上的
+ *   大小写别名，rev-parse 之后都会在这里现形。
+ * - basename 撞名也按 canonKey：两棵 worktree 要以仓库根 basename 平铺进同一个
+ *   集中目录，Windows 上 Repo 与 repo 是同一个目录。
+ * 这两条都只能在派生时判——容器创建时成员可以是仓库子目录、宿主 kind 也未必已知。
+ */
+export function vetoMultiRoots(kind: HostKind, roots: string[]): string | null {
+  const seenRoot = new Map<string, string>();
+  const seenBase = new Map<string, string>();
+  for (const root of roots) {
+    if (!isAbsolute(kind, root)) return `仓库根不是绝对路径：${root}`;
+    const rootKey = canonKey(kind, root);
+    const dupRoot = seenRoot.get(rootKey);
+    if (dupRoot) return `两个成员指向同一个仓库（${dupRoot}），请去掉一个`;
+    seenRoot.set(rootKey, root);
+    const base = basenameOf(kind, root);
+    const baseKey = canonKey(kind, base);
+    const dupBase = seenBase.get(baseKey);
+    if (dupBase) {
+      return `成员仓库目录同名（${dupBase} 与 ${root}），无法在同一个集中目录里平铺，请先给仓库目录改名`;
+    }
+    seenBase.set(baseKey, root);
+  }
+  return null;
 }
 
 /**

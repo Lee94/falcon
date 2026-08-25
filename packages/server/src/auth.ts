@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { Db } from "./db.js";
 import { hashPassword, verifyPassword } from "./crypto.js";
 
-const COOKIE_NAME = "mojito_token";
+const COOKIE_NAME = "falcon_token";
 const TOKEN_TTL_MS = 30 * 24 * 3600 * 1000;
 
 export class Auth {

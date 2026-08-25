@@ -1,8 +1,8 @@
 # 附属项目：把 git worktree 做成一等的 Project
 
-用 git 的人常态是同时开几条分支。mojito 现在支持从一个 Project **派生**出附属项目：算出仓库根同级的目录 → `git worktree add` → 落一条新 Project 记录；删除附属项目时**连目录一起删**，删源项目则级联删掉它的全部附属项目（源项目自己的目录不动）。local 与 ssh 项目都支持。
+用 git 的人常态是同时开几条分支。falcon 现在支持从一个 Project **派生**出附属项目：算出仓库根同级的目录 → `git worktree add` → 落一条新 Project 记录；删除附属项目时**连目录一起删**，删源项目则级联删掉它的全部附属项目（源项目自己的目录不动）。local 与 ssh 项目都支持。
 
-这是 mojito 第一次删除用户可控路径——在此之前后端的 TS 代码里零 fs 删除，唯一的 `rm -rf` 只作用于自己造的 `.tmp-<uuid>`。所以下面大半篇幅是在讲**怎么保证只删该删的那个目录**，而不是怎么调 git。
+这是 falcon 第一次删除用户可控路径——在此之前后端的 TS 代码里零 fs 删除，唯一的 `rm -rf` 只作用于自己造的 `.tmp-<uuid>`。所以下面大半篇幅是在讲**怎么保证只删该删的那个目录**，而不是怎么调 git。
 
 ## 决定一：附属项目是 Project，不是另一种实体
 
@@ -10,7 +10,7 @@
 
 附属项目在**运行时的每一个维度上都是 Project**：有名字、有宿主机、有 cwd、有会话、有 Zellij 布局、有主机授权。`sessions.project_id`、`SessionManager.getLink(ProjectRow)`、侧栏、总览、命令面板、HostDrawer 全部吃 `Project`。拆表等于把这些能力重新实现一遍；给 `ProjectType` 加值则会让每一处 `type === "ssh"` 都变成两条判断——「附属」与「local/ssh」是正交的两个维度。
 
-**不可编辑性靠类型不可达保证**：`ProjectInput` 不含这四列，而 `PUT /api/projects/:id` 用的就是 `ProjectInput`，`Db.updateProject` 的 SQL 也不碰它们。于是"改一行 JSON 让 mojito 去 rm -rf 任意路径"这条攻击面从写入路径上就不存在。
+**不可编辑性靠类型不可达保证**：`ProjectInput` 不含这四列，而 `PUT /api/projects/:id` 用的就是 `ProjectInput`，`Db.updateProject` 的 SQL 也不碰它们。于是"改一行 JSON 让 falcon 去 rm -rf 任意路径"这条攻击面从写入路径上就不存在。
 
 唯一的漏点是 `working_dir`——它既是删除目标又本来就可改，所以 `PUT` 里显式拒绝改附属项目的工作目录。这条是第一道防线，后面还有四道。
 
@@ -58,11 +58,11 @@
 
 ## 明确不做
 
-沿用 ADR 0001 那条"mojito 只管理自己创建的会话，绝不接管用户自有的"：
+沿用 ADR 0001 那条"falcon 只管理自己创建的会话，绝不接管用户自有的"：
 
-- **不接管 mojito 没创建的 worktree**。用户手动把普通项目指向一个已存在的 worktree，mojito 就当它是普通项目，不提供"删除时一并删目录"。
+- **不接管 falcon 没创建的 worktree**。用户手动把普通项目指向一个已存在的 worktree，falcon 就当它是普通项目，不提供"删除时一并删目录"。
 - **不删分支**、不自动 unlock、不给 `worktree add --force`、不给 `-B`、不给第二个 `--force`。
-- **`worktree prune` 只在走了兜底删除时才跑**：它是仓库级的，会清掉 mojito 没创建的 stale 条目。`worktree remove` 成功时会自己清理管理项。
+- **`worktree prune` 只在走了兜底删除时才跑**：它是仓库级的，会清掉 falcon 没创建的 stale 条目。`worktree remove` 成功时会自己清理管理项。
 - **不允许二级派生**。git 本身允许，但侧栏的两级树会变成任意深度、删除级联要递归，而收益是零——从源项目派生完全等价。将来若要放开，把 source 取成 `row.source_project_id ?? row.id` 重新挂到根即可，树仍是两级。
 - **不做定时 GC、不做启动自动清理**。每一次删除都必须由用户的一次点击直接触发。
 - **代码里不出现 `git clean` 的命令模板**，哪怕是 `-n` 的。在一个没有测试的仓库里，一个 `-n` 打错就是 `git clean -fdX`。

@@ -43,7 +43,7 @@ describe("termPtyEnv", () => {
   it("always declares truecolor, and stamps polarity only when known", () => {
     const bare = termPtyEnv();
     assert.equal(bare.COLORTERM, "truecolor");
-    assert.equal(bare.TERM_PROGRAM, "mojito");
+    assert.equal(bare.TERM_PROGRAM, "falcon");
     assert.equal(bare.COLORFGBG, undefined);
     assert.equal(bare.GROK_APPEARANCE, undefined);
 

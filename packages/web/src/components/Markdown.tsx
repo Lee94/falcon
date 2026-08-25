@@ -1,7 +1,9 @@
-import { useMemo, type ReactNode } from "react";
+import { Fragment, useMemo, type ReactNode } from "react";
 import { marked, type Token, type Tokens } from "marked";
 import { externalHref, resolveRel } from "../lib/mdLink.js";
+import { langForFence, splitCodeLines, useHighlight } from "../lib/highlight.js";
 import { cn } from "@/lib/utils";
+import { CodeLine } from "@/components/common/CodeLine";
 
 /**
  * Markdown 预览。README / CHANGELOG / ADR 这类文件在这里是主要内容，
@@ -78,11 +80,7 @@ function Node({ tok, ctx }: { tok: Token; ctx: Ctx }): ReactNode {
 
     case "code": {
       const t = tok as Tokens.Code;
-      return (
-        <pre className="my-3 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-5.5">
-          <code>{t.text}</code>
-        </pre>
-      );
+      return <CodeBlock text={t.text} lang={t.lang} />;
     }
 
     case "codespan":
@@ -218,6 +216,30 @@ function Node({ tok, ctx }: { tok: Token; ctx: Ctx }): ReactNode {
       return raw ? <>{raw}</> : null;
     }
   }
+}
+
+/**
+ * fence 代码块。语言认得出就上语法高亮（异步渐进，token 没到前是纯文本），
+ * 认不出保持原样。token 逐行给（useHighlight 的产出天然按行），行间自己补 \n，
+ * pre 的 whitespace 会保留它——不引入每行一个块级元素的额外布局。
+ */
+function CodeBlock({ text, lang }: { text: string; lang?: string }) {
+  const hl = useHighlight(text, langForFence(lang));
+  const lines = useMemo(() => splitCodeLines(text), [text]);
+  return (
+    <pre className="code-hl my-3 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-5.5">
+      <code>
+        {hl
+          ? lines.map((line, i) => (
+              <Fragment key={i}>
+                {i > 0 && "\n"}
+                <CodeLine text={line} tokens={hl[i]} />
+              </Fragment>
+            ))
+          : text}
+      </code>
+    </pre>
+  );
 }
 
 function Link({

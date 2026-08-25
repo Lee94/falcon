@@ -37,7 +37,7 @@ export interface FileSelection {
 
 export type FileViewMode = "list" | "tree";
 
-const MODE_KEY = "mojito.fileView";
+const MODE_KEY = "falcon.fileView";
 
 export function loadFileViewMode(): FileViewMode {
   try {

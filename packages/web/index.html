@@ -13,14 +13,14 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
-    <title>Mojito</title>
+    <title>Falcon</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="mojito" />
+    <meta name="apple-mobile-web-app-title" content="Falcon" />
     <!--
       主题在解析到 <body> 之前就定下来：晚一帧就会白闪一下，深色用户在夜里
       被闪到是很难受的。key 与取值必须与 src/lib/theme.ts 保持一致。
@@ -39,7 +39,7 @@
     <script>
       (function () {
         try {
-          var pref = localStorage.getItem("mojito.theme");
+          var pref = localStorage.getItem("falcon.theme") || localStorage.getItem("mojito.theme");
           var dark =
             pref === "dark" ||
             (pref !== "light" &&

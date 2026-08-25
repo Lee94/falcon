@@ -1,5 +1,6 @@
 /**
- * 全局快捷键。
+ * 全局快捷键。键位跟 VS Code 对齐——命令面板是 ⌘⇧P / Ctrl+Shift+P / F1，
+ * 其余能对上的也用同一套（⌘B 侧栏、⌘⇧E 文件、⌘⇧] / ⌘⇧[ 切 tab）。
  *
  * 硬约束：xterm 聚焦时几乎吞掉所有 Ctrl+* 组合（Ctrl+C/D/R/W 全是 shell 语义），
  * 所以全局键**不能**用裸 Ctrl+字母。安全区是 ⌘ 系列（mac）、Ctrl+Shift+*
@@ -13,6 +14,7 @@
 
 export type Command =
   | "palette"
+  | "quickOpen"
   | "newTerminal"
   | "closeTab"
   | "toggleSidebar"
@@ -31,42 +33,44 @@ export const isMac =
   typeof navigator !== "undefined" &&
   /mac/i.test(navigator.platform || navigator.userAgent);
 
-const MOD = isMac ? "⌘" : "Ctrl+";
-
-/** 菜单、tooltip 里显示的主键位 */
-export function chord(cmd: Command): string {
+/** 菜单、tooltip 里显示的主键位。mac 可注入，方便单测两套表。 */
+export function chord(cmd: Command, mac = isMac): string {
   switch (cmd) {
     case "palette":
-      return isMac ? "⌘K" : "Ctrl+Shift+P";
+      return mac ? "⌘⇧P" : "Ctrl+Shift+P";
+    case "quickOpen":
+      // Win 不能绑 Ctrl+P：那是 shell 的上一条历史。浏览器里 ⌘P 也常被打印截走，
+      // 菜单仍显示 VS Code 主键位，真正在网页里能用的是 Alt+P。
+      return mac ? "⌘P" : "Alt+P";
     case "newTerminal":
-      return isMac ? "⌘T" : "Ctrl+Shift+T";
+      return mac ? "⌘T" : "Ctrl+Shift+T";
     case "closeTab":
-      return isMac ? "⌘W" : "Ctrl+Shift+W";
+      return mac ? "⌘W" : "Ctrl+Shift+W";
     case "toggleSidebar":
-      return isMac ? "⌘B" : "Ctrl+Shift+B";
+      return mac ? "⌘B" : "Ctrl+Shift+B";
     case "toggleGitPanel":
-      return isMac ? "⌘⇧G" : "Ctrl+Shift+G";
+      return mac ? "⌘⇧G" : "Ctrl+Shift+G";
     case "toggleChangesPanel":
-      return isMac ? "⌘⇧U" : "Ctrl+Shift+U";
+      return mac ? "⌘⇧U" : "Ctrl+Shift+U";
     case "toggleForwardPanel":
-      return isMac ? "⌘⇧F" : "Ctrl+Shift+F";
+      return mac ? "⌘⇧F" : "Ctrl+Shift+F";
     case "toggleFilesPanel":
-      return isMac ? "⌘⇧E" : "Ctrl+Shift+E";
+      return mac ? "⌘⇧E" : "Ctrl+Shift+E";
     case "reattach":
-      return isMac ? "⌘R" : "Ctrl+Shift+R";
+      return mac ? "⌘R" : "Ctrl+Shift+R";
     case "overview":
-      return isMac ? "⌘0" : "Alt+0";
+      return mac ? "⌘0" : "Alt+0";
     case "nextTab":
-      return isMac ? "⌘⇧]" : "Ctrl+Tab";
+      return mac ? "⌘⇧]" : "Ctrl+Tab";
     case "prevTab":
-      return isMac ? "⌘⇧[" : "Ctrl+Shift+Tab";
+      return mac ? "⌘⇧[" : "Ctrl+Shift+Tab";
     default:
-      return `${isMac ? "⌘" : "Alt+"}${cmd.slice(3)}`;
+      return `${mac ? "⌘" : "Alt+"}${cmd.slice(3)}`;
   }
 }
 
-/** 浏览器保留了主键位时能用的别名，展示在命令面板里 */
-export function altChord(cmd: Command): string | null {
+/** 浏览器保留了主键位时能用的别名 */
+export function altChord(cmd: Command, mac = isMac): string | null {
   switch (cmd) {
     case "newTerminal":
       return "Alt+T";
@@ -85,7 +89,10 @@ export function altChord(cmd: Command): string | null {
     case "reattach":
       return "Alt+R";
     case "palette":
-      return `${MOD}K`;
+      // VS Code 主键位之外：旧的 ⌘/Ctrl+K，以及 F1
+      return mac ? "⌘K" : "Ctrl+K";
+    case "quickOpen":
+      return "Alt+P";
     case "nextTab":
       return "Alt+]";
     case "prevTab":
@@ -104,7 +111,7 @@ const ALT_LETTERS: Record<string, Command> = {
   KeyF: "toggleForwardPanel",
   KeyE: "toggleFilesPanel",
   KeyR: "reattach",
-  KeyP: "palette",
+  KeyP: "quickOpen",
 };
 
 const MODSHIFT_LETTERS: Record<string, Command> = {
@@ -120,11 +127,21 @@ const MODSHIFT_LETTERS: Record<string, Command> = {
 };
 
 const MAC_MOD_LETTERS: Record<string, Command> = {
+  // 旧主键位。VS Code 里 ⌘K 是 chord 前缀，这里没有 chord，留着当额外入口
   KeyK: "palette",
+  KeyP: "quickOpen",
   KeyT: "newTerminal",
   KeyW: "closeTab",
   KeyB: "toggleSidebar",
   KeyR: "reattach",
+};
+
+const MAC_MODSHIFT_LETTERS: Record<string, Command> = {
+  KeyP: "palette",
+  KeyG: "toggleGitPanel",
+  KeyU: "toggleChangesPanel",
+  KeyF: "toggleForwardPanel",
+  KeyE: "toggleFilesPanel",
 };
 
 function digit(code: string): number | null {
@@ -144,17 +161,30 @@ function eventCode(e: KeyboardEvent): string {
   if (key === "[") return "BracketLeft";
   if (key === "]") return "BracketRight";
   if (key === "Tab") return "Tab";
+  if (key === "F1") return "F1";
+  if (key === "`" || key === "~") return "Backquote";
   return "";
 }
 
 /**
  * 命中则返回命令。用 e.code 而不是 e.key：Alt+字母在 mac 上会变成特殊字符，
- * key 认不出来。
+ * key 认不出来。mac 可注入，方便单测两套表。
  */
-export function matchCommand(e: KeyboardEvent): Command | null {
-  const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+export function matchCommand(e: KeyboardEvent, mac = isMac): Command | null {
+  const mod = mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
   const code = eventCode(e);
   if (!code) return null;
+
+  // F1：VS Code 命令面板，两平台、无修饰键
+  if (code === "F1" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+    return "palette";
+  }
+
+  // VS Code「新建终端」：两平台都是 Ctrl+Shift+`（Mac 也用 Ctrl 不是 ⌘）。
+  // 不能用裸 Ctrl+字母，但 Ctrl+Shift 是安全区；浏览器也不截这一组。
+  if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && code === "Backquote") {
+    return "newTerminal";
+  }
 
   // Alt 别名（两个平台都有），浏览器不会截走
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -168,20 +198,16 @@ export function matchCommand(e: KeyboardEvent): Command | null {
   if (!mod) return null;
 
   if (e.shiftKey) {
-    if (isMac) {
+    if (mac) {
       if (code === "BracketRight") return "nextTab";
       if (code === "BracketLeft") return "prevTab";
-      if (code === "KeyG") return "toggleGitPanel";
-      if (code === "KeyU") return "toggleChangesPanel";
-      if (code === "KeyF") return "toggleForwardPanel";
-      if (code === "KeyE") return "toggleFilesPanel";
-      return null;
+      return MAC_MODSHIFT_LETTERS[code] ?? null;
     }
     if (code === "Tab") return "prevTab";
     return MODSHIFT_LETTERS[code] ?? null;
   }
 
-  if (!isMac) {
+  if (!mac) {
     if (code === "Tab") return "nextTab";
     if (code === "KeyK") return "palette";
     return null;

@@ -8,7 +8,7 @@
  * 单独一个文件是为了避免 host.ts ↔ repo.ts 的循环 import。
  */
 
-import type { WorktreeFailure } from "@mojito/shared";
+import type { WorktreeFailure } from "@falcon/shared";
 
 export class WorktreeError extends Error {
   constructor(

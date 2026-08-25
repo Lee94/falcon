@@ -9,7 +9,8 @@
 export type ThemePref = "system" | "light" | "dark";
 export type ThemeMode = "light" | "dark";
 
-export const THEME_KEY = "mojito.theme";
+export const THEME_KEY = "falcon.theme";
+const THEME_KEY_LEGACY = "mojito.theme";
 
 /** 安装后的标题栏 / 状态栏颜色，必须与 index.html 内联脚本用同一组值 */
 export const THEME_META_COLOR: Record<ThemeMode, string> = {
@@ -24,7 +25,7 @@ const darkQuery =
 
 export function loadThemePref(): ThemePref {
   try {
-    const raw = localStorage.getItem(THEME_KEY);
+    const raw = localStorage.getItem(THEME_KEY) ?? localStorage.getItem(THEME_KEY_LEGACY);
     if (raw === "light" || raw === "dark" || raw === "system") return raw;
   } catch {
     // 隐私模式下读不到，跟随系统即可

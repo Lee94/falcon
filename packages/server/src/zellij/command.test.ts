@@ -52,7 +52,7 @@ describe("createBackgroundArgs", () => {
   it("creates detached with the full session options", () => {
     const layout = hostLayout(
       "windows",
-      "C:\\Users\\fay\\.mojito",
+      "C:\\Users\\fay\\.falcon",
       "x86_64-pc-windows-msvc"
     );
     const sessionId = "0f0e0d0c-0b0a-0908-0706-050403020100";

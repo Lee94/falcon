@@ -4,8 +4,8 @@ import type {
   ClientMessage,
   InstallServerMessage,
   ServerMessage,
-} from "@mojito/shared";
-import { sanitizeColorHint } from "@mojito/shared";
+} from "@falcon/shared";
+import { sanitizeColorHint } from "@falcon/shared";
 import type { Auth } from "./auth.js";
 import type { Db } from "./db.js";
 import { InstallError } from "./zellij/install.js";

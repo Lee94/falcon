@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronRight, TriangleAlert } from "lucide-react";
-import { canRetryInstall } from "@mojito/shared";
+import { canRetryInstall } from "@falcon/shared";
 import type {
   HostZellijStatus,
   InstallServerMessage,
   NonDurableReason,
   ZellijInstallStage,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { reasonText } from "../lib/reason.js";
@@ -50,7 +50,7 @@ const URL_FIXABLE: NonDurableReason[] = [
 /**
  * 主机级持久会话的授权 + 安装。
  *
- * 授权是"允许 mojito 往这台服务器写可执行文件"的决定，该问；安装是随后的执行
+ * 授权是"允许 falcon 往这台服务器写可执行文件"的决定，该问；安装是随后的执行
  * 过程，只报进度。授权按主机记，同一台机器只问一次。
  *
  * 失败态里能直接改下载地址再重试——后端刚刚已经用旧地址自动试过 3 次了，
@@ -236,16 +236,16 @@ export function ZellijInstallModal() {
   const assetUrl = `${base}/v${version}/${asset}`;
   const manualCmd = windows
     ? [
-        `New-Item -ItemType Directory -Force ~\\.mojito\\bin | Out-Null`,
+        `New-Item -ItemType Directory -Force ~\\.falcon\\bin | Out-Null`,
         `curl.exe -fsSL "${assetUrl}" -o "$env:TEMP\\zellij.zip"`,
-        `tar.exe -xf "$env:TEMP\\zellij.zip" -C ~\\.mojito\\bin`,
-        `Move-Item -Force ~\\.mojito\\bin\\zellij.exe ~\\.mojito\\bin\\zellij-${version}.exe`,
+        `tar.exe -xf "$env:TEMP\\zellij.zip" -C ~\\.falcon\\bin`,
+        `Move-Item -Force ~\\.falcon\\bin\\zellij.exe ~\\.falcon\\bin\\zellij-${version}.exe`,
       ].join("\n")
     : [
-        `mkdir -p ~/.mojito/bin`,
-        `curl -L "${assetUrl}" | tar xz -C ~/.mojito/bin`,
-        `mv ~/.mojito/bin/zellij ~/.mojito/bin/zellij-${version}`,
-        `chmod +x ~/.mojito/bin/zellij-${version}`,
+        `mkdir -p ~/.falcon/bin`,
+        `curl -L "${assetUrl}" | tar xz -C ~/.falcon/bin`,
+        `mv ~/.falcon/bin/zellij ~/.falcon/bin/zellij-${version}`,
+        `chmod +x ~/.falcon/bin/zellij-${version}`,
       ].join("\n");
 
   const copyManual = async () => {

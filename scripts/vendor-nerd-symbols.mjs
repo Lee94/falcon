@@ -20,7 +20,7 @@ const VERSION = "v3.5.0";
 const ZIP_URL = `https://github.com/ryanoasis/nerd-fonts/releases/download/${VERSION}/NerdFontsSymbolsOnly.zip`;
 
 async function download(url, dest) {
-  const res = await fetch(url, { headers: { "user-agent": "mojito-vendor" } });
+  const res = await fetch(url, { headers: { "user-agent": "falcon-vendor" } });
   if (!res.ok || !res.body) throw new Error(`下载失败 ${url}: HTTP ${res.status}`);
   await pipeline(res.body, createWriteStream(dest));
 }
@@ -36,7 +36,7 @@ function convertTtfToWoff2(ttfPath, woff2Path) {
 
 async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mojito-nerd-"));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-nerd-"));
   const zipPath = path.join(tmp, "nf.zip");
   try {
     console.log(`下载 ${ZIP_URL}`);

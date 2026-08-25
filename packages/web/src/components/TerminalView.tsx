@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { DeadReason, ServerMessage, SessionState } from "@mojito/shared";
-import { PASTE_IMAGE_MAX_BYTES, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY } from "@mojito/shared";
+import type { DeadReason, ServerMessage, SessionState } from "@falcon/shared";
+import { PASTE_IMAGE_MAX_BYTES, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { connLabel } from "../lib/hostColor.js";

@@ -1,4 +1,4 @@
-import type { Project, SshHost } from "@mojito/shared";
+import type { Project, SshHost } from "@falcon/shared";
 import type { ProjectHead } from "../store.js";
 import { hostBarFromSsh, sshBar, sshConn } from "./hostColor.js";
 
@@ -30,6 +30,8 @@ export function folderKey(projectId: string): string {
 
 export function checkoutLabel(project: Project, head?: ProjectHead): string {
   if (project.worktree) return project.worktree.branch;
+  // 多仓库容器没有单一 HEAD，返回空串让调用方给「N 个仓库」这类多仓库专用标签
+  if (project.multi) return "";
   return head?.branch ?? head?.sha ?? project.name;
 }
 

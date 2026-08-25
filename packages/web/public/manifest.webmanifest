@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "mojito",
-  "short_name": "mojito",
+  "name": "Falcon",
+  "short_name": "Falcon",
   "description": "持久化终端工作台",
   "start_url": "/",
   "scope": "/",

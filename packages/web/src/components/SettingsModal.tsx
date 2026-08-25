@@ -2,7 +2,7 @@ import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Info, Palette, Search, Server, Shield, type LucideIcon } from "lucide-react";
 import type { ITheme } from "@xterm/xterm";
-import type { SshAuthMethod, SshHost } from "@mojito/shared";
+import type { SshAuthMethod, SshHost } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, type SettingsTab } from "../store.js";
 import { sshConn } from "../lib/hostColor.js";
@@ -370,7 +370,7 @@ function TermPreview() {
         <span style={{ color: ansi(theme, "brightBlack") }}>@</span>
         <span style={{ color: ansi(theme, "blue") }}>host</span>
         {" "}
-        <span style={{ color: ansi(theme, "cyan") }}>~/mojito</span>
+        <span style={{ color: ansi(theme, "cyan") }}>~/falcon</span>
         {"\n"}
         <span style={{ color: ansi(theme, "magenta") }}>$</span>
         {" git status\n"}

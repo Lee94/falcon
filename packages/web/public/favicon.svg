@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0a0a0a"/>
-  <g transform="translate(256 272)">
-    <path fill="#2bb86a" d="M-6-8C-18-128-168-138-186-18-198 58-108 122-6 146-28 48-24-40-6-8Z"/>
-    <path fill="#3ddc84" d="M6-8C18-128 168-138 186-18 198 58 108 122 6 146 28 48 24-40 6-8Z"/>
-    <path d="M0-122V136" fill="none" stroke="#14532d" stroke-width="16" stroke-linecap="round"/>
+  <g transform="translate(256 240)">
+    <path fill="#c9a024" d="M-200-72L-16-20 2 40-96 8Z"/>
+    <path fill="#e0b63a" d="M200-72L16-20-2 40 96 8Z"/>
+    <path fill="#e4c878" d="M0-6-34 32 0 176Z"/>
+    <path fill="#f3d99a" d="M0-6 34 32 0 176Z"/>
+    <path fill="#c9a024" d="M0-108-32-26 0 2 32-26Z"/>
+    <path fill="#f3d99a" d="M0-50-12-12 0 4 12-12Z"/>
   </g>
 </svg>

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { CircleAlert, CircleDot, CircleX, LoaderCircle, type LucideIcon } from "lucide-react";
-import type { SessionState } from "@mojito/shared";
+import type { SessionState } from "@falcon/shared";
 import { cn } from "@/lib/utils";
 
 /** creating 是纯前端状态：REST 还没返回，tab 已经出现了 */

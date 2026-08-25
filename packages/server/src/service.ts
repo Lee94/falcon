@@ -6,7 +6,7 @@ import { isSea } from "node:sea";
 import { isLoopback, parseArgs } from "./config.js";
 
 /**
- * `mojito service <install|uninstall|start|stop|status>` —— 把 mojito 注册成系统服务，
+ * `falcon service <install|uninstall|start|stop|status>` —— 把 falcon 注册成系统服务，
  * 由 init 守护：崩溃自动拉起、登出不退、开机自启。
  *
  * 刻意不自己写守护父进程：launchd / systemd 在这件事上比任何应用内实现都可靠
@@ -16,9 +16,9 @@ import { isLoopback, parseArgs } from "./config.js";
  * 服务启动时仍由 parseArgs 解析——这里不做校验，两边永远一致。
  */
 
-const LAUNCHD_LABEL = "com.mojito.server";
-const SYSTEMD_NAME = "mojito";
-const SERVICE_BIN_NAME = "mojito";
+const LAUNCHD_LABEL = "com.falcon.server";
+const SYSTEMD_NAME = "falcon";
+const SERVICE_BIN_NAME = "falcon";
 
 export function runServiceCli(argv: string[]): void {
   const cmd = argv[0];
@@ -26,7 +26,7 @@ export function runServiceCli(argv: string[]): void {
   const commands = ["install", "uninstall", "start", "stop", "restart", "status"];
   if (!cmd || !commands.includes(cmd)) {
     console.log(
-      `用法: mojito service <${commands.join("|")}> [--host ..] [--port ..] [--data-dir ..]\n` +
+      `用法: falcon service <${commands.join("|")}> [--host ..] [--port ..] [--data-dir ..]\n` +
         `启动参数仅 install 时生效，会原样写进服务配置。`
     );
     process.exit(cmd ? 1 : 0);
@@ -46,16 +46,16 @@ export function runServiceCli(argv: string[]): void {
   }
 }
 
-/** 服务进程的固定入口：`<dataDir>/bin/mojito` */
+/** 服务进程的固定入口：`<dataDir>/bin/falcon` */
 export function serviceBinPath(dataDir: string): string {
   return path.join(dataDir, "bin", SERVICE_BIN_NAME);
 }
 
 /**
- * 把当前 SEA 二进制拷到 dest（固定名为 mojito）。
+ * 把当前 SEA 二进制拷到 dest（固定名为 falcon）。
  *
- * 发布产物叫 `mojito-v0.1.0-darwin-arm64` 这类带版本的文件名，launchd / ps /
- * 活动监视器都拿文件名当进程名。拷到固定路径后进程就叫 mojito，升级也只是
+ * 发布产物叫 `falcon-v0.1.0-darwin-arm64` 这类带版本的文件名，launchd / ps /
+ * 活动监视器都拿文件名当进程名。拷到固定路径后进程就叫 falcon，升级也只是
  * 覆盖同一路径。用临时文件 + rename：覆盖正在跑的同路径不会 ETXTBSY，也不会
  * 让 macOS 因改了正在映射的签名文件而 SIGKILL。
  */
@@ -84,7 +84,7 @@ function samePath(a: string, b: string): boolean {
 
 /**
  * 被守护进程的启动命令。
- * SEA：跑 `<dataDir>/bin/mojito`（没有拷过就用当前 execPath）。
+ * SEA：跑 `<dataDir>/bin/falcon`（没有拷过就用当前 execPath）。
  * node 跑 dist：node + 入口脚本。
  */
 function programArguments(serverArgs: string[], seaBin?: string): string[] {
@@ -158,7 +158,7 @@ function launchd(cmd: string, serverArgs: string[]) {
       const config = warnIfNonLoopback(serverArgs);
       const logDir = path.join(config.dataDir, "logs");
       fs.mkdirSync(logDir, { recursive: true }); // launchd 不会替我们建日志目录
-      const logFile = path.join(logDir, "mojito.log");
+      const logFile = path.join(logDir, "falcon.log");
       const xml = (s: string) =>
         s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       const args = installProgramArguments(serverArgs)
@@ -200,7 +200,7 @@ ${args}
     case "start":
     case "restart":
       // 都是"按当前 plist 重新拉起"，覆盖二进制被替换过的场景
-      if (!fs.existsSync(plistPath)) fail("尚未安装，先执行 mojito service install");
+      if (!fs.existsSync(plistPath)) fail("尚未安装，先执行 falcon service install");
       relaunchJob(domain, target, plistPath);
       console.log(cmd === "start" ? "已启动。" : "已重启。");
       break;
@@ -306,7 +306,7 @@ function systemdUnit(serverArgs: string[], rootMode: boolean): string {
     /[\s"\\]/.test(a) ? `"${a.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : a;
   const exec = installProgramArguments(serverArgs).map(quote).join(" ");
   return `[Unit]
-Description=mojito terminal server
+Description=falcon terminal server
 After=network.target
 
 [Service]

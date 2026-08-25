@@ -2,7 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FileDiff, FileText, PanelLeft, Plus, X } from "lucide-react";
 import { api } from "../api.js";
-import { useApp, isPendingId, selectSidebarVisible, visibleTabs } from "../store.js";
+import {
+  useApp,
+  isPendingId,
+  selectSidebarVisible,
+  visibleFileTabs,
+  visibleTabs,
+} from "../store.js";
 import { connLabel, sshBar } from "../lib/hostColor.js";
 import { chord } from "../lib/shortcuts.js";
 import { cn } from "@/lib/utils";
@@ -112,9 +118,13 @@ export function TabBar() {
   const diffTab = useApp((s) => s.diffTab);
   const showDiff = useApp((s) => s.showDiff);
   const closeDiff = useApp((s) => s.closeDiff);
-  const fileTab = useApp((s) => s.fileTab);
-  const showFile = useApp((s) => s.showFile);
+  const fileTabs = useApp((s) => s.fileTabs);
+  const openFile = useApp((s) => s.openFile);
   const closeFile = useApp((s) => s.closeFile);
+  const files = useMemo(
+    () => visibleFileTabs({ fileTabs, selectedProjectId }),
+    [fileTabs, selectedProjectId]
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -295,12 +305,18 @@ export function TabBar() {
         );
       })()}
 
-      {/* 文件查看 tab：与差异 tab 同一套规矩——单例、不代表会话、跟着所属项目筛选 */}
-      {fileTab && (!selectedProjectId || fileTab.projectId === selectedProjectId) && (() => {
-        const on = active.kind === "file";
-        const label = fileTab.path.split("/").pop() ?? fileTab.path;
+      {/* 文件查看 tab：不代表会话，关掉只是收起视图。跟着所属项目一起被侧栏筛选 */}
+      {files.map((file) => {
+        const on =
+          active.kind === "file" &&
+          active.projectId === file.projectId &&
+          active.path === file.path;
+        const label = file.path.split("/").pop() ?? file.path;
+        const show = () => openFile(file.projectId, file.path);
+        const hide = () => closeFile(file);
         return (
           <div
+            key={`${file.projectId}:${file.path}`}
             role="tab"
             aria-selected={on}
             tabIndex={0}
@@ -308,18 +324,18 @@ export function TabBar() {
               "flex max-w-55 min-w-0 cursor-pointer items-center gap-2 border-t-2 border-r border-t-transparent px-2.5 text-xs outline-none select-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
               on ? "border-t-primary bg-background text-foreground" : "text-muted-foreground hover:bg-accent/50"
             )}
-            title={fileTab.path}
-            onClick={showFile}
+            title={file.path}
+            onClick={show}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                showFile();
+                show();
               }
             }}
             onAuxClick={(e) => {
               if (e.button === 1) {
                 e.preventDefault();
-                closeFile();
+                hide();
               }
             }}
           >
@@ -331,14 +347,14 @@ export function TabBar() {
               title={t("common.close")}
               onClick={(e) => {
                 e.stopPropagation();
-                closeFile();
+                hide();
               }}
             >
               <X className="size-3" />
             </button>
           </div>
         );
-      })()}
+      })}
 
       <button
         className={plain}

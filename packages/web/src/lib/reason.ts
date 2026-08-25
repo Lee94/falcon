@@ -1,4 +1,4 @@
-import type { NonDurableReason, WorktreeFailure } from "@mojito/shared";
+import type { NonDurableReason, WorktreeFailure } from "@falcon/shared";
 
 type TFunc = (key: string, options?: Record<string, unknown>) => string;
 

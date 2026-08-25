@@ -80,7 +80,7 @@ export async function isProcessInJob(): Promise<boolean> {
 
   const script = [
     "$sig = '[DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool IsProcessInJob(IntPtr h, IntPtr job, out bool result);'",
-    "$k = Add-Type -MemberDefinition $sig -Name Win32Job -Namespace MojitoNative -PassThru",
+    "$k = Add-Type -MemberDefinition $sig -Name Win32Job -Namespace FalconNative -PassThru",
     "$r = $false",
     "$ok = $k::IsProcessInJob([System.Diagnostics.Process]::GetCurrentProcess().Handle, [IntPtr]::Zero, [ref]$r)",
     "if ($ok) { if ($r) { 'yes' } else { 'no' } } else { 'unknown' }",
@@ -88,7 +88,7 @@ export async function isProcessInJob(): Promise<boolean> {
 
   const res = await localExec(encodePowerShell(script));
 
-  // 注意这条 PowerShell 查的是它自己的进程，而不是 mojito 后端进程——
+  // 注意这条 PowerShell 查的是它自己的进程，而不是 falcon 后端进程——
   // 但子进程默认继承父进程的 Job，所以"子进程在 Job 中"等价于"后端在 Job 中"。
   // 查不出来时按最坏情况处理：宁可标非持久，也不要骗用户。
   const out = res.stdout.trim();

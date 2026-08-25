@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import net from "node:net";
 import type { Duplex } from "node:stream";
-import type { ForwardKind, ForwardState, PortForward, PortForwardInput } from "@mojito/shared";
+import type { ForwardKind, ForwardState, PortForward, PortForwardInput } from "@falcon/shared";
 import type { Db, ProjectRow, SshForwardRow } from "../db.js";
 import { validateForwardInput } from "./forwardSpec.js";
 import type { SshLink } from "./ssh.js";

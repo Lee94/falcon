@@ -28,11 +28,11 @@ describe("imageExt", () => {
 });
 
 describe("pasteDir / pasteFileName", () => {
-  it("lives under the mojito root on either platform", () => {
-    assert.equal(pasteDir("posix", "/home/u/.mojito"), "/home/u/.mojito/paste");
+  it("lives under the falcon root on either platform", () => {
+    assert.equal(pasteDir("posix", "/home/u/.falcon"), "/home/u/.falcon/paste");
     assert.equal(
-      pasteDir("windows", "C:\\Users\\u\\.mojito"),
-      "C:\\Users\\u\\.mojito\\paste"
+      pasteDir("windows", "C:\\Users\\u\\.falcon"),
+      "C:\\Users\\u\\.falcon\\paste"
     );
   });
 
@@ -44,16 +44,16 @@ describe("pasteDir / pasteFileName", () => {
 
 describe("posixWriteCommand", () => {
   it("creates the dir, sweeps stale files, then cats stdin into the target", () => {
-    const cmd = posixWriteCommand("/home/u/.mojito/paste", "/home/u/.mojito/paste/img-1.png");
+    const cmd = posixWriteCommand("/home/u/.falcon/paste", "/home/u/.falcon/paste/img-1.png");
     assert.match(cmd, /mkdir -p "\$d"/);
     assert.match(cmd, /find "\$d" -maxdepth 1 -type f -mmin \+1440 -delete 2>\/dev\/null; /);
-    assert.ok(cmd.endsWith(`cat > '/home/u/.mojito/paste/img-1.png'`));
+    assert.ok(cmd.endsWith(`cat > '/home/u/.falcon/paste/img-1.png'`));
   });
 
   it("quotes paths so a home dir with spaces or quotes cannot split the command", () => {
-    const cmd = posixWriteCommand("/home/o'brien/.mojito/paste", "/home/o'brien/.mojito/paste/i.png");
-    assert.ok(cmd.startsWith(`d='/home/o'\\''brien/.mojito/paste'`));
-    assert.ok(cmd.endsWith(`cat > '/home/o'\\''brien/.mojito/paste/i.png'`));
+    const cmd = posixWriteCommand("/home/o'brien/.falcon/paste", "/home/o'brien/.falcon/paste/i.png");
+    assert.ok(cmd.startsWith(`d='/home/o'\\''brien/.falcon/paste'`));
+    assert.ok(cmd.endsWith(`cat > '/home/o'\\''brien/.falcon/paste/i.png'`));
   });
 });
 
@@ -64,18 +64,18 @@ describe("windowsWriteCommand", () => {
   }
 
   it("is an -EncodedCommand invocation immune to the remote DefaultShell", () => {
-    const cmd = windowsWriteCommand("C:\\u\\.mojito\\paste", "C:\\u\\.mojito\\paste\\i.png");
+    const cmd = windowsWriteCommand("C:\\u\\.falcon\\paste", "C:\\u\\.falcon\\paste\\i.png");
     assert.ok(cmd.startsWith("powershell -NoProfile -NonInteractive -EncodedCommand "));
   });
 
   it("reads base64 from stdin and writes decoded bytes to the target path", () => {
     const script = decode(
-      windowsWriteCommand("C:\\Users\\a b\\.mojito\\paste", "C:\\Users\\a b\\.mojito\\paste\\i.png")
+      windowsWriteCommand("C:\\Users\\a b\\.falcon\\paste", "C:\\Users\\a b\\.falcon\\paste\\i.png")
     );
     assert.match(script, /New-Item -ItemType Directory -Force -Path \$d/);
     assert.match(script, /\[Convert\]::FromBase64String\(\[Console\]::In\.ReadToEnd\(\)\)/);
-    assert.ok(script.includes(`[IO.File]::WriteAllBytes('C:\\Users\\a b\\.mojito\\paste\\i.png', $b)`));
-    assert.ok(script.includes(`$d = 'C:\\Users\\a b\\.mojito\\paste'`));
+    assert.ok(script.includes(`[IO.File]::WriteAllBytes('C:\\Users\\a b\\.falcon\\paste\\i.png', $b)`));
+    assert.ok(script.includes(`$d = 'C:\\Users\\a b\\.falcon\\paste'`));
   });
 
   it("sweeps files older than 24h before writing", () => {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { SshHost, SshHostInput } from "@mojito/shared";
+import type { SshHost, SshHostInput } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { Button } from "@/components/ui/button";

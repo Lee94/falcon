@@ -84,7 +84,7 @@ export function versionArgs(git: string): string[] {
  *
  * --path-format=absolute（git ≥ 2.31）挡住 MSYS2 / Git-Bash 环境下吐出
  * /d/code/xxx 这种不能直接喂给 Windows API 的路径。注意即便如此，Windows 上返回的
- * 仍是正斜杠（D:/code/mojito）——调用方必须过一遍 normalizeSep。
+ * 仍是正斜杠（D:/code/falcon）——调用方必须过一遍 normalizeSep。
  */
 export function repoRootArgs(git: string, dir: string): string[] {
   return at(git, dir, "rev-parse", "--path-format=absolute", "--show-toplevel");
@@ -125,6 +125,14 @@ export function branchListArgs(git: string, repo: string): string[] {
 
 export function worktreeListArgs(git: string, repo: string): string[] {
   return at(git, repo, "worktree", "list", "--porcelain");
+}
+
+/**
+ * 本地分支是否存在：退出码即答案（0 = 存在）。批量派生的 auto 模式与预检用。
+ * --verify 拒绝前缀匹配之类的猜测，--quiet 让"不存在"保持静默、不往 stderr 写 fatal。
+ */
+export function branchExistsArgs(git: string, repo: string, branch: string): string[] {
+  return at(git, repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`);
 }
 
 /**
@@ -191,6 +199,25 @@ export function diffCachedDirtyArgs(git: string, dir: string): string[] {
 /** 未跟踪文件清单（一行一个）。输出非空即有未跟踪文件 */
 export function untrackedArgs(git: string, dir: string): string[] {
   return at(git, dir, "ls-files", "--others", "--exclude-standard");
+}
+
+/**
+ * Quick Open 的文件清单：已跟踪 + 未跟踪，排除 gitignore。
+ * 路径相对 `-C` 的目录（工作目录），正斜杠分隔。
+ */
+export function lsFilesIndexArgs(git: string, dir: string): string[] {
+  return at(git, dir, "ls-files", "-co", "--exclude-standard");
+}
+
+/** 一行一个相对路径。空行丢掉；Windows 偶发反斜杠收成 `/` */
+export function parseLsFiles(stdout: string): string[] {
+  const out: string[] = [];
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.replace(/\r$/, "");
+    if (!line) continue;
+    out.push(line.replaceAll("\\", "/"));
+  }
+  return out;
 }
 
 /** 展示用：已跟踪改动 + 未跟踪文件 */
@@ -580,10 +607,10 @@ export const EXISTS_BATCH = 60;
  * 格式都不会产出这种行；就算路径里被人恶意塞进这个串，status 行有 "XY " 前缀、
  * diff 行有 +/- 前缀，都不会整行等于哨兵。
  */
-const BATCH_MARK = "__MOJITO_GIT_";
+const BATCH_MARK = "__FALCON_GIT_";
 
 /**
- * 把多条 git 命令拼成**一次** exec：每条命令后打一行 `__MOJITO_GIT_<i>_<code>__`
+ * 把多条 git 命令拼成**一次** exec：每条命令后打一行 `__FALCON_GIT_<i>_<code>__`
  * 哨兵，带序号与真实退出码。SSH 上一条 exec 就是一次 channel open/close 往返，
  * Git 面板一轮快照要跑十来条命令，逐条发就是十来个往返——与 existsManyCommand
  * 是同一笔账。

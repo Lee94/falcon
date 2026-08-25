@@ -42,7 +42,7 @@ describe("isStandalone", () => {
 
 describe("meetsChromeInstallManifest", () => {
   const ok = {
-    name: "mojito",
+    name: "Falcon",
     start_url: "/",
     display: "standalone",
     icons: [

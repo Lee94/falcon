@@ -1,4 +1,4 @@
-import type { ForwardKind, PortForwardInput } from "@mojito/shared";
+import type { ForwardKind, PortForwardInput } from "@falcon/shared";
 
 export interface NormalizedForward {
   name?: string;

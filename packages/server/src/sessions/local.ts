@@ -1,5 +1,5 @@
 import * as pty from "@lydell/node-pty";
-import { applyTermPtyEnv, type NonDurableReason, type TermAppearance } from "@mojito/shared";
+import { applyTermPtyEnv, type NonDurableReason, type TermAppearance } from "@falcon/shared";
 import * as zcmd from "../zellij/command.js";
 import {
   isProcessInJob,
@@ -40,7 +40,7 @@ let prepared: LocalZellij | null = null;
  * 准备本地宿主的 Zellij。整个后端进程只做一次，结果缓存。
  *
  * 本地二进制落在后端的 --data-dir 下（不是硬编码 home）：用户指定了数据目录，
- * 依赖就该跟着走。一律用 mojito 锁定的版本，无视系统 PATH 里可能存在的 Zellij——
+ * 依赖就该跟着走。一律用 falcon 锁定的版本，无视系统 PATH 里可能存在的 Zellij——
  * 版本锁定的全部价值就在于测试矩阵封闭，开一个"用户系统版本"的口子就等于放弃它。
  */
 export async function prepareLocalZellij(
@@ -157,13 +157,13 @@ export async function localKill(layout: HostLayout, sessionId: string): Promise<
   await zellij(layout, zcmd.deleteSessionArgs(layout, sessionId)).catch(() => {});
 }
 
-/** 列出该宿主机上所有 mojito 建的会话名（孤儿会话检测用） */
-export async function localListMojitoSessions(
+/** 列出该宿主机上所有 falcon 建的会话名（孤儿会话检测用） */
+export async function localListFalconSessions(
   layout: HostLayout
 ): Promise<string[]> {
   const res = await zellij(layout, zcmd.listArgs(layout));
   if (res.code !== 0) return [];
-  return zcmd.parseLiveSessions(res.stdout).filter(zcmd.isMojitoSession);
+  return zcmd.parseLiveSessions(res.stdout).filter(zcmd.isFalconSession);
 }
 
 // ---- 附着 ----

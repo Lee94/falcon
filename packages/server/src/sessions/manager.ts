@@ -5,14 +5,14 @@ import type {
   Session,
   SessionForeground,
   TermAppearance,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import {
   OscColorGate,
   TERM_FRAME_OUTPUT,
   TERM_FRAME_REPLAY,
   isTermAppearance,
   parseHexRgb,
-} from "@mojito/shared";
+} from "@falcon/shared";
 import type { Db, ProjectRow, SessionRow, SshHostRow } from "../db.js";
 import { Db as DbStatics } from "../db.js";
 import type { SecretBox } from "../crypto.js";
@@ -131,6 +131,7 @@ export function hostAsProject(host: SshHostRow): ProjectRow {
     worktree_repo_dir: null,
     worktree_created_by_mojito: null,
     worktree_archived_at: null,
+    multi_repos: null,
   };
 }
 
@@ -140,6 +141,8 @@ export class SessionManager {
   private hostLinks = new Map<string, SshLink>();
   private entries = new Map<string, LiveEntry>();
   private reconnects = new Map<string, ReconnectState>();
+  /** 本地持久会话的自动接回退避，键是 sessionId */
+  private localReattach = new Map<string, ReconnectState>();
   private lastTouch = new Map<string, number>();
   /** resize 落库的合并窗口：拖窗时前端逐帧发 resize，不能每次都同步 fsync */
   private sizeFlush = new Map<string, NodeJS.Timeout>();
@@ -156,6 +159,19 @@ export class SessionManager {
       const project = this.db.getProject(projectId);
       return project?.type === "ssh" ? this.getLink(project) : null;
     });
+  }
+
+  /**
+   * 后端刚起来时，上次 active 的持久会话都在 DB 里停成 unverified。
+   * 以前要等用户打开 tab 或点「接回」才验证—— falcon 一重启侧栏就一片黄。
+   * 这里按库存尺寸自动接回（跟总览里点接回同一条路，见 termSize.ts）。
+   */
+  resumeUnverified(): void {
+    for (const row of this.db.listSessions()) {
+      if (row.state !== "unverified" || row.durable !== 1) continue;
+      const entry = this.hydrateEntry(row);
+      this.kickAutoReattach(entry);
+    }
   }
 
   /**
@@ -386,11 +402,11 @@ export class SessionManager {
   }
 
   /**
-   * 懒惰接回：确保会话有活的 backend。
+   * 确保会话有活的 backend。
    * unverified 的持久会话在此被验证并恢复为 active；Zellij 不在了则标记 dead。
    *
-   * force：用户点了「接回」。必须马上 attach 并把 DB 写成 active，
-   * 不能因为 Viewer 还在等格子就原样返回 unverified。
+   * force：用户点了「接回」，或后台自动接回时没有 Viewer 在量格子。
+   * 必须马上 attach 并把 DB 写成 active，不能卡在 unverified。
    */
   async ensureAttached(
     sessionId: string,
@@ -400,20 +416,7 @@ export class SessionManager {
     if (!row) throw new NotFoundError("会话不存在");
     if (row.state === "dead") return row;
 
-    let entry = this.entries.get(sessionId);
-    if (!entry) {
-      const size = parseStoredTermSize(row.cols, row.rows);
-      const created = this.liveEntry({
-        sessionId,
-        projectId: row.project_id,
-        durable: row.durable === 1,
-        layout: null,
-        cols: size?.cols ?? null,
-        rows: size?.rows ?? null,
-      });
-      this.entries.set(sessionId, created);
-      entry = created;
-    }
+    const entry = this.hydrateEntry(row);
     if (entry.backend) {
       // PTY 已挂上但 DB 还停在 unverified：点接回必须把状态扳回来
       if (row.state !== "active") return this.markActive(entry);
@@ -426,7 +429,8 @@ export class SessionManager {
       return this.db.getSession(sessionId)!;
     }
 
-    // 懒惰路径才等格子。用户点接回不能卡在 unverified。
+    // 有 Viewer 在量格子时等它报尺寸，避免用 80×24 抢跑把 TUI 挤扁。
+    // 后台自动接回 / 用户点接回走 force，不能卡在 unverified。
     if (
       !opts?.force &&
       (entry.cols == null || entry.rows == null) &&
@@ -440,16 +444,16 @@ export class SessionManager {
         const project = this.db.getProject(row.project_id);
         if (!project) throw new NotFoundError("项目不存在");
         try {
-          await this.attachBackend(entry!, project, row, true);
-          this.markActive(entry!, { replay: true });
+          await this.attachBackend(entry, project, row, true);
+          this.markActive(entry, { replay: true });
         } catch (err) {
           if (err instanceof SessionGoneError) {
-            this.markDead(entry!, "session-gone");
+            this.markDead(entry, "session-gone");
           }
           throw err;
         }
       })().finally(() => {
-        entry!.attaching = null;
+        entry.attaching = null;
       });
     }
     await entry.attaching;
@@ -569,19 +573,7 @@ export class SessionManager {
       return;
     }
 
-    let entry = this.entries.get(sessionId);
-    if (!entry) {
-      const size = parseStoredTermSize(row.cols, row.rows);
-      entry = this.liveEntry({
-        sessionId,
-        projectId: row.project_id,
-        durable: row.durable === 1,
-        layout: null,
-        cols: size?.cols ?? null,
-        rows: size?.rows ?? null,
-      });
-      this.entries.set(sessionId, entry);
-    }
+    const entry = this.hydrateEntry(row);
 
     const alreadyLive = !!entry.backend;
     // 先冲掉旧 Viewer 的合并窗口再加入新人：pending 里的数据已经进了
@@ -605,7 +597,13 @@ export class SessionManager {
     }
 
     if (gate === "wait-size") {
-      // 等这条连接自己的 resize 再 attach，见 decideViewerAttach
+      // 等这条连接自己的 resize 再 attach，见 decideViewerAttach。
+      // 先把当前状态告诉 Viewer，不然 tab 会假装还在 active，标黄只出现在侧栏。
+      viewer.send({
+        type: "state",
+        state: row.state === "active" ? "unverified" : row.state,
+        deadReason: (row.dead_reason as DeadReason) ?? undefined,
+      });
       return;
     }
 
@@ -683,6 +681,23 @@ export class SessionManager {
   }
 
   // ---------- 内部 ----------
+
+  /** 从 DB 行拿到（或新建）LiveEntry。库存尺寸只在还没被 Viewer 量过时用。 */
+  private hydrateEntry(row: SessionRow): LiveEntry {
+    const existing = this.entries.get(row.id);
+    if (existing) return existing;
+    const size = parseStoredTermSize(row.cols, row.rows);
+    const entry = this.liveEntry({
+      sessionId: row.id,
+      projectId: row.project_id,
+      durable: row.durable === 1,
+      layout: null,
+      cols: size?.cols ?? null,
+      rows: size?.rows ?? null,
+    });
+    this.entries.set(row.id, entry);
+    return entry;
+  }
 
   private liveEntry(init: {
     sessionId: string;
@@ -809,6 +824,16 @@ export class SessionManager {
     entry.backend = null;
     this.db.updateSessionState(entry.sessionId, "unverified");
     this.broadcast(entry, { type: "state", state: "unverified" });
+    if (!entry.terminating) this.kickAutoReattach(entry);
+  }
+
+  /** 标黄之后自己去接，不再等用户点。SSH 走链路重连，本地直接再 attach。 */
+  private kickAutoReattach(entry: LiveEntry) {
+    if (!entry.durable) return;
+    const project = this.db.getProject(entry.projectId);
+    if (!project) return;
+    if (project.type === "ssh") this.scheduleReconnect(project.id);
+    else this.scheduleLocalReattach(entry.sessionId);
   }
 
   /** backend 附着结束：区分真退出 / 手动 detach / 链路断开 */
@@ -858,7 +883,6 @@ export class SessionManager {
   }
 
   private handleLinkDown(projectId: string) {
-    let needReconnect = false;
     for (const entry of this.entries.values()) {
       if (entry.projectId !== projectId) continue;
       if (entry.terminating) continue;
@@ -866,18 +890,18 @@ export class SessionManager {
       if (!row || row.state === "dead") continue;
       if (entry.durable) {
         this.markUnverified(entry);
-        if (entry.viewers.size > 0) needReconnect = true;
       } else {
         this.markDead(entry, "link-lost");
       }
     }
     this.forwards.onLinkDown(projectId);
-    if (needReconnect || this.forwards.hasEnabled(projectId)) {
-      this.scheduleReconnect(projectId);
-    }
+    if (this.forwards.hasEnabled(projectId)) this.scheduleReconnect(projectId);
   }
 
-  /** SSH 断线自动重连：指数退避。有人在看会话，或还有启用的端口转发，就坚持。 */
+  /**
+   * SSH 断线自动重连：指数退避。
+   * 有待接回的持久会话，或还有启用的端口转发，就坚持——不再要求有人正在看。
+   */
   private scheduleReconnect(projectId: string) {
     const existing = this.reconnects.get(projectId);
     if (existing?.timer) return;
@@ -885,26 +909,26 @@ export class SessionManager {
     const state: ReconnectState = existing ?? { attempt: 0, timer: null };
     this.reconnects.set(projectId, state);
 
-    const watchers = () =>
+    const targets = () =>
       [...this.entries.values()].filter(
         (e) =>
           e.projectId === projectId &&
           e.durable &&
           !e.backend &&
-          e.viewers.size > 0 &&
+          !e.terminating &&
           this.db.getSession(e.sessionId)?.state === "unverified"
       );
     const wantsForward = () => this.forwards.hasEnabled(projectId);
 
     const tick = async () => {
       state.timer = null;
-      const targets = watchers();
-      if (targets.length === 0 && !wantsForward()) {
+      const waiting = targets();
+      if (waiting.length === 0 && !wantsForward()) {
         this.reconnects.delete(projectId);
         return;
       }
       state.attempt++;
-      for (const e of targets) {
+      for (const e of waiting) {
         this.broadcast(e, { type: "reconnecting", attempt: state.attempt });
       }
       const project = this.db.getProject(projectId);
@@ -914,15 +938,74 @@ export class SessionManager {
       }
       try {
         await this.getLink(project).getClient();
-        for (const e of watchers()) {
+        for (const e of targets()) {
+          // 有 Viewer 还没报格子：等它自己的 resize，别用库存尺寸抢跑
+          if (e.viewers.size > 0 && (e.cols == null || e.rows == null)) continue;
           try {
-            await this.ensureAttached(e.sessionId);
+            await this.ensureAttached(e.sessionId, {
+              force: e.viewers.size === 0,
+            });
           } catch {
-            // 单个会话接回失败（如 tmux-gone），已在 ensureAttached 中标记
+            // 单个会话接回失败（如 session-gone），已在 ensureAttached 中标记
           }
         }
-        this.reconnects.delete(projectId);
+        const still = targets().filter(
+          (e) => !(e.viewers.size > 0 && (e.cols == null || e.rows == null))
+        );
+        if (still.length === 0 && !wantsForward()) {
+          this.reconnects.delete(projectId);
+          return;
+        }
       } catch {
+        // 链路还没通，继续退避
+      }
+      const delay = Math.min(
+        RECONNECT_MAX_DELAY,
+        1000 * 2 ** Math.min(state.attempt - 1, 10)
+      );
+      state.timer = setTimeout(tick, delay);
+    };
+
+    state.timer = setTimeout(tick, 1000);
+  }
+
+  /** 本地持久会话的自动接回。PTY 掉了但 Zellij 还在时，不必等用户点。 */
+  private scheduleLocalReattach(sessionId: string) {
+    const existing = this.localReattach.get(sessionId);
+    if (existing?.timer) return;
+
+    const state: ReconnectState = existing ?? { attempt: 0, timer: null };
+    this.localReattach.set(sessionId, state);
+
+    const tick = async () => {
+      state.timer = null;
+      const entry = this.entries.get(sessionId);
+      const row = this.db.getSession(sessionId);
+      if (
+        !entry ||
+        !row ||
+        row.state !== "unverified" ||
+        entry.backend ||
+        entry.terminating
+      ) {
+        this.localReattach.delete(sessionId);
+        return;
+      }
+      // 有 Viewer 还没报格子：resize() 会触发 ensureAttached，这里空转没有意义
+      if (entry.viewers.size > 0 && (entry.cols == null || entry.rows == null)) {
+        this.localReattach.delete(sessionId);
+        return;
+      }
+      state.attempt++;
+      this.broadcast(entry, { type: "reconnecting", attempt: state.attempt });
+      try {
+        await this.ensureAttached(sessionId, { force: entry.viewers.size === 0 });
+        this.localReattach.delete(sessionId);
+      } catch {
+        if (this.db.getSession(sessionId)?.state === "dead") {
+          this.localReattach.delete(sessionId);
+          return;
+        }
         const delay = Math.min(
           RECONNECT_MAX_DELAY,
           1000 * 2 ** Math.min(state.attempt - 1, 10)
@@ -931,7 +1014,7 @@ export class SessionManager {
       }
     };
 
-    state.timer = setTimeout(tick, 1000);
+    state.timer = setTimeout(tick, 250);
   }
 
   /**

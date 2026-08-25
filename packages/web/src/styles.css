@@ -257,3 +257,14 @@
 .terminal-host .xterm {
   height: 100%;
 }
+
+/* 语法高亮的明暗切换。token（lib/highlight.ts）只带 --shiki-light / --shiki-dark
+   两个自定义属性、没有内联 color，取哪个全由这里决定——切主题不用重新 tokenize，
+   也不需要 !important。变量缺席的 span（超长行截断、forgiving 引擎跳过的语法）
+   color 在计算期失效，按继承处理，正好落回前景色。 */
+.code-hl span {
+  color: var(--shiki-light);
+}
+.dark .code-hl span {
+  color: var(--shiki-dark);
+}

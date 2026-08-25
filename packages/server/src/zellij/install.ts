@@ -11,7 +11,7 @@
  */
 
 import crypto from "node:crypto";
-import { isAutoRetryable, type ZellijInstallFailure } from "@mojito/shared";
+import { isAutoRetryable, type ZellijInstallFailure } from "@falcon/shared";
 import {
   buildCommandLine,
   encodePowerShell,
@@ -59,7 +59,7 @@ const FAILURE_TEXT: Record<InstallFailure, string> = {
   "arch-unsupported": "该架构没有官方 Zellij 构建",
   "no-downloader": "宿主机缺少 curl / wget",
   "no-tar": "宿主机缺少 tar",
-  "dir-not-writable": "无法在宿主机家目录创建 .mojito 目录",
+  "dir-not-writable": "无法在宿主机家目录创建 .falcon 目录",
   "probe-failed": "无法探测宿主机（命令未跑通或系统未识别）",
   "download-failed": "下载 Zellij 失败",
   "extract-failed": "解压 Zellij 失败",
@@ -79,7 +79,7 @@ export function failureText(reason: InstallFailure): string {
 
 export interface InstallOptions {
   kind: HostKind;
-  /** mojito 根目录：远端为 remoteRoot(kind, home)，本地为后端的 --data-dir */
+  /** falcon 根目录：远端为 remoteRoot(kind, home)，本地为后端的 --data-dir */
   root: string;
   target: ZellijTarget;
   /** 该主机配置的下载源，缺省为 GitHub 官方地址 */

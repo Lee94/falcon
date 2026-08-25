@@ -1,12 +1,12 @@
 {
-  "name": "mojito-workspace",
+  "name": "falcon-workspace",
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "build": "pnpm --filter @mojito/shared build && pnpm --filter @mojito/server build && pnpm --filter @mojito/web build",
+    "build": "pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build && pnpm --filter @falcon/web build",
     "build:bin": "node scripts/build-binary.mjs",
-    "dev:server": "pnpm --filter @mojito/server dev",
-    "dev:web": "pnpm --filter @mojito/web dev",
+    "dev:server": "pnpm --filter @falcon/server dev",
+    "dev:web": "pnpm --filter @falcon/web dev",
     "start": "node packages/server/dist/index.js",
     "update-zellij": "node scripts/update-zellij.mjs",
     "vendor-maple-mono": "node scripts/vendor-maple-mono.mjs",

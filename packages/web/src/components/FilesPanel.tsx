@@ -9,7 +9,7 @@ import {
   FoldVertical,
   RefreshCw,
 } from "lucide-react";
-import type { WorkspaceEntry } from "@mojito/shared";
+import type { WorkspaceEntry } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, selectFocusProjectId } from "../store.js";
 import { cn } from "@/lib/utils";
@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
  * FileChangeView：那套结构一次拿到全部路径再树化，而这里目录可能有几万项，
  * 只能按层懒加载。
  *
- * 只读：点文件在查看 tab 里打开，不提供新建 / 重命名 / 删除。改文件是终端里的事。
+ * 只读：点文件新开一个查看 tab（同一文件再点则聚焦），不提供新建 / 重命名 / 删除。改文件是终端里的事。
  */
 
 /** 一层目录的加载状态。folded 的层保留缓存，再展开时立刻出来 */
@@ -95,11 +95,12 @@ export function FilesPanel() {
   const projectId = useApp(selectFocusProjectId);
   const project = useApp((s) => s.projects.find((p) => p.id === projectId));
   const openFile = useApp((s) => s.openFile);
-  const fileTab = useApp((s) => s.fileTab);
+  const active = useApp((s) => s.active);
   const { dirs, expanded, toggle, refresh, collapseAll } = useDirTree(projectId);
 
   const root = dirs[""];
-  const activePath = fileTab?.projectId === projectId ? fileTab.path : null;
+  const activePath =
+    active.kind === "file" && active.projectId === projectId ? active.path : null;
 
   return (
     <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">

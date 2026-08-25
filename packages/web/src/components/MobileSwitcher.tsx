@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
-import { Folder, GitBranch, Monitor, Plus, Server, Settings } from "lucide-react";
-import type { Project, SessionWithProject } from "@mojito/shared";
+import { Folder, Folders, GitBranch, Monitor, Plus, Server, Settings } from "lucide-react";
+import type { Project, SessionWithProject } from "@falcon/shared";
 import { useApp } from "../store.js";
 import { checkoutLabel, groupServers, type ServerGroup } from "../lib/projectTree.js";
 import { cn } from "@/lib/utils";
@@ -131,6 +131,7 @@ function ServerSection({
   onOpen: (id: string) => void;
   onCreate: (projectId: string) => void;
 }) {
+  const { t } = useTranslation();
   const Icon = server.kind === "local" ? Monitor : Server;
   return (
     <div className="pb-1">
@@ -149,7 +150,11 @@ function ServerSection({
           <ProjectBlock
             project={folder.project}
             label={folder.project.name}
-            meta={checkoutLabel(folder.project, heads[folder.project.id])}
+            meta={
+              folder.project.multi
+                ? t("multi.repoCount", { n: folder.project.multi.repos.length })
+                : checkoutLabel(folder.project, heads[folder.project.id])
+            }
             depth={0}
             sessions={sessions}
             activeId={activeId}
@@ -203,7 +208,7 @@ function ProjectBlock({
 }) {
   const { t } = useTranslation();
   const mine = sessions.filter((s) => s.projectId === project.id);
-  const RowIcon = worktree ? GitBranch : Folder;
+  const RowIcon = worktree ? GitBranch : project.multi ? Folders : Folder;
 
   return (
     <div>

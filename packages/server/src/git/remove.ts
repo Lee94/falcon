@@ -12,16 +12,19 @@
  */
 
 import fs from "node:fs";
-import type { ProjectRow } from "../db.js";
+import { MULTI_REPO_MAX, type MultiRepoMember } from "@falcon/shared";
+import { Db, type ProjectRow } from "../db.js";
 import { encodePowerShell, quotePosix, quotePowerShell } from "../zellij/host.js";
 import type { HostKind } from "../zellij/host.js";
 import * as gc from "./command.js";
 import { gitErrorLine } from "./error.js";
 import type { GitHost } from "./host.js";
+import { repoLockKey, withRepoLock } from "./lock.js";
 import {
   canonKey,
   isAbsolute,
   isAncestor,
+  isUnc,
   normalizeSep,
   pathDepth,
   samePath,
@@ -49,10 +52,10 @@ export function vetoRemoval(
   // ① 必须是附属项目
   if (!row.source_project_id) return `「${row.name}」不是附属项目，不清理任何目录`;
 
-  // ② 必须是 mojito 建的目录。用户手工建的 worktree、以及将来"接管已有 worktree"的
+  // ② 必须是 falcon 建的目录。用户手工建的 worktree、以及将来"接管已有 worktree"的
   //    场景一律不删——对应 ADR 0001 的"绝不接管用户自有的 Zellij 会话"
   if (row.worktree_created_by_mojito !== 1) {
-    return `${dir ?? "(空)"} 不是 mojito 创建的，未删除`;
+    return `${dir ?? "(空)"} 不是 Falcon 创建的，未删除`;
   }
 
   // ③ 路径必须非空且绝对。相对路径意味着这行是脏数据，宁可不删
@@ -235,7 +238,7 @@ async function removeRemoteDir(host: GitHost, dir: string): Promise<string | nul
  * - 只删目录而不 worktree remove，会在 $GIT_DIR/worktrees/<id>/ 留一条 stale 管理
  *   记录；下次用同名路径再派生，git 会报 "is a missing but locked working tree"
  *   之类，而用户完全看不懂这跟上次删除有什么关系。
- * - prune **只在走了兜底删除时才跑**：它是仓库级的，会清掉 mojito 没创建的 stale
+ * - prune **只在走了兜底删除时才跑**：它是仓库级的，会清掉 falcon 没创建的 stale
  *   条目（比如用户放在未挂载盘上的 worktree）。remove 成功时会自己清理管理项。
  */
 export async function cleanupWorktree(
@@ -243,7 +246,8 @@ export async function cleanupWorktree(
   host: GitHost,
   otherDirs: string[]
 ): Promise<string[]> {
-  const warn: string[] = [];
+  // 多仓库派生行走成员清单逐棵清理；调用点（routes 的 DELETE 与 archive 清扫）不感知
+  if (row.multi_repos != null) return cleanupMultiWorktree(row, host, otherDirs);
 
   const veto = vetoRemoval(host.kind, row, host.home, otherDirs);
   if (veto) return [veto];
@@ -261,6 +265,22 @@ export async function cleanupWorktree(
   // 绝不给第二个 --force，也绝不"remove 失败就直接 rm"。这条必须在动手之前拦住
   if (proof.locked) return [lockedWarning(dir)];
 
+  return (await clearOneWorktree(host, repo, dir, proof)).warnings;
+}
+
+/**
+ * 取证之后对单棵 worktree 的实际清理：worktree remove → 兜底删目录 → 兜底时 prune。
+ * 单仓库与多仓库共用；调用方必须已经做完 veto、取证与 locked 拦截。
+ * gone = 目录确认已不在磁盘上（多仓库版据此决定要不要删集中目录）。
+ */
+async function clearOneWorktree(
+  host: GitHost,
+  repo: string,
+  dir: string,
+  proof: Proof
+): Promise<{ warnings: string[]; gone: boolean }> {
+  const warn: string[] = [];
+
   if (proof.kind === "registered") {
     const res = await probeGit(host, gc.worktreeRemoveArgs(host.git, repo, dir), gc.GIT_ENV, {
       timeoutMs: TIMEOUT_REMOVE,
@@ -268,19 +288,25 @@ export async function cleanupWorktree(
     if (res.code !== 0) {
       const line = gitErrorLine(res.stderr || res.stdout);
       // list 与 remove 之间被 lock 上了：同样立刻收手，不落到兜底删除
-      if (/locked working tree/i.test(line)) return [lockedWarning(dir)];
+      if (/locked working tree/i.test(line)) {
+        return { warnings: [lockedWarning(dir)], gone: false };
+      }
       warn.push(`git worktree remove 失败：${line || `退出码 ${res.code}`}`);
     }
   }
 
   // remove 成功时目录已经没了，这一步是幂等兜底
   let usedFallback = false;
+  let gone = true;
   const stillThere = await pathExists(host, dir, { timeoutMs: TIMEOUT_REMOVE }).catch(() => true);
   if (stillThere) {
     usedFallback = true;
     const problem =
       host.key === "local" ? await removeLocalDir(dir) : await removeRemoteDir(host, dir);
-    if (problem) warn.push(problem);
+    if (problem) {
+      warn.push(problem);
+      gone = false;
+    }
   }
 
   if (usedFallback) {
@@ -289,5 +315,225 @@ export async function cleanupWorktree(
     }).catch(() => undefined);
   }
 
+  return { warnings: warn, gone };
+}
+
+// ---------------- 多仓库派生行 ----------------
+
+/**
+ * 多仓库派生行的静态否决。与 vetoRemoval 同一地位：纯函数、只吃行数据，
+ * 写错了会删掉用户东西的那一段，可审查性优先于复用度——所以不去改 vetoRemoval，
+ * 而是给多仓库形态一份自己的完整断言清单。
+ *
+ * 多版最关键的新断言是**包围盒**：集中目录（working_dir）是唯一允许动手的范围，
+ * 每个成员 worktree 必须严格在它内部——成员出圈即脏数据，整行拒删。
+ */
+export function vetoMultiRemoval(
+  kind: HostKind,
+  row: ProjectRow,
+  members: MultiRepoMember[] | null,
+  home: string,
+  otherDirs: string[]
+): string | null {
+  const central = row.working_dir;
+
+  // ① 必须是派生行。容器的成员是用户的真仓库，绝不进删除路径
+  if (!row.source_project_id) return `「${row.name}」不是附属项目，不清理任何目录`;
+
+  // ② 必须是 falcon 建的目录
+  if (row.worktree_created_by_mojito !== 1) {
+    return `${central ?? "(空)"} 不是 Falcon 创建的，未删除`;
+  }
+
+  // ③ 成员清单必须完好。JSON 损坏 / 空清单 / 超上限都视为脏数据——
+  //    清单就是删除目标，读不出清单等于不知道该删什么
+  if (!members || members.length === 0 || members.length > MULTI_REPO_MAX) {
+    return `成员记录损坏或异常，未删除任何目录：${central ?? "(空)"}`;
+  }
+
+  // ④ 集中目录非空、绝对、非 UNC、深度门槛（与单版 ③④ 同理）
+  if (!central || !isAbsolute(kind, central)) {
+    return `集中目录不是绝对路径，未删除：${central ?? "(空)"}`;
+  }
+  if (isUnc(kind, central)) return `集中目录是 UNC 路径，拒绝删除：${central}`;
+  if (pathDepth(kind, central) < 2) return `路径过浅，拒绝删除：${central}`;
+
+  // ⑤ 绝不删家目录本身或它的上层（可以在 home 里面，同单版 ⑥）
+  if (home && (samePath(kind, central, home) || isAncestor(kind, central, home))) {
+    return `集中目录是家目录或其上层，拒绝删除：${central}`;
+  }
+
+  for (const m of members) {
+    // ⑥ 包围盒：每个成员必须严格在集中目录内部
+    if (!m.dir || !isAbsolute(kind, m.dir)) {
+      return `成员路径不是绝对路径，未删除任何目录：${m.dir || "(空)"}`;
+    }
+    if (!isAncestor(kind, central, m.dir)) {
+      return `成员 ${m.dir} 不在集中目录 ${central} 内部，记录异常，未删除任何目录`;
+    }
+
+    // ⑦ 仓库根记录必须完好，且成员不得等于/包住任何成员的仓库根
+    if (!m.repoDir || !isAbsolute(kind, m.repoDir)) {
+      return `成员 ${m.dir} 缺少仓库根记录，未删除任何目录`;
+    }
+    for (const other of members) {
+      if (!other.repoDir) continue;
+      if (samePath(kind, m.dir, other.repoDir) || isAncestor(kind, m.dir, other.repoDir)) {
+        return `成员 ${m.dir} 覆盖仓库根 ${other.repoDir}，拒绝删除`;
+      }
+    }
+
+    // ⑧ 集中目录不得等于/包住任何仓库根——仓库先于集中目录存在，落进去只可能是脏数据
+    if (samePath(kind, central, m.repoDir) || isAncestor(kind, central, m.repoDir)) {
+      return `集中目录 ${central} 包含仓库根 ${m.repoDir}，拒绝删除`;
+    }
+
+    // ⑨ 成员别踩到其他项目的目录上。⑥ 保证成员在集中目录内部，检查集中目录本可覆盖
+    //    成员，但这里仍逐成员各查一遍——将来若有人放宽 ⑥，这条不至于跟着失守
+    const memberClash = otherDirs.find(
+      (o) => samePath(kind, m.dir, o) || isAncestor(kind, m.dir, o)
+    );
+    if (memberClash) {
+      return `成员 ${m.dir} 包含另一个项目的目录（${memberClash}），拒绝删除`;
+    }
+  }
+
+  // ⑨ 集中目录别踩到其他项目的目录上
+  const clash = otherDirs.find(
+    (o) => samePath(kind, central, o) || isAncestor(kind, central, o)
+  );
+  if (clash) return `集中目录包含另一个项目的目录（${clash}），拒绝删除：${central}`;
+
+  return null;
+}
+
+/**
+ * 多仓库派生行的清理：逐成员 取证 → 清理，最后收拾集中目录。
+ *
+ * locked 的成员**成员级保留**、其余照删（与"DB 行无条件删、清理 best-effort"一致：
+ * 整体收手会留下 N 个目录让用户手工收拾，更糟）。集中目录只走**空目录删除**——
+ * 里面可能有用户放的别的东西，非空一律留下 + warning 带路径。
+ */
+async function cleanupMultiWorktree(
+  row: ProjectRow,
+  host: GitHost,
+  otherDirs: string[]
+): Promise<string[]> {
+  const members = Db.parseMultiRepos(row);
+  const veto = vetoMultiRemoval(host.kind, row, members, host.home, otherDirs);
+  if (veto) return [veto];
+
+  const warn: string[] = [];
+  let allGone = true;
+  for (const m of members!) {
+    const dir = normalizeSep(host.kind, m.dir);
+    const repo = m.repoDir!; // veto ⑦ 已保证非空
+    const proof = await proveWorktree(host, repo, dir);
+    if (!proof) {
+      warn.push(`无法确认 ${dir} 仍是 ${repo} 的 worktree，出于安全没有删除，请手动清理`);
+      allGone = false;
+      continue;
+    }
+    if (proof.locked) {
+      warn.push(lockedWarning(dir));
+      allGone = false;
+      continue;
+    }
+    const res = await clearOneWorktree(host, repo, dir, proof);
+    warn.push(...res.warnings);
+    allGone &&= res.gone;
+  }
+
+  const central = normalizeSep(host.kind, row.working_dir!);
+  if (allGone) {
+    const problem = await removeEmptyDir(host, central);
+    if (problem) warn.push(problem);
+  } else {
+    warn.push(`集中目录未删除（内有残留）：${central}`);
+  }
   return warn;
+}
+
+/**
+ * 只删**空**目录：posix rmdir / windows [IO.Directory]::Delete($p, $false) /
+ * 本地 fs.rmdirSync。非递归在类别上无法毁数据（最多删掉一个空壳），但它仍然
+ * 住在这个文件里——remove.ts 继续是全仓库唯一删除用户可见路径的地方。
+ * 返回 null = 删掉了或本来就不在；非 null 是给用户的 warning（自带路径）。
+ */
+export async function removeEmptyDir(host: GitHost, dir: string): Promise<string | null> {
+  const failText = (detail: string) =>
+    `集中目录未删除（可能有残留文件）：${dir}（${detail}）`;
+  if (host.key === "local") {
+    try {
+      fs.rmdirSync(dir);
+      return null;
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      return e.code === "ENOENT" ? null : failText(e.message);
+    }
+  }
+  const cmd =
+    host.kind === "windows"
+      ? encodePowerShell(
+          [
+            `$p = ${quotePowerShell(dir)}`,
+            `if (-not (Test-Path -LiteralPath $p)) { 'gone'; exit 0 }`,
+            `try { [System.IO.Directory]::Delete($p, $false); 'ok' } catch { 'failed: ' + $_.Exception.Message }`,
+          ].join("; ")
+        )
+      : [
+          `p=${quotePosix(dir)}`,
+          `if [ ! -e "$p" ]; then printf gone`,
+          `elif rmdir -- "$p" 2>/dev/null; then printf ok`,
+          `else printf failed; fi`,
+        ].join("; ");
+  const res = await execRaw(host, cmd, { timeoutMs: TIMEOUT_REMOVE }).catch((err: Error) => ({
+    code: null,
+    stdout: "",
+    stderr: err.message,
+  }));
+  const out = res.stdout.trim();
+  if (out === "ok" || out === "gone") return null;
+  return failText(gitErrorLine(out || res.stderr) || `退出码 ${res.code}`);
+}
+
+/**
+ * 批量派生失败后的回滚。只对"本请求刚建出、claimWorktree 已确认"的成员动手：
+ * 逆序逐个 `git worktree remove --force`（一个 --force，与删除链路同一条规矩），
+ * 失败就记 leftover——刚建的树是干净的，remove 理应成功；万一失败（比如毫秒级内
+ * 被 lock），把路径原样报给用户比再开一条裸删路径便宜且诚实。绝不落 rm 兜底。
+ *
+ * 返回残留的绝对路径（空 = 回滚干净）。
+ */
+export async function rollbackCreatedWorktrees(
+  host: GitHost,
+  created: { dir: string; repoDir: string }[],
+  centralDir: string,
+  centralCreatedByUs: boolean
+): Promise<string[]> {
+  const leftover: string[] = [];
+  for (const c of [...created].reverse()) {
+    const res = await withRepoLock(repoLockKey(host, c.repoDir), () =>
+      probeGit(host, gc.worktreeRemoveArgs(host.git, c.repoDir, c.dir), gc.GIT_ENV, {
+        timeoutMs: TIMEOUT_REMOVE,
+      })
+    ).catch((err: Error) => ({ code: null, stdout: "", stderr: err.message }));
+    if (res.code !== 0) {
+      leftover.push(c.dir);
+      // remove 失败会留 stale 管理项，prune 一下别让下次同名派生报莫名其妙的错
+      await probeGit(host, gc.worktreePruneArgs(host.git, c.repoDir), gc.GIT_ENV, {
+        timeoutMs: TIMEOUT_REMOVE,
+      }).catch(() => undefined);
+    }
+  }
+  if (centralCreatedByUs) {
+    if (leftover.length === 0) {
+      const problem = await removeEmptyDir(host, centralDir);
+      if (problem) leftover.push(centralDir);
+    } else {
+      // 成员还在里面，集中目录必然留着——一并列出来，用户照单收拾
+      leftover.push(centralDir);
+    }
+  }
+  return leftover;
 }
