@@ -8,6 +8,7 @@ import { Login } from "./Login.js";
 import { MobileShell } from "./MobileShell.js";
 import { Sidebar } from "./Sidebar.js";
 import { RightBar } from "./RightBar.js";
+import { ResizableSlot } from "./common/ResizeHandle.js";
 import { GitPanel } from "./GitPanel.js";
 import { ChangesPanel } from "./ChangesPanel.js";
 import { FilesPanel } from "./FilesPanel.js";
@@ -223,7 +224,11 @@ export function App() {
         <MobileShell />
       ) : (
       <div className="flex min-h-0 flex-1">
-        {sidebarVisible && <Sidebar />}
+        {sidebarVisible && (
+          <ResizableSlot side="left">
+            <Sidebar />
+          </ResizableSlot>
+        )}
         <main className="flex min-w-0 flex-1 flex-col bg-background">
           <TabBar />
           <div className="relative min-h-0 flex-1">
@@ -278,10 +283,14 @@ export function App() {
             })}
           </div>
         </main>
-        {rightVisible && rightPanel === "files" && <FilesPanel />}
-        {rightVisible && rightPanel === "changes" && <ChangesPanel />}
-        {rightVisible && rightPanel === "git" && <GitPanel />}
-        {rightVisible && rightPanel === "forward" && <ForwardPanel />}
+        {rightVisible && (
+          <ResizableSlot side="right">
+            {rightPanel === "files" && <FilesPanel />}
+            {rightPanel === "changes" && <ChangesPanel />}
+            {rightPanel === "git" && <GitPanel />}
+            {rightPanel === "forward" && <ForwardPanel />}
+          </ResizableSlot>
+        )}
         <RightBar />
       </div>
       )}

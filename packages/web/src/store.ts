@@ -31,6 +31,7 @@ import {
   termColorHint,
   type TermPref,
 } from "./lib/term.js";
+import { PANEL_WIDTH_DEFAULT, clampPanelWidth, parsePanelWidth } from "./lib/panelWidth.js";
 
 export type ActiveView =
   | { kind: "overview" }
@@ -255,6 +256,8 @@ interface PersistedWorkspace {
   selectedProjectId: string | null;
   /** 侧栏是否显示已存档的附属项目。默认藏起来，存档就是为了少占地方 */
   showArchived: boolean;
+  sidebarWidth: number;
+  rightWidth: number;
 }
 
 function loadWorkspace(): PersistedWorkspace {
@@ -267,6 +270,8 @@ function loadWorkspace(): PersistedWorkspace {
     collapsed: {},
     selectedProjectId: null,
     showArchived: false,
+    sidebarWidth: PANEL_WIDTH_DEFAULT,
+    rightWidth: PANEL_WIDTH_DEFAULT,
   };
   try {
     const raw = localStorage.getItem(WORKSPACE_KEY);
@@ -288,6 +293,8 @@ function loadWorkspace(): PersistedWorkspace {
       selectedProjectId:
         typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
       showArchived: parsed.showArchived === true,
+      sidebarWidth: parsePanelWidth(parsed.sidebarWidth),
+      rightWidth: parsePanelWidth(parsed.rightWidth),
     };
   } catch {
     return fallback;
@@ -468,6 +475,9 @@ interface AppState {
   sidebarOpen: boolean;
   /** 窄屏临时隐藏，不写回偏好——不然开一次窄窗口就把用户的设置改了 */
   sidebarAutoHidden: boolean;
+  /** 左右栏宽度（持久化）。拖的时候只改内存，松手才写回 */
+  sidebarWidth: number;
+  rightWidth: number;
   /** 用户的右侧栏偏好（持久化）。默认关：第一次打开不该把终端挤窄 */
   rightOpen: boolean;
   /** 右侧打开的是哪一格 */
@@ -542,6 +552,10 @@ interface AppState {
   resetTerm(): void;
   toggleSidebar(): void;
   setSidebarAutoHidden(hidden: boolean): void;
+  setSidebarWidth(width: number): void;
+  setRightWidth(width: number): void;
+  /** 松手 / 键盘调完宽度之后才落盘，拖的途中不要同步写 localStorage */
+  persistLayout(): void;
   /** 点同一格再关；点另一格则切过去 */
   toggleRightPanel(id?: RightPanelId): void;
   toggleCollapsed(key: string): void;
@@ -592,6 +606,8 @@ export const useApp = create<AppState>((set, get) => {
       collapsed,
       selectedProjectId,
       showArchived,
+      sidebarWidth,
+      rightWidth,
     } = get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
@@ -610,6 +626,8 @@ export const useApp = create<AppState>((set, get) => {
       collapsed,
       selectedProjectId,
       showArchived,
+      sidebarWidth,
+      rightWidth,
     };
     const json = JSON.stringify(payload);
     // localStorage.setItem 是同步阻塞 API，轮询周期里内容多半没变，别白写
@@ -642,6 +660,8 @@ export const useApp = create<AppState>((set, get) => {
 
     sidebarOpen: initialWorkspace.sidebarOpen,
     sidebarAutoHidden: false,
+    sidebarWidth: initialWorkspace.sidebarWidth,
+    rightWidth: initialWorkspace.rightWidth,
     rightOpen: initialWorkspace.rightOpen,
     rightPanel: initialWorkspace.rightPanel,
     collapsed: initialWorkspace.collapsed,
@@ -1003,6 +1023,22 @@ export const useApp = create<AppState>((set, get) => {
 
     setSidebarAutoHidden(hidden) {
       set({ sidebarAutoHidden: hidden });
+    },
+
+    setSidebarWidth(width) {
+      const next = clampPanelWidth(width);
+      if (get().sidebarWidth === next) return;
+      set({ sidebarWidth: next });
+    },
+
+    setRightWidth(width) {
+      const next = clampPanelWidth(width);
+      if (get().rightWidth === next) return;
+      set({ rightWidth: next });
+    },
+
+    persistLayout() {
+      persist();
     },
 
     toggleRightPanel(id = "git") {

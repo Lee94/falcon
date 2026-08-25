@@ -66,7 +66,7 @@ export function Sidebar() {
   }, [refreshChanges]);
 
   return (
-    <aside className="flex w-65 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
+    <aside className="flex min-h-0 flex-1 flex-col border-r bg-sidebar text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b pr-2 pl-3">
         <button
           type="button"

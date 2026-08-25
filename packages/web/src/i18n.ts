@@ -21,6 +21,7 @@ const zh = {
       settingsTitle: "设置",
       collapse: "收起侧栏",
       expand: "展开侧栏",
+      resize: "调整侧栏宽度",
       toggleServer: "展开或折叠服务器",
       toggleProject: "展开或折叠项目",
       toggleWorktree: "展开或折叠 worktree",
@@ -252,6 +253,7 @@ const zh = {
     },
     rightbar: {
       label: "右侧面板",
+      resize: "调整右侧面板宽度",
     },
     forward: {
       panel: "端口转发",

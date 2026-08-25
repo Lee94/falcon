@@ -276,9 +276,9 @@ export function GitPanel() {
 
   const unavailable = snap && !snap.available;
   return (
-    // 宽度与 ForwardPanel 一致：两个面板共用右侧同一个槽位，宽度不同的话
-    // 来回切会连带改变终端宽度，白白触发一次 PTY reflow
-    <aside className="flex w-65 shrink-0 flex-col border-l bg-sidebar text-sidebar-foreground">
+    // 宽度由外层 ResizableSlot 统一管：四个右侧面板共用同一个槽位，
+    // 来回切不能改宽度，否则终端会跟着 reflow。
+    <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-1.5 border-b pr-2 pl-3">
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
           {t("git.history")}

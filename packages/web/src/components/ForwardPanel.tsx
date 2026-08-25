@@ -63,7 +63,7 @@ export function ForwardPanel() {
   const refresh = () => setTick((n) => n + 1);
 
   return (
-    <aside className="flex w-65 shrink-0 flex-col border-l bg-sidebar text-sidebar-foreground">
+    <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
       <div className="flex h-8.5 shrink-0 items-center gap-2 border-b pr-1.5 pl-3">
         <ArrowLeftRight className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("forward.title")}</span>

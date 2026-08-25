@@ -210,6 +210,17 @@
     @apply bg-background text-foreground font-sans text-[13px] leading-[1.35] antialiased;
   }
 
+  /* 拖左右栏时：光标锁定 col-resize，并禁止选中文字（xterm 也会抢选区） */
+  body.col-resizing,
+  body.col-resizing * {
+    cursor: col-resize !important;
+    user-select: none;
+  }
+  body.col-resizing canvas,
+  body.col-resizing iframe {
+    pointer-events: none;
+  }
+
   ::selection {
     @apply bg-primary/30;
   }
