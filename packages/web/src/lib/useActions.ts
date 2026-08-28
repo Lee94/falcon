@@ -364,6 +364,12 @@ export function useActions() {
       onSelect: () => useApp.getState().openProjectForm(null, { type: "ssh", hostId: host.id }),
     },
     {
+      // 多仓库项目的成员必须同宿主机，所以入口挂在主机上：位置随主机定死
+      label: t("multi.newProject"),
+      onSelect: () =>
+        useApp.getState().openProjectForm(null, { type: "ssh", hostId: host.id, multi: true }),
+    },
+    {
       label: t("host.edit"),
       separated: true,
       onSelect: () => useApp.getState().openHostForm(host),
@@ -383,6 +389,16 @@ export function useActions() {
       onSelect: () =>
         useApp.getState().openProjectForm(null, { type: kind === "local" ? "local" : "ssh" }),
     },
+    // legacy（未绑定主机的存量 SSH）不给：多仓库 v1 不支持手写 ssh 字段
+    ...(kind === "local"
+      ? [
+          {
+            label: t("multi.newProject"),
+            onSelect: () =>
+              useApp.getState().openProjectForm(null, { type: "local" as const, multi: true }),
+          },
+        ]
+      : []),
   ];
 
   const termMenuItems = (opts: {

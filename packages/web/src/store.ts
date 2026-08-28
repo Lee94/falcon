@@ -287,6 +287,8 @@ export interface InstallSpec {
 export interface ProjectFormPreset {
   type?: ProjectType;
   hostId?: string;
+  /** 直接进多仓库表单（位置随 type/hostId 定死），侧栏主机菜单的「新建多仓库项目」用 */
+  multi?: boolean;
 }
 
 /** 源项目工作区当前 HEAD，侧栏在没有 worktree 时用分支名代表默认仓库 */

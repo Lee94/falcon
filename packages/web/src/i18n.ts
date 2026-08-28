@@ -174,10 +174,13 @@ const zh = {
       moveUp: "上移",
       moveDown: "下移",
       reposReadonly: "成员由派生决定，不可修改。",
-      workingDirHint: "终端会话的初始目录，可留空（留空时落在家目录）。",
+      workingDirHint:
+        "终端会话的初始目录，可留空。留空时会话开在 falcon 生成的虚拟项目目录里：" +
+        "内含成员清单（AGENTS.md）与 Claude Code 的目录授权，coding agent 可直接访问全部成员仓库。",
       useCommonParent: "填入共同父目录",
       needRepo: "至少添加一个成员仓库",
       // 侧栏 / 面板
+      newProject: "新建多仓库项目…",
       repoCount: "{{n}} 个仓库",
       pickRepo: "选择成员仓库",
       // 批量派生

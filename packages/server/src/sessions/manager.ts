@@ -13,9 +13,19 @@ import {
   isTermAppearance,
   parseHexRgb,
 } from "@falcon/shared";
+import path from "node:path";
 import type { Db, ProjectRow, SessionRow, SshHostRow } from "../db.js";
 import { Db as DbStatics } from "../db.js";
 import type { SecretBox } from "../crypto.js";
+import {
+  containerManifestFiles,
+  posixWriteManifestCommand,
+  removeLocalVirtualDir,
+  removeVirtualDirCommand,
+  virtualProjectDir,
+  windowsWriteManifestCommands,
+  writeLocalManifest,
+} from "../virtualdir.js";
 import { RingBuffer } from "../ringbuffer.js";
 import type { HostLayout } from "../zellij/host.js";
 import type { StageFn } from "../zellij/install.js";
@@ -143,6 +153,8 @@ export class SessionManager {
   private reconnects = new Map<string, ReconnectState>();
   /** 本地持久会话的自动接回退避，键是 sessionId */
   private localReattach = new Map<string, ReconnectState>();
+  /** 本进程内已确认写过的虚拟项目目录，供文件面板等只读用途复用；attach 路径不走缓存 */
+  private virtualDirs = new Map<string, string>();
   private lastTouch = new Map<string, number>();
   /** resize 落库的合并窗口：拖窗时前端逐帧发 resize，不能每次都同步 fsync */
   private sizeFlush = new Map<string, NodeJS.Timeout>();
@@ -291,6 +303,78 @@ export class SessionManager {
     }
   }
 
+  // ---------- 虚拟项目目录 ----------
+  // 多仓库容器没有自己的聚合目录，falcon 在数据根下按 projectId 生成一个
+  // （清单内容与取舍见 virtualdir.ts），working_dir 留空时它就是会话 cwd。
+
+  /**
+   * 生成/刷新容器的虚拟项目目录，返回其绝对路径。
+   * 内容是确定性模板的覆盖写，天然幂等、可重入。refresh 跳过缓存强制重写——
+   * attach 路径必须带上：成员或项目名编辑后新会话要拿到新清单，
+   * 用户误删目录后接回也靠它自愈（否则 --default-cwd 会指向不存在的目录）。
+   */
+  async ensureVirtualDir(project: ProjectRow, opts?: { refresh?: boolean }): Promise<string> {
+    if (!opts?.refresh) {
+      const hit = this.virtualDirs.get(project.id);
+      if (hit) return hit;
+    }
+    const members = (DbStatics.parseMultiRepos(project) ?? []).map((m) => m.dir);
+    let dir: string;
+    if (project.type === "local") {
+      dir = path.join(path.resolve(this.dataDir), "projects", project.id);
+      await writeLocalManifest(dir, containerManifestFiles(project.name, members));
+    } else {
+      const link = this.getLink(project);
+      const facts = await link.hostFacts();
+      dir = virtualProjectDir(facts.kind, facts.root, project.id);
+      const files = containerManifestFiles(project.name, members);
+      if (facts.kind === "windows") {
+        for (const { cmd, stdinBase64 } of windowsWriteManifestCommands(dir, files)) {
+          const res = await link.execWithInput(cmd, stdinBase64);
+          if (res.code !== 0) {
+            throw new Error(res.stderr.trim() || `虚拟项目目录写入失败（exit ${res.code}）`);
+          }
+        }
+      } else {
+        const res = await link.exec(posixWriteManifestCommand(dir, files));
+        if (res.code !== 0) {
+          throw new Error(res.stderr.trim() || `虚拟项目目录写入失败（exit ${res.code}）`);
+        }
+      }
+    }
+    this.virtualDirs.set(project.id, dir);
+    return dir;
+  }
+
+  invalidateVirtualDir(projectId: string) {
+    this.virtualDirs.delete(projectId);
+  }
+
+  /**
+   * 删容器时清理虚拟目录。克制：只删 falcon 写的固定文件 + 非递归 rmdir——
+   * 它是会话 cwd，agent/用户可能落了别的文件，非空整目录保留。
+   * 返回 warning 文本或 null；链路故障往上抛，调用方决定要不要打扰用户。
+   */
+  async removeVirtualDir(project: ProjectRow): Promise<string | null> {
+    this.virtualDirs.delete(project.id);
+    let dir: string;
+    let left: boolean;
+    if (project.type === "local") {
+      dir = path.join(path.resolve(this.dataDir), "projects", project.id);
+      left = removeLocalVirtualDir(dir) === "left";
+    } else {
+      const link = this.getLink(project);
+      const facts = await link.hostFacts();
+      dir = virtualProjectDir(facts.kind, facts.root, project.id);
+      const res = await link.exec(removeVirtualDirCommand(facts.kind, dir));
+      if (res.code !== 0) {
+        throw new Error(res.stderr.trim() || `虚拟项目目录清理失败（exit ${res.code}）`);
+      }
+      left = res.stdout.trim() === "left";
+    }
+    return left ? `虚拟项目目录未删除（内有其他文件）：${dir}` : null;
+  }
+
   // ---------- 会话生命周期 ----------
 
   async createSession(
@@ -369,9 +453,17 @@ export class SessionManager {
       entry.layout = prep.layout;
     }
 
+    // 容器（multi 且非派生）working_dir 留空时把会话开进虚拟项目目录。
+    // 先写后指：materialize 成功才拿到路径，失败回退 undefined（现状行为）——
+    // 创建与接回（ensureAttached 同走本函数）都不能被它挡住。
+    let cwd = project.working_dir ?? undefined;
+    if (!cwd && project.multi_repos != null && !project.source_project_id) {
+      cwd = await this.ensureVirtualDir(project, { refresh: true }).catch(() => undefined);
+    }
+
     const opts = {
       sessionId: entry.sessionId,
-      cwd: project.working_dir ?? undefined,
+      cwd,
       shell: project.shell ?? undefined,
       durable: entry.durable,
       layout: entry.layout ?? undefined,

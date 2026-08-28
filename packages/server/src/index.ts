@@ -11,6 +11,7 @@ import { Db } from "./db.js";
 import { SecretBox } from "./crypto.js";
 import { Auth } from "./auth.js";
 import { SessionManager } from "./sessions/manager.js";
+import { resolveLocalBaseEnv } from "./sessions/loginEnv.js";
 import { startArchiveSweeper } from "./archive.js";
 import { registerRoutes } from "./routes.js";
 import { registerWs } from "./ws.js";
@@ -42,6 +43,9 @@ async function main() {
   }
 
   const manager = new SessionManager(db, secrets, config.dataDir);
+  // 本地 PTY 基底环境（login shell 解析 + locale 兜底）预热：
+  // 结果按进程缓存，先跑起来，首个本地会话就不用等 login shell 启动
+  void resolveLocalBaseEnv();
   // 启用中的转发是服务，后端重启后应自己把隧道拉起来，不等用户再开一次面板
   void manager.forwards.restoreEnabled();
   // 持久会话在 DB 里被标成 unverified：自动接回，不要等用户挨个点

@@ -25,11 +25,17 @@ import {
   isAbsolute,
   isAncestor,
   isUnc,
+  joinPath,
   normalizeSep,
   pathDepth,
   samePath,
 } from "./path.js";
 import { execRaw, listWorktrees, pathExists, probeGit, TIMEOUT_REMOVE } from "./repo.js";
+import {
+  CLAUDE_MD_BODY,
+  FALCON_GENERATED_MARK,
+  centralManifestSweepCommand,
+} from "../virtualdir.js";
 
 /**
  * 删除前的静态否决。返回非 null 即"不许删"，字符串直接作为 warning 给用户。
@@ -446,12 +452,46 @@ async function cleanupMultiWorktree(
 
   const central = normalizeSep(host.kind, row.working_dir!);
   if (allGone) {
+    // falcon 派生时写进集中目录的引导清单（AGENTS.md / CLAUDE.md，见 virtualdir.ts）：
+    // 不先删掉它们，下面的空目录删除永远非空、永远留 warning
+    await removeCentralManifests(host, central);
     const problem = await removeEmptyDir(host, central);
     if (problem) warn.push(problem);
   } else {
     warn.push(`集中目录未删除（内有残留）：${central}`);
   }
   return warn;
+}
+
+/**
+ * 守护式删除集中目录里 falcon 自己写的清单：AGENTS.md 首行要含生成标记、
+ * CLAUDE.md 全文要精确等于 @AGENTS.md 才删——用户改写过的内容视为用户文件，
+ * 保留 → 后面的 rmdir 因非空失败 → 既有 warning 带路径，方向安全
+ * （与 vetoMultiRemoval 同一个态度：比对不过宁可不删）。
+ *
+ * 只认两个固定 basename、非递归；best-effort，失败一律静默——它的失败必然
+ * 让 removeEmptyDir 报出带路径的 warning，不需要第二条。远端脚本在
+ * virtualdir.ts 构造（有单测盯形态），执行只在这里——remove.ts 继续是
+ * 全仓库唯一删除用户可见路径的地方。
+ */
+async function removeCentralManifests(host: GitHost, central: string): Promise<void> {
+  if (host.key === "local") {
+    const sweep = (name: string, ours: (text: string) => boolean) => {
+      const p = joinPath(host.kind, central, name);
+      try {
+        const text = fs.readFileSync(p, "utf8");
+        if (ours(text)) fs.unlinkSync(p);
+      } catch {
+        // ENOENT = 本来就没有；读不动就留给 rmdir 去失败
+      }
+    };
+    sweep("AGENTS.md", (t) => (t.split("\n")[0] ?? "").includes(FALCON_GENERATED_MARK));
+    sweep("CLAUDE.md", (t) => t.trim() === CLAUDE_MD_BODY.trim());
+    return;
+  }
+  await execRaw(host, centralManifestSweepCommand(host.kind, central), {
+    timeoutMs: TIMEOUT_REMOVE,
+  }).catch(() => undefined);
 }
 
 /**

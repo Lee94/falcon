@@ -48,7 +48,13 @@ export function ProjectForm({
   const openHostForm = useApp((s) => s.openHostForm);
 
   const [kind, setKind] = useState<FormKind>(
-    existing ? (existing.multi ? "multi" : existing.type) : (preset?.type ?? "local")
+    existing
+      ? existing.multi
+        ? "multi"
+        : existing.type
+      : preset?.multi
+        ? "multi"
+        : (preset?.type ?? "local")
   );
   const [name, setName] = useState(existing?.name ?? "");
   const [workingDir, setWorkingDir] = useState(existing?.workingDir ?? "");
@@ -73,11 +79,16 @@ export function ProjectForm({
   const [pathHint, setPathHint] = useState<{ ok: boolean; text: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  /** 从某台服务器进来：类型已定，直接选文件夹 */
+  /** 从某台服务器进来：类型已定。单仓库直接选文件夹；多仓库进多仓库表单 */
+  const presetMulti = Boolean(!existing && preset?.multi);
   const locked = Boolean(!existing && preset?.type);
-  const [picking, setPicking] = useState(locked);
-  /** 多仓库档「添加仓库」的选择器（与 picking 互斥地打开） */
-  const [pickingRepo, setPickingRepo] = useState(false);
+  const [picking, setPicking] = useState(locked && !presetMulti);
+  /**
+   * 多仓库档「添加仓库」的选择器（与 picking 互斥地打开）。
+   * 从主机菜单进来时先弹一次——与单仓库"点 + 就选文件夹"同一个节奏，
+   * 选完落回表单继续添加其余成员。
+   */
+  const [pickingRepo, setPickingRepo] = useState(presetMulti);
 
   // 多仓库档映射回 shared 的 type：编辑时跟 existing 走（PUT 不许改类型），
   // 新建时看有没有选主机
@@ -231,6 +242,12 @@ export function ProjectForm({
     setRepos((prev) => (prev.includes(dir) ? prev : [...prev, dir]));
     setPickingRepo(false);
   };
+  /** 从主机菜单进来、一个成员都没选就取消 = 反悔，整个对话框一起关（与 locked 单仓库同规矩） */
+  const closeRepoPicker = () => {
+    if (busy) return;
+    if (presetMulti && repos.length === 0) onClose();
+    else setPickingRepo(false);
+  };
   const parentOf = (p: string) => {
     const s = p.replace(/[\\/]+$/, "");
     const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
@@ -264,7 +281,7 @@ export function ProjectForm({
             : t("project.pickTitle")
           : title
       }
-      onClose={picking ? closePicker : pickingRepo ? () => setPickingRepo(false) : onClose}
+      onClose={picking ? closePicker : pickingRepo ? closeRepoPicker : onClose}
       lockOverlay
       wide={anyPicking}
       className={anyPicking ? "overflow-hidden" : undefined}
@@ -273,7 +290,7 @@ export function ProjectForm({
         <FolderPicker
           initialPath={pickingRepo ? repoInitial : workingDir}
           onSelect={pickingRepo ? pickRepoFolder : pickFolder}
-          onClose={pickingRepo ? () => setPickingRepo(false) : closePicker}
+          onClose={pickingRepo ? closeRepoPicker : closePicker}
           remote={type === "ssh"}
           confirming={busy}
           listDir={(dir) =>
@@ -313,7 +330,8 @@ export function ProjectForm({
 
         {kind === "multi" ? (
           <>
-            {!existing && (
+            {/* 从主机菜单进来位置已定死，不再显示下拉 */}
+            {!existing && !locked && (
               <Field
                 label={t("multi.location")}
                 hint={selected ? sshConn(selected) : undefined}

@@ -17,6 +17,7 @@ import {
 import { localTarget } from "../zellij/version.js";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
+import { resolveLocalBaseEnv } from "./loginEnv.js";
 
 export type { NonDurableReason };
 
@@ -102,9 +103,17 @@ export function resetLocalZellij() {
 
 // ---- Zellij 操作 ----
 
-function env(layout: HostLayout, appearance?: TermAppearance): Record<string, string> {
+/**
+ * PTY 环境的基底不是 process.env 而是 login 解析结果（见 loginEnv.ts）：
+ * 后端可能由 launchd / IDE 启动，process.env 缺 PATH 补全与 LANG，而 pane
+ * 里的 shell 是非 login 起的，修不回来。zellij 的路径变量与深浅线索照旧叠加。
+ */
+async function env(
+  layout: HostLayout,
+  appearance?: TermAppearance
+): Promise<Record<string, string>> {
   return applyTermPtyEnv(
-    { ...(process.env as Record<string, string | undefined>), ...zcmd.zellijEnv(layout) },
+    { ...(await resolveLocalBaseEnv()), ...zcmd.zellijEnv(layout) },
     appearance
   );
 }
@@ -210,7 +219,7 @@ export async function attachLocal(
         name: "xterm-256color",
         cols: opts.cols,
         rows: opts.rows,
-        env: env(layout, opts.appearance),
+        env: await env(layout, opts.appearance),
       }
     );
   } else {
@@ -219,7 +228,7 @@ export async function attachLocal(
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: applyTermPtyEnv(process.env, opts.appearance),
+      env: applyTermPtyEnv(await resolveLocalBaseEnv(), opts.appearance),
     });
   }
 

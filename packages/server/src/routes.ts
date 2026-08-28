@@ -77,6 +77,12 @@ import {
 
 import { cleanupWorktree } from "./git/remove.js";
 import {
+  centralManifestFiles,
+  posixWriteManifestCommand,
+  windowsWriteManifestCommands,
+  writeLocalManifest,
+} from "./virtualdir.js";
+import {
   addWorktree,
   commitWorking,
   describeCommit,
@@ -518,6 +524,17 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       db.updateMultiRepos(row.id, repos.repos.map((dir) => ({ dir })));
       row.multi_repos = JSON.stringify(repos.repos.map((dir) => ({ dir })));
     }
+    if (container) {
+      // 名字与成员都会进虚拟目录的清单（见 virtualdir.ts），编辑后作废缓存。
+      // 刷新是 fire-and-forget：宿主离线不能挡编辑；正在跑的会话尽快看到新清单
+      // 即可，失败也无妨——attach 路径不走缓存，下次开会话/文件面板会重写
+      manager.invalidateVirtualDir(row.id);
+      if (!row.working_dir) {
+        void manager
+          .ensureVirtualDir(row, { refresh: true })
+          .catch((err) => req.log.warn({ err }, "虚拟项目目录刷新失败（下次开会话时会重写）"));
+      }
+    }
     // 附属项目的 ssh_* 是从源项目复制来的（让 SshLink / getLink / GET host 全都
     // 不用改），代价就是这条手动传播。本地项目没有可传播的东西。
     if (row.type === "ssh") db.updateChildrenSsh(row.id, row);
@@ -579,6 +596,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
           warnings.push(
             `没能在宿主机上执行清理，目录未删除：${row.working_dir}（${e.detail ?? e.message}）`
           );
+        }
+      } else if (row.multi_repos != null) {
+        // 容器：清 falcon 根下的虚拟项目目录（克制删除，非空保留 + warning，
+        // 见 manager.removeVirtualDir）。它在 falcon 自己的数据根里，链路都
+        // 连不上时连目录在不在都不知道，只记日志不打扰用户
+        try {
+          const w = await manager.removeVirtualDir(row);
+          if (w) warnings.push(w);
+        } catch (err) {
+          req.log.warn({ err }, "虚拟项目目录清理失败");
         }
       }
       manager.disposeLink(row.id);
@@ -1171,18 +1198,25 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * 的链路，与 /api/fs/list 同一条路子。
    *
    * SSH 项目的工作目录可以留空（表单里就是可选的），那时以远端家目录为根——
-   * 和会话启动时的行为一致。
+   * 和会话启动时的行为一致。多仓库容器留空则以虚拟项目目录为根（会话 cwd
+   * 同款语义，见 manager.ensureVirtualDir）：首次打开文件面板会顺手把目录建出来。
    */
   const fileHostFor = async (row: ProjectRow): Promise<{ host: FileHost; root: string }> => {
+    const container = row.multi_repos != null && !row.source_project_id;
     if (row.type === "local") {
-      if (!row.working_dir) throw new Error(worktreeFailureText("no-working-dir"));
+      if (!row.working_dir) {
+        if (container) {
+          return { host: { local: true, kind: localKind() }, root: await manager.ensureVirtualDir(row) };
+        }
+        throw new Error(worktreeFailureText("no-working-dir"));
+      }
       return { host: { local: true, kind: localKind() }, root: row.working_dir };
     }
     const link = manager.getLink(row);
     const facts = await link.hostFacts();
     return {
       host: { local: false, kind: facts.kind, exec: link.exec },
-      root: row.working_dir || facts.home,
+      root: row.working_dir || (container ? await manager.ensureVirtualDir(row) : facts.home),
     };
   };
 
@@ -1306,6 +1340,33 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         worktree_archived_at: null,
         multi_repos: JSON.stringify(outcome.members),
       };
+
+      // 集中目录清单：给 coding agent 的结构说明（见 virtualdir.ts）。写失败**不回滚**：
+      // 全有或全无护的是 worktree——建错了要付回滚代价的东西；清单是纯引导文件、
+      // 可再生，为它逆序 remove N 棵刚建好的树得不偿失。集中目录必然是本请求
+      // 新建的（原先不存在才允许派生），首写无覆盖风险。
+      try {
+        const files = centralManifestFiles(
+          row.name,
+          branch,
+          outcome.members.map((m) => ({ base: basenameOf(host.kind, m.dir), repoDir: m.repoDir }))
+        );
+        if (src.type === "local") {
+          await writeLocalManifest(outcome.centralDir, files);
+        } else if (host.kind === "windows") {
+          const link = manager.getLink(src);
+          for (const { cmd, stdinBase64 } of windowsWriteManifestCommands(outcome.centralDir, files)) {
+            const res = await link.execWithInput(cmd, stdinBase64);
+            if (res.code !== 0) throw new Error(res.stderr.trim() || `exit ${res.code}`);
+          }
+        } else {
+          const res = await host.exec(posixWriteManifestCommand(outcome.centralDir, files));
+          if (res.code !== 0) throw new Error(res.stderr.trim() || `exit ${res.code}`);
+        }
+      } catch (err) {
+        reply.log.warn({ err }, `派生成功但集中目录清单写入失败：${outcome.centralDir}`);
+      }
+
       db.insertProject(row);
       return Db.toProject(row);
     } catch (err) {
