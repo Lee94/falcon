@@ -164,6 +164,15 @@ describe("buildDetachedCommandLine", () => {
     assert.doesNotMatch(inner, /-EncodedCommand/);
   });
 
+  it("passes cwd as Win32_Process.Create CurrentDirectory (quoted, quotes doubled)", () => {
+    const outer = decode(
+      buildDetachedCommandLine(["x.exe"], {}, "C:\\Users\\a b\\repo's")
+    );
+    // 不传 cwd 时新进程继承 WmiPrvSE 的 System32；上游丢 --default-cwd 的兜底
+    assert.match(outer, /CurrentDirectory = 'C:\\Users\\a b\\repo''s' \}/);
+    assert.doesNotMatch(decode(buildDetachedCommandLine(["x.exe"])), /CurrentDirectory/);
+  });
+
   it("stays well under the cmd.exe 8191 limit even with the full attach env", () => {
     // 复刻真实 attachSession 的最坏输入：长 shell 路径 + zellij + 终端深浅 env
     const bin = "C:\\Users\\fay\\.falcon\\bin\\zellij-0.44.3.exe";

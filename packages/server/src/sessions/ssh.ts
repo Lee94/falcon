@@ -615,16 +615,29 @@ export class SshLink extends EventEmitter {
     if (opts.durable && kind === "windows" && !opts.reattach) {
       const layout = opts.layout!;
       if (!(await this.hasSession(layout, opts.sessionId))) {
+        // Zellij 0.44.3 的 create-background 路径会丢掉 `attach ... options` 里的
+        // 会话级选项：start_server_detached 的 New 分支发给 server 的是
+        // cli_args.options()——它只认顶层 `zellij options ...` 子命令，attach 下的
+        // options 解析完就地蒸发（Resurrect 分支反而正确地带上了合并结果）。
+        // 其余选项在我们写的 config.kdl 里都有副本所以看不出来，唯独
+        // default-shell / default-cwd 只在 CLI 上传：表现为 Windows 持久会话
+        // 落进 cmd（get_default_shell 退到 COMSPEC）、目录落在 WmiPrvSE 的
+        // System32。兜底：get_default_shell 在 Windows 上先查 $SHELL 再退
+        // COMSPEC，把 shell 塞进 server 的环境变量；cwd 走 WMI 的
+        // CurrentDirectory 让 server 生在项目目录里（初始 pane 继承 server 目录）。
+        // argv 里的 --default-shell / --default-cwd 保留：上游修好后它们才是正路。
+        const shell = opts.shell ?? this.probed?.shell;
         const created = await this.exec(
           buildDetachedCommandLine(
             [
               layout.bin,
               ...zcmd.createBackgroundArgs(layout, opts.sessionId, {
                 cwd: opts.cwd,
-                shell: opts.shell ?? this.probed?.shell,
+                shell,
               }),
             ],
-            { ...zcmd.zellijEnv(layout), ...termEnv }
+            { ...zcmd.zellijEnv(layout), ...termEnv, ...(shell ? { SHELL: shell } : {}) },
+            opts.cwd
           )
         );
         // WMI 的退出码只是尽力而为（见 buildDetachedCommandLine），

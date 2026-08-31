@@ -280,14 +280,22 @@ export function buildPtyCommandLine(
  * 2. 进程在 Get-Process 之前就退掉的话既等不到也拿不到退出码，只能按 0 处理。
  * 所以退出码只是尽力而为——调用方必须用 list-sessions 之类的事实核验结果，
  * 不能只信退出码。WMI 本身的失败（DCOM 被禁、权限不足）会如实退非零。
+ *
+ * `cwd` 走 Win32_Process.Create 的 CurrentDirectory 参数：不传时新进程继承
+ * 调用方 WmiPrvSE 的目录（System32）。Zellij 的 `--default-cwd` 在
+ * create-background 路径上会被上游丢掉（见 attachSession 处的注释），初始 pane
+ * 的 cwd 退化为继承 server 进程的目录，所以必须在这里把 server 生在项目目录里。
  */
 export function buildDetachedCommandLine(
   argv: string[],
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  cwd?: string
 ): string {
   const innerCmd = `powershell -NoProfile -NonInteractive -Command "${powerShellScript(argv, env)}"`;
+  const cimArgs = [`CommandLine = ${quotePowerShell(innerCmd)}`];
+  if (cwd) cimArgs.push(`CurrentDirectory = ${quotePowerShell(cwd)}`);
   const script = [
-    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${quotePowerShell(innerCmd)} }`,
+    `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ ${cimArgs.join("; ")} }`,
     `if ($r.ReturnValue -ne 0) { Write-Error ('Win32_Process.Create failed: ' + $r.ReturnValue); exit 1 }`,
     `$p = Get-Process -Id $r.ProcessId -ErrorAction SilentlyContinue`,
     // 60s 兜底：内层命令挂死时不能让 SSH exec 永远不返回
