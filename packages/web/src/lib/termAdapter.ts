@@ -2,10 +2,10 @@
  * 终端引擎适配层：TerminalView 只面向 TermAdapter 接口，不关心底下是
  * xterm.js 还是 rioterm（实验性，Rio 的 Rust VT 核心编译成 WASM）。
  *
- * rioterm 连同 1.1MB 的 wasm 走动态 import，只在选中 rio 引擎时下载。
- * rio 引擎的已知短板（0.1.x）：不支持光标闪烁；鼠标点击不会上报给
- * TUI（滚轮会，由 Rust 侧编码）；改字体/主题要原地重建实例，应用态
- * VT 模式只能尽力恢复。
+ * rio 引擎的 DOM 装配、渲染器（自研 WebGPU，不可用时回落 rioterm 自带的 canvas）
+ * 与事件接线都在 lib/rio/ 下，连同 1.1MB 的 wasm 走动态 import，只在选中 rio
+ * 引擎时下载。rio 引擎的已知短板：鼠标点击不会上报给 TUI（滚轮会，由 Rust 侧
+ * 编码）；canvas 回退渲染器不支持光标闪烁。
  */
 
 import { Terminal, type ITheme } from "@xterm/xterm";
@@ -13,7 +13,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
-import type { OpenOptions as RioOpenOptions, RioTermHandle, Theme as RioTheme } from "rioterm";
+import type { RioAppearance, RioHandle, RioRendererKind, WebGpuFailReason } from "./rio/open.js";
 import { termFontStack, type TermPref } from "./term.js";
 import { isUsableTermSize } from "./termFit.js";
 import { deleteSeq } from "./termInput.js";
@@ -24,12 +24,24 @@ export interface TermAdapterHooks {
   onData(data: string): void;
   /** 格子数变了；接收方自行按 cols/rows 去重 */
   onResize(): void;
-  /** 异步引擎首次就绪 / 重建完成；应补一次量尺寸 */
+  /**
+   * 异步引擎首次就绪，或引擎自发换了渲染器（DPR 变化、GPU 设备丢失）；应补一次量尺寸。
+   * 宿主自己发起的 applyAppearance / refreshMetrics 不触发——那两条路径本来紧接着 fit()
+   */
   onReady(): void;
   /** 命中全局快捷键的按键，终端不该吃 */
   isGlobalKey(e: KeyboardEvent): boolean;
-  /** 引擎加载/重建失败（wasm 拉不下来等），提示用户切回 xterm */
+  /** 引擎加载失败（wasm 拉不下来等），提示用户切回 xterm */
   onEngineError?(message: string): void;
+  /** rio 引擎渲染器落定或变化。requested 是 webgpu 而 active 是 canvas 时宿主提示一次 */
+  onRenderer?(info: RendererInfo): void;
+}
+
+export interface RendererInfo {
+  requested: RioRendererKind;
+  active: RioRendererKind;
+  reason?: WebGpuFailReason;
+  cause: "open" | "device-lost" | "dpr";
 }
 
 export interface TermAdapterInit {
@@ -49,9 +61,9 @@ export interface TermAdapter {
   reset(): void;
   /** 按宿主容器适配格子；容器/引擎/字体没就绪返回 false（别把假尺寸发给 PTY） */
   fit(): boolean;
-  /** 字体加载完成后的重排（xterm 重建字形 atlas；rio 重测 cell 后重建实例） */
+  /** 字体加载完成后的重排（xterm 重建字形 atlas；rio 重测 cell 后换一个渲染器） */
   refreshMetrics(): void;
-  /** 热改外观。rio 引擎内部会重建实例，调用方无感知 */
+  /** 热改外观。rio 引擎只换渲染器，Terminal 与 VT 状态不动 */
   applyAppearance(pref: TermPref, theme: ITheme): void;
   /** DECCKM 应用光标键模式是否开着；移动端键位条据此决定方向键发 SS3 还是 CSI */
   appCursorKeys(): boolean;
@@ -274,8 +286,10 @@ class XtermAdapter implements TermAdapter {
   }
 }
 
-type RioModule = typeof import("rioterm");
-
+/**
+ * rio 引擎。DOM 装配、事件接线与渲染器生命周期都在 rio/open.ts；这里只管与
+ * TermAdapter 契约对接：输出队列、尺寸门控、外观比对、hooks 回调。
+ */
 class RioAdapter implements TermAdapter {
   private hooks: TermAdapterHooks;
   private pref: TermPref;
@@ -283,17 +297,14 @@ class RioAdapter implements TermAdapter {
   private scrollback: number;
 
   private host: HTMLElement | null = null;
-  private rio: RioModule | null = null;
-  private handle: RioTermHandle | null = null;
-  /** 挂载/重建期间到达的输出，按序回放。reset 以 RIS 字符串入队，顺序天然保持 */
+  private handle: RioHandle | null = null;
+  /** wasm 首次加载完成前到达的输出，按序回放。reset 以 RIS 字符串入队，顺序天然保持 */
   private queue: (string | Uint8Array)[] = [];
-  private dims = { cols: 0, rows: 0 };
   private decoder = new TextDecoder();
   private disposed = false;
-  private rebuilding = false;
-  private wantRebuild = false;
   private wantFocus = false;
-  private hostCleanup: (() => void) | null = null;
+  /** 传给 openRio 的外观快照。open 等待期间（wasm 首载窗口不小）改了外观，adopt 时补一次 */
+  private openedWith: RioAppearance | null = null;
 
   constructor(init: TermAdapterInit) {
     this.hooks = init.hooks;
@@ -312,36 +323,6 @@ class RioAdapter implements TermAdapter {
 
   open(host: HTMLElement): void {
     this.host = host;
-    // rio 把 keydown 挂在内部 textarea 上（冒泡阶段），这里在宿主的捕获阶段先拦：
-    // 1) IME 组合中的按键不能给 rio——确认候选的 Enter 会被当成真回车发给 PTY；
-    // 2) 全局快捷键（⌘*/Ctrl+Shift+*/Alt+*）不能让 rio 编码成字节发出去。截断后
-    //    事件到不了 window 的全局监听，克隆一份直接派发过去，App 侧无感知。
-    const gate = (e: KeyboardEvent) => {
-      if (e.isComposing || e.keyCode === 229) {
-        e.stopPropagation();
-        return;
-      }
-      if (!this.hooks.isGlobalKey(e)) return;
-      e.stopPropagation();
-      if (e.type !== "keydown") return;
-      e.preventDefault();
-      window.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: e.key,
-          code: e.code,
-          ctrlKey: e.ctrlKey,
-          metaKey: e.metaKey,
-          altKey: e.altKey,
-          shiftKey: e.shiftKey,
-        })
-      );
-    };
-    host.addEventListener("keydown", gate, true);
-    host.addEventListener("keyup", gate, true);
-    this.hostCleanup = () => {
-      host.removeEventListener("keydown", gate, true);
-      host.removeEventListener("keyup", gate, true);
-    };
     void this.boot();
   }
 
@@ -371,34 +352,29 @@ class RioAdapter implements TermAdapter {
     const beforeRows = handle.terminal.options.rows;
     handle.renderer.fit(box.width, box.height);
     const { cols, rows } = handle.terminal.options;
-    this.dims = { cols, rows };
     if (cols !== beforeCols || rows !== beforeRows) this.hooks.onResize();
     return true;
   }
 
   refreshMetrics(): void {
-    // cell 尺寸在 renderer 构造时量死，字体真正可用后只能重建实例。
-    // 初次挂载已等过 fonts.ready，这里主要兜 loadingdone（换自定义字体）。
-    this.scheduleRebuild();
+    // 字体真正可用后无条件重建渲染器：字形 atlas 可能已经用 fallback 字体栅格化过，
+    // 度量没变也得清。初次挂载已等过 fonts.ready，这里主要兜 loadingdone（换自定义字体）。
+    this.handle?.setAppearance(this.currentAppearance());
   }
 
   applyAppearance(pref: TermPref, theme: ITheme): void {
-    // 重建很重（serialize + 重开 wasm 实例），逐字段比对，没变就不动。
-    // theme 来自 resolveTermTheme 的常量表，引用比较即可。
-    // cursorBlink 不参与：rio 不支持闪烁，重建也没意义。
-    const same =
-      termFontStack(pref) === termFontStack(this.pref) &&
-      pref.fontSize === this.pref.fontSize &&
-      pref.lineHeight === this.pref.lineHeight &&
-      pref.cursorStyle === this.pref.cursorStyle &&
-      theme === this.theme;
+    // theme 来自 resolveTermTheme 的常量表，引用比较即可
+    const before = this.currentAppearance();
     this.pref = pref;
     this.theme = theme;
-    if (!same) this.scheduleRebuild();
+    const after = this.currentAppearance();
+    if (sameAppearance(before, after)) return;
+    // 未就绪时只记字段，adopt 会与 openedWith 比对后补上
+    this.handle?.setAppearance(after);
   }
 
   appCursorKeys(): boolean {
-    // 重建间隙 handle 为空，按普通模式给：CSI 形态的兼容面更广
+    // 未就绪按普通模式给：CSI 形态的兼容面更广
     return this.handle?.terminal.modes().applicationCursorKeys ?? false;
   }
 
@@ -421,8 +397,6 @@ class RioAdapter implements TermAdapter {
 
   dispose(): void {
     this.disposed = true;
-    this.hostCleanup?.();
-    this.hostCleanup = null;
     this.handle?.dispose();
     this.handle = null;
     this.queue = [];
@@ -433,201 +407,93 @@ class RioAdapter implements TermAdapter {
     else this.queue.push(data);
   }
 
+  private currentAppearance(): RioAppearance {
+    return {
+      fontFamily: termFontStack(this.pref),
+      fontSize: this.pref.fontSize,
+      lineHeight: this.pref.lineHeight,
+      theme: this.theme,
+      cursorStyle: this.pref.cursorStyle,
+      cursorBlink: this.pref.cursorBlink,
+    };
+  }
+
   private async boot(): Promise<void> {
     try {
-      // renderer 构造时量 cell 尺寸，必须等字体就绪，否则按 fallback 量出错的格子
-      const [rio] = await Promise.all([import("rioterm"), document.fonts.ready]);
+      // 渲染器构造时量 cell 尺寸，必须等字体就绪，否则按 fallback 字体量出错的格子
+      const [{ openRio, readRendererOverride }] = await Promise.all([
+        import("./rio/open.js"),
+        document.fonts.ready,
+      ]);
       if (this.disposed || !this.host) return;
-      this.rio = rio;
-      const handle = await rio.open(this.host, this.openOptions());
+      const requested: RioRendererKind = readRendererOverride(safeLocalStorage()) ?? "webgpu";
+      const appearance = this.currentAppearance();
+      this.openedWith = appearance;
+      const handle = await openRio(this.host, {
+        renderer: requested,
+        scrollback: this.scrollback,
+        appearance,
+        isGlobalKey: this.hooks.isGlobalKey,
+        // 对齐 xterm 的 WebLinksAddon：点链接直接开新页，不弹 confirm
+        activateLink: (uri) => void window.open(uri, "_blank", "noopener,noreferrer"),
+        writeClipboard: writeBrowserClipboard,
+        readClipboard: () => navigator.clipboard.readText(),
+        onRendererChanged: (active, cause) => {
+          this.hooks.onRenderer?.({ requested, active, reason: this.handle?.fallbackReason, cause });
+          // 渲染器换了 cell 可能变，补量一次尺寸
+          this.hooks.onReady();
+        },
+      });
       if (this.disposed) {
         handle.dispose();
         return;
       }
-      this.adopt(handle);
+      this.adopt(handle, requested);
     } catch (err) {
       if (!this.disposed) this.hooks.onEngineError?.((err as Error).message);
     }
   }
 
-  private scheduleRebuild(): void {
-    if (this.disposed) return;
-    if (this.rebuilding) {
-      this.wantRebuild = true;
-      return;
-    }
-    // 首次挂载还在路上：openOptions 读的就是最新 pref，不需要额外重建
-    if (!this.handle) return;
-    void this.rebuild();
-  }
-
-  private async rebuild(): Promise<void> {
-    const rio = this.rio;
-    const host = this.host;
-    const old = this.handle;
-    if (!rio || !host || !old) return;
-    this.rebuilding = true;
-    this.handle = null; // 重建期间的输出进队列，新实例好了按序回放
-    try {
-      const vt = old.terminal.serialize();
-      const modes = old.terminal.modes();
-      old.dispose();
-      const handle = await rio.open(host, this.openOptions());
-      if (this.disposed) {
-        handle.dispose();
-        return;
-      }
-      // serialize 只还原内容/样式/链接，应用态 VT 模式尽力手工补。
-      // 鼠标上报变体（1000/1002/1003）拿不到，按 zellij/tmux 常用组合猜。
-      handle.terminal.write(vt);
-      if (modes.applicationCursorKeys) handle.terminal.write("\x1b[?1h");
-      if (modes.bracketedPaste) handle.terminal.write("\x1b[?2004h");
-      if (modes.mouseTracking) handle.terminal.write("\x1b[?1002h\x1b[?1006h");
-      this.adopt(handle);
-    } catch (err) {
-      if (!this.disposed) this.hooks.onEngineError?.((err as Error).message);
-    } finally {
-      this.rebuilding = false;
-      if (this.wantRebuild && !this.disposed) {
-        this.wantRebuild = false;
-        void this.rebuild();
-      }
-    }
-  }
-
-  private adopt(handle: RioTermHandle): void {
+  private adopt(handle: RioHandle, requested: RioRendererKind): void {
     this.handle = handle;
-    this.dims = { cols: handle.terminal.options.cols, rows: handle.terminal.options.rows };
     handle.terminal.onData((bytes) => {
       this.hooks.onData(this.decoder.decode(bytes, { stream: true }));
     });
-    this.wireIme(handle);
     for (const chunk of this.queue) handle.terminal.write(chunk);
     this.queue = [];
+    const latest = this.currentAppearance();
+    if (this.openedWith && !sameAppearance(this.openedWith, latest)) handle.setAppearance(latest);
+    this.openedWith = null;
     if (this.wantFocus) {
       this.wantFocus = false;
       handle.focus();
     }
+    this.hooks.onRenderer?.({
+      requested,
+      active: handle.rendererKind,
+      reason: handle.fallbackReason,
+      cause: "open",
+    });
     this.hooks.onReady();
   }
+}
 
-  /**
-   * rioterm 0.1.x 没接 composition 事件，中文输入法的提交文本到不了终端，
-   * 这里在它自建的 textarea 上自己补。监听器随实例销毁跟着 DOM 一起失效，
-   * 不需要显式清理；重建后对新 textarea 重新接线。
-   */
-  private wireIme(handle: RioTermHandle): void {
-    const textarea = this.host?.querySelector("textarea");
-    if (!textarea) return;
-    const term = handle.terminal;
-    textarea.addEventListener("compositionend", (e) => {
-      if (e.data) term.input(e.data);
-      textarea.value = "";
-    });
-    textarea.addEventListener("input", (e) => {
-      const ie = e as InputEvent;
-      if (ie.isComposing) return;
-      // 死键、emoji 面板等不走 keydown 的直接插入；普通按键已被 rio
-      // preventDefault，不会落进 textarea，也就不会走到这里
-      if (ie.inputType === "insertText" && ie.data) term.input(ie.data);
-      textarea.value = "";
-    });
+function sameAppearance(a: RioAppearance, b: RioAppearance): boolean {
+  return (
+    a.fontFamily === b.fontFamily &&
+    a.fontSize === b.fontSize &&
+    a.lineHeight === b.lineHeight &&
+    a.cursorStyle === b.cursorStyle &&
+    a.cursorBlink === b.cursorBlink &&
+    a.theme === b.theme
+  );
+}
+
+/** 沙箱 iframe 里连 `localStorage` 这个属性读取都会抛 SecurityError */
+function safeLocalStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
   }
-
-  private openOptions(): RioOpenOptions {
-    return {
-      renderer: "canvas",
-      // 尺寸自己驱动：格子没量准前不能把假尺寸发给 PTY（见 termFit.ts）
-      fit: false,
-      autoFocus: false,
-      scrollback: this.scrollback,
-      fontFamily: termFontStack(this.pref),
-      fontSize: this.pref.fontSize,
-      lineHeight: this.pref.lineHeight,
-      cursorStyle: this.pref.cursorStyle,
-      theme: toRioTheme(this.theme),
-      // 对齐 xterm 的 WebLinksAddon：点链接直接开新页，不弹 confirm
-      linkHandler: {
-        activate: (uri) => void window.open(uri, "_blank", "noopener,noreferrer"),
-      },
-    };
-  }
-}
-
-/** xterm.js 的默认 ANSI 16 色（Tango）。跟随主题只定义底/字时补齐 rio 要求的全量字段 */
-const XTERM_DEFAULT_ANSI = {
-  black: "#2e3436",
-  red: "#cc0000",
-  green: "#4e9a06",
-  yellow: "#c4a000",
-  blue: "#3465a4",
-  magenta: "#75507b",
-  cyan: "#06989a",
-  white: "#d3d7cf",
-  brightBlack: "#555753",
-  brightRed: "#ef2929",
-  brightGreen: "#8ae234",
-  brightYellow: "#fce94f",
-  brightBlue: "#729fcf",
-  brightMagenta: "#ad7fa8",
-  brightCyan: "#34e2e2",
-  brightWhite: "#eeeeec",
-} as const;
-
-/** #rgb / #rrggbb / #rrggbbaa。非法输入返回 undefined，调用方原样透传。 */
-function parseHex(hex: string): { r: number; g: number; b: number; a: number } | undefined {
-  const m = /^#([\da-f]{3}|[\da-f]{6}|[\da-f]{8})$/i.exec(hex.trim());
-  if (!m) return undefined;
-  let h = m[1]!;
-  if (h.length === 3) h = `${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`;
-  const n = (i: number) => parseInt(h.slice(i, i + 2), 16);
-  return { r: n(0), g: n(2), b: n(4), a: h.length === 8 ? n(6) / 255 : 1 };
-}
-
-/**
- * 带 alpha 的颜色与底色预混合成不透明 #rrggbb。
- *
- * rio 的 canvas 渲染器每帧不清屏、选区背景直接 fillRect：半透明色会跨帧
- * 累积叠加——拖选时选区一帧比一帧白，最后把文字整个洗掉。混成不透明色
- * 从根上避开，观感与 xterm 把同一半透明色叠在纯色底上一致。
- */
-function opaqueOver(color: string, base: string): string {
-  const c = parseHex(color);
-  if (!c || c.a >= 1) return color;
-  const b = parseHex(base) ?? { r: 0, g: 0, b: 0 };
-  const mix = (x: number, y: number) =>
-    Math.round(x * c.a + y * (1 - c.a))
-      .toString(16)
-      .padStart(2, "0");
-  return `#${mix(c.r, b.r)}${mix(c.g, b.g)}${mix(c.b, b.b)}`;
-}
-
-function toRioTheme(t: ITheme): RioTheme {
-  const foreground = t.foreground ?? "#ffffff";
-  const background = t.background ?? "#000000";
-  return {
-    foreground,
-    background,
-    cursor: t.cursor ?? foreground,
-    // rio 把选中文字统一染成 selectionForeground；xterm 是半透明覆盖不改字色，
-    // 没配置时取 foreground 最接近原观感
-    selectionForeground: t.selectionForeground ?? foreground,
-    selectionBackground: opaqueOver(t.selectionBackground ?? "#3465a4", background),
-    black: t.black ?? XTERM_DEFAULT_ANSI.black,
-    red: t.red ?? XTERM_DEFAULT_ANSI.red,
-    green: t.green ?? XTERM_DEFAULT_ANSI.green,
-    yellow: t.yellow ?? XTERM_DEFAULT_ANSI.yellow,
-    blue: t.blue ?? XTERM_DEFAULT_ANSI.blue,
-    magenta: t.magenta ?? XTERM_DEFAULT_ANSI.magenta,
-    cyan: t.cyan ?? XTERM_DEFAULT_ANSI.cyan,
-    white: t.white ?? XTERM_DEFAULT_ANSI.white,
-    brightBlack: t.brightBlack ?? XTERM_DEFAULT_ANSI.brightBlack,
-    brightRed: t.brightRed ?? XTERM_DEFAULT_ANSI.brightRed,
-    brightGreen: t.brightGreen ?? XTERM_DEFAULT_ANSI.brightGreen,
-    brightYellow: t.brightYellow ?? XTERM_DEFAULT_ANSI.brightYellow,
-    brightBlue: t.brightBlue ?? XTERM_DEFAULT_ANSI.brightBlue,
-    brightMagenta: t.brightMagenta ?? XTERM_DEFAULT_ANSI.brightMagenta,
-    brightCyan: t.brightCyan ?? XTERM_DEFAULT_ANSI.brightCyan,
-    brightWhite: t.brightWhite ?? XTERM_DEFAULT_ANSI.brightWhite,
-  };
 }
