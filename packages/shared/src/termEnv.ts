@@ -43,7 +43,7 @@ export function appearanceFromHex(hex: string | undefined): TermAppearance {
   return hexLuminance(hex ?? "#000000") > 0.5 ? "light" : "dark";
 }
 
-/** 跟随界面时的默认底/字，跟 web MATCH_THEMES 对齐。 */
+/** 深浅线索到了、底字没到时的兜底，与 web 的 Falcon Dark / Falcon Light（lib/theme/catalog.ts）对齐。 */
 const FALLBACK: Record<TermAppearance, { bg: string; fg: string }> = {
   dark: { bg: "#0a0a0a", fg: "#fafafa" },
   light: { bg: "#ffffff", fg: "#171717" },

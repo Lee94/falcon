@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   PanelLeft,
   Plus,
+  Palette,
   Settings,
   ShieldCheck,
   TerminalIcon,
@@ -222,6 +223,12 @@ export function CommandPalette() {
         run: () => store.setTheme(pref),
       })
     );
+    actionItems.push({
+      key: `>${t("palette.pickTheme")} theme ghostty`,
+      label: t("palette.pickTheme"),
+      icon: Palette,
+      run: () => store.openSettings("appearance"),
+    });
     actionItems.push({
       key: `>${t("palette.setPassword")}`,
       label: t("palette.setPassword"),

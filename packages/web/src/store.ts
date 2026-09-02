@@ -14,21 +14,25 @@ import type {
 import { toast as sonner } from "sonner";
 import { api, ApiRequestError } from "./api.js";
 import i18n from "./i18n.js";
+import { applyThemeToDom, systemPrefersDark, watchSystemTheme } from "./lib/theme/apply.js";
+import { findTheme, loadCatalog } from "./lib/theme/catalog.js";
+import { deriveTheme, type ResolvedTheme } from "./lib/theme/derive.js";
 import {
-  applyTheme,
-  loadThemePref,
-  resolveTheme,
-  saveThemePref,
-  watchSystemTheme,
+  DEFAULT_THEME_SETTINGS,
+  choiceOf,
+  loadThemeSettings,
+  resolveThemeMode,
+  saveThemeSettings,
+  type ThemeChoice,
   type ThemeMode,
   type ThemePref,
-} from "./lib/theme.js";
+  type ThemeSettings,
+} from "./lib/theme/pref.js";
 import {
   DEFAULT_TERM_PREF,
   loadTermPref,
   saveTermPref,
   sanitizeTermPref,
-  termColorHint,
   type TermPref,
 } from "./lib/term.js";
 import { PANEL_WIDTH_DEFAULT, clampPanelWidth, parsePanelWidth } from "./lib/panelWidth.js";
@@ -375,8 +379,31 @@ function loadWorkspace(): PersistedWorkspace {
 }
 
 const initialWorkspace = loadWorkspace();
-const initialThemePref = loadThemePref();
+const initialThemes = loadThemeSettings(safeStorage());
 const initialTermPref = loadTermPref();
+
+/** 沙箱 iframe 里连 `localStorage` 这个属性读取都会抛 SecurityError */
+function safeStorage(): Storage | undefined {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 主题槽位 → 派生结果，按槽位对象引用缓存：TerminalView 把 activeTheme.xterm 交给
+ * 适配器，rio 那边按引用比对判断要不要重建渲染器，同一套主题必须给同一个对象。
+ */
+const resolvedThemes = new WeakMap<ThemeChoice, ResolvedTheme>();
+function resolveChoice(choice: ThemeChoice): ResolvedTheme {
+  let resolved = resolvedThemes.get(choice);
+  if (!resolved) {
+    resolved = deriveTheme(choice.colors);
+    resolvedThemes.set(choice, resolved);
+  }
+  return resolved;
+}
 
 let pendingSeq = 0;
 /** 本次页面加载内只解释一次"关 tab 会结束会话"，"不再提示"才写 localStorage */
@@ -543,10 +570,17 @@ interface AppState {
   /** 已打开的文件查看 tab，从左到右 */
   fileTabs: FileTabTarget[];
 
-  /** 用户的主题偏好（持久化）与它此刻实际解析成的明暗 */
+  /** 明暗模式偏好（持久化）与它此刻实际解析成的槽位 */
   themePref: ThemePref;
-  theme: ThemeMode;
-  /** 终端画面偏好（字体 / 字号 / 主题），与界面主题分开存 */
+  themeMode: ThemeMode;
+  /** 浅色 / 深色槽位各放一套主题（持久化，含颜色副本） */
+  themes: Pick<ThemeSettings, "light" | "dark">;
+  /**
+   * 此刻整个应用（界面 + 终端）用的主题：正常是 themes[themeMode] 的派生结果；
+   * 主题选择器里高亮某一项时临时换成预览的那套，关掉选择器就复原
+   */
+  activeTheme: ResolvedTheme;
+  /** 终端画面偏好（字体 / 字号 / 光标 / 引擎），配色不在这里 */
   term: TermPref;
 
   /** 用户的侧栏偏好（持久化） */
@@ -640,6 +674,11 @@ interface AppState {
   cycleTab(delta: number): void;
 
   setTheme(pref: ThemePref): void;
+  /** 给某个槽位换主题，立刻生效并持久化 */
+  setThemeChoice(slot: ThemeMode, choice: ThemeChoice): void;
+  /** 临时把整个应用换成某套主题看效果；null 复原。不持久化 */
+  previewTheme(choice: ThemeChoice | null): void;
+  resetThemes(): void;
   setTerm(patch: Partial<TermPref>): void;
   resetTerm(): void;
   toggleSidebar(): void;
@@ -747,8 +786,12 @@ export const useApp = create<AppState>((set, get) => {
     diffTab: null,
     fileTabs: [],
 
-    themePref: initialThemePref,
-    theme: resolveTheme(initialThemePref),
+    themePref: initialThemes.settings.mode,
+    themeMode: resolveThemeMode(initialThemes.settings.mode, systemPrefersDark()),
+    themes: { light: initialThemes.settings.light, dark: initialThemes.settings.dark },
+    activeTheme: resolveChoice(
+      initialThemes.settings[resolveThemeMode(initialThemes.settings.mode, systemPrefersDark())]
+    ),
     term: initialTermPref,
 
     sidebarOpen: initialWorkspace.sidebarOpen,
@@ -1105,10 +1148,35 @@ export const useApp = create<AppState>((set, get) => {
 
     /** 主题偏好单独存一个 key：换主题不该把工作区布局也写回去一遍 */
     setTheme(pref) {
-      const mode = resolveTheme(pref);
-      saveThemePref(pref);
-      applyTheme(mode);
-      set({ themePref: pref, theme: mode, menu: null, paletteOpen: false, quickOpen: false });
+      const mode = resolveThemeMode(pref, systemPrefersDark());
+      const { themes } = get();
+      saveThemeSettings(safeStorage(), { mode: pref, ...themes });
+      const activeTheme = resolveChoice(themes[mode]);
+      applyThemeToDom(activeTheme);
+      set({ themePref: pref, themeMode: mode, activeTheme, menu: null, paletteOpen: false, quickOpen: false });
+    },
+
+    setThemeChoice(slot, choice) {
+      const themes = { ...get().themes, [slot]: choice };
+      saveThemeSettings(safeStorage(), { mode: get().themePref, ...themes });
+      const activeTheme = resolveChoice(themes[get().themeMode]);
+      applyThemeToDom(activeTheme);
+      set({ themes, activeTheme });
+    },
+
+    previewTheme(choice) {
+      const activeTheme = resolveChoice(choice ?? get().themes[get().themeMode]);
+      if (activeTheme === get().activeTheme) return;
+      applyThemeToDom(activeTheme);
+      set({ activeTheme });
+    },
+
+    resetThemes() {
+      const themes = { light: DEFAULT_THEME_SETTINGS.light, dark: DEFAULT_THEME_SETTINGS.dark };
+      saveThemeSettings(safeStorage(), { mode: get().themePref, ...themes });
+      const activeTheme = resolveChoice(themes[get().themeMode]);
+      applyThemeToDom(activeTheme);
+      set({ themes, activeTheme });
     },
 
     setTerm(patch) {
@@ -1318,7 +1386,7 @@ export const useApp = create<AppState>((set, get) => {
         paletteOpen: false, quickOpen: false,
       }));
       try {
-        const session = await api.createSession(projectId, termColorHint(get().term.themeId, get().theme));
+        const session = await api.createSession(projectId, get().activeTheme.hint);
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
@@ -1348,10 +1416,7 @@ export const useApp = create<AppState>((set, get) => {
         ),
       }));
       try {
-        const session = await api.createSession(
-          entry.projectId,
-          termColorHint(get().term.themeId, get().theme)
-        );
+        const session = await api.createSession(entry.projectId, get().activeTheme.hint);
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
@@ -1380,14 +1445,31 @@ export const useApp = create<AppState>((set, get) => {
   };
 });
 
-// index.html 的内联脚本已经按同一份偏好写过 class 了，这里再落一次是为了兜住
-// 那段脚本读不到 localStorage 的情况——两边算出来的结果必须一致。
-applyTheme(useApp.getState().theme);
+// index.html 的内联脚本只写了底色 / 字色与 .dark，整套 token 在这里落；
+// 两边对深浅的判断必须一致（都按底色亮度）。
+applyThemeToDom(useApp.getState().activeTheme);
+// 旧格式第一次升级：把迁移出来的新格式写回去，之后内联脚本就能直接读到
+if (!safeStorage()?.getItem("falcon.themes")) {
+  const { themePref, themes } = useApp.getState();
+  saveThemeSettings(safeStorage(), { mode: themePref, ...themes });
+}
+// 旧版终端单独配色能对上 Ghostty 内置主题的，拉目录后补进对应槽位（一次性）
+if (initialThemes.legacyTerm) {
+  const { slot, name } = initialThemes.legacyTerm;
+  void loadCatalog()
+    .then((entries) => {
+      const entry = findTheme(entries, name);
+      if (entry) useApp.getState().setThemeChoice(slot, choiceOf(entry));
+    })
+    .catch(() => undefined);
+}
 
 // 跟随系统时才响应；选定了浅色/深色的用户不该因为系统入夜就被换掉主题
-watchSystemTheme((mode) => {
-  const { themePref, theme } = useApp.getState();
-  if (themePref !== "system" || theme === mode) return;
-  applyTheme(mode);
-  useApp.setState({ theme: mode });
+watchSystemTheme((dark) => {
+  const { themePref, themeMode, themes } = useApp.getState();
+  const mode: ThemeMode = dark ? "dark" : "light";
+  if (themePref !== "system" || themeMode === mode) return;
+  const activeTheme = resolveChoice(themes[mode]);
+  applyThemeToDom(activeTheme);
+  useApp.setState({ themeMode: mode, activeTheme });
 });

@@ -9,10 +9,10 @@ import { Toaster as Sonner, type ToasterProps } from "sonner"
 
 import { useApp } from "@/store.js"
 
-// 不接 next-themes：明暗已经在 store 里了，再引一层 provider 只是重复一份状态。
+// 不接 next-themes：明暗已经在 store 里了（按当前主题的实际深浅，不按明暗模式），再引一层 provider 只是重复一份状态。
 // description 用 pre-line —— 残留路径这类 body 是多行的，折行了才读得出来。
 const Toaster = ({ ...props }: ToasterProps) => {
-  const theme = useApp((s) => s.theme)
+  const theme = useApp((s) => s.activeTheme.appearance)
 
   return (
     <Sonner

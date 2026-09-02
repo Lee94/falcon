@@ -23,32 +23,65 @@
     <meta name="apple-mobile-web-app-title" content="Falcon" />
     <!--
       主题在解析到 <body> 之前就定下来：晚一帧就会白闪一下，深色用户在夜里
-      被闪到是很难受的。key 与取值必须与 src/lib/theme.ts 保持一致。
+      被闪到是很难受的。这时 body 还是空的，看得见的只有 html 的底色，所以
+      这里只写 --background / --foreground 与 .dark，整套 token 等 React 起来后
+      由 src/lib/theme/apply.ts 落。偏好的 key 与结构必须与 src/lib/theme/pref.ts
+      一致：falcon.themes = { mode, light: { colors }, dark: { colors } }；
+      深浅按选中主题的底色亮度判（与 @falcon/shared 的 appearanceFromHex 同一公式）。
       样式表是异步加载的，所以这里也顺带把 html 的底色兜住。
     -->
     <style>
       html {
-        background: #ffffff;
+        background: var(--background, #ffffff);
         color-scheme: light;
       }
       html.dark {
-        background: #0a0a0a;
+        background: var(--background, #0a0a0a);
         color-scheme: dark;
       }
     </style>
     <script>
       (function () {
+        var root = document.documentElement;
+        var bg = "#ffffff";
+        var fg = "#171717";
+        var dark = false;
         try {
-          var pref = localStorage.getItem("falcon.theme") || localStorage.getItem("mojito.theme");
-          var dark =
-            pref === "dark" ||
-            (pref !== "light" &&
-              window.matchMedia("(prefers-color-scheme: dark)").matches);
-          if (dark) document.documentElement.classList.add("dark");
-          var theme = document.querySelector('meta[name="theme-color"]');
-          if (theme) theme.setAttribute("content", dark ? "#0a0a0a" : "#ffffff");
+          var raw = localStorage.getItem("falcon.themes");
+          var pref = raw ? JSON.parse(raw) : null;
+          var mode = pref && pref.mode;
+          if (mode !== "light" && mode !== "dark" && mode !== "system") {
+            // 旧版只存明暗模式；第一次升级后 React 会把新格式写回去
+            mode = localStorage.getItem("falcon.theme") || localStorage.getItem("mojito.theme");
+          }
+          var system = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var slot = mode === "light" || mode === "dark" ? mode : system ? "dark" : "light";
+          var colors = pref && pref[slot] && pref[slot].colors;
+          var hex = /^#[0-9a-f]{6}$/i;
+          if (colors && hex.test(colors.background) && hex.test(colors.foreground)) {
+            bg = colors.background;
+            fg = colors.foreground;
+            dark = luminance(bg) <= 0.5;
+          } else {
+            dark = slot === "dark";
+            bg = dark ? "#0a0a0a" : "#ffffff";
+            fg = dark ? "#fafafa" : "#171717";
+          }
         } catch (e) {
           // 读不到偏好就用浅色，等 React 起来后再由 store 纠正
+        }
+        root.style.setProperty("--background", bg);
+        root.style.setProperty("--foreground", fg);
+        if (dark) root.classList.add("dark");
+        var theme = document.querySelector('meta[name="theme-color"]');
+        if (theme) theme.setAttribute("content", bg);
+
+        function luminance(hex) {
+          var lin = function (i) {
+            var s = parseInt(hex.slice(i, i + 2), 16) / 255;
+            return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+          };
+          return 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
         }
       })();
     </script>

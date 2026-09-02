@@ -1,35 +1,43 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  TERM_THEME_GROUPS,
-  appearanceFromTheme,
-  resolveTermTheme,
-  type TermThemeId,
-} from "./term.js";
+import { DEFAULT_TERM_PREF, MAPLE_FONT_FAMILY, NERD_FONT_FAMILY, sanitizeTermPref, termFontStack } from "./term.js";
 
-describe("appearanceFromTheme", () => {
-  it("match 跟随界面", () => {
-    assert.equal(appearanceFromTheme(resolveTermTheme("match", "dark")), "dark");
-    assert.equal(appearanceFromTheme(resolveTermTheme("match", "light")), "light");
+describe("sanitizeTermPref", () => {
+  it("空对象就是默认", () => {
+    assert.deepEqual(sanitizeTermPref({}), DEFAULT_TERM_PREF);
   });
 
-  it("固定配色按底色判深浅，不跟界面走", () => {
-    const darkIds = TERM_THEME_GROUPS.find((g) => g.id === "dark")!.themes;
-    const lightIds = TERM_THEME_GROUPS.find((g) => g.id === "light")!.themes;
-    for (const id of darkIds) {
-      assert.equal(appearanceFromTheme(resolveTermTheme(id, "light")), "dark", id);
-    }
-    for (const id of lightIds) {
-      assert.equal(appearanceFromTheme(resolveTermTheme(id, "dark")), "light", id);
-    }
+  it("旧版的 themeId 直接丢掉，其余字段照常", () => {
+    const pref = sanitizeTermPref({ fontSize: 16, themeId: "dracula", engine: "rio" } as Partial<typeof DEFAULT_TERM_PREF>);
+    assert.equal(pref.fontSize, 16);
+    assert.equal(pref.engine, "rio");
+    assert.ok(!("themeId" in pref));
   });
 
-  it("covers every catalogued theme id", () => {
-    const ids = TERM_THEME_GROUPS.flatMap((g) => g.themes);
-    assert.ok(ids.includes("match"));
-    for (const id of ids as TermThemeId[]) {
-      const appearance = appearanceFromTheme(resolveTermTheme(id, "dark"));
-      assert.ok(appearance === "light" || appearance === "dark", id);
-    }
+  it("越界值夹回范围，非法枚举回默认", () => {
+    const pref = sanitizeTermPref({ fontSize: 99, lineHeight: 0.2, cursorStyle: "weird" as never, fontId: "nope" as never });
+    assert.equal(pref.fontSize, 24);
+    assert.equal(pref.lineHeight, 1);
+    assert.equal(pref.cursorStyle, "block");
+    assert.equal(pref.fontId, "maple");
+  });
+});
+
+describe("termFontStack", () => {
+  it("图标字体永远打头，Maple 紧随其后", () => {
+    const stack = termFontStack(DEFAULT_TERM_PREF);
+    assert.ok(stack.startsWith(`"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}"`), stack);
+  });
+  it("自定义字体夹在图标字体与 Maple 之间，空的退回 Maple", () => {
+    assert.ok(
+      termFontStack({ ...DEFAULT_TERM_PREF, fontId: "custom", customFamily: "Sarasa Term SC" }).startsWith(
+        `"${NERD_FONT_FAMILY}", "Sarasa Term SC", "${MAPLE_FONT_FAMILY}"`
+      )
+    );
+    assert.ok(
+      termFontStack({ ...DEFAULT_TERM_PREF, fontId: "custom", customFamily: "  " }).startsWith(
+        `"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}"`
+      )
+    );
   });
 });

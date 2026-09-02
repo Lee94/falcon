@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Monitor, Moon, Sun, type LucideIcon } from "lucide-react";
 import { useApp } from "../../store.js";
-import type { ThemePref } from "../../lib/theme.js";
+import type { ThemePref } from "../../lib/theme/pref.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { menuAnchor } from "./Menu.js";

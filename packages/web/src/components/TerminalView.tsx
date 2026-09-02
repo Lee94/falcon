@@ -9,8 +9,6 @@ import { chord, matchCommand } from "../lib/shortcuts.js";
 import {
   MAPLE_FONT_FAMILY,
   NERD_FONT_FAMILY,
-  resolveTermTheme,
-  termColorHint,
 } from "../lib/term.js";
 import {
   createTermAdapter,
@@ -82,13 +80,13 @@ export function TerminalView({
   const newTerminal = useApp((s) => s.newTerminal);
   const dropTab = useApp((s) => s.dropTab);
   const toast = useApp((s) => s.toast);
-  const theme = useApp((s) => s.theme);
   const termPref = useApp((s) => s.term);
+  // 终端配色 = 当前应用主题（含选择器里的预览），对象引用稳定，适配器按引用去重
+  const palette = useApp((s) => s.activeTheme.xterm);
   // 引擎切换必须整体重建（终端实例 + WS 重连拿服务端 replay 恢复内容），
   // 单独订阅避免其余偏好变化也触发重建
   const termEngine = useApp((s) => s.term.engine);
   const actions = useActions();
-  const palette = resolveTermTheme(termPref.themeId, theme);
 
   const [view, setView] = useState<ViewState>({
     session: "active",
@@ -146,7 +144,7 @@ export function TerminalView({
     // applyAppearance（xterm 就地改 options，rio 内部重建），不断 WS
     const adapter = createTermAdapter({
       pref,
-      theme: resolveTermTheme(pref.themeId, useApp.getState().theme),
+      theme: useApp.getState().activeTheme.xterm,
       // 与服务端 zellij scroll_buffer_size（10000）匹配：replay 重建时前端
       // 缓冲会被整体替换，设得比远端小就白白丢历史
       scrollback: 10000,
@@ -204,8 +202,7 @@ export function TerminalView({
 
     const sendAppearance = () => {
       if (ws?.readyState !== WebSocket.OPEN) return;
-      const { theme: ui, term: pref } = useApp.getState();
-      ws.send(JSON.stringify({ type: "appearance", ...termColorHint(pref.themeId, ui) }));
+      ws.send(JSON.stringify({ type: "appearance", ...useApp.getState().activeTheme.hint }));
     };
     sendAppearanceRef.current = sendAppearance;
 

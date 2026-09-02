@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { langForFence, langForPath, splitCodeLines } from "./highlight.js";
+import { langForFence, langForPath, splitCodeLines, tokenStyle } from "./highlight.js";
 
 test("langForPath 按扩展名认语言，别名归一到规范 id", () => {
   assert.equal(langForPath("packages/web/src/store.ts"), "typescript");
@@ -44,4 +44,18 @@ test("splitCodeLines 吞掉末尾换行的幽灵空行，保留中间空行", ()
   assert.deepEqual(splitCodeLines("a\nb\n"), ["a", "b"]);
   assert.deepEqual(splitCodeLines("a\n\nb"), ["a", "", "b"]);
   assert.deepEqual(splitCodeLines("a"), ["a"]);
+});
+
+test("tokenStyle 把 shiki 单主题 token 拼成 React style，颜色是 CSS 变量引用原样透传", () => {
+  assert.deepEqual(tokenStyle({ color: "var(--shiki-token-keyword)", fontStyle: 0 }), {
+    color: "var(--shiki-token-keyword)",
+  });
+  assert.deepEqual(tokenStyle({ color: "var(--shiki-token-link)", fontStyle: 1 | 2 | 4 }), {
+    color: "var(--shiki-token-link)",
+    fontStyle: "italic",
+    fontWeight: "bold",
+    textDecoration: "underline",
+  });
+  assert.equal(tokenStyle({ fontStyle: -1 }), undefined);
+  assert.equal(tokenStyle({}), undefined);
 });

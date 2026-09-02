@@ -13,18 +13,16 @@ import {
   TERM_LINE_HEIGHT_MAX,
   TERM_LINE_HEIGHT_MIN,
   DEFAULT_TERM_PREF,
-  TERM_THEME_GROUPS,
-  TERM_THEME_LABELS,
   clampFontSize,
   clampLineHeight,
-  resolveTermTheme,
   termFontStack,
   type TermCursorStyle,
   type TermEngine,
   type TermFontId,
   type TermPref,
-  type TermThemeId,
 } from "../lib/term.js";
+import { isDefaultThemeSettings } from "../lib/theme/pref.js";
+import { GHOSTTY_THEMES_COUNT, GHOSTTY_THEMES_ORIGIN } from "../lib/theme/catalog.js";
 import { useActions } from "../lib/useActions.js";
 import { browserGpuEnv, webgpuAvailable } from "../lib/rio/gpu.js";
 import { useInstall } from "../lib/useInstall.js";
@@ -35,9 +33,7 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -51,6 +47,7 @@ import {
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ThemeChoice } from "./common/ThemeToggle.js";
+import { ThemePicker } from "./ThemePicker.js";
 import { Field, Segmented } from "./common/Field.js";
 
 interface TabDef {
@@ -186,6 +183,9 @@ function AppearancePane() {
   const term = useApp((s) => s.term);
   const setTerm = useApp((s) => s.setTerm);
   const resetTerm = useApp((s) => s.resetTerm);
+  const themes = useApp((s) => s.themes);
+  const resetThemes = useApp((s) => s.resetThemes);
+  const themesDefault = isDefaultThemeSettings({ mode: "system", ...themes });
 
   return (
     <>
@@ -193,6 +193,20 @@ function AppearancePane() {
         <SettingRow label={t("theme.label")} hint={t("settings.themeHint")}>
           <ThemeChoice />
         </SettingRow>
+        <SettingRow label={t("theme.lightTheme")} hint={t("theme.lightThemeHint")}>
+          <ThemePicker slot="light" />
+        </SettingRow>
+        <SettingRow label={t("theme.darkTheme")} hint={t("theme.darkThemeHint")}>
+          <ThemePicker slot="dark" />
+        </SettingRow>
+        <div className="flex items-center justify-between gap-3 pt-3">
+          <span className="text-xs text-muted-foreground">
+            {t("theme.ghosttyOrigin", { n: GHOSTTY_THEMES_COUNT, origin: GHOSTTY_THEMES_ORIGIN })}
+          </span>
+          <Button variant="outline" size="xs" disabled={themesDefault} onClick={() => resetThemes()}>
+            {t("theme.resetThemes")}
+          </Button>
+        </div>
       </SettingSection>
       <SettingSection title={t("settings.terminalTitle")} description={t("settings.terminalHint")}>
         <SettingRow label={t("settings.termFont")} hint={t("settings.termFontHint")}>
@@ -262,31 +276,6 @@ function AppearancePane() {
             aria-label={t("settings.termCursorBlink")}
           />
         </SettingRow>
-        <SettingRow label={t("settings.termTheme")} hint={t("settings.termThemeHint")}>
-          <Select
-            value={term.themeId}
-            onValueChange={(id) => setTerm({ themeId: id as TermThemeId })}
-          >
-            <SelectTrigger size="sm" className="w-64">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent align="end" position="popper" className="w-64">
-              {TERM_THEME_GROUPS.map((group) => (
-                <SelectGroup key={group.id}>
-                  <SelectLabel>{t(`term.themeGroup_${group.id}`)}</SelectLabel>
-                  {group.themes.map((id) => (
-                    <SelectItem key={id} value={id}>
-                      <span className="flex items-center gap-2">
-                        <ThemeSwatch id={id} />
-                        {id === "match" ? t("term.theme_match") : TERM_THEME_LABELS[id]}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              ))}
-            </SelectContent>
-          </Select>
-        </SettingRow>
         <div className="pt-4">
           <div className="mb-2 flex items-center justify-between gap-3">
             <div className="text-sm">{t("settings.termPreview")}</div>
@@ -343,24 +332,9 @@ function ansi(theme: ITheme, key: keyof typeof PREVIEW_ANSI): string {
   return theme[key] ?? PREVIEW_ANSI[key];
 }
 
-function ThemeSwatch({ id }: { id: TermThemeId }) {
-  const ui = useApp((s) => s.theme);
-  const theme = resolveTermTheme(id, ui);
-  return (
-    <span
-      aria-hidden
-      className="inline-flex size-3.5 shrink-0 overflow-hidden rounded-sm border border-black/15 dark:border-white/20"
-    >
-      <span className="h-full w-1/2" style={{ background: theme.background }} />
-      <span className="h-full w-1/2" style={{ background: theme.foreground }} />
-    </span>
-  );
-}
-
 function TermPreview() {
   const term = useApp((s) => s.term);
-  const ui = useApp((s) => s.theme);
-  const theme = resolveTermTheme(term.themeId, ui);
+  const theme = useApp((s) => s.activeTheme.xterm);
   return (
     <div
       className="overflow-hidden rounded-md border"
@@ -405,7 +379,6 @@ function termIsDefault(term: TermPref): boolean {
     term.customFamily === DEFAULT_TERM_PREF.customFamily &&
     term.fontSize === DEFAULT_TERM_PREF.fontSize &&
     term.lineHeight === DEFAULT_TERM_PREF.lineHeight &&
-    term.themeId === DEFAULT_TERM_PREF.themeId &&
     term.cursorStyle === DEFAULT_TERM_PREF.cursorStyle &&
     term.cursorBlink === DEFAULT_TERM_PREF.cursorBlink &&
     term.engine === DEFAULT_TERM_PREF.engine

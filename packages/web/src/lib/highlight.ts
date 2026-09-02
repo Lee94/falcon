@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { GrammarState } from "shiki/core";
+import type { GrammarState, ThemedToken } from "shiki/core";
 
 /**
  * 文件查看 / Markdown 代码块的语法高亮。
@@ -15,12 +15,35 @@ import type { GrammarState } from "shiki/core";
  * 表现为那一小段没颜色——比整个语言拒绝加载好。
  */
 
-/** shiki ThemedToken 的结构子集：渲染只认这两个字段，别的不背 */
+/** 渲染只认这两个字段：文本与一份 React style 对象 */
 export interface HlToken {
   content: string;
   htmlStyle?: Record<string, string>;
 }
 export type HlLine = HlToken[];
+
+/** shiki 的 FontStyle 位（@shikijs/vscode-textmate），只认前三个 */
+const FONT_ITALIC = 1;
+const FONT_BOLD = 2;
+const FONT_UNDERLINE = 4;
+
+/**
+ * ThemedToken → React style。单主题模式下 shiki 只给 color / fontStyle，不给 htmlStyle
+ * （那是多主题 + defaultColor:false 才有的），这里自己拼；color 是
+ * `var(--shiki-token-xxx)`，原样透传给 style.color 就行。
+ */
+export function tokenStyle(t: Pick<ThemedToken, "color" | "bgColor" | "fontStyle">): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  if (t.color) out.color = t.color;
+  if (t.bgColor) out.backgroundColor = t.bgColor;
+  const fs = t.fontStyle ?? 0;
+  if (fs > 0) {
+    if (fs & FONT_ITALIC) out.fontStyle = "italic";
+    if (fs & FONT_BOLD) out.fontWeight = "bold";
+    if (fs & FONT_UNDERLINE) out.textDecoration = "underline";
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 /**
  * 超过这个字符数不高亮（0.8ms/行的 tokenize，512KB ≈ 1.5 万行 ≈ 十几秒
@@ -34,7 +57,13 @@ const CHUNK_LINES = 64;
 /** 超长行（minified、base64 内联……）整行按纯文本放行，不喂正则引擎 */
 const MAX_TOKEN_LINE = 2000;
 
-const THEMES = { light: "github-light-default", dark: "github-dark-default" } as const;
+/**
+ * 只装一个"主题"：shiki 的 css-variables 主题把每种 token 的颜色写成
+ * `var(--shiki-token-xxx)`，变量值由当前应用主题派生（lib/theme/derive.ts）写在
+ * <html> 上。于是高亮色跟着终端调色板走，换主题不用重新 tokenize，也不用再
+ * 为明暗各装一套 github 主题。
+ */
+const CSS_THEME = "falcon-css-variables";
 
 /**
  * 行切分的唯一定义。高亮结果按行下标对齐回原文，CodePane / CodeBlock
@@ -183,17 +212,10 @@ let corePromise: Promise<Core> | null = null;
 
 function loadCore(): Promise<Core> {
   corePromise ??= (async () => {
-    const [{ createHighlighterCore }, { createJavaScriptRegexEngine }] = await Promise.all([
-      import("shiki/core"),
-      import("shiki/engine/javascript"),
-    ]);
+    const [{ createHighlighterCore, createCssVariablesTheme }, { createJavaScriptRegexEngine }] =
+      await Promise.all([import("shiki/core"), import("shiki/engine/javascript")]);
     return createHighlighterCore({
-      // 两个主题一次装齐：defaultColor:false 时每个 token 同时带明暗两色，
-      // 切主题纯靠 CSS 变量（见 styles.css 的 .code-hl），不用重新 tokenize
-      themes: [
-        import("shiki/themes/github-light-default.mjs"),
-        import("shiki/themes/github-dark-default.mjs"),
-      ],
+      themes: [createCssVariablesTheme({ name: CSS_THEME, variablePrefix: "--shiki-", fontStyle: true })],
       langs: [],
       engine: createJavaScriptRegexEngine({ forgiving: true }),
     });
@@ -246,15 +268,16 @@ export function useHighlight(text: string, lang: string | null): HlLine[] | null
       for (let i = 0; i < src.length; i += CHUNK_LINES) {
         const res = hl.codeToTokens(src.slice(i, i + CHUNK_LINES).join("\n"), {
           lang,
-          themes: THEMES,
-          defaultColor: false,
+          theme: CSS_THEME,
           grammarState: state,
           tokenizeMaxLineLength: MAX_TOKEN_LINE,
         });
         // 块与块之间必须续接语法状态：块尾正好切在模板字符串 / 块注释里时，
         // 下一块从干净状态起步会整段上错色
         state = res.grammarState;
-        out.push(...res.tokens);
+        for (const line of res.tokens) {
+          out.push(line.map((tok) => ({ content: tok.content, htmlStyle: tokenStyle(tok) })));
+        }
         if (cancelled) return;
         setLines(out.slice());
         if (i + CHUNK_LINES < src.length) await new Promise((r) => setTimeout(r));
