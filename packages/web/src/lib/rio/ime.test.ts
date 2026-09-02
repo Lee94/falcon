@@ -17,6 +17,7 @@ describe("imeCursorRect", () => {
       top: 54.75,
       width: 9.5,
       height: 18.25,
+      maxWidth: 712.5,
     });
   });
 
@@ -26,7 +27,14 @@ describe("imeCursorRect", () => {
       top: 0,
       width: 9.5,
       height: 18.25,
+      maxWidth: 9.5,
     });
+  });
+
+  it("caps the preedit overlay at the right edge of the grid", () => {
+    const rect = imeCursorRect({ line: 0, col: 0 }, grid);
+    assert.equal(rect?.maxWidth, 80 * 9.5);
+    assert.equal(imeCursorRect({ line: 0, col: 79 }, grid)?.maxWidth, 9.5);
   });
 
   it("does not move the live cursor anchor into a scrollback viewport", () => {

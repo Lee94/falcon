@@ -27,7 +27,7 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 - **字形位图只开 ink 盒那么大**（`measureText` 的 actualBoundingBox 四边各加 1px），保留溢出（斜体尾巴、Nerd 图标、CJK 回退字体）。emoji 不查 Unicode 表：永远画白字，彩色字体会无视 fillStyle，扫像素有色度就进 RGBA8 图集。
 - **盒线 / 块元素 / braille / powerline 程序化绘制**（`sprites.ts`）：字体里的盒线字形按字体自己的行盒设计，Maple Mono 的 ┼ 比 1.0 倍行高的格子高 50%，上下溢进邻行，回退字体又常与格宽对不齐。双线 junction 用 3×3 网格 + 停线规则复原 Unicode 图表里所有 ╒ ╤ ╔ ╬ 组合，见 `sprites.test.ts`。
 - **键盘分流**（`keyRoute.ts`）：IME 组合（`isComposing` / keyCode 229）与命中全局快捷键的按键既不 preventDefault 也不 stopPropagation，前者让组合文本落进 textarea 走 compositionend，后者让事件冒泡到 App 的 window 监听。⌘C / Ctrl+Shift+C 只在有选区时复制，与 rioterm 一致。
-- **IME 候选框锚点**（`ime.ts` / `open.ts`）：浏览器按接收 composition 的 textarea 定位系统候选框，不认 canvas/WebGPU 光标。隐藏 textarea 因此保留一个真实 cell 的尺寸，并按 `cursorPosition × cell metrics` 移到终端光标；当前 tab 的 `onUpdate` 按帧合并同步，换渲染器后立即按新 cell 重算，查看回滚区时沿用最后一个有效位置。
+- **IME 候选框锚点与预编辑层**（`ime.ts` / `open.ts`）：浏览器按接收 composition 的 textarea 定位系统候选框，不认 canvas/WebGPU 光标。隐藏 textarea 因此保留一个真实 cell 的尺寸，并按 `cursorPosition × cell metrics` 移到终端光标；当前 tab 的 `onUpdate` 按帧合并同步，换渲染器后立即按新 cell 重算，查看回滚区时沿用最后一个有效位置。组合中的拼音落在透明 textarea 里看不见，渲染器也画不了（组合串没进 PTY，WASM 里没有格子），所以照 xterm 的 composition-view 加一个 DOM 覆盖层：按终端字体与主题字/底色把 `compositionupdate.data` 画在光标格上，最多延伸到网格右边缘（rtl 容器 + LRM，超长时看到末尾），组合期间 textarea 与覆盖层同宽，候选框才锚在组合串末尾。
 - **滚轮攒余量**：rioterm 用 `Math.trunc(lines)`，触控板慢滚在 scrollback 里根本不动。
 - **`navigator.gpu` 只在 secure context 暴露**：这个项目常用 `http://<局域网 IP>:4923` 访问，那时它是 undefined，先查 `isSecureContext` 而不是等 `requestAdapter` 返回 null。`isFallbackAdapter` 新规范挪进了 `adapter.info`，两处都看。
 - **一个页面一个 GPUDevice**（`gpu.ts` 单例），pipeline 按 canvas format 挂在设备上共享；`getPreferredCanvasFormat()` 在 Safari 是 `bgra8unorm`，绝不硬编码。device lost 先重新 `requestAdapter` 原地重建，拿不到再退 canvas；`"destroyed"` 是我们主动 destroy 才有的原因，出现即忽略。

@@ -16,10 +16,12 @@ export interface ImeCursorRect {
   top: number;
   width: number;
   height: number;
+  /** 预编辑覆盖层从光标格起向右最多能延伸到网格右边缘的宽度 */
+  maxWidth: number;
 }
 
 /**
- * 把 Rio 的光标格子换成隐藏 textarea 的 CSS 像素位置。
+ * 把 Rio 的光标格子换成隐藏 textarea 与预编辑覆盖层的 CSS 像素位置。
  *
  * 浏览器把输入法候选框锚在真正接收 composition 事件的元素上，而不是 canvas
  * 画出的光标上。回滚区打开时实时光标不在 viewport 内，沿用上一个有效位置，
@@ -50,5 +52,7 @@ export function imeCursorRect(cursor: ImeCursor, grid: ImeGrid): ImeCursorRect |
     // 候选框才会自然落在当前行的下方。
     width: Math.max(1, cellWidth),
     height: Math.max(1, cellHeight),
+    // 组合串不换行，超出网格的部分由覆盖层自己裁掉，不能溢到终端外面
+    maxWidth: (Math.floor(cols) - col) * cellWidth,
   };
 }

@@ -77,9 +77,13 @@ function ansiOf(t: ITheme): Record<AnsiName, string> {
 
 const DEFAULT_SELECTION = "#3465a4";
 
+/** 主题的字/底色，没配置时与 xterm 同款默认（白字黑底）；两种渲染器与 IME 预编辑层共用 */
+export function themeBase(t: ITheme): { foreground: string; background: string } {
+  return { foreground: t.foreground ?? "#ffffff", background: t.background ?? "#000000" };
+}
+
 export function toRioTheme(t: ITheme): RioTheme {
-  const foreground = t.foreground ?? "#ffffff";
-  const background = t.background ?? "#000000";
+  const { foreground, background } = themeBase(t);
   return {
     foreground,
     background,
@@ -93,8 +97,7 @@ export function toRioTheme(t: ITheme): RioTheme {
 }
 
 export function toGpuTheme(t: ITheme): GpuTheme {
-  const foreground = t.foreground ?? "#ffffff";
-  const background = t.background ?? "#000000";
+  const { foreground, background } = themeBase(t);
   return {
     foreground,
     background,

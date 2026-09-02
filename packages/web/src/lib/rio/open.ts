@@ -12,7 +12,8 @@
  * - 渲染器由 renderer.ts 的工厂创建，WebGPU 不可用或构造失败回落 canvas；
  * - 键盘先过 keyRoute：IME 组合与全局快捷键原样放过（不 preventDefault、不
  *   stopPropagation），RioAdapter 以前的 capture 拦截 + 克隆重派发补丁随之删除；
- * - IME 的提交与候选框光标锚点内置（rioterm 0.1.x 没接提交，textarea 也常驻视口外）；
+ * - IME 的提交、预编辑覆盖层与候选框光标锚点内置（rioterm 0.1.x 没接提交，textarea
+ *   也常驻视口外，组合中的拼音完全看不见）；
  * - 滚轮攒余量（触控板慢滚在 scrollback 里能动）；
  * - mouseup 不写剪贴板：TerminalView 已在宿主 mouseup 上按 getSelection() 写，避免双写；
  * - 去掉 predictiveEcho、内置 ResizeObserver（宿主驱动 fit）、autoFocus、confirm() 链接提示；
@@ -35,6 +36,7 @@ import {
 import { imeCursorRect } from "./ime.js";
 import { routeKey } from "./keyRoute.js";
 import { createRenderer, RendererInitError, type RioAppearance, type RioRenderer } from "./renderer.js";
+import { themeBase } from "./theme.js";
 import { WheelAccumulator } from "./wheel.js";
 // 副作用导入：把 WebGPU 渲染器的工厂注册进 renderer.ts（避免 renderer.ts 反向依赖 webgpu/）
 import "./webgpu/webgpuRenderer.js";
@@ -139,6 +141,26 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
   textarea.setAttribute("autocapitalize", "off");
   textarea.setAttribute("spellcheck", "false");
   textarea.wrap = "off";
+
+  // 预编辑覆盖层：组合中的拼音 / 假名落在透明 textarea 里看不见，渲染器也画不了——
+  // 组合串还没进 PTY，WASM 里没有它的格子。与 xterm 的 composition-view 同一做法：
+  // 按终端字体把组合串画在光标格上，组合结束即隐藏。
+  const preedit = document.createElement("div");
+  Object.assign(preedit.style, {
+    position: "absolute",
+    display: "none",
+    left: "0",
+    top: "0",
+    overflow: "hidden",
+    // macOS 拼音的组合串带分词空格（"ni hao"），nowrap 会把连续空格折叠掉
+    whiteSpace: "pre",
+    pointerEvents: "none",
+    textDecoration: "underline",
+    // 组合串超出右边缘时要看到的是末尾而不是开头：rtl 容器让溢出发生在左侧被裁掉，
+    // 文本本身用 LRM 钉成 LTR（xterm 同款）
+    direction: "rtl",
+  } satisfies Partial<CSSStyleDeclaration>);
+  container.appendChild(preedit);
   container.appendChild(textarea);
   host.appendChild(container);
 
@@ -156,15 +178,24 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
 
   // 浏览器只认实际接收 composition 事件的 textarea，不认 canvas/WebGPU 画出的光标。
   // terminal 输出可能很密，定位按帧合并；非当前 tab 不做额外 WASM update，focus 时补齐。
+  // 组合期间 textarea 与预编辑覆盖层同宽：textarea 里的插入符在组合串末尾，系统候选框
+  // 才锚在末尾而不是光标格；覆盖层与 textarea 字体必须一致，两边量出的宽度才对得上。
   let imeRaf: number | null = null;
   let lastImePosition = "";
-  let lastImeFont = "";
+  let lastPreeditPosition = "";
+  let lastImeStyle = "";
+  let preeditText = "";
   const positionIme = () => {
-    const font = `${appearance.fontFamily}:${appearance.fontSize}`;
-    if (font !== lastImeFont) {
-      lastImeFont = font;
-      textarea.style.fontFamily = appearance.fontFamily;
-      textarea.style.fontSize = `${appearance.fontSize}px`;
+    const { foreground, background } = themeBase(appearance.theme);
+    const style = `${appearance.fontFamily}:${appearance.fontSize}:${foreground}:${background}`;
+    if (style !== lastImeStyle) {
+      lastImeStyle = style;
+      for (const el of [textarea, preedit]) {
+        el.style.fontFamily = appearance.fontFamily;
+        el.style.fontSize = `${appearance.fontSize}px`;
+      }
+      preedit.style.color = foreground;
+      preedit.style.backgroundColor = background;
     }
     const rect = imeCursorRect(terminal.cursorPosition(), {
       cols: terminal.options.cols,
@@ -174,16 +205,39 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
       displayOffset: terminal.displayOffset(),
     });
     if (!rect) return;
-    const position = `${rect.left}:${rect.top}:${rect.width}:${rect.height}`;
+    const preeditPosition = `${rect.left}:${rect.top}:${rect.maxWidth}:${rect.height}`;
+    if (preeditPosition !== lastPreeditPosition) {
+      lastPreeditPosition = preeditPosition;
+      Object.assign(preedit.style, {
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        maxWidth: `${rect.maxWidth}px`,
+        height: `${rect.height}px`,
+        lineHeight: `${rect.height}px`,
+      } satisfies Partial<CSSStyleDeclaration>);
+    }
+    // 读布局只发生在组合期间；覆盖层被右边缘裁掉时 textarea 也只到右边缘，插入符跟着贴边
+    const width = preeditText
+      ? Math.max(rect.width, preedit.getBoundingClientRect().width)
+      : rect.width;
+    const position = `${rect.left}:${rect.top}:${width}:${rect.height}`;
     if (position === lastImePosition) return;
     lastImePosition = position;
     Object.assign(textarea.style, {
       left: `${rect.left}px`,
       top: `${rect.top}px`,
-      width: `${rect.width}px`,
+      width: `${width}px`,
       height: `${rect.height}px`,
       lineHeight: `${rect.height}px`,
     } satisfies Partial<CSSStyleDeclaration>);
+  };
+  const setPreedit = (text: string) => {
+    if (text === preeditText) return;
+    preeditText = text;
+    // LRM 把组合串钉成 LTR，外层 rtl 只负责让溢出的开头被裁掉
+    preedit.textContent = text ? `\u200E${text}\u200E` : "";
+    preedit.style.display = text ? "block" : "none";
+    positionIme();
   };
   const runScheduledImePosition = () => {
     imeRaf = null;
@@ -240,9 +294,15 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
   });
   // IME：组合结束的提交文本，以及死键 / emoji 面板等不走 keydown 的直接插入。
   // 普通按键已被 handleKeyboardEvent preventDefault，不会落进 textarea，也就不会到这里
-  on(textarea, "compositionstart", positionIme);
-  on(textarea, "compositionupdate", positionIme);
+  on(textarea, "compositionstart", (e) => {
+    positionIme();
+    setPreedit(e.data);
+  });
+  // data 是当前完整组合串（xterm 也只信它，不等 textarea.value 在 input 事件后才更新）
+  on(textarea, "compositionupdate", (e) => setPreedit(e.data));
   on(textarea, "compositionend", (e) => {
+    // 先收覆盖层再提交：Esc 取消时 data 为空，只需隐藏
+    setPreedit("");
     if (e.data) terminal.input(e.data);
     textarea.value = "";
   });
@@ -350,7 +410,8 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     renderer = built.renderer;
     rendererKind = built.kind;
     fallbackReason = built.reason;
-    container.insertBefore(renderer.element, textarea);
+    // 画布永远是第一个孩子，预编辑覆盖层与 textarea 都在它后面
+    container.prepend(renderer.element);
     hoverCell = null;
     container.style.cursor = "";
     renderer.setFocused?.(document.activeElement === textarea);
