@@ -12,7 +12,7 @@
  * - 渲染器由 renderer.ts 的工厂创建，WebGPU 不可用或构造失败回落 canvas；
  * - 键盘先过 keyRoute：IME 组合与全局快捷键原样放过（不 preventDefault、不
  *   stopPropagation），RioAdapter 以前的 capture 拦截 + 克隆重派发补丁随之删除；
- * - IME 的 compositionend / input(insertText) 内置（rioterm 0.1.x 没接，中文提交不了）；
+ * - IME 的提交与候选框光标锚点内置（rioterm 0.1.x 没接提交，textarea 也常驻视口外）；
  * - 滚轮攒余量（触控板慢滚在 scrollback 里能动）；
  * - mouseup 不写剪贴板：TerminalView 已在宿主 mouseup 上按 getSelection() 写，避免双写；
  * - 去掉 predictiveEcho、内置 ResizeObserver（宿主驱动 fit）、autoFocus、confirm() 链接提示；
@@ -32,6 +32,7 @@ import {
   type RioRendererKind,
   type WebGpuFailReason,
 } from "./gpu.js";
+import { imeCursorRect } from "./ime.js";
 import { routeKey } from "./keyRoute.js";
 import { createRenderer, RendererInitError, type RioAppearance, type RioRenderer } from "./renderer.js";
 import { WheelAccumulator } from "./wheel.js";
@@ -127,10 +128,17 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     width: "0",
     height: "0",
     opacity: "0",
+    padding: "0",
+    margin: "0",
+    border: "0",
+    resize: "none",
+    overflow: "hidden",
+    pointerEvents: "none",
   } satisfies Partial<CSSStyleDeclaration>);
   textarea.setAttribute("autocorrect", "off");
   textarea.setAttribute("autocapitalize", "off");
   textarea.setAttribute("spellcheck", "false");
+  textarea.wrap = "off";
   container.appendChild(textarea);
   host.appendChild(container);
 
@@ -146,6 +154,51 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     disposers.push(() => el.removeEventListener(type, fn as EventListener, options));
   };
 
+  // 浏览器只认实际接收 composition 事件的 textarea，不认 canvas/WebGPU 画出的光标。
+  // terminal 输出可能很密，定位按帧合并；非当前 tab 不做额外 WASM update，focus 时补齐。
+  let imeRaf: number | null = null;
+  let lastImePosition = "";
+  let lastImeFont = "";
+  const positionIme = () => {
+    const font = `${appearance.fontFamily}:${appearance.fontSize}`;
+    if (font !== lastImeFont) {
+      lastImeFont = font;
+      textarea.style.fontFamily = appearance.fontFamily;
+      textarea.style.fontSize = `${appearance.fontSize}px`;
+    }
+    const rect = imeCursorRect(terminal.cursorPosition(), {
+      cols: terminal.options.cols,
+      rows: terminal.options.rows,
+      cellWidth: renderer.cellWidth,
+      cellHeight: renderer.cellHeight,
+      displayOffset: terminal.displayOffset(),
+    });
+    if (!rect) return;
+    const position = `${rect.left}:${rect.top}:${rect.width}:${rect.height}`;
+    if (position === lastImePosition) return;
+    lastImePosition = position;
+    Object.assign(textarea.style, {
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      lineHeight: `${rect.height}px`,
+    } satisfies Partial<CSSStyleDeclaration>);
+  };
+  const runScheduledImePosition = () => {
+    imeRaf = null;
+    positionIme();
+  };
+  const scheduleImePosition = () => {
+    if (document.activeElement !== textarea || imeRaf != null) return;
+    imeRaf = requestAnimationFrame(runScheduledImePosition);
+  };
+  const cursorSub = terminal.onUpdate(scheduleImePosition);
+  disposers.push(() => {
+    if (imeRaf != null) cancelAnimationFrame(imeRaf);
+    cursorSub.dispose();
+  });
+
   // ---- 键盘 ----
   on(textarea, "keydown", (e) => {
     // 只有可能是复制快捷键时才去问选区（FFI 调用），普通按键不付这个成本
@@ -153,6 +206,9 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     const hasSelection = maybeCopy && !!terminal.getSelection();
     switch (routeKey(e, opts.isGlobalKey, hasSelection)) {
       case "ime":
+        // keyCode 229 往往先于 compositionstart；在浏览器读取候选框锚点前同步一次。
+        positionIme();
+        return;
       case "global":
         return;
       case "copy": {
@@ -184,6 +240,8 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
   });
   // IME：组合结束的提交文本，以及死键 / emoji 面板等不走 keydown 的直接插入。
   // 普通按键已被 handleKeyboardEvent preventDefault，不会落进 textarea，也就不会到这里
+  on(textarea, "compositionstart", positionIme);
+  on(textarea, "compositionupdate", positionIme);
   on(textarea, "compositionend", (e) => {
     if (e.data) terminal.input(e.data);
     textarea.value = "";
@@ -194,8 +252,12 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     if (ie.inputType === "insertText" && ie.data) terminal.input(ie.data);
     textarea.value = "";
   });
-  on(textarea, "focus", () => renderer.setFocused?.(true));
+  on(textarea, "focus", () => {
+    positionIme();
+    renderer.setFocused?.(true);
+  });
   on(textarea, "blur", () => renderer.setFocused?.(false));
+  positionIme();
 
   // OSC 52：程序写系统剪贴板
   const clipboardSub = terminal.onClipboardWrite((text) => {
@@ -292,6 +354,8 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     hoverCell = null;
     container.style.cursor = "";
     renderer.setFocused?.(document.activeElement === textarea);
+    // 新渲染器可能换了 cell 度量；候选框必须跟着同一帧迁移。
+    positionIme();
     return built.kind;
   };
 
