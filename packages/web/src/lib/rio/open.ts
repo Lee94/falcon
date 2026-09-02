@@ -25,6 +25,7 @@ import { browserDprEnv, watchDpr, type DprEnv } from "./dpr.js";
 import {
   acquireGpu,
   browserGpuEnv,
+  isDev,
   pickRenderer,
   type GpuEnv,
   type GpuHandle,
@@ -34,6 +35,8 @@ import {
 import { routeKey } from "./keyRoute.js";
 import { createRenderer, RendererInitError, type RioAppearance, type RioRenderer } from "./renderer.js";
 import { WheelAccumulator } from "./wheel.js";
+// 副作用导入：把 WebGPU 渲染器的工厂注册进 renderer.ts（避免 renderer.ts 反向依赖 webgpu/）
+import "./webgpu/webgpuRenderer.js";
 
 export { readRendererOverride } from "./gpu.js";
 export type { RioRendererKind, WebGpuFailReason } from "./gpu.js";
@@ -325,7 +328,7 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     opts.onRendererChanged?.(swapRenderer(rendererKind), "dpr");
   }, opts.env?.dpr ?? browserDprEnv());
 
-  return {
+  const handle: RioHandle = {
     terminal,
     get renderer() {
       return renderer;
@@ -351,6 +354,16 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
       renderer.dispose();
       terminal.dispose();
       container.remove();
+      debugHandles()?.delete(handle);
     },
   };
+  debugHandles()?.add(handle);
+  return handle;
+}
+
+/** DEV 下把活着的 handle 挂到 globalThis.__rioHandles，控制台里看 rendererKind / stats 用 */
+function debugHandles(): Set<RioHandle> | null {
+  if (!isDev()) return null;
+  const g = globalThis as Record<string, unknown>;
+  return (g.__rioHandles ??= new Set<RioHandle>()) as Set<RioHandle>;
 }

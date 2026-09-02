@@ -26,6 +26,7 @@ import {
   type TermThemeId,
 } from "../lib/term.js";
 import { useActions } from "../lib/useActions.js";
+import { browserGpuEnv, webgpuAvailable } from "../lib/rio/gpu.js";
 import { useInstall } from "../lib/useInstall.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -305,7 +306,14 @@ function AppearancePane() {
         title={t("settings.experimentalTitle")}
         description={t("settings.experimentalHint")}
       >
-        <SettingRow label={t("settings.termEngine")} hint={t("settings.termEngineHint")}>
+        <SettingRow
+          label={t("settings.termEngine")}
+          hint={
+            webgpuAvailable(browserGpuEnv())
+              ? t("settings.termEngineHint")
+              : `${t("settings.termEngineHint")} ${t("settings.termEngineGpuUnavailable")}`
+          }
+        >
           <Segmented<TermEngine>
             label={t("settings.termEngine")}
             value={term.engine}

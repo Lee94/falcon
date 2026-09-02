@@ -12,7 +12,12 @@ import {
   resolveTermTheme,
   termColorHint,
 } from "../lib/term.js";
-import { createTermAdapter, type TermAdapter } from "../lib/termAdapter.js";
+import {
+  createTermAdapter,
+  type RendererInfo,
+  type TermAdapter,
+  type WebGpuFailReason,
+} from "../lib/termAdapter.js";
 import {
   mouseReportCoord,
   registerTermInput,
@@ -26,6 +31,28 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Banner } from "./common/Banner.js";
 import { openContextMenu } from "./common/Menu.js";
+
+const GPU_REASON_KEY: Record<WebGpuFailReason, string> = {
+  unsupported: "term.gpuReasonUnsupported",
+  "no-adapter": "term.gpuReasonNoAdapter",
+  "device-rejected": "term.gpuReasonDeviceRejected",
+  "no-context": "term.gpuReasonNoContext",
+  lost: "term.gpuReasonLost",
+};
+
+/** 每页面只提示一次：N 个 rio tab 同时丢 GPU 设备不能刷一屏 toast */
+let gpuFallbackNotified = false;
+
+function notifyRendererFallback(info: RendererInfo, t: (key: string, opts?: Record<string, string>) => string): void {
+  console.info(`rio: renderer ${info.active} (requested ${info.requested}, cause ${info.cause}${info.reason ? `, reason ${info.reason}` : ""})`);
+  if (info.requested !== "webgpu" || info.active === "webgpu" || gpuFallbackNotified) return;
+  gpuFallbackNotified = true;
+  const title =
+    info.cause === "device-lost"
+      ? t("term.rendererLost")
+      : t("term.rendererFallback", { reason: t(GPU_REASON_KEY[info.reason ?? "unsupported"]) });
+  useApp.getState().toast({ kind: "info", title });
+}
 
 interface ViewState {
   session: SessionState;
@@ -143,6 +170,7 @@ export function TerminalView({
         isGlobalKey: (e) => matchCommand(e) !== null,
         onEngineError: (message) =>
           useApp.getState().toast({ kind: "warning", title: t("term.engineFailed"), body: message }),
+        onRenderer: (info) => notifyRendererFallback(info, t),
       },
     });
     adapter.open(containerRef.current!);

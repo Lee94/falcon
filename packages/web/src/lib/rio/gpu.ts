@@ -69,6 +69,11 @@ export type GpuResult = { ok: true; gpu: GpuHandle } | { ok: false; reason: WebG
 let current: GpuHandle | null = null;
 let pending: Promise<GpuResult> | null = null;
 
+/** vite 的 import.meta.env.DEV；tsconfig 没带 vite/client 类型，手动收窄 */
+export function isDev(): boolean {
+  return (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV === true;
+}
+
 function isFallback(adapter: AdapterLike): boolean {
   return adapter.info?.isFallbackAdapter === true || adapter.isFallbackAdapter === true;
 }
@@ -96,6 +101,11 @@ async function acquire(env: GpuEnv): Promise<GpuResult> {
     lost: device.lost,
     shared: new Map(),
   };
+  // Chrome 会把未捕获的校验错误打到控制台，但 Safari 不一定；统一显式打一份
+  (device as Partial<GPUDevice>).addEventListener?.("uncapturederror", (e) => {
+    console.error("rio: WebGPU uncaptured error:", (e as GPUUncapturedErrorEvent).error.message);
+  });
+  if (isDev()) (globalThis as Record<string, unknown>).__rioGpu = handle;
   void device.lost.then(
     () => {
       if (current === handle) {

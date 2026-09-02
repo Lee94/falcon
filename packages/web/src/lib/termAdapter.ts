@@ -14,6 +14,8 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import type { RioAppearance, RioHandle, RioRendererKind, WebGpuFailReason } from "./rio/open.js";
+
+export type { RioRendererKind, WebGpuFailReason } from "./rio/open.js";
 import { termFontStack, type TermPref } from "./term.js";
 import { isUsableTermSize } from "./termFit.js";
 import { deleteSeq } from "./termInput.js";
@@ -459,6 +461,10 @@ class RioAdapter implements TermAdapter {
     handle.terminal.onData((bytes) => {
       this.hooks.onData(this.decoder.decode(bytes, { stream: true }));
     });
+    // 先把格子量到宿主尺寸再回放队列。队列里通常是整份 replay（重载时 WS 比 wasm +
+    // GPU 设备先就绪）：写进默认的 80×24 再 resize，alt screen 里的内容会被截掉，
+    // 而服务端按尺寸去重不会再让 zellij 重绘，屏幕就一直空着（2026-09-02 实测）。
+    this.fit();
     for (const chunk of this.queue) handle.terminal.write(chunk);
     this.queue = [];
     const latest = this.currentAppearance();
