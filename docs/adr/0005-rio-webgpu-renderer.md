@@ -46,7 +46,20 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 
 已在 Chrome 桌面（macOS，dpr 2，localhost）验证：文字 / 颜色 / 粗斜体 / dim / inverse、5 种下划线与删除线、CJK 宽字符、彩色 emoji、盒线（细 / 粗 / 双 / 圆角 / 对角线 / 虚线）与块元素 / 阴影 / braille、块光标闪烁与失焦空心、⌘K 等全局快捷键穿透、键盘输入与回显；换字号 / 主题 / 光标样式时同一个 Terminal 实例、不新建 WebSocket、VT 模式保留；`navigator.gpu` 缺失时回落 canvas、每页面一次 toast、设置页提示；盒线相邻格像素级相接。单测 79 个覆盖纯函数层（key 分流、滚轮、DPR、GPU 获取、度量、颜色、图集分配、装饰、行构建与脏行、sprite）。
 
-未验证：Safari 26 / iOS、Android Chrome、Firefox；DPR 变化（跨屏拖窗）；真实 device lost；真实输入法；触屏；多 tab 泄漏；与 xterm-webgl 的微基准对比。
+微基准（2026-09-02，Mac mini Apple Silicon，Chrome，dpr 2，220×50，系统等宽 13px，3 轮中位；脚本 `scripts/bench-term-engines.js`）：
+
+| | xterm-webgl | rio-webgpu | rio-canvas |
+|---|---|---|---|
+| 10.4MB / 10 万行 ASCII 灌屏，1× | 392 ms | 50 ms | 50 ms |
+| 5.9MB / 5 万行中文灌屏，1× | 367 ms | 150 ms | 150 ms |
+| 同上两项，4× CPU 节流 | 1517 / 917 ms | 149 / 550 ms | 149 / 550 ms |
+| TUI 每 tick 5 帧 × 60 tick，4×（满帧 ≈ 1000） | 1051 ms | 1003 ms | 2382 ms |
+| TUI 每 tick 20 帧（27MB/s），4×：tick 墙钟 / 画完积压 | 1001 / 1317 ms | 1016 / 1051 ms | 2967 / 3001 ms |
+| TUI 每 tick 40 帧（55MB/s），4× | 1010 / 2199 ms | 1701 / 1716 ms | 3700 / 3736 ms |
+
+读法：灌屏是解析为主，rio 的 WASM 解析比 xterm 快 8×（中文 2.4×），两种 rio 渲染器只画最后一帧所以相同。TUI 重绘才看渲染器：4× 节流下 rio-canvas 掉到 25fps，rio-webgpu 与 xterm-webgl 都保住 60fps；再加压时 xterm 的 write 是异步的，靠推迟解析保住 tick 但画面积压（40 帧 / tick 时落后 1.2s），rio 的 write 同步，画面永远最新、压力直接体现在 tick 上（40 帧 / tick 降到 35fps）。全速 1× 下三者在 55MB/s 的重压下都满帧。
+
+未验证：Safari 26 / iOS、Android Chrome、Firefox；DPR 变化（跨屏拖窗）；真实 device lost；真实输入法；触屏；多 tab 泄漏。
 
 ## Consequences
 
