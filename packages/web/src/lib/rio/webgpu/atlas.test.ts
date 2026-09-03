@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  bucketFill,
+  colorBucket,
   extractAlpha,
   GLYPH_EMPTY,
   GLYPH_FULL,
   GlyphAtlas,
   glyphKey,
-  hasChroma,
+  isColorGlyph,
   premultiply,
   ShelfAllocator,
   type AtlasTexture,
   type Raster,
   type Rasterizer,
 } from "./atlas.js";
+import { rgba } from "./colors.js";
 
 describe("ShelfAllocator", () => {
   it("首块落在 (pad, pad)，同高同架，更高开新架", () => {
@@ -70,15 +73,33 @@ describe("像素工具", () => {
     assert.deepEqual([...extractAlpha(px, 2, 1)], [128, 255]);
     assert.deepEqual([...premultiply(px)], [128, 128, 128, 128, 10, 20, 30, 255]);
   });
-  it("hasChroma：白 / 灰不算，彩色算，全透明像素忽略", () => {
-    assert.equal(hasChroma(new Uint8ClampedArray([255, 255, 255, 200, 120, 120, 120, 50])), false);
-    assert.equal(hasChroma(new Uint8ClampedArray([255, 200, 0, 200])), true);
-    assert.equal(hasChroma(new Uint8ClampedArray([255, 0, 0, 0])), false);
+  it("isColorGlyph：像素等于画笔色不算，偏离算，低 alpha 像素的反预乘误差忽略", () => {
+    const light: [number, number, number] = [224, 224, 224];
+    assert.equal(isColorGlyph(new Uint8ClampedArray([224, 224, 224, 200, 120, 120, 120, 50]), light), false);
+    assert.equal(isColorGlyph(new Uint8ClampedArray([255, 200, 0, 200]), light), true);
+    assert.equal(isColorGlyph(new Uint8ClampedArray([255, 0, 0, 100]), light), false);
+    const tint: [number, number, number] = [32, 96, 160];
+    assert.equal(isColorGlyph(new Uint8ClampedArray([32, 96, 160, 255, 33, 95, 161, 130]), tint), false);
+    assert.equal(isColorGlyph(new Uint8ClampedArray([255, 204, 0, 255]), tint), true);
   });
-  it("glyphKey 把样式位叠在 21 位码位之上", () => {
+  it("colorBucket 只看每通道高 2 位；bucketFill 取桶中点", () => {
+    assert.equal(colorBucket(rgba(0x17, 0x17, 0x17)), 0);
+    assert.equal(colorBucket(rgba(0x3f, 0x3f, 0x3f)), 0);
+    assert.equal(colorBucket(rgba(0x40, 0x3f, 0x3f)), 1 << 4);
+    assert.equal(colorBucket(rgba(0xff, 0xff, 0xff)), 63);
+    assert.equal(colorBucket(rgba(0xab, 0xb2, 0xbf)), (2 << 4) | (2 << 2) | 2);
+    assert.equal(colorBucket(rgba(0x04, 0x51, 0xa5)), (1 << 2) | 2);
+    assert.deepEqual(bucketFill(0), [32, 32, 32]);
+    assert.deepEqual(bucketFill(63), [224, 224, 224]);
+    assert.deepEqual(bucketFill((1 << 4) | (2 << 2) | 3), [96, 160, 224]);
+  });
+  it("glyphKey 把样式位叠在 21 位码位之上，颜色桶再往上叠且不进符号位", () => {
     assert.equal(glyphKey(0x41, false, false, false), 0x41);
     assert.equal(glyphKey(0x10ffff, true, true, true), 0x10ffff | (7 << 21));
     assert.notEqual(glyphKey(0x41, true, false, false), glyphKey(0x41, false, true, false));
+    assert.equal(glyphKey(0x41, false, false, false, 63), 0x41 | (63 << 24));
+    assert.ok(glyphKey(0x10ffff, true, true, true, 63) > 0);
+    assert.notEqual(glyphKey(0x41, false, false, false, 1), glyphKey(0x41, false, false, false, 2));
   });
 });
 
@@ -92,8 +113,8 @@ function fakeRasterizer(widthOf: (text: string) => number): Rasterizer & { calls
   const calls: string[] = [];
   return {
     calls,
-    raster(text, bold) {
-      calls.push(text);
+    raster(text, bold, _italic, _wide, bucket) {
+      calls.push(`${text}|${bucket}`);
       const w = widthOf(text);
       if (w === 0) return null;
       const r: Raster = {
@@ -117,18 +138,41 @@ describe("GlyphAtlas", () => {
     const color = fakeTexture(64);
     const r = fakeRasterizer((t) => (t === " " ? 0 : 6));
     const atlas = new GlyphAtlas(gray.tex, color.tex, r);
-    const a = atlas.get(0x41, null, false, false, false);
-    const b = atlas.get(0x41, null, false, false, false);
+    const a = atlas.get(0x41, null, false, false, false, 0);
+    const b = atlas.get(0x41, null, false, false, false, 0);
     assert.equal(a, b);
     assert.equal(r.calls.length, 1);
-    assert.notEqual(atlas.get(0x41, null, true, false, false), a);
-    assert.equal(atlas.get(0x20, null, false, false, false), GLYPH_EMPTY);
-    const e = atlas.get(0x1f642, "🙂", false, false, true);
+    assert.notEqual(atlas.get(0x41, null, true, false, false, 0), a);
+    assert.equal(atlas.get(0x20, null, false, false, false, 0), GLYPH_EMPTY);
+    const e = atlas.get(0x1f642, "🙂", false, false, true, 0);
     assert.equal(atlas.table.flags[e], 1);
     assert.equal(color.uploads.length, 1);
     assert.equal(gray.uploads.length, 2);
     assert.equal(atlas.table.bx[a], -1);
     assert.equal(atlas.table.by[a], 2);
+  });
+
+  it("灰度字形按颜色桶各画一份（画笔色不同）；彩色字形无视画笔色，跨桶共享", () => {
+    const gray = fakeTexture(64);
+    const color = fakeTexture(64);
+    const r = fakeRasterizer(() => 6);
+    const atlas = new GlyphAtlas(gray.tex, color.tex, r);
+    const a0 = atlas.get(0x41, null, false, false, false, 0);
+    const a63 = atlas.get(0x41, null, false, false, false, 63);
+    assert.notEqual(a0, a63);
+    assert.equal(atlas.get(0x41, null, false, false, false, 63), a63);
+    assert.deepEqual(r.calls, ["A|0", "A|63"]);
+    const e0 = atlas.get(0x1f642, null, false, false, true, 0);
+    assert.equal(atlas.get(0x1f642, null, false, false, true, 63), e0);
+    assert.equal(atlas.get(0x1f642, null, false, false, true, 63), e0);
+    assert.equal(color.uploads.length, 1);
+    const c5 = atlas.get(0x1f642, "🙂", false, false, true, 5);
+    assert.equal(atlas.get(0x1f642, "🙂", false, false, true, 9), c5);
+    assert.equal(color.uploads.length, 2);
+    assert.equal(r.calls.length, 4);
+    atlas.reset();
+    assert.equal(atlas.get(0x1f642, null, false, false, true, 7), 0);
+    assert.equal(color.uploads.length, 3);
   });
 
   it("图集满返回 GLYPH_FULL，reset 后从头分配", () => {
@@ -137,14 +181,14 @@ describe("GlyphAtlas", () => {
     const atlas = new GlyphAtlas(gray.tex, color.tex, fakeRasterizer(() => 6));
     const ids: number[] = [];
     for (let cp = 0x41; cp < 0x60; cp++) {
-      const id = atlas.get(cp, null, false, false, false);
+      const id = atlas.get(cp, null, false, false, false, 0);
       if (id === GLYPH_FULL) break;
       ids.push(id);
     }
     assert.ok(ids.length >= 2 && ids.length < 0x1f);
-    assert.equal(atlas.get(0x7a, null, false, false, false), GLYPH_FULL);
+    assert.equal(atlas.get(0x7a, null, false, false, false, 0), GLYPH_FULL);
     atlas.reset();
-    assert.equal(atlas.get(0x7a, null, false, false, false), 0);
+    assert.equal(atlas.get(0x7a, null, false, false, false, 0), 0);
   });
 
   it("getSprite 按 key 复用，make 返回 null 记作 GLYPH_EMPTY", () => {

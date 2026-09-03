@@ -28,7 +28,7 @@ import {
   type RioRenderer,
 } from "../renderer.js";
 import { toGpuTheme } from "../theme.js";
-import { createCanvasRasterizer, createGpuAtlasTexture, GLYPH_EMPTY, GlyphAtlas } from "./atlas.js";
+import { colorBucket, createCanvasRasterizer, createGpuAtlasTexture, GLYPH_EMPTY, GlyphAtlas } from "./atlas.js";
 import { buildPalette, channels, type Palette } from "./colors.js";
 import { decorationSprite, solidRects } from "./decorations.js";
 import {
@@ -242,7 +242,7 @@ export class WebgpuRenderer implements RioRenderer {
       cols: 0,
       palette: this.palette,
       glyphs: this.atlas.table,
-      lookup: (cp, text, bold, italic, wide) => {
+      lookup: (cp, text, bold, italic, wide, fg) => {
         // 盒线 / 块元素 / braille / powerline 自己画，与字体无关；cluster（带附标）不走这里
         if (text === null && isSprite(cp)) {
           const id = this.atlas.getSprite(`sprite:${cp}:${this.m.cellW}x${this.m.cellH}`, () => {
@@ -252,7 +252,7 @@ export class WebgpuRenderer implements RioRenderer {
           if (id !== GLYPH_EMPTY) return id;
           // 没有对应的 sprite（表里没覆盖的码位）退回字体字形
         }
-        return this.atlas.get(cp, text, bold, italic, wide);
+        return this.atlas.get(cp, text, bold, italic, wide, colorBucket(fg));
       },
       decor: { undercurl: GLYPH_EMPTY, dotted: GLYPH_EMPTY, dashed: GLYPH_EMPTY },
       solid: {

@@ -58,8 +58,11 @@ export interface RowCtx {
   cols: number;
   palette: Palette;
   glyphs: GlyphTable;
-  /** text 非 null 表示 grapheme cluster 的完整文本；返回 id / GLYPH_EMPTY / GLYPH_FULL */
-  lookup(cp: number, text: string | null, bold: boolean, italic: boolean, wide: boolean): number;
+  /**
+   * text 非 null 表示 grapheme cluster 的完整文本；fg 是折算完 inverse / dim / 选区的
+   * 前景色，图集按它的颜色桶画字（见 atlas.ts 文件头）。返回 id / GLYPH_EMPTY / GLYPH_FULL
+   */
+  lookup(cp: number, text: string | null, bold: boolean, italic: boolean, wide: boolean, fg: Rgba): number;
   /** 波浪 / 点 / 虚线 sprite 的 id（GLYPH_EMPTY 表示没有） */
   decor: { undercurl: number; dotted: number; dashed: number };
   /** 直线类装饰的矩形，按 metrics 预先算好 */
@@ -152,7 +155,8 @@ export function buildRow(cells: Uint32Array, row: number, ctx: RowCtx, outBg: Ui
 
     if (wide !== WIDE_SPACER && cp > 32) {
       const text = w0 & CELL_HAS_CLUSTER ? (ctx.clusterText(row, col) ?? null) : null;
-      const id = ctx.lookup(cp, text, bold, italic, wide === WIDE_WIDE);
+      // block 光标下的字形在 shader 里换成 cursorFg 色，遮罩仍按 fg 的桶取，差一格无所谓
+      const id = ctx.lookup(cp, text, bold, italic, wide === WIDE_WIDE, fg);
       if (id === GLYPH_FULL) return -1;
       if (id >= 0) {
         packInstance(

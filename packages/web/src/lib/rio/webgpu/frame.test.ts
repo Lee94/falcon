@@ -58,7 +58,7 @@ function grid(rows: Cell[][]): Uint32Array {
   return cells;
 }
 
-function ctxWith(overrides: Partial<RowCtx> = {}): RowCtx & { calls: string[] } {
+function ctxWith(overrides: Partial<RowCtx> = {}): RowCtx & { calls: string[]; fgs: number[] } {
   const glyphs = new GlyphTable();
   // id 0：普通字形；id 1：彩色；id 2..4：undercurl/dotted/dashed sprite
   glyphs.push(10, 20, 7, 12, -1, 3, 0);
@@ -67,13 +67,16 @@ function ctxWith(overrides: Partial<RowCtx> = {}): RowCtx & { calls: string[] } 
   glyphs.push(8, 0, 8, 2, 0, 13, 0);
   glyphs.push(16, 0, 8, 2, 0, 13, 0);
   const calls: string[] = [];
+  const fgs: number[] = [];
   return {
     calls,
+    fgs,
     cols: COLS,
     palette,
     glyphs,
-    lookup(cp, text, bold, italic, wide) {
+    lookup(cp, text, bold, italic, wide, fg) {
       calls.push(`${text ?? String.fromCodePoint(cp)}|${bold ? "b" : ""}${italic ? "i" : ""}${wide ? "w" : ""}`);
+      fgs.push(fg);
       if (cp === 0x1f642) return 1;
       if (cp === 0xffff) return GLYPH_FULL;
       return 0;
@@ -164,13 +167,16 @@ describe("buildRow", () => {
       { cp: 0x41, fg: RED, flags: STYLE_DIM },
       { cp: 0x41, fg: RED, bg: RED, flags: STYLE_HIDDEN | STYLE_UNDERLINE },
     ]]);
-    const { n, bg, inst } = build(cells, 0, ctxWith());
+    const ctx = ctxWith();
+    const { n, bg, inst } = build(cells, 0, ctx);
     assert.equal(bg[0], rgba(255, 0, 0));
     assert.equal(inst(0).color, palette.bg);
     assert.equal(inst(1).color, dimColor(rgba(255, 0, 0)));
     assert.equal(bg[1], palette.bg);
     assert.equal(bg[2], rgba(255, 0, 0));
     assert.equal(n, 2);
+    // lookup 拿到的是折算完的 fg（图集按它的颜色桶画字），HIDDEN 格不查
+    assert.deepEqual(ctx.fgs, [palette.bg, dimColor(rgba(255, 0, 0))]);
   });
 
   it("选区：bg 合成、无 selFg 时 fg 不变；block 与多行 simple 选区", () => {
