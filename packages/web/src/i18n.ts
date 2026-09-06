@@ -14,7 +14,6 @@ const zh = {
     },
     sidebar: {
       projects: "项目",
-      servers: "服务器",
       newProject: "新建项目",
       newTerminal: "新建终端",
       settings: "设置",

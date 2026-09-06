@@ -100,19 +100,27 @@ export function ThemePicker({ slot }: { slot: ThemeMode }) {
     };
   }, [open, highlighted, catalog, choice, previewTheme]);
 
-  const groups = useMemo(() => {
-    if (!catalog) return [];
-    const falcon = catalog.filter((e) => e.name.startsWith("Falcon "));
-    const light = catalog.filter((e) => !e.name.startsWith("Falcon ") && e.appearance === "light");
-    const dark = catalog.filter((e) => !e.name.startsWith("Falcon ") && e.appearance === "dark");
-    const same = slot === "light" ? light : dark;
-    const other = slot === "light" ? dark : light;
-    return [
-      { key: "falcon", heading: t("theme.groupFalcon"), entries: falcon },
-      { key: slot, heading: t(slot === "light" ? "theme.groupLight" : "theme.groupDark"), entries: same },
-      { key: slot === "light" ? "dark" : "light", heading: t(slot === "light" ? "theme.groupDark" : "theme.groupLight"), entries: other },
-    ];
-  }, [catalog, slot, t]);
+  // 只列与槽位同明暗的主题：深色槽位选进一套浅色主题，.dark 会跟着底色亮度翻成
+  // 浅色界面，"深色主题"这个设置就名不副实了。明暗按底色亮度判（catalog 里的 appearance）
+  const candidates = useMemo(
+    () => (catalog ?? []).filter((e) => e.appearance === slot),
+    [catalog, slot]
+  );
+  const groups = useMemo(
+    () => [
+      {
+        key: "falcon",
+        heading: t("theme.groupFalcon"),
+        entries: candidates.filter((e) => e.name.startsWith("Falcon ")),
+      },
+      {
+        key: slot,
+        heading: t(slot === "light" ? "theme.groupLight" : "theme.groupDark"),
+        entries: candidates.filter((e) => !e.name.startsWith("Falcon ")),
+      },
+    ],
+    [candidates, slot, t]
+  );
 
   const currentValue = choice.kind === "custom" ? `custom:${choice.name}` : choice.name;
 
@@ -123,7 +131,11 @@ export function ThemePicker({ slot }: { slot: ThemeMode }) {
 
   return (
     <>
+      {/* modal 不是为了遮罩：选择器开在设置对话框里，Dialog 的 react-remove-scroll 把
+          portal 出去的弹层当成"对话框外"，滚轮一律 preventDefault，列表根本滚不动；
+          modal 让 Popover 自己再压一层滚动锁到栈顶，锁的范围就是弹层本身 */}
       <Popover
+        modal
         open={open}
         onOpenChange={(next) => {
           setOpen(next);
@@ -148,7 +160,7 @@ export function ThemePicker({ slot }: { slot: ThemeMode }) {
         </PopoverTrigger>
         <PopoverContent align="end" className="w-80 p-0">
           <Command loop value={highlighted} onValueChange={setHighlighted}>
-            <CommandInput placeholder={t("theme.search", { n: catalog?.length ?? 0 })} />
+            <CommandInput placeholder={t("theme.search", { n: candidates.length })} />
             <CommandList className="max-h-80">
               {!catalog && (
                 <div className="py-6 text-center text-xs text-muted-foreground">

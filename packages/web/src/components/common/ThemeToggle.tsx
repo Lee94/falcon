@@ -4,7 +4,6 @@ import { useApp } from "../../store.js";
 import type { ThemePref } from "../../lib/theme/pref.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { menuAnchor } from "./Menu.js";
 
 export const THEME_PREFS: ThemePref[] = ["system", "light", "dark"];
 
@@ -13,37 +12,6 @@ export const THEME_ICONS: Record<ThemePref, LucideIcon> = {
   light: Sun,
   dark: Moon,
 };
-
-/** 侧栏底部那个图标按钮：图标显示的是**偏好**，跟随系统时永远是显示器图标 */
-export function ThemeButton() {
-  const { t } = useTranslation();
-  const themePref = useApp((s) => s.themePref);
-  const openMenu = useApp((s) => s.openMenu);
-  const setTheme = useApp((s) => s.setTheme);
-  const Icon = THEME_ICONS[themePref];
-
-  return (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      className="text-muted-foreground"
-      aria-label={t("theme.label")}
-      title={`${t("theme.label")} · ${t(`theme.${themePref}`)}`}
-      onClick={(e) =>
-        openMenu({
-          ...menuAnchor(e),
-          items: THEME_PREFS.map((pref) => ({
-            label: t(`theme.${pref}`),
-            checked: pref === themePref,
-            onSelect: () => setTheme(pref),
-          })),
-        })
-      }
-    >
-      <Icon />
-    </Button>
-  );
-}
 
 /**
  * 设置页里的三段选择器。一眼能看见三个档位分别是什么、现在停在哪一档——

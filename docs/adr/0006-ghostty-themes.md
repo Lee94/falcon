@@ -25,6 +25,8 @@
 - **验证时的工具坑**：Chrome DevTools MCP 的 `fill` 直接写 textarea 的 value，会把 React 的 value tracker 一起改掉，之后再派发 input 事件 React 认为"没变"不触发 onChange；看起来像编辑器不响应粘贴，实际真人键入 / 粘贴都正常。要模拟输入用键盘 `type_text`。
 - **终端配色对象引用稳定**：store 按槽位对象 `WeakMap` 缓存派生结果，`activeTheme.xterm` 同一套主题永远是同一个对象——rio 适配器按引用比对决定要不要重建渲染器。
 - **选择器的实时预览走 store 的 `previewTheme`**（不是只改 DOM）：终端也要跟着换，否则预览是半截的。键盘连按时 120ms 节流——每次换主题 rio 都会重建渲染器、TerminalView 会给服务端发 appearance（服务端在深浅翻转时往 zellij 注 `997` 通知）。弹层关掉复原到真正的槽位主题。
+- **选择器只列与槽位同明暗的主题**（按 catalog 的 appearance，即底色亮度）：`.dark` 按底色亮度切，深色槽位选进一套浅色主题整站就翻成浅色界面，"深色主题"这个设置名不副实。自定义编辑器不设限——贴进来的是什么就是什么，那是用户明确要的。
+- **选择器的 Popover 要 `modal`**：它开在设置对话框里，Radix Dialog 的 react-remove-scroll 把 portal 到 body 的弹层当成"对话框外"，滚轮一律 preventDefault，列表滚不动（直接赋 scrollTop 能动，是事件被拦不是 CSS）。modal 让 Popover 自己再压一层滚动锁到栈顶，锁的范围就是弹层本身；点外关闭、点选、进编辑器都不受影响。
 - **旧偏好迁移**：`falcon.theme`（明暗模式字符串）直接带过来；`falcon.term.themeId` 能对上 Ghostty 名字的（14 个）在首次启动异步拉目录后补进对应槽位，Campbell / Light+ 没有对应，落回 Falcon 默认。`sanitizeTermPref` 现在直接丢掉 themeId。
 - **内置目录的产物格式**：每行 `名字 \t 22 个不带 # 的 rrggbb`，77KB / gz 31KB，独立 chunk 只在打开选择器时拉；`ghostty-themes.meta.ts` 单独给设置页显示条数与来源。`pnpm vendor-ghostty-themes` 优先读本机 `Ghostty.app/Contents/Resources/ghostty/themes`（就是用户那个 Ghostty 认的主题），没装才去 GitHub 稀疏克隆。
 
@@ -36,7 +38,7 @@
 
 ## 验证状态
 
-已在 Chrome 桌面（macOS，vite dev）验证：默认主题下界面与改动前同款（Falcon Light / Dark 复现 shadcn neutral）；设置页两个槽位的选择器列出 465 项（Falcon 2 + Ghostty 463，按槽位深浅分组）、搜索过滤、键盘高亮即整站预览（含设置对话框自身与侧栏）、回车选定后落盘（`falcon.themes` 深色槽位 = Catppuccin Mocha，含颜色副本）；自定义编辑器贴入用户的 noctis-lux（Ghostty 主题文件原文）实时预览、应用后进浅色槽位（kind = custom）；切明暗模式后 `.dark` / color-scheme / meta theme-color / 71 个 token 全部跟着换；终端（xterm）底 / 字 / ANSI 与文件查看的语法高亮都跟主题走；刷新页面后 index.html 内联脚本单独跑出的首帧底字与 React 落的一致。单测 522 个全绿（主题层 67 个），`tsc` 两个包干净，`vite build` 通过。
+已在 Chrome 桌面（macOS，vite dev）验证：默认主题下界面与改动前同款（Falcon Light / Dark 复现 shadcn neutral）；设置页两个槽位的选择器只列与槽位同明暗的主题（浅色 78 / 深色 387，合计 465 = Falcon 2 + Ghostty 463），弹层内滚轮可滚、搜索过滤、键盘高亮即整站预览（含设置对话框自身与侧栏）、回车选定后落盘（`falcon.themes` 深色槽位 = Catppuccin Mocha，含颜色副本）；自定义编辑器贴入用户的 noctis-lux（Ghostty 主题文件原文）实时预览、应用后进浅色槽位（kind = custom）；切明暗模式后 `.dark` / color-scheme / meta theme-color / 71 个 token 全部跟着换；终端（xterm）底 / 字 / ANSI 与文件查看的语法高亮都跟主题走；刷新页面后 index.html 内联脚本单独跑出的首帧底字与 React 落的一致。单测 522 个全绿（主题层 67 个），`tsc` 两个包干净，`vite build` 通过。
 
 未验证：Safari / Firefox / 移动端；rio 引擎下高频预览的渲染器重建开销；真实 Ghostty 用户主题文件之外的奇怪写法（多行值、`config-file` 引用）。
 

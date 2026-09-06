@@ -30,7 +30,6 @@ import { chord } from "../lib/shortcuts.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { menuAnchor, openContextMenu } from "./common/Menu.js";
-import { ThemeButton } from "./common/ThemeToggle.js";
 
 const CHANGES_POLL_MS = 8000;
 
@@ -41,13 +40,11 @@ export function Sidebar() {
   const heads = useApp((s) => s.heads);
   const changes = useApp((s) => s.changes);
   const collapsed = useApp((s) => s.collapsed);
-  const system = useApp((s) => s.system);
   const toggleSidebar = useApp((s) => s.toggleSidebar);
   const toggleCollapsed = useApp((s) => s.toggleCollapsed);
   const openProjectForm = useApp((s) => s.openProjectForm);
   const selectProject = useApp((s) => s.selectProject);
   const selectedProjectId = useApp((s) => s.selectedProjectId);
-  const showOverview = useApp((s) => s.showOverview);
   const openSettings = useApp((s) => s.openSettings);
   const settingsOpen = useApp((s) => s.settingsOpen);
   const openMenu = useApp((s) => s.openMenu);
@@ -69,45 +66,8 @@ export function Sidebar() {
 
   return (
     <aside className="flex min-h-0 flex-1 flex-col border-r bg-sidebar text-sidebar-foreground">
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b pr-2 pl-3">
-        <button
-          type="button"
-          className="flex items-center gap-2 text-base font-medium tracking-tight outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-          title={t("palette.overview")}
-          onClick={showOverview}
-        >
-          <img src="/favicon.svg" alt="" width={20} height={20} className="rounded-[4.5px]" />
-          {t("appName")}
-        </button>
-        <span className="flex-1" />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={t("sidebar.collapse")}
-          title={`${t("sidebar.collapse")} · ${chord("toggleSidebar")}`}
-          onClick={toggleSidebar}
-        >
-          <PanelLeft />
-        </Button>
-      </div>
-
-      <div className="mt-1 flex h-8 items-center pr-1.5 pl-3">
-        <span className="text-[11px] tracking-wide text-muted-foreground">
-          {t("sidebar.servers")}
-        </span>
-        <span className="flex-1" />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={t("sidebar.newProject")}
-          title={t("sidebar.newProject")}
-          onClick={() => openProjectForm(null)}
-        >
-          <Plus />
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+      {/* 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 + / 右键 / 命令面板 */}
+      <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
         {empty && (
           <p className="px-3 pt-1.5 pb-2.5 text-xs leading-relaxed text-muted-foreground">
             {t("sidebar.empty")}
@@ -183,14 +143,16 @@ export function Sidebar() {
           <Settings />
           {t("sidebar.settings")}
         </Button>
-        <span className="ml-auto flex items-center gap-1">
-          {system?.version && (
-            <span className="font-mono text-[11px] text-muted-foreground/70">
-              v{system.version}
-            </span>
-          )}
-          <ThemeButton />
-        </span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="ml-auto text-muted-foreground"
+          aria-label={t("sidebar.collapse")}
+          title={`${t("sidebar.collapse")} · ${chord("toggleSidebar")}`}
+          onClick={toggleSidebar}
+        >
+          <PanelLeft />
+        </Button>
       </div>
     </aside>
   );
