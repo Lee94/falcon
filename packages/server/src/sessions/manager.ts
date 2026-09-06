@@ -10,6 +10,7 @@ import {
   OscColorGate,
   TERM_FRAME_OUTPUT,
   TERM_FRAME_REPLAY,
+  TermModeTracker,
   isTermAppearance,
   parseHexRgb,
 } from "@falcon/shared";
@@ -48,7 +49,6 @@ import {
   fallbackTermSize,
   parseStoredTermSize,
 } from "./termSize.js";
-import { TermModeTracker } from "./termModes.js";
 
 export interface Viewer {
   /** 控制类消息（state / reconnecting / error），JSON 文本帧 */

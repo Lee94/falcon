@@ -14,13 +14,18 @@
  *   stopPropagation），RioAdapter 以前的 capture 拦截 + 克隆重派发补丁随之删除；
  * - IME 的提交、预编辑覆盖层与候选框光标锚点内置（rioterm 0.1.x 没接提交，textarea
  *   也常驻视口外，组合中的拼音完全看不见）；
- * - 滚轮攒余量（触控板慢滚在 scrollback 里能动）；
+ * - 滚轮分两种口径：程序接管（鼠标上报 / alt screen）时一个事件最多一次点击，按 xterm.js
+ *   的门槛与触控板阻尼；本地 scrollback 才按行推并攒余量（触控板慢滚能动）；
+ * - 鼠标按键上报（rioterm 没有 API，上游 dom.ts 只做本地选区）：程序开了鼠标协议就把按下 /
+ *   松开 / 拖动按 xterm.js 的口径合成报文经 terminal.input() 送出（mouse.ts），协议与编码由
+ *   shared 的 TermModeTracker 从输出流跟踪，所以输出必须经 handle.write() 进来；
  * - mouseup 不写剪贴板：TerminalView 已在宿主 mouseup 上按 getSelection() 写，避免双写；
  * - 去掉 predictiveEcho、内置 ResizeObserver（宿主驱动 fit）、autoFocus、confirm() 链接提示；
  * - window 级 mousemove/mouseup 只在拖选期间挂着；
  * - DPR 变化与 device lost 自动换渲染器。
  */
 
+import { TermModeTracker } from "@falcon/shared";
 import { handleKeyboardEvent, initWasm, modsOf, Terminal } from "rioterm";
 import { browserDprEnv, watchDpr, type DprEnv } from "./dpr.js";
 import {
@@ -35,6 +40,7 @@ import {
 } from "./gpu.js";
 import { imeCursorRect } from "./ime.js";
 import { routeKey } from "./keyRoute.js";
+import { MouseReporter, type MouseAction, type MouseButton } from "./mouse.js";
 import { createRenderer, RendererInitError, type RioAppearance, type RioRenderer } from "./renderer.js";
 import { themeBase } from "./theme.js";
 import { WheelAccumulator } from "./wheel.js";
@@ -66,6 +72,11 @@ export interface RioOpenOptions {
 
 export interface RioHandle {
   readonly terminal: Terminal;
+  /**
+   * 输出一律从这里进，别直接 terminal.write()：先喂给 VT 模式跟踪（鼠标上报要知道程序开的
+   * 协议与编码），再交给 terminal。RIS（adapter 的 reset）同样走这里，跟踪器随之清零。
+   */
+  write(data: string | Uint8Array): void;
   /** getter：换渲染器后指向新的 */
   readonly renderer: RioRenderer;
   readonly rendererKind: RioRendererKind;
@@ -92,6 +103,15 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
   ]);
 
   const terminal = new Terminal({ scrollback: opts.scrollback });
+  // 鼠标按键上报要知道程序开的是哪种协议与编码，rioterm 的 modes() 只有一个布尔位：
+  // 在输出流上自己跟踪 DEC 私有模式，与服务端回放前缀是同一个跟踪器（回放前缀也在流里，
+  // 重连后同样能对上）。字节流按 UTF-8 流式解码，序列被 chunk 切开也能续上。
+  const modes = new TermModeTracker();
+  const modeDecoder = new TextDecoder();
+  const write = (data: string | Uint8Array) => {
+    modes.track(typeof data === "string" ? data : modeDecoder.decode(data, { stream: true }));
+    terminal.write(data);
+  };
   let gpu: GpuHandle | null = gpuResult?.ok ? gpuResult.gpu : null;
   let appearance = opts.appearance;
   let disposed = false;
@@ -325,7 +345,55 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
   });
   disposers.push(() => clipboardSub.dispose());
 
-  // ---- 鼠标选区 / 链接 ----
+  // ---- 鼠标：上报 / 选区 / 链接 ----
+  // 程序开了鼠标协议（zellij 永远开着 ?1002 ?1006）就把按键报给它，本地选区让位；按住 Shift
+  // 才绕过上报做本地选区——zellij 自己的文档就叫用户按 Shift 选，Ghostty / Alacritty / Kitty
+  // 在 macOS 上也都是 Shift。xterm.js 在 macOS 上要开 macOptionClickForcesSelection 才有绕过键
+  // 且是 Option，我们没开（它会顺带关掉 Option 块选），所以 xterm 引擎在 macOS 上没有绕过键，
+  // 这是两引擎目前唯一的手感差异。
+  const reporter = new MouseReporter();
+  const bypassReport = (e: MouseEvent) => e.shiftKey;
+  const buttonOf = (e: MouseEvent): MouseButton => (e.button < 3 ? (e.button as MouseButton) : 3);
+  /** 移动事件里按住的键：buttons 位图的位序与 button 不同（右键是 2、中键是 4） */
+  const heldButton = (e: MouseEvent): MouseButton =>
+    e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 3;
+  const reportMouse = (e: MouseEvent, action: MouseAction, button: MouseButton) => {
+    const mode = { protocol: modes.mouseProtocol, encoding: modes.mouseEncoding };
+    const { col, row } = renderer.cellAt(e.clientX, e.clientY);
+    let x = 0;
+    let y = 0;
+    if (mode.encoding === 1016) {
+      // 像素坐标：画布左上角起、夹在画布内的 CSS 像素，与 xterm.js 同口径
+      const rect = renderer.element.getBoundingClientRect();
+      x = Math.min(Math.max(0, Math.floor(e.clientX - rect.left)), Math.max(0, Math.floor(rect.width) - 1));
+      y = Math.min(Math.max(0, Math.floor(e.clientY - rect.top)), Math.max(0, Math.floor(rect.height) - 1));
+    }
+    const report = reporter.report(
+      { action, button, col, row, x, y, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey },
+      mode,
+      { cols: terminal.options.cols, rows: terminal.options.rows }
+    );
+    // send_text 原样到 onData，不做 CRLF / bracketed paste 之类的改写
+    if (report) terminal.input(report);
+  };
+  let reporting = false;
+  const onReportMove = (e: MouseEvent) => {
+    // 按住期间的拖动；无按键移动由 container 上的 mousemove 按 ?1003 报
+    if (e.buttons) reportMouse(e, "move", heldButton(e));
+  };
+  const endReporting = () => {
+    if (!reporting) return;
+    reporting = false;
+    window.removeEventListener("mousemove", onReportMove);
+    window.removeEventListener("mouseup", onReportUp);
+  };
+  const onReportUp = (e: MouseEvent) => {
+    if (e.button <= 2) reportMouse(e, "up", buttonOf(e));
+    // 还有别的键按着就继续跟
+    if (!e.buttons) endReporting();
+  };
+  disposers.push(endReporting);
+
   let selecting = false;
   let downAt: { x: number; y: number } | null = null;
   const onDragMove = (e: MouseEvent) => {
@@ -349,6 +417,22 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     downAt = null;
   };
   on(container, "mousedown", (e) => {
+    if (e.button > 2) return;
+    if (modes.mouseProtocol && !bypassReport(e)) {
+      textarea.focus();
+      // 残留的本地选区盖在 TUI 上没意义，点一下就清
+      terminal.clearSelection();
+      reportMouse(e, "down", buttonOf(e));
+      if (!reporting) {
+        reporting = true;
+        // 按住期间移出终端也要继续报拖动与松开，挂 window；xterm.js 同样做法
+        window.addEventListener("mousemove", onReportMove);
+        window.addEventListener("mouseup", onReportUp);
+      }
+      // 右键照样冒到宿主的 contextmenu：xterm 引擎也是报文与菜单都有
+      e.preventDefault();
+      return;
+    }
     if (e.button !== 0) return;
     textarea.focus();
     downAt = { x: e.clientX, y: e.clientY };
@@ -362,6 +446,11 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     e.preventDefault();
   });
   disposers.push(endDrag);
+
+  on(container, "mousemove", (e) => {
+    // ?1003 连无按键移动也报；按住时的移动走 window 上的 onReportMove
+    if (modes.mouseProtocol === 1003 && !e.buttons) reportMouse(e, "move", 3);
+  });
 
   let hoverCell: { row: number; col: number } | null = null;
   on(container, "mousemove", (e) => {
@@ -384,7 +473,14 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
     container,
     "wheel",
     (e) => {
-      const lines = wheel.push(e.deltaMode, e.deltaY, renderer.cellHeight, terminal.options.rows);
+      // zellij / vim 这类程序接管了滚轮（鼠标上报或 alt screen）时，scroll_wheel 把 n 行翻成
+      // n 条上报，zellij 每条又自己滚 3 行，鼠标一格就冲出十几行。按 xterm.js 的口径：一个
+      // DOM 事件最多一次点击，行数只做门槛（见 wheel.ts）。只有本地 scrollback 才按行推。
+      const modes = terminal.modes();
+      const lines =
+        modes.mouseTracking || modes.altScreen
+          ? wheel.click(e.deltaMode, e.deltaY, renderer.cellHeight, terminal.options.rows)
+          : wheel.push(e.deltaMode, e.deltaY, renderer.cellHeight, terminal.options.rows);
       // 不足一行的事件在攒余量，也算终端消费了：终端占满 pane，页面本来就不该跟着滚
       if (lines === 0) {
         e.preventDefault();
@@ -455,6 +551,7 @@ export async function openRio(host: HTMLElement, opts: RioOpenOptions): Promise<
 
   const handle: RioHandle = {
     terminal,
+    write,
     get renderer() {
       return renderer;
     },

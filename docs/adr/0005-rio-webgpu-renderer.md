@@ -30,6 +30,7 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 - **键盘分流**（`keyRoute.ts`）：IME 组合（`isComposing` / keyCode 229）与命中全局快捷键的按键既不 preventDefault 也不 stopPropagation，前者让组合文本落进 textarea 走 compositionend，后者让事件冒泡到 App 的 window 监听。⌘C / Ctrl+Shift+C 只在有选区时复制，与 rioterm 一致。
 - **IME 候选框锚点与预编辑层**（`ime.ts` / `open.ts`）：浏览器按接收 composition 的 textarea 定位系统候选框，不认 canvas/WebGPU 光标。隐藏 textarea 因此保留一个真实 cell 的尺寸，并按 `cursorPosition × cell metrics` 移到终端光标；当前 tab 的 `onUpdate` 按帧合并同步，换渲染器后立即按新 cell 重算，查看回滚区时沿用最后一个有效位置。组合中的拼音落在透明 textarea 里看不见，渲染器也画不了（组合串没进 PTY，WASM 里没有格子），所以照 xterm 的 composition-view 加一个 DOM 覆盖层：按终端字体与主题字/底色把 `compositionupdate.data` 画在光标格上，最多延伸到网格右边缘（rtl 容器 + LRM，超长时看到末尾），组合期间 textarea 与覆盖层同宽，候选框才锚在组合串末尾。
 - **滚轮分两种口径**（`wheel.ts`）：程序接管滚轮（`terminal.modes()` 的 mouseTracking 或 altScreen，zellij 里永远是）时一个 DOM 事件最多折成一次点击。rioterm 的 `scroll_wheel(n)` 会把 n 行翻成 n 条 SGR 上报 / n 个方向键（Node 里驱动 wasm 实测），zellij 收到每条上报自己再滚 3 行，macOS 鼠标一格 deltaY 上百像素折五六行就冲出十几行，用户看着是"一滚就过了"。xterm.js（`MouseService._consumeWheelEvent`）行数只当门槛、每事件最多一条、多出的整行丢掉、|deltaY| < 50 当触控板乘 0.3，这里照抄，两引擎手感一致。本地 scrollback 才按行推并攒余量：rioterm 用 `Math.trunc(lines)`，触控板慢滚在 scrollback 里根本不动。
+- **鼠标按键上报自己合成**（`mouse.ts` + shared 的 `TermModeTracker`）：rioterm 0.1.8（也是 npm 上的最新版）的 WASM 只导出 `scroll_wheel`，按下 / 松开 / 拖动没有 API，`modes()` 也只给一个 mouseTracking 位；上游 dom.ts 只做本地选区，zellij 切 tab、vim 点光标在 rio 下全是哑的。做法：输出一律经 `handle.write()` 喂给服务端回放前缀用的同一个 `TermModeTracker`（回放前缀本身也在流里，重连后照样对上），拿到精确的协议（?9 / ?1000 / ?1002 / ?1003）与编码（?1006 / ?1016），按 xterm.js `MouseStateService` 的筛选 / 编码 / 移动去重合成报文，`terminal.input()` 经 send_text 原样到 onData。按住 Shift 绕过上报做本地选区（zellij 文档、Ghostty / Alacritty / Kitty 都是 Shift；xterm.js 在 macOS 上要开 `macOptionClickForcesSelection` 才有绕过键且是 Option，我们没开，所以 xterm 引擎在 macOS 上没有绕过键，这是两引擎目前唯一的手感差异）。默认单字节编码超过 ASCII 的报文丢掉：输入通道是 JSON 文本帧，0x80 以上的字节会被 UTF-8 成两字节；xterm 引擎那边这种报文走 onBinary 而 adapter 只接了 onData，本来就发不出去。
 - **`navigator.gpu` 只在 secure context 暴露**：这个项目常用 `http://<局域网 IP>:4923` 访问，那时它是 undefined，先查 `isSecureContext` 而不是等 `requestAdapter` 返回 null。`isFallbackAdapter` 新规范挪进了 `adapter.info`，两处都看。
 - **一个页面一个 GPUDevice**（`gpu.ts` 单例），pipeline 按 canvas format 挂在设备上共享；`getPreferredCanvasFormat()` 在 Safari 是 `bgra8unorm`，绝不硬编码。device lost 先重新 `requestAdapter` 原地重建，拿不到再退 canvas；`"destroyed"` 是我们主动 destroy 才有的原因，出现即忽略。
 - **WGSL 整数 varying 必须 `@interpolate(flat)`**，否则编译失败（Safari 最严）；WGSL 写成字符串常量，tsconfig 没有 vite/client 类型，`?raw` 会报错。
@@ -45,7 +46,7 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 
 ## 验证状态
 
-已在 Chrome 桌面（macOS，dpr 2，localhost）验证：文字 / 颜色 / 粗斜体 / dim / inverse、5 种下划线与删除线、CJK 宽字符、彩色 emoji、盒线（细 / 粗 / 双 / 圆角 / 对角线 / 虚线）与块元素 / 阴影 / braille、块光标闪烁与失焦空心、⌘K 等全局快捷键穿透、键盘输入与回显；换字号 / 主题 / 光标样式时同一个 Terminal 实例、不新建 WebSocket、VT 模式保留；`navigator.gpu` 缺失时回落 canvas、每页面一次 toast、设置页提示；盒线相邻格像素级相接。单测 79 个覆盖纯函数层（key 分流、滚轮、DPR、GPU 获取、度量、颜色、图集分配、装饰、行构建与脏行、sprite）。
+已在 Chrome 桌面（macOS，dpr 2，localhost）验证：文字 / 颜色 / 粗斜体 / dim / inverse、5 种下划线与删除线、CJK 宽字符、彩色 emoji、盒线（细 / 粗 / 双 / 圆角 / 对角线 / 虚线）与块元素 / 阴影 / braille、块光标闪烁与失焦空心、⌘K 等全局快捷键穿透、键盘输入与回显；换字号 / 主题 / 光标样式时同一个 Terminal 实例、不新建 WebSocket、VT 模式保留；`navigator.gpu` 缺失时回落 canvas、每页面一次 toast、设置页提示；盒线相邻格像素级相接。单测 79 个覆盖纯函数层（key 分流、滚轮、DPR、GPU 获取、度量、颜色、图集分配、装饰、行构建与脏行、sprite）。鼠标上报（2026-09-05）在无头 Chrome 里用 CDP 真实鼠标输入对着直接装配的 `openRio` 验过：?1002/?1006 的点击、拖动（含 window 级松开）、右键、Shift 绕过做本地选区、?1003 无按键移动、默认单字节编码、RIS 与 ?1002l 之后回到本地选区，报文字节与 xterm.js 逐条一致；没有在真实 zellij 会话里点过，那条链路（WS → server → PTY）与 xterm 引擎共用。
 
 微基准（2026-09-02，Mac mini Apple Silicon，Chrome，dpr 2，220×50，系统等宽 13px，3 轮中位；脚本 `scripts/bench-term-engines.js`）：
 
@@ -66,4 +67,4 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 
 - `open.ts` 与上游 rioterm 的 `open()` 会漂移，由我们维护；上游修的 bug 不会自动带过来。
 - 引擎仍是两值（xterm / rio），WebGPU 与 canvas 的切换对用户不可见，只靠 toast 与设置页提示；花屏但不抛异常时靠 localStorage 逃生口。
-- 明确不做（可后补）：触屏滚动、软键盘退格连删（rio 的 textarea 现在归我们，xterm 那套哨兵可以搬）、跨终端共享图集、鼠标点击上报 TUI（rioterm 没有 API）、DOMRenderer。
+- 明确不做（可后补）：触屏滚动、软键盘退格连删（rio 的 textarea 现在归我们，xterm 那套哨兵可以搬）、跨终端共享图集、DOMRenderer。

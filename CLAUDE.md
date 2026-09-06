@@ -37,7 +37,7 @@ pnpm --filter @falcon/server exec tsx --test --test-name-pattern "dump-screen" s
 
 ## 架构
 
-三个 workspace 包，`packages/shared` 是类型与协议的唯一真相来源，server 与 web 都从它取。
+三个 workspace 包，`packages/shared` 是类型与协议的唯一真相来源，server 与 web 都从它取（含 VT 模式跟踪 `termModes.ts`：服务端回放前缀与 rio 鼠标上报共用一个跟踪器）。
 
 ### 数据流
 
@@ -63,7 +63,7 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - `store.ts` 是单个 zustand store，含全部 UI 态与持久化的工作区布局；`lib/useActions.ts` 集中所有菜单项 / 命令面板动作。
 - `components/ui/` 是 shadcn 生成物，`components/common/` 是本项目封装（Menu / ConfirmDialog / Field 等），业务组件在 `components/` 顶层。
 - `TerminalView.tsx` 只面向 `lib/termAdapter.ts` 接口，底下是 xterm.js（默认）或 rioterm（实验性，Rust VT 核心编译成 WASM，动态 import）。
-- `lib/rio/` 是 rio 引擎的自持装配层（ADR 0005）：`open.ts` 复刻了 rioterm 的 `open()`（键鼠 / IME / 滚轮 / 剪贴板接线，换字体只换渲染器、Terminal 不动），`renderer.ts` 是渲染器契约，`webgpu/` 是自研 WebGPU 渲染器（不可用时回落 rioterm 自带 canvas）。**rioterm 锁定精确版本**，升级前按 ADR 核对它的 open()/canvas/keys/core。纯函数层（度量、颜色、图集分配、行构建、脏行、sprite 几何）都有单测；GPU 与 DOM 只在真机验。排查用 `localStorage["falcon.rio.renderer"] = "canvas" | "webgpu"` 强制渲染器，DEV 下控制台看 `__rioHandles`（`rendererKind` / `fallbackReason` / `renderer.stats`）。WebGPU 画布 present 后回读是空的，看像素只能页面截图。
+- `lib/rio/` 是 rio 引擎的自持装配层（ADR 0005）：`open.ts` 复刻了 rioterm 的 `open()`（键鼠 / IME / 滚轮 / 剪贴板接线，换字体只换渲染器、Terminal 不动），`renderer.ts` 是渲染器契约，`webgpu/` 是自研 WebGPU 渲染器（不可用时回落 rioterm 自带 canvas），`mouse.ts` 合成鼠标按键报文（rioterm 没有这个 API），输出一律经 `handle.write()` 进来才有协议 / 编码可查。**rioterm 锁定精确版本**，升级前按 ADR 核对它的 open()/canvas/keys/core。纯函数层（度量、颜色、图集分配、行构建、脏行、sprite 几何、鼠标报文）都有单测；GPU 与 DOM 只在真机验。排查用 `localStorage["falcon.rio.renderer"] = "canvas" | "webgpu"` 强制渲染器，DEV 下控制台看 `__rioHandles`（`rendererKind` / `fallbackReason` / `renderer.stats`）。WebGPU 画布 present 后回读是空的，看像素只能页面截图。
 - `lib/theme/` 是主题系统（ADR 0006）：数据模型就是 Ghostty 主题文件（`ghostty.ts` 解析 / 补默认 / 序列化，含 `theme = X` 覆盖与 cell-foreground 特殊值），浅色 / 深色各一个槽位（`pref.ts`，存的是颜色**副本**，启动不等目录），整套 shadcn 语义色、语法高亮色（shiki css-variables 主题）、终端 ITheme 都由 `derive.ts` 从一套主题推出来并写在 `<html>` 内联 style 上（`apply.ts`）。**`.dark` 按主题底色亮度切，不按明暗模式**。内置目录 = Falcon 两套 + Ghostty 全部 463 套（`assets/themes/ghostty-themes.ts`，`pnpm vendor-ghostty-themes` 从本机 Ghostty.app 或 GitHub 重新生成，懒加载）。界面色**只准用语义 token**，不许写死颜色；新增语义色去 `derive.ts` 加，不要回到 `styles.css` 写两套。
 - 界面上**不允许硬编码中文**，一律走 `i18n.ts` 的 key（v1 只有中文资源）。
 - 重组件（终端、命令面板、各种表单、设置）都在 `App.tsx` 里 `lazy()` 加载，新增浮层沿用这个做法。

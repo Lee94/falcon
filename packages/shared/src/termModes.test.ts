@@ -96,6 +96,21 @@ describe("TermModeTracker", () => {
     assert.equal(tracked("\x1b[?12h\x1b[?2026h\x1b[?1048h"), "");
   });
 
+  it("鼠标协议与编码的 getter（rio 引擎合成按键报文用）", () => {
+    const t = new TermModeTracker();
+    assert.equal(t.mouseProtocol, 0);
+    assert.equal(t.mouseEncoding, 0);
+    t.track("\x1b[?1002h\x1b[?1006h");
+    assert.equal(t.mouseProtocol, 1002);
+    assert.equal(t.mouseEncoding, 1006);
+    // 关编码不影响协议
+    t.track("\x1b[?1006l");
+    assert.equal(t.mouseProtocol, 1002);
+    assert.equal(t.mouseEncoding, 0);
+    t.track("\x1bc");
+    assert.equal(t.mouseProtocol, 0);
+  });
+
   it("?2031（亮暗通知订阅）记进 themeNotify，不进前缀", () => {
     const t = new TermModeTracker();
     assert.equal(t.themeNotify, false);

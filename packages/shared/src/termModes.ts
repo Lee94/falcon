@@ -1,16 +1,22 @@
 /**
- * 终端 VT 模式跟踪。
+ * 终端 VT 模式跟踪：从 PTY 输出流里跟踪 DEC 私有模式的当前值。纯函数、零 I/O，
+ * server 与 web 各用在一处：
  *
- * Viewer 重同步（WS 重连 / 新开页面 / 背压 lagged 后的 resync）走的是
- * term.reset() + RingBuffer 快照回放，而 reset 会清掉 xterm.js 的全部
- * DEC 私有模式。Zellij 客户端只在 attach 那一刻设置一次 ?1049 / ?1002 /
- * ?1006 等模式，RingBuffer 只留最近 4MB——输出多的会话很快把这些字节挤出
- * 窗口，此后每次回放都让该 Viewer 永久失去 mouse tracking / bracketed
- * paste / 方向键编码：滚轮彻底失效，多行粘贴被逐行直接执行。
+ * 1. 服务端回放前缀（server/sessions/manager.ts）。Viewer 重同步（WS 重连 / 新开页面 /
+ *    背压 lagged 后的 resync）走的是 term.reset() + RingBuffer 快照回放，而 reset 会清掉
+ *    xterm.js 的全部 DEC 私有模式。Zellij 客户端只在 attach 那一刻设置一次 ?1049 / ?1002 /
+ *    ?1006 等模式，RingBuffer 只留最近 4MB——输出多的会话很快把这些字节挤出窗口，此后每次
+ *    回放都让该 Viewer 永久失去 mouse tracking / bracketed paste / 方向键编码：滚轮彻底失效，
+ *    多行粘贴被逐行直接执行。所以服务端全程跟踪输出流里的模式变化，回放时把「重建当前模式」
+ *    的序列拼在快照前面。
  *
- * 所以在服务端全程跟踪输出流里的模式变化，回放时把「重建当前模式」的
- * 序列拼在快照前面。语义对齐 xterm.js 的 setModePrivate / resetModePrivate /
- * softReset——客户端只有它，别的终端方言不重要：
+ * 2. rio 引擎的鼠标按键上报（web/lib/rio/open.ts）。rioterm 的 WASM 只导出滚轮上报，
+ *    `modes()` 也只给一个 mouseTracking 布尔位，分不出协议（?9 / ?1000 / ?1002 / ?1003）
+ *    与编码（?1006 / ?1016）；按键报文由装配层自己合成，协议与编码从这里的 getter 读。
+ *    客户端喂的是同一条输出流（回放前缀也在其中），跟踪结果与服务端一致。
+ *
+ * 语义对齐 xterm.js 的 setModePrivate / resetModePrivate / softReset——客户端的 xterm 引擎
+ * 就是它，rio 引擎合成报文也照它的口径，别的终端方言不重要：
  * - 鼠标协议（?9/?1000/?1002/?1003）与编码（?1006/?1016）是单值状态，
  *   后设的赢；关掉其中任意一个号都会把整个状态清空（xterm.js 就是这么写的）；
  * - alt-screen 记住是哪个变体（?47/?1047/?1049）开的，回放用同一个号；
@@ -54,9 +60,9 @@ const CSI_PARAM_MAX = 64;
 export class TermModeTracker {
   private bools = new Map(BOOL_MODE_DEFAULTS);
   /** 0 = NONE；否则是最后一次 h 的协议号 */
-  private mouseProtocol = 0;
+  private mouseProto = 0;
   /** 0 = DEFAULT；否则 1006（SGR）/ 1016（SGR_PIXELS） */
-  private mouseEncoding = 0;
+  private mouseEnc = 0;
   /** 0 = normal buffer；否则是打开 alt-screen 用的那个号 */
   private altScreen = 0;
   /** ?2031 亮暗通知订阅。不进 prefix()，只喂给 997 注入的 gating。 */
@@ -65,6 +71,16 @@ export class TermModeTracker {
   /** 是否有程序订阅了亮暗主题变化通知（DECSET 2031）。 */
   get themeNotify(): boolean {
     return this.notify2031;
+  }
+
+  /** 当前鼠标协议：0 = 没开；否则 9 / 1000 / 1002 / 1003（最后一次 h 的号）。 */
+  get mouseProtocol(): number {
+    return this.mouseProto;
+  }
+
+  /** 当前鼠标编码：0 = 默认单字节；否则 1006（SGR）/ 1016（SGR 像素坐标）。 */
+  get mouseEncoding(): number {
+    return this.mouseEnc;
   }
 
   private state = GROUND;
@@ -172,8 +188,8 @@ export class TermModeTracker {
       const cur = this.bools.get(mode)!;
       if (cur !== def) out += cur ? `\x1b[?${mode}h` : `\x1b[?${mode}l`;
     }
-    if (this.mouseProtocol) out += `\x1b[?${this.mouseProtocol}h`;
-    if (this.mouseEncoding) out += `\x1b[?${this.mouseEncoding}h`;
+    if (this.mouseProto) out += `\x1b[?${this.mouseProto}h`;
+    if (this.mouseEnc) out += `\x1b[?${this.mouseEnc}h`;
     return out;
   }
 
@@ -194,11 +210,11 @@ export class TermModeTracker {
         case 1000:
         case 1002:
         case 1003:
-          this.mouseProtocol = set ? mode : 0;
+          this.mouseProto = set ? mode : 0;
           break;
         case 1006:
         case 1016:
-          this.mouseEncoding = set ? mode : 0;
+          this.mouseEnc = set ? mode : 0;
           break;
         case 47:
         case 1047:
@@ -216,8 +232,8 @@ export class TermModeTracker {
 
   private hardReset(): void {
     this.bools = new Map(BOOL_MODE_DEFAULTS);
-    this.mouseProtocol = 0;
-    this.mouseEncoding = 0;
+    this.mouseProto = 0;
+    this.mouseEnc = 0;
     this.altScreen = 0;
     this.notify2031 = false;
   }

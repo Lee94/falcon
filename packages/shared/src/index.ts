@@ -13,6 +13,7 @@ export {
   sanitizeColorHint,
   termPtyEnv,
 } from "./termEnv.js";
+export { TermModeTracker } from "./termModes.js";
 
 // ============ Project ============
 
