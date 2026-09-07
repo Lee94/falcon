@@ -1,34 +1,61 @@
 /**
- * 项目工作目录的只读浏览：列一层目录、取一个文件的内容用于查看。
+ * 项目工作目录的浏览与改动：列一层目录、取一个文件的内容、新建文件夹、
+ * 重命名、删除（ADR 0009）。
  *
  * 与 fs.ts 是两件不同的事。那边服务于项目表单——只列文件夹、能一路往上走到根；
- * 这边只在**项目工作目录内部**打转，文件和目录都要列，还得把文件内容取回来。
- * 相同的是执行环境的取舍：本地走 node:fs，远端走宿主机 exec 而不是 SFTP
- * （理由同 fs.ts：sftp-server 被禁的机器并不少见）。
+ * 这边只在**项目工作目录内部**打转，文件和目录都要列，还得把文件内容取回来，
+ * 以及在用户确认之后改这一层（mkdir / rename / rm）。下载 / 上传按流走，在
+ * transfer.ts。相同的是执行环境的取舍：本地走 node:fs，远端走宿主机 exec 而
+ * 不是 SFTP（理由同 fs.ts：sftp-server 被禁的机器并不少见）。
  *
- * 命令构造是纯函数（listCommand / readCommand）、输出解析也是（parseEntries /
- * parseRead / classify），照 git 与 zellij 那两套的分层来，测试只打这一层。
+ * 命令构造是纯函数（listCommand / readCommand / mkdirCommand 等）、输出解析
+ * 也是（parseEntries / parseRead / classify），照 git 与 zellij 那两套的分层
+ * 来，测试只打这一层。
  */
 
 import fs from "node:fs";
+import type { Duplex, Readable } from "node:stream";
 import type {
+  FileOpResult,
   FilePreview,
+  FileRemoveResult,
   WorkspaceEntry,
   WorkspaceIndex,
   WorkspaceListing,
 } from "@falcon/shared";
-import { WORKSPACE_FILE_CAP, WORKSPACE_INDEX_CAP, WORKSPACE_LIST_CAP } from "@falcon/shared";
-import { isAncestor, joinPath, normalizeSep, samePath } from "./git/path.js";
+import {
+  WORKSPACE_FILE_CAP,
+  WORKSPACE_INDEX_CAP,
+  WORKSPACE_LIST_CAP,
+  WORKSPACE_RAW_CAP,
+} from "@falcon/shared";
+import { dirnameOf, isAncestor, joinPath, normalizeSep, samePath } from "./git/path.js";
 import { encodePowerShell, quotePosix, quotePowerShell, type HostKind } from "./zellij/host.js";
 import type { ExecFn } from "./zellij/install.js";
+
+/**
+ * 远端命令的流式通道：写入端是命令的 stdin，读取端是 stdout，`close` 事件带退出码
+ * （ssh2 的 ClientChannel 正是这个形状）。下载 / 上传（transfer.ts）按流走，
+ * exec 那种"攒成字符串"的形状装不下一个几百 MB 的文件。
+ */
+export interface ExecChannel extends Duplex {
+  stderr: Readable;
+}
+export type ExecStreamFn = (commandLine: string) => Promise<ExecChannel>;
 
 /** 执行环境。本地不走 exec——node_modules 那种目录用 shell 循环列会慢到没法用 */
 export type FileHost =
   | { local: true; kind: HostKind }
-  | { local: false; kind: HostKind; exec: ExecFn };
+  | { local: false; kind: HostKind; exec: ExecFn; execStream: ExecStreamFn };
 
 const LIST_TIMEOUT_MS = 15_000;
 const READ_TIMEOUT_MS = 30_000;
+/** 原始字节上限是文本的 8 倍，慢一点的 SSH 链路上 base64 回传 16MB 要不少时间 */
+const RAW_TIMEOUT_MS = 90_000;
+const MKDIR_TIMEOUT_MS = 15_000;
+const RENAME_TIMEOUT_MS = 15_000;
+/** 递归删 node_modules 那种目录，远端可能要一会儿 */
+const REMOVE_TIMEOUT_MS = 120_000;
 
 // ---------------- 路径 ----------------
 
@@ -80,10 +107,14 @@ function relJoin(parent: string, name: string): string {
 // ---------------- 列目录 ----------------
 
 /**
- * 每行 `d <名字>` 或 `f <名字>`。
+ * 每行 `d <size> <mtime> <名字>` 或 `f <size> <mtime> <名字>`。
  *
- * 名字里含换行的文件会被拆成两条错行——与 fs.ts 的既有取舍一致：
- * 换行文件名在真实仓库里基本不存在，而为它引入 NUL 分隔会牺牲 busybox 兼容性。
+ * 目录的 size 恒 0（前端画成 —）；mtime 是 Unix 秒。名字是行里第三个空格之后的
+ * 全部——文件名可以含空格，不能含换行。换行文件名会被拆成两条错行，与 fs.ts
+ * 的既有取舍一致：真实仓库里基本不存在，而为它引入 NUL 分隔会牺牲 busybox。
+ *
+ * POSIX 的 size / mtime 先试 `stat -c`（GNU / busybox），没有再试 `stat -f`
+ * （BSD / macOS 远端）。列一层多一次 stat 比再开一条命令划算。
  */
 export function listCommand(kind: HostKind, dir: string): string {
   if (kind === "windows") {
@@ -92,8 +123,12 @@ export function listCommand(kind: HostKind, dir: string): string {
         `$d = ${quotePowerShell(dir)}`,
         `if (-not (Test-Path -LiteralPath $d)) { Write-Output 'ENOENT'; exit 1 }`,
         `if (-not (Test-Path -LiteralPath $d -PathType Container)) { Write-Output 'ENOTDIR'; exit 1 }`,
+        `$epoch = [datetime]::new(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)`,
         `Get-ChildItem -LiteralPath $d -Force | ForEach-Object { ` +
-          `if ($_.PSIsContainer) { Write-Output ('d ' + $_.Name) } else { Write-Output ('f ' + $_.Name) } }`,
+          `$k = if ($_.PSIsContainer) { 'd' } else { 'f' }; ` +
+          `$s = if ($_.PSIsContainer) { 0 } else { $_.Length }; ` +
+          `$m = [int64]($_.LastWriteTimeUtc - $epoch).TotalSeconds; ` +
+          `Write-Output ($k + ' ' + $s + ' ' + $m + ' ' + $_.Name) }`,
       ].join("; ")
     );
   }
@@ -105,7 +140,12 @@ export function listCommand(kind: HostKind, dir: string): string {
     `if [ ! -r "$d" ]; then printf '%s\\n' EACCES; exit 1; fi`,
     // -d 会跟随符号链接：指向目录的链接算目录，点开进去是用户的预期
     `ls -1A "$d" | while IFS= read -r n; do ` +
-      `if [ -d "$d/$n" ]; then printf 'd %s\\n' "$n"; else printf 'f %s\\n' "$n"; fi; done`,
+      `if [ -d "$d/$n" ]; then k=d; s=0; ` +
+      `m=$(stat -c %Y "$d/$n" 2>/dev/null || stat -f %m "$d/$n" 2>/dev/null || echo 0); ` +
+      `else k=f; ` +
+      `info=$(stat -c '%s %Y' "$d/$n" 2>/dev/null || stat -f '%z %m' "$d/$n" 2>/dev/null || echo '0 0'); ` +
+      `s=\${info%% *}; m=\${info#* }; fi; ` +
+      `printf '%s %s %s %s\\n' "$k" "$s" "$m" "$n"; done`,
   ].join("; ");
 }
 
@@ -113,12 +153,17 @@ export function parseEntries(stdout: string, parentRel: string): WorkspaceEntry[
   const out: WorkspaceEntry[] = [];
   for (const raw of stdout.split(/\r?\n/)) {
     const line = raw.replace(/\r$/, "");
-    if (line.length < 2) continue;
-    const tag = line[0];
-    if ((tag !== "d" && tag !== "f") || line[1] !== " ") continue;
-    const name = line.slice(2);
+    const m = /^([df]) (\d+) (\d+) (.*)$/.exec(line);
+    if (!m) continue;
+    const name = m[4]!;
     if (!name || name === "." || name === "..") continue;
-    out.push({ name, path: relJoin(parentRel, name), kind: tag === "d" ? "dir" : "file" });
+    const kind = m[1] === "d" ? "dir" : "file";
+    const size = Number(m[2]);
+    const mtime = Number(m[3]);
+    const entry: WorkspaceEntry = { name, path: relJoin(parentRel, name), kind };
+    if (kind === "file" && Number.isFinite(size)) entry.size = size;
+    if (Number.isFinite(mtime)) entry.mtime = mtime;
+    out.push(entry);
   }
   return out;
 }
@@ -153,20 +198,27 @@ async function listLocal(kind: HostKind, dir: string, rel: string): Promise<Work
   }
   const entries: WorkspaceEntry[] = [];
   for (const ent of dirents) {
-    let isDir = ent.isDirectory();
-    if (ent.isSymbolicLink()) {
-      // dirent.isDirectory() 对符号链接恒为 false，得跟过去看一眼
+    const full = joinPath(kind, dir, ent.name);
+    // 跟过去看：指向目录的链接算 dir。断掉的链接当文件，size / mtime 用 lstat
+    let st: fs.Stats;
+    try {
+      st = await fs.promises.stat(full);
+    } catch {
       try {
-        isDir = (await fs.promises.stat(joinPath(kind, dir, ent.name))).isDirectory();
+        st = await fs.promises.lstat(full);
       } catch {
-        isDir = false;
+        continue;
       }
     }
-    entries.push({
+    const isDir = st.isDirectory();
+    const entry: WorkspaceEntry = {
       name: ent.name,
       path: relJoin(rel, ent.name),
       kind: isDir ? "dir" : "file",
-    });
+      mtime: Math.floor(st.mtimeMs / 1000),
+    };
+    if (!isDir) entry.size = st.size;
+    entries.push(entry);
   }
   return capEntries(entries, rel);
 }
@@ -402,7 +454,15 @@ export function parseRead(stdout: string): ReadResult {
   return { size, bytes: Buffer.from(b64, "base64") };
 }
 
-const IMAGE_MIME: Record<string, string> = {
+/**
+ * 扩展名 → Content-Type。原始字节路由靠它告诉浏览器怎么处理一个文件：
+ * HTML 当文档渲染、CSS / JS 当子资源、图片当图片。表里没有的一律
+ * application/octet-stream——配合 nosniff，浏览器不会把它猜成可执行的东西。
+ *
+ * 不引入 mime-db：这里只需要 web 预览会碰到的那几十种，一整张表大而无当。
+ */
+const MIME: Record<string, string> = {
+  // 图片：`<img>` 里的 SVG 不执行脚本，当图片渲染是安全的
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -411,9 +471,33 @@ const IMAGE_MIME: Record<string, string> = {
   bmp: "image/bmp",
   ico: "image/x-icon",
   avif: "image/avif",
-  // SVG 本身是文本，但用户点开它想看的是图。<img> 里的 SVG 不执行脚本，
-  // 当图片渲染是安全的
   svg: "image/svg+xml",
+  // 文档与子资源
+  html: "text/html; charset=utf-8",
+  htm: "text/html; charset=utf-8",
+  css: "text/css; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
+  cjs: "text/javascript; charset=utf-8",
+  json: "application/json; charset=utf-8",
+  map: "application/json; charset=utf-8",
+  xml: "application/xml; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  md: "text/plain; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  wasm: "application/wasm",
+  pdf: "application/pdf",
+  // 字体
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  // 音视频
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  mp4: "video/mp4",
+  webm: "video/webm",
 };
 
 export function extOf(name: string): string {
@@ -421,18 +505,32 @@ export function extOf(name: string): string {
   return i <= 0 ? "" : name.slice(i + 1).toLowerCase();
 }
 
+/** 原始字节路由用的 Content-Type，认不出给 octet-stream */
+export function mimeOf(name: string): string {
+  return MIME[extOf(name)] ?? "application/octet-stream";
+}
+
+/** 查看 tab 把这些扩展名当图片：走原始字节路由给 `<img>`，不读文本 */
+export function imageMimeOf(name: string): string | undefined {
+  const mime = MIME[extOf(name)];
+  return mime?.startsWith("image/") ? mime : undefined;
+}
+
 /**
  * 字节 → 前端能直接渲染的形状。
+ *
+ * 图片不看字节只看扩展名与大小：字节由浏览器自己经原始字节路由取，这里
+ * 收到的 bytes 通常是空的（readWorkspaceFile 对图片按 cap 0 读）。
  *
  * 二进制判定跟 git 一样看 NUL：前 8KB 里出现 NUL 就当二进制。这条规则会把
  * UTF-16 文本也判成二进制，但那在源码仓库里几乎不出现，而反过来把真二进制
  * 当文本渲染会当场喷出几兆乱码。
  */
 export function classify(name: string, size: number, bytes: Buffer): FilePreview {
-  const mime = IMAGE_MIME[extOf(name)];
+  const mime = imageMimeOf(name);
   if (mime) {
-    if (size > WORKSPACE_FILE_CAP) return { kind: "too-large", size };
-    return { kind: "image", mime, base64: bytes.toString("base64"), size };
+    if (size > WORKSPACE_RAW_CAP) return { kind: "too-large", size };
+    return { kind: "image", mime, size };
   }
   const head = bytes.subarray(0, 8192);
   if (head.includes(0)) return { kind: "binary", size };
@@ -444,7 +542,7 @@ export function classify(name: string, size: number, bytes: Buffer): FilePreview
   };
 }
 
-async function readLocal(file: string): Promise<ReadResult> {
+async function readLocal(file: string, cap: number): Promise<ReadResult> {
   let stat: fs.Stats;
   try {
     stat = await fs.promises.stat(file);
@@ -453,6 +551,9 @@ async function readLocal(file: string): Promise<ReadResult> {
   }
   if (stat.isDirectory()) throw new Error("这是一个文件夹");
   const size = stat.size;
+  const want = Math.min(size, cap);
+  // 只要大小（图片）就不开文件了
+  if (want === 0) return { size, bytes: Buffer.alloc(0) };
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(file, "r");
@@ -460,13 +561,44 @@ async function readLocal(file: string): Promise<ReadResult> {
     throw localError(err, "读不到该文件");
   }
   try {
-    const want = Math.min(size, WORKSPACE_FILE_CAP);
     const buf = Buffer.alloc(want);
     const { bytesRead } = await handle.read(buf, 0, want, 0);
     return { size, bytes: buf.subarray(0, bytesRead) };
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * 读工作目录里一个文件的前 cap 个字节，连同真实大小。查看 tab 与原始字节路由
+ * 共用：前者对文本取 WORKSPACE_FILE_CAP、对图片取 0（只要大小），后者取
+ * WORKSPACE_RAW_CAP。
+ */
+export async function readWorkspaceBytes(
+  host: FileHost,
+  root: string,
+  rel: string,
+  cap: number
+): Promise<ReadResult & { name: string }> {
+  const segs = relSegments(rel);
+  if (segs.length === 0) throw new Error("路径不合法");
+  const file = resolveInside(host.kind, root, rel);
+  const name = segs[segs.length - 1]!;
+
+  if (host.local) {
+    const { size, bytes } = await readLocal(file, cap);
+    return { name, size, bytes };
+  }
+  const res = await execTimed(
+    host.exec,
+    readCommand(host.kind, file, cap),
+    cap > WORKSPACE_FILE_CAP ? RAW_TIMEOUT_MS : READ_TIMEOUT_MS
+  );
+  if (res.code !== 0) {
+    throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "读不到该文件");
+  }
+  const { size, bytes } = parseRead(res.stdout);
+  return { name, size, bytes };
 }
 
 /** 读工作目录里的一个文件，供查看 tab 渲染 */
@@ -476,53 +608,316 @@ export async function readWorkspaceFile(
   rel: string
 ): Promise<FilePreview> {
   const segs = relSegments(rel);
-  if (segs.length === 0) throw new Error("路径不合法");
-  const file = resolveInside(host.kind, root, rel);
-  const name = segs[segs.length - 1]!;
+  const name = segs[segs.length - 1] ?? "";
+  // 图片的字节浏览器会自己去原始字节路由取，这里只要大小；`head -c 0` 与
+  // PowerShell 那个 0 字节循环都是合法的空读
+  const cap = imageMimeOf(name) ? 0 : WORKSPACE_FILE_CAP;
+  const { size, bytes } = await readWorkspaceBytes(host, root, rel, cap);
+  return classify(name, size, bytes);
+}
 
+// ---------------- 改目录（mkdir / rename / remove） ----------------
+
+/**
+ * 单段文件名的护栏。mkdir / rename / 上传共用。
+ *
+ * 浏览器给的 File.name 不会含分隔符，会含的只能是构造出来的请求；控制字符与
+ * `..` 同 relSegments 的理由。Windows 的保留字符在远端也会失败，但那边的报错
+ * 是一段 .NET 异常文本，不如在这里直接说清楚。
+ */
+export function validateEntryName(kind: HostKind, name: string): void {
+  if (!name || name === "." || name === "..") throw new Error("文件名不合法");
+  if (/[\u0000-\u001f/\\]/.test(name)) throw new Error("文件名不合法");
+  if (name.length > 255) throw new Error("文件名太长");
+  if (kind === "windows" && /[<>:"|?*]/.test(name)) {
+    throw new Error("文件名含 Windows 不允许的字符");
+  }
+}
+
+function validateRelSegments(kind: HostKind, rel: string): string[] {
+  const segs = relSegments(rel);
+  if (segs.length === 0) throw new Error("路径不合法");
+  for (const seg of segs) validateEntryName(kind, seg);
+  return segs;
+}
+
+/**
+ * 批量删除时把子孙路径收进祖先：删 `src` 就不必再删 `src/a.ts`。
+ * 空串（工作目录本身）丢掉——那是护栏，不是省略。
+ */
+export function collapseRemovePaths(paths: string[]): string[] {
+  const norm = [
+    ...new Set(paths.map((p) => p.replace(/\/+$/, "")).filter((p) => p.length > 0)),
+  ].sort();
+  const out: string[] = [];
+  for (const p of norm) {
+    if (out.some((parent) => p.startsWith(`${parent}/`))) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+export function mkdirCommand(
+  kind: HostKind,
+  dir: string,
+  parent: string,
+  recursive: boolean
+): string {
+  if (kind === "windows") {
+    return encodePowerShell(
+      [
+        `$p = ${quotePowerShell(dir)}`,
+        `$g = ${quotePowerShell(parent)}`,
+        `if (Test-Path -LiteralPath $p -PathType Leaf) { Write-Output 'EEXIST'; exit 1 }`,
+        recursive
+          ? `if (Test-Path -LiteralPath $p -PathType Container) { exit 0 }`
+          : [
+              `if (Test-Path -LiteralPath $p) { Write-Output 'EEXIST'; exit 1 }`,
+              `if (-not (Test-Path -LiteralPath $g -PathType Container)) { Write-Output 'ENOENT'; exit 1 }`,
+            ].join("; "),
+        `New-Item -ItemType Directory -LiteralPath $p${recursive ? " -Force" : ""} | Out-Null`,
+      ].join("; ")
+    );
+  }
+  const p = quotePosix(dir);
+  const g = quotePosix(parent);
+  if (recursive) {
+    return [
+      `p=${p}`,
+      `if [ -e "$p" ] && [ ! -d "$p" ]; then printf '%s\\n' EEXIST; exit 1; fi`,
+      `if [ -d "$p" ]; then exit 0; fi`,
+      `mkdir -p -- "$p" || { printf '%s\\n' EACCES; exit 1; }`,
+    ].join("; ");
+  }
+  return [
+    `p=${p}`,
+    `g=${g}`,
+    `if [ -e "$p" ]; then printf '%s\\n' EEXIST; exit 1; fi`,
+    `if [ ! -d "$g" ]; then printf '%s\\n' ENOENT; exit 1; fi`,
+    `mkdir -- "$p" || { printf '%s\\n' EACCES; exit 1; }`,
+  ].join("; ");
+}
+
+export function renameCommand(kind: HostKind, src: string, dst: string): string {
+  if (kind === "windows") {
+    return encodePowerShell(
+      [
+        `$s = ${quotePowerShell(src)}`,
+        `$d = ${quotePowerShell(dst)}`,
+        `if (-not (Test-Path -LiteralPath $s)) { Write-Output 'ENOENT'; exit 1 }`,
+        `if (Test-Path -LiteralPath $d) { Write-Output 'EEXIST'; exit 1 }`,
+        `Move-Item -LiteralPath $s -Destination $d`,
+      ].join("; ")
+    );
+  }
+  return [
+    `s=${quotePosix(src)}`,
+    `d=${quotePosix(dst)}`,
+    `if [ ! -e "$s" ] && [ ! -L "$s" ]; then printf '%s\\n' ENOENT; exit 1; fi`,
+    `if [ -e "$d" ] || [ -L "$d" ]; then printf '%s\\n' EEXIST; exit 1; fi`,
+    `mv -- "$s" "$d" || { printf '%s\\n' EACCES; exit 1; }`,
+  ].join("; ");
+}
+
+/**
+ * 递归删除文件或目录。
+ *
+ * POSIX `rm -rf --` 对作为参数的符号链接只删链接本身，不跟过去——这是我们要的：
+ * 工作目录里一条指向 /etc 的链接被删掉，不该把 /etc 带走。Windows 走
+ * `[IO.Directory]::Delete` / `[IO.File]::Delete`：不走 Remove-Item 的通配展开，
+ * 也不穿越 reparse point（理由同 ADR 0002）。
+ */
+export function removeCommand(kind: HostKind, full: string): string {
+  if (kind === "windows") {
+    return encodePowerShell(
+      [
+        `$p = ${quotePowerShell(full)}`,
+        `if (-not (Test-Path -LiteralPath $p)) { Write-Output 'ENOENT'; exit 1 }`,
+        `$item = Get-Item -LiteralPath $p -Force`,
+        `if ($item.PSIsContainer) { [IO.Directory]::Delete($p, $true) } else { [IO.File]::Delete($p) }`,
+      ].join("; ")
+    );
+  }
+  return [
+    `p=${quotePosix(full)}`,
+    `if [ ! -e "$p" ] && [ ! -L "$p" ]; then printf '%s\\n' ENOENT; exit 1; fi`,
+    `rm -rf -- "$p" || { printf '%s\\n' EACCES; exit 1; }`,
+  ].join("; ");
+}
+
+export async function mkdirWorkspace(
+  host: FileHost,
+  root: string,
+  rel: string,
+  recursive: boolean
+): Promise<FileOpResult> {
+  const segs = validateRelSegments(host.kind, rel);
+  const path = segs.join("/");
+  const dir = resolveInside(host.kind, root, path);
+  const parent = dirnameOf(host.kind, dir);
   if (host.local) {
-    const { size, bytes } = await readLocal(file);
-    return classify(name, size, bytes);
+    await mkdirLocal(dir, parent, recursive);
+    return { path };
   }
   const res = await execTimed(
     host.exec,
-    readCommand(host.kind, file, WORKSPACE_FILE_CAP),
-    READ_TIMEOUT_MS
+    mkdirCommand(host.kind, dir, parent, recursive),
+    MKDIR_TIMEOUT_MS,
+    "操作超时"
   );
   if (res.code !== 0) {
-    throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "读不到该文件");
+    throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "无法创建文件夹");
   }
-  const { size, bytes } = parseRead(res.stdout);
-  return classify(name, size, bytes);
+  return { path };
+}
+
+async function mkdirLocal(dir: string, parent: string, recursive: boolean): Promise<void> {
+  if (!recursive) {
+    let pst: fs.Stats;
+    try {
+      pst = await fs.promises.stat(parent);
+    } catch (err) {
+      throw localError(err, "上级目录不可访问");
+    }
+    if (!pst.isDirectory()) throw new Error("不是文件夹");
+  }
+  try {
+    await fs.promises.mkdir(dir, { recursive });
+  } catch (err) {
+    throw localError(err, "无法创建文件夹");
+  }
+}
+
+export async function renameWorkspace(
+  host: FileHost,
+  root: string,
+  rel: string,
+  name: string
+): Promise<FileOpResult> {
+  const segs = validateRelSegments(host.kind, rel);
+  validateEntryName(host.kind, name);
+  const parentRel = segs.slice(0, -1).join("/");
+  const destRel = parentRel ? `${parentRel}/${name}` : name;
+  const src = resolveInside(host.kind, root, segs.join("/"));
+  const dst = resolveInside(host.kind, root, destRel);
+  if (samePath(host.kind, src, dst)) return { path: destRel };
+  if (host.local) {
+    await renameLocal(src, dst);
+    return { path: destRel };
+  }
+  const res = await execTimed(
+    host.exec,
+    renameCommand(host.kind, src, dst),
+    RENAME_TIMEOUT_MS,
+    "操作超时"
+  );
+  if (res.code !== 0) {
+    throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "无法重命名");
+  }
+  return { path: destRel };
+}
+
+async function renameLocal(src: string, dst: string): Promise<void> {
+  try {
+    await fs.promises.lstat(src);
+  } catch (err) {
+    throw localError(err, "路径不存在或不可访问");
+  }
+  try {
+    await fs.promises.lstat(dst);
+    throw new Error("同名文件已存在");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      if (err instanceof Error && err.message === "同名文件已存在") throw err;
+      throw localError(err, "无法重命名");
+    }
+  }
+  try {
+    await fs.promises.rename(src, dst);
+  } catch (err) {
+    throw localError(err, "无法重命名");
+  }
+}
+
+export async function removeWorkspace(
+  host: FileHost,
+  root: string,
+  rels: string[]
+): Promise<FileRemoveResult> {
+  const rootFull = resolveInside(host.kind, root, "");
+  const collapsed = collapseRemovePaths(rels);
+  const removed: string[] = [];
+  const errors: { path: string; error: string }[] = [];
+  for (const rel of collapsed) {
+    try {
+      const segs = relSegments(rel);
+      if (segs.length === 0) throw new Error("不能删除工作目录本身");
+      const path = segs.join("/");
+      const full = resolveInside(host.kind, root, path);
+      if (samePath(host.kind, full, rootFull)) throw new Error("不能删除工作目录本身");
+      if (host.local) await removeLocal(full);
+      else {
+        const res = await execTimed(
+          host.exec,
+          removeCommand(host.kind, full),
+          REMOVE_TIMEOUT_MS,
+          "操作超时"
+        );
+        if (res.code !== 0) {
+          throw remoteError(res.stdout || res.stderr, res.stderr.trim() || "无法删除");
+        }
+      }
+      removed.push(path);
+    } catch (err) {
+      errors.push({ path: rel, error: (err as Error).message });
+    }
+  }
+  return { removed, errors };
+}
+
+async function removeLocal(full: string): Promise<void> {
+  try {
+    await fs.promises.rm(full, { recursive: true, force: false });
+  } catch (err) {
+    throw localError(err, "无法删除");
+  }
 }
 
 // ---------------- 错误 ----------------
 
-function localError(err: unknown, fallback: string): Error {
+export function localError(err: unknown, fallback: string): Error {
   const code = (err as NodeJS.ErrnoException).code;
   if (code === "ENOENT") return new Error("路径不存在或不可访问");
   if (code === "ENOTDIR") return new Error("不是文件夹");
   if (code === "EISDIR") return new Error("这是一个文件夹");
   if (code === "EACCES" || code === "EPERM") return new Error("没有权限访问该路径");
+  if (code === "EEXIST") return new Error("同名文件已存在");
   return new Error(fallback);
 }
 
-function remoteError(stdout: string, fallback: string): Error {
+/** 远端脚本约定：失败时 stdout 第一行是错误码（ENOENT 等），没有约定码的走 fallback */
+export function remoteError(stdout: string, fallback: string): Error {
   const code = stdout.trim().split(/\r?\n/)[0];
   if (code === "ENOENT") return new Error("路径不存在或不可访问");
   if (code === "ENOTDIR") return new Error("不是文件夹");
   if (code === "EISDIR") return new Error("这是一个文件夹");
   if (code === "EACCES") return new Error("没有权限访问该路径");
+  if (code === "EEXIST") return new Error("同名文件已存在");
   return new Error(fallback);
 }
 
-async function execTimed(exec: ExecFn, command: string, timeoutMs: number) {
+async function execTimed(
+  exec: ExecFn,
+  command: string,
+  timeoutMs: number,
+  timeoutMsg = "读取超时"
+) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     return await exec(command, ac.signal);
   } catch (err) {
-    if (ac.signal.aborted) throw new Error("读取超时");
+    if (ac.signal.aborted) throw new Error(timeoutMsg);
     throw new Error(`SSH 连接失败：${(err as Error).message}`);
   } finally {
     clearTimeout(timer);

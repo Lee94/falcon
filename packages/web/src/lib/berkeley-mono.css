@@ -1,0 +1,45 @@
+/*
+ * Berkeley Mono TX-02（2.002），经 scripts/vendor-berkeley-mono.mjs 从官方发行包抽出。
+ * Copyright (c) 2022-2024, U.S. Graphics LLC. All Rights Reserved.
+ * https://usgraphics.com/products/berkeley-mono
+ *
+ * 产品默认字体：界面（--font-sans / --font-mono）和终端正文都用它。
+ * family 名必须是 TX-02——TTF name 表里就是这个，term.ts 的 berkeley 项也认这个。
+ *
+ * 上游没有 CJK：界面中文落到系统黑体，终端落到 Maple（termFontStack 把它垫在后面）。
+ * 盒线 / 希腊 / 西里尔覆盖也比 Ioskeley 窄，缺的码位终端同样回退到 Ioskeley。
+ *
+ * Oblique 按 italic 挂：浏览器的 <em> / ANSI 斜体才会命中真切，而不是把 Regular 拉斜。
+ * font-medium（500）落到 Regular，font-semibold（600）落到 Bold，见 vendor 脚本。
+ */
+@font-face {
+  font-family: "TX-02";
+  src: url("../assets/fonts/berkeley-mono/TX-02-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "TX-02";
+  src: url("../assets/fonts/berkeley-mono/TX-02-Oblique.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "TX-02";
+  src: url("../assets/fonts/berkeley-mono/TX-02-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "TX-02";
+  src: url("../assets/fonts/berkeley-mono/TX-02-BoldOblique.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}

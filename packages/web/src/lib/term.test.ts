@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DEFAULT_TERM_PREF, MAPLE_FONT_FAMILY, NERD_FONT_FAMILY, sanitizeTermPref, termFontStack } from "./term.js";
+import {
+  BERKELEY_FONT_FAMILY,
+  DEFAULT_TERM_PREF,
+  IOSKELEY_FONT_FAMILY,
+  MAPLE_FONT_FAMILY,
+  NERD_FONT_FAMILY,
+  sanitizeTermPref,
+  termFontStack,
+} from "./term.js";
 
 describe("sanitizeTermPref", () => {
   it("空对象就是默认", () => {
@@ -19,13 +27,30 @@ describe("sanitizeTermPref", () => {
     assert.equal(pref.fontSize, 24);
     assert.equal(pref.lineHeight, 1);
     assert.equal(pref.cursorStyle, "block");
-    assert.equal(pref.fontId, "maple");
+    assert.equal(pref.fontId, "berkeley");
   });
 });
 
 describe("termFontStack", () => {
-  it("图标字体永远打头，Maple 紧随其后", () => {
+  it("图标字体打头，默认正文字体紧随其后，内置的 Ioskeley / Maple 依次兜底", () => {
     const stack = termFontStack(DEFAULT_TERM_PREF);
+    assert.ok(
+      stack.startsWith(
+        `"${NERD_FONT_FAMILY}", "${BERKELEY_FONT_FAMILY}", "${IOSKELEY_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}"`
+      ),
+      stack
+    );
+  });
+  it("选内置的 Ioskeley 时它自己不重复列", () => {
+    const stack = termFontStack({ ...DEFAULT_TERM_PREF, fontId: "ioskeley" });
+    assert.ok(
+      stack.startsWith(`"${NERD_FONT_FAMILY}", "${IOSKELEY_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}"`),
+      stack
+    );
+    assert.equal(stack.split(IOSKELEY_FONT_FAMILY).length - 1, 1, stack);
+  });
+  it("选 Maple 时图标字体打头，Maple 紧随其后", () => {
+    const stack = termFontStack({ ...DEFAULT_TERM_PREF, fontId: "maple" });
     assert.ok(stack.startsWith(`"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}"`), stack);
   });
   it("自定义字体夹在图标字体与 Maple 之间，空的退回 Maple", () => {

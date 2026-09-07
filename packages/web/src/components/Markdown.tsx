@@ -1,6 +1,7 @@
-import { Fragment, useMemo, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { marked, type Token, type Tokens } from "marked";
 import { externalHref, resolveRel } from "../lib/mdLink.js";
+import { rawUrl } from "../lib/rawUrl.js";
 import { langForFence, splitCodeLines, useHighlight } from "../lib/highlight.js";
 import { cn } from "@/lib/utils";
 import { CodeLine } from "@/components/common/CodeLine";
@@ -20,15 +21,18 @@ export function Markdown({
   text,
   /** 当前文件所在目录（工作目录相对），用来解析文档里的相对链接 */
   dir,
+  /** 原始字节前缀（见 WorkspaceFile.rawBase）；给了，文档里的相对图片就内联显示 */
+  rawBase,
   /** 点开文档里指向仓库内另一个文件的链接 */
   onOpenPath,
 }: {
   text: string;
   dir: string;
+  rawBase?: string;
   onOpenPath?: (path: string) => void;
 }) {
   const tokens = useMemo(() => marked.lexer(text), [text]);
-  const ctx: Ctx = { dir, onOpenPath };
+  const ctx: Ctx = { dir, rawBase, onOpenPath };
   return (
     <div className="mx-auto max-w-3xl px-6 py-5 text-sm break-words text-foreground">
       {renderTokens(tokens, ctx)}
@@ -38,6 +42,7 @@ export function Markdown({
 
 interface Ctx {
   dir: string;
+  rawBase?: string;
   onOpenPath?: (path: string) => void;
 }
 
@@ -191,20 +196,10 @@ function Node({ tok, ctx }: { tok: Token; ctx: Ctx }): ReactNode {
       if (external) {
         return <img src={external} alt={t.text} title={t.title ?? undefined} className="my-3 max-w-full rounded" />;
       }
-      // 相对图片的字节在宿主机上，浏览器取不到——给一个能点开的占位，
-      // 点了就在查看 tab 里打开那张图（后端读回 base64）
+      // 相对图片走原始字节路由内联显示；解析不出路径（跑出工作目录）或
+      // 取不到字节（文件不存在）时退成能点开的占位
       const path = resolveRel(ctx.dir, t.href);
-      return (
-        <button
-          type="button"
-          disabled={!path || !ctx.onOpenPath}
-          onClick={() => path && ctx.onOpenPath?.(path)}
-          className="my-1 inline-flex items-center rounded border border-dashed px-2 py-1 font-mono text-xs text-muted-foreground hover:bg-accent disabled:opacity-60"
-          title={t.href}
-        >
-          {t.text || t.href}
-        </button>
-      );
+      return <RelImage href={t.href} path={path} alt={t.text} title={t.title ?? undefined} ctx={ctx} />;
     }
 
     // 内联 / 块级 HTML 一律按原文显示，不解释
@@ -216,6 +211,50 @@ function Node({ tok, ctx }: { tok: Token; ctx: Ctx }): ReactNode {
       return raw ? <>{raw}</> : null;
     }
   }
+}
+
+/**
+ * 文档里的相对图片。点一下在查看 tab 里打开原图（能缩放）；加载失败退成
+ * 虚线占位，占位仍可点——多半是路径写错了，打开它能看到后端的报错。
+ */
+function RelImage({
+  href,
+  path,
+  alt,
+  title,
+  ctx,
+}: {
+  href: string;
+  path: string | null;
+  alt: string;
+  title?: string;
+  ctx: Ctx;
+}) {
+  const [failed, setFailed] = useState(false);
+  const open = () => path && ctx.onOpenPath?.(path);
+  if (path && ctx.rawBase && !failed) {
+    return (
+      <img
+        src={rawUrl(ctx.rawBase, path)}
+        alt={alt}
+        title={title ?? href}
+        onError={() => setFailed(true)}
+        onClick={open}
+        className={cn("my-3 max-w-full rounded", ctx.onOpenPath && "cursor-zoom-in")}
+      />
+    );
+  }
+  return (
+    <button
+      type="button"
+      disabled={!path || !ctx.onOpenPath}
+      onClick={open}
+      className="my-1 inline-flex items-center rounded border border-dashed px-2 py-1 font-mono text-xs text-muted-foreground hover:bg-accent disabled:opacity-60"
+      title={href}
+    >
+      {alt || href}
+    </button>
+  );
 }
 
 /**

@@ -15,6 +15,8 @@ export const TERM_LINE_HEIGHT_MIN = 1;
 export const TERM_LINE_HEIGHT_MAX = 1.6;
 
 export type TermFontId =
+  | "berkeley"
+  | "ioskeley"
   | "maple"
   | "system"
   | "jetbrains"
@@ -40,7 +42,7 @@ export interface TermPref {
 }
 
 export const DEFAULT_TERM_PREF: TermPref = {
-  fontId: "maple",
+  fontId: "berkeley",
   customFamily: "",
   fontSize: 13,
   lineHeight: 1,
@@ -50,6 +52,8 @@ export const DEFAULT_TERM_PREF: TermPref = {
 };
 
 const FONT_IDS: TermFontId[] = [
+  "berkeley",
+  "ioskeley",
   "maple",
   "system",
   "jetbrains",
@@ -61,6 +65,12 @@ const FONT_IDS: TermFontId[] = [
 ];
 
 export const TERM_FONT_IDS: TermFontId[] = FONT_IDS;
+
+/** 内置默认正文字体的 CSS family 名，必须与 berkeley-mono.css 的 @font-face 一致 */
+export const BERKELEY_FONT_FAMILY = "TX-02";
+
+/** 内置的 OFL 回退，必须与 ioskeley-mono.css 的 @font-face 一致 */
+export const IOSKELEY_FONT_FAMILY = "IoskeleyMonoTerm Nerd Font Mono";
 
 /** 内置 Maple 的 CSS family 名，必须与 maple-mono.css 的 @font-face 一致 */
 export const MAPLE_FONT_FAMILY = "Maple Mono NL NF CN";
@@ -95,6 +105,13 @@ const FALLBACK_STACK = [
 ].join(", ");
 
 const NAMED_FONTS: Record<Exclude<TermFontId, "maple" | "system" | "custom">, string> = {
+  // 默认字体。Berkeley Mono TX-02（U.S. Graphics 商业字体）经
+  // scripts/vendor-berkeley-mono.mjs 内嵌，family 名跟 TTF name 表一致。
+  // 覆盖比 Ioskeley 窄（几乎没有希腊 / 西里尔，盒线也不全），缺的码位顺着
+  // stack 落到 Ioskeley，中文再落到 Maple。
+  berkeley: BERKELEY_FONT_FAMILY,
+  // 内置的 OFL 回退（子集见 scripts/vendor-ioskeley-mono.mjs）。
+  ioskeley: IOSKELEY_FONT_FAMILY,
   jetbrains: "JetBrains Mono",
   cascadia: "Cascadia Mono",
   "fira-code": "Fira Code",
@@ -114,7 +131,14 @@ export function termFontStack(pref: TermPref): string {
       ? `"${NERD_FONT_FAMILY}", ${quoteFamily(custom)}, "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`
       : `"${NERD_FONT_FAMILY}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
   }
-  return `"${NERD_FONT_FAMILY}", "${NAMED_FONTS[pref.fontId]}", "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
+  // 内置的 Ioskeley 垫在 Maple 前面：选了本机没装的字体、或 Berkeley 缺字形时，
+  // 回退的是同为等宽骨架的内置字体而不是系统栈。fontId 本身就是它时不重复列。
+  const named = NAMED_FONTS[pref.fontId];
+  const builtin =
+    named === IOSKELEY_FONT_FAMILY
+      ? `"${IOSKELEY_FONT_FAMILY}"`
+      : `"${named}", "${IOSKELEY_FONT_FAMILY}"`;
+  return `"${NERD_FONT_FAMILY}", ${builtin}, "${MAPLE_FONT_FAMILY}", ${FALLBACK_STACK}`;
 }
 
 function quoteFamily(name: string): string {

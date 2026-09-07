@@ -293,6 +293,18 @@ export class SshLink extends EventEmitter {
   }
 
   /**
+   * 同 exec，但把 ssh2 的通道原样交给调用方：写入端是命令的 stdin，读取端是 stdout，
+   * `close` 事件带退出码。文件下载 / 上传（transfer.ts）按流走，"攒成字符串"装不下
+   * 一个几百 MB 的文件。调用方必须把读端读起来——ssh2 要等读端 end 之后才发 close。
+   */
+  async execStream(commandLine: string): Promise<ClientChannel> {
+    const client = await this.getClient();
+    return new Promise<ClientChannel>((resolve, reject) => {
+      client.exec(commandLine, (err, stream) => (err ? reject(err) : resolve(stream)));
+    });
+  }
+
+  /**
    * 宿主机类型、家目录与默认 shell，供 git 层与 shell 侦测使用。
    * probe() 自带缓存，重复调用不产生往返；RemoteProbe 本身不外泄，只给出这几项事实。
    */

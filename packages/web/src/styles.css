@@ -41,10 +41,10 @@
 
 @theme inline {
   --font-sans:
-    -apple-system, "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
+    "TX-02", -apple-system, "Segoe UI Variable Text", "Segoe UI", "PingFang SC",
     "Microsoft YaHei UI", system-ui, sans-serif;
   --font-mono:
-    "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas,
+    "TX-02", "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas,
     "Noto Sans Mono CJK SC", monospace;
 
   --radius-sm: calc(var(--radius) - 4px);

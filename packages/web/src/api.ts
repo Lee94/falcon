@@ -1,7 +1,6 @@
 import type {
   AuthStatus,
   DeleteProjectResult,
-  FilePreview,
   FsListing,
   GitChangeCounts,
   GitCommitDetail,
@@ -30,8 +29,12 @@ import type {
   SshHostInput,
   SshProbeResult,
   SystemInfo,
+  UploadResult,
+  FileOpResult,
+  FileRemoveResult,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceFile,
   WorkspaceIndex,
   WorkspaceListing,
 } from "@falcon/shared";
@@ -220,12 +223,60 @@ export const api = {
   /** Quick Open：工作目录里的文件路径清单（git 仓库走 ls-files） */
   indexFiles: (projectId: string) =>
     request<WorkspaceIndex>("GET", `/api/projects/${projectId}/files/index`),
-  /** 查看 tab：读一个文件。二进制与超大文件也是 200，形状里写清了是什么 */
+  /**
+   * 查看 tab：读一个文件。二进制与超大文件也是 200，形状里写清了是什么。
+   * 响应里的 rawBase 拼上路径就是图片 / HTML 预览用的原始字节地址（lib/rawUrl.ts）
+   */
   readFile: (projectId: string, path: string) =>
-    request<FilePreview>(
+    request<WorkspaceFile>(
       "GET",
       `/api/projects/${projectId}/file?path=${encodeURIComponent(path)}`
     ),
+  /**
+   * 下载地址（lib/fileTransfer.ts 的 triggerDownload 用）。同源导航自带登录
+   * cookie，不需要原始字节路由那种放在 URL 里的作用域令牌；服务端按流回整个
+   * 文件，没有预览的 16MB 上限。
+   */
+  downloadUrl: (projectId: string, path: string) =>
+    `/api/projects/${projectId}/download?path=${encodeURIComponent(path)}`,
+  /**
+   * 上传一个文件到工作目录里的 dir。用 XHR 而不是 fetch：只有它给上传进度。
+   * 请求体就是 File 本身，浏览器按流发、自动带 Content-Length（服务端靠它核对
+   * 收满了没有）。同名文件已存在且没带 overwrite 时服务端回 409，调用方问过
+   * 用户再带 overwrite 重发。
+   */
+  uploadFile: (
+    projectId: string,
+    dir: string,
+    file: File,
+    opts: { overwrite?: boolean; onProgress?: (sent: number, total: number) => void } = {}
+  ) =>
+    new Promise<UploadResult>((resolve, reject) => {
+      const q = new URLSearchParams({ path: dir, name: file.name });
+      if (opts.overwrite) q.set("overwrite", "1");
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", `/api/projects/${projectId}/upload?${q}`);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.responseType = "json";
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) opts.onProgress?.(e.loaded, e.total);
+      };
+      xhr.onerror = () => reject(new ApiRequestError("网络错误", 0));
+      xhr.onabort = () => reject(new ApiRequestError("上传已取消", 0));
+      xhr.onload = () => {
+        const data = (xhr.response ?? {}) as { error?: string };
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data as UploadResult);
+        else reject(new ApiRequestError(data.error ?? `HTTP ${xhr.status}`, xhr.status, data));
+      };
+      xhr.send(file);
+    }),
+  mkdir: (projectId: string, path: string, recursive = false) =>
+    request<FileOpResult>("POST", `/api/projects/${projectId}/mkdir`, { path, recursive }),
+  renameFile: (projectId: string, path: string, name: string) =>
+    request<FileOpResult>("POST", `/api/projects/${projectId}/rename`, { path, name }),
+  removeFiles: (projectId: string, paths: string[]) =>
+    request<FileRemoveResult>("POST", `/api/projects/${projectId}/remove`, { paths }),
 
   listForwards: (projectId: string) =>
     request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),

@@ -850,6 +850,10 @@ export interface WorkspaceEntry {
   path: string;
   /** 指向目录的符号链接算 dir——用户点它期待的是进去 */
   kind: "file" | "dir";
+  /** 字节数。目录不给（前端画成 —） */
+  size?: number;
+  /** 最后修改时间，Unix 秒 */
+  mtime?: number;
 }
 
 /** 工作目录下某一层的列表。目录在前、文件在后，各自按名字排 */
@@ -877,16 +881,24 @@ export interface WorkspaceIndex {
 }
 
 /**
- * 查看单个文件的上限。base64 传输会膨胀 1/3，2MB 的文件已经是 2.7MB 的响应，
+ * 查看单个文件（文本）的上限。base64 传输会膨胀 1/3，2MB 的文件已经是 2.7MB 的响应，
  * 再大就不是"查看"而是"下载"了。
  */
 export const WORKSPACE_FILE_CAP = 2 * 1024 * 1024;
 
 /**
+ * 原始字节路由（`/api/projects/:id/raw/<token>/<path>`）单个文件的上限。
+ *
+ * 图片与 HTML 预览的子资源走这条路，浏览器直接吃字节、不经 JSON / base64，
+ * 所以上限可以比文本宽得多；再往上 SSH 端 base64 一次性攒在内存里就不合适了。
+ */
+export const WORKSPACE_RAW_CAP = 16 * 1024 * 1024;
+
+/**
  * 查看一个文件的结果。
  *
- * 类型判定在后端做（要看字节，前端只有 base64 会更啰嗦）：
- * text 直接给解好的 UTF-8 文本，image 给 base64 让前端拼 data URL，
+ * 类型判定在后端做（要看字节）：text 直接给解好的 UTF-8 文本；image 只报 mime
+ * 与大小，字节由前端拼 rawBase + path 让浏览器自己去取（见 WorkspaceFile）；
  * 剩下的一律 binary，前端只报"这是二进制文件"。
  */
 export type FilePreview =
@@ -897,10 +909,45 @@ export type FilePreview =
       size: number;
       truncated: boolean;
     }
-  | { kind: "image"; mime: string; base64: string; size: number }
+  | { kind: "image"; mime: string; size: number }
   | { kind: "binary"; size: number }
-  /** 超过 WORKSPACE_FILE_CAP 且不是文本（文本会截断显示），只报大小 */
+  /** 超过上限且不是文本（文本会截断显示）：图片按 WORKSPACE_RAW_CAP 算，只报大小 */
   | { kind: "too-large"; size: number };
+
+/**
+ * `GET /api/projects/:id/file` 的响应。
+ *
+ * rawBase 是这个项目原始字节路由的前缀（形如 `/api/projects/<id>/raw/<token>/`），
+ * 前端把工作目录相对路径按段 URL 编码接在后面就是能直接给 `<img src>` /
+ * `<iframe src>` 用的地址。前缀里带一枚**只对这个项目的原始读取有效**的令牌：
+ * HTML 预览跑在 opaque origin 的沙箱里，浏览器不会给它的子资源请求带登录
+ * cookie，只能靠 URL 自带凭据；令牌泄给页面里的脚本也拿不到别的接口。
+ * 令牌有时效，每次读文件都会给一枚新鲜的，前端不用缓存。
+ */
+/** `PUT /api/projects/:id/upload` 的响应：落盘后的工作目录相对路径与字节数 */
+export interface UploadResult {
+  path: string;
+  size: number;
+}
+
+/** mkdir / rename 成功后回相对路径，前端用来刷新那一层 */
+export interface FileOpResult {
+  path: string;
+}
+
+/**
+ * 批量删除。每条路径单独试，互不挡住——20 个里坏了 1 个，另外 19 个不该陪葬。
+ * 前端按 removed / errors 分别 toast。
+ */
+export interface FileRemoveResult {
+  removed: string[];
+  errors: { path: string; error: string }[];
+}
+
+export interface WorkspaceFile {
+  preview: FilePreview;
+  rawBase: string;
+}
 
 /**
  * 宿主机上可用 shell 的侦测结果（项目表单的 shell 选择用）。

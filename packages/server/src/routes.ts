@@ -1,9 +1,9 @@
 import fs from "node:fs";
+import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   AuthStatus,
   DeleteProjectResult,
-  FilePreview,
   FsListing,
   GitChangeCounts,
   GitCommitDetail,
@@ -32,13 +32,29 @@ import type {
   WorktreeFailure,
   WorktreeInput,
   WorktreeStatus,
+  WorkspaceFile,
   WorkspaceIndex,
+  UploadResult,
+  FileOpResult,
+  FileRemoveResult,
   WorkspaceListing,
 } from "@falcon/shared";
-import { PASTE_IMAGE_MAX_BYTES, sanitizeColorHint } from "@falcon/shared";
+import { PASTE_IMAGE_MAX_BYTES, WORKSPACE_RAW_CAP, sanitizeColorHint } from "@falcon/shared";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
-import { capFileIndex, indexWorkspace, listWorkspace, readWorkspaceFile, type FileHost } from "./files.js";
+import {
+  capFileIndex,
+  indexWorkspace,
+  listWorkspace,
+  mkdirWorkspace,
+  mimeOf,
+  readWorkspaceBytes,
+  readWorkspaceFile,
+  removeWorkspace,
+  renameWorkspace,
+  type FileHost,
+} from "./files.js";
+import { contentDisposition, openDownload, receiveUpload, type DownloadSource } from "./transfer.js";
 import { detectShells } from "./shells.js";
 import { defaultLocalShell } from "./sessions/local.js";
 import { localExec, localKind } from "./zellij/exec.js";
@@ -168,11 +184,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     { parseAs: "buffer", bodyLimit: PASTE_IMAGE_MAX_BYTES },
     (_req, body, done) => done(null, body)
   );
+  // 上传的请求体原样以流的形式交给路由（PUT /upload），不攒、不设上限：
+  // 字节直接接到宿主机的写入端，几百 MB 的文件也不经过内存
+  app.addContentTypeParser("application/octet-stream", (_req, payload, done) =>
+    done(null, payload)
+  );
 
   app.addHook("onRequest", async (req, reply) => {
     const url = req.url;
     if (!url.startsWith("/api/")) return;
     if (url.startsWith("/api/auth/")) return;
+    // 原始字节路由自己验作用域令牌（见下方 /raw/），cookie 在那里只是可选的加分项
+    if ((req.routeOptions.config as { rawToken?: boolean } | undefined)?.rawToken) return;
     if (!auth.isAuthenticated(req)) {
       reply.code(401).send({ error: "未认证" });
     }
@@ -1215,7 +1238,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const link = manager.getLink(row);
     const facts = await link.hostFacts();
     return {
-      host: { local: false, kind: facts.kind, exec: link.exec },
+      host: {
+        local: false,
+        kind: facts.kind,
+        exec: link.exec,
+        execStream: (cmd) => link.execStream(cmd),
+      },
       root: row.working_dir || (container ? await manager.ensureVirtualDir(row) : facts.home),
     };
   };
@@ -1263,8 +1291,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
   });
 
-  /** 读一个文件供查看 tab 渲染。二进制 / 超大文件也回 200，形状里写清是什么 */
-  app.get("/api/projects/:id/file", async (req, reply): Promise<FilePreview | void> => {
+  const rawBaseFor = (projectId: string) =>
+    `/api/projects/${encodeURIComponent(projectId)}/raw/${auth.rawToken(projectId)}/`;
+
+  /**
+   * 读一个文件供查看 tab 渲染。二进制 / 超大文件也回 200，形状里写清是什么。
+   * 顺带给出这个项目的原始字节前缀（含新鲜令牌），图片与 HTML 预览拼它用。
+   */
+  app.get("/api/projects/:id/file", async (req, reply): Promise<WorkspaceFile | void> => {
     const { id } = req.params as { id: string };
     const { path: p } = req.query as { path?: string };
     const row = db.getProject(id);
@@ -1272,7 +1306,194 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!p) return reply.code(400).send({ error: "缺少文件路径" });
     try {
       const { host, root } = await fileHostFor(row);
-      return await readWorkspaceFile(host, root, p);
+      const preview = await readWorkspaceFile(host, root, p);
+      return { preview, rawBase: rawBaseFor(id) };
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  /**
+   * 原始字节：把工作目录里的一个文件按它本来的 Content-Type 原样吐给浏览器。
+   * 图片预览的 `<img src>`、HTML 预览的 `<iframe src>` 以及页面里相对路径引用的
+   * CSS / JS / 图片 / 字体都走这里。
+   *
+   * 路由是**路径形状**而不是 `?path=`：HTML 里的 `./style.css` 要能按 URL 规则
+   * 相对当前文档解析到 `.../raw/<token>/docs/style.css`，query 形状做不到。
+   *
+   * 鉴权与别的 /api 不同（onRequest 钩子对它放行）：HTML 预览跑在没有
+   * allow-same-origin 的沙箱 iframe 里，origin 是 opaque 的，浏览器不给它的子资源
+   * 请求带 SameSite=Lax 的登录 cookie，所以凭据只能放在 URL 里——一枚只能读这个
+   * 项目文件的作用域令牌（Auth.rawToken）。登录 cookie 若在（用户直接在新标签页
+   * 打开原始地址）也认。
+   *
+   * 响应头是另一半护栏：`Content-Security-Policy: sandbox` 让这个 HTML 即使被
+   * 当成顶层页面打开也跑在 opaque origin 里，碰不到本站的 cookie / storage /
+   * 其它接口；nosniff 防止把 octet-stream 猜成脚本。no-store 是因为用户改完文件
+   * 按刷新就想看到新的，这里不发 ETag。
+   */
+  app.get(
+    "/api/projects/:id/raw/:token/*",
+    { config: { rawToken: true } },
+    async (req, reply) => {
+      const { id, token, "*": rel } = req.params as { id: string; token: string; "*": string };
+      if (!auth.isAuthenticated(req) && !auth.rawTokenValid(token, id)) {
+        return reply.code(401).send({ error: "未认证" });
+      }
+      const row = db.getProject(id);
+      if (!row) return reply.code(404).send({ error: "项目不存在" });
+      if (!rel) return reply.code(400).send({ error: "缺少文件路径" });
+      let name: string;
+      let size: number;
+      let bytes: Buffer;
+      try {
+        const { host, root } = await fileHostFor(row);
+        ({ name, size, bytes } = await readWorkspaceBytes(host, root, rel, WORKSPACE_RAW_CAP));
+      } catch (err) {
+        const message = (err as Error).message;
+        return reply.code(message === "路径不存在或不可访问" ? 404 : 400).send({ error: message });
+      }
+      if (size > bytes.length) {
+        // 截断的字节对浏览器没有意义（半张图、半个脚本），如实拒绝
+        return reply.code(413).send({ error: `文件超过 ${WORKSPACE_RAW_CAP / 1024 / 1024}MB` });
+      }
+      return reply
+        .header("Content-Type", mimeOf(name))
+        .header("Content-Length", bytes.length)
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
+        .header("Referrer-Policy", "no-referrer")
+        .send(bytes);
+    }
+  );
+
+  /**
+   * 下载工作目录里的一个文件：整个文件按流接到响应上，没有原始字节路由那个
+   * 16MB 上限（ADR 0008）。
+   *
+   * 鉴权就是普通的登录 cookie：下载由主页面发起的同源导航触发（`<a download>`），
+   * 浏览器会带 cookie，用不着原始字节路由那种放在 URL 里的作用域令牌。
+   * Content-Type 一律 octet-stream + attachment：这是"存到本地"，不是"在浏览器里
+   * 看"，浏览器按文件名后缀自己认类型。
+   */
+  app.get("/api/projects/:id/download", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: p } = req.query as { path?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!p) return reply.code(400).send({ error: "缺少文件路径" });
+    let src: DownloadSource;
+    try {
+      const { host, root } = await fileHostFor(row);
+      src = await openDownload(host, root, p);
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.code(message === "路径不存在或不可访问" ? 404 : 400).send({ error: message });
+    }
+    return reply
+      .header("Content-Type", "application/octet-stream")
+      .header("Content-Length", src.size)
+      .header("Content-Disposition", contentDisposition(src.name))
+      .header("Cache-Control", "no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .send(src.stream);
+  });
+
+  /**
+   * 上传一个文件到工作目录里的 `path` 目录下，文件名是 `name`，请求体是原始字节
+   * （application/octet-stream，见上面的解析器），按流写到宿主机。
+   *
+   * Content-Length 是必需的：宿主机那头收满这个数才把文件改名到位，中途断开的
+   * 上传不会留下截断的文件。浏览器给 File 请求体一定带这个头。
+   *
+   * 同名文件已存在且没带 overwrite=1 时回 409，前端问过用户再重发；此时请求体
+   * 可能还没收完，Node 会把剩下的读掉丢弃，连接不会被掐断。
+   */
+  app.put("/api/projects/:id/upload", async (req, reply): Promise<UploadResult | void> => {
+    const { id } = req.params as { id: string };
+    const { path: dir, name, overwrite } = req.query as {
+      path?: string;
+      name?: string;
+      overwrite?: string;
+    };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!name) return reply.code(400).send({ error: "缺少文件名" });
+    const size = Number(req.headers["content-length"]);
+    if (!Number.isInteger(size) || size < 0) {
+      return reply.code(411).send({ error: "缺少 Content-Length" });
+    }
+    // 空文件时 fastify 可能跳过解析器，body 为 undefined；别的 Content-Type 会解成
+    // JSON / 字符串，那不是这条路由要的
+    const body =
+      req.body instanceof Readable ? req.body : size === 0 ? Readable.from([]) : null;
+    if (!body) return reply.code(415).send({ error: "请求体必须是 application/octet-stream" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await receiveUpload(host, root, dir, name, size, overwrite === "1", body);
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.code(message === "同名文件已存在" ? 409 : 400).send({ error: message });
+    }
+  });
+
+  /**
+   * 在工作目录里建一个文件夹。`path` 是工作目录相对路径（含要建的那一段）。
+   * recursive 给文件夹上传用：中间层已存在当成功；已存在一个同名文件仍是 409。
+   */
+  app.post("/api/projects/:id/mkdir", async (req, reply): Promise<FileOpResult | void> => {
+    const { id } = req.params as { id: string };
+    const { path: p, recursive } = (req.body ?? {}) as { path?: string; recursive?: boolean };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!p) return reply.code(400).send({ error: "缺少路径" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await mkdirWorkspace(host, root, p, recursive === true);
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.code(message === "同名文件已存在" ? 409 : 400).send({ error: message });
+    }
+  });
+
+  /**
+   * 重命名工作目录里的一项。只改最后一段名字，不移动到别的目录。
+   */
+  app.post("/api/projects/:id/rename", async (req, reply): Promise<FileOpResult | void> => {
+    const { id } = req.params as { id: string };
+    const { path: p, name } = (req.body ?? {}) as { path?: string; name?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!p) return reply.code(400).send({ error: "缺少路径" });
+    if (!name) return reply.code(400).send({ error: "缺少文件名" });
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await renameWorkspace(host, root, p, name);
+    } catch (err) {
+      const message = (err as Error).message;
+      return reply.code(message === "同名文件已存在" ? 409 : 400).send({ error: message });
+    }
+  });
+
+  /**
+   * 删除工作目录里的若干项。每条单独试，部分失败仍 200，细节在 errors 里。
+   * 空路径（工作目录本身）会被丢掉；前端不该把它送来。
+   */
+  app.post("/api/projects/:id/remove", async (req, reply): Promise<FileRemoveResult | void> => {
+    const { id } = req.params as { id: string };
+    const { paths } = (req.body ?? {}) as { paths?: unknown };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (!Array.isArray(paths) || paths.length === 0) {
+      return reply.code(400).send({ error: "缺少路径" });
+    }
+    if (!paths.every((x) => typeof x === "string")) {
+      return reply.code(400).send({ error: "路径不合法" });
+    }
+    try {
+      const { host, root } = await fileHostFor(row);
+      return await removeWorkspace(host, root, paths);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }

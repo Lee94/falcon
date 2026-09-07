@@ -1,0 +1,29 @@
+/*
+ * IoskeleyMonoTerm Nerd Font Mono（v2.1.0），经 scripts/vendor-ioskeley-mono.mjs 子集化
+ * https://github.com/ahatem/IoskeleyMono
+ * SIL Open Font License 1.1 — 全文见同目录 LICENSE.txt
+ *
+ * 终端正文的 OFL 回退。Iosevka 的自定义 build，照 Berkeley Mono 的骨架调；
+ * Term 变体把符号窄化成 1 格。默认正文是内嵌的 TX-02，这份接它缺的码位。
+ *
+ * 只有一片、不写 unicode-range：上游没有 CJK，Nerd Font 的 PUA 图标也在子集时
+ * 整个剔掉了（termFontStack 里 Symbols Nerd Font Mono 排在它前面）。
+ * 这片没覆盖到的字符浏览器按 cmap 落空后自动回退到 stack 下一位——
+ * 中文落到 Maple，emoji 落到系统。保留哪些范围见 vendor 脚本里的表。
+ *
+ * 不带 Bold face：终端 ANSI 粗体由浏览器从 Regular 合成，等宽字体的合成粗体
+ * 不改变字符步进，省下再一份下载（上游一共 19 个字重）。
+ *
+ * 与 Maple 选的 NL 版不同，这份**带连字**（Iosevka 的 term spacing 保留 liga，
+ * 只有 fixed 才关）。终端里看不到：xterm 与 rio 都是逐 cell 栅格化单个字形，
+ * shaping 根本不跨格。连字是等宽的，就算哪天在 DOM 文本上用到这个 family，
+ * 对齐也不会散，只是 != 会画成 ≠——真要避开就在使用处关 liga / calt。
+ */
+@font-face {
+  font-family: "IoskeleyMonoTerm Nerd Font Mono";
+  src: url("../assets/fonts/ioskeley-mono/IoskeleyMonoTermNFM-Latin.woff2")
+    format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

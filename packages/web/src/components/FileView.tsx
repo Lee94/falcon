@@ -1,10 +1,22 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
-import { Code2, Eye, FileText, RefreshCw } from "lucide-react";
-import type { FilePreview } from "@falcon/shared";
+import { Code2, Download, ExternalLink, Eye, FileText, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
+import type { WorkspaceFile } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { langForPath, splitCodeLines, useHighlight } from "../lib/highlight.js";
+import { rawUrl } from "../lib/rawUrl.js";
+import { triggerDownload } from "../lib/fileTransfer.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { CodeLine } from "@/components/common/CodeLine";
@@ -19,13 +31,17 @@ const Markdown = lazy(() => import("./Markdown.js").then((m) => ({ default: m.Ma
  * 比看到旧内容更让人困惑（要新的按刷新就是了）。
  *
  * 只读，没有编辑：改文件是终端里的事，这里不做半个编辑器。
+ *
+ * 图片与 HTML 预览的字节不经 JSON：readFile 只判类型并给出这个项目的原始字节
+ * 前缀（rawBase，带作用域令牌），`<img src>` / `<iframe src>` 直接指向宿主机上的
+ * 文件，页面里相对路径引用的 CSS / JS / 图片也就自然能解析到（ADR 0007）。
  */
 export function FileView() {
   const { t } = useTranslation();
   const active = useApp((s) => s.active);
   const target = active.kind === "file" ? active : null;
   const openFile = useApp((s) => s.openFile);
-  const [result, setResult] = useState<FilePreview | null>(null);
+  const [result, setResult] = useState<WorkspaceFile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tick, setTick] = useState(0);
@@ -59,12 +75,18 @@ export function FileView() {
 
   if (!target || !path || !projectId) return null;
 
+  const preview = result?.preview ?? null;
   const markdown = isMarkdown(path);
-  const preview = markdown && mode === "preview";
+  const html = isHtml(path);
+  const renderable = markdown || html;
+  const previewing = renderable && mode === "preview";
   const switchMode = (next: ViewMode) => {
     setMode(next);
     saveViewMode(next);
   };
+  // 图片与 HTML 预览用的是浏览器能直接打开的地址，顺手给个"在新标签页打开"：
+  // 原始字节路由带 CSP sandbox，顶层打开也跑在 opaque origin 里，碰不到本站
+  const raw = result && (preview?.kind === "image" || (html && previewing)) ? rawUrl(result.rawBase, path) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -73,27 +95,27 @@ export function FileView() {
         <span className="min-w-0 truncate font-mono text-xs" title={path}>
           {path}
         </span>
-        {result?.kind === "text" && result.truncated && (
+        {preview?.kind === "text" && preview.truncated && (
           <span className="shrink-0 text-[11px] text-warning">
-            {t("files.viewTruncated", { size: formatBytes(result.size) })}
+            {t("files.viewTruncated", { size: formatBytes(preview.size) })}
           </span>
         )}
-        {result && result.kind !== "text" && (
+        {preview && preview.kind !== "text" && (
           <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-            {formatBytes(result.size)}
+            {formatBytes(preview.size)}
           </span>
         )}
         <span className="flex-1" />
-        {markdown && (
-          // 预览 / 源码只对 Markdown 有意义，别的文件类型不摆这两个按钮
+        {renderable && (
+          // 预览 / 源码只对 Markdown 与 HTML 有意义，别的文件类型不摆这两个按钮
           <>
             <Button
               variant="ghost"
               size="icon-xs"
-              className={cn("text-muted-foreground", preview && "bg-accent text-foreground")}
+              className={cn("text-muted-foreground", previewing && "bg-accent text-foreground")}
               aria-label={t("files.preview")}
               title={t("files.preview")}
-              aria-pressed={preview}
+              aria-pressed={previewing}
               onClick={() => switchMode("preview")}
             >
               <Eye />
@@ -101,16 +123,40 @@ export function FileView() {
             <Button
               variant="ghost"
               size="icon-xs"
-              className={cn("text-muted-foreground", !preview && "bg-accent text-foreground")}
+              className={cn("text-muted-foreground", !previewing && "bg-accent text-foreground")}
               aria-label={t("files.source")}
               title={t("files.source")}
-              aria-pressed={!preview}
+              aria-pressed={!previewing}
               onClick={() => switchMode("source")}
             >
               <Code2 />
             </Button>
           </>
         )}
+        {raw && (
+          <Button variant="ghost" size="icon-xs" className="text-muted-foreground" asChild>
+            <a
+              href={raw}
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label={t("files.openRaw")}
+              title={t("files.openRaw")}
+            >
+              <ExternalLink />
+            </a>
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground"
+          aria-label={t("files.download")}
+          title={t("files.download")}
+          // 二进制 / 超大文件在这里"无法预览"，下载是它们唯一的出路，所以不看 preview 的种类
+          onClick={() => triggerDownload(api.downloadUrl(projectId, path))}
+        >
+          <Download />
+        </Button>
         <Button
           variant="ghost"
           size="icon-xs"
@@ -133,28 +179,32 @@ export function FileView() {
             {t("files.viewFailed")}
             <span className="mt-1 block font-mono text-[11px]">{error}</span>
           </Hint>
-        ) : !result ? (
+        ) : !result || !preview ? (
           <Hint>{t("files.viewLoading")}</Hint>
-        ) : result.kind === "binary" ? (
+        ) : preview.kind === "binary" ? (
           <Hint>{t("files.viewBinary")}</Hint>
-        ) : result.kind === "too-large" ? (
-          <Hint>{t("files.viewTooLarge", { size: formatBytes(result.size) })}</Hint>
-        ) : result.kind === "image" ? (
-          <ImagePane mime={result.mime} base64={result.base64} name={path} />
-        ) : !result.text ? (
+        ) : preview.kind === "too-large" ? (
+          <Hint>{t("files.viewTooLarge", { size: formatBytes(preview.size) })}</Hint>
+        ) : preview.kind === "image" ? (
+          // key 挂 tick：同一个 src 换不了 <img> 的加载，刷新得靠重挂（响应是 no-store）
+          <ImagePane key={tick} src={rawUrl(result.rawBase, path)} name={path} />
+        ) : !preview.text ? (
           <Hint>{t("files.viewEmpty")}</Hint>
-        ) : preview ? (
+        ) : html && previewing ? (
+          <HtmlPane key={tick} src={rawUrl(result.rawBase, path)} name={path} />
+        ) : markdown && previewing ? (
           <div className="h-full overflow-auto">
             <Suspense fallback={<Hint>{t("files.viewLoading")}</Hint>}>
               <Markdown
-                text={result.text}
+                text={preview.text}
                 dir={dirOf(path)}
+                rawBase={result.rawBase}
                 onOpenPath={(next) => openFile(projectId, next)}
               />
             </Suspense>
           </div>
         ) : (
-          <CodePane text={result.text} path={path} />
+          <CodePane text={preview.text} path={path} />
         )}
       </div>
     </div>
@@ -185,6 +235,10 @@ function isMarkdown(path: string): boolean {
   return /\.(md|markdown|mdx)$/i.test(path);
 }
 
+function isHtml(path: string): boolean {
+  return /\.(html?|xhtml)$/i.test(path);
+}
+
 function dirOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? "" : path.slice(0, i);
@@ -200,15 +254,246 @@ function Hint({ children }: { children: ReactNode }) {
   return <p className="px-4 py-4 text-xs leading-relaxed text-muted-foreground">{children}</p>;
 }
 
-function ImagePane({ mime, base64, name }: { mime: string; base64: string; name: string }) {
+// ---------------- HTML 预览 ----------------
+
+/**
+ * 直接把 HTML 当页面渲染。src 指向原始字节路由，所以页面里 `./style.css` 这类
+ * 相对引用按 URL 规则就能解析到同一项目的文件。
+ *
+ * sandbox 不给 allow-same-origin：页面跑在 opaque origin 里，脚本碰不到本站的
+ * cookie / localStorage，也调不动 /api——仓库里一个来路不明的 HTML 不能借着
+ * 预览冒充用户操作。allow-scripts 得给，否则大半 HTML 页面白屏；弹窗与表单
+ * 也在沙箱内（没有 allow-popups-to-escape-sandbox）。
+ */
+function HtmlPane({ src, name }: { src: string; name: string }) {
   return (
-    <div className="grid h-full place-items-center overflow-auto p-6">
-      {/* 图片字节在宿主机上，只能由后端读回来内联；棋盘底衬让透明 PNG 看得出边界 */}
-      <img
-        src={`data:${mime};base64,${base64}`}
-        alt={name}
-        className="max-h-full max-w-full rounded border bg-[repeating-conic-gradient(var(--muted)_0%_25%,transparent_0%_50%)] bg-[length:16px_16px] object-contain"
-      />
+    <iframe
+      src={src}
+      title={name}
+      sandbox="allow-scripts allow-forms allow-popups allow-modals"
+      referrerPolicy="no-referrer"
+      // 底色是浏览器的画布默认色而不是界面色：没设背景的 HTML 页面在浏览器里
+      // 就是白底黑字，跟着本站深色主题走会把页面变成黑底黑字
+      className="h-full w-full border-0 bg-white"
+    />
+  );
+}
+
+// ---------------- 图片预览 ----------------
+//
+// 缩放模型：`fit`（贴合窗口，但不放大小图——16px 的图标撑满屏幕只是一团马赛克）
+// 或一个具体倍率。⌘/Ctrl + 滚轮与触控板捏合缩放、双击在 fit 与 1:1 之间切换、
+// 放大后拖拽平移；缩放以指针位置为锚点——放大时光标底下那个像素不动。
+// 锚定要等新尺寸排完版才能算滚动量，所以放在 useLayoutEffect 里做。
+
+type Zoom = "fit" | number;
+const ZOOM_MIN = 0.05;
+const ZOOM_MAX = 32;
+/** 贴合时四周留的空，与容器 padding 一致 */
+const FIT_PAD = 24;
+
+function clampZoom(z: number): number {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+}
+
+function ImagePane({ src, name }: { src: string; name: string }) {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [zoom, setZoom] = useState<Zoom>("fit");
+  /** 待应用的缩放锚点：图片上的相对位置 (fx, fy) 应停在视口坐标 (x, y) */
+  const anchor = useRef<{ fx: number; fy: number; x: number; y: number } | null>(null);
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    setBox({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  // 没有固有尺寸的 SVG（只有 viewBox）naturalWidth 是 0，缩放算不出来，按浏览器默认画
+  const sized = natural != null && natural.w > 0 && natural.h > 0;
+  const fitScale = useMemo(() => {
+    if (!sized || !box.w || !box.h) return 1;
+    return Math.min(1, (box.w - FIT_PAD * 2) / natural.w, (box.h - FIT_PAD * 2) / natural.h);
+  }, [sized, natural, box]);
+  const scale = zoom === "fit" ? fitScale : zoom;
+
+  useLayoutEffect(() => {
+    const a = anchor.current;
+    anchor.current = null;
+    const el = scrollRef.current;
+    const img = imgRef.current;
+    if (!a || !el || !img) return;
+    const r = img.getBoundingClientRect();
+    el.scrollLeft += r.left + a.fx * r.width - a.x;
+    el.scrollTop += r.top + a.fy * r.height - a.y;
+  }, [scale]);
+
+  const setAnchor = (at?: { x: number; y: number }) => {
+    const img = imgRef.current;
+    if (!at || !img) return;
+    const r = img.getBoundingClientRect();
+    anchor.current = { fx: (at.x - r.left) / r.width, fy: (at.y - r.top) / r.height, x: at.x, y: at.y };
+  };
+  const zoomTo = (next: Zoom, at?: { x: number; y: number }) => {
+    setAnchor(at);
+    setZoom(next === "fit" ? next : clampZoom(next));
+  };
+  // 相对缩放用函数式更新：连点两下"放大"落在同一帧里时，第二下要基于第一下的结果，
+  // 而不是渲染闭包里那个还没更新的 scale
+  const zoomBy = (factor: number, at?: { x: number; y: number }) => {
+    setAnchor(at);
+    setZoom((z) => clampZoom((z === "fit" ? fitScale : z) * factor));
+  };
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !sized) return;
+    // React 的 onWheel 是 passive 的，preventDefault 拦不住浏览器自己的页面缩放，
+    // 得自己以 passive: false 挂。触控板捏合在 Chrome 里也是带 ctrlKey 的 wheel，
+    // delta 很小；鼠标滚轮一格约 100。按 delta 指数缩放两种设备手感都自然
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      zoomBy(Math.exp(-e.deltaY * 0.0025), { x: e.clientX, y: e.clientY });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    drag.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+    el.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    const el = scrollRef.current;
+    if (!d || !el) return;
+    el.scrollLeft = d.left - (e.clientX - d.x);
+    el.scrollTop = d.top - (e.clientY - d.y);
+  };
+  const endDrag = () => {
+    drag.current = null;
+  };
+
+  if (failed) return <Hint>{t("files.viewImageFailed")}</Hint>;
+
+  const overflowing = sized && (natural.w * scale > box.w || natural.h * scale > box.h);
+  const percent = `${Math.round(scale * 100)}%`;
+
+  return (
+    <div className="relative h-full">
+      <div
+        ref={scrollRef}
+        className={cn("h-full overflow-auto", overflowing && "cursor-grab active:cursor-grabbing")}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDoubleClick={(e) => zoomTo(zoom === "fit" && fitScale < 1 ? 1 : "fit", { x: e.clientX, y: e.clientY })}
+      >
+        {/* min-w/min-h 100% + w-max：图比窗口小时居中，比窗口大时撑开容器让它能滚 */}
+        <div className="grid min-h-full w-max min-w-full place-items-center p-6">
+          {/* 图片字节由浏览器直接从原始字节路由取；棋盘底衬让透明 PNG 看得出边界 */}
+          <img
+            ref={imgRef}
+            src={src}
+            alt={name}
+            draggable={false}
+            onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            onError={() => setFailed(true)}
+            className={cn(
+              "rounded border bg-[repeating-conic-gradient(var(--muted)_0%_25%,transparent_0%_50%)] bg-[length:16px_16px] select-none",
+              !sized && "max-h-full max-w-full object-contain"
+            )}
+            style={
+              sized
+                ? {
+                    width: natural.w * scale,
+                    height: natural.h * scale,
+                    // 放大到 2 倍以上是在看像素，插值糊成一片反而看不清
+                    imageRendering: scale >= 2 ? "pixelated" : undefined,
+                  }
+                : undefined
+            }
+          />
+        </div>
+      </div>
+      {sized && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-md border bg-popover/90 px-1 py-0.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+            <span className="px-1.5 tabular-nums" title={t("files.imageDims")}>
+              {natural.w} × {natural.h}
+            </span>
+            <span className="h-3.5 w-px bg-border" />
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground"
+              aria-label={t("files.zoomOut")}
+              title={t("files.zoomOut")}
+              disabled={scale <= ZOOM_MIN}
+              onClick={() => zoomBy(1 / 1.25)}
+            >
+              <ZoomOut />
+            </Button>
+            <button
+              type="button"
+              className="min-w-11 rounded px-1 tabular-nums hover:bg-accent hover:text-foreground"
+              title={t("files.zoomReset")}
+              onClick={() => zoomTo("fit")}
+            >
+              {percent}
+            </button>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              className="text-muted-foreground"
+              aria-label={t("files.zoomIn")}
+              title={t("files.zoomIn")}
+              disabled={scale >= ZOOM_MAX}
+              onClick={() => zoomBy(1.25)}
+            >
+              <ZoomIn />
+            </Button>
+            <span className="h-3.5 w-px bg-border" />
+            <button
+              type="button"
+              className={cn(
+                "rounded px-1.5 hover:bg-accent hover:text-foreground",
+                zoom !== "fit" && scale === 1 && "bg-accent text-foreground"
+              )}
+              title={t("files.zoomActual")}
+              aria-pressed={zoom !== "fit" && scale === 1}
+              onClick={() => zoomTo(1)}
+            >
+              1:1
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded px-1.5 hover:bg-accent hover:text-foreground",
+                zoom === "fit" && "bg-accent text-foreground"
+              )}
+              title={t("files.zoomFit")}
+              aria-pressed={zoom === "fit"}
+              onClick={() => zoomTo("fit")}
+            >
+              {t("files.zoomFit")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
