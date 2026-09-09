@@ -24,6 +24,10 @@ _Avoid_: Connection、Server、Remote（太宽）、Host（单独说会和 Zelli
 挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink，与终端会话独立。本地转发（ssh -L）在 falcon 后端监听、打到远端能到达的地址；远端转发（ssh -R）在远端监听、打回后端能到达的地址。规则持久化，启用中的隧道在链路断开后随 SSH 一起重连。
 _Avoid_: Tunnel（太宽）、Proxy / SOCKS（v1 不做动态转发）
 
+**Docker Panel（Docker 面板）**:
+挂在当前焦点项目上的宿主机 Docker 管理：容器、镜像、Compose。命令在项目的宿主机上执行（local = 后端机器，ssh = 远端经现有 SSH 链路），不是后端本机的 Docker（除非当前就是本地项目）。Compose 只在项目工作目录及往下两层子目录里发现 compose.yaml / docker-compose.yml。
+_Avoid_: 本机 Docker（SSH 项目不是）、集群 / Swarm / Kubernetes
+
 **Worktree Project（附属项目）**:
 从一个 Project 派生出来的 Project，工作目录是源项目所在 git 仓库的一棵 worktree，检出另一条分支。与源项目共用同一台宿主机与同一份连接配置（local / ssh 跟着源项目走），但拥有独立的名称、独立的会话、独立的生命周期。目录由 falcon 在**仓库根**的同级创建（`<仓库基名>-<分支 slug>`），也只有 falcon 自己建的目录才会在删除时被清理。只能从普通 Project 派生一层。多仓库容器批量派生出的附属项目同时也是多仓库项目（multi 与 worktree 同时存在），删除按成员清单逐棵清理。
 _Avoid_: 子项目（暗示嵌套，实际是磁盘上的同级）、分支项目（附属项目不等于分支，分支可以换）、Clone / 副本（只有一份仓库，什么都没有复制）

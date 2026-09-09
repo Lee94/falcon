@@ -545,7 +545,7 @@ export function GitPanel() {
 
   const unavailable = snap && !snap.available;
   return (
-    // 宽度由外层 ResizableSlot 统一管：四个右侧面板共用同一个槽位，
+    // 宽度由外层 ResizableSlot 统一管：右侧各面板共用同一个槽位，
     // 来回切不能改宽度，否则终端会跟着 reflow。
     <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-1.5 border-b pr-2 pl-3">

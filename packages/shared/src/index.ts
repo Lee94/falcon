@@ -1019,3 +1019,100 @@ export interface DeleteProjectResult {
   ok: true;
   warnings?: string[];
 }
+
+// ============ Docker（宿主机容器 / Compose） ============
+
+/**
+ * Docker 面板的失败原因。闭集，前后端共用，前端按 reason 渲染具体说明。
+ *
+ * docker-missing / permission / daemon 是宿主机环境事实；compose-missing
+ * 只挡 Compose 那一栏，容器和镜像照样能管。
+ */
+export type DockerUnavailableReason =
+  | "docker-missing"
+  | "docker-permission"
+  | "docker-daemon"
+  | "compose-missing"
+  | "no-working-dir"
+  | "link-failed"
+  | "command-failed";
+
+export interface DockerContainer {
+  id: string;
+  names: string[];
+  image: string;
+  /** running / exited / paused / created / restarting / dead / unknown */
+  state: string;
+  /** docker 原文，如 "Up 2 hours" / "Exited (0) 3 days ago" */
+  status: string;
+  ports: string;
+  created: string;
+  command: string;
+}
+
+export interface DockerImage {
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  created: string;
+  dangling: boolean;
+}
+
+/** 工作目录相对路径，分隔符一律 `/`（与 WorkspaceEntry 相同） */
+export interface DockerComposeFile {
+  path: string;
+}
+
+export interface DockerComposeService {
+  name: string;
+  service: string;
+  state: string;
+  status: string;
+  ports: string;
+}
+
+/**
+ * 右侧 Docker 面板快照。容器 / 镜像是宿主机级的；Compose 文件只在项目工作目录里找。
+ * 环境事实写在 available / reason 里，不抛 4xx。
+ */
+export interface DockerSnapshot {
+  available: boolean;
+  reason?: DockerUnavailableReason;
+  detail?: string;
+  containers: DockerContainer[];
+  images: DockerImage[];
+  composeFiles: DockerComposeFile[];
+  composeAvailable: boolean;
+  composeReason?: DockerUnavailableReason;
+  composeDetail?: string;
+  compose?: {
+    file: string;
+    services: DockerComposeService[];
+  };
+}
+
+export interface DockerLogs {
+  available: boolean;
+  reason?: DockerUnavailableReason;
+  detail?: string;
+  text: string;
+  truncated?: boolean;
+}
+
+/**
+ * Docker 面板写操作。失败不抛 4xx：容器已在跑、镜像被占用都是正常状态，
+ * 把 docker 的原话回给前端。
+ */
+export type DockerOpInput =
+  | { op: "start" | "stop" | "restart"; ref: string }
+  | { op: "remove"; ref: string; force?: boolean }
+  | { op: "image-remove"; ref: string }
+  | { op: "image-prune" }
+  | { op: "compose-up" | "compose-down"; file: string };
+
+export interface DockerOpResult {
+  ok: boolean;
+  reason?: DockerUnavailableReason;
+  detail: string;
+}

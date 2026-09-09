@@ -22,6 +22,7 @@ export type Command =
   | "toggleChangesPanel"
   | "toggleForwardPanel"
   | "toggleFilesPanel"
+  | "toggleDockerPanel"
   | "reattach"
   | "overview"
   | "nextTab"
@@ -56,6 +57,8 @@ export function chord(cmd: Command, mac = isMac): string {
       return mac ? "⌘⇧F" : "Ctrl+Shift+F";
     case "toggleFilesPanel":
       return mac ? "⌘⇧E" : "Ctrl+Shift+E";
+    case "toggleDockerPanel":
+      return mac ? "⌘⇧D" : "Ctrl+Shift+D";
     case "reattach":
       return mac ? "⌘R" : "Ctrl+Shift+R";
     case "overview":
@@ -86,6 +89,8 @@ export function altChord(cmd: Command, mac = isMac): string | null {
       return "Alt+F";
     case "toggleFilesPanel":
       return "Alt+E";
+    case "toggleDockerPanel":
+      return "Alt+D";
     case "reattach":
       return "Alt+R";
     case "palette":
@@ -110,6 +115,7 @@ const ALT_LETTERS: Record<string, Command> = {
   KeyU: "toggleChangesPanel",
   KeyF: "toggleForwardPanel",
   KeyE: "toggleFilesPanel",
+  KeyD: "toggleDockerPanel",
   KeyR: "reattach",
   KeyP: "quickOpen",
 };
@@ -123,6 +129,7 @@ const MODSHIFT_LETTERS: Record<string, Command> = {
   KeyU: "toggleChangesPanel",
   KeyF: "toggleForwardPanel",
   KeyE: "toggleFilesPanel",
+  KeyD: "toggleDockerPanel",
   KeyR: "reattach",
 };
 
@@ -142,6 +149,7 @@ const MAC_MODSHIFT_LETTERS: Record<string, Command> = {
   KeyU: "toggleChangesPanel",
   KeyF: "toggleForwardPanel",
   KeyE: "toggleFilesPanel",
+  KeyD: "toggleDockerPanel",
 };
 
 function digit(code: string): number | null {

@@ -6,6 +6,7 @@ import {
   CircleX,
   Download,
   ArrowLeftRight,
+  Container,
   FileDiff,
   FileText,
   Folder,
@@ -187,6 +188,7 @@ export function CommandPalette() {
     const changesOn = rightVisible && rightPanel === "changes";
     const gitOn = rightVisible && rightPanel === "git";
     const forwardOn = rightVisible && rightPanel === "forward";
+    const dockerOn = rightVisible && rightPanel === "docker";
     actionItems.push({
       key: `>${t("palette.toggleFilesOn")} ${t("palette.toggleFilesOff")}`,
       label: filesOn ? t("palette.toggleFilesOn") : t("palette.toggleFilesOff"),
@@ -214,6 +216,13 @@ export function CommandPalette() {
       meta: chord("toggleForwardPanel"),
       icon: ArrowLeftRight,
       run: () => store.toggleRightPanel("forward"),
+    });
+    actionItems.push({
+      key: `>${t("palette.toggleDockerOn")} ${t("palette.toggleDockerOff")}`,
+      label: dockerOn ? t("palette.toggleDockerOn") : t("palette.toggleDockerOff"),
+      meta: chord("toggleDockerPanel"),
+      icon: Container,
+      run: () => store.toggleRightPanel("docker"),
     });
     THEME_PREFS.filter((pref) => pref !== store.themePref).forEach((pref) =>
       actionItems.push({
