@@ -1,5 +1,6 @@
 import * as pty from "@lydell/node-pty";
 import { applyTermPtyEnv, type NonDurableReason, type TermAppearance } from "@falcon/shared";
+import { prependPath } from "../askpass/install.js";
 import * as zcmd from "../zellij/command.js";
 import {
   isProcessInJob,
@@ -110,12 +111,18 @@ export function resetLocalZellij() {
  */
 async function env(
   layout: HostLayout,
-  appearance?: TermAppearance
+  appearance?: TermAppearance,
+  askpass?: { bin: string; sessionId: string }
 ): Promise<Record<string, string>> {
-  return applyTermPtyEnv(
+  let out = applyTermPtyEnv(
     { ...(await resolveLocalBaseEnv()), ...zcmd.zellijEnv(layout) },
     appearance
   );
+  if (askpass) {
+    out = prependPath(out, askpass.bin);
+    out.FALCON_SESSION_ID = askpass.sessionId;
+  }
+  return out;
 }
 
 async function zellij(layout: HostLayout, args: string[]) {
@@ -190,6 +197,8 @@ export interface LocalAttachOptions {
   rows: number;
   /** 当前 Viewer 的终端深浅；接回时内层 shell 的 env 已经冻住，只影响新会话 */
   appearance?: TermAppearance;
+  /** sudo askpass 包装所在目录，会插到 PATH 最前；缺省不注入 */
+  askpassBin?: string;
 }
 
 export async function attachLocal(
@@ -198,6 +207,9 @@ export async function attachLocal(
 ): Promise<AttachResult> {
   let proc: pty.IPty;
   let capturedHistory: string | undefined;
+  const askpass = opts.askpassBin
+    ? { bin: opts.askpassBin, sessionId: opts.sessionId }
+    : undefined;
 
   if (opts.durable) {
     const layout = opts.layout;
@@ -219,16 +231,21 @@ export async function attachLocal(
         name: "xterm-256color",
         cols: opts.cols,
         rows: opts.rows,
-        env: await env(layout, opts.appearance),
+        env: await env(layout, opts.appearance, askpass),
       }
     );
   } else {
+    let spawnedEnv = applyTermPtyEnv(await resolveLocalBaseEnv(), opts.appearance);
+    if (askpass) {
+      spawnedEnv = prependPath(spawnedEnv, askpass.bin);
+      spawnedEnv.FALCON_SESSION_ID = askpass.sessionId;
+    }
     proc = pty.spawn(opts.shell ?? defaultLocalShell(), [], {
       name: "xterm-256color",
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: applyTermPtyEnv(await resolveLocalBaseEnv(), opts.appearance),
+      env: spawnedEnv,
     });
   }
 

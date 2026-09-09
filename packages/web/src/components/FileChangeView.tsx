@@ -413,6 +413,9 @@ export function statusText(status: string, t: (key: string) => string): string {
  */
 export function porcelainStatus(index: string, work: string): string {
   if (index === "?" || work === "?") return "?";
+  if (index === "U" || work === "U" || (index === "A" && work === "A") || (index === "D" && work === "D")) {
+    return "U";
+  }
   if (index !== " " && index !== "") return index;
   return work.trim() || "M";
 }

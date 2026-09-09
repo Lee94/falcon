@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import { StringDecoder } from "node:string_decoder";
 import { Client, type ClientChannel, type TcpConnectionDetails } from "ssh2";
 import type { ProjectRow } from "../db.js";
@@ -43,6 +44,8 @@ import {
   type ZellijTarget,
 } from "../zellij/version.js";
 import { applyTermPtyEnv, type TermAppearance } from "@falcon/shared";
+import type { AskpassHub } from "../askpass/hub.js";
+import { askpassBinDir, posixWriteAskpassCommand } from "../askpass/install.js";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
 import type { NonDurableReason } from "./local.js";
@@ -96,6 +99,8 @@ export class SshLink extends EventEmitter {
     number,
     (info: TcpConnectionDetails, accept: () => ClientChannel, reject: () => void) => void
   >();
+  /** 远端 127.0.0.1 上 askpass 反连 Falcon 的端口；链路断开后作废 */
+  private askpassPort: number | null = null;
 
   constructor(
     private project: ProjectRow,
@@ -165,6 +170,7 @@ export class SshLink extends EventEmitter {
       client.on("close", () => {
         if (this.client === client) {
           this.client = null;
+          this.askpassPort = null;
           this.emit("down");
         } else if (!ready) {
           reject(new Error("SSH 连接已关闭"));
@@ -200,8 +206,67 @@ export class SshLink extends EventEmitter {
   dispose() {
     const c = this.client;
     this.client = null;
+    this.askpassPort = null;
     this.remoteAcceptors.clear();
     c?.end();
+  }
+
+  /**
+   * 在远端落下 sudo 包装，并开一条 127.0.0.1 反向转发让 helper 能打到
+   * Falcon 的 /api/askpass。失败不抛——会话照开，只是 agent 的 sudo 还是没 tty。
+   */
+  async ensureAskpass(hub: AskpassHub): Promise<string | null> {
+    const probe = await this.probe();
+    if (probe.kind !== "posix") return null;
+    const binDir = askpassBinDir("posix", probe.root);
+    const remotePort = await this.ensureAskpassTunnel(hub);
+    const helperUrl = remotePort
+      ? `http://127.0.0.1:${remotePort}/api/askpass`
+      : hub.helperUrl();
+    const res = await this.exec(posixWriteAskpassCommand(binDir, hub, helperUrl)).catch(
+      () => null
+    );
+    if (!res || res.code !== 0) return null;
+    return binDir;
+  }
+
+  private async ensureAskpassTunnel(hub: AskpassHub): Promise<number | null> {
+    if (this.askpassPort != null && this.client) return this.askpassPort;
+    let dest: URL;
+    try {
+      dest = new URL(hub.helperUrl());
+    } catch {
+      return null;
+    }
+    const destPort = dest.port ? Number(dest.port) : dest.protocol === "https:" ? 443 : 80;
+    const destHost = dest.hostname || "127.0.0.1";
+    const onStream = (stream: ClientChannel) => {
+      const socket = net.connect(destPort, destHost);
+      socket.once("error", () => stream.destroy());
+      socket.once("connect", () => {
+        stream.pipe(socket);
+        socket.pipe(stream);
+        const close = () => {
+          stream.destroy();
+          socket.destroy();
+        };
+        stream.on("close", close);
+        socket.on("close", close);
+        stream.on("error", close);
+        socket.on("error", close);
+      });
+    };
+    for (let i = 0; i < 8; i++) {
+      const port = 41200 + Math.floor(Math.random() * 800);
+      try {
+        await this.addRemoteForward("127.0.0.1", port, onStream);
+        this.askpassPort = port;
+        return port;
+      } catch {
+        // 远端端口占用，换一个
+      }
+    }
+    return null;
   }
 
   /**
@@ -603,6 +668,7 @@ export class SshLink extends EventEmitter {
       cols: number;
       rows: number;
       appearance?: TermAppearance;
+      askpassBin?: string;
     },
     cb: BackendCallbacks
   ): Promise<AttachResult> {
@@ -618,6 +684,7 @@ export class SshLink extends EventEmitter {
 
     const ptyOpts = { rows: opts.rows, cols: opts.cols, term: "xterm-256color" };
     const termEnv = applyTermPtyEnv({}, opts.appearance);
+    if (opts.askpassBin) termEnv.FALCON_SESSION_ID = opts.sessionId;
 
     // Windows 持久会话：server 必须生在 sshd 进程树之外，否则创建它的 PTY 通道
     // 一关（关标签、断网）server 就被 sshd 连坐杀掉，"持久"名存实亡。先经 WMI
@@ -678,7 +745,8 @@ export class SshLink extends EventEmitter {
           ],
           { ...zcmd.zellijEnv(layout), ...termEnv },
           // 包一层登录 shell，否则 ~/.profile 里的 PATH 全丢——详见 buildPtyCommandLine
-          this.probed?.shell
+          this.probed?.shell,
+          opts.askpassBin
         );
         client.exec(cmd, { pty: ptyOpts }, (err, s) => (err ? reject(err) : resolve(s)));
       } else {
@@ -696,9 +764,12 @@ export class SshLink extends EventEmitter {
           // 非持久会话同样要走登录 shell，否则 PATH 与持久会话不一致
           const assigns = Object.entries(termEnv).map(([k, v]) => `${k}=${quotePosix(v)}`);
           const prefix = assigns.length ? `env ${assigns.join(" ")} ` : "";
+          const pathPrepend = opts.askpassBin
+            ? `PATH=${quotePosix(opts.askpassBin)}:$PATH `
+            : "";
           const cd = opts.cwd ? `cd ${quotePosix(opts.cwd)} && ` : "";
           const sh = quotePosix(opts.shell ?? this.probed?.shell ?? "/bin/sh");
-          cmd = `${cd}exec ${prefix}${sh} -l`;
+          cmd = `${cd}exec ${pathPrepend}${prefix}${sh} -l`;
         }
         client.exec(cmd, { pty: ptyOpts }, (err, s) => (err ? reject(err) : resolve(s)));
       }

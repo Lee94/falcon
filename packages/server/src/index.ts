@@ -10,6 +10,7 @@ import { isLoopback, parseArgs } from "./config.js";
 import { Db } from "./db.js";
 import { SecretBox } from "./crypto.js";
 import { Auth } from "./auth.js";
+import { AskpassHub } from "./askpass/hub.js";
 import { SessionManager } from "./sessions/manager.js";
 import { resolveLocalBaseEnv } from "./sessions/loginEnv.js";
 import { startArchiveSweeper } from "./archive.js";
@@ -42,7 +43,10 @@ async function main() {
     process.exit(1);
   }
 
-  const manager = new SessionManager(db, secrets, config.dataDir);
+  const askpass = new AskpassHub();
+  askpass.setOrigin(`http://127.0.0.1:${config.port}`);
+  const manager = new SessionManager(db, secrets, config.dataDir, askpass);
+  askpass.onPrompt = (p) => manager.broadcastAskpass(p);
   // 本地 PTY 基底环境（login shell 解析 + locale 兜底）预热：
   // 结果按进程缓存，先跑起来，首个本地会话就不用等 login shell 启动
   void resolveLocalBaseEnv();
@@ -55,7 +59,15 @@ async function main() {
   await app.register(fastifyCookie);
   await app.register(fastifyWebsocket, { options: { maxPayload: 1024 * 1024 } });
 
-  registerRoutes(app, { db, auth, manager, secrets, version: VERSION, dataDir: config.dataDir });
+  registerRoutes(app, {
+    db,
+    auth,
+    manager,
+    secrets,
+    version: VERSION,
+    dataDir: config.dataDir,
+    askpass,
+  });
   registerWs(app, { auth, manager, db });
 
   // 存档到期的附属项目由后台清扫自动删除，不等用户下次打开界面

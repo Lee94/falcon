@@ -10,9 +10,11 @@ import type {
   GitChangeCounts,
   GitCommitDetail,
   GitCommitInput,
+  GitConflictKind,
   GitFileDiff,
   GitLogCommit,
   GitLogPage,
+  GitOpInput,
   GitRefsInfo,
   GitSnapshot,
   GitSyncResult,
@@ -602,7 +604,7 @@ export function unavailableLog(reason: GitUnavailableReason, detail?: string): G
 }
 
 export function unavailableRefs(reason: GitUnavailableReason, detail?: string): GitRefsInfo {
-  return { available: false, reason, detail, branches: [], authors: [] };
+  return { available: false, reason, detail, branches: [], tags: [], authors: [] };
 }
 
 export function unavailableCommit(
@@ -697,13 +699,14 @@ export async function describeGitRefs(
       gc.versionArgs(git),
       gc.remoteListArgs(git, workingDir),
       gc.branchListArgs(git, workingDir),
+      gc.tagListArgs(git, workingDir),
       gc.logAuthorsArgs(git, workingDir),
       gc.configUserNameArgs(git, workingDir),
     ],
     gc.GIT_ENV_RO,
     opts
   );
-  const [verRes, remotesRes, branchRes, authorRes, meRes] = results;
+  const [verRes, remotesRes, branchRes, tagRes, authorRes, meRes] = results;
   ensureVersion(host, verRes, stderr);
 
   const remotes = remotesRes.code === 0 ? remoteNames(remotesRes.stdout) : [];
@@ -716,10 +719,11 @@ export async function describeGitRefs(
           upstream: b.upstream,
         }))
       : [];
+  const tags = tagRes.code === 0 ? gc.parseTagList(tagRes.stdout) : [];
   const authors = authorRes.code === 0 ? gc.rankAuthors(authorRes.stdout) : [];
   // 没配 user.name 时 git config 退出码 1，那是正常状态不是错误
   const me = meRes.code === 0 ? meRes.stdout.trim() || undefined : undefined;
-  return { available: true, branches, authors, me };
+  return { available: true, branches, tags, authors, me };
 }
 
 /** `git remote` 的输出：一行一个远程名 */
@@ -761,11 +765,17 @@ export async function describeWorkingChanges(
       gc.repoRootArgs(git, workingDir),
       gc.statusAllArgs(git, workingDir),
       gc.workingNumstatArgs(git, workingDir, "HEAD"),
+      gc.headMessageArgs(git, workingDir),
+      gc.revExistsArgs(git, workingDir, "REBASE_HEAD"),
+      gc.revExistsArgs(git, workingDir, "MERGE_HEAD"),
+      gc.revExistsArgs(git, workingDir, "CHERRY_PICK_HEAD"),
+      gc.revExistsArgs(git, workingDir, "REVERT_HEAD"),
     ],
     gc.GIT_ENV_RO,
     opts
   );
-  const [verRes, rootRes, statusRes, numstatRes] = results;
+  const [verRes, rootRes, statusRes, numstatRes, headMsgRes, rebaseRes, mergeRes, cherryRes, revertRes] =
+    results;
   ensureVersion(host, verRes, stderr);
   const root = rootFrom(host, rootRes, stderr);
 
@@ -824,11 +834,27 @@ export async function describeWorkingChanges(
     };
   });
 
+  const headMessage =
+    headMsgRes.code === 0 ? headMsgRes.stdout.replace(/\r?\n$/, "") || undefined : undefined;
+
+  const conflictKind: GitConflictKind | undefined =
+    rebaseRes.code === 0
+      ? "rebase"
+      : mergeRes.code === 0
+        ? "merge"
+        : cherryRes.code === 0
+          ? "cherry-pick"
+          : revertRes.code === 0
+            ? "revert"
+            : undefined;
+
   return {
     available: true,
     repoName: baseName(host, root),
     files: files.slice(0, gc.WORKING_FILE_CAP),
     fileCount: files.length,
+    headMessage,
+    conflict: conflictKind ? { kind: conflictKind } : undefined,
   };
 }
 
@@ -934,12 +960,186 @@ export async function syncGit(
     timeoutMs: TIMEOUT_SYNC,
     ...opts,
   });
-  // git 把进度写 stderr、结果写 stdout，成功时该看的是后者，失败时是前者；
-  // 两边都空只剩一个退出码时至少说清是哪一步（三级兜底同 runGit）
+  return syncResult(res, action);
+}
+
+/**
+ * 历史面板的写操作。与 syncGit 同一条规矩：失败不抛，git 的原话进 detail。
+ *
+ * checkout / cherry-pick / revert 都会动工作区；fetch 只更新远程跟踪。
+ * 冲突不 abort——面板没有 merge tool，终端就在旁边。
+ */
+export async function runGitOp(
+  host: GitHost,
+  workingDir: string,
+  input: GitOpInput,
+  opts?: RunOpts
+): Promise<GitSyncResult> {
+  const git = host.git;
+  const run = (argv: string[], label: string) =>
+    probeGit(host, argv, gc.GIT_ENV, { timeoutMs: TIMEOUT_SYNC, ...opts }).then((res) =>
+      syncResult(res, label)
+    );
+
+  switch (input.op) {
+    case "fetch":
+      return run(gc.fetchArgs(git, workingDir), "fetch");
+    case "checkout":
+      return run(
+        input.detach
+          ? gc.checkoutDetachArgs(git, workingDir, input.rev)
+          : gc.checkoutBranchArgs(git, workingDir, input.rev),
+        "checkout"
+      );
+    case "checkout-branch": {
+      if (!input.createTracking) {
+        return run(gc.checkoutBranchArgs(git, workingDir, input.branch), "checkout");
+      }
+      const remotesRes = await probeGit(
+        host,
+        gc.remoteListArgs(git, workingDir),
+        gc.GIT_ENV_RO,
+        opts
+      );
+      const remotes = remotesRes.code === 0 ? remoteNames(remotesRes.stdout) : [];
+      const local = gc.trackingLocalName(input.branch, remotes);
+      if (!local) {
+        return { ok: false, detail: `无法从 ${input.branch} 解析本地分支名` };
+      }
+      const exists = await probeGit(
+        host,
+        gc.branchExistsArgs(git, workingDir, local),
+        gc.GIT_ENV_RO,
+        opts
+      );
+      // 本地已有同名分支：切过去，不要再 -b 一次（git 会拒绝 already exists）
+      if (exists.code === 0) {
+        return run(gc.checkoutBranchArgs(git, workingDir, local), "checkout");
+      }
+      return run(gc.checkoutTrackArgs(git, workingDir, local, input.branch), "checkout");
+    }
+    case "cherry-pick":
+      return run(gc.cherryPickArgs(git, workingDir, input.sha), "cherry-pick");
+    case "revert":
+      return run(gc.revertArgs(git, workingDir, input.sha), "revert");
+    case "branch-create":
+      return run(
+        input.checkout
+          ? gc.checkoutNewBranchArgs(git, workingDir, input.name, input.startPoint)
+          : gc.branchCreateArgs(git, workingDir, input.name, input.startPoint),
+        input.checkout ? "checkout" : "branch"
+      );
+    case "reset":
+      return run(gc.resetArgs(git, workingDir, input.rev, input.mode), "reset");
+    case "merge":
+      return run(gc.mergeArgs(git, workingDir, input.rev), "merge");
+    case "rebase":
+      return run(gc.rebaseArgs(git, workingDir, input.rev), "rebase");
+    case "restore": {
+      if (input.paths.length > 0) {
+        const restored = await run(gc.restoreArgs(git, workingDir, input.paths), "restore");
+        if (!restored.ok) return restored;
+      }
+      if (input.untracked && input.untracked.length > 0) {
+        const cleaned = await run(gc.cleanPathsArgs(git, workingDir, input.untracked), "clean");
+        if (!cleaned.ok) return cleaned;
+      }
+      return { ok: true, detail: "已丢弃所选改动" };
+    }
+    case "push":
+      return run(
+        gc.pushArgs(git, workingDir, { forceWithLease: input.forceWithLease }),
+        "push"
+      );
+    case "drop": {
+      const head = await probeGit(host, gc.headShaArgs(git, workingDir), gc.GIT_ENV_RO, opts);
+      const full = head.code === 0 ? head.stdout.trim().toLowerCase() : "";
+      const target = input.sha.toLowerCase();
+      const isHead = full === target || full.startsWith(target) || target.startsWith(full);
+      return run(
+        isHead ? gc.dropHeadArgs(git, workingDir) : gc.dropCommitArgs(git, workingDir, input.sha),
+        "rebase"
+      );
+    }
+    case "squash": {
+      const head = await probeGit(host, gc.headShaArgs(git, workingDir), gc.GIT_ENV_RO, opts);
+      const full = head.code === 0 ? head.stdout.trim().toLowerCase() : "";
+      const target = input.sha.toLowerCase();
+      const isHead = full === target || full.startsWith(target) || target.startsWith(full);
+      if (!isHead) {
+        return { ok: false, detail: "只能把最新一次提交压进上一条。更早的提交请在终端里 rebase -i。" };
+      }
+      const soft = await run(gc.squashHeadSoftArgs(git, workingDir), "reset");
+      if (!soft.ok) return soft;
+      return run(
+        gc.commitArgs(git, workingDir, "", undefined, { amend: true, noEdit: true }),
+        "commit"
+      );
+    }
+    case "reword": {
+      const head = await probeGit(host, gc.headShaArgs(git, workingDir), gc.GIT_ENV_RO, opts);
+      const full = head.code === 0 ? head.stdout.trim().toLowerCase() : "";
+      const target = input.sha.toLowerCase();
+      const isHead = full === target || full.startsWith(target) || target.startsWith(full);
+      if (!isHead) {
+        return { ok: false, detail: "只能改最新一次提交的说明。更早的提交请在终端里 rebase -i。" };
+      }
+      return run(
+        gc.commitArgs(git, workingDir, input.message, undefined, { amend: true }),
+        "commit"
+      );
+    }
+    case "continue":
+    case "abort": {
+      const kind = await detectConflict(host, workingDir, opts);
+      if (!kind) return { ok: false, detail: "现在没有进行中的合并或变基" };
+      return run(
+        input.op === "continue"
+          ? gc.continueConflictArgs(git, workingDir, kind)
+          : gc.abortConflictArgs(git, workingDir, kind),
+        input.op
+      );
+    }
+    case "take": {
+      const checked = await run(
+        gc.checkoutConflictSideArgs(git, workingDir, input.side, input.paths),
+        "checkout"
+      );
+      if (!checked.ok) return checked;
+      return run(gc.addPathsArgs(git, workingDir, input.paths), "add");
+    }
+  }
+}
+
+async function detectConflict(
+  host: GitHost,
+  workingDir: string,
+  opts?: RunOpts
+): Promise<GitConflictKind | undefined> {
+  const git = host.git;
+  const order: GitConflictKind[] = ["rebase", "merge", "cherry-pick", "revert"];
+  const revs = ["REBASE_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"];
+  const { results } = await batchGit(
+    host,
+    revs.map((rev) => gc.revExistsArgs(git, workingDir, rev)),
+    gc.GIT_ENV_RO,
+    opts
+  );
+  for (let i = 0; i < order.length; i++) {
+    if (results[i]?.code === 0) return order[i];
+  }
+  return undefined;
+}
+
+/** git 把进度写 stderr、结果写 stdout；两边都空只剩退出码时至少说清是哪一步 */
+function syncResult(res: ExecResult, label: string): GitSyncResult {
   const text = (res.code === 0 ? res.stdout || res.stderr : res.stderr || res.stdout).trim();
+  // 成功且 git 一声不吭（fetch 已经是最新）也要有回声，否则按钮像没反应。
+  // 失败才把退出码写进 detail——成功时「退出码 0」看着像报错。
+  const fallback = res.code === 0 ? `git ${label} 完成` : `git ${label} 退出码 ${res.code}`;
   return {
     ok: res.code === 0,
-    detail: (text || `git ${action} 退出码 ${res.code}`).slice(0, SYNC_OUTPUT_CAP),
+    detail: (text || fallback).slice(0, SYNC_OUTPUT_CAP),
   };
 }
 
@@ -958,7 +1158,8 @@ export async function commitWorking(
 ): Promise<GitSyncResult> {
   const git = host.git;
   const message = input.message.trim();
-  if (!message) return { ok: false, detail: "提交信息不能为空" };
+  const amend = input.amend === true;
+  if (!amend && !message) return { ok: false, detail: "提交信息不能为空" };
 
   const run = (argv: string[]) =>
     probeGit(host, argv, gc.GIT_ENV, { timeoutMs: TIMEOUT_SYNC, ...opts });
@@ -966,12 +1167,13 @@ export async function commitWorking(
     ok: false,
     detail: (res.stderr.trim() || res.stdout.trim() || fallback).slice(0, SYNC_OUTPUT_CAP),
   });
+  const commitOpts = { amend, noEdit: amend && !message };
 
   let commitArgv: string[];
   if (input.all) {
     const add = await run(gc.addAllArgs(git, workingDir));
     if (add.code !== 0) return fail(add, `git add 退出码 ${add.code}`);
-    commitArgv = gc.commitArgs(git, workingDir, message);
+    commitArgv = gc.commitArgs(git, workingDir, message, undefined, commitOpts);
   } else {
     const paths = (input.paths ?? []).filter(Boolean);
     if (paths.length === 0) return { ok: false, detail: "没有选中任何文件" };
@@ -996,14 +1198,24 @@ export async function commitWorking(
         if (add.code !== 0) return fail(add, `git add 退出码 ${add.code}`);
       }
     }
-    commitArgv = gc.commitArgs(git, workingDir, message, paths);
+    commitArgv = gc.commitArgs(git, workingDir, message, paths, commitOpts);
   }
 
   const res = await run(commitArgv);
   if (res.code !== 0) return fail(res, `git commit 退出码 ${res.code}`);
+  const committed = (res.stdout.trim() || res.stderr.trim()).slice(0, SYNC_OUTPUT_CAP);
+  if (!input.push) return { ok: true, detail: committed };
+
+  const pushed = await syncGit(host, workingDir, "push", opts);
+  if (!pushed.ok) {
+    return {
+      ok: false,
+      detail: `已提交。推送失败：\n${pushed.detail}`.slice(0, SYNC_OUTPUT_CAP),
+    };
+  }
   return {
     ok: true,
-    detail: (res.stdout.trim() || res.stderr.trim()).slice(0, SYNC_OUTPUT_CAP),
+    detail: [committed, pushed.detail].filter(Boolean).join("\n").slice(0, SYNC_OUTPUT_CAP),
   };
 }
 

@@ -246,14 +246,19 @@ export function buildPtyCommandLine(
   kind: HostKind,
   argv: string[],
   env: Record<string, string> = {},
-  loginShell?: string
+  loginShell?: string,
+  /** 插到登录 shell 展开后的 PATH 前面（sudo askpass 包装）。不能写进 env.PATH，那会盖掉 profile 里的 PATH */
+  pathPrepend?: string
 ): string {
   if (kind === "windows") {
     return encodePowerShell(powerShellScript(argv, env));
   }
   const assigns = Object.entries(env).map(([k, v]) => `${k}=${quotePosix(v)}`);
   const cmd = argv.map(quotePosix).join(" ");
-  const inner = assigns.length ? `exec env ${assigns.join(" ")} ${cmd}` : `exec ${cmd}`;
+  let inner = assigns.length ? `exec env ${assigns.join(" ")} ${cmd}` : `exec ${cmd}`;
+  if (pathPrepend) {
+    inner = `PATH=${quotePosix(pathPrepend)}:$PATH ${inner}`;
+  }
   return loginShell
     ? `exec ${quotePosix(loginShell)} -l -c ${quotePosix(inner)}`
     : inner;

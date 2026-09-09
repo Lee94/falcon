@@ -3,6 +3,7 @@ import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from ".
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
 import { useIsMobile } from "../lib/useIsMobile.js";
+import { api } from "../api.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { Login } from "./Login.js";
 import { MobileShell } from "./MobileShell.js";
@@ -19,6 +20,7 @@ import { ProjectEmpty } from "./ProjectEmpty.js";
 import { RenameDialog } from "./RenameDialog.js";
 import { Menu } from "./common/Menu.js";
 import { ConfirmDialog } from "./common/ConfirmDialog.js";
+import { AskpassDialog } from "./AskpassDialog.js";
 import { Toaster } from "@/components/ui/sonner";
 
 // 浮层与重组件按需加载：首屏（登录页 / 总览）不需要 xterm、cmdk、表单和
@@ -111,6 +113,21 @@ export function App() {
     // 页面不可见时停掉轮询，回到前台立刻补一次
     return pollWhileVisible(() => void refreshSessions(), 5000);
   }, [authed, refreshSessions]);
+
+  useEffect(() => {
+    if (!authed) return;
+    const pull = () => {
+      void api
+        .pendingAskpass()
+        .then((list) => {
+          const push = useApp.getState().pushAskpass;
+          for (const p of list) push(p);
+        })
+        .catch(() => {});
+    };
+    pull();
+    return pollWhileVisible(pull, 1500);
+  }, [authed]);
 
   // 窄屏临时收起侧栏；这是设计里唯一的"响应式"，不做移动端交互。
   // 只影响显示，不改用户偏好——显式开合会解除它。
@@ -305,6 +322,7 @@ export function App() {
 
       <Menu />
       <ConfirmDialog />
+      <AskpassDialog />
       <RenameDialog />
       <Suspense fallback={null}>
         {settingsOpen && <SettingsModal />}

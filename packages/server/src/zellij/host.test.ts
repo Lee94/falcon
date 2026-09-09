@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   buildDetachedCommandLine,
+  buildPtyCommandLine,
   legacyRemoteRoot,
   migrateRemoteRootCommand,
   parseMigratedRoot,
@@ -204,5 +205,21 @@ describe("buildDetachedCommandLine", () => {
     assert.match(outer, /if \(\$r\.ReturnValue -ne 0\)/);
     assert.match(outer, /WaitForExit\(60000\)/);
     assert.match(outer, /exit \$p\.ExitCode/);
+  });
+});
+
+describe("buildPtyCommandLine pathPrepend", () => {
+  it("prefixes PATH without freezing the login profile PATH", () => {
+    const cmd = buildPtyCommandLine(
+      "posix",
+      ["/bin/zsh"],
+      { COLORTERM: "truecolor" },
+      "/bin/zsh",
+      "/home/u/.falcon/bin"
+    );
+    // -c 的参数再套一层 quotePosix，单引号被 '\'' 转义，但 $PATH 仍由登录 shell 展开
+    assert.ok(cmd.includes("/home/u/.falcon/bin"));
+    assert.ok(cmd.includes(":$PATH "));
+    assert.ok(cmd.includes("COLORTERM="));
   });
 });

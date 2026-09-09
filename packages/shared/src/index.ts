@@ -481,6 +481,8 @@ export interface GitRefsInfo {
   reason?: GitUnavailableReason;
   detail?: string;
   branches: GitBranchRef[];
+  /** 短名，按创建时间新→旧。树里 Tags 那一组 */
+  tags: string[];
   /** 近若干条提交里出现过的作者名，按出现次数降序 */
   authors: string[];
   /** 这台机器上 git 配的 user.name，作者下拉里的「我」。没配则 undefined */
@@ -511,7 +513,13 @@ export interface GitWorkingChanges {
   files: GitWorkingFile[];
   /** 改动总数；files 可能被截断 */
   fileCount: number;
+  /** HEAD 完整提交信息。修订上次提交时预填；空仓库没有 */
+  headMessage?: string;
+  /** 进行中的合并 / 变基 / cherry-pick / revert。有值时面板出继续 / 中止 */
+  conflict?: { kind: GitConflictKind };
 }
+
+export type GitConflictKind = "merge" | "rebase" | "cherry-pick" | "revert";
 
 /** 提交详情里的一个改动文件 */
 export interface GitCommitFile {
@@ -565,6 +573,10 @@ export interface GitCommitInput {
   all: boolean;
   /** all=false 时必填。重命名要同时给新旧两个路径 */
   paths?: string[];
+  /** 修订 HEAD。信息空则 --no-edit，沿用上次提交说明 */
+  amend?: boolean;
+  /** 提交成功后再 push。推送失败时 ok=false，detail 会写明提交已经落了 */
+  push?: boolean;
 }
 
 /**
@@ -579,6 +591,34 @@ export interface GitSyncResult {
   /** git 的输出（成功时是 stdout，失败时优先 stderr），已截断到可读长度 */
   detail: string;
 }
+
+/**
+ * 历史面板上对仓库动手的操作。失败同样不抛 4xx，回 GitSyncResult。
+ *
+ * checkout 的 detach 用来检出提交 / 标签（游离 HEAD）；检出已有本地分支走
+ * checkout-branch。createTracking 只在远程分支还没有对应本地分支时建跟踪。
+ */
+export type GitResetMode = "soft" | "mixed" | "hard";
+
+export type GitOpInput =
+  | { op: "fetch" }
+  | { op: "checkout"; rev: string; detach?: boolean }
+  | { op: "checkout-branch"; branch: string; createTracking?: boolean }
+  | { op: "cherry-pick"; sha: string }
+  | { op: "revert"; sha: string }
+  | { op: "branch-create"; name: string; startPoint: string; checkout?: boolean }
+  | { op: "reset"; rev: string; mode: GitResetMode }
+  | { op: "merge"; rev: string }
+  | { op: "rebase"; rev: string }
+  | { op: "restore"; paths: string[]; untracked?: string[] }
+  /** 绝不带 --force。forceWithLease 才是远端领先时的那条路 */
+  | { op: "push"; forceWithLease?: boolean }
+  | { op: "drop"; sha: string }
+  | { op: "squash"; sha: string }
+  | { op: "reword"; sha: string; message: string }
+  | { op: "continue" }
+  | { op: "abort" }
+  | { op: "take"; side: "ours" | "theirs"; paths: string[] };
 
 /**
  * 侧栏最后一层用的工作区文件计数。只跑 `status --porcelain`，不跑 numstat。
@@ -779,7 +819,9 @@ export type ServerMessage =
   | { type: "state"; state: SessionState; deadReason?: DeadReason }
   /** SSH 断线自动重连中 */
   | { type: "reconnecting"; attempt: number }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** sudo / SSH askpass：helper 在等密码，弹网页对话框 */
+  | { type: "askpass"; id: string; prompt: string };
 
 /**
  * Zellij 安装通道（/ws/install/:projectId）。

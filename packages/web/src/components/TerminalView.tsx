@@ -294,6 +294,9 @@ export function TerminalView({
           case "error":
             setView((v) => ({ ...v, attachError: msg.message }));
             break;
+          case "askpass":
+            useApp.getState().pushAskpass({ id: msg.id, prompt: msg.prompt });
+            break;
         }
       };
     };

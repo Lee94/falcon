@@ -36,6 +36,19 @@ import {
   type TermPref,
 } from "./lib/term.js";
 import { PANEL_WIDTH_DEFAULT, clampPanelWidth, parsePanelWidth } from "./lib/panelWidth.js";
+import {
+  DIFF_KEY,
+  applyVisibleOrder,
+  defaultStripKeys,
+  fileKey,
+  insertAfter,
+  orderedStripKeys,
+  parseStripKey,
+  replaceKey,
+  termKey,
+  weaveOrder,
+  type StripFile,
+} from "./lib/tabStrip.js";
 
 export type ActiveView =
   | { kind: "overview" }
@@ -152,7 +165,38 @@ function sameActive(a: ActiveView, b: ActiveView): boolean {
   return true;
 }
 
-/** 主区 tab 栏从左到右：会话 → 文件 → 差异。切 tab 快捷键按这个顺序走 */
+function stripSource(s: {
+  tabs: string[];
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  selectedProjectId: string | null;
+  fileTabs: FileTabTarget[];
+  diffTab: DiffTabTarget | null;
+}) {
+  return {
+    terminalIds: visibleTabs(s),
+    files: visibleFileTabs(s) as StripFile[],
+    hasDiff: !!(
+      s.diffTab &&
+      (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)
+    ),
+  };
+}
+
+/** 主区 tab 栏从左到右的可见 key。记住的拖拽顺序优先，新开的接到末尾。 */
+export function visibleStripKeys(s: {
+  tabs: string[];
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  selectedProjectId: string | null;
+  fileTabs: FileTabTarget[];
+  diffTab: DiffTabTarget | null;
+  tabOrder: string[];
+}): string[] {
+  return orderedStripKeys(s.tabOrder, defaultStripKeys(stripSource(s)));
+}
+
+/** 切 tab 快捷键按 strip 顺序走，跟拖拽之后看到的一样 */
 function viewTabs(s: {
   tabs: string[];
   sessions: SessionWithProject[];
@@ -160,18 +204,18 @@ function viewTabs(s: {
   selectedProjectId: string | null;
   fileTabs: FileTabTarget[];
   diffTab: DiffTabTarget | null;
+  tabOrder: string[];
 }): ActiveView[] {
-  const sessions = visibleTabs(s).map((id) => ({ kind: "terminal" as const, sessionId: id }));
-  const files = visibleFileTabs(s).map((f) => ({
-    kind: "file" as const,
-    projectId: f.projectId,
-    path: f.path,
-  }));
-  const diffs =
-    s.diffTab && (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)
-      ? [{ kind: "diff" as const }]
-      : [];
-  return [...sessions, ...files, ...diffs];
+  const views: ActiveView[] = [];
+  for (const key of visibleStripKeys(s)) {
+    const item = parseStripKey(key);
+    if (!item) continue;
+    if (item.kind === "terminal") views.push({ kind: "terminal", sessionId: item.id });
+    else if (item.kind === "file") {
+      views.push({ kind: "file", projectId: item.projectId, path: item.path });
+    } else views.push({ kind: "diff" });
+  }
+  return views;
 }
 
 export type OverviewFilter = "all" | SessionState;
@@ -279,6 +323,11 @@ export interface ConfirmSpec {
   footnote?: string;
   confirmLabel: string;
   onConfirm: () => void | Promise<void>;
+}
+
+export interface AskpassSpec {
+  id: string;
+  prompt: string;
 }
 
 export interface InstallSpec {
@@ -563,6 +612,11 @@ interface AppState {
 
   /** 打开的终端 tab（手动关掉 = 结束会话，见 closeTab），可能含 pending id */
   tabs: string[];
+  /**
+   * 整条 tab 栏的混排顺序（终端 / 文件 / 差异的 strip key）。
+   * 不持久化：刷新后面板 tab 本来就会消失，终端顺序已经在 tabs 里。
+   */
+  tabOrder: string[];
   active: ActiveView;
   pending: PendingSession[];
   /** 差异查看 tab；null = 没开 */
@@ -617,6 +671,8 @@ interface AppState {
 
   menu: MenuSpec | null;
   confirm: ConfirmSpec | null;
+  /** sudo askpass 排队；对话框只展示队头 */
+  askpass: AskpassSpec[];
   /** 就地重命名的会话 id，替代 prompt() */
   renameFor: string | null;
   paletteOpen: boolean;
@@ -668,6 +724,13 @@ interface AppState {
   detachTab(id: string): void;
   /** 只把 tab 摘掉，不碰会话、不做任何引导——清除已丢失记录这类场景用它 */
   dropTab(id: string): void;
+  /** 拖拽松手：把可见 strip 的 from 挪到 to，隐藏项目的 tab 原地不动 */
+  moveStrip(from: number, to: number): void;
+  /**
+   * 关掉一组 strip key（关闭其他 / 左 / 右）。文件和差异立刻收起；
+   * 终端走 Terminate。有前台程序在跑时合成一次确认，避免连弹。
+   */
+  closeStripKeys(keys: string[]): Promise<void>;
   selectProject(projectId: string): void;
   showOverview(): void;
   focusTabAt(index: number): void;
@@ -710,6 +773,8 @@ interface AppState {
   closeMenu(): void;
   askConfirm(spec: ConfirmSpec): void;
   closeConfirm(): void;
+  pushAskpass(spec: AskpassSpec): void;
+  shiftAskpass(): void;
   openRename(sessionId: string): void;
   closeRename(): void;
   setPalette(open: boolean): void;
@@ -717,8 +782,8 @@ interface AppState {
   openInstall(spec: InstallSpec): void;
   closeInstall(): void;
 
-  newTerminal(projectId: string): Promise<void>;
-  createSessionNow(projectId: string): Promise<void>;
+  newTerminal(projectId: string, afterKey?: string): Promise<void>;
+  createSessionNow(projectId: string, afterKey?: string): Promise<void>;
   retryPending(pendingId: string): Promise<void>;
 
   handleApiError(err: unknown): void;
@@ -781,6 +846,7 @@ export const useApp = create<AppState>((set, get) => {
     sessions: [],
 
     tabs: initialWorkspace.tabs,
+    tabOrder: initialWorkspace.tabs.map(termKey),
     active: initialWorkspace.active,
     pending: [],
     diffTab: null,
@@ -818,6 +884,7 @@ export const useApp = create<AppState>((set, get) => {
 
     menu: null,
     confirm: null,
+    askpass: [],
     renameFor: null,
     paletteOpen: false, quickOpen: false,
     install: null,
@@ -912,6 +979,10 @@ export const useApp = create<AppState>((set, get) => {
         set((state) => ({
           sessions,
           tabs: state.tabs.filter(keep),
+          tabOrder: state.tabOrder.filter((k) => {
+            const item = parseStripKey(k);
+            return item?.kind !== "terminal" || keep(item.id);
+          }),
           active:
             state.active.kind === "terminal" && !keep(state.active.sessionId)
               ? state.selectedProjectId
@@ -930,8 +1001,14 @@ export const useApp = create<AppState>((set, get) => {
       set((state) => {
         const projectId =
           tabProjectId(sessionId, state.sessions, state.pending) ?? state.selectedProjectId;
+        const already = state.tabs.includes(sessionId);
+        const key = termKey(sessionId);
         return {
-          tabs: state.tabs.includes(sessionId) ? state.tabs : [...state.tabs, sessionId],
+          tabs: already ? state.tabs : [...state.tabs, sessionId],
+          tabOrder:
+            already || !state.tabOrder.length || state.tabOrder.includes(key)
+              ? state.tabOrder
+              : [...state.tabOrder, key],
           active: { kind: "terminal" as const, sessionId },
           selectedProjectId: projectId ?? state.selectedProjectId,
           paletteOpen: false, quickOpen: false,
@@ -942,7 +1019,14 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     openDiff(projectId, file, commit, repo) {
-      set({ diffTab: { projectId, file, commit, repo }, active: { kind: "diff" } });
+      set((state) => ({
+        diffTab: { projectId, file, commit, repo },
+        tabOrder:
+          !state.tabOrder.length || state.tabOrder.includes(DIFF_KEY)
+            ? state.tabOrder
+            : [...state.tabOrder, DIFF_KEY],
+        active: { kind: "diff" as const },
+      }));
     },
 
     setMultiRepo(projectId, dir) {
@@ -956,6 +1040,7 @@ export const useApp = create<AppState>((set, get) => {
     closeDiff() {
       set((state) => ({
         diffTab: null,
+        tabOrder: state.tabOrder.filter((k) => k !== DIFF_KEY),
         ...(state.active.kind === "diff"
           ? { active: fallbackActive({ ...state, diffTab: null }) }
           : null),
@@ -966,8 +1051,13 @@ export const useApp = create<AppState>((set, get) => {
       set((state) => {
         const next = { projectId, path };
         const exists = state.fileTabs.some((f) => sameFile(f, next));
+        const key = fileKey(next);
         return {
           fileTabs: exists ? state.fileTabs : [...state.fileTabs, next],
+          tabOrder:
+            exists || !state.tabOrder.length || state.tabOrder.includes(key)
+              ? state.tabOrder
+              : [...state.tabOrder, key],
           active: { kind: "file" as const, projectId, path },
           paletteOpen: false,
           quickOpen: false,
@@ -989,6 +1079,7 @@ export const useApp = create<AppState>((set, get) => {
           state.active.kind === "file" && sameFile(state.active, closing);
         return {
           fileTabs,
+          tabOrder: state.tabOrder.filter((k) => k !== fileKey(closing)),
           ...(wasActive ? { active: fallbackActive({ ...state, fileTabs }) } : null),
         };
       });
@@ -1034,13 +1125,174 @@ export const useApp = create<AppState>((set, get) => {
       set((state) => {
         const tabs = state.tabs.filter((t) => t !== id);
         const pending = state.pending.filter((p) => p.id !== id);
+        const tabOrder = state.tabOrder.filter((k) => k !== termKey(id));
         let active = state.active;
         if (active.kind === "terminal" && active.sessionId === id) {
           active = fallbackActive({ ...state, tabs, pending });
         }
-        return { tabs, active, pending };
+        return { tabs, tabOrder, active, pending };
       });
       persist();
+    },
+
+    moveStrip(from, to) {
+      const state = get();
+      const visible = visibleStripKeys(state);
+      if (
+        from === to ||
+        from < 0 ||
+        to < 0 ||
+        from >= visible.length ||
+        to >= visible.length
+      ) {
+        return;
+      }
+      const nextVisible = visible.slice();
+      const [moved] = nextVisible.splice(from, 1);
+      nextVisible.splice(to, 0, moved!);
+
+      const visTerm = new Set(
+        visible.flatMap((k) => {
+          const item = parseStripKey(k);
+          return item?.kind === "terminal" ? [item.id] : [];
+        })
+      );
+      const newTerm = nextVisible.flatMap((k) => {
+        const item = parseStripKey(k);
+        return item?.kind === "terminal" ? [item.id] : [];
+      });
+      const visFile = new Set(
+        visible.flatMap((k) => {
+          const item = parseStripKey(k);
+          return item?.kind === "file" ? [`${item.projectId}:${item.path}`] : [];
+        })
+      );
+      const newFiles: FileTabTarget[] = nextVisible.flatMap((k) => {
+        const item = parseStripKey(k);
+        return item?.kind === "file" ? [{ projectId: item.projectId, path: item.path }] : [];
+      });
+
+      set({
+        tabOrder: weaveOrder(
+          state.tabOrder.length ? state.tabOrder : visible,
+          visible,
+          nextVisible
+        ),
+        tabs: applyVisibleOrder(state.tabs, newTerm, (id) => visTerm.has(id)),
+        fileTabs: applyVisibleOrder(state.fileTabs, newFiles, (f) =>
+          visFile.has(`${f.projectId}:${f.path}`)
+        ),
+      });
+      persist();
+    },
+
+    async closeStripKeys(keys) {
+      if (keys.length === 0) return;
+      const state = get();
+      const files: FileTabTarget[] = [];
+      const termIds: string[] = [];
+      let closeDiff = false;
+      for (const key of keys) {
+        const item = parseStripKey(key);
+        if (!item) continue;
+        if (item.kind === "file") files.push({ projectId: item.projectId, path: item.path });
+        else if (item.kind === "diff") closeDiff = true;
+        else termIds.push(item.id);
+      }
+
+      const dropOrIdle: string[] = [];
+      const live: SessionWithProject[] = [];
+      for (const id of termIds) {
+        if (isPendingId(id)) {
+          dropOrIdle.push(id);
+          continue;
+        }
+        const session = state.sessions.find((s) => s.id === id);
+        if (!session || session.state === "dead") dropOrIdle.push(id);
+        else live.push(session);
+      }
+
+      const busy: { session: SessionWithProject; command: string }[] = [];
+      const idleLive: SessionWithProject[] = [];
+      await Promise.all(
+        live.map(async (session) => {
+          let fg: SessionForeground | null = null;
+          try {
+            fg = await Promise.race([
+              api.sessionForeground(session.id),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+            ]);
+          } catch {
+            // 侦测失败按空闲，跟单独关 tab 同一条保底
+          }
+          if (fg?.busy) busy.push({ session, command: fg.command ?? "" });
+          else idleLive.push(session);
+        })
+      );
+
+      const run = async (sessions: SessionWithProject[]) => {
+        for (const file of files) get().closeFile(file);
+        if (closeDiff) get().closeDiff();
+        for (const id of dropOrIdle) get().dropTab(id);
+        const names: string[] = [];
+        await Promise.all(
+          sessions.map(async (session) => {
+            get().dropTab(session.id);
+            try {
+              await api.terminateSession(session.id);
+              names.push(session.name);
+            } catch (err) {
+              get().handleApiError(err);
+              get().toast({
+                kind: "danger",
+                title: i18n.t("toast.failed"),
+                body: (err as Error).message,
+              });
+            }
+          })
+        );
+        if (names.length === 1) {
+          get().toast({
+            kind: "danger",
+            title: i18n.t("toast.terminated", { name: names[0] }),
+            ...closeKillsHint(),
+          });
+        } else if (names.length > 1) {
+          get().toast({
+            kind: "danger",
+            title: i18n.t("toast.terminatedMany", { n: names.length }),
+            ...closeKillsHint(),
+          });
+        }
+        await get().refreshSessions();
+      };
+
+      if (busy.length === 0) {
+        await run(idleLive);
+        return;
+      }
+
+      get().askConfirm({
+        title:
+          busy.length === 1
+            ? i18n.t("tab.busyTitle", { name: busy[0]!.session.name })
+            : i18n.t("tab.closeBusyManyTitle", { n: busy.length }),
+        body:
+          busy.length === 1
+            ? i18n.t("tab.busyBody", { command: busy[0]!.command })
+            : i18n.t("tab.closeBusyManyBody"),
+        list:
+          busy.length > 1
+            ? busy.map((b) => ({
+                name: b.session.name,
+                state: b.session.state,
+                meta: b.command,
+              }))
+            : undefined,
+        footnote: i18n.t("tab.busyFootnote"),
+        confirmLabel: i18n.t("tab.closeBusyManyConfirm"),
+        onConfirm: () => run([...idleLive, ...busy.map((b) => b.session)]),
+      });
     },
 
     /**
@@ -1127,10 +1379,9 @@ export const useApp = create<AppState>((set, get) => {
     },
 
     focusTabAt(index) {
-      const tabs = visibleTabs(get());
-      const id = tabs[index];
-      if (id) {
-        set({ active: { kind: "terminal", sessionId: id } });
+      const next = viewTabs(get())[index];
+      if (next) {
+        set({ active: next });
         persist();
       }
     },
@@ -1331,6 +1582,15 @@ export const useApp = create<AppState>((set, get) => {
     closeConfirm() {
       set({ confirm: null });
     },
+    pushAskpass(spec) {
+      set((s) => {
+        if (s.askpass.some((p) => p.id === spec.id)) return s;
+        return { askpass: [...s.askpass, spec] };
+      });
+    },
+    shiftAskpass() {
+      set((s) => ({ askpass: s.askpass.slice(1) }));
+    },
     openRename(sessionId) {
       set({ renameFor: sessionId, menu: null, paletteOpen: false, quickOpen: false });
     },
@@ -1354,7 +1614,7 @@ export const useApp = create<AppState>((set, get) => {
      * 新建终端。SSH 项目首次用时先走授权 + 安装；
      * 已拒绝过的主机不再打扰，直接建非持久会话。重新启用走命令面板。
      */
-    async newTerminal(projectId) {
+    async newTerminal(projectId, afterKey) {
       const project = get().projects.find((p) => p.id === projectId);
       if (!project) return;
       set({ menu: null, paletteOpen: false, quickOpen: false });
@@ -1372,25 +1632,41 @@ export const useApp = create<AppState>((set, get) => {
           // 查不到主机状态就照常建会话，由后端判定持久性
         }
       }
-      await get().createSessionNow(projectId);
+      await get().createSessionNow(projectId, afterKey);
     },
 
-    async createSessionNow(projectId) {
+    async createSessionNow(projectId, afterKey) {
       const pendingId = `${PENDING_PREFIX}${++pendingSeq}`;
-      set((s) => ({
-        pending: [...s.pending, { id: pendingId, projectId }],
-        tabs: [...s.tabs, pendingId],
-        active: { kind: "terminal", sessionId: pendingId },
-        selectedProjectId: projectId,
-        menu: null,
-        paletteOpen: false, quickOpen: false,
-      }));
+      const key = termKey(pendingId);
+      set((s) => {
+        const pending = [...s.pending, { id: pendingId, projectId }];
+        const tabs = [...s.tabs, pendingId];
+        const current = visibleStripKeys({ ...s, pending, tabs });
+        const without = current.filter((k) => k !== key);
+        const tabOrder = insertAfter(without, afterKey, key);
+        const visIds = new Set(visibleTabs({ ...s, pending, tabs }));
+        const orderedVis = tabOrder.flatMap((k) => {
+          const item = parseStripKey(k);
+          return item?.kind === "terminal" ? [item.id] : [];
+        });
+        return {
+          pending,
+          tabs: applyVisibleOrder(tabs, orderedVis, (id) => visIds.has(id)),
+          tabOrder,
+          active: { kind: "terminal" as const, sessionId: pendingId },
+          selectedProjectId: projectId,
+          menu: null,
+          paletteOpen: false,
+          quickOpen: false,
+        };
+      });
       try {
         const session = await api.createSession(projectId, get().activeTheme.hint);
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
           tabs: s.tabs.map((t) => (t === pendingId ? session.id : t)),
+          tabOrder: replaceKey(s.tabOrder, key, termKey(session.id)),
           active:
             s.active.kind === "terminal" && s.active.sessionId === pendingId
               ? { kind: "terminal", sessionId: session.id }
@@ -1421,6 +1697,7 @@ export const useApp = create<AppState>((set, get) => {
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
           tabs: s.tabs.map((t) => (t === pendingId ? session.id : t)),
+          tabOrder: replaceKey(s.tabOrder, termKey(pendingId), termKey(session.id)),
           active:
             s.active.kind === "terminal" && s.active.sessionId === pendingId
               ? { kind: "terminal", sessionId: session.id }

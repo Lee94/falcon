@@ -143,6 +143,23 @@
     pointer-events: none;
   }
 
+  /* 拖 tab 时：光标锁定 grabbing，禁止选中。overflow 的 tablist 会裁掉一点阴影，跟 Chrome 一样。 */
+  body.tab-dragging,
+  body.tab-dragging * {
+    cursor: grabbing !important;
+    user-select: none;
+  }
+  body.tab-dragging canvas,
+  body.tab-dragging iframe {
+    pointer-events: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-tab-key] {
+      transition: none !important;
+    }
+  }
+
   /* 界面文字的选区与终端选区同一套颜色；selection-foreground 是 cell-foreground 的主题保留原字色 */
   ::selection {
     background: var(--selection, color-mix(in oklab, var(--foreground) 25%, transparent));

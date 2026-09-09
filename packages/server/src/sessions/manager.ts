@@ -33,6 +33,8 @@ import type { StageFn } from "../zellij/install.js";
 import type { Backend } from "./backend.js";
 import { SessionGoneError } from "./backend.js";
 import { isShellCommand } from "../shells.js";
+import type { AskpassHub, AskpassPrompt } from "../askpass/hub.js";
+import { writeLocalAskpass } from "../askpass/install.js";
 import {
   attachLocal,
   localForeground,
@@ -164,7 +166,8 @@ export class SessionManager {
   constructor(
     private db: Db,
     private secrets: SecretBox,
-    private dataDir: string
+    private dataDir: string,
+    readonly askpass: AskpassHub
   ) {
     this.db.recoverSessionsOnStartup();
     this.forwards = new ForwardManager(db, (projectId) => {
@@ -461,6 +464,17 @@ export class SessionManager {
       cwd = await this.ensureVirtualDir(project, { refresh: true }).catch(() => undefined);
     }
 
+    let askpassBin: string | undefined;
+    try {
+      if (project.type === "local") {
+        askpassBin = writeLocalAskpass(this.dataDir, this.askpass);
+      } else {
+        askpassBin = (await this.getLink(project).ensureAskpass(this.askpass)) ?? undefined;
+      }
+    } catch {
+      // 包装没写上不挡开会话；agent 的 sudo 仍会报没 tty
+    }
+
     const opts = {
       sessionId: entry.sessionId,
       cwd,
@@ -474,6 +488,7 @@ export class SessionManager {
           : null
       ),
       appearance: entry.appearance,
+      askpassBin,
     };
 
     const result =
@@ -696,11 +711,13 @@ export class SessionManager {
         state: row.state === "active" ? "unverified" : row.state,
         deadReason: (row.dead_reason as DeadReason) ?? undefined,
       });
+      this.flushAskpass(viewer, sessionId);
       return;
     }
 
     this.sendReplay(entry, viewer);
     viewer.send({ type: "state", state: "active" });
+    this.flushAskpass(viewer, sessionId);
     this.touch(sessionId, true);
   }
 
@@ -869,6 +886,29 @@ export class SessionManager {
       entry.flushTimer = null;
     }
     entry.pendingOut = [];
+  }
+
+  private flushAskpass(viewer: Viewer, sessionId: string) {
+    for (const p of this.askpass.pendingPrompts()) {
+      if (p.sessionId && p.sessionId !== sessionId) continue;
+      viewer.send({ type: "askpass", id: p.id, prompt: p.prompt });
+    }
+  }
+
+  /**
+   * sudo askpass 弹窗：优先推给该会话的 Viewer；sessionId 对不上或没人看
+   * 时发给所有还连着的 Viewer——agent 的 sudo 往往发生在当前 tab。
+   */
+  broadcastAskpass(prompt: AskpassPrompt) {
+    const msg: ServerMessage = { type: "askpass", id: prompt.id, prompt: prompt.prompt };
+    const target = prompt.sessionId ? this.entries.get(prompt.sessionId) : undefined;
+    if (target && target.viewers.size > 0) {
+      this.broadcast(target, msg);
+      return;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.viewers.size > 0) this.broadcast(entry, msg);
+    }
   }
 
   private broadcast(entry: LiveEntry, msg: ServerMessage) {

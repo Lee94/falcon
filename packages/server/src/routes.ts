@@ -9,6 +9,7 @@ import type {
   GitCommitDetail,
   GitCommitInput,
   GitFileDiff,
+  GitOpInput,
   GitLogPage,
   GitRefsInfo,
   GitSnapshot,
@@ -40,6 +41,7 @@ import type {
   WorkspaceListing,
 } from "@falcon/shared";
 import { PASTE_IMAGE_MAX_BYTES, WORKSPACE_RAW_CAP, sanitizeColorHint } from "@falcon/shared";
+import { AskpassCancelled, AskpassTimeout, type AskpassHub } from "./askpass/hub.js";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
 import {
@@ -70,6 +72,7 @@ import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
 import { ForwardConflictError } from "./sessions/forward.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
+import { parseGitOpInput } from "./git/command.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
 import { gitHostFor, hostKeyOf } from "./git/host.js";
 import { repoLockKey, withRepoLock } from "./git/lock.js";
@@ -114,6 +117,7 @@ import {
   listRepoFiles,
   pathExists,
   repoRoot,
+  runGitOp,
   syncGit,
   unavailableChanges,
   unavailableCommit,
@@ -173,10 +177,11 @@ export interface RouteDeps {
   version: string;
   /** falcon 数据目录，本地会话的粘贴图片落在 <dataDir>/paste */
   dataDir: string;
+  askpass: AskpassHub;
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, auth, manager, secrets } = deps;
+  const { db, auth, manager, secrets, askpass } = deps;
 
   // 粘贴图片的请求体是原始图片字节。fastify 默认只认 JSON，这里按原样收成 Buffer
   app.addContentTypeParser(
@@ -196,6 +201,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (url.startsWith("/api/auth/")) return;
     // 原始字节路由自己验作用域令牌（见下方 /raw/），cookie 在那里只是可选的加分项
     if ((req.routeOptions.config as { rawToken?: boolean } | undefined)?.rawToken) return;
+    if ((req.routeOptions.config as { askpassHelper?: boolean } | undefined)?.askpassHelper) {
+      return;
+    }
     if (!auth.isAuthenticated(req)) {
       reply.code(401).send({ error: "未认证" });
     }
@@ -243,6 +251,46 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   // ---- system / fs ----
+
+  /**
+   * sudo askpass helper 长轮询。Bearer 是写进宿主机 conf 的专用令牌，
+   * 不能走登录 cookie——helper 不是浏览器。
+   */
+  app.post("/api/askpass", { config: { askpassHelper: true } }, async (req, reply) => {
+    const header = req.headers.authorization;
+    if (!askpass.tokenMatches(typeof header === "string" ? header : undefined)) {
+      return reply.code(401).send({ error: "未认证" });
+    }
+    const body = (req.body ?? {}) as { prompt?: unknown; sessionId?: unknown };
+    const prompt = typeof body.prompt === "string" && body.prompt ? body.prompt : "Password:";
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+    try {
+      const password = await askpass.request({ prompt, sessionId });
+      return { password };
+    } catch (err) {
+      if (err instanceof AskpassCancelled) return reply.code(409).send({ error: "cancelled" });
+      if (err instanceof AskpassTimeout) return reply.code(504).send({ error: "timeout" });
+      throw err;
+    }
+  });
+
+  app.get("/api/askpass/pending", async () => {
+    return askpass.pendingPrompts().map((p) => ({ id: p.id, prompt: p.prompt }));
+  });
+
+  app.post("/api/askpass/:id/answer", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { password?: unknown; cancel?: unknown };
+    if (body.cancel === true) {
+      if (!askpass.cancel(id)) return reply.code(404).send({ error: "不存在" });
+      return { ok: true };
+    }
+    if (typeof body.password !== "string") {
+      return reply.code(400).send({ error: "missing password" });
+    }
+    if (!askpass.answer(id, body.password)) return reply.code(404).send({ error: "不存在" });
+    return { ok: true };
+  });
 
   app.get("/api/system", async (): Promise<SystemInfo> => {
     // 只报已知状态，不触发探测/下载——那是首次创建本地会话时才做的事
@@ -858,7 +906,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * 仓库（容器 = 可选会话 cwd，派生行 = 集中目录），git 目标是某个成员：
    * repo 给了必须**精确等于**某个成员 dir——前端从 project.multi.repos 原样带回，
    * 不需要归一化比较，不匹配就是请求造错了（400）；repo 缺省时读端点回退第一个
-   * 成员（面板至少有东西看），写端点（commit / pull / push）拒绝——写操作不猜。
+   * 成员（面板至少有东西看），写端点（commit / pull / push / op）拒绝——写操作不猜。
    */
   function gitTargetOf(
     row: ProjectRow,
@@ -1142,7 +1190,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const body = (req.body ?? {}) as Partial<GitCommitInput>;
     const row = db.getProject(id);
     if (!row) return reply.code(404).send({ error: "项目不存在" });
-    if (typeof body.message !== "string" || !body.message.trim()) {
+    const amend = body.amend === true;
+    const message = typeof body.message === "string" ? body.message : "";
+    if (!amend && !message.trim()) {
       return reply.code(400).send({ error: "缺少提交信息" });
     }
     const all = body.all === true;
@@ -1164,8 +1214,47 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       const host = await gitHostFor(row, manager);
       const root = await repoRoot(host, t.dir);
       return await withRepoLock(repoLockKey(host, root), () =>
-        commitWorking(host, root, { message: body.message!, all, paths })
+        commitWorking(host, root, {
+          message,
+          all,
+          paths,
+          amend,
+          push: body.push === true,
+        })
       );
+    } catch (err) {
+      const e = err as WorktreeError;
+      return { ok: false, reason: gitReasonOf(e), detail: e.detail ?? e.message };
+    }
+  });
+
+  /**
+   * 历史面板写操作：fetch / checkout / cherry-pick / revert / 建分支。
+   *
+   * 必须写在 `:action` 之前——Fastify 静态段优先，但把 `op` 漏进 :action
+   * 会变成 404「未知操作」。规矩与 commit / pull / push 相同：withRepoLock、
+   * 多仓库强制 repo、git 失败回 GitSyncResult 而不是 4xx。
+   */
+  app.post("/api/projects/:id/git/op", async (req, reply): Promise<GitSyncResult | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    const parsed = parseGitOpInput(req.body);
+    if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
+    const input: GitOpInput = parsed;
+    const t = gitTargetOf(row, (req.query as { repo?: string }).repo, true);
+    if ("badRequest" in t) return reply.code(400).send({ error: t.badRequest });
+    if ("noWorkingDir" in t) {
+      return {
+        ok: false,
+        reason: "no-working-dir",
+        detail: worktreeFailureText("no-working-dir"),
+      };
+    }
+    try {
+      const host = await gitHostFor(row, manager);
+      const root = await repoRoot(host, t.dir);
+      return await withRepoLock(repoLockKey(host, root), () => runGitOp(host, root, input));
     } catch (err) {
       const e = err as WorktreeError;
       return { ok: false, reason: gitReasonOf(e), detail: e.detail ?? e.message };
@@ -1175,12 +1264,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * Pull / Push。
    *
-   * 唯一两个会往远端写、也会动工作区的 git 端点：
-   * - 走 withRepoLock，键是「宿主机 + 仓库根」（不是 projectId——同一个仓库
-   *   完全可能挂着好几个 Project，按 id 加锁等于没加）。同一棵检出上并发
-   *   pull 会争 index.lock，报出来的错对用户毫无意义。
-   * - 失败**不是 4xx**：凭据不对、非快进、远端拒绝都是仓库的正常状态，
-   *   把 git 的原话回给前端展示，那比一句"操作失败"有用得多。
+   * 走 withRepoLock，键是「宿主机 + 仓库根」（不是 projectId——同一个仓库
+   * 完全可能挂着好几个 Project，按 id 加锁等于没加）。同一棵检出上并发
+   * pull 会争 index.lock，报出来的错对用户毫无意义。
+   *
+   * 失败**不是 4xx**：凭据不对、非快进、远端拒绝都是仓库的正常状态，
+   * 把 git 的原话回给前端展示，那比一句"操作失败"有用得多。
    */
   app.post("/api/projects/:id/git/:action", async (req, reply): Promise<GitSyncResult | void> => {
     const { id, action } = req.params as { id: string; action: string };

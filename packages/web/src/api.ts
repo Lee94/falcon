@@ -7,6 +7,7 @@ import type {
   GitCommitInput,
   GitFileDiff,
   GitLogPage,
+  GitOpInput,
   GitRefsInfo,
   GitSnapshot,
   GitSyncResult,
@@ -77,6 +78,12 @@ export const api = {
   authStatus: () => request<AuthStatus>("GET", "/api/auth/status"),
   login: (password: string) => request("POST", "/api/auth/login", { password }),
   logout: () => request("POST", "/api/auth/logout"),
+  pendingAskpass: () =>
+    request<{ id: string; prompt: string }[]>("GET", "/api/askpass/pending"),
+  answerAskpass: (id: string, password: string) =>
+    request<{ ok: true }>("POST", `/api/askpass/${id}/answer`, { password }),
+  cancelAskpass: (id: string) =>
+    request<{ ok: true }>("POST", `/api/askpass/${id}/answer`, { cancel: true }),
   setPassword: (next: string, current?: string) =>
     request("POST", "/api/auth/password", { next, current }),
 
@@ -211,6 +218,16 @@ export const api = {
     request<GitSyncResult>(
       "POST",
       `/api/projects/${projectId}/git/${action}${repoQuery(opts?.repo)}`
+    ),
+  /**
+   * 历史面板写操作（fetch / checkout / cherry-pick / revert / 建分支）。
+   * 失败不抛，git 的原话写在 ok/detail 里。多仓库项目必须带 repo。
+   */
+  gitOp: (projectId: string, input: GitOpInput, opts?: { repo?: string }) =>
+    request<GitSyncResult>(
+      "POST",
+      `/api/projects/${projectId}/git/op${repoQuery(opts?.repo)}`,
+      input
     ),
   /**
    * 文件面板：工作目录里的一层。`path` 缺省为工作目录本身。

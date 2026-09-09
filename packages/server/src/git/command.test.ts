@@ -1,18 +1,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  branchCreateArgs,
   branchExistsArgs,
+  checkoutBranchArgs,
+  checkoutDetachArgs,
+  checkoutNewBranchArgs,
+  checkoutTrackArgs,
+  cherryPickArgs,
+  cleanPathsArgs,
+  continueConflictArgs,
+  commitArgs,
   countStatusChanges,
+  dropCommitArgs,
+  fetchArgs,
+  isSafeRefName,
   logPageArgs,
+  mergeArgs,
   lsFilesIndexArgs,
+  parseGitOpInput,
   parseCommitFiles,
   parseBranchList,
   parseCommitMeta,
   parseLogPage,
   parseLsFiles,
+  pushArgs,
   parseRefLabels,
   parseStatusEntries,
   rankAuthors,
+  rebaseArgs,
+  resetArgs,
+  restoreArgs,
+  revertArgs,
+  trackingLocalName,
   truncateDiff,
 } from "./command.js";
 
@@ -261,5 +281,198 @@ describe("branchExistsArgs", () => {
     const argv = branchExistsArgs("/usr/bin/git", "/home/u/repo", "feat/x");
     assert.deepEqual(argv.slice(-4), ["rev-parse", "--verify", "--quiet", "refs/heads/feat/x"]);
     assert.equal(argv[argv.indexOf("-C") + 1], "/home/u/repo");
+  });
+});
+
+describe("history write argv", () => {
+  it("fetches every remote and prunes stale tracking branches", () => {
+    assert.deepEqual(fetchArgs("git", "/repo").slice(-3), ["fetch", "--all", "--prune"]);
+  });
+
+  it("detaches HEAD at the revision instead of guessing a branch", () => {
+    assert.deepEqual(checkoutDetachArgs("git", "/repo", "abc").slice(-3), [
+      "checkout",
+      "--detach",
+      "abc",
+    ]);
+  });
+
+  it("checks out a local branch without -- so git does not treat it as a pathspec", () => {
+    const argv = checkoutBranchArgs("git", "/repo", "main");
+    assert.deepEqual(argv.slice(-2), ["checkout", "main"]);
+    assert.ok(!argv.includes("--"));
+  });
+
+  it("creates a tracking branch from the remote ref", () => {
+    assert.deepEqual(checkoutTrackArgs("git", "/repo", "main", "origin/main").slice(-5), [
+      "checkout",
+      "-b",
+      "main",
+      "--track",
+      "origin/main",
+    ]);
+  });
+
+  it("cherry-picks and reverts by full sha, revert without opening an editor", () => {
+    const sha = "a".repeat(40);
+    assert.deepEqual(cherryPickArgs("git", "/repo", sha).slice(-2), ["cherry-pick", sha]);
+    assert.deepEqual(revertArgs("git", "/repo", sha).slice(-3), ["revert", "--no-edit", sha]);
+  });
+
+  it("creates a branch with -- so a leading-dash name cannot become an option", () => {
+    assert.deepEqual(branchCreateArgs("git", "/repo", "feat", "HEAD").slice(-4), [
+      "branch",
+      "--",
+      "feat",
+      "HEAD",
+    ]);
+  });
+
+  it("creates and checks out a branch in one checkout -b", () => {
+    assert.deepEqual(checkoutNewBranchArgs("git", "/repo", "feat", "abc").slice(-4), [
+      "checkout",
+      "-b",
+      "feat",
+      "abc",
+    ]);
+  });
+
+  it("writes the reset mode into argv instead of relying on git defaults", () => {
+    assert.deepEqual(resetArgs("git", "/repo", "abc", "hard").slice(-3), [
+      "reset",
+      "--hard",
+      "abc",
+    ]);
+    assert.ok(resetArgs("git", "/repo", "abc", "mixed").includes("--mixed"));
+  });
+
+  it("merges without opening an editor and rebases onto the revision", () => {
+    assert.deepEqual(mergeArgs("git", "/repo", "abc").slice(-3), ["merge", "--no-edit", "abc"]);
+    assert.deepEqual(rebaseArgs("git", "/repo", "abc").slice(-2), ["rebase", "abc"]);
+  });
+
+  it("restores tracked files from HEAD and cleans untracked paths behind --", () => {
+    assert.deepEqual(restoreArgs("git", "/repo", ["a.ts"]).slice(-6), [
+      "restore",
+      "--source=HEAD",
+      "--staged",
+      "--worktree",
+      "--",
+      "a.ts",
+    ]);
+    assert.deepEqual(cleanPathsArgs("git", "/repo", ["b.ts"]).slice(-4), [
+      "clean",
+      "-f",
+      "--",
+      "b.ts",
+    ]);
+  });
+
+  it("amends with --no-edit when the message is kept", () => {
+    const argv = commitArgs("git", "/repo", "", undefined, { amend: true, noEdit: true });
+    assert.ok(argv.includes("--amend"));
+    assert.ok(argv.includes("--no-edit"));
+    assert.ok(!argv.includes("-m"));
+  });
+
+  it("force-pushes with lease, never --force", () => {
+    assert.ok(!pushArgs("git", "/repo").some((a) => a === "--force" || a === "--force-with-lease"));
+    const forced = pushArgs("git", "/repo", { forceWithLease: true });
+    assert.ok(forced.includes("--force-with-lease"));
+    assert.ok(!forced.some((a) => a === "--force"));
+  });
+
+  it("drops a commit by rebasing later commits onto its parent", () => {
+    const sha = "a".repeat(40);
+    assert.deepEqual(dropCommitArgs("git", "/repo", sha).slice(-4), [
+      "rebase",
+      "--onto",
+      `${sha}~1`,
+      sha,
+    ]);
+  });
+
+  it("continues a rebase without opening an editor", () => {
+    const argv = continueConflictArgs("git", "/repo", "rebase");
+    assert.ok(argv.includes("core.editor=true"));
+    assert.deepEqual(argv.slice(-2), ["rebase", "--continue"]);
+  });
+});
+
+describe("isSafeRefName", () => {
+  it("accepts ordinary branch and tag names", () => {
+    assert.equal(isSafeRefName("main"), true);
+    assert.equal(isSafeRefName("feat/x"), true);
+    assert.equal(isSafeRefName("v1.2.3"), true);
+    assert.equal(isSafeRefName("origin/main"), true);
+  });
+
+  it("rejects names that would change argv meaning", () => {
+    assert.equal(isSafeRefName(""), false);
+    assert.equal(isSafeRefName("-n"), false);
+    assert.equal(isSafeRefName("a..b"), false);
+    assert.equal(isSafeRefName("a~1"), false);
+    assert.equal(isSafeRefName("foo bar"), false);
+    assert.equal(isSafeRefName("a^{}"), false);
+  });
+});
+
+describe("trackingLocalName", () => {
+  it("strips the longest matching remote prefix", () => {
+    assert.equal(trackingLocalName("origin/main", ["origin"]), "main");
+    assert.equal(trackingLocalName("origin/feat/x", ["origin"]), "feat/x");
+    assert.equal(trackingLocalName("origin-backup/x", ["origin", "origin-backup"]), "x");
+  });
+
+  it("returns null when the name is not under a known remote", () => {
+    assert.equal(trackingLocalName("main", ["origin"]), null);
+    assert.equal(trackingLocalName("origin", ["origin"]), null);
+  });
+});
+
+describe("parseGitOpInput", () => {
+  it("accepts fetch with no extra fields", () => {
+    assert.deepEqual(parseGitOpInput({ op: "fetch" }), { op: "fetch" });
+  });
+
+  it("rejects an unsafe branch name instead of letting it become an option", () => {
+    const bad = parseGitOpInput({ op: "checkout-branch", branch: "-n" });
+    assert.ok("error" in bad);
+  });
+
+  it("requires a hex sha for cherry-pick and revert", () => {
+    const bad = parseGitOpInput({ op: "cherry-pick", sha: "HEAD" });
+    assert.ok("error" in bad);
+    const ok = parseGitOpInput({ op: "revert", sha: "abcd" });
+    assert.deepEqual(ok, { op: "revert", sha: "abcd" });
+  });
+
+  it("accepts reset / merge / restore and rejects an empty restore", () => {
+    assert.deepEqual(parseGitOpInput({ op: "reset", rev: "abcd", mode: "hard" }), {
+      op: "reset",
+      rev: "abcd",
+      mode: "hard",
+    });
+    assert.deepEqual(parseGitOpInput({ op: "merge", rev: "main" }), { op: "merge", rev: "main" });
+    const empty = parseGitOpInput({ op: "restore", paths: [] });
+    assert.ok("error" in empty);
+    assert.deepEqual(parseGitOpInput({ op: "restore", untracked: ["scratch.ts"] }), {
+      op: "restore",
+      paths: [],
+      untracked: ["scratch.ts"],
+    });
+  });
+
+  it("parses force-with-lease push, drop, and conflict take", () => {
+    assert.deepEqual(parseGitOpInput({ op: "push", forceWithLease: true }), {
+      op: "push",
+      forceWithLease: true,
+    });
+    assert.deepEqual(parseGitOpInput({ op: "drop", sha: "abcd" }), { op: "drop", sha: "abcd" });
+    assert.deepEqual(parseGitOpInput({ op: "take", side: "ours", paths: ["a.ts"] }), {
+      op: "take",
+      side: "ours",
+      paths: ["a.ts"],
+    });
   });
 });

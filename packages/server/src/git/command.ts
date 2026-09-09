@@ -11,6 +11,7 @@
  * 落在里面，Windows 上这个目录就永久删不掉。
  */
 
+import type { GitOpInput } from "@falcon/shared";
 import {
   buildCommandLine,
   encodePowerShell,
@@ -493,9 +494,13 @@ export function commitArgs(
   git: string,
   dir: string,
   message: string,
-  paths?: string[]
+  paths?: string[],
+  opts?: { amend?: boolean; noEdit?: boolean }
 ): string[] {
-  const args = ["commit", "-m", message];
+  const args = ["commit"];
+  if (opts?.amend) args.push("--amend");
+  if (opts?.amend && opts.noEdit) args.push("--no-edit");
+  else args.push("-m", message);
   if (paths && paths.length > 0) args.push("--", ...paths);
   return at(git, dir, ...args);
 }
@@ -535,8 +540,392 @@ export function pullArgs(git: string, dir: string): string[] {
  * 该敲的命令印在 stderr 里，那比我们替他猜一个远程分支名要好。
  * 绝不加 --force——按钮点下去要么是安全的，要么就失败。
  */
-export function pushArgs(git: string, dir: string): string[] {
-  return at(git, dir, "push");
+export function pushArgs(git: string, dir: string, opts?: { forceWithLease?: boolean }): string[] {
+  const args = ["push"];
+  // --force-with-lease 不是 --force：远端若多了你没 fetch 到的提交会拒绝，
+  // 不会把别人刚推上去的历史盖掉。面板上的「强制推送」只走这条。
+  if (opts?.forceWithLease) args.push("--force-with-lease");
+  return at(git, dir, ...args);
+}
+
+// ---------------- History 面板写操作 ----------------
+
+/**
+ * Fetch 全部远程并剪掉已删的跟踪分支。不改工作区、不动 HEAD——所以可以
+ * 做成工具条上的 icon，不必再确认。
+ *
+ * `--all` 而不是只 fetch upstream：面板上能看见的远程分支都该能刷新，
+ * 用户点 origin/foo 的徽标时不想还停在上周的 sha。
+ */
+export function fetchArgs(git: string, dir: string): string[] {
+  return at(git, dir, "fetch", "--all", "--prune");
+}
+
+/**
+ * 检出一次提交 / 一个标签，HEAD 进入游离。
+ *
+ * 用 `--detach` 而不是光传 sha：意图写在 argv 里，git 不会在 rev 恰好
+ * 也是分支名时（少见，但 `git checkout v1` 会优先匹配分支）悄悄切走。
+ * 不加 `-f`：脏工作区让 git 自己拒绝，面板按钮不该丢掉未提交的改动。
+ */
+export function checkoutDetachArgs(git: string, dir: string, rev: string): string[] {
+  return at(git, dir, "checkout", "--detach", rev);
+}
+
+/**
+ * 检出一条本地分支。
+ *
+ * **不能**写成 `checkout -- <branch>`：checkout 的 `--` 后面是 pathspec，
+ * 会去工作区里找同名文件，而不是切分支。分支名以 `-` 开头的在进这里
+ * 之前就被 isSafeRefName 挡掉了。
+ */
+export function checkoutBranchArgs(git: string, dir: string, branch: string): string[] {
+  return at(git, dir, "checkout", branch);
+}
+
+/**
+ * 从远程分支建本地跟踪分支并检出。本地还没有对应分支时才走这条。
+ *
+ * `--track` 显式写上：即使用户关了 autoSetupMerge，点远程徽标的预期
+ * 也是"这条本地分支对着那条远程推"，跟 IDEA 点 origin/x 的行为一致。
+ */
+export function checkoutTrackArgs(
+  git: string,
+  dir: string,
+  local: string,
+  remote: string
+): string[] {
+  return at(git, dir, "checkout", "-b", local, "--track", remote);
+}
+
+export function cherryPickArgs(git: string, dir: string, sha: string): string[] {
+  return at(git, dir, "cherry-pick", sha);
+}
+
+/**
+ * 用一次新提交撤销指定提交。`--no-edit`：面板上没有提交信息编辑器，
+ * 沿用 git 默认的 `Revert "…"` 标题。撞冲突不 abort——Falcon 没有
+ * merge tool，终端就在旁边，git 的原文比我们替他善后更有用。
+ */
+export function revertArgs(git: string, dir: string, sha: string): string[] {
+  return at(git, dir, "revert", "--no-edit", sha);
+}
+
+/** 只建分支，不检出。`--` 挡住以 `-` 开头的名字被当成选项（调用方也会先拒）。 */
+export function branchCreateArgs(
+  git: string,
+  dir: string,
+  name: string,
+  startPoint: string
+): string[] {
+  return at(git, dir, "branch", "--", name, startPoint);
+}
+
+/** 建分支并立刻检出。与 branchCreateArgs 成对，对应对话框里「创建后检出」。 */
+export function checkoutNewBranchArgs(
+  git: string,
+  dir: string,
+  name: string,
+  startPoint: string
+): string[] {
+  return at(git, dir, "checkout", "-b", name, startPoint);
+}
+
+/**
+ * 重置当前分支到某次提交。
+ *
+ * hard 会丢掉工作区——面板上单独确认。不加 `--force` 之外的花样，
+ * mixed / soft 也把 mode 写进 argv，避免默认值让人猜。
+ */
+export function resetArgs(
+  git: string,
+  dir: string,
+  rev: string,
+  mode: "soft" | "mixed" | "hard"
+): string[] {
+  return at(git, dir, "reset", `--${mode}`, rev);
+}
+
+/**
+ * 把 rev 合并进当前分支。`--no-edit`：面板没有提交信息编辑器。
+ * 不加 `--ff-only`：用户点 Merge 就是要这次合并，快进不了就该造合并提交。
+ * 冲突不 abort。
+ */
+export function mergeArgs(git: string, dir: string, rev: string): string[] {
+  return at(git, dir, "merge", "--no-edit", rev);
+}
+
+/**
+ * 把当前分支变基到 rev 之上。不加 `--force` / `-i`：交互式变基没有终端 UI
+ * 可接。冲突不 abort，git 的原文告诉用户该在终端里怎么继续。
+ */
+export function rebaseArgs(git: string, dir: string, rev: string): string[] {
+  return at(git, dir, "rebase", rev);
+}
+
+/**
+ * 从当前分支拿掉 sha 这一笔：把它后面的提交接到它的第一父上。
+ *
+ * 不用 `rebase -i`：那要一个能改 todo 文件的编辑器，POSIX / Windows /
+ * SSH 各写一套太脆。`--onto <sha>~1 <sha>` 对线性历史就是 drop；
+ * 合并提交 git 会自己拒绝，原文回给面板。
+ */
+export function dropCommitArgs(git: string, dir: string, sha: string): string[] {
+  return at(git, dir, "rebase", "--onto", `${sha}~1`, sha);
+}
+
+/** 丢掉当前 HEAD。空 todo 的 rebase --onto 不会移动 HEAD，必须走 reset。 */
+export function dropHeadArgs(git: string, dir: string): string[] {
+  return at(git, dir, "reset", "--hard", "HEAD~1");
+}
+
+/** 把 HEAD 压进上一条：软重置留下工作区，amend 合成一次提交。 */
+export function squashHeadSoftArgs(git: string, dir: string): string[] {
+  return at(git, dir, "reset", "--soft", "HEAD~1");
+}
+
+export function revExistsArgs(git: string, dir: string, rev: string): string[] {
+  return at(git, dir, "rev-parse", "-q", "--verify", rev);
+}
+
+export function headShaArgs(git: string, dir: string): string[] {
+  return at(git, dir, "rev-parse", "HEAD");
+}
+
+/**
+ * 冲突解决之后继续。`core.editor=true` 让 git 别打开 vim 等提交说明——
+ * SSH exec 没有 tty，一弹编辑器请求就挂死。
+ */
+export function continueConflictArgs(
+  git: string,
+  dir: string,
+  kind: "merge" | "rebase" | "cherry-pick" | "revert"
+): string[] {
+  const cmd =
+    kind === "merge"
+      ? ["merge", "--continue"]
+      : kind === "rebase"
+        ? ["rebase", "--continue"]
+        : kind === "cherry-pick"
+          ? ["cherry-pick", "--continue"]
+          : ["revert", "--continue"];
+  return at(git, dir, "-c", "core.editor=true", ...cmd);
+}
+
+export function abortConflictArgs(
+  git: string,
+  dir: string,
+  kind: "merge" | "rebase" | "cherry-pick" | "revert"
+): string[] {
+  const cmd =
+    kind === "merge"
+      ? ["merge", "--abort"]
+      : kind === "rebase"
+        ? ["rebase", "--abort"]
+        : kind === "cherry-pick"
+          ? ["cherry-pick", "--abort"]
+          : ["revert", "--abort"];
+  return at(git, dir, ...cmd);
+}
+
+export function checkoutConflictSideArgs(
+  git: string,
+  dir: string,
+  side: "ours" | "theirs",
+  paths: string[]
+): string[] {
+  return at(git, dir, "checkout", `--${side}`, "--", ...paths);
+}
+
+/**
+ * 把已跟踪文件恢复成 HEAD。`--staged --worktree` 两边一起丢掉，
+ * 跟面板「暂存+未暂存合着看」的视角一致。
+ */
+export function restoreArgs(git: string, dir: string, paths: string[]): string[] {
+  return at(git, dir, "restore", "--source=HEAD", "--staged", "--worktree", "--", ...paths);
+}
+
+/**
+ * 丢掉未跟踪文件。`-f` 是 clean 的硬要求（否则 git 拒绝），不是 checkout -f。
+ * 不加 `-d`：工作区列表已经把未跟踪目录展开成文件（status --untracked-files=all）。
+ */
+export function cleanPathsArgs(git: string, dir: string, paths: string[]): string[] {
+  return at(git, dir, "clean", "-f", "--", ...paths);
+}
+
+/** 标签短名，新的在前。History 左侧树 Tags 一组用 */
+export function tagListArgs(git: string, dir: string): string[] {
+  return at(git, dir, "for-each-ref", "--format=%(refname:short)", "--sort=-creatordate", "refs/tags");
+}
+
+export function parseTagList(stdout: string, cap = 200): string[] {
+  const out: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    const name = line.trim();
+    if (!name) continue;
+    out.push(name);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+/** HEAD 完整提交说明。空仓库时 git log 退出码 128，调用方当没有。 */
+export function headMessageArgs(git: string, dir: string): string[] {
+  return at(git, dir, "log", "-1", "--format=%B");
+}
+
+/** 完整 sha 或 git 允许的短 sha。面板点进来的都是 40 位，短的留给手填/测试。 */
+export const GIT_SHA_RE = /^[0-9a-f]{4,40}$/i;
+
+/**
+ * 能安全塞进 argv 当 ref 的名字。不是 git check-ref-format 的完整复刻，
+ * 只挡会让命令行变义或被当成选项的那种：空、前导 `-`、控制字符、
+ * git 的修订语法（`..` `~` `^` `:` `@{}`）和通配。
+ */
+export function isSafeRefName(name: string): boolean {
+  if (!name || name.startsWith("-") || name.endsWith(".") || name.endsWith("/")) return false;
+  if (name.endsWith(".lock")) return false;
+  if (name.includes("..") || name.includes("@{")) return false;
+  return !/[\x00-\x20\x7f~^:?*\\[]/.test(name);
+}
+
+/**
+ * `origin/main` + remotes `["origin"]` → `"main"`。多个远程时取最长前缀，
+ * 避免 `origin` 把 `origin-backup/x` 切错。对不上或切完不合法就 null。
+ */
+export function trackingLocalName(remoteBranch: string, remotes: string[]): string | null {
+  const names = [...remotes].sort((a, b) => b.length - a.length);
+  for (const remote of names) {
+    const prefix = `${remote}/`;
+    if (!remoteBranch.startsWith(prefix)) continue;
+    const local = remoteBranch.slice(prefix.length);
+    if (isSafeRefName(local)) return local;
+  }
+  return null;
+}
+
+function asTrimmed(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+function asSha(v: unknown): string | null {
+  const s = asTrimmed(v);
+  return s && GIT_SHA_RE.test(s) ? s : null;
+}
+
+function asRef(v: unknown): string | null {
+  const s = asTrimmed(v);
+  return s && isSafeRefName(s) ? s : null;
+}
+
+function asRev(v: unknown): string | null {
+  return asSha(v) ?? asRef(v);
+}
+
+/**
+ * POST /git/op 的 body。形状不对返回 error 字符串，让路由回 400；
+ * git 自己会失败的情况（脏工作区、分支占用）不在这里拦，留给 runGitOp。
+ */
+export function parseGitOpInput(body: unknown): GitOpInput | { error: string } {
+  if (!body || typeof body !== "object") return { error: "缺少操作" };
+  const o = body as Record<string, unknown>;
+  switch (o.op) {
+    case "fetch":
+      return { op: "fetch" };
+    case "checkout": {
+      const rev = asRev(o.rev);
+      if (!rev) return { error: "rev 不合法" };
+      return { op: "checkout", rev, detach: o.detach === true };
+    }
+    case "checkout-branch": {
+      const branch = asRef(o.branch);
+      if (!branch) return { error: "branch 不合法" };
+      return {
+        op: "checkout-branch",
+        branch,
+        createTracking: o.createTracking === true,
+      };
+    }
+    case "cherry-pick":
+    case "revert": {
+      const sha = asSha(o.sha);
+      if (!sha) return { error: "sha 参数不合法" };
+      return { op: o.op, sha };
+    }
+    case "branch-create": {
+      const name = asRef(o.name);
+      const startPoint = asRev(o.startPoint);
+      if (!name) return { error: "分支名不合法" };
+      if (!startPoint) return { error: "起点不合法" };
+      return { op: "branch-create", name, startPoint, checkout: o.checkout === true };
+    }
+    case "reset": {
+      const rev = asRev(o.rev);
+      const mode = o.mode;
+      if (!rev) return { error: "rev 不合法" };
+      if (mode !== "soft" && mode !== "mixed" && mode !== "hard") {
+        return { error: "reset mode 不合法" };
+      }
+      return { op: "reset", rev, mode };
+    }
+    case "merge":
+    case "rebase": {
+      const rev = asRev(o.rev);
+      if (!rev) return { error: "rev 不合法" };
+      return { op: o.op, rev };
+    }
+    case "restore": {
+      const paths = asPaths(o.paths);
+      const untracked = asPaths(o.untracked);
+      if (!paths || !untracked) return { error: "路径不合法" };
+      if (paths.length === 0 && untracked.length === 0) return { error: "缺少路径" };
+      if (pathspecTooLong([...paths, ...untracked])) {
+        return { error: "选中的文件太多，路径拼不进一条命令行。少选几个再丢弃。" };
+      }
+      return { op: "restore", paths, untracked };
+    }
+    case "push":
+      return { op: "push", forceWithLease: o.forceWithLease === true };
+    case "drop":
+    case "squash": {
+      const sha = asSha(o.sha);
+      if (!sha) return { error: "sha 参数不合法" };
+      return { op: o.op, sha };
+    }
+    case "reword": {
+      const sha = asSha(o.sha);
+      const message = asTrimmed(o.message);
+      if (!sha) return { error: "sha 参数不合法" };
+      if (!message) return { error: "缺少提交信息" };
+      return { op: "reword", sha, message };
+    }
+    case "continue":
+    case "abort":
+      return { op: o.op };
+    case "take": {
+      const side = o.side;
+      const paths = asPaths(o.paths);
+      if (side !== "ours" && side !== "theirs") return { error: "side 不合法" };
+      if (!paths || paths.length === 0) return { error: "缺少路径" };
+      if (pathspecTooLong(paths)) return { error: "选中的文件太多，路径拼不进一条命令行。" };
+      return { op: "take", side, paths };
+    }
+    default:
+      return { error: "未知操作" };
+  }
+}
+
+function asPaths(v: unknown): string[] | null {
+  if (v == null) return [];
+  if (!Array.isArray(v)) return null;
+  const out: string[] = [];
+  for (const p of v) {
+    if (typeof p !== "string" || !p || p.startsWith("-") || /[\x00-\x08\x0a-\x1f]/.test(p)) {
+      return null;
+    }
+    out.push(p);
+  }
+  return out;
 }
 
 // ---------------- 命令行拼装 ----------------
@@ -820,6 +1209,16 @@ export interface GitStatusEntry {
   origPath?: string;
   index: string;
   work: string;
+}
+
+/** porcelain 未合并：U 出现在任一列，或双方都新增 / 都删除 */
+export function isUnmergedStatus(index: string, work: string): boolean {
+  return (
+    index === "U" ||
+    work === "U" ||
+    (index === "A" && work === "A") ||
+    (index === "D" && work === "D")
+  );
 }
 
 /**
