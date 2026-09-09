@@ -4,6 +4,10 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   AuthStatus,
   DeleteProjectResult,
+  DockerLogs,
+  DockerOpInput,
+  DockerOpResult,
+  DockerSnapshot,
   FsListing,
   GitChangeCounts,
   GitCommitDetail,
@@ -129,6 +133,17 @@ import {
   worktreeStatus,
 } from "./git/repo.js";
 import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
+import { isSafeComposeRel, isSafeDockerRef, parseDockerOpInput } from "./docker/command.js";
+import { DockerError, dockerFailureText } from "./docker/error.js";
+import { dockerHostFor } from "./docker/host.js";
+import {
+  composeLogs,
+  containerLogs,
+  describeDocker,
+  runDockerOp,
+  unavailableLogs,
+  unavailableSnapshot as unavailableDocker,
+} from "./docker/runtime.js";
 
 /**
  * WorktreeFailure → HTTP 码。
@@ -1297,6 +1312,87 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     } catch (err) {
       const e = err as WorktreeError;
       return { ok: false, reason: gitReasonOf(e), detail: e.detail ?? e.message };
+    }
+  });
+
+  // ---- Docker（宿主机容器 / Compose） ----
+
+  /**
+   * 右侧 Docker 面板快照。命令跑在当前项目的宿主机上（local = 后端机器，
+   * ssh = 远端）。环境事实写在 available/reason 里，不抛 4xx。
+   * `?file=` 指定要看的 compose 文件（工作目录相对路径）；缺省用发现到的第一份。
+   */
+  app.get("/api/projects/:id/docker", async (req, reply): Promise<DockerSnapshot | void> => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { file?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    if (q.file != null && q.file !== "" && !isSafeComposeRel(q.file)) {
+      return reply.code(400).send({ error: "compose 文件路径不合法" });
+    }
+    try {
+      return await describeDocker(
+        await dockerHostFor(row, manager),
+        row.working_dir ?? undefined,
+        q.file
+      );
+    } catch (err) {
+      const e = err as DockerError;
+      return unavailableDocker(e.reason ?? "link-failed", e.detail ?? e.message);
+    }
+  });
+
+  /**
+   * 容器或 compose 项目的一段日志。不跟尾——跟尾要占一条 SSH channel 挂着，
+   * 面板打开日志对话框时由前端轮询本端点冒充。
+   */
+  app.get("/api/projects/:id/docker/logs", async (req, reply): Promise<DockerLogs | void> => {
+    const { id } = req.params as { id: string };
+    const q = req.query as { target?: string; ref?: string; file?: string; tail?: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    const tail = q.tail != null ? Number(q.tail) : undefined;
+    try {
+      const host = await dockerHostFor(row, manager);
+      if (q.target === "compose") {
+        if (!row.working_dir) {
+          return unavailableLogs("no-working-dir", dockerFailureText("no-working-dir"));
+        }
+        if (!q.file || !isSafeComposeRel(q.file)) {
+          return reply.code(400).send({ error: "compose 文件路径不合法" });
+        }
+        return await composeLogs(host, row.working_dir, q.file, tail as number);
+      }
+      if (!q.ref || !isSafeDockerRef(q.ref)) {
+        return reply.code(400).send({ error: "容器引用不合法" });
+      }
+      return await containerLogs(host, q.ref, tail as number);
+    } catch (err) {
+      const e = err as DockerError;
+      return unavailableLogs(e.reason ?? "link-failed", e.detail ?? e.message);
+    }
+  });
+
+  /**
+   * 容器 / 镜像 / compose 写操作。失败不抛 4xx：容器已在跑、镜像被占用都是
+   * 宿主机的正常状态，docker 的原话写在 ok/detail 里。
+   */
+  app.post("/api/projects/:id/docker/op", async (req, reply): Promise<DockerOpResult | void> => {
+    const { id } = req.params as { id: string };
+    const row = db.getProject(id);
+    if (!row) return reply.code(404).send({ error: "项目不存在" });
+    const parsed = parseDockerOpInput(req.body);
+    if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
+    const input: DockerOpInput = parsed;
+    try {
+      return await runDockerOp(
+        await dockerHostFor(row, manager),
+        row.working_dir ?? undefined,
+        input
+      );
+    } catch (err) {
+      const e = err as DockerError;
+      return { ok: false, reason: e.reason ?? "link-failed", detail: e.detail ?? e.message };
     }
   });
 

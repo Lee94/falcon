@@ -111,11 +111,11 @@ export function visibleFileTabs(s: {
 }
 
 /** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
-export type RightPanelId = "git" | "changes" | "forward" | "files";
+export type RightPanelId = "git" | "changes" | "forward" | "files" | "docker";
 
 /** 持久化的布局可能来自旧版本，认不出的面板名一律退回默认 */
 function isRightPanelId(v: unknown): v is RightPanelId {
-  return v === "git" || v === "changes" || v === "forward" || v === "files";
+  return v === "git" || v === "changes" || v === "forward" || v === "files" || v === "docker";
 }
 
 export const selectRightVisible = (s: { rightOpen: boolean }) => s.rightOpen;

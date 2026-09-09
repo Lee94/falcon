@@ -12,6 +12,10 @@ import type {
   GitSnapshot,
   GitSyncResult,
   GitWorkingChanges,
+  DockerLogs,
+  DockerOpInput,
+  DockerOpResult,
+  DockerSnapshot,
   HostZellijStatus,
   MultiRepoProbe,
   MultiWorktreeInput,
@@ -294,6 +298,27 @@ export const api = {
     request<FileOpResult>("POST", `/api/projects/${projectId}/rename`, { path, name }),
   removeFiles: (projectId: string, paths: string[]) =>
     request<FileRemoveResult>("POST", `/api/projects/${projectId}/remove`, { paths }),
+
+  /**
+   * 右侧 Docker 面板。命令跑在当前项目的宿主机上。
+   * 环境事实写在 available/reason 里，不会抛。`file` 是要看的 compose 相对路径。
+   */
+  dockerSnapshot: (projectId: string, file?: string) => {
+    const q = file ? `?file=${encodeURIComponent(file)}` : "";
+    return request<DockerSnapshot>("GET", `/api/projects/${projectId}/docker${q}`);
+  },
+  dockerOp: (projectId: string, input: DockerOpInput) =>
+    request<DockerOpResult>("POST", `/api/projects/${projectId}/docker/op`, input),
+  dockerLogs: (
+    projectId: string,
+    opts: { target: "container"; ref: string; tail?: number } | { target: "compose"; file: string; tail?: number }
+  ) => {
+    const q = new URLSearchParams({ target: opts.target });
+    if (opts.target === "container") q.set("ref", opts.ref);
+    else q.set("file", opts.file);
+    if (opts.tail != null) q.set("tail", String(opts.tail));
+    return request<DockerLogs>("GET", `/api/projects/${projectId}/docker/logs?${q}`);
+  },
 
   listForwards: (projectId: string) =>
     request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),
