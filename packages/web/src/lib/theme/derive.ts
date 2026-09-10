@@ -114,7 +114,9 @@ export function deriveTheme(colors: ThemeColors): ResolvedTheme {
     "--accent": tone(dark ? 0.27 : 0.035),
     "--accent-foreground": fg,
     "--destructive": destructive,
-    "--destructive-foreground": moreReadable(bg, fg, destructive),
+    // button / badge 深色是 `bg-destructive/60`（叠在底上），浅色是实心。字色要对
+    // 实际填色挑，否则深底上半透明红会把给实心粉红挑的深字铺上去（黑字压暗红）。
+    "--destructive-foreground": moreReadable(bg, fg, dark ? mix(bg, destructive, 0.6) : destructive),
     "--success": success,
     "--success-foreground": moreReadable(bg, fg, success),
     "--warning": warning,

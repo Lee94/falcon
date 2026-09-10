@@ -149,6 +149,8 @@ function AlertDialogAction({
   ...props
 }: React.ComponentProps<typeof AlertDialogPrimitive.Action> &
   Pick<React.ComponentProps<typeof Button>, "variant" | "size">) {
+  // 用 variant，不要再塞一份 buttonVariants() 进 className：asChild 会把 Button
+  // 默认变体和 className 拼在一起，两套 text-* 同权重，CSS 源序决定谁赢。
   return (
     <Button variant={variant} size={size} asChild>
       <AlertDialogPrimitive.Action

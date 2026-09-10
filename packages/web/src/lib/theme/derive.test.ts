@@ -74,14 +74,17 @@ describe("deriveTheme", () => {
     }
   });
 
-  it("语义色的字色在语义色上选底 / 字里对比更高的", () => {
+  it("语义色的字色在按钮实际填色上选底 / 字里对比更高的", () => {
     const light = deriveTheme(FALCON_LIGHT.colors).vars;
     assert.equal(light["--destructive-foreground"], "#ffffff");
+    const dark = deriveTheme(FALCON_DARK.colors).vars;
+    // 深色是 bg-destructive/60，#ef2929 叠到 #0a0a0a 上变暗红，浅字才读得出
+    assert.equal(dark["--destructive-foreground"], "#fafafa");
     const mocha = deriveTheme(
       parseCatalogData(GHOSTTY_THEMES_DATA).find((e) => e.name === "Catppuccin Mocha")!.colors
     ).vars;
-    // 粉红 #f38ba8 上深底色更清楚
-    assert.equal(mocha["--destructive-foreground"], "#1e1e2e");
+    // 实心粉红 #f38ba8 上深底更清楚，但按钮叠 60% 之后浅字对比更高
+    assert.equal(mocha["--destructive-foreground"], "#cdd6f4");
   });
 
   it("每个 var 都是合法颜色或百分比，全部主题无一例外", () => {

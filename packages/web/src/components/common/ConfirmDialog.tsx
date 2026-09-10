@@ -11,7 +11,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { buttonVariants } from "@/components/ui/button";
 import { StatusMark } from "./StatusMark.js";
 
 /**
@@ -79,7 +78,7 @@ export function ConfirmDialog() {
         <AlertDialogFooter>
           <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
           <AlertDialogAction
-            className={buttonVariants({ variant: "destructive" })}
+            variant="destructive"
             disabled={busy}
             onClick={(e) => {
               // 关闭时机由 run() 自己决定，别让 Radix 抢在请求发出前拆掉对话框
