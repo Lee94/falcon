@@ -11,7 +11,8 @@
  *   2. 生成 SEA bootstrap：首次运行把 pty.node / spawn-helper / web 静态资源
  *      解压到 <dataDir>/runtime/<hash>/，再以该目录为根 createRequire 执行 bundle，
  *      因此 node-pty 的动态 require 与 spawn-helper 都按真实文件系统解析，无需 patch；
- *   3. 资产嵌入 SEA blob，注入到 nodejs.org 官方二进制（postject），macOS 重新 ad-hoc 签名。
+ *   3. 资产（web 产物、node-pty、内置的 meegle CLI 二进制）嵌入 SEA blob，注入到
+ *      nodejs.org 官方二进制（postject），macOS 重新 ad-hoc 签名。
  *
  * 不支持 Windows 目标：服务本身依赖 zellij 与 POSIX shell。
  */
@@ -146,6 +147,10 @@ const ptyPkgDir = path.dirname(
   fs.realpathSync(serverRequire.resolve("@lydell/node-pty/package.json"))
 );
 const ptyVersion = readJson(path.join(ptyPkgDir, "package.json")).version;
+// 飞书项目面板的数据源：npm 包自带六个平台的静态二进制，按目标各取一个
+const meeglePkgDir = path.dirname(
+  fs.realpathSync(serverRequire.resolve("@lark-project/meegle/package.json"))
+);
 const webDist = path.join(ROOT, "packages/web/dist");
 if (!fs.existsSync(path.join(webDist, "index.html"))) {
   console.error("packages/web/dist 缺少 index.html，请先构建 web");
@@ -179,6 +184,12 @@ for (const target of targets) {
   addTree(ptyPkgDir, "node_modules/@lydell/node-pty");
   addTree(ptyPlatformDir, `node_modules/@lydell/node-pty-${target}`);
   addTree(webDist, "web");
+  const meegleBin = path.join(meeglePkgDir, "bin", `meegle-${target}`);
+  if (!fs.existsSync(meegleBin)) {
+    console.error(`@lark-project/meegle 没有 ${target} 的二进制: ${meegleBin}`);
+    process.exit(1);
+  }
+  assets.push({ key: "bin/meegle", src: meegleBin, mode: 0o755 });
 
   const hasher = crypto.createHash("sha256");
   hasher.update(`${VERSION}\0${target}\0`);
@@ -251,6 +262,12 @@ if (seaMode) {
   const inheritedWebDist = process.env.FALCON_WEB_DIST ?? process.env.MOJITO_WEB_DIST;
   if (!inheritedWebDist || !fs.existsSync(path.join(inheritedWebDist, "index.html"))) {
     process.env.FALCON_WEB_DIST = path.join(runtimeDir, "web");
+  }
+  // 内置的 meegle CLI 同样从 runtime 目录指入（bundle 里没有 node_modules 可解析，
+  // 见 packages/server/src/meegle/bin.ts）；继承自父实例的陈旧路径同理换成自己的
+  const inheritedMeegle = process.env.FALCON_MEEGLE_BIN;
+  if (!inheritedMeegle || !fs.existsSync(inheritedMeegle)) {
+    process.env.FALCON_MEEGLE_BIN = path.join(runtimeDir, "bin", "meegle");
   }
   anchor = path.join(runtimeDir, "sea-loader.cjs");
 } else {

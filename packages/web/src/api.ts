@@ -33,6 +33,19 @@ import type {
   UploadResult,
   FileOpResult,
   FileRemoveResult,
+  MeegleLogin,
+  MeeglePage,
+  MeeglePin,
+  MeeglePinInput,
+  MeegleSearchResult,
+  MeegleSpace,
+  MeegleStatus,
+  MeegleTodoAction,
+  MeegleTodoItem,
+  MeegleUrlTarget,
+  MeegleWorkItem,
+  MeegleWorkItemDetail,
+  MeegleWorkItemType,
   WorktreeInput,
   WorktreeStatus,
   WorkspaceFile,
@@ -330,6 +343,51 @@ export const api = {
   clearSession: (id: string) => request("DELETE", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
     request("PATCH", `/api/sessions/${id}`, { name }),
+  // ---- 飞书项目（Meegle）：宿主机上的 meegle CLI ----
+  meegleStatus: () => request<MeegleStatus>("GET", "/api/meegle/status"),
+  meegleLogin: (host: string) => request<MeegleLogin>("POST", "/api/meegle/login", { host }),
+  meegleCancelLogin: () => request<{ ok: true }>("POST", "/api/meegle/login/cancel"),
+  meegleSpaces: () => request<MeegleSpace[]>("GET", "/api/meegle/spaces"),
+  meegleTypes: (spaceKey: string) =>
+    request<MeegleWorkItemType[]>("GET", `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/types`),
+  meegleSearch: (spaceKey: string, q: string, type?: string) => {
+    const params = new URLSearchParams({ q });
+    if (type) params.set("type", type);
+    return request<MeegleSearchResult>(
+      "GET",
+      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/search?${params}`
+    );
+  },
+  meegleRecent: (spaceKey: string, type: string) =>
+    request<MeegleWorkItem[]>(
+      "GET",
+      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/recent?type=${encodeURIComponent(type)}`
+    ),
+  meegleViewItems: (spaceKey: string, viewId: string, page: number) =>
+    request<MeeglePage<MeegleWorkItem>>(
+      "GET",
+      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/views/${encodeURIComponent(viewId)}/items?page=${page}`
+    ),
+  meegleWorkItem: (spaceKey: string, id: string) =>
+    request<MeegleWorkItemDetail>(
+      "GET",
+      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/items/${encodeURIComponent(id)}`
+    ),
+  meegleTodo: (action: MeegleTodoAction, page: number) =>
+    request<MeeglePage<MeegleTodoItem>>("GET", `/api/meegle/todo?action=${action}&page=${page}`),
+  meegleMultiViewItems: (spaceKey: string, viewId: string, page: number) =>
+    request<MeeglePage<MeegleWorkItem>>(
+      "GET",
+      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/multi-views/${encodeURIComponent(viewId)}/items?page=${page}`
+    ),
+  meegleResolveUrl: (url: string) =>
+    request<MeegleUrlTarget>("POST", "/api/meegle/resolve-url", { url }),
+  meeglePins: () => request<MeeglePin[]>("GET", "/api/meegle/pins"),
+  meeglePin: (input: MeeglePinInput) => request<MeeglePin>("POST", "/api/meegle/pins", input),
+  meegleRenamePin: (id: string, label: string) =>
+    request<MeeglePin>("PATCH", `/api/meegle/pins/${encodeURIComponent(id)}`, { label }),
+  meegleUnpin: (id: string) =>
+    request<{ ok: true }>("DELETE", `/api/meegle/pins/${encodeURIComponent(id)}`),
   /** 图片按原始字节直传，Content-Type 就是图片类型，不走 JSON 包装 */
   pasteImage: async (id: string, blob: Blob): Promise<PasteImageResult> => {
     const res = await fetch(`/api/sessions/${id}/paste-image`, {

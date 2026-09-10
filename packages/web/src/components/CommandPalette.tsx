@@ -11,6 +11,7 @@ import {
   Folder,
   GitBranch,
   LayoutDashboard,
+  ListTodo,
   PanelLeft,
   Plus,
   Palette,
@@ -187,6 +188,7 @@ export function CommandPalette() {
     const changesOn = rightVisible && rightPanel === "changes";
     const gitOn = rightVisible && rightPanel === "git";
     const forwardOn = rightVisible && rightPanel === "forward";
+    const meegleOn = rightVisible && rightPanel === "meegle";
     actionItems.push({
       key: `>${t("palette.toggleFilesOn")} ${t("palette.toggleFilesOff")}`,
       label: filesOn ? t("palette.toggleFilesOn") : t("palette.toggleFilesOff"),
@@ -214,6 +216,13 @@ export function CommandPalette() {
       meta: chord("toggleForwardPanel"),
       icon: ArrowLeftRight,
       run: () => store.toggleRightPanel("forward"),
+    });
+    actionItems.push({
+      key: `>${t("palette.toggleMeegleOn")} ${t("palette.toggleMeegleOff")}`,
+      label: meegleOn ? t("palette.toggleMeegleOn") : t("palette.toggleMeegleOff"),
+      meta: chord("toggleMeeglePanel"),
+      icon: ListTodo,
+      run: () => store.toggleRightPanel("meegle"),
     });
     THEME_PREFS.filter((pref) => pref !== store.themePref).forEach((pref) =>
       actionItems.push({

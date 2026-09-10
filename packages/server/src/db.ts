@@ -10,6 +10,8 @@ import type {
   SessionState,
   SshAuthMethod,
   SshHost,
+  MeeglePin,
+  MeeglePinKind,
 } from "@falcon/shared";
 
 export interface ProjectRow {
@@ -81,6 +83,18 @@ export interface SshForwardRow {
   dest_host: string;
   dest_port: number;
   enabled: number;
+  created_at: number;
+}
+
+export interface MeeglePinRow {
+  id: string;
+  kind: string;
+  space_key: string;
+  space_name: string | null;
+  target_id: string;
+  type_key: string | null;
+  label: string;
+  url: string | null;
   created_at: number;
 }
 
@@ -231,6 +245,20 @@ export class Db {
         dest_host TEXT NOT NULL,
         dest_port INTEGER NOT NULL,
         enabled INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    // 飞书项目面板的固定列表（ADR 0010）。不挂在项目上：CLI 的登录态是整台机器一份
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS meegle_pins (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        space_key TEXT NOT NULL,
+        space_name TEXT,
+        target_id TEXT NOT NULL,
+        type_key TEXT,
+        label TEXT NOT NULL,
+        url TEXT,
         created_at INTEGER NOT NULL
       );
     `);
@@ -559,6 +587,56 @@ export class Db {
 
   deleteForward(id: string) {
     this.stmt("DELETE FROM ssh_forwards WHERE id = ?").run(id);
+  }
+
+  // ---- 飞书项目面板的固定列表 ----
+
+  static toMeeglePin(row: MeeglePinRow): MeeglePin {
+    return {
+      id: row.id,
+      kind: row.kind as MeeglePinKind,
+      spaceKey: row.space_key,
+      spaceName: row.space_name ?? undefined,
+      targetId: row.target_id,
+      typeKey: row.type_key ?? undefined,
+      label: row.label,
+      url: row.url ?? undefined,
+      createdAt: row.created_at,
+    };
+  }
+
+  listMeeglePins(): MeeglePinRow[] {
+    return this.stmt("SELECT * FROM meegle_pins ORDER BY created_at ASC").all() as unknown as MeeglePinRow[];
+  }
+
+  getMeeglePin(id: string): MeeglePinRow | undefined {
+    return this.stmt("SELECT * FROM meegle_pins WHERE id = ?").get(id) as MeeglePinRow | undefined;
+  }
+
+  /** 同一个东西只固定一次 */
+  findMeeglePin(kind: string, spaceKey: string, targetId: string): MeeglePinRow | undefined {
+    return this.stmt(
+        "SELECT * FROM meegle_pins WHERE kind = ? AND space_key = ? AND target_id = ?"
+      )
+      .get(kind, spaceKey, targetId) as MeeglePinRow | undefined;
+  }
+
+  insertMeeglePin(row: MeeglePinRow) {
+    this.stmt(
+        `INSERT INTO meegle_pins
+           (id, kind, space_key, space_name, target_id, type_key, label, url, created_at)
+         VALUES
+           (@id, @kind, @space_key, @space_name, @target_id, @type_key, @label, @url, @created_at)`
+      )
+      .run(bindRow(row));
+  }
+
+  renameMeeglePin(id: string, label: string) {
+    this.stmt("UPDATE meegle_pins SET label = ? WHERE id = ?").run(label, id);
+  }
+
+  deleteMeeglePin(id: string) {
+    this.stmt("DELETE FROM meegle_pins WHERE id = ?").run(id);
   }
 
   // ---- saved SSH hosts ----

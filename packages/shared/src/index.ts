@@ -1019,3 +1019,160 @@ export interface DeleteProjectResult {
   ok: true;
   warnings?: string[];
 }
+
+// ---- 飞书项目（Meegle）----
+
+/**
+ * 右侧「飞书项目」面板的数据协议。数据源是宿主机（falcon 后端所在机器）上的
+ * `meegle` CLI（@lark-project/meegle）：后端只负责起进程、解析 JSON、把几个
+ * 接口的原始形状收敛成下面这些扁平结构；前端不认识 CLI 的任何原始字段。
+ */
+
+/** 面板里可选的站点；自定义域名走手填 */
+export const MEEGLE_HOSTS = ["project.feishu.cn", "meegle.com"] as const;
+
+/** CLI 不可用的原因，随 409 一起回给前端；前端据此切到安装 / 登录提示 */
+export type MeegleUnavailableReason = "not-installed" | "not-authenticated";
+
+export interface MeegleUser {
+  key: string;
+  name: string;
+  email?: string;
+  avatarUrl?: string;
+}
+
+/** 正在进行中的 device-code 登录：授权链接与授权码来自 CLI 的输出 */
+export interface MeegleLogin {
+  host: string;
+  url: string;
+  code: string;
+}
+
+export interface MeegleStatus {
+  installed: boolean;
+  /** 实际拿来 spawn 的可执行文件路径，排查"为什么说没装"用 */
+  bin?: string;
+  version?: string;
+  authenticated: boolean;
+  /** 已配置的站点（project.feishu.cn / meegle.com / 私有域名），未配置为 null */
+  host: string | null;
+  expiresInMinutes?: number;
+  /** 登录后才有；取不到（网络等）时缺省，不影响 authenticated */
+  user?: MeegleUser;
+  /** 后端正拉着一个 `meegle auth login --device-code` 进程等用户授权 */
+  login?: MeegleLogin;
+}
+
+/** 空间（飞书项目里的 project） */
+export interface MeegleSpace {
+  key: string;
+  name: string;
+  simpleName: string;
+}
+
+export interface MeegleWorkItemType {
+  key: string;
+  name: string;
+  apiName: string;
+  disabled: boolean;
+}
+
+export interface MeegleView {
+  id: string;
+  name: string;
+  typeKey: string;
+  typeName: string;
+}
+
+export interface MeegleWorkItem {
+  id: string;
+  name: string;
+  spaceKey: string;
+  spaceName?: string;
+  typeKey: string;
+  typeName?: string;
+  status?: string;
+  /** 详情页地址，缺少空间 simple_name 时没有 */
+  url?: string;
+  updatedAt?: string;
+}
+
+export type MeegleTodoAction = "todo" | "this_week" | "overdue" | "done";
+
+export interface MeegleTodoItem extends MeegleWorkItem {
+  /** 节点流工作项当前停在我这里的节点 */
+  nodeName?: string;
+  /** 状态流工作项当前状态 */
+  stateName?: string;
+  scheduleStart?: string;
+  scheduleEnd?: string;
+  /** 已办列表里的完成时间 */
+  finishedAt?: string;
+}
+
+export interface MeeglePage<T> {
+  items: T[];
+  page: number;
+  hasMore: boolean;
+  total?: number;
+}
+
+/** 关键字搜索：视图与工作项两路并行，各自的失败记在 errors 里，不拖垮另一路 */
+export interface MeegleSearchResult {
+  views: MeegleView[];
+  items: MeegleWorkItem[];
+  errors: string[];
+}
+
+/** 粘贴的飞书项目链接解析结果：后端用 CLI 的 `url decode` 认路由，再把 simple_name 换成 project_key */
+export type MeegleUrlTarget =
+  | { kind: "workitem"; spaceKey: string; spaceName?: string; typeKey: string; id: string; url: string }
+  | { kind: "view"; spaceKey: string; spaceName?: string; viewId: string; typeKey?: string; url: string }
+  | { kind: "multiProjectView"; spaceKey: string; spaceName?: string; viewId: string; url: string };
+
+export type MeeglePinKind = "view" | "multiProjectView" | "workitem";
+
+/** 面板里固定的视图 / 工作项，存在后端 SQLite 里：登录态是整台机器一份，固定列表也跟着机器走 */
+export interface MeeglePin {
+  id: string;
+  kind: MeeglePinKind;
+  spaceKey: string;
+  spaceName?: string;
+  /** 视图 id 或工作项 id */
+  targetId: string;
+  /** 工作项才有 */
+  typeKey?: string;
+  /** 用户可改的显示名；从链接打开的视图拿不到名字，默认就是 id */
+  label: string;
+  /** 飞书里的地址，点外链用；搜出来的普通视图没有 */
+  url?: string;
+  createdAt: number;
+}
+
+export interface MeeglePinInput {
+  kind: MeeglePinKind;
+  spaceKey: string;
+  spaceName?: string;
+  targetId: string;
+  typeKey?: string;
+  label: string;
+  url?: string;
+}
+
+export interface MeegleWorkItemDetail extends MeegleWorkItem {
+  simpleName?: string;
+  /** 节点流 / 状态流 */
+  mode?: string;
+  template?: string;
+  priority?: string;
+  description?: string;
+  createdAt?: string;
+  createdBy?: string;
+  updatedBy?: string;
+  /** 当前进行中的节点及其负责人 */
+  currentNodes: { name: string; owners: string[] }[];
+  /** 当前负责人（current_status_operator） */
+  operators: string[];
+  /** 有人的角色 */
+  roles: { name: string; members: string[] }[];
+}

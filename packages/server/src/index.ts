@@ -16,6 +16,7 @@ import { resolveLocalBaseEnv } from "./sessions/loginEnv.js";
 import { startArchiveSweeper } from "./archive.js";
 import { registerRoutes } from "./routes.js";
 import { registerWs } from "./ws.js";
+import { MeegleClient } from "./meegle/client.js";
 import { ZELLIJ_VERSION } from "./zellij/version.js";
 
 const VERSION = "0.1.0";
@@ -59,6 +60,8 @@ async function main() {
   await app.register(fastifyCookie);
   await app.register(fastifyWebsocket, { options: { maxPayload: 1024 * 1024 } });
 
+  // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
+  const meegle = new MeegleClient(app.log);
   registerRoutes(app, {
     db,
     auth,
@@ -67,6 +70,7 @@ async function main() {
     version: VERSION,
     dataDir: config.dataDir,
     askpass,
+    meegle,
   });
   registerWs(app, { auth, manager, db });
 

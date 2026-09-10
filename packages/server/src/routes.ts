@@ -129,6 +129,8 @@ import {
   worktreeStatus,
 } from "./git/repo.js";
 import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
+import type { MeegleClient } from "./meegle/client.js";
+import { registerMeegleRoutes } from "./meegle/routes.js";
 
 /**
  * WorktreeFailure → HTTP 码。
@@ -178,10 +180,11 @@ export interface RouteDeps {
   /** falcon 数据目录，本地会话的粘贴图片落在 <dataDir>/paste */
   dataDir: string;
   askpass: AskpassHub;
+  meegle: MeegleClient;
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, auth, manager, secrets, askpass } = deps;
+  const { db, auth, manager, secrets, askpass, meegle } = deps;
 
   // 粘贴图片的请求体是原始图片字节。fastify 默认只认 JSON，这里按原样收成 Buffer
   app.addContentTypeParser(
@@ -2138,4 +2141,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       return reply.code(502).send({ error: `图片上传失败：${(err as Error).message}` });
     }
   });
+
+  // ---- 飞书项目（Meegle）----
+  // 放在最后、鉴权钩子之后注册：这些路由同样只认登录 cookie
+  registerMeegleRoutes(app, meegle, db);
 }

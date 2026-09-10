@@ -14,6 +14,7 @@ import { GitPanel } from "./GitPanel.js";
 import { ChangesPanel } from "./ChangesPanel.js";
 import { FilesPanel } from "./FilesPanel.js";
 import { ForwardPanel } from "./ForwardPanel.js";
+import { MeeglePanel } from "./MeeglePanel.js";
 import { TabBar } from "./TabBar.js";
 import { SessionOverview } from "./SessionOverview.js";
 import { ProjectEmpty } from "./ProjectEmpty.js";
@@ -172,6 +173,9 @@ export function App() {
       case "toggleFilesPanel":
         s.toggleRightPanel("files");
         return;
+      case "toggleMeeglePanel":
+        s.toggleRightPanel("meegle");
+        return;
       case "overview":
         s.showOverview();
         return;
@@ -314,6 +318,7 @@ export function App() {
             {rightPanel === "changes" && <ChangesPanel />}
             {rightPanel === "git" && <GitPanel />}
             {rightPanel === "forward" && <ForwardPanel />}
+            {rightPanel === "meegle" && <MeeglePanel />}
           </ResizableSlot>
         )}
         <RightBar />
