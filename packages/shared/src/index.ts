@@ -1183,6 +1183,14 @@ export interface MeegleWorkItemDetail extends MeegleWorkItem {
   description?: string;
   /** 保留图片、链接、代码的原始 Markdown，仅剥掉 HTML 注释 */
   descriptionMarkdown?: string;
+  /** 工作项附件字段中的文件；URL 可能仍要求飞书登录态 */
+  attachments?: { name?: string; url: string }[];
+  /** 附件字段读取失败时保留基础详情，并在复制内容中明确提示 */
+  attachmentsUnavailable?: boolean;
+  /** 评论正文及评论所带附件；人员标识不进入 AI 上下文 */
+  comments?: { content: string; createdAt?: string; attachments?: string[] }[];
+  /** 评论接口失败时保留基础详情，并在复制内容中明确提示 */
+  commentsUnavailable?: boolean;
   /** 按字段元数据筛选的排障信息，不包含人员字段 */
   contextFields?: { name: string; value: string }[];
   /** 基础详情可读但补充字段请求失败；复制上下文不能把这种降级当作完整读取。 */

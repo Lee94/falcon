@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   chunk,
   cliErrorText,
+  commentArgs,
   groupForLookup,
   isValidHost,
   isValidKey,
@@ -33,6 +34,12 @@ import {
   viewSearchArgs,
   workItemUrl,
 } from "./command.js";
+
+test("comment list argv carries the project, item and page", () => {
+  assert.deepEqual(commentArgs("p1", "123", 2), [
+    "comment", "list", "--project-key=p1", "--work-item-id=123", "--page-num=2", "--format", "json",
+  ]);
+});
 
 test("argv 用 --flag=value，用户输入以 - 开头也不会被当成 flag", () => {
   assert.deepEqual(viewSearchArgs("p1", "story", "-foo"), [

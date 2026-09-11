@@ -28,14 +28,15 @@ describe("AskpassHub", () => {
     await assert.rejects(p2, AskpassCancelled);
   });
 
-  it("lists prompts still waiting so a late viewer can catch up", () => {
+  it("lists prompts still waiting so a late viewer can catch up", async () => {
     const hub = new AskpassHub();
-    void hub.request({ prompt: "pw", sessionId: "s1" });
+    const request = hub.request({ prompt: "pw", sessionId: "s1" });
     const listed = hub.pendingPrompts();
     assert.equal(listed.length, 1);
     assert.equal(listed[0]!.prompt, "pw");
     assert.equal(listed[0]!.sessionId, "s1");
     hub.cancel(listed[0]!.id);
+    await assert.rejects(request, AskpassCancelled);
     assert.equal(hub.pendingPrompts().length, 0);
   });
 });

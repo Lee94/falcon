@@ -5,6 +5,7 @@ import type { MeegleWorkItem } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp } from "../store.js";
 import { formatMeegleContext } from "../lib/meegleContext.js";
+import { meegleDisplayKey } from "../lib/meegleKey.js";
 import { writeClipboardText } from "../lib/clipboard.js";
 import { openContextMenu } from "./common/Menu.js";
 
@@ -14,7 +15,15 @@ export function useMeegleCopyMenu(onUnavailable?: (err: unknown) => void) {
   const { t } = useTranslation();
   const copyKey = async (item: Target) => {
     try {
-      await navigator.clipboard.writeText(item.id);
+      await writeClipboardText(async () => {
+        try {
+          return meegleDisplayKey(await api.meegleWorkItem(item.spaceKey, item.id));
+        } catch (err) {
+          useApp.getState().handleApiError(err);
+          onUnavailable?.(err);
+          throw err;
+        }
+      });
       toast.success(t("meegle.copyKeyDone"));
     } catch {
       toast.error(t("meegle.copyFailed"));

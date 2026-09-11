@@ -14,18 +14,17 @@ const detail: MeegleWorkItemDetail = {
 };
 const t = (key: string) => key;
 
-test("AI context keeps source identity and explicitly identifies missing information", () => {
+test("AI context omits work item metadata and keeps only the useful content sections", () => {
   const output = formatMeegleContext(detail, "2026-01-02T03:04:05Z", t);
-  assert.match(output, /copyKeyLabel: 123/);
-  assert.match(output, /contextSpaceKey: space/);
-  assert.match(output, /contextTypeKey: issue/);
-  assert.match(output, /d_business: meegle.contextUnavailable/);
-  assert.match(output, /contextFetchedAt: 2026-01-02T03:04:05Z/);
-  assert.match(output, /d_currentNode: Fixing/);
+  assert.match(output, /^# Broken chart/);
+  assert.match(output, /meegle\.contextDescription/);
+  assert.match(output, /meegle\.contextAttachments/);
+  assert.match(output, /meegle\.contextComments/);
+  assert.doesNotMatch(output, /123|space|issue|2026-01-02|Fixing/);
   assert.doesNotMatch(output, /Private/);
 });
 
-test("AI context preserves Markdown images, code and custom fields instead of preview text", () => {
+test("AI context preserves description Markdown, attachments and comments", () => {
   const markdown = "Steps\n\n```js\nthrow new Error('oops');\n```\n\n![screen](https://example.com/a.png)";
   const output = formatMeegleContext({
     ...detail,
@@ -34,10 +33,18 @@ test("AI context preserves Markdown images, code and custom fields instead of pr
     description: "Steps [图片]",
     descriptionMarkdown: markdown,
     contextFields: [{ name: "Environment", value: "Browser v1\nOS v2" }],
+    attachments: [{ name: "trace.txt", url: "https://example.com/trace.txt" }],
+    comments: [{
+      content: "Please check this case",
+      createdAt: "2026-01-03 10:00:00",
+      attachments: ["https://example.com/comment.png"],
+    }],
   }, "now", t);
   assert.ok(output.includes(markdown));
-  assert.ok(output.includes("### Environment\n\nBrowser v1\nOS v2"));
-  assert.match(output, /d_business: Charts/);
+  assert.ok(output.includes("[trace.txt](https://example.com/trace.txt)"));
+  assert.ok(output.includes("Please check this case"));
+  assert.ok(output.includes("https://example.com/comment.png"));
+  assert.doesNotMatch(output, /Environment|Browser v1|Charts/);
   assert.doesNotMatch(output, /\n## Not a section/);
   assert.doesNotMatch(output, /\[图片\]/);
 });
@@ -45,13 +52,15 @@ test("AI context preserves Markdown images, code and custom fields instead of pr
 test("older details fall back to their available description without inventing data", () => {
   const output = formatMeegleContext({ ...detail, description: "Original text" }, "now", t);
   assert.ok(output.includes("Original text"));
-  assert.match(output, /contextGapsNote/);
-  assert.match(output, /contextAttachmentsNote/);
+  assert.match(output, /contextUnavailable/);
 });
 
-test("failed supplementary reads must not become a seemingly complete clipboard context", () => {
-  assert.throws(() => formatMeegleContext({
+test("incomplete comment reads are disclosed without discarding title and description", () => {
+  const output = formatMeegleContext({
     ...detail,
-    contextFieldsUnavailable: true,
-  }, "now", t), /copyContextFailed/);
+    description: "Original text",
+    commentsUnavailable: true,
+  }, "now", t);
+  assert.ok(output.includes("Original text"));
+  assert.match(output, /contextCommentsIncomplete/);
 });

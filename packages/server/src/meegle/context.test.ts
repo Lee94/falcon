@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
-  businessText, detailContext, fieldsArgs, isContextField, mqlNextArgs,
-  mqlRecent, mqlSearch, normalizeDetail, normalizeFields, normalizeMqlRows, workItemArgs,
+  businessText, detailContext, fieldsArgs, isAttachmentField, isContextField, mqlNextArgs,
+  mqlRecent, mqlSearch, normalizeComments, normalizeDetail, normalizeFields, normalizeMqlRows, workItemArgs,
 } from "./command.js";
 
 const metadata = normalizeFields({
@@ -21,6 +21,7 @@ const metadata = normalizeFields({
     { field_key: "version", field_name: "影响版本", field_type: "workitem_related_multi_select" },
     { field_key: "logs", field_name: "日志", field_type: "multi-text" },
     { field_key: "links", field_name: "相关链接", field_type: "link" },
+    { field_key: "multi_attachment", field_name: "附件", field_type: "multi-file" },
     { field_key: "owner", field_name: "环境负责人", field_type: "user" },
     { field_key: "email", field_name: "邮箱", field_type: "text" },
     { field_key: "users", field_name: "复现用户", field_type: "multi-user" },
@@ -54,6 +55,10 @@ test("detail context retains diagnosis text, code and image links, excludes pers
     { key: "version", value: [{ id: 123, name: "v1.2.3" }] },
     { key: "logs", value: "```text\nError: boom\n```" },
     { key: "links", value: { name: "trace", url: "https://example.com/trace" } },
+    { key: "multi_attachment", value: [
+      { file_name: "screen.png", file_url: "https://example.com/screen.png" },
+      { name: "trace.txt", url: "https://example.com/trace.txt" },
+    ] },
     { key: "owner", value: { name: "某人", email: "private@example.com" } },
     { key: "email", value: "private@example.com" },
     { key: "users", value: [{ name: "某人", email: "private@example.com" }] },
@@ -62,11 +67,38 @@ test("detail context retains diagnosis text, code and image links, excludes pers
   ] }, metadata.items);
   assert.equal(result.business, "数据分析 / AI");
   assert.equal(result.contextFields.length, 7);
+  assert.deepEqual(result.attachments, [
+    { name: "screen.png", url: "https://example.com/screen.png" },
+    { name: "trace.txt", url: "https://example.com/trace.txt" },
+  ]);
   assert.equal(result.contextFields[0].value, markdown.replace(/<!--[\s\S]*?-->/g, ""));
   assert.deepEqual(result.contextFields.find((f) => f.name === "影响版本"), { name: "影响版本", value: "v1.2.3" });
   assert.ok(!JSON.stringify(result).includes("private@example.com"));
   assert.ok(metadata.items.filter(isContextField).every((f) => !["owner", "email", "users", "template_version"].includes(f.key)));
+  assert.equal(metadata.items.filter(isAttachmentField).length, 1);
   assert.deepEqual(detailContext({ work_item_fields: [{ key: "logs", value: { email: "x" } }] }, metadata.items).contextFields, []);
+});
+
+test("comments retain only content, time and attachment URLs", () => {
+  assert.deepEqual(normalizeComments({
+    comments: [
+      {
+        content: "  已复现\n",
+        created_at: "2026-09-11 10:53:20",
+        creator: "private-user-key",
+        file_url: "https://example.com/comment.png",
+      },
+      { content: "", file_url: "" },
+    ],
+    pagination: { total_pages: 3 },
+  }), {
+    comments: [{
+      content: "已复现",
+      createdAt: "2026-09-11 10:53:20",
+      attachments: ["https://example.com/comment.png"],
+    }],
+    totalPages: 3,
+  });
 });
 
 test("descriptionMarkdown strips only HTML comments, legacy description stays compact", () => {

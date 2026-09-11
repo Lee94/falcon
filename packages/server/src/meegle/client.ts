@@ -34,11 +34,12 @@ import {
   CLI_PAGE_SIZE,
   businessText,
   chunk,
+  commentArgs,
   detailContext,
   fieldsArgs,
   firstLine,
   groupForLookup,
-  isContextField,
+  isAttachmentField,
   loginArgs,
   meArgs,
   mqlByIds,
@@ -47,6 +48,7 @@ import {
   mqlSearch,
   multiViewItemsArgs,
   normalizeDetail,
+  normalizeComments,
   normalizeFields,
   normalizeMultiViewItems,
   normalizeMqlRows,
@@ -611,7 +613,9 @@ export class MeegleClient {
         if (!detail) throw new MeegleError("cli-error", "工作项不存在或没有权限");
         try {
           const fields = await this.fields(spaceKey, detail.typeKey, opts);
-          const keys = fields.filter((f) => f.key === "business" || isContextField(f)).map((f) => f.key);
+          const keys = fields
+            .filter((f) => f.key === "business" || isAttachmentField(f))
+            .map((f) => f.key);
           if (keys.length) {
             const extra = await this.call(workItemArgs(spaceKey, id, keys));
             Object.assign(detail, detailContext(extra, fields));
@@ -623,6 +627,24 @@ export class MeegleClient {
           // 可选字段配置 / 读取权限不应挡住基础详情；不拿 ID 假装业务名称。
           this.log.warn(`meegle 详情上下文补充失败: ${(err as Error).message}`);
           detail.contextFieldsUnavailable = true;
+          detail.attachmentsUnavailable = true;
+        }
+        try {
+          const first = normalizeComments(await this.call(commentArgs(spaceKey, id, 1)));
+          detail.comments = first.comments;
+          // 评论单页 20 条。完整上下文比静默截断更可靠，但设上限避免异常工作项无限放大复制内容。
+          const pages = Math.min(first.totalPages, 10);
+          for (let page = 2; page <= pages; page++) {
+            detail.comments.push(...normalizeComments(
+              await this.call(commentArgs(spaceKey, id, page))
+            ).comments);
+          }
+          if (first.totalPages > pages) detail.commentsUnavailable = true;
+        } catch (err) {
+          if (err instanceof MeegleError &&
+              (err.reason === "not-authenticated" || err.reason === "not-installed")) throw err;
+          this.log.warn(`meegle 评论读取失败: ${(err as Error).message}`);
+          detail.commentsUnavailable = true;
         }
         return detail;
       },

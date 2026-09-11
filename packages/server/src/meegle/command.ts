@@ -176,6 +176,18 @@ export function workItemArgs(spaceKey: string, id: string, fields?: string[]): s
   ];
 }
 
+export function commentArgs(spaceKey: string, id: string, page: number): string[] {
+  return [
+    "comment",
+    "list",
+    `--project-key=${spaceKey}`,
+    `--work-item-id=${id}`,
+    `--page-num=${page}`,
+    "--format",
+    "json",
+  ];
+}
+
 // ---- MQL ----
 
 const MQL_FIELDS = "`work_item_id`, `name`, `work_item_status`, `updated_at`, `business`";
@@ -311,6 +323,10 @@ export function isContextField(field: FieldMetadata): boolean {
     && /^(text|multi-pure-text|multi-text|multi_text|rich_text|rich-text|textarea|select|multi-select|tree-select|tree-multi-select|cascade_select|link|url|number|workitem_related_(multi_)?select)$/.test(field.type);
 }
 
+export function isAttachmentField(field: FieldMetadata): boolean {
+  return /附件|attachment/i.test(field.name) && /^(multi-)?file$/.test(field.type);
+}
+
 function contextValue(value: unknown, field: FieldMetadata): string | undefined {
   if (typeof value === "string") {
     if (/select/.test(field.type)) return field.options.get(value);
@@ -331,21 +347,60 @@ function contextValue(value: unknown, field: FieldMetadata): string | undefined 
 }
 
 export function detailContext(data: unknown, metadata: FieldMetadata[]): {
-  business?: string; contextFields: { name: string; value: string }[];
+  business?: string;
+  contextFields: { name: string; value: string }[];
+  attachments: { name?: string; url: string }[];
 } {
   const fields = isObj(data) && Array.isArray(data.work_item_fields) ? data.work_item_fields : [];
   const byKey = new Map(metadata.map((f) => [f.key, f]));
   const contextFields: { name: string; value: string }[] = [];
+  const attachments: { name?: string; url: string }[] = [];
   let business: string | undefined;
   for (const field of fields) {
     if (!isObj(field) || typeof field.key !== "string") continue;
     const meta = byKey.get(field.key);
     if (field.key === "business") business = businessText(field.value, meta?.options);
+    if (meta && isAttachmentField(meta)) {
+      const values = Array.isArray(field.value) ? field.value : [field.value];
+      for (const value of values) {
+        if (!isObj(value)) continue;
+        const url = str(value.url) ?? str(value.file_url);
+        if (!url || !/^https?:\/\//.test(url)) continue;
+        const name = str(value.name) ?? str(value.file_name);
+        attachments.push({ ...(name ? { name } : {}), url });
+      }
+    }
     if (!meta || !isContextField(meta)) continue;
     const value = contextValue(field.value, meta);
     if (value) contextFields.push({ name: meta.name, value });
   }
-  return { business, contextFields };
+  return { business, contextFields, attachments };
+}
+
+export function normalizeComments(data: unknown): {
+  comments: NonNullable<MeegleWorkItemDetail["comments"]>;
+  totalPages: number;
+} {
+  const rows = isObj(data) && Array.isArray(data.comments) ? data.comments : [];
+  const comments: NonNullable<MeegleWorkItemDetail["comments"]> = [];
+  for (const row of rows) {
+    if (!isObj(row)) continue;
+    const content = str(row.content)?.trim() ?? "";
+    const rawFiles = Array.isArray(row.file_url) ? row.file_url : [row.file_url];
+    const attachments = rawFiles
+      .map(str)
+      .filter((url): url is string => Boolean(url && /^https?:\/\//.test(url)));
+    if (!content && !attachments.length) continue;
+    const createdAt = str(row.created_at);
+    comments.push({
+      content,
+      ...(createdAt ? { createdAt } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    });
+  }
+  const pagination = isObj(data) && isObj(data.pagination) ? data.pagination : {};
+  const totalPages = Math.max(1, Number(pagination.total_pages) || 1);
+  return { comments, totalPages };
 }
 
 /** LIMIT doesn't change MQL's fixed 50-row transport page; use its opaque session to fetch page 2. */
