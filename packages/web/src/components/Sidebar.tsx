@@ -1,4 +1,4 @@
-import { useEffect, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Archive,
@@ -27,6 +27,7 @@ import {
 import { memberBasename } from "../lib/multiDerive.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
+import { hasMeegleWorkItemType, parseMeegleWorkItemDrag } from "../lib/meegleDrag.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { menuAnchor, openContextMenu } from "./common/Menu.js";
@@ -50,6 +51,7 @@ export function Sidebar() {
   const openMenu = useApp((s) => s.openMenu);
   const refreshChanges = useApp((s) => s.refreshChanges);
   const showArchived = useApp((s) => s.showArchived);
+  const [meegleDragging, setMeegleDragging] = useState(false);
   const actions = useActions();
   const servers = groupServers(
     projects,
@@ -64,8 +66,27 @@ export function Sidebar() {
     return pollWhileVisible(() => void refreshChanges(), CHANGES_POLL_MS);
   }, [refreshChanges]);
 
+  useEffect(() => {
+    const clear = () => setMeegleDragging(false);
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, []);
+
   return (
-    <aside className="flex min-h-0 flex-1 flex-col border-r bg-sidebar text-sidebar-foreground">
+    <aside
+      className="flex min-h-0 flex-1 flex-col border-r bg-sidebar text-sidebar-foreground"
+      onDragEnter={(e) => {
+        if (hasMeegleWorkItemType(e.dataTransfer)) setMeegleDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setMeegleDragging(false);
+      }}
+      onDrop={() => setMeegleDragging(false)}
+    >
       {/* 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 + / 右键 / 命令面板 */}
       <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
         {empty && (
@@ -124,6 +145,7 @@ export function Sidebar() {
             onProjectContext={(project, e) => {
               openContextMenu(e, actions.projectMenuItems(project));
             }}
+            meegleDragging={meegleDragging}
           />
         ))}
       </div>
@@ -173,6 +195,7 @@ function ServerNode({
   onContextMenu,
   onProjectMenu,
   onProjectContext,
+  meegleDragging,
 }: {
   server: ServerGroup;
   heads: Record<string, ProjectHead>;
@@ -188,6 +211,7 @@ function ServerNode({
   onContextMenu: (e: MouseEvent) => void;
   onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
   onProjectContext: (project: Project, e: MouseEvent) => void;
+  meegleDragging: boolean;
 }) {
   const { t } = useTranslation();
   const Icon = server.kind === "local" ? Monitor : Server;
@@ -257,6 +281,7 @@ function ServerNode({
               onToggleKey={onToggleKey}
               onProjectMenu={onProjectMenu}
               onProjectContext={onProjectContext}
+              meegleDragging={meegleDragging}
             />
           ))
         ))}
@@ -274,6 +299,7 @@ function FolderNode({
   onToggleKey,
   onProjectMenu,
   onProjectContext,
+  meegleDragging,
 }: {
   folder: FolderGroup;
   heads: Record<string, ProjectHead>;
@@ -284,6 +310,7 @@ function FolderNode({
   onToggleKey: (key: string) => void;
   onProjectMenu: (project: Project, e: { currentTarget: HTMLElement }) => void;
   onProjectContext: (project: Project, e: MouseEvent) => void;
+  meegleDragging: boolean;
 }) {
   const { t } = useTranslation();
   const { project, worktrees } = folder;
@@ -313,6 +340,9 @@ function FolderNode({
         onSelect={() => onSelectProject(project.id)}
         onMenu={(e) => onProjectMenu(project, e)}
         onContextMenu={(e) => onProjectContext(project, e)}
+        meegleDrop={
+          meegleDragging && !project.worktree ? { sourceId: project.id } : undefined
+        }
       />
       {open && (
         <>
@@ -439,6 +469,7 @@ function TreeRow({
   onSelect,
   onMenu,
   onContextMenu,
+  meegleDrop,
 }: {
   depth: number;
   expanded?: boolean;
@@ -455,9 +486,21 @@ function TreeRow({
   onSelect?: () => void;
   onMenu?: (e: { currentTarget: HTMLElement }) => void;
   onContextMenu?: (e: MouseEvent) => void;
+  meegleDrop?: { sourceId: string };
 }) {
   const { t } = useTranslation();
+  const openWorktreeForm = useApp((s) => s.openWorktreeForm);
+  const [dropOver, setDropOver] = useState(false);
   const leaf = !onToggle;
+  const onDragOver = meegleDrop
+    ? (e: DragEvent<HTMLDivElement>) => {
+        if (!hasMeegleWorkItemType(e.dataTransfer)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+        setDropOver(true);
+      }
+    : undefined;
   return (
     <div
       role={onSelect ? "button" : undefined}
@@ -465,16 +508,45 @@ function TreeRow({
       aria-current={selected ? "true" : undefined}
       title={
         onContextMenu
-          ? `${title ?? label} · ${t("sidebar.projectContext")}`
+          ? `${title ?? label} · ${
+              meegleDrop ? t("sidebar.meegleDropTarget") : t("sidebar.projectContext")
+            }`
           : title
       }
       className={cn(
         "group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent",
         onSelect && "cursor-pointer",
-        selected && "bg-accent"
+        selected && "bg-accent",
+        meegleDrop && "bg-primary/5 ring-1 ring-inset ring-primary/40",
+        dropOver && "bg-accent ring-primary"
       )}
       style={{ paddingLeft: 4 + depth * 12 }}
       onClick={onSelect}
+      onDragOver={onDragOver}
+      onDragLeave={
+        meegleDrop
+          ? (e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropOver(false);
+            }
+          : undefined
+      }
+      onDrop={
+        meegleDrop
+          ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDropOver(false);
+              const payload = parseMeegleWorkItemDrag(e.dataTransfer);
+              if (!payload) return;
+              openWorktreeForm(meegleDrop.sourceId, {
+                name: payload.id,
+                branch: payload.id,
+                mode: "new-branch",
+                startPoint: "HEAD",
+              });
+            }
+          : undefined
+      }
       onContextMenu={
         onContextMenu
           ? (e) => {

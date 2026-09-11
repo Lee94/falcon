@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import {
   ArrowLeft,
   ExternalLink,
   FileText,
+  GripVertical,
   Layers,
   ListTodo,
   LogIn,
@@ -48,7 +50,9 @@ import {
   peekMeegleCache,
   writeMeegleCache,
 } from "../lib/meegleCache.js";
+import { canDragMeegleWorkItem, writeMeegleWorkItemDrag } from "../lib/meegleDrag.js";
 import { useApp } from "../store.js";
+import { filterMeegleItems as filterItems, groupMeegleItems, meeglePage, type ItemGroup } from "../lib/meegleGroups.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -60,6 +64,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Segmented } from "./common/Field.js";
+import { useMeegleCopyMenu } from "./useMeegleCopyMenu.js";
 
 /**
  * 右侧「飞书项目」面板：宿主机上 meegle CLI 的一个窗口。
@@ -126,6 +131,7 @@ interface PinsApi {
 }
 
 const PinsContext = createContext<PinsApi | null>(null);
+const UnavailableContext = createContext<((err: unknown) => void) | undefined>(undefined);
 
 function usePins(): PinsApi {
   const v = useContext(PinsContext);
@@ -417,6 +423,7 @@ export function MeeglePanel() {
 
   return (
     <PinsContext.Provider value={pinsApi}>
+      <UnavailableContext.Provider value={onUnavailable}>
       <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
         <div className="flex h-8.5 shrink-0 items-center gap-2 border-b pr-1.5 pl-3">
           <ListTodo className="size-3.5 shrink-0 text-muted-foreground" />
@@ -499,6 +506,7 @@ export function MeeglePanel() {
           </div>
         )}
       </aside>
+      </UnavailableContext.Provider>
     </PinsContext.Provider>
   );
 }
@@ -699,26 +707,22 @@ function TodoSection({
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const gen = useRef(0);
+  const requestedPage = useRef(1);
   const epochRef = useRef(epoch);
 
   const load = useCallback(
     async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
+      requestedPage.current = nextPage;
       setLoading(true);
       setError(null);
       try {
         const res = await api.meegleTodo(action, nextPage, fresh);
         if (gen.current !== my) return;
-        setItems((cur) => {
-          const next = nextPage === 1 ? res.items : [...cur, ...res.items];
-          writeMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey, {
-            items: next,
-            page: res.page,
-            hasMore: res.hasMore,
-            total: res.total,
-          });
-          return next;
-        });
+        // Cache the last successful page, never an accumulated prefix. A failed
+        // navigation keeps both the visible records and their page number intact.
+        writeMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey, res);
+        setItems(res.items);
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
@@ -752,9 +756,10 @@ function TodoSection({
     }
     if (hit && !force && !meegleCacheStale(cacheKey)) {
       setLoading(false);
-      return;
+      return () => { ++gen.current; };
     }
-    void load(1, force);
+    void load(hit?.page ?? 1, force);
+    return () => { ++gen.current; };
   }, [cacheKey, load, epoch]);
 
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
@@ -772,7 +777,7 @@ function TodoSection({
           className="mt-1.5"
           value={filter}
           onChange={setFilter}
-          placeholder={t("meegle.filterPlaceholder")}
+          placeholder={t("meegle.filterPagePlaceholder")}
         />
       </div>
       <ItemList
@@ -784,6 +789,7 @@ function TodoSection({
         hasMore={hasMore}
         total={total}
         onMore={(p) => void load(p)}
+        onRetry={() => void load(requestedPage.current)}
         renderRow={(it) => (
           <ItemRow key={`${it.spaceKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
             <TodoMeta item={it} action={action} />
@@ -840,6 +846,10 @@ function SpaceSection({
   const spacesEpoch = useRef(epoch);
   const typesEpoch = useRef(epoch);
   const searchEpoch = useRef(epoch);
+  const resultsScroll = useRef<HTMLDivElement>(null);
+  const resetResultsScroll = useCallback(() => {
+    if (resultsScroll.current) resultsScroll.current.scrollTop = 0;
+  }, []);
 
   useEffect(() => {
     const force = epoch !== spacesEpoch.current;
@@ -1025,7 +1035,7 @@ function SpaceSection({
           </div>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={resultsScroll} className="min-h-0 flex-1 overflow-y-auto">
         {spaces && spaces.length === 0 ? (
           <Hint>{spacesError ?? t("meegle.noSpaces")}</Hint>
         ) : !spaceKey ? (
@@ -1040,6 +1050,7 @@ function SpaceSection({
             result={result}
             onOpenView={(v) => onOpenView(spaceKey, v, space?.name)}
             onOpenItem={onOpenItem}
+            onPageChange={resetResultsScroll}
           />
         ) : recent ? (
           <>
@@ -1049,13 +1060,11 @@ function SpaceSection({
             {recent.length === 0 ? (
               <Hint>{t("meegle.empty")}</Hint>
             ) : (
-              <ul>
-                {recent.map((it) => (
+              <LocalGroupedItems items={recent} onPageChange={resetResultsScroll} renderRow={(it) => (
                   <ItemRow key={it.id} item={it} onClick={() => onOpenItem(it)}>
                     {[it.status, it.updatedAt && dateOnly(it.updatedAt)].filter(Boolean).join(" · ")}
                   </ItemRow>
-                ))}
-              </ul>
+                )} />
             )}
           </>
         ) : loading ? (
@@ -1072,10 +1081,12 @@ function SearchResults({
   result,
   onOpenView,
   onOpenItem,
+  onPageChange,
 }: {
   result: MeegleSearchResult;
   onOpenView: (view: MeegleView) => void;
   onOpenItem: (item: MeegleWorkItem) => void;
+  onPageChange: () => void;
 }) {
   const { t } = useTranslation();
   const nothing = result.views.length === 0 && result.items.length === 0;
@@ -1110,13 +1121,11 @@ function SearchResults({
           <GroupTitle>
             {t("meegle.items")} <span className="text-muted-foreground/70">{result.items.length}</span>
           </GroupTitle>
-          <ul>
-            {result.items.map((it) => (
+          <LocalGroupedItems items={result.items} onPageChange={onPageChange} renderRow={(it) => (
               <ItemRow key={`${it.typeKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
                 {[it.typeName, it.status, it.updatedAt && dateOnly(it.updatedAt)].filter(Boolean).join(" · ")}
               </ItemRow>
-            ))}
-          </ul>
+            )} />
         </>
       )}
       {result.errors.length > 0 && (
@@ -1213,6 +1222,7 @@ const PIN_ICONS = { view: Table2, multiProjectView: Layers, workitem: FileText }
 function PinRow({ pin, onOpen }: { pin: MeeglePin; onOpen: () => void }) {
   const { t } = useTranslation();
   const pins = usePins();
+  const getCopyMenuProps = useMeegleCopyMenu(useContext(UnavailableContext));
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(pin.label);
   const Icon = PIN_ICONS[pin.kind];
@@ -1257,8 +1267,25 @@ function PinRow({ pin, onOpen }: { pin: MeeglePin; onOpen: () => void }) {
         <>
           <button
             type="button"
-            className="flex w-full items-start gap-2 px-3 py-1.5 pr-20 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50"
+            draggable={
+              pin.kind === "workitem" &&
+              canDragMeegleWorkItem({ id: pin.targetId, spaceKey: pin.spaceKey })
+            }
+            className={cn(
+              "flex w-full items-start gap-2 px-3 py-1.5 pr-20 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50",
+              pin.kind === "workitem" && "cursor-grab active:cursor-grabbing"
+            )}
+            title={pin.kind === "workitem" ? t("meegle.dragHint") : undefined}
             onClick={onOpen}
+            onDragStart={(e) => {
+              if (pin.kind === "workitem") {
+                writeMeegleWorkItemDrag(e.dataTransfer, {
+                  id: pin.targetId,
+                  spaceKey: pin.spaceKey,
+                });
+              }
+            }}
+            {...getCopyMenuProps(pin.kind === "workitem" ? { id: pin.targetId, spaceKey: pin.spaceKey } : null)}
           >
             <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1">
@@ -1368,11 +1395,13 @@ function ViewItems({
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const gen = useRef(0);
+  const requestedPage = useRef(1);
   const epochRef = useRef(epoch);
 
   const load = useCallback(
     async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
+      requestedPage.current = nextPage;
       setLoading(true);
       setError(null);
       try {
@@ -1380,16 +1409,9 @@ function ViewItems({
           ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage, fresh)
           : await api.meegleViewItems(spaceKey, viewId, nextPage, fresh);
         if (gen.current !== my) return;
-        setItems((cur) => {
-          const next = nextPage === 1 ? res.items : [...cur, ...res.items];
-          writeMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey, {
-            items: next,
-            page: res.page,
-            hasMore: res.hasMore,
-            total: res.total,
-          });
-          return next;
-        });
+        // Keep the same last-successful-page contract as the todo list.
+        writeMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey, res);
+        setItems(res.items);
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
@@ -1420,12 +1442,14 @@ function ViewItems({
       setPage(1);
       setHasMore(false);
       setTotal(undefined);
+      setError(null);
     }
     if (hit && !force && !meegleCacheStale(cacheKey)) {
       setLoading(false);
-      return;
+      return () => { ++gen.current; };
     }
-    void load(1, force);
+    void load(hit?.page ?? 1, force);
+    return () => { ++gen.current; };
   }, [cacheKey, load, epoch]);
 
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
@@ -1454,7 +1478,7 @@ function ViewItems({
         }
       />
       <div className="shrink-0 border-b px-2 py-1.5">
-        <SearchBox value={filter} onChange={setFilter} placeholder={t("meegle.filterPlaceholder")} />
+        <SearchBox value={filter} onChange={setFilter} placeholder={t("meegle.filterPagePlaceholder")} />
       </div>
       <ItemList
         items={items}
@@ -1465,6 +1489,7 @@ function ViewItems({
         hasMore={hasMore}
         total={total}
         onMore={(p) => void load(p)}
+        onRetry={() => void load(requestedPage.current)}
         renderRow={(it) => (
           <ItemRow key={`${it.spaceKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
             {[
@@ -1497,6 +1522,7 @@ function ItemDetail({
 }) {
   const { t } = useTranslation();
   const { spaceKey, id, title } = drill;
+  const getCopyMenuProps = useMeegleCopyMenu(onUnavailable);
   const cacheKey = `item:${spaceKey}:${id}`;
   const [detail, setDetail] = useState<MeegleWorkItemDetail | null>(
     () => peekMeegleCache<MeegleWorkItemDetail>(cacheKey) ?? null
@@ -1570,7 +1596,17 @@ function ItemDetail({
             <div className="mt-1.5 flex flex-wrap gap-1">
               {detail.status && <Pill>{detail.status}</Pill>}
               {detail.priority && <Pill>{detail.priority}</Pill>}
-              <Pill muted>#{detail.id}</Pill>
+              <span
+                className="inline-flex cursor-grab items-center gap-0.5 active:cursor-grabbing"
+                draggable={canDragMeegleWorkItem({ id, spaceKey })}
+                tabIndex={0}
+                title={t("meegle.dragHint")}
+                onDragStart={(e) => writeMeegleWorkItemDrag(e.dataTransfer, { id, spaceKey })}
+                {...getCopyMenuProps({ id, spaceKey })}
+              >
+                <GripVertical className="size-3 text-muted-foreground" aria-hidden />
+                <Pill muted>#{detail.id}</Pill>
+              </span>
             </div>
             <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
               <Row label={t("meegle.d_space")}>{detail.spaceName}</Row>
@@ -1644,6 +1680,58 @@ function ItemDetail({
 
 // ---- 小件 ----
 
+function GroupedItems<T extends MeegleWorkItem>({
+  items, renderRow,
+}: { items: T[]; renderRow: (item: T) => ReactNode }) {
+  const { t } = useTranslation();
+  const groups = useMemo(() => groupMeegleItems(items), [items]);
+  const levels = ["business", "type", "status"] as const;
+  const renderGroups = (nodes: ItemGroup<T>[], depth: number): ReactNode => nodes.map(node => (
+    <details key={node.key} open className={cn("border-b", depth > 0 && "ml-2 border-l")}>
+      <summary className="cursor-pointer px-2 py-1.5 text-xs hover:bg-accent/50">
+        <span className="text-muted-foreground">{t(`meegle.group_${levels[depth]}`)} · </span>
+        {node.label ?? t(`meegle.unknown_${levels[depth]}`)}
+        <span className="ml-2 text-muted-foreground">{node.count}</span>
+      </summary>
+      {node.children ? renderGroups(node.children, depth + 1) : <ul>{node.items?.map(renderRow)}</ul>}
+    </details>
+  ));
+  return <>{renderGroups(groups, 0)}</>;
+}
+
+function PageControls({
+  page, count, total, hasMore, loading = false, onPage,
+}: {
+  page: number; count: number; total?: number; hasMore: boolean;
+  loading?: boolean; onPage: (page: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-1 border-t px-2 py-2 text-[11px] text-muted-foreground">
+      <span>{t("meegle.pageSummary", { page, count })}{total !== undefined && ` · ${t("meegle.totalItems", { count: total })}`}</span>
+      <div className="flex gap-1">
+        <Button size="xs" variant="ghost" disabled={loading || page <= 1} onClick={() => onPage(page - 1)}>{t("meegle.previousPage")}</Button>
+        <Button size="xs" variant="ghost" disabled={loading || !hasMore} onClick={() => onPage(page + 1)}>{t("meegle.nextPage")}</Button>
+      </div>
+    </div>
+  );
+}
+
+function LocalGroupedItems<T extends MeegleWorkItem>({
+  items, renderRow, onPageChange,
+}: { items: T[]; renderRow: (item: T) => ReactNode; onPageChange: () => void }) {
+  const { t } = useTranslation();
+  const [requested, setRequested] = useState(1);
+  useEffect(() => setRequested(1), [items]);
+  const current = meeglePage(items, requested);
+  useLayoutEffect(onPageChange, [current.page, onPageChange]);
+  return <>
+    <p className="px-3 py-1 text-[11px] text-muted-foreground">{t("meegle.groupReturnedPage")}</p>
+    <GroupedItems key={current.page} items={current.items} renderRow={renderRow} />
+    <PageControls page={current.page} count={current.items.length} total={items.length} hasMore={current.hasMore} onPage={setRequested} />
+  </>;
+}
+
 /** 待办 / 视图两种列表共用的正文：空态、错误、筛不到、翻页 */
 function ItemList<T extends MeegleWorkItem>({
   items,
@@ -1654,6 +1742,7 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore,
   total,
   onMore,
+  onRetry,
   renderRow,
 }: {
   items: T[];
@@ -1664,11 +1753,17 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore: boolean;
   total?: number;
   onMore: (page: number) => void;
+  onRetry: () => void;
   renderRow: (item: T) => ReactNode;
 }) {
   const { t } = useTranslation();
+  const scroll = useRef<HTMLDivElement>(null);
+  // 页码只在请求成功后改变；加载中或翻页失败时不打断用户原来的阅读位置。
+  useLayoutEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = 0;
+  }, [page]);
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div ref={scroll} className="min-h-0 flex-1 overflow-y-auto">
       {error && items.length === 0 ? (
         <Hint>
           {t("meegle.loadFailed")}
@@ -1681,29 +1776,18 @@ function ItemList<T extends MeegleWorkItem>({
       ) : shown.length === 0 ? (
         <Hint>{t("meegle.noResults")}</Hint>
       ) : (
-        <ul>{shown.map(renderRow)}</ul>
+        <GroupedItems key={page} items={shown} renderRow={renderRow} />
       )}
-      {items.length > 0 && (
-        <LoadMore
-          count={items.length}
-          total={total}
-          hasMore={hasMore}
-          loading={loading}
-          error={error}
-          onMore={() => onMore(page + 1)}
-        />
+      <p className="px-3 py-1 text-[11px] text-muted-foreground">{t("meegle.groupCurrentPage")}</p>
+      {loading && items.length > 0 && <Hint>{t("meegle.loadingList")}</Hint>}
+      {error && (
+        <div className="px-3 py-2 text-xs text-destructive">
+          {error}
+          <Button size="xs" variant="ghost" disabled={loading} onClick={onRetry}>{t("meegle.retry")}</Button>
+        </div>
       )}
+      <PageControls page={page} count={shown.length} total={total} hasMore={hasMore} loading={loading} onPage={onMore} />
     </div>
-  );
-}
-
-function filterItems<T extends MeegleWorkItem & Partial<MeegleTodoItem>>(items: T[], filter: string): T[] {
-  const q = filter.trim().toLowerCase();
-  if (!q) return items;
-  return items.filter((it) =>
-    [it.name, it.id, it.spaceName, it.typeName, it.nodeName, it.stateName, it.status]
-      .filter((s): s is string => Boolean(s))
-      .some((s) => s.toLowerCase().includes(q))
   );
 }
 
@@ -1718,12 +1802,17 @@ function ItemRow({
 }) {
   const { t } = useTranslation();
   const name = item.name || t("meegle.untitled", { id: item.id });
+  const getCopyMenuProps = useMeegleCopyMenu(useContext(UnavailableContext));
   return (
     <li className="group relative border-b">
       <button
         type="button"
-        className="block w-full px-3 py-1.5 pr-8 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50"
+        draggable={canDragMeegleWorkItem(item)}
+        className="block w-full cursor-grab px-3 py-1.5 pr-8 text-left outline-none active:cursor-grabbing hover:bg-accent/50 focus-visible:bg-accent/50"
+        title={t("meegle.dragHint")}
         onClick={onClick}
+        onDragStart={(e) => writeMeegleWorkItemDrag(e.dataTransfer, item)}
+        {...getCopyMenuProps(item)}
       >
         <span className="line-clamp-2 text-xs leading-snug break-words" title={name}>
           {name}
@@ -1833,37 +1922,6 @@ function SearchBox({
         >
           <X className="size-3" />
         </button>
-      )}
-    </div>
-  );
-}
-
-function LoadMore({
-  count,
-  total,
-  hasMore,
-  loading,
-  error,
-  onMore,
-}: {
-  count: number;
-  total?: number;
-  hasMore: boolean;
-  loading: boolean;
-  error: string | null;
-  onMore: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
-      <span className="min-w-0 flex-1 truncate">
-        {total != null ? t("meegle.loadedOf", { count, total }) : count}
-        {error && <span className="ml-1 text-destructive">{error}</span>}
-      </span>
-      {hasMore && (
-        <Button size="xs" variant="outline" className="h-6" disabled={loading} onClick={onMore}>
-          {loading ? t("meegle.loadingList") : t("meegle.loadMore")}
-        </Button>
       )}
     </div>
   );

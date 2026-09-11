@@ -9,6 +9,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import {
+  MEEGLE_PAGE_SIZE,
   TtlCache,
   type MeegleLogin,
   type MeegleSearchResult,
@@ -27,19 +28,26 @@ import {
 } from "@falcon/shared";
 import { resolveLocalBaseEnv } from "../sessions/loginEnv.js";
 import { resolveMeegleBin } from "./bin.js";
+import { logicalPage } from "./pagination.js";
 import {
   CLI_ENV,
   CLI_PAGE_SIZE,
+  businessText,
   chunk,
+  detailContext,
+  fieldsArgs,
   firstLine,
   groupForLookup,
+  isContextField,
   loginArgs,
   meArgs,
   mqlByIds,
+  mqlNextArgs,
   mqlRecent,
   mqlSearch,
   multiViewItemsArgs,
   normalizeDetail,
+  normalizeFields,
   normalizeMultiViewItems,
   normalizeMqlRows,
   normalizeSpaces,
@@ -64,6 +72,7 @@ import {
   workItemArgs,
   workItemUrl,
   type MqlRow,
+  type FieldMetadata,
 } from "./command.js";
 
 /** 一次 CLI 调用的上限。每条命令都是一次到飞书的网络往返，实测 0.5–2s，30s 已是病态 */
@@ -84,8 +93,8 @@ const FANOUT = 3;
 /** 撞限流后等多久再试；重试次数见 call() */
 const RATE_LIMIT_BACKOFF_MS = 700;
 const RATE_LIMIT_RETRIES = 2;
-/** 搜索结果上限：面板就那么窄，翻不到几十条以外 */
-const SEARCH_CAP = 60;
+/** 搜索与最近列表均最多 100 条；MQL 的两页传输不等于两页 REST。 */
+const SEARCH_CAP = MEEGLE_PAGE_SIZE;
 
 export class MeegleError extends Error {
   constructor(
@@ -355,6 +364,38 @@ export class MeegleClient {
     );
   }
 
+  private async fields(spaceKey: string, typeKey: string, opts?: MeegleQueryOpts): Promise<FieldMetadata[]> {
+    return this.cache.getOrLoad(`fields:${spaceKey}:${typeKey}`, async () => {
+      const fields: FieldMetadata[] = [];
+      for (let page = 1; ; page++) {
+        const result = normalizeFields(await this.call(fieldsArgs(spaceKey, typeKey, page)), page);
+        fields.push(...result.items);
+        if (!result.hasMore) return fields;
+      }
+    }, { ...opts, ttlMs: CACHE_MS * 2 });
+  }
+
+  private async resolveRows(data: unknown, spaceKey: string, typeKey: string): Promise<MqlRow[]> {
+    const rows = normalizeMqlRows(data);
+    if (rows.some((row) => row.businessValue !== undefined)) {
+      try {
+        const options = (await this.fields(spaceKey, typeKey)).find((f) => f.key === "business")?.options;
+        for (const row of rows) row.business ??= businessText(row.businessValue, options);
+      } catch (err) {
+        this.log.warn(`meegle 业务名称解析失败（${spaceKey}/${typeKey}）: ${(err as Error).message}`);
+      }
+    }
+    return rows;
+  }
+
+  private async queryHundred(spaceKey: string, typeKey: string, mql: string): Promise<MqlRow[]> {
+    const data = await this.call(queryArgs(spaceKey, mql));
+    const rows = await this.resolveRows(data, spaceKey, typeKey);
+    const next = rows.length === CLI_PAGE_SIZE ? mqlNextArgs(spaceKey, data) : undefined;
+    if (next) rows.push(...await this.resolveRows(await this.call(next), spaceKey, typeKey));
+    return rows.slice(0, SEARCH_CAP);
+  }
+
   /** simple_name → 空间：先翻最近访问过的缓存，没有再按 simple_name 查一次（可能有同名无权限的，只认精确匹配） */
   private async spaceBySimpleName(simpleName: string): Promise<MeegleSpace | undefined> {
     const cached = (await this.spaces().catch(() => [] as MeegleSpace[])).find(
@@ -476,7 +517,7 @@ export class MeegleClient {
     const [host, simpleName] = await Promise.all([this.hostOrProbe(), this.simpleNameOf(spaceKey)]);
     const perType = await mapLimit(types, FANOUT, async (type) => {
       try {
-        const rows = normalizeMqlRows(await this.call(queryArgs(spaceKey, mqlSearch(spaceKey, type.key, keyword))));
+        const rows = await this.queryHundred(spaceKey, type.key, mqlSearch(spaceKey, type.key, keyword));
         return rows.map((r) => this.rowToItem(r, spaceKey, type, host, simpleName));
       } catch (err) {
         errors.push(`${type.name}：${(err as Error).message}`);
@@ -496,7 +537,7 @@ export class MeegleClient {
       async () => {
         const [type] = await this.enabledTypes(spaceKey, typeKey, opts);
         const [host, simpleName] = await Promise.all([this.hostOrProbe(), this.simpleNameOf(spaceKey)]);
-        const rows = normalizeMqlRows(await this.call(queryArgs(spaceKey, mqlRecent(spaceKey, type.key))));
+        const rows = await this.queryHundred(spaceKey, type.key, mqlRecent(spaceKey, type.key));
         return rows.map((r) => this.rowToItem(r, spaceKey, type, host, simpleName));
       },
       opts
@@ -517,6 +558,7 @@ export class MeegleClient {
       typeKey: type.key,
       typeName: type.name,
       status: row.status,
+      business: row.business,
       updatedAt: row.updatedAt,
       url: workItemUrl(host, simpleName, type.key, row.id),
     };
@@ -532,7 +574,10 @@ export class MeegleClient {
       `view:${spaceKey}:${viewId}:${page}`,
       async () => {
         const host = await this.hostOrProbe();
-        return normalizeViewItems(await this.call(viewItemsArgs(spaceKey, viewId, page)), host, page);
+        const result = await logicalPage(page, async (p) =>
+          normalizeViewItems(await this.call(viewItemsArgs(spaceKey, viewId, p)), host, p));
+        await this.enrich(result.items);
+        return result;
       },
       opts
     );
@@ -548,7 +593,8 @@ export class MeegleClient {
     return this.cache.getOrLoad(
       `mview:${spaceKey}:${viewId}:${page}`,
       async () => {
-        const result = normalizeMultiViewItems(await this.call(multiViewItemsArgs(spaceKey, viewId, page)), page);
+        const result = await logicalPage(page, async (p) =>
+          normalizeMultiViewItems(await this.call(multiViewItemsArgs(spaceKey, viewId, p)), p));
         await this.enrich(result.items);
         return result;
       },
@@ -563,6 +609,21 @@ export class MeegleClient {
         const host = await this.hostOrProbe();
         const detail = normalizeDetail(await this.call(workItemArgs(spaceKey, id)), host);
         if (!detail) throw new MeegleError("cli-error", "工作项不存在或没有权限");
+        try {
+          const fields = await this.fields(spaceKey, detail.typeKey, opts);
+          const keys = fields.filter((f) => f.key === "business" || isContextField(f)).map((f) => f.key);
+          if (keys.length) {
+            const extra = await this.call(workItemArgs(spaceKey, id, keys));
+            Object.assign(detail, detailContext(extra, fields));
+          }
+        } catch (err) {
+          // 登录 / CLI 可用性错误仍须回 409，让面板切回登录提示。
+          if (err instanceof MeegleError &&
+              (err.reason === "not-authenticated" || err.reason === "not-installed")) throw err;
+          // 可选字段配置 / 读取权限不应挡住基础详情；不拿 ID 假装业务名称。
+          this.log.warn(`meegle 详情上下文补充失败: ${(err as Error).message}`);
+          detail.contextFieldsUnavailable = true;
+        }
         return detail;
       },
       opts
@@ -574,7 +635,8 @@ export class MeegleClient {
     return this.cache.getOrLoad(
       `todo:${action}:${page}`,
       async () => {
-        const result = normalizeTodo(await this.call(todoArgs(action, page)), page);
+        const result = await logicalPage(page, async (p) =>
+          normalizeTodo(await this.call(todoArgs(action, p)), p));
         await this.enrich(result.items);
         return result;
       },
@@ -583,7 +645,7 @@ export class MeegleClient {
   }
 
   /**
-   * 给"半成品"的行补齐：名字（空的才补）、状态、更新时间、类型名、外链。mywork 与全景视图
+   * 给列表行补齐：名字（空的才补）、状态、业务、更新时间、类型名、外链。mywork 与全景视图
    * 给的行都只有 id 一类的骨架，按 空间 × 类型 分组用 MQL 一次补 50 个；补不到（没权限、
    * 类型停用）就留空，前端显示 #id，别让整页失败。
    */
@@ -600,7 +662,9 @@ export class MeegleClient {
       async (g) => {
         try {
           const data = await this.call(queryArgs(g.spaceKey, mqlByIds(g.spaceKey, g.typeKey, g.ids)));
-          for (const row of normalizeMqlRows(data)) rows.set(`${g.spaceKey} ${row.id}`, row);
+          for (const row of await this.resolveRows(data, g.spaceKey, g.typeKey)) {
+            rows.set(`${g.spaceKey} ${g.typeKey} ${row.id}`, row);
+          }
         } catch (err) {
           this.log.warn(`meegle 补待办名称失败（${g.spaceKey}/${g.typeKey}）: ${(err as Error).message}`);
         }
@@ -618,14 +682,15 @@ export class MeegleClient {
       })
     );
     for (const it of items) {
-      const row = rows.get(`${it.spaceKey} ${it.id}`);
+      const row = rows.get(`${it.spaceKey} ${it.typeKey} ${it.id}`);
       if (row) {
-        if (row.name) it.name = row.name;
-        it.status = row.status;
-        it.updatedAt = row.updatedAt;
+        if (!it.name && row.name) it.name = row.name;
+        it.status = row.status ?? it.status;
+        it.business = row.business ?? it.business;
+        it.updatedAt = row.updatedAt ?? it.updatedAt;
       }
-      it.typeName = typeNames.get(`${it.spaceKey} ${it.typeKey}`);
-      it.url = workItemUrl(host, simpleNames.get(it.spaceKey), it.typeKey, it.id);
+      it.typeName ??= typeNames.get(`${it.spaceKey} ${it.typeKey}`);
+      it.url ??= workItemUrl(host, simpleNames.get(it.spaceKey), it.typeKey, it.id);
     }
   }
 }

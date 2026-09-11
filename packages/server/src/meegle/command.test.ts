@@ -76,14 +76,14 @@ test("MQL 字面量：单引号双写、控制字符变空格", () => {
   assert.equal(mqlLiteral("a\nb\u0000c"), "'a b c'");
   assert.equal(
     mqlSearch("p1", "issue", "登录'", 20),
-    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM `p1`.`issue` " +
+    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `business` FROM `p1`.`issue` " +
       "WHERE `name` LIKE '%登录''%' ORDER BY `work_item_id` DESC LIMIT 20"
   );
-  assert.match(mqlRecent("p1", "story", 999), /LIMIT 50$/);
+  assert.match(mqlRecent("p1", "story", 999), /LIMIT 100$/);
   // 非数字 id 直接丢，LIMIT 跟着有效数量走
   assert.equal(
     mqlByIds("p1", "issue", ["1", "x", "2"]),
-    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM `p1`.`issue` " +
+    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `business` FROM `p1`.`issue` " +
       "WHERE `work_item_id` IN (1, 2) LIMIT 2"
   );
 });

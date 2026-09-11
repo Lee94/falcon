@@ -364,7 +364,12 @@ export function App() {
           />
         )}
         {worktreeFor && (
-          <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
+          <WorktreeForm
+            key={`${worktreeFor.sourceProjectId}:${worktreeFor.preset?.branch ?? ""}`}
+            sourceId={worktreeFor.sourceProjectId}
+            preset={worktreeFor.preset}
+            onClose={closeWorktreeForm}
+          />
         )}
         {paletteOpen && <CommandPalette />}
         {quickOpen && <FileQuickOpen />}
