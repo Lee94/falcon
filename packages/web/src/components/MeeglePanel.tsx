@@ -41,6 +41,13 @@ import {
   type MeegleWorkItemType,
 } from "@falcon/shared";
 import { api, ApiRequestError } from "../api.js";
+import {
+  clearMeegleCache,
+  loadMeegleCache,
+  meegleCacheStale,
+  peekMeegleCache,
+  writeMeegleCache,
+} from "../lib/meegleCache.js";
 import { useApp } from "../store.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -66,7 +73,18 @@ import { Segmented } from "./common/Field.js";
  * 状态由后端 `/api/meegle/status` 说了算：没装 CLI 给安装提示，没登录给登录卡片
  * （device-code 模式，后端拉起登录进程，这里只负责把授权链接给用户并轮询）。
  * 业务请求撞上 409 说明登录态在中途没了，重新拉一次状态让面板自己切过去。
+ *
+ * 列表 / 详情走两层缓存：前端内存（面板卸载后再挂立刻画出上次的结果）+ 后端 CLI
+ * TTL（整页刷新后 HTTP 也是毫秒级）。30s 内不打网络，之后后台静默再拉；顶栏刷新
+ * 清空两边并带 `fresh=1`。不进 localStorage。
  */
+
+interface CachedPage<T> {
+  items: T[];
+  page: number;
+  hasMore: boolean;
+  total?: number;
+}
 
 const TAB_KEY = "falcon.meegle.tab";
 const SPACE_KEY = "falcon.meegle.space";
@@ -142,17 +160,26 @@ function loadTab(): Tab {
 
 export function MeeglePanel() {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<MeegleStatus | null>(null);
+  const [status, setStatus] = useState<MeegleStatus | null>(
+    () => peekMeegleCache<MeegleStatus>("status") ?? null
+  );
   const [statusError, setStatusError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [tab, setTab] = useState<Tab>(loadTab);
   const [drill, setDrill] = useState<Drill[]>([]);
-  const [pins, setPins] = useState<MeeglePin[] | null>(null);
+  const [pins, setPins] = useState<MeeglePin[] | null>(() => peekMeegleCache<MeeglePin[]>("pins") ?? null);
+  const [epoch, setEpoch] = useState(0);
+  const lastUser = useRef<string | undefined>(undefined);
 
-  const loadStatus = useCallback(async () => {
-    setChecking(true);
+  const loadStatus = useCallback(async (fresh = false) => {
+    const hit = peekMeegleCache<MeegleStatus>("status");
+    if (hit && !fresh) setStatus(hit);
+    if (!fresh && hit && !meegleCacheStale("status")) return;
+    const bust = fresh || Boolean(hit);
+    if (!hit || fresh) setChecking(true);
     try {
-      setStatus(await api.meegleStatus());
+      const st = await loadMeegleCache("status", () => api.meegleStatus(fresh), bust);
+      setStatus(st);
       setStatusError(null);
     } catch (err) {
       useApp.getState().handleApiError(err);
@@ -162,21 +189,40 @@ export function MeeglePanel() {
     }
   }, []);
 
+  const refresh = useCallback(() => {
+    clearMeegleCache();
+    void api.meegleClearCache();
+    setEpoch((n) => n + 1);
+    void loadStatus(true);
+  }, [loadStatus]);
+
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
 
-  // 登录进行中：轮询，授权一完成登录卡片就换成正文
+  // 登录进行中：轮询必须绕过缓存，授权一完成登录卡片就换成正文
   useEffect(() => {
     if (!status?.login) return;
-    const timer = window.setInterval(() => void loadStatus(), LOGIN_POLL_MS);
+    const timer = window.setInterval(() => void loadStatus(true), LOGIN_POLL_MS);
     return () => clearInterval(timer);
   }, [status?.login, loadStatus]);
+
+  useEffect(() => {
+    const key = status?.user?.key;
+    if (lastUser.current && key && lastUser.current !== key) {
+      clearMeegleCache();
+      setEpoch((n) => n + 1);
+    }
+    if (key) lastUser.current = key;
+  }, [status?.user?.key]);
 
   /** 业务请求撞上 409（没装 / 没登录）：面板要切到对应提示，重新问一次状态 */
   const onUnavailable = useCallback(
     (err: unknown) => {
-      if (err instanceof ApiRequestError && err.status === 409) void loadStatus();
+      if (err instanceof ApiRequestError && err.status === 409) {
+        clearMeegleCache();
+        void loadStatus(true);
+      }
     },
     [loadStatus]
   );
@@ -187,10 +233,14 @@ export function MeeglePanel() {
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
+    const hit = peekMeegleCache<MeeglePin[]>("pins");
+    if (hit) setPins(hit);
     api
       .meeglePins()
       .then((list) => {
-        if (!cancelled) setPins(list);
+        if (cancelled) return;
+        setPins(list);
+        writeMeegleCache("pins", list);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -200,7 +250,7 @@ export function MeeglePanel() {
     return () => {
       cancelled = true;
     };
-  }, [ready]);
+  }, [ready, epoch]);
 
   const pinsApi = useMemo<PinsApi>(
     () => ({
@@ -214,10 +264,18 @@ export function MeeglePanel() {
         try {
           if (existing) {
             await api.meegleUnpin(existing.id);
-            setPins((cur) => cur?.filter((p) => p.id !== existing.id) ?? cur);
+            setPins((cur) => {
+              const next = cur?.filter((p) => p.id !== existing.id) ?? cur;
+              if (next) writeMeegleCache("pins", next);
+              return next;
+            });
           } else {
             const created = await api.meeglePin(input);
-            setPins((cur) => (cur?.some((p) => p.id === created.id) ? cur : [...(cur ?? []), created]));
+            setPins((cur) => {
+              const next = cur?.some((p) => p.id === created.id) ? cur : [...(cur ?? []), created];
+              writeMeegleCache("pins", next);
+              return next;
+            });
           }
         } catch (err) {
           useApp.getState().handleApiError(err);
@@ -227,7 +285,11 @@ export function MeeglePanel() {
       async rename(id, label) {
         try {
           const next = await api.meegleRenamePin(id, label);
-          setPins((cur) => cur?.map((p) => (p.id === id ? next : p)) ?? cur);
+          setPins((cur) => {
+            const list = cur?.map((p) => (p.id === id ? next : p)) ?? cur;
+            if (list) writeMeegleCache("pins", list);
+            return list;
+          });
         } catch (err) {
           useApp.getState().handleApiError(err);
           useApp.getState().toast({ kind: "danger", title: t("toast.failed"), body: (err as Error).message });
@@ -236,7 +298,11 @@ export function MeeglePanel() {
       async remove(id) {
         try {
           await api.meegleUnpin(id);
-          setPins((cur) => cur?.filter((p) => p.id !== id) ?? cur);
+          setPins((cur) => {
+            const next = cur?.filter((p) => p.id !== id) ?? cur;
+            if (next) writeMeegleCache("pins", next);
+            return next;
+          });
         } catch (err) {
           useApp.getState().handleApiError(err);
           useApp.getState().toast({ kind: "danger", title: t("toast.failed"), body: (err as Error).message });
@@ -363,7 +429,7 @@ export function MeeglePanel() {
             aria-label={t("meegle.refresh")}
             title={t("meegle.refresh")}
             disabled={checking}
-            onClick={() => void loadStatus()}
+            onClick={refresh}
           >
             <RefreshCw className={cn(checking && "animate-spin")} />
           </Button>
@@ -372,13 +438,20 @@ export function MeeglePanel() {
         {!status ? (
           <Hint>{statusError ? `${t("meegle.statusFailed")}：${statusError}` : t("meegle.loading")}</Hint>
         ) : !status.installed ? (
-          <InstallHint bin={status.bin} onRecheck={() => void loadStatus()} checking={checking} />
+          <InstallHint bin={status.bin} onRecheck={() => void loadStatus(true)} checking={checking} />
         ) : !status.authenticated ? (
-          <LoginCard status={status} onChanged={() => void loadStatus()} />
+          <LoginCard
+            status={status}
+            onChanged={() => {
+              clearMeegleCache();
+              void loadStatus(true);
+            }}
+          />
         ) : top?.kind === "view" ? (
           <ViewItems
             key={`${top.spaceKey}/${top.multi ? "m" : "v"}/${top.viewId}`}
             drill={top}
+            epoch={epoch}
             onBack={pop}
             onOpenItem={openItem}
             onUnavailable={onUnavailable}
@@ -387,6 +460,7 @@ export function MeeglePanel() {
           <ItemDetail
             key={`${top.spaceKey}/${top.id}`}
             drill={top}
+            epoch={epoch}
             onBack={pop}
             onUnavailable={onUnavailable}
           />
@@ -405,9 +479,10 @@ export function MeeglePanel() {
               />
             </div>
             {tab === "todo" ? (
-              <TodoSection onOpenItem={openItem} onUnavailable={onUnavailable} />
+              <TodoSection epoch={epoch} onOpenItem={openItem} onUnavailable={onUnavailable} />
             ) : tab === "space" ? (
               <SpaceSection
+                epoch={epoch}
                 onOpenView={openView}
                 onOpenItem={openItem}
                 onOpenUrl={openUrl}
@@ -601,32 +676,49 @@ function LoginCard({ status, onChanged }: { status: MeegleStatus; onChanged: () 
 const ACTIONS: MeegleTodoAction[] = ["todo", "this_week", "overdue", "done"];
 
 function TodoSection({
+  epoch,
   onOpenItem,
   onUnavailable,
 }: {
+  epoch: number;
   onOpenItem: (item: MeegleWorkItem) => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const [action, setAction] = useState<MeegleTodoAction>("todo");
-  const [items, setItems] = useState<MeegleTodoItem[]>([]);
+  const cacheKey = `todo:${action}`;
+  const [items, setItems] = useState<MeegleTodoItem[]>(
+    () => peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey)?.items ?? []
+  );
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState<number | undefined>();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    () => !peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey)
+  );
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const gen = useRef(0);
+  const epochRef = useRef(epoch);
 
   const load = useCallback(
-    async (nextPage: number) => {
+    async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
       setLoading(true);
       setError(null);
       try {
-        const res = await api.meegleTodo(action, nextPage);
+        const res = await api.meegleTodo(action, nextPage, fresh);
         if (gen.current !== my) return;
-        setItems((cur) => (nextPage === 1 ? res.items : [...cur, ...res.items]));
+        setItems((cur) => {
+          const next = nextPage === 1 ? res.items : [...cur, ...res.items];
+          writeMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey, {
+            items: next,
+            page: res.page,
+            hasMore: res.hasMore,
+            total: res.total,
+          });
+          return next;
+        });
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
@@ -639,14 +731,31 @@ function TodoSection({
         if (gen.current === my) setLoading(false);
       }
     },
-    [action, onUnavailable]
+    [action, cacheKey, onUnavailable]
   );
 
   useEffect(() => {
-    setItems([]);
-    setTotal(undefined);
-    void load(1);
-  }, [load]);
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey);
+    if (hit) {
+      setItems(hit.items);
+      setPage(hit.page);
+      setHasMore(hit.hasMore);
+      setTotal(hit.total);
+      setError(null);
+    } else {
+      setItems([]);
+      setPage(1);
+      setHasMore(false);
+      setTotal(undefined);
+    }
+    if (hit && !force && !meegleCacheStale(cacheKey)) {
+      setLoading(false);
+      return;
+    }
+    void load(1, force);
+  }, [cacheKey, load, epoch]);
 
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
 
@@ -701,18 +810,22 @@ function TodoMeta({ item, action }: { item: MeegleTodoItem; action: MeegleTodoAc
 // ---- 空间 ----
 
 function SpaceSection({
+  epoch,
   onOpenView,
   onOpenItem,
   onOpenUrl,
   onUnavailable,
 }: {
+  epoch: number;
   onOpenView: (spaceKey: string, view: MeegleView, spaceName?: string) => void;
   onOpenItem: (item: MeegleWorkItem) => void;
   onOpenUrl: (url: string) => Promise<string | null>;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
-  const [spaces, setSpaces] = useState<MeegleSpace[] | null>(null);
+  const [spaces, setSpaces] = useState<MeegleSpace[] | null>(
+    () => peekMeegleCache<MeegleSpace[]>("spaces") ?? null
+  );
   const [spacesError, setSpacesError] = useState<string | null>(null);
   const [spaceKey, setSpaceKey] = useState<string>(() => loadPref(SPACE_KEY) ?? "");
   const [types, setTypes] = useState<MeegleWorkItemType[] | null>(null);
@@ -724,11 +837,22 @@ function SpaceSection({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const gen = useRef(0);
+  const spacesEpoch = useRef(epoch);
+  const typesEpoch = useRef(epoch);
+  const searchEpoch = useRef(epoch);
 
   useEffect(() => {
+    const force = epoch !== spacesEpoch.current;
+    spacesEpoch.current = epoch;
+    const hit = peekMeegleCache<MeegleSpace[]>("spaces");
+    if (hit) {
+      setSpaces(hit);
+      setSpaceKey((cur) => (hit.some((s) => s.key === cur) ? cur : (hit[0]?.key ?? "")));
+    }
+    if (hit && !force && !meegleCacheStale("spaces")) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleSpaces()
+    loadMeegleCache("spaces", () => api.meegleSpaces(force), bust)
       .then((list) => {
         if (cancelled) return;
         setSpaces(list);
@@ -745,16 +869,28 @@ function SpaceSection({
     return () => {
       cancelled = true;
     };
-  }, [onUnavailable]);
+  }, [onUnavailable, epoch]);
 
   useEffect(() => {
-    setTypes(null);
     setTypeKey("");
-    if (!spaceKey) return;
+  }, [spaceKey]);
+
+  useEffect(() => {
+    if (!spaceKey) {
+      setTypes(null);
+      return;
+    }
     savePref(SPACE_KEY, spaceKey);
+    const force = epoch !== typesEpoch.current;
+    typesEpoch.current = epoch;
+    const key = `types:${spaceKey}`;
+    const hit = peekMeegleCache<MeegleWorkItemType[]>(key);
+    if (hit) setTypes(hit.filter((x) => !x.disabled));
+    else setTypes(null);
+    if (hit && !force && !meegleCacheStale(key)) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleTypes(spaceKey)
+    loadMeegleCache(key, () => api.meegleTypes(spaceKey, force), bust)
       .then((list) => {
         if (!cancelled) setTypes(list.filter((x) => !x.disabled));
       })
@@ -767,15 +903,17 @@ function SpaceSection({
     return () => {
       cancelled = true;
     };
-  }, [spaceKey, onUnavailable]);
+  }, [spaceKey, onUnavailable, epoch]);
 
   // 贴进来的是链接就直接开，不当关键字搜；其余：有关键字就搜，没关键字但选了类型就看最近
   useEffect(() => {
     const my = ++gen.current;
-    setResult(null);
-    setRecent(null);
-    setError(null);
+    const force = epoch !== searchEpoch.current;
+    searchEpoch.current = epoch;
     if (isUrl(keyword)) {
+      setResult(null);
+      setRecent(null);
+      setError(null);
       setLoading(true);
       void onOpenUrl(keyword).then((err) => {
         if (gen.current !== my) return;
@@ -786,18 +924,58 @@ function SpaceSection({
       return;
     }
     if (!spaceKey || (!keyword && !typeKey)) {
+      setResult(null);
+      setRecent(null);
+      setError(null);
       setLoading(false);
       return;
     }
-    setLoading(true);
-    const req = keyword
-      ? api.meegleSearch(spaceKey, keyword, typeKey || undefined).then((r) => {
+    if (keyword) {
+      const key = `search:${spaceKey}:${keyword}:${typeKey}`;
+      const hit = peekMeegleCache<MeegleSearchResult>(key);
+      setRecent(null);
+      if (hit) {
+        setResult(hit);
+        setError(null);
+      } else setResult(null);
+      if (hit && !force && !meegleCacheStale(key)) {
+        setLoading(false);
+        return;
+      }
+      const bust = force || Boolean(hit);
+      setLoading(true);
+      loadMeegleCache(key, () => api.meegleSearch(spaceKey, keyword, typeKey || undefined, force), bust)
+        .then((r) => {
           if (gen.current === my) setResult(r);
         })
-      : api.meegleRecent(spaceKey, typeKey).then((r) => {
-          if (gen.current === my) setRecent(r);
+        .catch((err) => {
+          if (gen.current !== my) return;
+          useApp.getState().handleApiError(err);
+          onUnavailable(err);
+          setError((err as Error).message);
+        })
+        .finally(() => {
+          if (gen.current === my) setLoading(false);
         });
-    req
+      return;
+    }
+    const key = `recent:${spaceKey}:${typeKey}`;
+    const hit = peekMeegleCache<MeegleWorkItem[]>(key);
+    setResult(null);
+    if (hit) {
+      setRecent(hit);
+      setError(null);
+    } else setRecent(null);
+    if (hit && !force && !meegleCacheStale(key)) {
+      setLoading(false);
+      return;
+    }
+    const bust = force || Boolean(hit);
+    setLoading(true);
+    loadMeegleCache(key, () => api.meegleRecent(spaceKey, typeKey, force), bust)
+      .then((r) => {
+        if (gen.current === my) setRecent(r);
+      })
       .catch((err) => {
         if (gen.current !== my) return;
         useApp.getState().handleApiError(err);
@@ -807,7 +985,7 @@ function SpaceSection({
       .finally(() => {
         if (gen.current === my) setLoading(false);
       });
-  }, [spaceKey, keyword, typeKey, onUnavailable, onOpenUrl]);
+  }, [spaceKey, keyword, typeKey, onUnavailable, onOpenUrl, epoch]);
 
   const space = spaces?.find((s) => s.key === spaceKey);
 
@@ -852,13 +1030,11 @@ function SpaceSection({
           <Hint>{spacesError ?? t("meegle.noSpaces")}</Hint>
         ) : !spaceKey ? (
           <Hint>{t("meegle.loadingList")}</Hint>
-        ) : error ? (
+        ) : error && !result && !recent ? (
           <Hint>
             {t("meegle.loadFailed")}
             <span className="mt-1 block font-mono text-[11px]">{error}</span>
           </Hint>
-        ) : loading ? (
-          <Hint>{isUrl(keyword) ? t("meegle.resolving") : t("meegle.searching")}</Hint>
         ) : result ? (
           <SearchResults
             result={result}
@@ -882,6 +1058,8 @@ function SpaceSection({
               </ul>
             )}
           </>
+        ) : loading ? (
+          <Hint>{isUrl(keyword) ? t("meegle.resolving") : t("meegle.searching")}</Hint>
         ) : (
           <Hint>{space ? t("meegle.searchHint") : t("meegle.loadingList")}</Hint>
         )}
@@ -1164,37 +1342,54 @@ function PinButton({ input }: { input: MeeglePinInput }) {
 
 function ViewItems({
   drill,
+  epoch,
   onBack,
   onOpenItem,
   onUnavailable,
 }: {
   drill: Extract<Drill, { kind: "view" }>;
+  epoch: number;
   onBack: () => void;
   onOpenItem: (item: MeegleWorkItem) => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const { spaceKey, viewId, multi } = drill;
-  const [items, setItems] = useState<MeegleWorkItem[]>([]);
+  const cacheKey = `${multi ? "mview" : "view"}:${spaceKey}:${viewId}`;
+  const [items, setItems] = useState<MeegleWorkItem[]>(
+    () => peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey)?.items ?? []
+  );
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState<number | undefined>();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    () => !peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey)
+  );
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const gen = useRef(0);
+  const epochRef = useRef(epoch);
 
   const load = useCallback(
-    async (nextPage: number) => {
+    async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
       setLoading(true);
       setError(null);
       try {
         const res = multi
-          ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage)
-          : await api.meegleViewItems(spaceKey, viewId, nextPage);
+          ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage, fresh)
+          : await api.meegleViewItems(spaceKey, viewId, nextPage, fresh);
         if (gen.current !== my) return;
-        setItems((cur) => (nextPage === 1 ? res.items : [...cur, ...res.items]));
+        setItems((cur) => {
+          const next = nextPage === 1 ? res.items : [...cur, ...res.items];
+          writeMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey, {
+            items: next,
+            page: res.page,
+            hasMore: res.hasMore,
+            total: res.total,
+          });
+          return next;
+        });
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
@@ -1207,12 +1402,31 @@ function ViewItems({
         if (gen.current === my) setLoading(false);
       }
     },
-    [spaceKey, viewId, multi, onUnavailable]
+    [spaceKey, viewId, multi, cacheKey, onUnavailable]
   );
 
   useEffect(() => {
-    void load(1);
-  }, [load]);
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey);
+    if (hit) {
+      setItems(hit.items);
+      setPage(hit.page);
+      setHasMore(hit.hasMore);
+      setTotal(hit.total);
+      setError(null);
+    } else {
+      setItems([]);
+      setPage(1);
+      setHasMore(false);
+      setTotal(undefined);
+    }
+    if (hit && !force && !meegleCacheStale(cacheKey)) {
+      setLoading(false);
+      return;
+    }
+    void load(1, force);
+  }, [cacheKey, load, epoch]);
 
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
 
@@ -1272,22 +1486,36 @@ function ViewItems({
 
 function ItemDetail({
   drill,
+  epoch,
   onBack,
   onUnavailable,
 }: {
   drill: Extract<Drill, { kind: "item" }>;
+  epoch: number;
   onBack: () => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const { spaceKey, id, title } = drill;
-  const [detail, setDetail] = useState<MeegleWorkItemDetail | null>(null);
+  const cacheKey = `item:${spaceKey}:${id}`;
+  const [detail, setDetail] = useState<MeegleWorkItemDetail | null>(
+    () => peekMeegleCache<MeegleWorkItemDetail>(cacheKey) ?? null
+  );
   const [error, setError] = useState<string | null>(null);
+  const epochRef = useRef(epoch);
 
   useEffect(() => {
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<MeegleWorkItemDetail>(cacheKey);
+    if (hit) {
+      setDetail(hit);
+      setError(null);
+    } else setDetail(null);
+    if (hit && !force && !meegleCacheStale(cacheKey)) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleWorkItem(spaceKey, id)
+    loadMeegleCache(cacheKey, () => api.meegleWorkItem(spaceKey, id, force), bust)
       .then((d) => {
         if (!cancelled) setDetail(d);
       })
@@ -1300,7 +1528,7 @@ function ItemDetail({
     return () => {
       cancelled = true;
     };
-  }, [spaceKey, id, onUnavailable]);
+  }, [spaceKey, id, cacheKey, onUnavailable, epoch]);
 
   const name = detail?.name || title || t("meegle.untitled", { id });
   const url = detail?.url ?? drill.url;

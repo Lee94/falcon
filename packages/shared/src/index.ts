@@ -14,6 +14,7 @@ export {
   termPtyEnv,
 } from "./termEnv.js";
 export { TermModeTracker } from "./termModes.js";
+export { TtlCache, type TtlCacheEntry, type TtlCacheLoadOpts } from "./ttlCache.js";
 
 // ============ Project ============
 

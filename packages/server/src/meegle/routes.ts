@@ -27,6 +27,7 @@ import { isTodoAction, isValidHost, isValidId, isValidKey, isValidUrl } from "./
  * 鉴权由 routes.ts 的全局 onRequest 钩子管，这里不再查 cookie。
  *
  * 固定列表存 SQLite（db.meegle_pins）：只读的 CLI 查询走 meegle，固定是 falcon 自己的数据。
+ * 查询默认走 client 的 TTL 缓存；`?fresh=1` 跳过（面板刷新按钮）。
  */
 export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient, db: Db) {
   const fail = (reply: FastifyReply, err: unknown) => {
@@ -37,7 +38,9 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
     throw err;
   };
 
-  app.get("/api/meegle/status", async (): Promise<MeegleStatus> => meegle.status());
+  app.get("/api/meegle/status", async (req): Promise<MeegleStatus> =>
+    meegle.status(queryOpts(req.query as FreshQuery))
+  );
 
   app.post("/api/meegle/login", async (req, reply): Promise<MeegleLogin | void> => {
     const { host } = (req.body ?? {}) as { host?: unknown };
@@ -54,10 +57,15 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
     return { ok: true };
   });
 
+  app.post("/api/meegle/cache/clear", async () => {
+    meegle.clearCache();
+    return { ok: true };
+  });
+
   app.get("/api/meegle/spaces", async (req, reply): Promise<MeegleSpace[] | void> => {
-    const { q } = req.query as { q?: string };
+    const { q, fresh } = req.query as { q?: string; fresh?: string };
     try {
-      return await meegle.spaces(q);
+      return await meegle.spaces(q, queryOpts({ fresh }));
     } catch (err) {
       return fail(reply, err);
     }
@@ -69,7 +77,7 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
       const { key } = req.params as { key: string };
       if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
       try {
-        return await meegle.types(key);
+        return await meegle.types(key, queryOpts(req.query as FreshQuery));
       } catch (err) {
         return fail(reply, err);
       }
@@ -80,13 +88,13 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
     "/api/meegle/spaces/:key/search",
     async (req, reply): Promise<MeegleSearchResult | void> => {
       const { key } = req.params as { key: string };
-      const { q, type } = req.query as { q?: string; type?: string };
+      const { q, type, fresh } = req.query as { q?: string; type?: string; fresh?: string };
       const keyword = q?.trim() ?? "";
       if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
       if (!keyword) return reply.code(400).send({ error: "缺少关键字" });
       if (type && !isValidKey(type)) return reply.code(400).send({ error: "类型 key 不合法" });
       try {
-        return await meegle.search(key, keyword, type || undefined);
+        return await meegle.search(key, keyword, type || undefined, queryOpts({ fresh }));
       } catch (err) {
         return fail(reply, err);
       }
@@ -95,11 +103,11 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
 
   app.get("/api/meegle/spaces/:key/recent", async (req, reply): Promise<MeegleWorkItem[] | void> => {
     const { key } = req.params as { key: string };
-    const { type } = req.query as { type?: string };
+    const { type, fresh } = req.query as { type?: string; fresh?: string };
     if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
     if (!isValidKey(type)) return reply.code(400).send({ error: "类型 key 不合法" });
     try {
-      return await meegle.recent(key, type);
+      return await meegle.recent(key, type, queryOpts({ fresh }));
     } catch (err) {
       return fail(reply, err);
     }
@@ -109,11 +117,12 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
     "/api/meegle/spaces/:key/views/:viewId/items",
     async (req, reply): Promise<MeeglePage<MeegleWorkItem> | void> => {
       const { key, viewId } = req.params as { key: string; viewId: string };
-      const page = pageOf((req.query as { page?: string }).page);
+      const q = req.query as { page?: string; fresh?: string };
+      const page = pageOf(q.page);
       if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
       if (!isValidKey(viewId)) return reply.code(400).send({ error: "视图 id 不合法" });
       try {
-        return await meegle.viewItems(key, viewId, page);
+        return await meegle.viewItems(key, viewId, page, queryOpts(q));
       } catch (err) {
         return fail(reply, err);
       }
@@ -127,7 +136,7 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
       if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
       if (!isValidId(id)) return reply.code(400).send({ error: "工作项 id 不合法" });
       try {
-        return await meegle.workItem(key, id);
+        return await meegle.workItem(key, id, queryOpts(req.query as FreshQuery));
       } catch (err) {
         return fail(reply, err);
       }
@@ -138,11 +147,12 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
     "/api/meegle/spaces/:key/multi-views/:viewId/items",
     async (req, reply): Promise<MeeglePage<MeegleWorkItem> | void> => {
       const { key, viewId } = req.params as { key: string; viewId: string };
-      const page = pageOf((req.query as { page?: string }).page);
+      const q = req.query as { page?: string; fresh?: string };
+      const page = pageOf(q.page);
       if (!isValidKey(key)) return reply.code(400).send({ error: "空间 key 不合法" });
       if (!isValidKey(viewId)) return reply.code(400).send({ error: "视图 id 不合法" });
       try {
-        return await meegle.multiViewItems(key, viewId, page);
+        return await meegle.multiViewItems(key, viewId, page, queryOpts(q));
       } catch (err) {
         return fail(reply, err);
       }
@@ -204,14 +214,20 @@ export function registerMeegleRoutes(app: FastifyInstance, meegle: MeegleClient,
   });
 
   app.get("/api/meegle/todo", async (req, reply): Promise<MeeglePage<MeegleTodoItem> | void> => {
-    const { action, page } = req.query as { action?: string; page?: string };
+    const { action, page, fresh } = req.query as { action?: string; page?: string; fresh?: string };
     if (!isTodoAction(action)) return reply.code(400).send({ error: "action 不合法" });
     try {
-      return await meegle.todo(action, pageOf(page));
+      return await meegle.todo(action, pageOf(page), queryOpts({ fresh }));
     } catch (err) {
       return fail(reply, err);
     }
   });
+}
+
+type FreshQuery = { fresh?: string };
+
+function queryOpts(q: FreshQuery): { fresh?: boolean } {
+  return q.fresh === "1" || q.fresh === "true" ? { fresh: true } : {};
 }
 
 const PIN_KINDS: readonly MeeglePinKind[] = ["view", "multiProjectView", "workitem"];

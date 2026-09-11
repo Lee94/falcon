@@ -87,6 +87,11 @@ function repoQuery(repo?: string): string {
   return repo ? `?repo=${encodeURIComponent(repo)}` : "";
 }
 
+function withFresh(url: string, fresh?: boolean): string {
+  if (!fresh) return url;
+  return url.includes("?") ? `${url}&fresh=1` : `${url}?fresh=1`;
+}
+
 export const api = {
   authStatus: () => request<AuthStatus>("GET", "/api/auth/status"),
   login: (password: string) => request("POST", "/api/auth/login", { password }),
@@ -343,42 +348,60 @@ export const api = {
   clearSession: (id: string) => request("DELETE", `/api/sessions/${id}`),
   renameSession: (id: string, name: string) =>
     request("PATCH", `/api/sessions/${id}`, { name }),
-  // ---- 飞书项目（Meegle）：宿主机上的 meegle CLI ----
-  meegleStatus: () => request<MeegleStatus>("GET", "/api/meegle/status"),
+  // ---- 飞书项目（Meegle）：宿主机上的 meegle CLI；fresh 跳过后端 TTL 缓存 ----
+  meegleStatus: (fresh?: boolean) =>
+    request<MeegleStatus>("GET", withFresh("/api/meegle/status", fresh)),
   meegleLogin: (host: string) => request<MeegleLogin>("POST", "/api/meegle/login", { host }),
   meegleCancelLogin: () => request<{ ok: true }>("POST", "/api/meegle/login/cancel"),
-  meegleSpaces: () => request<MeegleSpace[]>("GET", "/api/meegle/spaces"),
-  meegleTypes: (spaceKey: string) =>
-    request<MeegleWorkItemType[]>("GET", `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/types`),
-  meegleSearch: (spaceKey: string, q: string, type?: string) => {
+  meegleClearCache: () => request<{ ok: true }>("POST", "/api/meegle/cache/clear"),
+  meegleSpaces: (fresh?: boolean) =>
+    request<MeegleSpace[]>("GET", withFresh("/api/meegle/spaces", fresh)),
+  meegleTypes: (spaceKey: string, fresh?: boolean) =>
+    request<MeegleWorkItemType[]>(
+      "GET",
+      withFresh(`/api/meegle/spaces/${encodeURIComponent(spaceKey)}/types`, fresh)
+    ),
+  meegleSearch: (spaceKey: string, q: string, type?: string, fresh?: boolean) => {
     const params = new URLSearchParams({ q });
     if (type) params.set("type", type);
     return request<MeegleSearchResult>(
       "GET",
-      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/search?${params}`
+      withFresh(`/api/meegle/spaces/${encodeURIComponent(spaceKey)}/search?${params}`, fresh)
     );
   },
-  meegleRecent: (spaceKey: string, type: string) =>
+  meegleRecent: (spaceKey: string, type: string, fresh?: boolean) =>
     request<MeegleWorkItem[]>(
       "GET",
-      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/recent?type=${encodeURIComponent(type)}`
+      withFresh(
+        `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/recent?type=${encodeURIComponent(type)}`,
+        fresh
+      )
     ),
-  meegleViewItems: (spaceKey: string, viewId: string, page: number) =>
+  meegleViewItems: (spaceKey: string, viewId: string, page: number, fresh?: boolean) =>
     request<MeeglePage<MeegleWorkItem>>(
       "GET",
-      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/views/${encodeURIComponent(viewId)}/items?page=${page}`
+      withFresh(
+        `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/views/${encodeURIComponent(viewId)}/items?page=${page}`,
+        fresh
+      )
     ),
-  meegleWorkItem: (spaceKey: string, id: string) =>
+  meegleWorkItem: (spaceKey: string, id: string, fresh?: boolean) =>
     request<MeegleWorkItemDetail>(
       "GET",
-      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/items/${encodeURIComponent(id)}`
+      withFresh(`/api/meegle/spaces/${encodeURIComponent(spaceKey)}/items/${encodeURIComponent(id)}`, fresh)
     ),
-  meegleTodo: (action: MeegleTodoAction, page: number) =>
-    request<MeeglePage<MeegleTodoItem>>("GET", `/api/meegle/todo?action=${action}&page=${page}`),
-  meegleMultiViewItems: (spaceKey: string, viewId: string, page: number) =>
+  meegleTodo: (action: MeegleTodoAction, page: number, fresh?: boolean) =>
+    request<MeeglePage<MeegleTodoItem>>(
+      "GET",
+      withFresh(`/api/meegle/todo?action=${action}&page=${page}`, fresh)
+    ),
+  meegleMultiViewItems: (spaceKey: string, viewId: string, page: number, fresh?: boolean) =>
     request<MeeglePage<MeegleWorkItem>>(
       "GET",
-      `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/multi-views/${encodeURIComponent(viewId)}/items?page=${page}`
+      withFresh(
+        `/api/meegle/spaces/${encodeURIComponent(spaceKey)}/multi-views/${encodeURIComponent(viewId)}/items?page=${page}`,
+        fresh
+      )
     ),
   meegleResolveUrl: (url: string) =>
     request<MeegleUrlTarget>("POST", "/api/meegle/resolve-url", { url }),
