@@ -8,37 +8,48 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import type {
-  MeegleLogin,
-  MeegleSearchResult,
-  MeegleUrlTarget,
-  MeegleSpace,
-  MeegleStatus,
-  MeegleTodoAction,
-  MeegleTodoItem,
-  MeegleUnavailableReason,
-  MeegleUser,
-  MeegleView,
-  MeegleWorkItem,
-  MeegleWorkItemDetail,
-  MeegleWorkItemType,
-  MeeglePage,
+import {
+  MEEGLE_PAGE_SIZE,
+  TtlCache,
+  type MeegleLogin,
+  type MeegleSearchResult,
+  type MeegleUrlTarget,
+  type MeegleSpace,
+  type MeegleStatus,
+  type MeegleTodoAction,
+  type MeegleTodoItem,
+  type MeegleUnavailableReason,
+  type MeegleUser,
+  type MeegleView,
+  type MeegleWorkItem,
+  type MeegleWorkItemDetail,
+  type MeegleWorkItemType,
+  type MeeglePage,
 } from "@falcon/shared";
 import { resolveLocalBaseEnv } from "../sessions/loginEnv.js";
 import { resolveMeegleBin } from "./bin.js";
+import { logicalPage } from "./pagination.js";
 import {
   CLI_ENV,
   CLI_PAGE_SIZE,
+  businessText,
   chunk,
+  commentArgs,
+  detailContext,
+  fieldsArgs,
   firstLine,
   groupForLookup,
+  isAttachmentField,
   loginArgs,
   meArgs,
   mqlByIds,
+  mqlNextArgs,
   mqlRecent,
   mqlSearch,
   multiViewItemsArgs,
   normalizeDetail,
+  normalizeComments,
+  normalizeFields,
   normalizeMultiViewItems,
   normalizeMqlRows,
   normalizeSpaces,
@@ -63,6 +74,7 @@ import {
   workItemArgs,
   workItemUrl,
   type MqlRow,
+  type FieldMetadata,
 } from "./command.js";
 
 /** 一次 CLI 调用的上限。每条命令都是一次到飞书的网络往返，实测 0.5–2s，30s 已是病态 */
@@ -71,7 +83,9 @@ const CLI_TIMEOUT_MS = 30_000;
 const LOGIN_PROMPT_TIMEOUT_MS = 20_000;
 /** 用户迟迟不授权就把登录进程收掉，别让它一直挂着 */
 const LOGIN_MAX_MS = 10 * 60_000;
+/** 查询结果默认 5 分钟；空间/类型变动少，类型单独加长。刷新按钮带 fresh 跳过 */
 const CACHE_MS = 5 * 60_000;
+const STATUS_CACHE_MS = 30_000;
 /**
  * 同时起几个 CLI 进程：视图 / 工作项搜索要按类型扇出，十来个类型串行太慢，全开又太重。
  * 实测 `view search` 按租户限 5 qps（超了报 `rate limit, … qps: 5`），视图与工作项两路
@@ -81,8 +95,8 @@ const FANOUT = 3;
 /** 撞限流后等多久再试；重试次数见 call() */
 const RATE_LIMIT_BACKOFF_MS = 700;
 const RATE_LIMIT_RETRIES = 2;
-/** 搜索结果上限：面板就那么窄，翻不到几十条以外 */
-const SEARCH_CAP = 60;
+/** 搜索与最近列表均最多 100 条；MQL 的两页传输不等于两页 REST。 */
+const SEARCH_CAP = MEEGLE_PAGE_SIZE;
 
 export class MeegleError extends Error {
   constructor(
@@ -103,10 +117,7 @@ interface ExecResult {
   spawnError?: "ENOENT" | "TIMEOUT" | string;
 }
 
-interface Cached<T> {
-  at: number;
-  value: T;
-}
+export type MeegleQueryOpts = { fresh?: boolean };
 
 interface Logger {
   info(msg: string): void;
@@ -117,9 +128,8 @@ export class MeegleClient {
   private readonly bin = resolveMeegleBin();
   private version: string | null = null;
   private host: string | null = null;
-  private userCache: Cached<MeegleUser> | null = null;
-  private spacesCache: Cached<MeegleSpace[]> | null = null;
-  private typesCache = new Map<string, Cached<MeegleWorkItemType[]>>();
+  /** 用户 / 空间 / 类型 / 待办 / 搜索 / 详情共用；登录换人时整表清掉 */
+  private readonly cache = new TtlCache(CACHE_MS);
   private login: { proc: ChildProcess; prompt: MeegleLogin } | null = null;
   private loginStarting: Promise<MeegleLogin> | null = null;
 
@@ -203,7 +213,13 @@ export class MeegleClient {
     return { installed: true, ...st };
   }
 
-  async status(): Promise<MeegleStatus> {
+  async status(opts?: MeegleQueryOpts): Promise<MeegleStatus> {
+    // 登录进行中每 2s 会变，不能吃缓存；授权完成后 loadStatus 里会 dropDataCache
+    if (this.login) return this.loadStatus();
+    return this.cache.getOrLoad("status", () => this.loadStatus(), { ...opts, ttlMs: STATUS_CACHE_MS });
+  }
+
+  private async loadStatus(): Promise<MeegleStatus> {
     const st = await this.probeStatus();
     const status: MeegleStatus = {
       installed: st.installed,
@@ -232,10 +248,11 @@ export class MeegleClient {
   }
 
   private async me(): Promise<MeegleUser | undefined> {
-    if (this.userCache && Date.now() - this.userCache.at < CACHE_MS * 2) return this.userCache.value;
+    const hit = this.cache.peek<MeegleUser>("user");
+    if (hit) return hit.value;
     const user = normalizeUser(await this.call(meArgs()));
     if (!user) return undefined;
-    this.userCache = { at: Date.now(), value: user };
+    this.cache.set("user", user, { ttlMs: CACHE_MS * 2 });
     return user;
   }
 
@@ -296,10 +313,8 @@ export class MeegleClient {
       );
       proc.on("close", (code) => {
         if (this.login?.proc === proc) this.login = null;
-        // 登录态变了：用户、空间列表都可能换人
-        this.userCache = null;
-        this.spacesCache = null;
-        this.typesCache.clear();
+        // 登录态变了：用户、空间、待办都可能换人
+        this.cache.clear();
         this.log.info(`meegle auth login 退出（${code}）`);
         settle(() =>
           reject(new MeegleError("cli-error", firstLine(text) || `登录进程退出（${code}）`))
@@ -319,24 +334,68 @@ export class MeegleClient {
     this.login = null;
   }
 
-  // ---- 空间 / 类型 ----
-
-  async spaces(keyword?: string): Promise<MeegleSpace[]> {
-    const kw = keyword?.trim();
-    if (!kw && this.spacesCache && Date.now() - this.spacesCache.at < CACHE_MS) {
-      return this.spacesCache.value;
-    }
-    const { spaces } = normalizeSpaces(await this.call(spacesArgs(kw)));
-    if (!kw) this.spacesCache = { at: Date.now(), value: spaces };
-    return spaces;
+  /** 面板刷新按钮：丢掉查询缓存，下一次请求重新打 CLI */
+  clearCache(): void {
+    this.cache.clear();
   }
 
-  async types(spaceKey: string): Promise<MeegleWorkItemType[]> {
-    const hit = this.typesCache.get(spaceKey);
-    if (hit && Date.now() - hit.at < CACHE_MS * 2) return hit.value;
-    const types = normalizeTypes(await this.call(typesArgs(spaceKey)));
-    this.typesCache.set(spaceKey, { at: Date.now(), value: types });
-    return types;
+  // ---- 空间 / 类型 ----
+
+  async spaces(keyword?: string, opts?: MeegleQueryOpts): Promise<MeegleSpace[]> {
+    const kw = keyword?.trim();
+    // 带关键字是精确查找（粘贴链接换 project_key），不进最近访问列表的缓存
+    if (kw) {
+      const { spaces } = normalizeSpaces(await this.call(spacesArgs(kw)));
+      return spaces;
+    }
+    return this.cache.getOrLoad(
+      "spaces",
+      async () => {
+        const { spaces } = normalizeSpaces(await this.call(spacesArgs()));
+        return spaces;
+      },
+      opts
+    );
+  }
+
+  async types(spaceKey: string, opts?: MeegleQueryOpts): Promise<MeegleWorkItemType[]> {
+    return this.cache.getOrLoad(
+      `types:${spaceKey}`,
+      async () => normalizeTypes(await this.call(typesArgs(spaceKey))),
+      { ...opts, ttlMs: CACHE_MS * 2 }
+    );
+  }
+
+  private async fields(spaceKey: string, typeKey: string, opts?: MeegleQueryOpts): Promise<FieldMetadata[]> {
+    return this.cache.getOrLoad(`fields:${spaceKey}:${typeKey}`, async () => {
+      const fields: FieldMetadata[] = [];
+      for (let page = 1; ; page++) {
+        const result = normalizeFields(await this.call(fieldsArgs(spaceKey, typeKey, page)), page);
+        fields.push(...result.items);
+        if (!result.hasMore) return fields;
+      }
+    }, { ...opts, ttlMs: CACHE_MS * 2 });
+  }
+
+  private async resolveRows(data: unknown, spaceKey: string, typeKey: string): Promise<MqlRow[]> {
+    const rows = normalizeMqlRows(data);
+    if (rows.some((row) => row.businessValue !== undefined)) {
+      try {
+        const options = (await this.fields(spaceKey, typeKey)).find((f) => f.key === "business")?.options;
+        for (const row of rows) row.business ??= businessText(row.businessValue, options);
+      } catch (err) {
+        this.log.warn(`meegle 业务名称解析失败（${spaceKey}/${typeKey}）: ${(err as Error).message}`);
+      }
+    }
+    return rows;
+  }
+
+  private async queryHundred(spaceKey: string, typeKey: string, mql: string): Promise<MqlRow[]> {
+    const data = await this.call(queryArgs(spaceKey, mql));
+    const rows = await this.resolveRows(data, spaceKey, typeKey);
+    const next = rows.length === CLI_PAGE_SIZE ? mqlNextArgs(spaceKey, data) : undefined;
+    if (next) rows.push(...await this.resolveRows(await this.call(next), spaceKey, typeKey));
+    return rows.slice(0, SEARCH_CAP);
   }
 
   /** simple_name → 空间：先翻最近访问过的缓存，没有再按 simple_name 查一次（可能有同名无权限的，只认精确匹配） */
@@ -391,8 +450,12 @@ export class MeegleClient {
     return this.host;
   }
 
-  private async enabledTypes(spaceKey: string, typeKey?: string): Promise<MeegleWorkItemType[]> {
-    const types = (await this.types(spaceKey)).filter((t) => !t.disabled);
+  private async enabledTypes(
+    spaceKey: string,
+    typeKey?: string,
+    opts?: MeegleQueryOpts
+  ): Promise<MeegleWorkItemType[]> {
+    const types = (await this.types(spaceKey, opts)).filter((t) => !t.disabled);
     if (!typeKey) return types;
     const one = types.find((t) => t.key === typeKey);
     if (!one) throw new MeegleError("cli-error", "工作项类型不存在");
@@ -402,8 +465,26 @@ export class MeegleClient {
   // ---- 搜索 / 浏览 ----
 
   /** 视图与工作项两路并行；一路里某个类型失败只记一条错误，其余照常出结果 */
-  async search(spaceKey: string, keyword: string, typeKey?: string): Promise<MeegleSearchResult> {
-    const types = await this.enabledTypes(spaceKey, typeKey);
+  async search(
+    spaceKey: string,
+    keyword: string,
+    typeKey?: string,
+    opts?: MeegleQueryOpts
+  ): Promise<MeegleSearchResult> {
+    return this.cache.getOrLoad(
+      `search:${spaceKey}:${keyword}:${typeKey ?? ""}`,
+      () => this.searchUncached(spaceKey, keyword, typeKey, opts),
+      opts
+    );
+  }
+
+  private async searchUncached(
+    spaceKey: string,
+    keyword: string,
+    typeKey: string | undefined,
+    opts?: MeegleQueryOpts
+  ): Promise<MeegleSearchResult> {
+    const types = await this.enabledTypes(spaceKey, typeKey, opts);
     const errors: string[] = [];
     const [views, items] = await Promise.all([
       this.searchViews(spaceKey, types, keyword, errors),
@@ -438,7 +519,7 @@ export class MeegleClient {
     const [host, simpleName] = await Promise.all([this.hostOrProbe(), this.simpleNameOf(spaceKey)]);
     const perType = await mapLimit(types, FANOUT, async (type) => {
       try {
-        const rows = normalizeMqlRows(await this.call(queryArgs(spaceKey, mqlSearch(spaceKey, type.key, keyword))));
+        const rows = await this.queryHundred(spaceKey, type.key, mqlSearch(spaceKey, type.key, keyword));
         return rows.map((r) => this.rowToItem(r, spaceKey, type, host, simpleName));
       } catch (err) {
         errors.push(`${type.name}：${(err as Error).message}`);
@@ -452,11 +533,17 @@ export class MeegleClient {
       .slice(0, SEARCH_CAP);
   }
 
-  async recent(spaceKey: string, typeKey: string): Promise<MeegleWorkItem[]> {
-    const [type] = await this.enabledTypes(spaceKey, typeKey);
-    const [host, simpleName] = await Promise.all([this.hostOrProbe(), this.simpleNameOf(spaceKey)]);
-    const rows = normalizeMqlRows(await this.call(queryArgs(spaceKey, mqlRecent(spaceKey, type.key))));
-    return rows.map((r) => this.rowToItem(r, spaceKey, type, host, simpleName));
+  async recent(spaceKey: string, typeKey: string, opts?: MeegleQueryOpts): Promise<MeegleWorkItem[]> {
+    return this.cache.getOrLoad(
+      `recent:${spaceKey}:${typeKey}`,
+      async () => {
+        const [type] = await this.enabledTypes(spaceKey, typeKey, opts);
+        const [host, simpleName] = await Promise.all([this.hostOrProbe(), this.simpleNameOf(spaceKey)]);
+        const rows = await this.queryHundred(spaceKey, type.key, mqlRecent(spaceKey, type.key));
+        return rows.map((r) => this.rowToItem(r, spaceKey, type, host, simpleName));
+      },
+      opts
+    );
   }
 
   private rowToItem(
@@ -473,43 +560,114 @@ export class MeegleClient {
       typeKey: type.key,
       typeName: type.name,
       status: row.status,
+      business: row.business,
       updatedAt: row.updatedAt,
       url: workItemUrl(host, simpleName, type.key, row.id),
     };
   }
 
-  async viewItems(spaceKey: string, viewId: string, page: number): Promise<MeeglePage<MeegleWorkItem>> {
-    const host = await this.hostOrProbe();
-    return normalizeViewItems(await this.call(viewItemsArgs(spaceKey, viewId, page)), host, page);
+  async viewItems(
+    spaceKey: string,
+    viewId: string,
+    page: number,
+    opts?: MeegleQueryOpts
+  ): Promise<MeeglePage<MeegleWorkItem>> {
+    return this.cache.getOrLoad(
+      `view:${spaceKey}:${viewId}:${page}`,
+      async () => {
+        const host = await this.hostOrProbe();
+        const result = await logicalPage(page, async (p) =>
+          normalizeViewItems(await this.call(viewItemsArgs(spaceKey, viewId, p)), host, p));
+        await this.enrich(result.items);
+        return result;
+      },
+      opts
+    );
   }
 
   /** 全景视图：CLI 只给名字 / 空间 / id / 类型，状态与外链按待办同一套补 */
   async multiViewItems(
     spaceKey: string,
     viewId: string,
-    page: number
+    page: number,
+    opts?: MeegleQueryOpts
   ): Promise<MeeglePage<MeegleWorkItem>> {
-    const result = normalizeMultiViewItems(await this.call(multiViewItemsArgs(spaceKey, viewId, page)), page);
-    await this.enrich(result.items);
-    return result;
+    return this.cache.getOrLoad(
+      `mview:${spaceKey}:${viewId}:${page}`,
+      async () => {
+        const result = await logicalPage(page, async (p) =>
+          normalizeMultiViewItems(await this.call(multiViewItemsArgs(spaceKey, viewId, p)), p));
+        await this.enrich(result.items);
+        return result;
+      },
+      opts
+    );
   }
 
-  async workItem(spaceKey: string, id: string): Promise<MeegleWorkItemDetail> {
-    const host = await this.hostOrProbe();
-    const detail = normalizeDetail(await this.call(workItemArgs(spaceKey, id)), host);
-    if (!detail) throw new MeegleError("cli-error", "工作项不存在或没有权限");
-    return detail;
+  async workItem(spaceKey: string, id: string, opts?: MeegleQueryOpts): Promise<MeegleWorkItemDetail> {
+    return this.cache.getOrLoad(
+      `item:${spaceKey}:${id}`,
+      async () => {
+        const host = await this.hostOrProbe();
+        const detail = normalizeDetail(await this.call(workItemArgs(spaceKey, id)), host);
+        if (!detail) throw new MeegleError("cli-error", "工作项不存在或没有权限");
+        try {
+          const fields = await this.fields(spaceKey, detail.typeKey, opts);
+          const keys = fields
+            .filter((f) => f.key === "business" || isAttachmentField(f))
+            .map((f) => f.key);
+          if (keys.length) {
+            const extra = await this.call(workItemArgs(spaceKey, id, keys));
+            Object.assign(detail, detailContext(extra, fields));
+          }
+        } catch (err) {
+          // 登录 / CLI 可用性错误仍须回 409，让面板切回登录提示。
+          if (err instanceof MeegleError &&
+              (err.reason === "not-authenticated" || err.reason === "not-installed")) throw err;
+          // 可选字段配置 / 读取权限不应挡住基础详情；不拿 ID 假装业务名称。
+          this.log.warn(`meegle 详情上下文补充失败: ${(err as Error).message}`);
+          detail.contextFieldsUnavailable = true;
+          detail.attachmentsUnavailable = true;
+        }
+        try {
+          const first = normalizeComments(await this.call(commentArgs(spaceKey, id, 1)));
+          detail.comments = first.comments;
+          // 评论单页 20 条。完整上下文比静默截断更可靠，但设上限避免异常工作项无限放大复制内容。
+          const pages = Math.min(first.totalPages, 10);
+          for (let page = 2; page <= pages; page++) {
+            detail.comments.push(...normalizeComments(
+              await this.call(commentArgs(spaceKey, id, page))
+            ).comments);
+          }
+          if (first.totalPages > pages) detail.commentsUnavailable = true;
+        } catch (err) {
+          if (err instanceof MeegleError &&
+              (err.reason === "not-authenticated" || err.reason === "not-installed")) throw err;
+          this.log.warn(`meegle 评论读取失败: ${(err as Error).message}`);
+          detail.commentsUnavailable = true;
+        }
+        return detail;
+      },
+      opts
+    );
   }
 
   /** 我的待办：mywork 给的行没有名字，见 enrich() */
-  async todo(action: MeegleTodoAction, page: number): Promise<MeeglePage<MeegleTodoItem>> {
-    const result = normalizeTodo(await this.call(todoArgs(action, page)), page);
-    await this.enrich(result.items);
-    return result;
+  async todo(action: MeegleTodoAction, page: number, opts?: MeegleQueryOpts): Promise<MeeglePage<MeegleTodoItem>> {
+    return this.cache.getOrLoad(
+      `todo:${action}:${page}`,
+      async () => {
+        const result = await logicalPage(page, async (p) =>
+          normalizeTodo(await this.call(todoArgs(action, p)), p));
+        await this.enrich(result.items);
+        return result;
+      },
+      opts
+    );
   }
 
   /**
-   * 给"半成品"的行补齐：名字（空的才补）、状态、更新时间、类型名、空间名、外链。mywork 与
+   * 给列表行补齐：名字（空的才补）、状态、业务、更新时间、类型名、空间名、外链。mywork 与
    * 全景视图给的行都只有 id 一类的骨架，按 空间 × 类型 分组用 MQL 一次补 50 个；补不到
    * （没权限、类型停用）就留空，前端显示 #id，别让整页失败。
    */
@@ -527,7 +685,9 @@ export class MeegleClient {
       async (g) => {
         try {
           const data = await this.call(queryArgs(g.spaceKey, mqlByIds(g.spaceKey, g.typeKey, g.ids)));
-          for (const row of normalizeMqlRows(data)) rows.set(`${g.spaceKey} ${row.id}`, row);
+          for (const row of await this.resolveRows(data, g.spaceKey, g.typeKey)) {
+            rows.set(`${g.spaceKey} ${g.typeKey} ${row.id}`, row);
+          }
         } catch (err) {
           this.log.warn(`meegle 补待办名称失败（${g.spaceKey}/${g.typeKey}）: ${(err as Error).message}`);
         }
@@ -548,15 +708,16 @@ export class MeegleClient {
       })
     );
     for (const it of items) {
-      const row = rows.get(`${it.spaceKey} ${it.id}`);
+      const row = rows.get(`${it.spaceKey} ${it.typeKey} ${it.id}`);
       if (row) {
-        if (row.name) it.name = row.name;
-        it.status = row.status;
-        it.updatedAt = row.updatedAt;
+        if (!it.name && row.name) it.name = row.name;
+        it.status = row.status ?? it.status;
+        it.business = row.business ?? it.business;
+        it.updatedAt = row.updatedAt ?? it.updatedAt;
       }
-      it.typeName = typeNames.get(`${it.spaceKey} ${it.typeKey}`);
+      it.typeName ??= typeNames.get(`${it.spaceKey} ${it.typeKey}`);
       it.spaceName ??= spaceNames.get(it.spaceKey);
-      it.url = workItemUrl(host, simpleNames.get(it.spaceKey), it.typeKey, it.id);
+      it.url ??= workItemUrl(host, simpleNames.get(it.spaceKey), it.typeKey, it.id);
     }
   }
 }

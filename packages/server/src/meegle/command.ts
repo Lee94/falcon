@@ -15,10 +15,15 @@
  * - `mywork todo` 返回的 work_item_name 是空串，名字要靠 MQL 按 ID 补。
  * - MQL 的 FROM 可以直接用 project_key 与 type_key，不必换成空间名 / 类型名；
  *   单引号按 SQL 规矩双写即可。
+ * - business 是工作项业务字段：get 给叶子 ID，meta-fields 的 list[].option 是
+ *   option_id / option_name / children 树，MQL 给 cascade_key_label_value 的完整路径。
+ *   未知 ID 不能当名称、也不能拿 owned_project 顶替。详情只按元数据挑排障字段。
+ * - MQL LIMIT 100 仍只回 50 条；下一页用 session_id + group_id "1" / page_num 2。
  * - 用户输入一律走 `--flag=value` 形式：值以 `-` 开头时（关键字"-foo"）
  *   `--flag value` 会被 pflag 当成下一个 flag。
  */
 
+import { MEEGLE_PAGE_SIZE } from "@falcon/shared";
 import type {
   MeegleLogin,
   MeeglePage,
@@ -31,6 +36,7 @@ import type {
   MeegleWorkItemDetail,
   MeegleWorkItemType,
 } from "@falcon/shared";
+import { isValidMeegleKey, isValidMeegleWorkItemId } from "@falcon/shared";
 
 /** 交互式启动时的更新提示会往 stdout 里塞非 JSON，明确关掉 */
 export const CLI_ENV: Record<string, string> = { MEEGLE_NO_UPDATE_CHECK: "1" };
@@ -54,11 +60,11 @@ export function isValidHost(v: unknown): v is string {
 
 /** 空间 key / 类型 key / 视图 id 都是 URL 安全的短串；放行别的就等于把任意 argv 交给 CLI */
 export function isValidKey(v: unknown): v is string {
-  return typeof v === "string" && /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/.test(v);
+  return isValidMeegleKey(v);
 }
 
 export function isValidId(v: unknown): v is string {
-  return typeof v === "string" && /^\d{1,20}$/.test(v);
+  return isValidMeegleWorkItemId(v);
 }
 
 /** 粘贴进来的飞书项目链接：只收 http(s)，不含空白 / 控制字符，长度封顶 */
@@ -100,6 +106,11 @@ export function spacesArgs(keyword?: string, page = 1): string[] {
 
 export function typesArgs(spaceKey: string): string[] {
   return ["workitem", "meta-types", `--project-key=${spaceKey}`, "--format", "json"];
+}
+
+export function fieldsArgs(spaceKey: string, typeKey: string, page: number): string[] {
+  return ["workitem", "meta-fields", `--project-key=${spaceKey}`, `--work-item-type=${typeKey}`,
+    `--page-num=${page}`, "--format", "json"];
 }
 
 export function viewSearchArgs(spaceKey: string, typeKey: string, keyword: string): string[] {
@@ -152,13 +163,26 @@ export function urlDecodeArgs(url: string): string[] {
   return ["url", "decode", `--url=${url}`, "--format", "json"];
 }
 
-/** 不传 --fields：默认就带 description / priority / current_status_operator，够详情页用 */
-export function workItemArgs(spaceKey: string, id: string): string[] {
+/** 显式字段只用于补业务与排障上下文；基础详情仍使用默认字段。 */
+export function workItemArgs(spaceKey: string, id: string, fields?: string[]): string[] {
   return [
     "workitem",
     "get",
     `--project-key=${spaceKey}`,
     `--work-item-id=${id}`,
+    ...(fields?.length ? [`--fields=${JSON.stringify(fields)}`] : []),
+    "--format",
+    "json",
+  ];
+}
+
+export function commentArgs(spaceKey: string, id: string, page: number): string[] {
+  return [
+    "comment",
+    "list",
+    `--project-key=${spaceKey}`,
+    `--work-item-id=${id}`,
+    `--page-num=${page}`,
     "--format",
     "json",
   ];
@@ -166,7 +190,7 @@ export function workItemArgs(spaceKey: string, id: string): string[] {
 
 // ---- MQL ----
 
-const MQL_FIELDS = "`work_item_id`, `name`, `work_item_status`, `updated_at`";
+const MQL_FIELDS = "`work_item_id`, `name`, `work_item_status`, `updated_at`, `business`";
 
 /** 字符串字面量：单引号双写；控制字符没有任何合法用途，换成空格 */
 export function mqlLiteral(s: string): string {
@@ -185,7 +209,7 @@ function mqlFrom(spaceKey: string, typeKey: string): string {
 }
 
 /** 按名称子串搜；`%` / `_` 是 LIKE 通配符，用户要是故意打了就让它当通配符 */
-export function mqlSearch(spaceKey: string, typeKey: string, keyword: string, limit = 20): string {
+export function mqlSearch(spaceKey: string, typeKey: string, keyword: string, limit = MEEGLE_PAGE_SIZE): string {
   return (
     `SELECT ${MQL_FIELDS} ${mqlFrom(spaceKey, typeKey)} ` +
     `WHERE \`name\` LIKE ${mqlLiteral(`%${keyword}%`)} ` +
@@ -194,7 +218,7 @@ export function mqlSearch(spaceKey: string, typeKey: string, keyword: string, li
 }
 
 /** 类型下最新创建的工作项。id 单调递增，按它倒序就是"最近" */
-export function mqlRecent(spaceKey: string, typeKey: string, limit = 30): string {
+export function mqlRecent(spaceKey: string, typeKey: string, limit = MEEGLE_PAGE_SIZE): string {
   return (
     `SELECT ${MQL_FIELDS} ${mqlFrom(spaceKey, typeKey)} ` +
     `ORDER BY \`work_item_id\` DESC LIMIT ${clampLimit(limit)}`
@@ -211,7 +235,7 @@ export function mqlByIds(spaceKey: string, typeKey: string, ids: string[]): stri
 }
 
 function clampLimit(n: number): number {
-  return Math.max(1, Math.min(CLI_PAGE_SIZE, Math.floor(n)));
+  return Math.max(1, Math.min(MEEGLE_PAGE_SIZE, Math.floor(n)));
 }
 
 export function chunk<T>(arr: T[], size: number): T[][] {
@@ -236,6 +260,154 @@ function str(v: unknown): string | undefined {
   if (typeof v === "string") return v || undefined;
   if (typeof v === "number") return String(v);
   return undefined;
+}
+
+export interface FieldMetadata {
+  key: string;
+  name: string;
+  type: string;
+  options: Map<string, string>;
+}
+
+/** 实测 meta-fields 返回 list + option 树；保留父级路径，不能用所属空间代替业务。 */
+export function normalizeFields(data: unknown, page: number): MeeglePage<FieldMetadata> {
+  const list = isObj(data) && Array.isArray(data.list) ? data.list : [];
+  const items: FieldMetadata[] = [];
+  for (const field of list) {
+    if (!isObj(field) || !str(field.field_key)) continue;
+    const options = new Map<string, string>();
+    const visit = (nodes: unknown, parents: string[]) => {
+      if (!Array.isArray(nodes)) return;
+      for (const node of nodes) {
+        if (!isObj(node)) continue;
+        const name = str(node.option_name);
+        const id = str(node.option_id);
+        const path = name ? [...parents, name] : parents;
+        if (id && name) options.set(id, path.join(" / "));
+        visit(node.children, path);
+      }
+    };
+    visit(field.option, []);
+    items.push({ key: String(field.field_key), name: str(field.field_name) ?? String(field.field_key),
+      type: str(field.field_type) ?? "", options });
+  }
+  const pagination = isObj(data) && isObj(data.pagination) ? data.pagination : {};
+  return { items, page, hasMore: pagination.has_more === true };
+}
+
+/** IDs are only names when metadata proves it. MQL cascade labels are authoritative too. */
+export function businessText(value: unknown, options = new Map<string, string>()): string | undefined {
+  if (typeof value === "string" || typeof value === "number") return options.get(String(value));
+  if (Array.isArray(value)) {
+    const labels = value.map((v) => businessText(v, options)).filter((s): s is string => Boolean(s));
+    return labels.length ? [...new Set(labels)].join("、") : undefined;
+  }
+  if (!isObj(value)) return undefined;
+  if (isObj(value.value)) return businessText(value.value, options);
+  for (const key of ["cascade_key_label_value", "key_label_value", "key_label_value_list", "string_value"]) {
+    if (value[key] !== undefined) return businessText(value[key], options);
+  }
+  const label = str(value.label);
+  if (label) {
+    const children = businessText(value.children, options);
+    return children ? `${label} / ${children}` : label;
+  }
+  return options.get(str(value.key) ?? "");
+}
+
+/** Only named diagnostic fields of safe types enter AI context; never stringify arbitrary objects. */
+export function isContextField(field: FieldMetadata): boolean {
+  return /复现|重现|预期|期望|实际|环境|版本|日志|堆栈|链接|repro|expected|actual|environment|version|logs?|stack.?trace|related.?links?/i.test(field.name)
+    && field.key !== "template_version"
+    && !/人员|负责人|经办|邮箱|客户|用户|owner|operator|email|person|user/i.test(field.name.replace(/客户环境/g, "环境"))
+    && /^(text|multi-pure-text|multi-text|multi_text|rich_text|rich-text|textarea|select|multi-select|tree-select|tree-multi-select|cascade_select|link|url|number|workitem_related_(multi_)?select)$/.test(field.type);
+}
+
+export function isAttachmentField(field: FieldMetadata): boolean {
+  return /附件|attachment/i.test(field.name) && /^(multi-)?file$/.test(field.type);
+}
+
+function contextValue(value: unknown, field: FieldMetadata): string | undefined {
+  if (typeof value === "string") {
+    if (/select/.test(field.type)) return field.options.get(value);
+    return value.replace(/<!--[\s\S]*?-->/g, "") || undefined;
+  }
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) {
+    const parts = value.map((v) => contextValue(v, field)).filter((v): v is string => Boolean(v));
+    return parts.length ? parts.join("、") : undefined;
+  }
+  if (!isObj(value)) return undefined;
+  if (/^workitem_related_/.test(field.type)) return str(value.name);
+  if (typeof value.label === "string") return value.label;
+  if (typeof value.url === "string" && /^https?:\/\//.test(value.url)) {
+    return typeof value.name === "string" ? `[${value.name}](${value.url})` : value.url;
+  }
+  return undefined;
+}
+
+export function detailContext(data: unknown, metadata: FieldMetadata[]): {
+  business?: string;
+  contextFields: { name: string; value: string }[];
+  attachments: { name?: string; url: string }[];
+} {
+  const fields = isObj(data) && Array.isArray(data.work_item_fields) ? data.work_item_fields : [];
+  const byKey = new Map(metadata.map((f) => [f.key, f]));
+  const contextFields: { name: string; value: string }[] = [];
+  const attachments: { name?: string; url: string }[] = [];
+  let business: string | undefined;
+  for (const field of fields) {
+    if (!isObj(field) || typeof field.key !== "string") continue;
+    const meta = byKey.get(field.key);
+    if (field.key === "business") business = businessText(field.value, meta?.options);
+    if (meta && isAttachmentField(meta)) {
+      const values = Array.isArray(field.value) ? field.value : [field.value];
+      for (const value of values) {
+        if (!isObj(value)) continue;
+        const url = str(value.url) ?? str(value.file_url);
+        if (!url || !/^https?:\/\//.test(url)) continue;
+        const name = str(value.name) ?? str(value.file_name);
+        attachments.push({ ...(name ? { name } : {}), url });
+      }
+    }
+    if (!meta || !isContextField(meta)) continue;
+    const value = contextValue(field.value, meta);
+    if (value) contextFields.push({ name: meta.name, value });
+  }
+  return { business, contextFields, attachments };
+}
+
+export function normalizeComments(data: unknown): {
+  comments: NonNullable<MeegleWorkItemDetail["comments"]>;
+  totalPages: number;
+} {
+  const rows = isObj(data) && Array.isArray(data.comments) ? data.comments : [];
+  const comments: NonNullable<MeegleWorkItemDetail["comments"]> = [];
+  for (const row of rows) {
+    if (!isObj(row)) continue;
+    const content = str(row.content)?.trim() ?? "";
+    const rawFiles = Array.isArray(row.file_url) ? row.file_url : [row.file_url];
+    const attachments = rawFiles
+      .map(str)
+      .filter((url): url is string => Boolean(url && /^https?:\/\//.test(url)));
+    if (!content && !attachments.length) continue;
+    const createdAt = str(row.created_at);
+    comments.push({
+      content,
+      ...(createdAt ? { createdAt } : {}),
+      ...(attachments.length ? { attachments } : {}),
+    });
+  }
+  const pagination = isObj(data) && isObj(data.pagination) ? data.pagination : {};
+  const totalPages = Math.max(1, Number(pagination.total_pages) || 1);
+  return { comments, totalPages };
+}
+
+/** LIMIT doesn't change MQL's fixed 50-row transport page; use its opaque session to fetch page 2. */
+export function mqlNextArgs(spaceKey: string, data: unknown): string[] | undefined {
+  if (!isObj(data) || !str(data.session_id)) return undefined;
+  return ["workitem", "query", `--project-key=${spaceKey}`, `--session-id=${String(data.session_id)}`,
+    '--group-pagination-list=[{"group_id":"1","page_num":2}]', "--format", "json"];
 }
 
 /**
@@ -380,6 +552,9 @@ export function normalizeViews(data: unknown, type: { key: string; name: string 
 export interface MqlRow {
   id: string;
   name: string;
+  business?: string;
+  /** 仅内部使用：只有 MQL 未给 label 时才需要按空间×类型读一次元数据。 */
+  businessValue?: unknown;
   status?: string;
   updatedAt?: string;
 }
@@ -426,11 +601,14 @@ export function normalizeMqlRows(data: unknown): MqlRow[] {
       }
       const id = mqlValueText(cells.get("work_item_id"));
       if (!id) continue;
+      const businessValue = cells.get("business");
+      const business = businessText(businessValue);
       rows.push({
         id,
         name: mqlValueText(cells.get("name")) ?? "",
         status: mqlValueText(cells.get("work_item_status")),
         updatedAt: mqlValueText(cells.get("updated_at")),
+        ...(business ? { business } : businessValue ? { businessValue } : {}),
       });
     }
   }
@@ -664,6 +842,8 @@ export function normalizeDetail(data: unknown, host: string | null): MeegleWorkI
     template: isObj(attr.template) ? str(attr.template.name) : undefined,
     priority: isObj(priority) ? str(priority.label) : str(priority),
     description: typeof description === "string" ? plainDescription(description) || undefined : undefined,
+    descriptionMarkdown: typeof description === "string" ? description.replace(/<!--[\s\S]*?-->/g, "") || undefined : undefined,
+    business: businessText(fields.get("business")),
     createdAt: str(attr.create_time),
     createdBy: personName(attr.create_by),
     updatedBy: personName(attr.updated_by),

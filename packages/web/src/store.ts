@@ -408,6 +408,13 @@ export interface ProjectHead {
   sha?: string;
 }
 
+export interface WorktreeFormPreset {
+  name: string;
+  branch: string;
+  mode: "new-branch";
+  startPoint: "HEAD";
+}
+
 /** 侧栏最后一层的 +N −M。只给脏工作区留条目，干净的不占位置 */
 export interface ProjectChanges {
   added: number;
@@ -807,8 +814,8 @@ interface AppState {
    * 存完之后把新主机选进项目表单，不用用户再点一次下拉框。
    */
   hostForm: { edit: SshHost | null; onSaved?: (host: SshHost) => void } | null;
-  /** 正在从哪个源项目派生附属项目；null = 关闭 */
-  worktreeFor: string | null;
+  /** 派生表单及可选预填；菜单入口不带 preset，保持原来的空表单行为 */
+  worktreeFor: { sourceProjectId: string; preset?: WorktreeFormPreset } | null;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
 
@@ -900,7 +907,7 @@ interface AppState {
   closeProjectForm(): void;
   openHostForm(edit: SshHost | null, onSaved?: (host: SshHost) => void): void;
   closeHostForm(): void;
-  openWorktreeForm(sourceProjectId: string): void;
+  openWorktreeForm(sourceProjectId: string, preset?: WorktreeFormPreset): void;
   closeWorktreeForm(): void;
   openSettings(tab?: SettingsTab): void;
   closeSettings(): void;
@@ -1681,8 +1688,13 @@ export const useApp = create<AppState>((set, get) => {
     closeHostForm() {
       set({ hostForm: null });
     },
-    openWorktreeForm(sourceProjectId) {
-      set({ worktreeFor: sourceProjectId, menu: null, paletteOpen: false, quickOpen: false });
+    openWorktreeForm(sourceProjectId, preset) {
+      set({
+        worktreeFor: { sourceProjectId, preset },
+        menu: null,
+        paletteOpen: false,
+        quickOpen: false,
+      });
     },
     closeWorktreeForm() {
       set({ worktreeFor: null });

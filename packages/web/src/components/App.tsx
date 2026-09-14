@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useRef } from "react";
-import { useApp, selectRightVisible, selectSidebarVisible } from "../store.js";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
 import { useIsMobile } from "../lib/useIsMobile.js";
@@ -69,6 +69,12 @@ export function App() {
   const sidebarVisible = useApp(selectSidebarVisible);
   const rightVisible = useApp(selectRightVisible);
   const rightPanel = useApp((s) => s.rightPanel);
+  // 飞书面板 CLI 往返 2–6s：在右侧栏开着时切走不卸载，关掉右侧栏才卸（数据仍在 meegleCache）
+  const [meegleSeen, setMeegleSeen] = useState(false);
+  useEffect(() => {
+    if (!rightVisible) setMeegleSeen(false);
+    else if (rightPanel === "meegle") setMeegleSeen(true);
+  }, [rightVisible, rightPanel]);
   const projectForm = useApp((s) => s.projectForm);
   const hostForm = useApp((s) => s.hostForm);
   const worktreeFor = useApp((s) => s.worktreeFor);
@@ -276,7 +282,16 @@ export function App() {
             {rightPanel === "changes" && <ChangesPanel />}
             {rightPanel === "git" && <GitPanel />}
             {rightPanel === "forward" && <ForwardPanel />}
-            {rightPanel === "meegle" && <MeeglePanel />}
+            {(rightPanel === "meegle" || meegleSeen) && (
+              <div
+                className={cn(
+                  "flex min-h-0 min-w-0 flex-1 flex-col",
+                  rightPanel !== "meegle" && "hidden"
+                )}
+              >
+                <MeeglePanel />
+              </div>
+            )}
           </ResizableSlot>
         )}
         <RightBar />
@@ -307,7 +322,12 @@ export function App() {
           />
         )}
         {worktreeFor && (
-          <WorktreeForm key={worktreeFor} sourceId={worktreeFor} onClose={closeWorktreeForm} />
+          <WorktreeForm
+            key={`${worktreeFor.sourceProjectId}:${worktreeFor.preset?.branch ?? ""}`}
+            sourceId={worktreeFor.sourceProjectId}
+            preset={worktreeFor.preset}
+            onClose={closeWorktreeForm}
+          />
         )}
         {paletteOpen && <CommandPalette />}
         {quickOpen && <FileQuickOpen />}

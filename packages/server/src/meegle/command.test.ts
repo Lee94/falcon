@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   chunk,
   cliErrorText,
+  commentArgs,
   groupForLookup,
   isValidHost,
   isValidKey,
@@ -33,6 +34,12 @@ import {
   viewSearchArgs,
   workItemUrl,
 } from "./command.js";
+
+test("comment list argv carries the project, item and page", () => {
+  assert.deepEqual(commentArgs("p1", "123", 2), [
+    "comment", "list", "--project-key=p1", "--work-item-id=123", "--page-num=2", "--format", "json",
+  ]);
+});
 
 test("argv 用 --flag=value，用户输入以 - 开头也不会被当成 flag", () => {
   assert.deepEqual(viewSearchArgs("p1", "story", "-foo"), [
@@ -76,14 +83,14 @@ test("MQL 字面量：单引号双写、控制字符变空格", () => {
   assert.equal(mqlLiteral("a\nb\u0000c"), "'a b c'");
   assert.equal(
     mqlSearch("p1", "issue", "登录'", 20),
-    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM `p1`.`issue` " +
+    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `business` FROM `p1`.`issue` " +
       "WHERE `name` LIKE '%登录''%' ORDER BY `work_item_id` DESC LIMIT 20"
   );
-  assert.match(mqlRecent("p1", "story", 999), /LIMIT 50$/);
+  assert.match(mqlRecent("p1", "story", 999), /LIMIT 100$/);
   // 非数字 id 直接丢，LIMIT 跟着有效数量走
   assert.equal(
     mqlByIds("p1", "issue", ["1", "x", "2"]),
-    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM `p1`.`issue` " +
+    "SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `business` FROM `p1`.`issue` " +
       "WHERE `work_item_id` IN (1, 2) LIMIT 2"
   );
 });

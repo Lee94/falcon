@@ -9,7 +9,7 @@ import type {
   WorktreeInput,
 } from "@falcon/shared";
 import { api, ApiRequestError } from "../api.js";
-import { useApp } from "../store.js";
+import { useApp, type WorktreeFormPreset } from "../store.js";
 import { worktreeReasonText } from "../lib/reason.js";
 import {
   actionBlocksSubmit,
@@ -33,14 +33,30 @@ import {
 import { AppDialog } from "./common/AppDialog.js";
 import { Field, Segmented } from "./common/Field.js";
 
-export function WorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
+export function WorktreeForm({
+  sourceId,
+  preset,
+  onClose,
+}: {
+  sourceId: string;
+  preset?: WorktreeFormPreset;
+  onClose: () => void;
+}) {
   const project = useApp((s) => s.projects.find((p) => p.id === sourceId));
   // 多仓库容器走批量派生表单；单仓库路径与从前一字不差
-  if (project?.multi) return <MultiWorktreeForm project={project} onClose={onClose} />;
-  return <SingleWorktreeForm sourceId={sourceId} onClose={onClose} />;
+  if (project?.multi) return <MultiWorktreeForm project={project} preset={preset} onClose={onClose} />;
+  return <SingleWorktreeForm sourceId={sourceId} preset={preset} onClose={onClose} />;
 }
 
-function SingleWorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
+function SingleWorktreeForm({
+  sourceId,
+  preset,
+  onClose,
+}: {
+  sourceId: string;
+  preset?: WorktreeFormPreset;
+  onClose: () => void;
+}) {
   const { t } = useTranslation();
   const sourceName = useApp((s) => s.projects.find((p) => p.id === sourceId)?.name ?? "");
   const refreshProjects = useApp((s) => s.refreshProjects);
@@ -49,11 +65,11 @@ function SingleWorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: 
 
   const [info, setInfo] = useState<RepoInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"new-branch" | "existing-branch">("new-branch");
-  const [newBranch, setNewBranch] = useState("");
-  const [startPoint, setStartPoint] = useState("HEAD");
+  const [mode, setMode] = useState<"new-branch" | "existing-branch">(preset?.mode ?? "new-branch");
+  const [newBranch, setNewBranch] = useState(preset?.branch ?? "");
+  const [startPoint, setStartPoint] = useState<string>(preset?.startPoint ?? "HEAD");
   const [pickedRef, setPickedRef] = useState("");
-  const [name, setName] = useState("");
+  const [name, setName] = useState(preset?.name ?? "");
   const [dir, setDir] = useState("");
   const [dirTouched, setDirTouched] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -309,7 +325,15 @@ function SingleWorktreeForm({ sourceId, onClose }: { sourceId: string; onClose: 
  * 失败展示（成员归因 + 回滚残留）都不同，塞进一个组件只会互相绊脚。
  * 提交不带 dir——集中目录由服务端算，这里只渲染只读预览（漂移无害）。
  */
-function MultiWorktreeForm({ project, onClose }: { project: Project; onClose: () => void }) {
+function MultiWorktreeForm({
+  project,
+  preset,
+  onClose,
+}: {
+  project: Project;
+  preset?: WorktreeFormPreset;
+  onClose: () => void;
+}) {
   const { t } = useTranslation();
   const refreshProjects = useApp((s) => s.refreshProjects);
   const refreshHosts = useApp((s) => s.refreshHosts);
@@ -317,10 +341,10 @@ function MultiWorktreeForm({ project, onClose }: { project: Project; onClose: ()
 
   const [probe, setProbe] = useState<MultiRepoProbe | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [mode, setMode] = useState<MultiMode>("auto");
-  const [branchText, setBranchText] = useState("");
+  const [mode, setMode] = useState<MultiMode>(preset?.mode ?? "auto");
+  const [branchText, setBranchText] = useState(preset?.branch ?? "");
   const [pickedRef, setPickedRef] = useState("");
-  const [name, setName] = useState("");
+  const [name, setName] = useState(preset?.name ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

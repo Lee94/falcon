@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import {
   ArrowLeft,
   ExternalLink,
   FileText,
+  GripVertical,
   Layers,
   ListTodo,
   LogIn,
@@ -28,7 +30,6 @@ import {
 } from "lucide-react";
 import {
   MEEGLE_HOSTS,
-  type MeeglePage,
   type MeeglePin,
   type MeeglePinInput,
   type MeegleSearchResult,
@@ -42,7 +43,16 @@ import {
   type MeegleWorkItemType,
 } from "@falcon/shared";
 import { api, ApiRequestError } from "../api.js";
+import {
+  clearMeegleCache,
+  loadMeegleCache,
+  meegleCacheStale,
+  peekMeegleCache,
+  writeMeegleCache,
+} from "../lib/meegleCache.js";
+import { canDragMeegleWorkItem, writeMeegleWorkItemDrag } from "../lib/meegleDrag.js";
 import { useApp } from "../store.js";
+import { filterMeegleItems as filterItems, groupMeegleItems, meeglePage, type ItemGroup } from "../lib/meegleGroups.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,6 +64,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Segmented } from "./common/Field.js";
+import { useMeegleCopyMenu } from "./useMeegleCopyMenu.js";
 
 /**
  * 右侧「飞书项目」面板：宿主机上 meegle CLI 的一个窗口。
@@ -67,14 +78,23 @@ import { Segmented } from "./common/Field.js";
  * 状态由后端 `/api/meegle/status` 说了算：没装 CLI 给安装提示，没登录给登录卡片
  * （device-code 模式，后端拉起登录进程，这里只负责把授权链接给用户并轮询）。
  * 业务请求撞上 409 说明登录态在中途没了，重新拉一次状态让面板自己切过去。
+ *
+ * 列表 / 详情走两层缓存：前端内存（面板卸载后再挂立刻画出上次的结果）+ 后端 CLI
+ * TTL（整页刷新后 HTTP 也是毫秒级）。30s 内不打网络，之后后台静默再拉；顶栏刷新
+ * 清空两边并带 `fresh=1`。不进 localStorage。
  */
+
+interface CachedPage<T> {
+  items: T[];
+  page: number;
+  hasMore: boolean;
+  total?: number;
+}
 
 const TAB_KEY = "falcon.meegle.tab";
 const SPACE_KEY = "falcon.meegle.space";
 const LOGIN_POLL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 350;
-/** 视图下钻页「全部加载」一次最多翻的页数（每页 50 条），防手滑点在几千条的视图上 */
-const MAX_AUTO_PAGES = 20;
 
 type Tab = "todo" | "space" | "pins";
 const TABS: Tab[] = ["todo", "space", "pins"];
@@ -111,6 +131,7 @@ interface PinsApi {
 }
 
 const PinsContext = createContext<PinsApi | null>(null);
+const UnavailableContext = createContext<((err: unknown) => void) | undefined>(undefined);
 
 function usePins(): PinsApi {
   const v = useContext(PinsContext);
@@ -145,17 +166,26 @@ function loadTab(): Tab {
 
 export function MeeglePanel() {
   const { t } = useTranslation();
-  const [status, setStatus] = useState<MeegleStatus | null>(null);
+  const [status, setStatus] = useState<MeegleStatus | null>(
+    () => peekMeegleCache<MeegleStatus>("status") ?? null
+  );
   const [statusError, setStatusError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [tab, setTab] = useState<Tab>(loadTab);
   const [drill, setDrill] = useState<Drill[]>([]);
-  const [pins, setPins] = useState<MeeglePin[] | null>(null);
+  const [pins, setPins] = useState<MeeglePin[] | null>(() => peekMeegleCache<MeeglePin[]>("pins") ?? null);
+  const [epoch, setEpoch] = useState(0);
+  const lastUser = useRef<string | undefined>(undefined);
 
-  const loadStatus = useCallback(async () => {
-    setChecking(true);
+  const loadStatus = useCallback(async (fresh = false) => {
+    const hit = peekMeegleCache<MeegleStatus>("status");
+    if (hit && !fresh) setStatus(hit);
+    if (!fresh && hit && !meegleCacheStale("status")) return;
+    const bust = fresh || Boolean(hit);
+    if (!hit || fresh) setChecking(true);
     try {
-      setStatus(await api.meegleStatus());
+      const st = await loadMeegleCache("status", () => api.meegleStatus(fresh), bust);
+      setStatus(st);
       setStatusError(null);
     } catch (err) {
       useApp.getState().handleApiError(err);
@@ -165,21 +195,40 @@ export function MeeglePanel() {
     }
   }, []);
 
+  const refresh = useCallback(() => {
+    clearMeegleCache();
+    void api.meegleClearCache();
+    setEpoch((n) => n + 1);
+    void loadStatus(true);
+  }, [loadStatus]);
+
   useEffect(() => {
     void loadStatus();
   }, [loadStatus]);
 
-  // 登录进行中：轮询，授权一完成登录卡片就换成正文
+  // 登录进行中：轮询必须绕过缓存，授权一完成登录卡片就换成正文
   useEffect(() => {
     if (!status?.login) return;
-    const timer = window.setInterval(() => void loadStatus(), LOGIN_POLL_MS);
+    const timer = window.setInterval(() => void loadStatus(true), LOGIN_POLL_MS);
     return () => clearInterval(timer);
   }, [status?.login, loadStatus]);
+
+  useEffect(() => {
+    const key = status?.user?.key;
+    if (lastUser.current && key && lastUser.current !== key) {
+      clearMeegleCache();
+      setEpoch((n) => n + 1);
+    }
+    if (key) lastUser.current = key;
+  }, [status?.user?.key]);
 
   /** 业务请求撞上 409（没装 / 没登录）：面板要切到对应提示，重新问一次状态 */
   const onUnavailable = useCallback(
     (err: unknown) => {
-      if (err instanceof ApiRequestError && err.status === 409) void loadStatus();
+      if (err instanceof ApiRequestError && err.status === 409) {
+        clearMeegleCache();
+        void loadStatus(true);
+      }
     },
     [loadStatus]
   );
@@ -190,10 +239,14 @@ export function MeeglePanel() {
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
+    const hit = peekMeegleCache<MeeglePin[]>("pins");
+    if (hit) setPins(hit);
     api
       .meeglePins()
       .then((list) => {
-        if (!cancelled) setPins(list);
+        if (cancelled) return;
+        setPins(list);
+        writeMeegleCache("pins", list);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -203,7 +256,7 @@ export function MeeglePanel() {
     return () => {
       cancelled = true;
     };
-  }, [ready]);
+  }, [ready, epoch]);
 
   const pinsApi = useMemo<PinsApi>(
     () => ({
@@ -217,10 +270,18 @@ export function MeeglePanel() {
         try {
           if (existing) {
             await api.meegleUnpin(existing.id);
-            setPins((cur) => cur?.filter((p) => p.id !== existing.id) ?? cur);
+            setPins((cur) => {
+              const next = cur?.filter((p) => p.id !== existing.id) ?? cur;
+              if (next) writeMeegleCache("pins", next);
+              return next;
+            });
           } else {
             const created = await api.meeglePin(input);
-            setPins((cur) => (cur?.some((p) => p.id === created.id) ? cur : [...(cur ?? []), created]));
+            setPins((cur) => {
+              const next = cur?.some((p) => p.id === created.id) ? cur : [...(cur ?? []), created];
+              writeMeegleCache("pins", next);
+              return next;
+            });
           }
         } catch (err) {
           useApp.getState().handleApiError(err);
@@ -230,7 +291,11 @@ export function MeeglePanel() {
       async rename(id, label) {
         try {
           const next = await api.meegleRenamePin(id, label);
-          setPins((cur) => cur?.map((p) => (p.id === id ? next : p)) ?? cur);
+          setPins((cur) => {
+            const list = cur?.map((p) => (p.id === id ? next : p)) ?? cur;
+            if (list) writeMeegleCache("pins", list);
+            return list;
+          });
         } catch (err) {
           useApp.getState().handleApiError(err);
           useApp.getState().toast({ kind: "danger", title: t("toast.failed"), body: (err as Error).message });
@@ -239,7 +304,11 @@ export function MeeglePanel() {
       async remove(id) {
         try {
           await api.meegleUnpin(id);
-          setPins((cur) => cur?.filter((p) => p.id !== id) ?? cur);
+          setPins((cur) => {
+            const next = cur?.filter((p) => p.id !== id) ?? cur;
+            if (next) writeMeegleCache("pins", next);
+            return next;
+          });
         } catch (err) {
           useApp.getState().handleApiError(err);
           useApp.getState().toast({ kind: "danger", title: t("toast.failed"), body: (err as Error).message });
@@ -354,6 +423,7 @@ export function MeeglePanel() {
 
   return (
     <PinsContext.Provider value={pinsApi}>
+      <UnavailableContext.Provider value={onUnavailable}>
       <aside className="island flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
         <div className="flex h-8.5 shrink-0 items-center gap-2 border-b pr-1.5 pl-3">
           <ListTodo className="size-3.5 shrink-0 text-muted-foreground" />
@@ -366,7 +436,7 @@ export function MeeglePanel() {
             aria-label={t("meegle.refresh")}
             title={t("meegle.refresh")}
             disabled={checking}
-            onClick={() => void loadStatus()}
+            onClick={refresh}
           >
             <RefreshCw className={cn(checking && "animate-spin")} />
           </Button>
@@ -375,13 +445,20 @@ export function MeeglePanel() {
         {!status ? (
           <Hint>{statusError ? `${t("meegle.statusFailed")}：${statusError}` : t("meegle.loading")}</Hint>
         ) : !status.installed ? (
-          <InstallHint bin={status.bin} onRecheck={() => void loadStatus()} checking={checking} />
+          <InstallHint bin={status.bin} onRecheck={() => void loadStatus(true)} checking={checking} />
         ) : !status.authenticated ? (
-          <LoginCard status={status} onChanged={() => void loadStatus()} />
+          <LoginCard
+            status={status}
+            onChanged={() => {
+              clearMeegleCache();
+              void loadStatus(true);
+            }}
+          />
         ) : top?.kind === "view" ? (
           <ViewItems
             key={`${top.spaceKey}/${top.multi ? "m" : "v"}/${top.viewId}`}
             drill={top}
+            epoch={epoch}
             onBack={pop}
             onOpenItem={openItem}
             onUnavailable={onUnavailable}
@@ -390,6 +467,7 @@ export function MeeglePanel() {
           <ItemDetail
             key={`${top.spaceKey}/${top.id}`}
             drill={top}
+            epoch={epoch}
             onBack={pop}
             onUnavailable={onUnavailable}
           />
@@ -408,9 +486,10 @@ export function MeeglePanel() {
               />
             </div>
             {tab === "todo" ? (
-              <TodoSection onOpenItem={openItem} onUnavailable={onUnavailable} />
+              <TodoSection epoch={epoch} onOpenItem={openItem} onUnavailable={onUnavailable} />
             ) : tab === "space" ? (
               <SpaceSection
+                epoch={epoch}
                 onOpenView={openView}
                 onOpenItem={openItem}
                 onOpenUrl={openUrl}
@@ -427,6 +506,7 @@ export function MeeglePanel() {
           </div>
         )}
       </aside>
+      </UnavailableContext.Provider>
     </PinsContext.Provider>
   );
 }
@@ -604,32 +684,45 @@ function LoginCard({ status, onChanged }: { status: MeegleStatus; onChanged: () 
 const ACTIONS: MeegleTodoAction[] = ["todo", "this_week", "overdue", "done"];
 
 function TodoSection({
+  epoch,
   onOpenItem,
   onUnavailable,
 }: {
+  epoch: number;
   onOpenItem: (item: MeegleWorkItem) => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const [action, setAction] = useState<MeegleTodoAction>("todo");
-  const [items, setItems] = useState<MeegleTodoItem[]>([]);
+  const cacheKey = `todo:${action}`;
+  const [items, setItems] = useState<MeegleTodoItem[]>(
+    () => peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey)?.items ?? []
+  );
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState<number | undefined>();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    () => !peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey)
+  );
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const gen = useRef(0);
+  const requestedPage = useRef(1);
+  const epochRef = useRef(epoch);
 
   const load = useCallback(
-    async (nextPage: number) => {
+    async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
+      requestedPage.current = nextPage;
       setLoading(true);
       setError(null);
       try {
-        const res = await api.meegleTodo(action, nextPage);
+        const res = await api.meegleTodo(action, nextPage, fresh);
         if (gen.current !== my) return;
-        setItems((cur) => (nextPage === 1 ? res.items : [...cur, ...res.items]));
+        // Cache the last successful page, never an accumulated prefix. A failed
+        // navigation keeps both the visible records and their page number intact.
+        writeMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey, res);
+        setItems(res.items);
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
@@ -642,14 +735,32 @@ function TodoSection({
         if (gen.current === my) setLoading(false);
       }
     },
-    [action, onUnavailable]
+    [action, cacheKey, onUnavailable]
   );
 
   useEffect(() => {
-    setItems([]);
-    setTotal(undefined);
-    void load(1);
-  }, [load]);
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<CachedPage<MeegleTodoItem>>(cacheKey);
+    if (hit) {
+      setItems(hit.items);
+      setPage(hit.page);
+      setHasMore(hit.hasMore);
+      setTotal(hit.total);
+      setError(null);
+    } else {
+      setItems([]);
+      setPage(1);
+      setHasMore(false);
+      setTotal(undefined);
+    }
+    if (hit && !force && !meegleCacheStale(cacheKey)) {
+      setLoading(false);
+      return () => { ++gen.current; };
+    }
+    void load(hit?.page ?? 1, force);
+    return () => { ++gen.current; };
+  }, [cacheKey, load, epoch]);
 
   const shown = useMemo(() => filterItems(items, filter), [items, filter]);
 
@@ -666,7 +777,7 @@ function TodoSection({
           className="mt-1.5"
           value={filter}
           onChange={setFilter}
-          placeholder={t("meegle.filterPlaceholder")}
+          placeholder={t("meegle.filterPagePlaceholder")}
         />
       </div>
       <ItemList
@@ -678,6 +789,7 @@ function TodoSection({
         hasMore={hasMore}
         total={total}
         onMore={(p) => void load(p)}
+        onRetry={() => void load(requestedPage.current)}
         renderRow={(it) => (
           <ItemRow key={`${it.spaceKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
             <TodoMeta item={it} action={action} />
@@ -704,18 +816,22 @@ function TodoMeta({ item, action }: { item: MeegleTodoItem; action: MeegleTodoAc
 // ---- 空间 ----
 
 function SpaceSection({
+  epoch,
   onOpenView,
   onOpenItem,
   onOpenUrl,
   onUnavailable,
 }: {
+  epoch: number;
   onOpenView: (spaceKey: string, view: MeegleView, spaceName?: string) => void;
   onOpenItem: (item: MeegleWorkItem) => void;
   onOpenUrl: (url: string) => Promise<string | null>;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
-  const [spaces, setSpaces] = useState<MeegleSpace[] | null>(null);
+  const [spaces, setSpaces] = useState<MeegleSpace[] | null>(
+    () => peekMeegleCache<MeegleSpace[]>("spaces") ?? null
+  );
   const [spacesError, setSpacesError] = useState<string | null>(null);
   const [spaceKey, setSpaceKey] = useState<string>(() => loadPref(SPACE_KEY) ?? "");
   const [types, setTypes] = useState<MeegleWorkItemType[] | null>(null);
@@ -727,11 +843,26 @@ function SpaceSection({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const gen = useRef(0);
+  const spacesEpoch = useRef(epoch);
+  const typesEpoch = useRef(epoch);
+  const searchEpoch = useRef(epoch);
+  const resultsScroll = useRef<HTMLDivElement>(null);
+  const resetResultsScroll = useCallback(() => {
+    if (resultsScroll.current) resultsScroll.current.scrollTop = 0;
+  }, []);
 
   useEffect(() => {
+    const force = epoch !== spacesEpoch.current;
+    spacesEpoch.current = epoch;
+    const hit = peekMeegleCache<MeegleSpace[]>("spaces");
+    if (hit) {
+      setSpaces(hit);
+      setSpaceKey((cur) => (hit.some((s) => s.key === cur) ? cur : (hit[0]?.key ?? "")));
+    }
+    if (hit && !force && !meegleCacheStale("spaces")) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleSpaces()
+    loadMeegleCache("spaces", () => api.meegleSpaces(force), bust)
       .then((list) => {
         if (cancelled) return;
         setSpaces(list);
@@ -748,16 +879,28 @@ function SpaceSection({
     return () => {
       cancelled = true;
     };
-  }, [onUnavailable]);
+  }, [onUnavailable, epoch]);
 
   useEffect(() => {
-    setTypes(null);
     setTypeKey("");
-    if (!spaceKey) return;
+  }, [spaceKey]);
+
+  useEffect(() => {
+    if (!spaceKey) {
+      setTypes(null);
+      return;
+    }
     savePref(SPACE_KEY, spaceKey);
+    const force = epoch !== typesEpoch.current;
+    typesEpoch.current = epoch;
+    const key = `types:${spaceKey}`;
+    const hit = peekMeegleCache<MeegleWorkItemType[]>(key);
+    if (hit) setTypes(hit.filter((x) => !x.disabled));
+    else setTypes(null);
+    if (hit && !force && !meegleCacheStale(key)) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleTypes(spaceKey)
+    loadMeegleCache(key, () => api.meegleTypes(spaceKey, force), bust)
       .then((list) => {
         if (!cancelled) setTypes(list.filter((x) => !x.disabled));
       })
@@ -770,15 +913,17 @@ function SpaceSection({
     return () => {
       cancelled = true;
     };
-  }, [spaceKey, onUnavailable]);
+  }, [spaceKey, onUnavailable, epoch]);
 
   // 贴进来的是链接就直接开，不当关键字搜；其余：有关键字就搜，没关键字但选了类型就看最近
   useEffect(() => {
     const my = ++gen.current;
-    setResult(null);
-    setRecent(null);
-    setError(null);
+    const force = epoch !== searchEpoch.current;
+    searchEpoch.current = epoch;
     if (isUrl(keyword)) {
+      setResult(null);
+      setRecent(null);
+      setError(null);
       setLoading(true);
       void onOpenUrl(keyword).then((err) => {
         if (gen.current !== my) return;
@@ -789,18 +934,58 @@ function SpaceSection({
       return;
     }
     if (!spaceKey || (!keyword && !typeKey)) {
+      setResult(null);
+      setRecent(null);
+      setError(null);
       setLoading(false);
       return;
     }
-    setLoading(true);
-    const req = keyword
-      ? api.meegleSearch(spaceKey, keyword, typeKey || undefined).then((r) => {
+    if (keyword) {
+      const key = `search:${spaceKey}:${keyword}:${typeKey}`;
+      const hit = peekMeegleCache<MeegleSearchResult>(key);
+      setRecent(null);
+      if (hit) {
+        setResult(hit);
+        setError(null);
+      } else setResult(null);
+      if (hit && !force && !meegleCacheStale(key)) {
+        setLoading(false);
+        return;
+      }
+      const bust = force || Boolean(hit);
+      setLoading(true);
+      loadMeegleCache(key, () => api.meegleSearch(spaceKey, keyword, typeKey || undefined, force), bust)
+        .then((r) => {
           if (gen.current === my) setResult(r);
         })
-      : api.meegleRecent(spaceKey, typeKey).then((r) => {
-          if (gen.current === my) setRecent(r);
+        .catch((err) => {
+          if (gen.current !== my) return;
+          useApp.getState().handleApiError(err);
+          onUnavailable(err);
+          setError((err as Error).message);
+        })
+        .finally(() => {
+          if (gen.current === my) setLoading(false);
         });
-    req
+      return;
+    }
+    const key = `recent:${spaceKey}:${typeKey}`;
+    const hit = peekMeegleCache<MeegleWorkItem[]>(key);
+    setResult(null);
+    if (hit) {
+      setRecent(hit);
+      setError(null);
+    } else setRecent(null);
+    if (hit && !force && !meegleCacheStale(key)) {
+      setLoading(false);
+      return;
+    }
+    const bust = force || Boolean(hit);
+    setLoading(true);
+    loadMeegleCache(key, () => api.meegleRecent(spaceKey, typeKey, force), bust)
+      .then((r) => {
+        if (gen.current === my) setRecent(r);
+      })
       .catch((err) => {
         if (gen.current !== my) return;
         useApp.getState().handleApiError(err);
@@ -810,7 +995,7 @@ function SpaceSection({
       .finally(() => {
         if (gen.current === my) setLoading(false);
       });
-  }, [spaceKey, keyword, typeKey, onUnavailable, onOpenUrl]);
+  }, [spaceKey, keyword, typeKey, onUnavailable, onOpenUrl, epoch]);
 
   const space = spaces?.find((s) => s.key === spaceKey);
 
@@ -850,23 +1035,22 @@ function SpaceSection({
           </div>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={resultsScroll} className="min-h-0 flex-1 overflow-y-auto">
         {spaces && spaces.length === 0 ? (
           <Hint>{spacesError ?? t("meegle.noSpaces")}</Hint>
         ) : !spaceKey ? (
           <Hint>{t("meegle.loadingList")}</Hint>
-        ) : error ? (
+        ) : error && !result && !recent ? (
           <Hint>
             {t("meegle.loadFailed")}
             <span className="mt-1 block font-mono text-[11px]">{error}</span>
           </Hint>
-        ) : loading ? (
-          <Hint>{isUrl(keyword) ? t("meegle.resolving") : t("meegle.searching")}</Hint>
         ) : result ? (
           <SearchResults
             result={result}
             onOpenView={(v) => onOpenView(spaceKey, v, space?.name)}
             onOpenItem={onOpenItem}
+            onPageChange={resetResultsScroll}
           />
         ) : recent ? (
           <>
@@ -876,15 +1060,15 @@ function SpaceSection({
             {recent.length === 0 ? (
               <Hint>{t("meegle.empty")}</Hint>
             ) : (
-              <ul>
-                {recent.map((it) => (
+              <LocalGroupedItems items={recent} onPageChange={resetResultsScroll} renderRow={(it) => (
                   <ItemRow key={it.id} item={it} onClick={() => onOpenItem(it)}>
                     {[it.status, it.updatedAt && dateOnly(it.updatedAt)].filter(Boolean).join(" · ")}
                   </ItemRow>
-                ))}
-              </ul>
+                )} />
             )}
           </>
+        ) : loading ? (
+          <Hint>{isUrl(keyword) ? t("meegle.resolving") : t("meegle.searching")}</Hint>
         ) : (
           <Hint>{space ? t("meegle.searchHint") : t("meegle.loadingList")}</Hint>
         )}
@@ -897,10 +1081,12 @@ function SearchResults({
   result,
   onOpenView,
   onOpenItem,
+  onPageChange,
 }: {
   result: MeegleSearchResult;
   onOpenView: (view: MeegleView) => void;
   onOpenItem: (item: MeegleWorkItem) => void;
+  onPageChange: () => void;
 }) {
   const { t } = useTranslation();
   const nothing = result.views.length === 0 && result.items.length === 0;
@@ -935,13 +1121,11 @@ function SearchResults({
           <GroupTitle>
             {t("meegle.items")} <span className="text-muted-foreground/70">{result.items.length}</span>
           </GroupTitle>
-          <ul>
-            {result.items.map((it) => (
+          <LocalGroupedItems items={result.items} onPageChange={onPageChange} renderRow={(it) => (
               <ItemRow key={`${it.typeKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
                 {[it.typeName, it.status, it.updatedAt && dateOnly(it.updatedAt)].filter(Boolean).join(" · ")}
               </ItemRow>
-            ))}
-          </ul>
+            )} />
         </>
       )}
       {result.errors.length > 0 && (
@@ -1038,6 +1222,7 @@ const PIN_ICONS = { view: Table2, multiProjectView: Layers, workitem: FileText }
 function PinRow({ pin, onOpen }: { pin: MeeglePin; onOpen: () => void }) {
   const { t } = useTranslation();
   const pins = usePins();
+  const getCopyMenuProps = useMeegleCopyMenu(useContext(UnavailableContext));
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(pin.label);
   const Icon = PIN_ICONS[pin.kind];
@@ -1082,8 +1267,25 @@ function PinRow({ pin, onOpen }: { pin: MeeglePin; onOpen: () => void }) {
         <>
           <button
             type="button"
-            className="flex w-full items-start gap-2 px-3 py-1.5 pr-20 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50"
+            draggable={
+              pin.kind === "workitem" &&
+              canDragMeegleWorkItem({ id: pin.targetId, spaceKey: pin.spaceKey })
+            }
+            className={cn(
+              "flex w-full items-start gap-2 px-3 py-1.5 pr-20 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50",
+              pin.kind === "workitem" && "cursor-grab active:cursor-grabbing"
+            )}
+            title={pin.kind === "workitem" ? t("meegle.dragHint") : undefined}
             onClick={onOpen}
+            onDragStart={(e) => {
+              if (pin.kind === "workitem") {
+                writeMeegleWorkItemDrag(e.dataTransfer, {
+                  id: pin.targetId,
+                  spaceKey: pin.spaceKey,
+                });
+              }
+            }}
+            {...getCopyMenuProps(pin.kind === "workitem" ? { id: pin.targetId, spaceKey: pin.spaceKey } : null)}
           >
             <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1">
@@ -1167,72 +1369,90 @@ function PinButton({ input }: { input: MeeglePinInput }) {
 
 function ViewItems({
   drill,
+  epoch,
   onBack,
   onOpenItem,
   onUnavailable,
 }: {
   drill: Extract<Drill, { kind: "view" }>;
+  epoch: number;
   onBack: () => void;
   onOpenItem: (item: MeegleWorkItem) => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const { spaceKey, viewId, multi } = drill;
-  const [items, setItems] = useState<MeegleWorkItem[]>([]);
+  const cacheKey = `${multi ? "mview" : "view"}:${spaceKey}:${viewId}`;
+  const [items, setItems] = useState<MeegleWorkItem[]>(
+    () => peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey)?.items ?? []
+  );
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const [total, setTotal] = useState<number | undefined>();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    () => !peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey)
+  );
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [facets, setFacets] = useState<FacetSelection>({});
   const gen = useRef(0);
+  const requestedPage = useRef(1);
+  const epochRef = useRef(epoch);
 
   const load = useCallback(
-    async (nextPage: number): Promise<MeeglePage<MeegleWorkItem> | null> => {
+    async (nextPage: number, fresh = false) => {
       const my = ++gen.current;
+      requestedPage.current = nextPage;
       setLoading(true);
       setError(null);
       try {
         const res = multi
-          ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage)
-          : await api.meegleViewItems(spaceKey, viewId, nextPage);
-        if (gen.current !== my) return null;
-        setItems((cur) => (nextPage === 1 ? res.items : [...cur, ...res.items]));
+          ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage, fresh)
+          : await api.meegleViewItems(spaceKey, viewId, nextPage, fresh);
+        if (gen.current !== my) return;
+        // Keep the same last-successful-page contract as the todo list.
+        writeMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey, res);
+        setItems(res.items);
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
-        return res;
       } catch (err) {
-        if (gen.current !== my) return null;
+        if (gen.current !== my) return;
         useApp.getState().handleApiError(err);
         onUnavailable(err);
         setError((err as Error).message);
-        return null;
       } finally {
         if (gen.current === my) setLoading(false);
       }
     },
-    [spaceKey, viewId, multi, onUnavailable]
+    [spaceKey, viewId, multi, cacheKey, onUnavailable]
   );
 
-  // 过滤器只筛已加载的条目（见 FacetBar），一页 50 条的视图动辄两三页，给一次把剩下翻完的路子
-  const loadAll = useCallback(async () => {
-    let next = page + 1;
-    for (let i = 0; i < MAX_AUTO_PAGES; i++) {
-      const res = await load(next);
-      if (!res?.hasMore) break;
-      next = res.page + 1;
-    }
-  }, [load, page]);
-
   useEffect(() => {
-    void load(1);
-  }, [load]);
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<CachedPage<MeegleWorkItem>>(cacheKey);
+    if (hit) {
+      setItems(hit.items);
+      setPage(hit.page);
+      setHasMore(hit.hasMore);
+      setTotal(hit.total);
+      setError(null);
+    } else {
+      setItems([]);
+      setPage(1);
+      setHasMore(false);
+      setTotal(undefined);
+      setError(null);
+    }
+    if (hit && !force && !meegleCacheStale(cacheKey)) {
+      setLoading(false);
+      return () => { ++gen.current; };
+    }
+    void load(hit?.page ?? 1, force);
+    return () => { ++gen.current; };
+  }, [cacheKey, load, epoch]);
 
-  const shown = useMemo(() => filterItems(matchFacets(items, facets), filter), [items, facets, filter]);
-  // 全景视图跨了空间才值得每行标空间名，单空间视图那一段每行都一样，白占本来就不宽的一行
-  const manySpaces = useMemo(() => facetOptions(items, "spaceName").length > 1, [items]);
+  const shown = useMemo(() => filterItems(items, filter), [items, filter]);
 
   return (
     <>
@@ -1258,8 +1478,7 @@ function ViewItems({
         }
       />
       <div className="shrink-0 border-b px-2 py-1.5">
-        <SearchBox value={filter} onChange={setFilter} placeholder={t("meegle.filterPlaceholder")} />
-        <FacetBar items={items} value={facets} onChange={setFacets} />
+        <SearchBox value={filter} onChange={setFilter} placeholder={t("meegle.filterPagePlaceholder")} />
       </div>
       <ItemList
         items={items}
@@ -1270,11 +1489,11 @@ function ViewItems({
         hasMore={hasMore}
         total={total}
         onMore={(p) => void load(p)}
-        onAll={() => void loadAll()}
+        onRetry={() => void load(requestedPage.current)}
         renderRow={(it) => (
           <ItemRow key={`${it.spaceKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
             {[
-              multi && manySpaces ? it.spaceName : undefined,
+              multi ? it.spaceName : undefined,
               multi ? it.typeName : undefined,
               it.status,
               it.updatedAt && dateOnly(it.updatedAt),
@@ -1292,22 +1511,37 @@ function ViewItems({
 
 function ItemDetail({
   drill,
+  epoch,
   onBack,
   onUnavailable,
 }: {
   drill: Extract<Drill, { kind: "item" }>;
+  epoch: number;
   onBack: () => void;
   onUnavailable: (err: unknown) => void;
 }) {
   const { t } = useTranslation();
   const { spaceKey, id, title } = drill;
-  const [detail, setDetail] = useState<MeegleWorkItemDetail | null>(null);
+  const getCopyMenuProps = useMeegleCopyMenu(onUnavailable);
+  const cacheKey = `item:${spaceKey}:${id}`;
+  const [detail, setDetail] = useState<MeegleWorkItemDetail | null>(
+    () => peekMeegleCache<MeegleWorkItemDetail>(cacheKey) ?? null
+  );
   const [error, setError] = useState<string | null>(null);
+  const epochRef = useRef(epoch);
 
   useEffect(() => {
+    const force = epoch !== epochRef.current;
+    epochRef.current = epoch;
+    const hit = peekMeegleCache<MeegleWorkItemDetail>(cacheKey);
+    if (hit) {
+      setDetail(hit);
+      setError(null);
+    } else setDetail(null);
+    if (hit && !force && !meegleCacheStale(cacheKey)) return;
+    const bust = force || Boolean(hit);
     let cancelled = false;
-    api
-      .meegleWorkItem(spaceKey, id)
+    loadMeegleCache(cacheKey, () => api.meegleWorkItem(spaceKey, id, force), bust)
       .then((d) => {
         if (!cancelled) setDetail(d);
       })
@@ -1320,7 +1554,7 @@ function ItemDetail({
     return () => {
       cancelled = true;
     };
-  }, [spaceKey, id, onUnavailable]);
+  }, [spaceKey, id, cacheKey, onUnavailable, epoch]);
 
   const name = detail?.name || title || t("meegle.untitled", { id });
   const url = detail?.url ?? drill.url;
@@ -1362,7 +1596,17 @@ function ItemDetail({
             <div className="mt-1.5 flex flex-wrap gap-1">
               {detail.status && <Pill>{detail.status}</Pill>}
               {detail.priority && <Pill>{detail.priority}</Pill>}
-              <Pill muted>#{detail.id}</Pill>
+              <span
+                className="inline-flex cursor-grab items-center gap-0.5 active:cursor-grabbing"
+                draggable={canDragMeegleWorkItem({ id, spaceKey })}
+                tabIndex={0}
+                title={t("meegle.dragHint")}
+                onDragStart={(e) => writeMeegleWorkItemDrag(e.dataTransfer, { id, spaceKey })}
+                {...getCopyMenuProps({ id, spaceKey })}
+              >
+                <GripVertical className="size-3 text-muted-foreground" aria-hidden />
+                <Pill muted>#{detail.id}</Pill>
+              </span>
             </div>
             <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
               <Row label={t("meegle.d_space")}>{detail.spaceName}</Row>
@@ -1436,6 +1680,58 @@ function ItemDetail({
 
 // ---- 小件 ----
 
+function GroupedItems<T extends MeegleWorkItem>({
+  items, renderRow,
+}: { items: T[]; renderRow: (item: T) => ReactNode }) {
+  const { t } = useTranslation();
+  const groups = useMemo(() => groupMeegleItems(items), [items]);
+  const levels = ["business", "type", "status"] as const;
+  const renderGroups = (nodes: ItemGroup<T>[], depth: number): ReactNode => nodes.map(node => (
+    <details key={node.key} open className={cn("border-b", depth > 0 && "ml-2 border-l")}>
+      <summary className="cursor-pointer px-2 py-1.5 text-xs hover:bg-accent/50">
+        <span className="text-muted-foreground">{t(`meegle.group_${levels[depth]}`)} · </span>
+        {node.label ?? t(`meegle.unknown_${levels[depth]}`)}
+        <span className="ml-2 text-muted-foreground">{node.count}</span>
+      </summary>
+      {node.children ? renderGroups(node.children, depth + 1) : <ul>{node.items?.map(renderRow)}</ul>}
+    </details>
+  ));
+  return <>{renderGroups(groups, 0)}</>;
+}
+
+function PageControls({
+  page, count, total, hasMore, loading = false, onPage,
+}: {
+  page: number; count: number; total?: number; hasMore: boolean;
+  loading?: boolean; onPage: (page: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-1 border-t px-2 py-2 text-[11px] text-muted-foreground">
+      <span>{t("meegle.pageSummary", { page, count })}{total !== undefined && ` · ${t("meegle.totalItems", { count: total })}`}</span>
+      <div className="flex gap-1">
+        <Button size="xs" variant="ghost" disabled={loading || page <= 1} onClick={() => onPage(page - 1)}>{t("meegle.previousPage")}</Button>
+        <Button size="xs" variant="ghost" disabled={loading || !hasMore} onClick={() => onPage(page + 1)}>{t("meegle.nextPage")}</Button>
+      </div>
+    </div>
+  );
+}
+
+function LocalGroupedItems<T extends MeegleWorkItem>({
+  items, renderRow, onPageChange,
+}: { items: T[]; renderRow: (item: T) => ReactNode; onPageChange: () => void }) {
+  const { t } = useTranslation();
+  const [requested, setRequested] = useState(1);
+  useEffect(() => setRequested(1), [items]);
+  const current = meeglePage(items, requested);
+  useLayoutEffect(onPageChange, [current.page, onPageChange]);
+  return <>
+    <p className="px-3 py-1 text-[11px] text-muted-foreground">{t("meegle.groupReturnedPage")}</p>
+    <GroupedItems key={current.page} items={current.items} renderRow={renderRow} />
+    <PageControls page={current.page} count={current.items.length} total={items.length} hasMore={current.hasMore} onPage={setRequested} />
+  </>;
+}
+
 /** 待办 / 视图两种列表共用的正文：空态、错误、筛不到、翻页 */
 function ItemList<T extends MeegleWorkItem>({
   items,
@@ -1446,7 +1742,7 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore,
   total,
   onMore,
-  onAll,
+  onRetry,
   renderRow,
 }: {
   items: T[];
@@ -1457,13 +1753,17 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore: boolean;
   total?: number;
   onMore: (page: number) => void;
-  /** 给了才有「全部加载」：过滤器按已加载的条目统计，翻完才算数 */
-  onAll?: () => void;
+  onRetry: () => void;
   renderRow: (item: T) => ReactNode;
 }) {
   const { t } = useTranslation();
+  const scroll = useRef<HTMLDivElement>(null);
+  // 页码只在请求成功后改变；加载中或翻页失败时不打断用户原来的阅读位置。
+  useLayoutEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = 0;
+  }, [page]);
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div ref={scroll} className="min-h-0 flex-1 overflow-y-auto">
       {error && items.length === 0 ? (
         <Hint>
           {t("meegle.loadFailed")}
@@ -1476,127 +1776,18 @@ function ItemList<T extends MeegleWorkItem>({
       ) : shown.length === 0 ? (
         <Hint>{t("meegle.noResults")}</Hint>
       ) : (
-        <ul>{shown.map(renderRow)}</ul>
+        <GroupedItems key={page} items={shown} renderRow={renderRow} />
       )}
-      {items.length > 0 && (
-        <LoadMore
-          count={items.length}
-          total={total}
-          hasMore={hasMore}
-          loading={loading}
-          error={error}
-          onMore={() => onMore(page + 1)}
-          onAll={onAll}
-        />
+      <p className="px-3 py-1 text-[11px] text-muted-foreground">{t("meegle.groupCurrentPage")}</p>
+      {loading && items.length > 0 && <Hint>{t("meegle.loadingList")}</Hint>}
+      {error && (
+        <div className="px-3 py-2 text-xs text-destructive">
+          {error}
+          <Button size="xs" variant="ghost" disabled={loading} onClick={onRetry}>{t("meegle.retry")}</Button>
+        </div>
       )}
+      <PageControls page={page} count={shown.length} total={total} hasMore={hasMore} loading={loading} onPage={onMore} />
     </div>
-  );
-}
-
-/**
- * 视图里的"分类"过滤器。
- *
- * 飞书那边视图左侧的分类树 / 分组是页面自己的东西：`view get` 与
- * `list-multi-project-workitems` 都只回一串工作项，全景视图 URL 里的 `node=`（左侧树
- * 的定位）也没有对应入参，CLI 根本没开出来。所以这里不是"把分类找回来"，而是就
- * **已加载的条目**现推几个维度——类型 / 状态 / 空间——把混成一长条的列表分开看。
- * 没翻到的页不在统计里，底下那行"已加载 N / 总数"与「全部加载」就是配套的。
- */
-const FACET_FIELDS = ["typeName", "status", "spaceName"] as const;
-type FacetField = (typeof FACET_FIELDS)[number];
-type FacetSelection = Partial<Record<FacetField, string>>;
-
-/** Radix 的 Select 不收空串当值，用哨兵表示"这一维不筛" */
-const FACET_ALL = "__all";
-
-const FACET_LABELS: Record<FacetField, string> = {
-  typeName: "meegle.d_type",
-  status: "meegle.d_status",
-  spaceName: "meegle.d_space",
-};
-
-/** 某一维上出现过的值与条数，多的排前面；值为空的条目（补不到状态 / 类型名）不计入 */
-function facetOptions(items: MeegleWorkItem[], field: FacetField): { value: string; count: number }[] {
-  const counts = new Map<string, number>();
-  for (const it of items) {
-    const v = it[field];
-    if (v) counts.set(v, (counts.get(v) ?? 0) + 1);
-  }
-  return [...counts]
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-}
-
-function matchFacets<T extends MeegleWorkItem>(items: T[], sel: FacetSelection): T[] {
-  const picked = FACET_FIELDS.filter((f) => sel[f]);
-  if (picked.length === 0) return items;
-  return items.filter((it) => picked.every((f) => it[f] === sel[f]));
-}
-
-function FacetBar({
-  items,
-  value,
-  onChange,
-}: {
-  items: MeegleWorkItem[];
-  value: FacetSelection;
-  onChange: (v: FacetSelection) => void;
-}) {
-  const { t } = useTranslation();
-  // 只有一种取值的维度分不开任何东西（单类型视图的类型、单空间视图的空间），不占位
-  const facets = useMemo(
-    () =>
-      FACET_FIELDS.map((field) => ({ field, options: facetOptions(items, field) })).filter(
-        (f) => f.options.length > 1
-      ),
-    [items]
-  );
-  if (facets.length === 0) return null;
-  return (
-    <div className="mt-1.5 flex gap-1">
-      {facets.map(({ field, options }) => {
-        const name = t(FACET_LABELS[field]);
-        const all = t("meegle.facetAll", { name });
-        const picked = value[field];
-        return (
-          <Select
-            key={field}
-            value={picked ?? FACET_ALL}
-            onValueChange={(v) => onChange({ ...value, [field]: v === FACET_ALL ? undefined : v })}
-          >
-            <SelectTrigger
-              className={cn(
-                "h-6 min-w-0 flex-1 gap-1 px-1.5 text-[11px]",
-                picked && "bg-tint text-tint-foreground"
-              )}
-              aria-label={name}
-              title={picked ?? all}
-            >
-              <span className="truncate">{picked ?? all}</span>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={FACET_ALL}>{all}</SelectItem>
-              {options.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.value}
-                  <span className="ml-2 text-[11px] text-muted-foreground">{o.count}</span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        );
-      })}
-    </div>
-  );
-}
-
-function filterItems<T extends MeegleWorkItem & Partial<MeegleTodoItem>>(items: T[], filter: string): T[] {
-  const q = filter.trim().toLowerCase();
-  if (!q) return items;
-  return items.filter((it) =>
-    [it.name, it.id, it.spaceName, it.typeName, it.nodeName, it.stateName, it.status]
-      .filter((s): s is string => Boolean(s))
-      .some((s) => s.toLowerCase().includes(q))
   );
 }
 
@@ -1611,12 +1802,17 @@ function ItemRow({
 }) {
   const { t } = useTranslation();
   const name = item.name || t("meegle.untitled", { id: item.id });
+  const getCopyMenuProps = useMeegleCopyMenu(useContext(UnavailableContext));
   return (
     <li className="group relative border-b">
       <button
         type="button"
-        className="block w-full px-3 py-1.5 pr-8 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent/50"
+        draggable={canDragMeegleWorkItem(item)}
+        className="block w-full cursor-grab px-3 py-1.5 pr-8 text-left outline-none active:cursor-grabbing hover:bg-accent/50 focus-visible:bg-accent/50"
+        title={t("meegle.dragHint")}
         onClick={onClick}
+        onDragStart={(e) => writeMeegleWorkItemDrag(e.dataTransfer, item)}
+        {...getCopyMenuProps(item)}
       >
         <span className="line-clamp-2 text-xs leading-snug break-words" title={name}>
           {name}
@@ -1731,44 +1927,6 @@ function SearchBox({
   );
 }
 
-function LoadMore({
-  count,
-  total,
-  hasMore,
-  loading,
-  error,
-  onMore,
-  onAll,
-}: {
-  count: number;
-  total?: number;
-  hasMore: boolean;
-  loading: boolean;
-  error: string | null;
-  onMore: () => void;
-  onAll?: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
-      <span className="min-w-0 flex-1 truncate">
-        {total != null ? t("meegle.loadedOf", { count, total }) : count}
-        {error && <span className="ml-1 text-destructive">{error}</span>}
-      </span>
-      {hasMore && onAll && (
-        <Button size="xs" variant="ghost" className="h-6" disabled={loading} onClick={onAll}>
-          {t("meegle.loadAll")}
-        </Button>
-      )}
-      {hasMore && (
-        <Button size="xs" variant="outline" className="h-6" disabled={loading} onClick={onMore}>
-          {loading ? t("meegle.loadingList") : t("meegle.loadMore")}
-        </Button>
-      )}
-    </div>
-  );
-}
-
 function TypeChip({ on, onClick, children }: { on: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button
@@ -1776,7 +1934,7 @@ function TypeChip({ on, onClick, children }: { on: boolean; onClick: () => void;
       role="radio"
       aria-checked={on}
       className={cn(
-        "h-5 rounded-full border px-2 text-[11px] leading-none whitespace-nowrap outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring",
+        "h-5 rounded-full border px-2 text-[11px] leading-none whitespace-nowrap outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50",
         on
           ? "border-primary bg-primary text-primary-foreground"
           : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"

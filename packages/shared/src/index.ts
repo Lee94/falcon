@@ -14,6 +14,7 @@ export {
   termPtyEnv,
 } from "./termEnv.js";
 export { TermModeTracker } from "./termModes.js";
+export { TtlCache, type TtlCacheEntry, type TtlCacheLoadOpts } from "./ttlCache.js";
 
 // ============ Project ============
 
@@ -1065,6 +1066,15 @@ export interface DeleteProjectResult {
 /** 面板里可选的站点；自定义域名走手填 */
 export const MEEGLE_HOSTS = ["project.feishu.cn", "meegle.com"] as const;
 
+/** CLI / REST / 浏览器拖放共用同一套 Meegle 标识符边界，避免某一层静默拒绝合法工作项。 */
+export function isValidMeegleKey(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$/.test(value);
+}
+
+export function isValidMeegleWorkItemId(value: unknown): value is string {
+  return typeof value === "string" && /^\d{1,20}$/.test(value);
+}
+
 /** CLI 不可用的原因，随 409 一起回给前端；前端据此切到安装 / 登录提示 */
 export type MeegleUnavailableReason = "not-installed" | "not-authenticated";
 
@@ -1118,9 +1128,14 @@ export interface MeegleView {
   typeName: string;
 }
 
+/** REST 列表的逻辑页长；CLI 仍固定每页 50 条。 */
+export const MEEGLE_PAGE_SIZE = 100;
+
 export interface MeegleWorkItem {
   id: string;
   name: string;
+  /** 工作项业务字段的可读名称；不是所属空间，无法解析时缺省 */
+  business?: string;
   spaceKey: string;
   spaceName?: string;
   typeKey: string;
@@ -1200,6 +1215,20 @@ export interface MeegleWorkItemDetail extends MeegleWorkItem {
   template?: string;
   priority?: string;
   description?: string;
+  /** 保留图片、链接、代码的原始 Markdown，仅剥掉 HTML 注释 */
+  descriptionMarkdown?: string;
+  /** 工作项附件字段中的文件；URL 可能仍要求飞书登录态 */
+  attachments?: { name?: string; url: string }[];
+  /** 附件字段读取失败时保留基础详情，并在复制内容中明确提示 */
+  attachmentsUnavailable?: boolean;
+  /** 评论正文及评论所带附件；人员标识不进入 AI 上下文 */
+  comments?: { content: string; createdAt?: string; attachments?: string[] }[];
+  /** 评论接口失败时保留基础详情，并在复制内容中明确提示 */
+  commentsUnavailable?: boolean;
+  /** 按字段元数据筛选的排障信息，不包含人员字段 */
+  contextFields?: { name: string; value: string }[];
+  /** 基础详情可读但补充字段请求失败；复制上下文不能把这种降级当作完整读取。 */
+  contextFieldsUnavailable?: boolean;
   createdAt?: string;
   createdBy?: string;
   updatedBy?: string;
