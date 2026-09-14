@@ -105,6 +105,13 @@ describe("isShellCommand", () => {
 
   it("shell 带参数是在跑脚本，不是在等输入", () => {
     assert.ok(!isShellCommand("bash deploy.sh"));
+    assert.ok(!isShellCommand("zsh -c 'make'"));
+  });
+
+  it("只跟登录 / 交互标志仍是 shell 在等输入（agent 会话 exec 出来的样子）", () => {
+    assert.ok(isShellCommand("/bin/zsh -l"));
+    assert.ok(isShellCommand("bash --login"));
+    assert.ok(isShellCommand("/bin/zsh -il"));
   });
 
   it("会话配置的非常见 shell 也算空闲", () => {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
-import { useApp, isPendingId, selectRightVisible, selectSidebarVisible } from "../store.js";
+import { useApp, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { matchCommand, type Command } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
 import { useIsMobile } from "../lib/useIsMobile.js";
@@ -15,7 +15,7 @@ import { ChangesPanel } from "./ChangesPanel.js";
 import { FilesPanel } from "./FilesPanel.js";
 import { ForwardPanel } from "./ForwardPanel.js";
 import { MeeglePanel } from "./MeeglePanel.js";
-import { TabBar } from "./TabBar.js";
+import { WorkCanvas } from "./WorkCanvas.js";
 import { SessionOverview } from "./SessionOverview.js";
 import { ProjectEmpty } from "./ProjectEmpty.js";
 import { RenameDialog } from "./RenameDialog.js";
@@ -27,16 +27,7 @@ import { Toaster } from "@/components/ui/sonner";
 // 浮层与重组件按需加载：首屏（登录页 / 总览）不需要 xterm、cmdk、表单和
 // 设置页，切出去能把入口 chunk 砍掉一半以上。都是本地静态资源，首次打开
 // 时的加载只有几毫秒，fallback 给 null 就够了。
-const TerminalView = lazy(() =>
-  import("./TerminalView.js").then((m) => ({ default: m.TerminalView }))
-);
-const PendingPane = lazy(() =>
-  import("./TerminalView.js").then((m) => ({ default: m.PendingPane }))
-);
-const GitDiffView = lazy(() =>
-  import("./GitDiffView.js").then((m) => ({ default: m.GitDiffView }))
-);
-const FileView = lazy(() => import("./FileView.js").then((m) => ({ default: m.FileView })));
+// （文件 / 差异视图现在是画布里的窗口，它们的懒加载在 WorkCanvas 里）
 const ProjectForm = lazy(() =>
   import("./ProjectForm.js").then((m) => ({ default: m.ProjectForm }))
 );
@@ -74,7 +65,6 @@ function currentProjectId(): string | null {
 export function App() {
   const authChecked = useApp((s) => s.authChecked);
   const auth = useApp((s) => s.auth);
-  const tabs = useApp((s) => s.tabs);
   const active = useApp((s) => s.active);
   const sidebarVisible = useApp(selectSidebarVisible);
   const rightVisible = useApp(selectRightVisible);
@@ -218,9 +208,9 @@ export function App() {
       // 各浮层都把 Radix 自己的 Esc 关闭 preventDefault 掉了，唯一的分发点在这里。
       if (e.key === "Escape") {
         if (s.install) {
-          const { projectId, thenCreate } = s.install;
+          const { projectId, thenCreate, agent } = s.install;
           s.closeInstall();
-          if (thenCreate) void s.createSessionNow(projectId);
+          if (thenCreate) void s.createSessionNow(projectId, { agent });
         } else if (s.confirm) s.closeConfirm();
         else if (s.renameFor) s.closeRename();
         else if (s.worktreeFor) s.closeWorktreeForm();
@@ -252,64 +242,32 @@ export function App() {
       {isMobile ? (
         <MobileShell />
       ) : (
-      <div className="flex min-h-0 flex-1">
+      /*
+       * 浮动岛骨架（docs/adr/0011）：窗口底铺 --app，侧栏 / 主区 / 右面板是浮在上面
+       * 的圆角岛，之间只有 GAP 那道缝——没有一条分栏边框。右侧活动栏不成岛，图标
+       * 直接落在窗口底上，所以这里右边不留 padding，由它自己带。
+       */
+      <div className="flex min-h-0 flex-1 gap-1.5 bg-app p-1.5 pr-0">
         {sidebarVisible && (
           <ResizableSlot side="left">
             <Sidebar />
           </ResizableSlot>
         )}
-        <main className="flex min-w-0 flex-1 flex-col bg-background">
-          <TabBar />
+        {/*
+          * 没有顶部 tab 栏：工作区就是画布上的列，开哪些窗口、谁在哪一列由排布决定，
+          * 新建入口在侧栏（每个 checkout 一行 ＋）。
+          */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          {/* 这层只管定位：内容岛由各个视图自己出（画布是一列一座岛） */}
           <div className="relative min-h-0 flex-1">
             {/* 总览没有终端那种"卸载=重连"的成本，切走直接卸载，省掉后台轮询时的整表重渲 */}
             {active.kind === "overview" && (
-              <div className="absolute inset-0 flex flex-col">
+              <div className="island absolute inset-0 z-10 flex flex-col overflow-hidden">
                 <SessionOverview />
               </div>
             )}
             {active.kind === "project" && <ProjectEmpty />}
-            {/* 差异视图没有 xterm 那种重连成本，切走即卸载，切回来重拉一份新的 */}
-            {active.kind === "diff" && (
-              <div className="absolute inset-0 flex flex-col">
-                <Suspense fallback={null}>
-                  <GitDiffView />
-                </Suspense>
-              </div>
-            )}
-            {/* 查看 tab 与差异 tab 同理：切走即卸载，切回来重读一次文件 */}
-            {active.kind === "file" && (
-              <div className="absolute inset-0 flex flex-col">
-                <Suspense fallback={null}>
-                  <FileView />
-                </Suspense>
-              </div>
-            )}
-            {/* 非活动 pane 只是移出视口，绝不卸载——
-                xterm 实例和 WebSocket 一旦卸载就要重连重放，切 tab 会闪。
-                用 translate 而不是 visibility:hidden：xterm 靠 IntersectionObserver
-                的几何相交判定是否暂停渲染，hidden 不改几何、后台 tab 会照常全速刷
-                DOM；移出视口（被根节点 overflow-hidden 裁掉）才会真正暂停，切回时
-                xterm 自动做一次全量刷新。transform 不影响布局尺寸，fit 测量不受影响 */}
-            {tabs.map((id) => {
-              const isActive = active.kind === "terminal" && active.sessionId === id;
-              return (
-                <div
-                  key={id}
-                  className={cn(
-                    "absolute inset-0 flex flex-col",
-                    isActive ? "" : "invisible -translate-x-[200%]"
-                  )}
-                >
-                  <Suspense fallback={null}>
-                    {isPendingId(id) ? (
-                      <PendingPane pendingId={id} />
-                    ) : (
-                      <TerminalView sessionId={id} visible={isActive} />
-                    )}
-                  </Suspense>
-                </div>
-              );
-            })}
+            <WorkCanvas />
           </div>
         </main>
         {rightVisible && (

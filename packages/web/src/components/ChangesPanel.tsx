@@ -255,7 +255,7 @@ export function ChangesPanel() {
   };
 
   return (
-    <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
+    <aside className="island flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-1 border-b pr-2 pl-3">
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
           {t("changes.title")}
@@ -389,7 +389,7 @@ export function ChangesPanel() {
               rows={3}
               placeholder={t("changes.messagePlaceholder")}
               aria-label={t("changes.messagePlaceholder")}
-              className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
             />
             <label className="mt-1.5 flex items-center gap-2 text-[11px]">
               <Checkbox

@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import {
   MEEGLE_HOSTS,
+  type MeeglePage,
   type MeeglePin,
   type MeeglePinInput,
   type MeegleSearchResult,
@@ -72,6 +73,8 @@ const TAB_KEY = "falcon.meegle.tab";
 const SPACE_KEY = "falcon.meegle.space";
 const LOGIN_POLL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 350;
+/** 视图下钻页「全部加载」一次最多翻的页数（每页 50 条），防手滑点在几千条的视图上 */
+const MAX_AUTO_PAGES = 20;
 
 type Tab = "todo" | "space" | "pins";
 const TABS: Tab[] = ["todo", "space", "pins"];
@@ -351,7 +354,7 @@ export function MeeglePanel() {
 
   return (
     <PinsContext.Provider value={pinsApi}>
-      <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
+      <aside className="island flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
         <div className="flex h-8.5 shrink-0 items-center gap-2 border-b pr-1.5 pl-3">
           <ListTodo className="size-3.5 shrink-0 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate text-xs font-medium">{t("meegle.title")}</span>
@@ -1099,7 +1102,7 @@ function PinRow({ pin, onOpen }: { pin: MeeglePin; onOpen: () => void }) {
                 href={pin.url}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="grid size-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                className="grid size-5 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
                 aria-label={t("meegle.openExternal")}
                 title={t("meegle.openExternal")}
               >
@@ -1128,7 +1131,7 @@ function RowAction({
   return (
     <button
       type="button"
-      className="grid size-5 place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+      className="grid size-5 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
       aria-label={label}
       title={label}
       onClick={onClick}
@@ -1182,10 +1185,11 @@ function ViewItems({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [facets, setFacets] = useState<FacetSelection>({});
   const gen = useRef(0);
 
   const load = useCallback(
-    async (nextPage: number) => {
+    async (nextPage: number): Promise<MeeglePage<MeegleWorkItem> | null> => {
       const my = ++gen.current;
       setLoading(true);
       setError(null);
@@ -1193,16 +1197,18 @@ function ViewItems({
         const res = multi
           ? await api.meegleMultiViewItems(spaceKey, viewId, nextPage)
           : await api.meegleViewItems(spaceKey, viewId, nextPage);
-        if (gen.current !== my) return;
+        if (gen.current !== my) return null;
         setItems((cur) => (nextPage === 1 ? res.items : [...cur, ...res.items]));
         setPage(res.page);
         setHasMore(res.hasMore);
         setTotal(res.total);
+        return res;
       } catch (err) {
-        if (gen.current !== my) return;
+        if (gen.current !== my) return null;
         useApp.getState().handleApiError(err);
         onUnavailable(err);
         setError((err as Error).message);
+        return null;
       } finally {
         if (gen.current === my) setLoading(false);
       }
@@ -1210,11 +1216,23 @@ function ViewItems({
     [spaceKey, viewId, multi, onUnavailable]
   );
 
+  // 过滤器只筛已加载的条目（见 FacetBar），一页 50 条的视图动辄两三页，给一次把剩下翻完的路子
+  const loadAll = useCallback(async () => {
+    let next = page + 1;
+    for (let i = 0; i < MAX_AUTO_PAGES; i++) {
+      const res = await load(next);
+      if (!res?.hasMore) break;
+      next = res.page + 1;
+    }
+  }, [load, page]);
+
   useEffect(() => {
     void load(1);
   }, [load]);
 
-  const shown = useMemo(() => filterItems(items, filter), [items, filter]);
+  const shown = useMemo(() => filterItems(matchFacets(items, facets), filter), [items, facets, filter]);
+  // 全景视图跨了空间才值得每行标空间名，单空间视图那一段每行都一样，白占本来就不宽的一行
+  const manySpaces = useMemo(() => facetOptions(items, "spaceName").length > 1, [items]);
 
   return (
     <>
@@ -1241,6 +1259,7 @@ function ViewItems({
       />
       <div className="shrink-0 border-b px-2 py-1.5">
         <SearchBox value={filter} onChange={setFilter} placeholder={t("meegle.filterPlaceholder")} />
+        <FacetBar items={items} value={facets} onChange={setFacets} />
       </div>
       <ItemList
         items={items}
@@ -1251,10 +1270,11 @@ function ViewItems({
         hasMore={hasMore}
         total={total}
         onMore={(p) => void load(p)}
+        onAll={() => void loadAll()}
         renderRow={(it) => (
           <ItemRow key={`${it.spaceKey}/${it.id}`} item={it} onClick={() => onOpenItem(it)}>
             {[
-              multi ? it.spaceName : undefined,
+              multi && manySpaces ? it.spaceName : undefined,
               multi ? it.typeName : undefined,
               it.status,
               it.updatedAt && dateOnly(it.updatedAt),
@@ -1426,6 +1446,7 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore,
   total,
   onMore,
+  onAll,
   renderRow,
 }: {
   items: T[];
@@ -1436,6 +1457,8 @@ function ItemList<T extends MeegleWorkItem>({
   hasMore: boolean;
   total?: number;
   onMore: (page: number) => void;
+  /** 给了才有「全部加载」：过滤器按已加载的条目统计，翻完才算数 */
+  onAll?: () => void;
   renderRow: (item: T) => ReactNode;
 }) {
   const { t } = useTranslation();
@@ -1463,8 +1486,106 @@ function ItemList<T extends MeegleWorkItem>({
           loading={loading}
           error={error}
           onMore={() => onMore(page + 1)}
+          onAll={onAll}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * 视图里的"分类"过滤器。
+ *
+ * 飞书那边视图左侧的分类树 / 分组是页面自己的东西：`view get` 与
+ * `list-multi-project-workitems` 都只回一串工作项，全景视图 URL 里的 `node=`（左侧树
+ * 的定位）也没有对应入参，CLI 根本没开出来。所以这里不是"把分类找回来"，而是就
+ * **已加载的条目**现推几个维度——类型 / 状态 / 空间——把混成一长条的列表分开看。
+ * 没翻到的页不在统计里，底下那行"已加载 N / 总数"与「全部加载」就是配套的。
+ */
+const FACET_FIELDS = ["typeName", "status", "spaceName"] as const;
+type FacetField = (typeof FACET_FIELDS)[number];
+type FacetSelection = Partial<Record<FacetField, string>>;
+
+/** Radix 的 Select 不收空串当值，用哨兵表示"这一维不筛" */
+const FACET_ALL = "__all";
+
+const FACET_LABELS: Record<FacetField, string> = {
+  typeName: "meegle.d_type",
+  status: "meegle.d_status",
+  spaceName: "meegle.d_space",
+};
+
+/** 某一维上出现过的值与条数，多的排前面；值为空的条目（补不到状态 / 类型名）不计入 */
+function facetOptions(items: MeegleWorkItem[], field: FacetField): { value: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const it of items) {
+    const v = it[field];
+    if (v) counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+}
+
+function matchFacets<T extends MeegleWorkItem>(items: T[], sel: FacetSelection): T[] {
+  const picked = FACET_FIELDS.filter((f) => sel[f]);
+  if (picked.length === 0) return items;
+  return items.filter((it) => picked.every((f) => it[f] === sel[f]));
+}
+
+function FacetBar({
+  items,
+  value,
+  onChange,
+}: {
+  items: MeegleWorkItem[];
+  value: FacetSelection;
+  onChange: (v: FacetSelection) => void;
+}) {
+  const { t } = useTranslation();
+  // 只有一种取值的维度分不开任何东西（单类型视图的类型、单空间视图的空间），不占位
+  const facets = useMemo(
+    () =>
+      FACET_FIELDS.map((field) => ({ field, options: facetOptions(items, field) })).filter(
+        (f) => f.options.length > 1
+      ),
+    [items]
+  );
+  if (facets.length === 0) return null;
+  return (
+    <div className="mt-1.5 flex gap-1">
+      {facets.map(({ field, options }) => {
+        const name = t(FACET_LABELS[field]);
+        const all = t("meegle.facetAll", { name });
+        const picked = value[field];
+        return (
+          <Select
+            key={field}
+            value={picked ?? FACET_ALL}
+            onValueChange={(v) => onChange({ ...value, [field]: v === FACET_ALL ? undefined : v })}
+          >
+            <SelectTrigger
+              className={cn(
+                "h-6 min-w-0 flex-1 gap-1 px-1.5 text-[11px]",
+                picked && "bg-tint text-tint-foreground"
+              )}
+              aria-label={name}
+              title={picked ?? all}
+            >
+              <span className="truncate">{picked ?? all}</span>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={FACET_ALL}>{all}</SelectItem>
+              {options.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  {o.value}
+                  <span className="ml-2 text-[11px] text-muted-foreground">{o.count}</span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        );
+      })}
     </div>
   );
 }
@@ -1509,7 +1630,7 @@ function ItemRow({
           href={item.url}
           target="_blank"
           rel="noreferrer noopener"
-          className="absolute top-1.5 right-1.5 grid size-5 place-items-center rounded text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          className="absolute top-1.5 right-1.5 grid size-5 place-items-center rounded-md text-muted-foreground opacity-0 hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
           aria-label={t("meegle.openExternal")}
           title={t("meegle.openExternal")}
           onClick={(e) => e.stopPropagation()}
@@ -1599,7 +1720,7 @@ function SearchBox({
       {value && (
         <button
           type="button"
-          className="absolute top-1/2 right-1 grid size-5 -translate-y-1/2 place-items-center rounded text-muted-foreground hover:text-foreground"
+          className="absolute top-1/2 right-1 grid size-5 -translate-y-1/2 place-items-center rounded-md text-muted-foreground hover:text-foreground"
           aria-label={t("meegle.clearSearch")}
           onClick={() => onChange("")}
         >
@@ -1617,6 +1738,7 @@ function LoadMore({
   loading,
   error,
   onMore,
+  onAll,
 }: {
   count: number;
   total?: number;
@@ -1624,6 +1746,7 @@ function LoadMore({
   loading: boolean;
   error: string | null;
   onMore: () => void;
+  onAll?: () => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -1632,6 +1755,11 @@ function LoadMore({
         {total != null ? t("meegle.loadedOf", { count, total }) : count}
         {error && <span className="ml-1 text-destructive">{error}</span>}
       </span>
+      {hasMore && onAll && (
+        <Button size="xs" variant="ghost" className="h-6" disabled={loading} onClick={onAll}>
+          {t("meegle.loadAll")}
+        </Button>
+      )}
       {hasMore && (
         <Button size="xs" variant="outline" className="h-6" disabled={loading} onClick={onMore}>
           {loading ? t("meegle.loadingList") : t("meegle.loadMore")}
@@ -1648,7 +1776,7 @@ function TypeChip({ on, onClick, children }: { on: boolean; onClick: () => void;
       role="radio"
       aria-checked={on}
       className={cn(
-        "h-5 rounded-full border px-2 text-[11px] leading-none whitespace-nowrap outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        "h-5 rounded-full border px-2 text-[11px] leading-none whitespace-nowrap outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring",
         on
           ? "border-primary bg-primary text-primary-foreground"
           : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"

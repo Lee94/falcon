@@ -547,7 +547,7 @@ export function GitPanel() {
   return (
     // 宽度由外层 ResizableSlot 统一管：四个右侧面板共用同一个槽位，
     // 来回切不能改宽度，否则终端会跟着 reflow。
-    <aside className="flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
+    <aside className="island flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
       <div className="flex h-11 shrink-0 items-center gap-1.5 border-b pr-2 pl-3">
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">
           {t("git.history")}
@@ -634,7 +634,7 @@ export function GitPanel() {
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={t("git.searchCommits")}
                 aria-label={t("git.searchCommits")}
-                className="h-8 w-full rounded-md border bg-background pr-6 pl-7 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                className="h-8 w-full rounded-md border bg-background pr-6 pl-7 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
               />
               {query && (
                 <button
@@ -983,7 +983,7 @@ function FilterRow({
       onClick={onPick}
       title={label}
       className={cn(
-        "flex h-7 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-xs",
+        "flex h-7 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-xs",
         selected
           ? "bg-primary text-primary-foreground"
           : "hover:bg-accent hover:text-accent-foreground",
@@ -1039,7 +1039,7 @@ const CommitRow = memo(function CommitRow({
           // 左右的 padding 放在按钮**内部**：选中态的底色仍然通栏，
           // 而图形与文字都不贴边
           "flex w-full min-w-0 items-center gap-2 pr-3 pl-2 text-left",
-          selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+          selected ? "bg-tint text-tint-foreground" : "hover:bg-accent/50"
         )}
       >
         <GraphCell row={row} />
@@ -1057,7 +1057,7 @@ const CommitRow = memo(function CommitRow({
           <span
             className={cn(
               "min-w-0 truncate text-[11px] leading-4",
-              selected ? "text-accent-foreground/70" : "text-muted-foreground"
+              selected ? "text-tint-foreground/70" : "text-muted-foreground"
             )}
           >
             {commit.author}
@@ -1185,7 +1185,7 @@ function BranchTree({
         <span className="min-w-0 flex-1 truncate text-left">{t("git.branchesTree")}</span>
       </button>
       {open && (
-        <div className="max-h-36 overflow-y-auto pb-1">
+        <div className="max-h-36 overflow-y-auto px-1 pb-1">
           <TreeRow
             label={t("git.allRefs")}
             active={selected == null}
@@ -1241,7 +1241,7 @@ function BranchTree({
 function TreeGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div>
-      <div className="px-3 pt-1.5 pb-0.5 text-[10px] text-muted-foreground">{title}</div>
+      <div className="px-2 pt-1.5 pb-0.5 text-[10px] text-muted-foreground">{title}</div>
       {children}
     </div>
   );
@@ -1267,8 +1267,8 @@ function TreeRow({
       onClick={onPick}
       onContextMenu={onMenu}
       className={cn(
-        "flex h-6 w-full min-w-0 items-center gap-1.5 px-3 text-left text-[11px]",
-        active ? "bg-accent text-accent-foreground" : "hover:bg-accent/50"
+        "flex h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-[11px]",
+        active ? "bg-tint text-tint-foreground" : "hover:bg-accent/50"
       )}
     >
       <span className="flex size-1.5 shrink-0 items-center justify-center">
@@ -1384,7 +1384,7 @@ function ResetDialog({
               key={opt.value}
               className={cn(
                 "flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs",
-                mode === opt.value ? "border-primary bg-primary/5" : "hover:bg-accent/50"
+                mode === opt.value ? "bg-tint" : "hover:bg-accent/50"
               )}
             >
               <input
@@ -1450,7 +1450,7 @@ function RewordDialog({
             rows={5}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
         </Field>
         <div className="mt-1 flex justify-end gap-2">

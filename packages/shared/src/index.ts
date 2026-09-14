@@ -657,11 +657,40 @@ export type SessionState = "active" | "unverified" | "dead";
 
 export type DeadReason = "exited" | "backend-restart" | "link-lost" | "session-gone";
 
+/**
+ * 会话开出来直接跑的 CLI。缺省（undefined）就是普通 shell。
+ *
+ * 只是"用什么命令开场"，不改变会话的其它性质：CLI 退出后落回登录 shell，
+ * 会话还在（见 server/sessions/agent.ts 的启动脚本）。
+ */
+export const SESSION_AGENTS = ["claude", "codex", "grok"] as const;
+
+export type SessionAgent = (typeof SESSION_AGENTS)[number];
+
+export function isSessionAgent(v: unknown): v is SessionAgent {
+  return typeof v === "string" && (SESSION_AGENTS as readonly string[]).includes(v);
+}
+
 export interface Session {
   id: string;
   projectId: string;
+  /**
+   * 用户手起的名字。**空串 = 没起过名**，此时 UI 显示 title / agent / 工作目录，
+   * 不再摆 "Terminal 3" 这种占位名：会话挂在侧栏树的哪个检出下面、窗口标题栏右边
+   * 的工作目录，已经把"这是谁"说完了，序号只是噪音。
+   */
   name: string;
+  /**
+   * 自动标题：宿主机上这个会话**此刻**的前台命令（`pnpm dev`、`vim x.ts`），
+   * 空闲在 shell 里时为空。后端探测（manager.foreground）得来，不入库。
+   *
+   * 只在有 Viewer 看着时刷新，所以后台会话上可能是陈旧值——见 manager 的
+   * scheduleTitleProbe 注释。name 非空时 UI 一律以 name 为准。
+   */
+  title?: string;
   state: SessionState;
+  /** 开场跑的 CLI；缺省是普通 shell */
+  agent?: SessionAgent;
   /** 持久会话 = Zellij 包装，可在断链 / 后端重启后接回 */
   durable: boolean;
   /** durable=false 时的具体原因，UI 据此标注"为什么不持久"而非笼统的"非持久" */
@@ -703,7 +732,10 @@ export interface PasteImageResult {
  * 用户可以浅色 UI + Solarized Dark。后端据此写 COLORFGBG / GROK_APPEARANCE。
  */
 export interface CreateSessionRequest {
+  /** 留空 = 不起名，UI 走自动标题（见 Session.name） */
   name?: string;
+  /** 开场跑的 CLI（claude / codex / grok）；缺省是普通 shell */
+  agent?: SessionAgent;
   appearance?: TermAppearance;
   /** #rrggbb，给 OSC 11 用；缺省按 appearance 给黑 / 白 */
   background?: string;
@@ -820,6 +852,8 @@ export type ServerMessage =
   /** SSH 断线自动重连中 */
   | { type: "reconnecting"; attempt: number }
   | { type: "error"; message: string }
+  /** 前台命令变了（含变空），UI 据此换会话的自动标题 */
+  | { type: "title"; title: string | null }
   /** sudo / SSH askpass：helper 在等密码，弹网页对话框 */
   | { type: "askpass"; id: string; prompt: string };
 

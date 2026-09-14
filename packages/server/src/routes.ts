@@ -40,7 +40,12 @@ import type {
   FileRemoveResult,
   WorkspaceListing,
 } from "@falcon/shared";
-import { PASTE_IMAGE_MAX_BYTES, WORKSPACE_RAW_CAP, sanitizeColorHint } from "@falcon/shared";
+import {
+  PASTE_IMAGE_MAX_BYTES,
+  WORKSPACE_RAW_CAP,
+  isSessionAgent,
+  sanitizeColorHint,
+} from "@falcon/shared";
 import { AskpassCancelled, AskpassTimeout, type AskpassHub } from "./askpass/hub.js";
 import { Db, type ProjectRow, type SshHostRow } from "./db.js";
 import { listDirectories, listRemoteDirectories } from "./fs.js";
@@ -2028,6 +2033,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       const p = projects.get(row.project_id);
       return {
         ...Db.toSession(row),
+        // 自动标题不入库，只有还活着的 entry 手上有（可能是陈旧值，见 titleOf）
+        title: manager.titleOf(row.id),
         projectName: p?.name ?? "?",
         projectType: p?.type ?? "local",
       };
@@ -2047,13 +2054,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       appearance?: unknown;
       background?: unknown;
       foreground?: unknown;
+      agent?: unknown;
     };
-    const count = db.listSessionsByProject(id).length;
+    // 认不出的 agent 一律当普通终端：宁可开出一个 shell，也不要 400 一个新会话
+    const agent = isSessionAgent(body.agent) ? body.agent : undefined;
     try {
+      // 不起名（空串）是常态：UI 显示的是前台命令 / agent / 工作目录，
+      // 编号名（"Terminal 3"）既没信息量，序号还会随删除重号
       return await manager.createSession(
         project,
-        body.name?.trim() || `Terminal ${count + 1}`,
-        sanitizeColorHint(body)
+        body.name?.trim() ?? "",
+        sanitizeColorHint(body),
+        agent
       );
     } catch (err) {
       return reply.code(502).send({ error: `创建会话失败：${(err as Error).message}` });
@@ -2096,8 +2108,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.patch("/api/sessions/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const { name } = (req.body ?? {}) as { name?: string };
-    if (!name?.trim()) return reply.code(400).send({ error: "名称不能为空" });
+    if (typeof name !== "string") return reply.code(400).send({ error: "缺少名称" });
     if (!db.getSession(id)) return reply.code(404).send({ error: "会话不存在" });
+    // 空串是合法的：清掉名字就回到自动标题，这是"取消重命名"的唯一出口
     db.renameSession(id, name.trim());
     return { ok: true };
   });

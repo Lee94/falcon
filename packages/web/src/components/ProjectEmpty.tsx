@@ -11,7 +11,7 @@ export function ProjectEmpty() {
   const newTerminal = useApp((s) => s.newTerminal);
 
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2.5 px-6 text-center text-muted-foreground">
+    <div className="island absolute inset-0 z-10 flex flex-col items-center justify-center gap-2.5 px-6 text-center text-muted-foreground">
       <TerminalIcon className="size-7 stroke-[1.5] text-muted-foreground/50" />
       <span className="text-[15px] text-foreground">
         {t("sidebar.emptyProjectTitle")}

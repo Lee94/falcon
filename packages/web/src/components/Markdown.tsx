@@ -90,7 +90,7 @@ function Node({ tok, ctx }: { tok: Token; ctx: Ctx }): ReactNode {
 
     case "codespan":
       return (
-        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em]">
+        <code className="rounded-md bg-muted px-1 py-0.5 font-mono text-[0.9em]">
           {(tok as Tokens.Codespan).text}
         </code>
       );
@@ -266,7 +266,7 @@ function CodeBlock({ text, lang }: { text: string; lang?: string }) {
   const hl = useHighlight(text, langForFence(lang));
   const lines = useMemo(() => splitCodeLines(text), [text]);
   return (
-    <pre className="code-hl my-3 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-5.5">
+    <pre className="code-hl sunken my-3 overflow-x-auto p-3 font-mono text-xs leading-5.5">
       <code>
         {hl
           ? lines.map((line, i) => (

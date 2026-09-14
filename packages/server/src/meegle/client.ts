@@ -509,9 +509,9 @@ export class MeegleClient {
   }
 
   /**
-   * 给"半成品"的行补齐：名字（空的才补）、状态、更新时间、类型名、外链。mywork 与全景视图
-   * 给的行都只有 id 一类的骨架，按 空间 × 类型 分组用 MQL 一次补 50 个；补不到（没权限、
-   * 类型停用）就留空，前端显示 #id，别让整页失败。
+   * 给"半成品"的行补齐：名字（空的才补）、状态、更新时间、类型名、空间名、外链。mywork 与
+   * 全景视图给的行都只有 id 一类的骨架，按 空间 × 类型 分组用 MQL 一次补 50 个；补不到
+   * （没权限、类型停用）就留空，前端显示 #id，别让整页失败。
    */
   private async enrich(items: MeegleWorkItem[]): Promise<void> {
     if (items.length === 0) return;
@@ -519,6 +519,7 @@ export class MeegleClient {
     const groups = groupForLookup(items);
     const rows = new Map<string, MqlRow>();
     const typeNames = new Map<string, string>();
+    const spaceNames = new Map<string, string>();
     const simpleNames = new Map<string, string | undefined>();
     await mapLimit(
       groups.flatMap((g) => chunk(g.ids, CLI_PAGE_SIZE).map((ids) => ({ ...g, ids }))),
@@ -533,6 +534,9 @@ export class MeegleClient {
       }
     );
     const spaceKeys = [...new Set(groups.map((g) => g.spaceKey))];
+    // 空间名：全景视图的行只给 project_key，"这条属于哪个空间"全靠这里补（待办自带 project_name，
+    // 不覆盖）。spaces() 只有最近访问过的空间，跨到没访问过的空间就补不到，留空即可。
+    for (const s of await this.spaces().catch(() => [])) spaceNames.set(s.key, s.name);
     await Promise.all(
       spaceKeys.map(async (key) => {
         simpleNames.set(key, await this.simpleNameOf(key));
@@ -551,6 +555,7 @@ export class MeegleClient {
         it.updatedAt = row.updatedAt;
       }
       it.typeName = typeNames.get(`${it.spaceKey} ${it.typeKey}`);
+      it.spaceName ??= spaceNames.get(it.spaceKey);
       it.url = workItemUrl(host, simpleNames.get(it.spaceKey), it.typeKey, it.id);
     }
   }

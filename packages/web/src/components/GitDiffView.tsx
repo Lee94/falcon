@@ -354,7 +354,7 @@ function DiffTable({ text }: { text: string }) {
               <tr key={i}>
                 <td
                   colSpan={3}
-                  className="sticky top-0 border-y bg-muted px-3 py-1.5 font-medium text-foreground"
+                  className="sticky top-0 border-y bg-app px-3 py-1.5 font-medium text-foreground"
                 >
                   {row.label}
                 </td>
@@ -535,7 +535,7 @@ function SidePane({
               <tr key={i}>
                 <td
                   colSpan={2}
-                  className="sticky top-0 z-10 border-y bg-muted px-3 py-1.5 font-medium whitespace-pre text-foreground"
+                  className="sticky top-0 z-10 border-y bg-app px-3 py-1.5 font-medium whitespace-pre text-foreground"
                 >
                   <span className="sticky left-3 inline-block">{row.label}</span>
                 </td>

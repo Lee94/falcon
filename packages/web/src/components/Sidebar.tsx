@@ -1,7 +1,8 @@
-import { useEffect, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, type MouseEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Archive,
+  Bot,
   ChevronDown,
   ChevronRight,
   Ellipsis,
@@ -13,10 +14,16 @@ import {
   Plus,
   Server,
   Settings,
+  SquareTerminal,
 } from "lucide-react";
-import type { Project } from "@falcon/shared";
+import type { Project, SessionWithProject } from "@falcon/shared";
 import { WORKTREE_ARCHIVE_TTL_MS } from "@falcon/shared";
-import { useApp, type ProjectChanges, type ProjectHead } from "../store.js";
+import {
+  useApp,
+  type PendingSession,
+  type ProjectChanges,
+  type ProjectHead,
+} from "../store.js";
 import {
   checkoutLabel,
   folderKey,
@@ -25,6 +32,8 @@ import {
   type ServerGroup,
 } from "../lib/projectTree.js";
 import { memberBasename } from "../lib/multiDerive.js";
+import { StatusMark, type MarkState } from "./common/StatusMark.js";
+import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
@@ -65,11 +74,12 @@ export function Sidebar() {
   }, [refreshChanges]);
 
   return (
-    <aside className="flex min-h-0 flex-1 flex-col border-r bg-sidebar text-sidebar-foreground">
+    <aside className="island flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
       {/* 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 + / 右键 / 命令面板 */}
-      <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
+      {/* 左右也留出内边距：行的 hover / 选中是内缩的圆角块，贴着岛边会切掉那个圆角 */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {empty && (
-          <p className="px-3 pt-1.5 pb-2.5 text-xs leading-relaxed text-muted-foreground">
+          <p className="px-2 pt-1.5 pb-2.5 text-xs leading-relaxed text-muted-foreground">
             {t("sidebar.empty")}
           </p>
         )}
@@ -128,7 +138,7 @@ export function Sidebar() {
         ))}
       </div>
 
-      <div className="flex h-9 shrink-0 items-center gap-2 border-t px-1.5">
+      <div className="flex h-9 shrink-0 items-center gap-2 px-1.5">
         <Button
           variant="ghost"
           size="sm"
@@ -195,12 +205,12 @@ function ServerNode({
   return (
     <div className="mb-0.5">
       <div
-        className="group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent"
+        className="group/row flex h-7.5 items-center gap-1 rounded-lg pr-1.5 pl-1 hover:bg-sidebar-accent"
         title={`${server.conn ?? server.name} · ${t("sidebar.projectContext")}`}
         onContextMenu={onContextMenu}
       >
         <button
-          className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
           aria-label={t("sidebar.toggleServer")}
           aria-expanded={expanded}
           onClick={onToggle}
@@ -241,7 +251,7 @@ function ServerNode({
 
       {expanded &&
         (server.folders.length === 0 ? (
-          <p className="px-3 py-1 pl-8.5 text-[11px] text-muted-foreground">
+          <p className="py-1 pr-2 pl-8.5 text-[11px] text-muted-foreground">
             {t("sidebar.emptyServer")}
           </p>
         ) : (
@@ -372,6 +382,13 @@ function CheckoutNode({
   onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
+  const openMenu = useApp((s) => s.openMenu);
+  const actions = useActions();
+  const { mine, minePending } = useProjectSessions(project.id);
+  // 会话行默认收着（见 store 的 sessionsOpen）：一个检出能挂五六个终端，
+  // 全摊开就把侧栏占满了，平时看这一行尾巴上的计数就够
+  const sessionsOpen = useApp((s) => s.sessionsOpen[project.id] === true);
+  const toggleSessions = useApp((s) => s.toggleSessions);
   const sourceName = useApp((s) =>
     project.worktree
       ? (s.projects.find((p) => p.id === project.worktree?.sourceProjectId)?.name ?? "")
@@ -398,29 +415,247 @@ function CheckoutNode({
         .join(" · ")
     : (project.workingDir ?? project.name);
 
+  const count = mine.length + minePending.length;
+  // 存档的检出开不了会话，也就没有会话行可摊（下面 SessionRows 同样跳过）
+  const expandable = !archivedAt && count > 0;
+
   return (
-    <TreeRow
-      depth={depth}
-      icon={
-        archivedAt ? (
-          <Archive className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : project.multi && !project.worktree ? (
-          <Folders className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : branched ? (
-          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-        )
-      }
-      label={label}
-      meta={archivedNote ?? meta}
-      changes={archivedAt ? undefined : changes}
-      title={title}
-      muted={!!archivedAt}
-      selected={selected}
-      onSelect={archivedAt ? undefined : onSelect}
-      onContextMenu={onContextMenu}
-    />
+    <>
+      <TreeRow
+        depth={depth}
+        expanded={expandable ? sessionsOpen : undefined}
+        toggleLabel={expandable ? "sidebar.toggleSessions" : undefined}
+        onToggle={expandable ? () => toggleSessions(project.id) : undefined}
+        trailing={
+          expandable ? (
+            <SessionCountBadge
+              count={count}
+              worst={worstState(mine, minePending)}
+              expanded={sessionsOpen}
+              onToggle={() => toggleSessions(project.id)}
+            />
+          ) : undefined
+        }
+        icon={
+          archivedAt ? (
+            <Archive className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : project.multi && !project.worktree ? (
+            <Folders className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : branched ? (
+            <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+          )
+        }
+        label={label}
+        meta={archivedNote ?? meta}
+        changes={archivedAt ? undefined : changes}
+        title={title}
+        muted={!!archivedAt}
+        selected={selected}
+        onSelect={archivedAt ? undefined : onSelect}
+        onContextMenu={onContextMenu}
+        // 存档的项目不能再开会话（目录到期要连着删）
+        onNew={
+          archivedAt
+            ? undefined
+            : (e) => openMenu({ ...menuAnchor(e), items: actions.newSessionItems(project.id) })
+        }
+      />
+      {expandable && sessionsOpen && (
+        <SessionRows
+          sessions={mine}
+          pending={minePending}
+          projectId={project.id}
+          depth={depth + 1}
+        />
+      )}
+    </>
+  );
+}
+
+/** 某个检出下的会话与在建会话。计数徽标与会话行共用一份筛选，不能各筛各的。 */
+function useProjectSessions(projectId: string) {
+  const sessions = useApp((s) => s.sessions);
+  const pending = useApp((s) => s.pending);
+  // sessions 内容没变时引用是稳的（store 的 sameFlatArray），filter 放渲染里就够
+  const mine = useMemo(
+    () => sessions.filter((s) => s.projectId === projectId),
+    [sessions, projectId]
+  );
+  const minePending = useMemo(
+    () => pending.filter((p) => p.projectId === projectId),
+    [pending, projectId]
+  );
+  return { mine, minePending };
+}
+
+/** 折叠着也得看得出出没出事：取最重的那个状态，全是 active 就不摆记号。 */
+function worstState(
+  sessions: SessionWithProject[],
+  pending: { error?: string }[]
+): MarkState | null {
+  if (sessions.some((s) => s.state === "dead") || pending.some((p) => p.error)) return "dead";
+  if (sessions.some((s) => s.state === "unverified")) return "unverified";
+  if (pending.length > 0) return "creating";
+  return null;
+}
+
+/**
+ * 检出行尾巴上的会话计数。点它 = 摊开 / 收起会话行，和行首的箭头同一个动作——
+ * 那个箭头只有 12px 见方，这里给个够大的落点。
+ */
+function SessionCountBadge({
+  count,
+  worst,
+  expanded,
+  onToggle,
+}: {
+  count: number;
+  worst: MarkState | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useTranslation();
+  const label = t("sidebar.sessionCount", { n: count });
+  return (
+    <button
+      className={cn(
+        "flex h-5 shrink-0 items-center gap-0.5 rounded-sm px-0.5 text-[11px] tabular-nums outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        expanded ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+      )}
+      aria-label={label}
+      aria-expanded={expanded}
+      title={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+    >
+      {worst ? (
+        <StatusMark state={worst} />
+      ) : (
+        <SquareTerminal className="size-3" strokeWidth={2} />
+      )}
+      {count}
+    </button>
+  );
+}
+
+/**
+ * 项目下的会话行。没有顶部 tab 栏之后，"现在开着哪些终端"就摆在侧栏这棵树里：
+ * 点一行把焦点交给画布上那扇窗口，还没在画布上的（别的项目、之前 Detach 掉的）
+ * 点了会重新摆一列出来（openSession 负责）。
+ */
+function SessionRows({
+  sessions: mine,
+  pending: minePending,
+  projectId,
+  depth,
+}: {
+  sessions: SessionWithProject[];
+  pending: PendingSession[];
+  projectId: string;
+  depth: number;
+}) {
+  const { t } = useTranslation();
+  const active = useApp((s) => s.active);
+  const openSession = useApp((s) => s.openSession);
+  const openMenu = useApp((s) => s.openMenu);
+  const actions = useActions();
+  const activeId = active.kind === "terminal" ? active.sessionId : null;
+
+  return (
+    <>
+      {mine.map((session) => (
+        <SessionRow
+          key={session.id}
+          session={session}
+          depth={depth}
+          selected={activeId === session.id}
+          onSelect={() => openSession(session.id)}
+          onMenu={(e) =>
+            openMenu({ ...menuAnchor(e), items: actions.sessionMenuItems(session) })
+          }
+          onContextMenu={(e) => openContextMenu(e, actions.sessionMenuItems(session))}
+        />
+      ))}
+      {minePending.map((p) => (
+        <div
+          key={p.id}
+          className="flex h-7 items-center gap-1.5 rounded-lg pr-1.5 text-muted-foreground"
+          style={{ paddingLeft: 4 + depth * 12 }}
+        >
+          <span className="size-4.5 shrink-0" />
+          <StatusMark state={p.error ? "dead" : "creating"} />
+          <span className="min-w-0 flex-1 truncate pl-1">{t("tab.creating")}</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function SessionRow({
+  session,
+  depth,
+  selected,
+  onSelect,
+  onMenu,
+  onContextMenu,
+}: {
+  session: SessionWithProject;
+  depth: number;
+  selected: boolean;
+  onSelect: () => void;
+  onMenu: (e: { currentTarget: HTMLElement }) => void;
+  onContextMenu: (e: MouseEvent) => void;
+}) {
+  const { t } = useTranslation();
+  const Icon = session.agent ? Bot : SquareTerminal;
+  const label = useSessionLabel()(session);
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-current={selected ? "true" : undefined}
+      title={`${label} · ${t("sidebar.projectContext")}`}
+      className={cn(
+        "group/row flex h-7 cursor-pointer items-center gap-1 rounded-lg pr-1.5 hover:bg-sidebar-accent",
+        selected && "bg-tint text-tint-foreground hover:bg-tint"
+      )}
+      style={{ paddingLeft: 4 + depth * 12 }}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e);
+      }}
+    >
+      <span className="size-4.5 shrink-0" />
+      <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate pl-1">{label}</span>
+      {/* 运行中不摆状态记号，异常才值得占位置 */}
+      {session.state !== "active" && <StatusMark state={session.state} />}
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        className="text-muted-foreground opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+        aria-label={t("session.moreActions")}
+        title={t("common.more")}
+        onClick={(e) => {
+          e.stopPropagation();
+          onMenu(e);
+        }}
+      >
+        <Ellipsis />
+      </Button>
+    </div>
   );
 }
 
@@ -438,7 +673,9 @@ function TreeRow({
   selected,
   onSelect,
   onMenu,
+  onNew,
   onContextMenu,
+  trailing,
 }: {
   depth: number;
   expanded?: boolean;
@@ -447,17 +684,24 @@ function TreeRow({
   meta?: string;
   changes?: ProjectChanges;
   title?: string;
-  toggleLabel?: "sidebar.toggleServer" | "sidebar.toggleProject" | "sidebar.toggleWorktree";
+  toggleLabel?:
+    | "sidebar.toggleServer"
+    | "sidebar.toggleProject"
+    | "sidebar.toggleWorktree"
+    | "sidebar.toggleSessions";
   onToggle?: () => void;
   /** 存档行的置灰态 */
   muted?: boolean;
   selected?: boolean;
   onSelect?: () => void;
   onMenu?: (e: { currentTarget: HTMLElement }) => void;
+  /** 行尾的 ＋：新建会话的菜单（普通终端 / 各家 CLI） */
+  onNew?: (e: { currentTarget: HTMLElement }) => void;
   onContextMenu?: (e: MouseEvent) => void;
+  /** 摆在 +N −M 左边的附加徽标（检出行的会话计数） */
+  trailing?: ReactNode;
 }) {
   const { t } = useTranslation();
-  const leaf = !onToggle;
   return (
     <div
       role={onSelect ? "button" : undefined}
@@ -469,9 +713,10 @@ function TreeRow({
           : title
       }
       className={cn(
-        "group/row flex h-7.5 items-center gap-1 pr-1.5 hover:bg-sidebar-accent",
+        // 圆角块而不是铺满整行的条：选中 / hover 都内缩在岛里
+        "group/row flex h-7.5 items-center gap-1 rounded-lg pr-1.5 hover:bg-sidebar-accent",
         onSelect && "cursor-pointer",
-        selected && "bg-accent"
+        selected && "bg-tint text-tint-foreground hover:bg-tint"
       )}
       style={{ paddingLeft: 4 + depth * 12 }}
       onClick={onSelect}
@@ -497,7 +742,7 @@ function TreeRow({
     >
       {onToggle && toggleLabel ? (
         <button
-          className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="grid size-4.5 shrink-0 place-items-center rounded-sm text-muted-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
           aria-label={t(toggleLabel)}
           aria-expanded={expanded}
           onClick={(e) => {
@@ -525,24 +770,37 @@ function TreeRow({
           {meta}
         </span>
       )}
-      {leaf ? (
-        <GitChangeBadge changes={changes} />
-      ) : (
-        onMenu && (
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            className="text-muted-foreground"
-            aria-label={t("sidebar.projectMenu")}
-            title={t("common.more")}
-            onClick={(e) => {
-              e.stopPropagation();
-              onMenu(e);
-            }}
-          >
-            <Ellipsis />
-          </Button>
-        )
+      {onNew && (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+          aria-label={t("sidebar.newTerminal")}
+          title={`${t("sidebar.newTerminal")} · ${chord("newTerminal")}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onNew(e);
+          }}
+        >
+          <Plus />
+        </Button>
+      )}
+      {trailing}
+      <GitChangeBadge changes={changes} />
+      {onMenu && (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground"
+          aria-label={t("sidebar.projectMenu")}
+          title={t("common.more")}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMenu(e);
+          }}
+        >
+          <Ellipsis />
+        </Button>
       )}
     </div>
   );

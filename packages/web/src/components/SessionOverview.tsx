@@ -6,6 +6,7 @@ import { useApp, type OverviewFilter } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { durabilityHint } from "../lib/reason.js";
 import { absoluteTime, idleText, useActions } from "../lib/useActions.js";
+import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,8 +65,8 @@ export function SessionOverview() {
           <button
             key={state}
             className={cn(
-              "w-44 rounded-lg border bg-card px-3.5 py-3 text-left outline-none transition-colors hover:border-ring/60 focus-visible:ring-[3px] focus-visible:ring-ring/50",
-              filter === state && "border-ring/60 bg-accent"
+              "sunken w-44 px-3.5 py-3 text-left outline-none transition-colors hover:bg-tint/60 focus-visible:ring-1 focus-visible:ring-ring",
+              filter === state && "bg-tint hover:bg-tint"
             )}
             onClick={() => setFilter(filter === state ? "all" : (state as OverviewFilter))}
           >
@@ -112,8 +113,8 @@ export function SessionOverview() {
           onClearFilter={resetFilter}
         />
       ) : (
-        <div className="overflow-x-auto rounded-lg border bg-card">
-          <Table className="min-w-[800px]">
+        <div className="sunken overflow-x-auto">
+          <Table className="min-w-[800px] [&_tbody_tr]:border-border/50 [&_tbody_tr:hover]:bg-background/70">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="w-9">
@@ -188,6 +189,7 @@ function Row({
   onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
+  const label = useSessionLabel()(session);
   const dead = session.state === "dead";
   // 按状态给一个主操作，其余进 ⋯ ——一行铺四个按钮时危险操作也被平铺了
   const primary =
@@ -214,9 +216,9 @@ function Row({
       </TableCell>
       <TableCell
         className={cn("max-w-0 truncate", dead && "text-muted-foreground line-through")}
-        title={session.name}
+        title={label}
       >
-        {session.name}
+        {label}
       </TableCell>
       <TableCell className="max-w-0 truncate text-muted-foreground">
         {/* 分隔点用透明度而不是 --border：后者在浅色下是实色浅灰，白底上看不见 */}

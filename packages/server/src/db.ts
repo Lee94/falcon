@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
+import { isSessionAgent } from "@falcon/shared";
 import type {
   DeadReason,
   ForwardKind,
@@ -59,6 +60,8 @@ export interface SessionRow {
   /** 上次 Viewer 量到的格子；null = 从未量过，接回时不能当 80×24 用 */
   cols: number | null;
   rows: number | null;
+  /** 开场跑的 CLI（claude / codex / grok）；null = 普通 shell */
+  agent: string | null;
 }
 
 export interface SshHostRow {
@@ -214,9 +217,11 @@ export class Db {
     this.addColumn("sessions", "non_durable_reason", "TEXT");
     this.addColumn("sessions", "cols", "INTEGER");
     this.addColumn("sessions", "rows", "INTEGER");
+    this.addColumn("sessions", "agent", "TEXT");
     // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
     this.stmt("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'")
       .run();
+    this.clearAutoNames();
 
     // 附属项目（git worktree）。四列全可空，存量行天然是"普通项目"。
     //
@@ -278,6 +283,30 @@ export class Db {
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
+  }
+
+  /**
+   * 存量会话的自动名（`Terminal 3` / `Claude 1`）一次性清空——现在没起名就是空串，
+   * UI 走自动标题。
+   *
+   * 只跑一次，用 settings 里的标记记着：这条清理认不出"用户手动起的名字恰好
+   * 长这样"，每次启动都跑会把人家改回去的名字又抹掉。没有版本号迁移表（见 migrate），
+   * 标记就是最轻的一次性开关。
+   */
+  private clearAutoNames() {
+    const KEY = "migration.sessions.clearAutoNames";
+    if (this.getSetting(KEY)) return;
+    // 在 TS 里按正则筛，不在 SQL 里拼 GLOB：会话数量是个位数到几十，精确匹配
+    // 比省几次查询值钱（`Terminal 2 号` 这种手起的名字不该被误伤）
+    const auto = /^(?:Terminal|Claude|Codex|Grok) \d+$/;
+    const rows = this.stmt("SELECT id, name FROM sessions").all() as {
+      id: string;
+      name: string;
+    }[];
+    for (const row of rows) {
+      if (auto.test(row.name)) this.renameSession(row.id, "");
+    }
+    this.setSetting(KEY, "1");
   }
 
   // ---- settings ----
@@ -723,6 +752,7 @@ export class Db {
       nonDurableReason:
         (row.non_durable_reason as Session["nonDurableReason"] | null) ?? undefined,
       deadReason: (row.dead_reason as DeadReason | null) ?? undefined,
+      agent: isSessionAgent(row.agent) ? row.agent : undefined,
       createdAt: row.created_at,
       lastActiveAt: row.last_active_at,
     };
@@ -746,8 +776,8 @@ export class Db {
 
   insertSession(row: SessionRow) {
     this.stmt(
-        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows)
-         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows)`
+        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows, agent)
+         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows, @agent)`
       )
       .run(bindRow(row));
   }

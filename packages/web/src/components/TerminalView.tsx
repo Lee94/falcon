@@ -294,6 +294,9 @@ export function TerminalView({
           case "error":
             setView((v) => ({ ...v, attachError: msg.message }));
             break;
+          case "title":
+            useApp.getState().applySessionTitle(sessionId, msg.title);
+            break;
           case "askpass":
             useApp.getState().pushAskpass({ id: msg.id, prompt: msg.prompt });
             break;

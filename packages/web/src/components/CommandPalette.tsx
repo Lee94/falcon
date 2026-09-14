@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  Bot,
   CircleAlert,
   CircleDot,
   CircleX,
@@ -12,6 +13,8 @@ import {
   GitBranch,
   LayoutDashboard,
   ListTodo,
+  Maximize2,
+  Minimize2,
   PanelLeft,
   Plus,
   Palette,
@@ -21,11 +24,13 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
+import { SESSION_AGENTS } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, selectRightVisible, selectSidebarVisible } from "../store.js";
 import { hostLabel } from "../lib/hostColor.js";
 import { chord } from "../lib/shortcuts.js";
 import { useActions } from "../lib/useActions.js";
+import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { useInstall } from "../lib/useInstall.js";
 import { THEME_ICONS, THEME_PREFS } from "./common/ThemeToggle.js";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -72,7 +77,9 @@ export function CommandPalette() {
   const rightVisible = useApp(selectRightVisible);
   const rightPanel = useApp((s) => s.rightPanel);
   const themePref = useApp((s) => s.themePref);
+  const termZoomed = useApp((s) => s.termZoomed);
   const actions = useActions();
+  const sessionLabel = useSessionLabel();
   const { canInstall, standalone, promptInstall } = useInstall();
   const [query, setQuery] = useState("");
 
@@ -94,9 +101,10 @@ export function CommandPalette() {
     const sessionItems: PaletteItem[] = sessions.map((session) => {
       const project = projects.find((p) => p.id === session.projectId);
       const [icon, tone] = stateIcon(session.state);
+      const name = sessionLabel(session);
       return {
-        key: `@${session.name} ${session.projectName} ${hostLabel(project, localWord)}`,
-        label: session.name,
+        key: `@${name} ${session.projectName} ${hostLabel(project, localWord)}`,
+        label: name,
         meta: `${session.projectName} · ${hostLabel(project, localWord)}`,
         icon,
         tone,
@@ -105,15 +113,26 @@ export function CommandPalette() {
     });
 
     // 存档的项目不能开终端（到期会连目录一起删），不进面板
+    // 每个项目一条普通终端 + 每家 CLI 一条：面板是"敲名字就开"的地方，
+    // 让人先开终端再输命令就白搭了
     const projectItems: PaletteItem[] = projects
       .filter((p) => !p.worktree?.archivedAt)
-      .map((project) => ({
-        key: `#${project.name} ${t("sidebar.newTerminal")}`,
-        label: t("palette.newTerminalIn", { name: project.name }),
-        meta: hostLabel(project, localWord),
-        icon: TerminalIcon,
-        run: () => void store.newTerminal(project.id),
-      }));
+      .flatMap((project) => [
+        {
+          key: `#${project.name} ${t("sidebar.newTerminal")}`,
+          label: t("palette.newTerminalIn", { name: project.name }),
+          meta: hostLabel(project, localWord),
+          icon: TerminalIcon,
+          run: () => void store.newTerminal(project.id),
+        },
+        ...SESSION_AGENTS.map((agent) => ({
+          key: `#${project.name} ${t(`agent.${agent}`)}`,
+          label: t("palette.newAgentIn", { agent: t(`agent.${agent}`), name: project.name }),
+          meta: hostLabel(project, localWord),
+          icon: Bot,
+          run: () => void store.newTerminal(project.id, { agent }),
+        })),
+      ]);
     projectItems.push({
       key: `#${t("palette.newProject")}`,
       label: t("palette.newProject"),
@@ -126,8 +145,8 @@ export function CommandPalette() {
       .filter((s) => s.state === "unverified")
       .forEach((session) =>
         actionItems.push({
-          key: `>${t("session.reattach")} ${session.name}`,
-          label: t("palette.reattachOne", { name: session.name }),
+          key: `>${t("session.reattach")} ${sessionLabel(session)}`,
+          label: t("palette.reattachOne", { name: sessionLabel(session) }),
           meta: chord("reattach"),
           icon: CircleAlert,
           tone: "text-warning",
@@ -156,6 +175,12 @@ export function CommandPalette() {
           run: () => actions.terminate(current),
         });
       }
+      actionItems.push({
+        key: `>${t("palette.zoomOn")} ${t("palette.zoomOff")}`,
+        label: termZoomed ? t("palette.zoomOff") : t("palette.zoomOn"),
+        icon: termZoomed ? Minimize2 : Maximize2,
+        run: () => store.toggleTermZoom(),
+      });
     }
     actionItems.push({
       key: `>${t("palette.goToFile")}`,
@@ -278,7 +303,7 @@ export function CommandPalette() {
     ];
     // actions 每次渲染都是新对象，纳入依赖会让 memo 失效；它只读 store，不用跟
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, sessions, projects, active, auth, sidebarVisible, rightVisible, rightPanel, themePref, canInstall, standalone, promptInstall, t]);
+  }, [open, sessions, projects, sessionLabel, active, auth, sidebarVisible, rightVisible, rightPanel, themePref, termZoomed, canInstall, standalone, promptInstall, t]);
 
   const prefix = query.charAt(0);
   const needle = query.replace(/^[>@#]/, "").trim().toLowerCase();

@@ -28,7 +28,8 @@ export function RightBar() {
 
   return (
     <aside
-      className="flex w-9 shrink-0 flex-col items-center border-l bg-sidebar py-1.5 text-sidebar-foreground"
+      // 不成岛：图标直接落在窗口底上，右边的 padding 由它自己带（骨架那层 pr-0）
+      className="flex w-10 shrink-0 flex-col items-center gap-0.5 px-1.5 py-1.5 text-sidebar-foreground"
       aria-label={t("rightbar.label")}
     >
       {ITEMS.map((item) => {
@@ -38,8 +39,8 @@ export function RightBar() {
           <button
             key={item.id}
             className={cn(
-              "grid size-7 place-items-center rounded-md text-muted-foreground outline-none hover:bg-accent/50 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50",
-              on && "bg-accent text-foreground"
+              "grid size-7 place-items-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-background/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring",
+              on && "bg-tint text-tint-foreground"
             )}
             aria-label={label}
             aria-pressed={on}

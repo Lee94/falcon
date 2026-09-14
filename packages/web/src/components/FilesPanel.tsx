@@ -171,19 +171,19 @@ function uniqueName(base: string, taken: Iterable<string>): string {
   }
 }
 
+/** 删掉的文件如果正开着（或它在被删的目录里），把那扇查看窗口收起来 */
 function closeMatchingTabs(projectId: string, paths: string[]) {
-  const { fileTabs, closeFile } = useApp.getState();
-  for (const tab of [...fileTabs]) {
-    if (tab.projectId !== projectId) continue;
-    if (paths.some((p) => tab.path === p || tab.path.startsWith(`${p}/`))) closeFile(tab);
+  const { fileTab, closeFile } = useApp.getState();
+  if (!fileTab || fileTab.projectId !== projectId) return;
+  if (paths.some((p) => fileTab.path === p || fileTab.path.startsWith(`${p}/`))) {
+    closeFile(fileTab);
   }
 }
 
+/** 改名后让查看窗口跟到新路径上（openFile 是就地换内容，不会多开一扇） */
 function retargetTab(projectId: string, from: string, to: string) {
-  const { fileTabs, closeFile, openFile } = useApp.getState();
-  const wasOpen = fileTabs.some((f) => f.projectId === projectId && f.path === from);
-  if (!wasOpen) return;
-  closeFile({ projectId, path: from });
+  const { fileTab, openFile } = useApp.getState();
+  if (!fileTab || fileTab.projectId !== projectId || fileTab.path !== from) return;
   openFile(projectId, to);
 }
 
@@ -557,7 +557,7 @@ export function FilesPanel() {
   const canMutate = Boolean(projectId);
 
   return (
-    <aside className="@container flex min-h-0 flex-1 flex-col border-l bg-sidebar text-sidebar-foreground">
+    <aside className="island @container flex min-h-0 flex-1 flex-col overflow-hidden text-sidebar-foreground">
       <div className="shrink-0 border-b px-2 py-1.5">
         <Input
           value={pathDraft}
@@ -651,10 +651,10 @@ export function FilesPanel() {
           <span className="mt-1 block font-mono text-[11px]">{listing.error}</span>
         </Hint>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div className="min-h-0 flex-1 overflow-auto px-1">
           <div
             className={cn(
-              "sticky top-0 z-10 grid items-center border-b bg-sidebar text-[11px] text-muted-foreground",
+              "sticky top-0 z-10 grid items-center bg-background text-[11px] text-muted-foreground",
               "grid-cols-[24px_minmax(0,1fr)]",
               "@[300px]:grid-cols-[24px_minmax(0,1fr)_3.5rem]",
               "@[360px]:grid-cols-[24px_minmax(0,1fr)_3.5rem_9.5rem]"
@@ -730,12 +730,12 @@ export function FilesPanel() {
                     onContextMenu={(e) => openRowMenu(e, entry)}
                     title={entry.path}
                     className={cn(
-                      "grid h-7 cursor-default items-center border-b border-border/60 text-[11.5px] hover:bg-accent/50",
+                      "grid h-7 cursor-default items-center rounded-lg text-[11.5px] hover:bg-accent/50",
                       "grid-cols-[24px_minmax(0,1fr)]",
                       "@[300px]:grid-cols-[24px_minmax(0,1fr)_3.5rem]",
                       "@[360px]:grid-cols-[24px_minmax(0,1fr)_3.5rem_9.5rem]",
-                      on && "bg-accent/70",
-                      opened && !on && "bg-accent/30"
+                      on && "bg-tint hover:bg-tint",
+                      opened && !on && "bg-accent/40"
                     )}
                   >
                     <div className="grid place-items-center" data-file-check>
@@ -880,7 +880,7 @@ function NameRow({
   return (
     <li
       className={cn(
-        "grid h-7 items-center border-b border-border/60 bg-accent/40 text-[11.5px]",
+        "grid h-7 items-center rounded-lg bg-accent/40 text-[11.5px]",
         "grid-cols-[24px_minmax(0,1fr)]"
       )}
     >

@@ -56,17 +56,29 @@ _Avoid_: 工作区目录（与 working_dir 混）、根目录
 
 **Terminal Session（终端会话）**:
 一个由后端持有的运行中的 shell（PTY）。归属于某个 Project，一个 Project 可同时拥有多个。生命周期独立于任何浏览器页面。
-_Avoid_: Tab（Tab 是前端视图，不是会话本身）、Terminal（指渲染组件时才用）
+_Avoid_: Window / Pane（窗口是前端视图，不是会话本身）、Tab（已经没有 tab 栏了，见 ADR 0012）、Terminal（指渲染组件时才用）
+
+**Window（窗口 / pane）**:
+工作画布上的一格，装一个终端、一个文件或一份差异。窗口排成列（Column），列可并排、可上下叠、可拖。前端概念，不对应后端任何东西。
+_Avoid_: Tab、面板（面板是右侧栏那几格）
+
+**Agent 会话**:
+开场直接跑 claude / codex / grok 的终端会话（`sessions.agent`）。除了开场命令，与普通会话没有任何区别；CLI 退出后落回登录 shell，会话不结束。见 ADR 0013。
+_Avoid_: AI 会话、机器人（"agent" 就是这些 CLI 的自称）
+
+**自动标题**:
+会话在界面上显示的那行字，按 手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名 取第一个有值的（`web/lib/sessionTitle.ts`）。会话**默认没有名字**（`name` 空串）：编号名（"Terminal 3"）没有信息量，序号还会随删除重号，而"这个终端在干什么"由前台命令回答得更好。前台命令由后端探测（`manager.foreground`），只在有 Viewer 时刷新，所以后台会话上可能是陈旧值。
+_Avoid_: 会话名（那专指用户手起的那个）、tab 标题（没有 tab 栏）
 
 **Scrollback（历史输出）**:
 会话在无人观看期间产生的输出记录，重新连接时先回放再接实时流。
 
 **Detach（断开视图）**:
-视图与会话断开、会话继续运行：离开或关闭页面，以及 Shift+关闭 Tab。会话仍留在会话列表里。
+视图与会话断开、会话继续运行：离开或关闭页面，以及 Shift+关闭窗口。会话仍留在会话列表里。
 _Avoid_: 关闭（语义不明确）
 
 **Terminate（终止）**:
-显式销毁会话及其底层 shell / tmux 的动作，与 Detach 严格区分。**手动关闭 Tab 就是 Terminate**——Tab 即会话，用户收起它就是不要它了；离开页面则永远不是。
+显式销毁会话及其底层 shell / tmux 的动作，与 Detach 严格区分。**手动关闭终端窗口就是 Terminate**——窗口即会话，用户收起它就是不要它了；离开页面则永远不是。
 _Avoid_: 关闭、删除
 
 **Viewer（观看端）**:
@@ -104,7 +116,7 @@ _Avoid_: 断开（与 Detach 混淆）
 
 **Reattach（接回）**:
 对 Unverified 会话重新建立链路、验证存活并恢复为 Active 的动作。后端自动接回（启动恢复、SSH 断线、本地 PTY 掉了都会自己试）；用户也可以手动再点一次。
-_Avoid_: 懒惰验证（曾经是打开 tab 才接，已经改成自动）
+_Avoid_: 懒惰验证（曾经是打开窗口才接，已经改成自动）
 
 ### 存活性
 

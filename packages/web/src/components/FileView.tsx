@@ -13,7 +13,7 @@ import { useTranslation } from "react-i18next";
 import { Code2, Download, ExternalLink, Eye, FileText, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
 import type { WorkspaceFile } from "@falcon/shared";
 import { api } from "../api.js";
-import { useApp } from "../store.js";
+import { useApp, type FileTabTarget } from "../store.js";
 import { langForPath, splitCodeLines, useHighlight } from "../lib/highlight.js";
 import { rawUrl } from "../lib/rawUrl.js";
 import { triggerDownload } from "../lib/fileTransfer.js";
@@ -25,7 +25,8 @@ import { CodeLine } from "@/components/common/CodeLine";
 const Markdown = lazy(() => import("./Markdown.js").then((m) => ({ default: m.Markdown })));
 
 /**
- * 文件查看 tab 的主区。目标来自 store.active（kind === "file"）。
+ * 文件查看窗口。目标由排布给（props）而不是 store.active：文件窗口是列里的一扇，
+ * 焦点在别处时它照样要显示自己的内容。
  *
  * 打开 / 换文件 / 手动刷新时拉一次，不轮询——正看着的文件在眼皮底下换掉，
  * 比看到旧内容更让人困惑（要新的按刷新就是了）。
@@ -36,10 +37,8 @@ const Markdown = lazy(() => import("./Markdown.js").then((m) => ({ default: m.Ma
  * 前缀（rawBase，带作用域令牌），`<img src>` / `<iframe src>` 直接指向宿主机上的
  * 文件，页面里相对路径引用的 CSS / JS / 图片也就自然能解析到（ADR 0007）。
  */
-export function FileView() {
+export function FileView({ target }: { target: FileTabTarget }) {
   const { t } = useTranslation();
-  const active = useApp((s) => s.active);
-  const target = active.kind === "file" ? active : null;
   const openFile = useApp((s) => s.openFile);
   const [result, setResult] = useState<WorkspaceFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -431,7 +430,7 @@ function ImagePane({ src, name }: { src: string; name: string }) {
       </div>
       {sized && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
-          <div className="pointer-events-auto flex items-center gap-0.5 rounded-md border bg-popover/90 px-1 py-0.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+          <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border bg-popover/80 px-1 py-0.5 text-[11px] text-muted-foreground shadow-sm backdrop-blur-xl">
             <span className="px-1.5 tabular-nums" title={t("files.imageDims")}>
               {natural.w} × {natural.h}
             </span>

@@ -29,7 +29,7 @@ export function Login() {
   };
 
   return (
-    <div className="flex h-full items-center justify-center bg-background">
+    <div className="flex h-full items-center justify-center bg-app">
       <Card className="w-85">
         <CardHeader>
           <CardTitle className="text-lg">{t("login.title")}</CardTitle>

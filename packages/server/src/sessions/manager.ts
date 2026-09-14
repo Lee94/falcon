@@ -3,6 +3,7 @@ import type {
   NonDurableReason,
   ServerMessage,
   Session,
+  SessionAgent,
   SessionForeground,
   TermAppearance,
 } from "@falcon/shared";
@@ -11,6 +12,7 @@ import {
   TERM_FRAME_OUTPUT,
   TERM_FRAME_REPLAY,
   TermModeTracker,
+  isSessionAgent,
   isTermAppearance,
   parseHexRgb,
 } from "@falcon/shared";
@@ -37,6 +39,7 @@ import type { AskpassHub, AskpassPrompt } from "../askpass/hub.js";
 import { writeLocalAskpass } from "../askpass/install.js";
 import {
   attachLocal,
+  defaultLocalShell,
   localForeground,
   localHasSession,
   localKill,
@@ -44,6 +47,7 @@ import {
   prepareLocalZellij,
   resetLocalZellij,
 } from "./local.js";
+import { writeLocalLauncher } from "./agent.js";
 import { ForwardManager } from "./forward.js";
 import { SshLink } from "./ssh.js";
 import {
@@ -80,6 +84,15 @@ function encodeTermFrame(kind: number, data: string): Buffer {
  */
 const OUTPUT_FLUSH_MS = 16;
 
+/**
+ * 自动标题的探测节流窗口。每次探测是宿主机上一条实打实的命令
+ * （Zellij list-clients，SSH 上还要开一条 channel），不能跟着输出走。
+ *
+ * 2.5s 是"命令跑起来到标题出现"的可感延迟上限，也压住了 `yes` 这种
+ * 满屏输出的会话——窗口内无论来多少输出都只探一次。
+ */
+const TITLE_PROBE_MS = 2_500;
+
 /** 某个项目的宿主机能否提供持久会话 */
 export interface DurableState {
   durable: boolean;
@@ -113,6 +126,12 @@ interface LiveEntry {
   osc: OscColorGate;
   /** 输出流里的 VT 模式跟踪，replay 时重建（模式序列早被 RingBuffer 挤掉了） */
   modes: TermModeTracker;
+  /** 最近一次探到的前台命令（自动标题）；null = 空闲在 shell 里或探不到 */
+  title: string | null;
+  /** 自动标题的探测节流窗口，见 scheduleTitleProbe */
+  titleTimer: NodeJS.Timeout | null;
+  /** 探测在飞：Viewer 进出与输出可能同时点火，只许有一条在跑 */
+  titleProbing: boolean;
 }
 
 interface ReconnectState {
@@ -383,7 +402,8 @@ export class SessionManager {
   async createSession(
     project: ProjectRow,
     name: string,
-    hint?: { appearance?: TermAppearance; background?: string; foreground?: string }
+    hint?: { appearance?: TermAppearance; background?: string; foreground?: string },
+    agent?: SessionAgent
   ): Promise<Session> {
     const id = crypto.randomUUID();
     const now = Date.now();
@@ -402,6 +422,7 @@ export class SessionManager {
       last_active_at: now,
       cols: null,
       rows: null,
+      agent: agent ?? null,
     };
 
     const entry = this.liveEntry({
@@ -424,6 +445,29 @@ export class SessionManager {
 
     this.db.insertSession(row);
     return DbStatics.toSession(row);
+  }
+
+  /**
+   * 这个会话该用什么 shell 开场。
+   *
+   * 普通会话就是项目配的 shell（或让下游按平台挑默认）；agent 会话则换成写在宿主机上
+   * 的启动脚本（sessions/agent.ts）。脚本没写成时**退回普通 shell**：把一个不存在的
+   * 路径当 shell 交给 Zellij，pane 根本起不来，用户只会看到一片空白。
+   *
+   * 每次附着都重写一遍脚本（本地一次 fs 写、远端一次往返）：用户删了它、换了登录
+   * shell、falcon 升级换了脚本内容，都能自愈。
+   */
+  private async sessionShell(project: ProjectRow, row: SessionRow): Promise<string | undefined> {
+    const shell = project.shell ?? undefined;
+    if (!isSessionAgent(row.agent)) return shell;
+    try {
+      if (project.type === "local") {
+        return writeLocalLauncher(this.dataDir, row.agent, shell ?? defaultLocalShell());
+      }
+      return (await this.getLink(project).ensureAgentLauncher(row.agent, shell)) ?? shell;
+    } catch {
+      return shell;
+    }
   }
 
   private async attachBackend(
@@ -478,7 +522,7 @@ export class SessionManager {
     const opts = {
       sessionId: entry.sessionId,
       cwd,
-      shell: project.shell ?? undefined,
+      shell: await this.sessionShell(project, row),
       durable: entry.durable,
       layout: entry.layout ?? undefined,
       reattach,
@@ -605,6 +649,57 @@ export class SessionManager {
     }
   }
 
+  // ---------- 自动标题 ----------
+
+  /** 会话此刻的自动标题（前台命令）。没有 live entry 的会话没有标题，不为它现探。 */
+  titleOf(sessionId: string): string | undefined {
+    return this.entries.get(sessionId)?.title ?? undefined;
+  }
+
+  /**
+   * 安排一次前台命令探测。
+   *
+   * 只在有 Viewer 时探：每次探测是宿主机上一条实打实的命令（SSH 上还要开一条
+   * channel），没人看着的会话探出来也没人用。代价是**后台会话的标题会陈旧**——
+   * 停在最后一个 Viewer 离开时探到的那次，直到下次有人打开它。宁可陈旧也不轮询：
+   * 会话可以有十几个，定时全量探测会把 SSH 链路占满。
+   *
+   * 节流而非 debounce：窗口内重复点火直接忽略，所以满屏输出的会话也按固定间隔
+   * 出标题，不必等它安静下来。
+   */
+  private scheduleTitleProbe(entry: LiveEntry) {
+    if (entry.titleTimer || entry.viewers.size === 0) return;
+    entry.titleTimer = setTimeout(() => {
+      entry.titleTimer = null;
+      void this.probeTitle(entry);
+    }, TITLE_PROBE_MS);
+  }
+
+  /** 探一次并广播变化。foreground() 自己吞掉所有错误，这里不会抛。 */
+  private async probeTitle(entry: LiveEntry) {
+    if (entry.titleProbing) return;
+    entry.titleProbing = true;
+    try {
+      const { command } = await this.foreground(entry.sessionId);
+      // 探测期间会话可能已被终止，entry 也可能被重建过
+      if (this.entries.get(entry.sessionId) !== entry) return;
+      const next = command ?? null;
+      if (next === entry.title) return;
+      entry.title = next;
+      this.broadcast(entry, { type: "title", title: next });
+    } finally {
+      entry.titleProbing = false;
+    }
+  }
+
+  private clearTitle(entry: LiveEntry) {
+    if (entry.titleTimer) {
+      clearTimeout(entry.titleTimer);
+      entry.titleTimer = null;
+    }
+    entry.title = null;
+  }
+
   /**
    * 终止一个会话。
    *
@@ -719,11 +814,17 @@ export class SessionManager {
     viewer.send({ type: "state", state: "active" });
     this.flushAskpass(viewer, sessionId);
     this.touch(sessionId, true);
+    // 刚打开的窗口不等节流窗口，立刻给一次标题
+    void this.probeTitle(entry);
   }
 
   removeViewer(sessionId: string, viewer: Viewer) {
-    this.entries.get(sessionId)?.viewers.delete(viewer);
+    const entry = this.entries.get(sessionId);
+    entry?.viewers.delete(viewer);
     this.lagged.delete(viewer);
+    // 最后一个人走之前再探一次：Detach 掉的会话在侧栏上要还看得出在跑什么，
+    // 而这是它能更新标题的最后时机（此后不再探，见 scheduleTitleProbe）
+    if (entry && entry.viewers.size === 0) void this.probeTitle(entry);
   }
 
   input(sessionId: string, data: string) {
@@ -838,6 +939,9 @@ export class SessionManager {
       foreground: init.foreground,
       osc: null as unknown as OscColorGate,
       modes: new TermModeTracker(),
+      title: null,
+      titleTimer: null,
+      titleProbing: false,
     };
     entry.osc = new OscColorGate(() => ({
       appearance: entry.appearance,
@@ -851,6 +955,8 @@ export class SessionManager {
   private lagged = new WeakSet<Viewer>();
 
   private queueOutput(entry: LiveEntry, data: string) {
+    // 有输出多半意味着前台换了程序（或刚跑完），顺手给自动标题点一次火
+    this.scheduleTitleProbe(entry);
     entry.pendingOut.push(data);
     if (entry.flushTimer) return;
     entry.flushTimer = setTimeout(() => {
@@ -948,8 +1054,11 @@ export class SessionManager {
     // Scrollback——每个会话最多占 4MB 字节（V8 里最高 8MB 堆）
     entry.buffer.reset();
     this.lastTouch.delete(entry.sessionId);
+    // 死了就没有前台命令可言，停掉待发的探测并把标题收回去
+    this.clearTitle(entry);
     this.db.updateSessionState(entry.sessionId, "dead", reason);
     this.broadcast(entry, { type: "state", state: "dead", deadReason: reason });
+    this.broadcast(entry, { type: "title", title: null });
   }
 
   private markUnverified(entry: LiveEntry) {

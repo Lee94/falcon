@@ -353,7 +353,7 @@ function ThemeEditor({
             value={text}
             spellCheck={false}
             rows={14}
-            className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30"
+            className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-5 outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring dark:bg-input/30"
             onChange={(e) => setText(e.target.value)}
           />
         </Field>

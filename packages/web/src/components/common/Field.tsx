@@ -44,7 +44,12 @@ export function Field({
   );
 }
 
-/** 二选一切换。语义上是 radiogroup，不是 tab —— 它切的是同一份表单的填法。 */
+/**
+ * 二选一切换。语义上是 radiogroup，不是 tab —— 它切的是同一份表单的填法。
+ *
+ * 形态是「凹槽里浮起一块」：槽用 .sunken，选中项直接用 .island，和整个界面的
+ * 岛是同一套材质与曲率，只是尺度小了一号。
+ */
 export function Segmented<T extends string>({
   value,
   options,
@@ -60,7 +65,7 @@ export function Segmented<T extends string>({
   dense?: boolean;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex overflow-hidden rounded-md border">
+    <div role="radiogroup" aria-label={label} className="sunken flex gap-0.5 p-0.5">
       {options.map((option) => {
         const on = option.value === value;
         return (
@@ -70,11 +75,11 @@ export function Segmented<T extends string>({
             role="radio"
             aria-checked={on}
             className={cn(
-              "flex-1 whitespace-nowrap outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
-              dense ? "h-7 px-2 text-xs" : "h-8 px-3 text-[13px]",
+              "flex-1 rounded-md whitespace-nowrap outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring",
+              dense ? "h-6 px-2 text-xs" : "h-7 px-3 text-[13px]",
               on
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                ? "island rounded-md font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground"
             )}
             onClick={() => onChange(option.value)}
           >

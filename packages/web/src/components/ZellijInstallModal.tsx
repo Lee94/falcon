@@ -118,7 +118,7 @@ export function ZellijInstallModal() {
   function finish(create: boolean) {
     const id = spec!.projectId;
     closeInstall();
-    if (create && spec!.thenCreate) void createSessionNow(id);
+    if (create && spec!.thenCreate) void createSessionNow(id, { agent: spec!.agent });
   }
 
   function skip(_reason?: NonDurableReason) {
@@ -437,7 +437,7 @@ function Disclosure({
 }) {
   return (
     <Collapsible open={open} onOpenChange={onOpenChange}>
-      <CollapsibleTrigger className="flex w-full items-center gap-1.5 py-1.5 text-left text-[12.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50">
+      <CollapsibleTrigger className="flex w-full items-center gap-1.5 py-1.5 text-left text-[12.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring">
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
         {label}
       </CollapsibleTrigger>

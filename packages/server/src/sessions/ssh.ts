@@ -43,7 +43,8 @@ import {
   ZELLIJ_VERSION,
   type ZellijTarget,
 } from "../zellij/version.js";
-import { applyTermPtyEnv, type TermAppearance } from "@falcon/shared";
+import { applyTermPtyEnv, type SessionAgent, type TermAppearance } from "@falcon/shared";
+import { launcherDir, remoteLauncherPath, writeRemoteLauncherCommand } from "./agent.js";
 import type { AskpassHub } from "../askpass/hub.js";
 import { askpassBinDir, posixWriteAskpassCommand } from "../askpass/install.js";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
@@ -228,6 +229,23 @@ export class SshLink extends EventEmitter {
     );
     if (!res || res.code !== 0) return null;
     return binDir;
+  }
+
+  /**
+   * 在远端落下 agent 启动脚本，返回它的绝对路径。
+   *
+   * 与 ensureAskpass 同样是"写一个包装再把路径交出去"，但失败**不能**静默吞掉：
+   * 路径拿不到时调用方要退回普通 shell，不能把一个不存在的文件当 shell 传给
+   * Zellij——那样 pane 起不来，会话看起来就是空白一片。
+   */
+  async ensureAgentLauncher(agent: SessionAgent, shell?: string): Promise<string | null> {
+    const probe = await this.probe();
+    const dir = launcherDir(probe.kind, probe.root);
+    const res = await this.exec(
+      writeRemoteLauncherCommand(probe.kind, dir, agent, shell ?? probe.shell)
+    ).catch(() => null);
+    if (!res || res.code !== 0) return null;
+    return remoteLauncherPath(probe.kind, probe.root, agent);
   }
 
   private async ensureAskpassTunnel(hub: AskpassHub): Promise<number | null> {

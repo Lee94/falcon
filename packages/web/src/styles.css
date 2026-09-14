@@ -6,15 +6,21 @@
 /*
  * 界面配色全部由当前主题派生：lib/theme/derive.ts 把一套 Ghostty 主题（底 / 字 /
  * ANSI 16 色）推成下面这些语义 token，写在 <html> 的内联 style 上（lib/theme/apply.ts），
- * 内联值压过这里的 `:root`。这里只留两件事：
+ * 内联值压过这里的 `:root`。这里只留三件事：
  *
  * 1. 兜底值——React 起来之前 body 是空的，真正看得见的只有 html 的底色，
  *    index.html 的内联脚本会按偏好先写 --background / --foreground。
  * 2. `.dark` 带动的 color-scheme（原生滚动条 / 表单控件）。`.dark` 按主题的实际
  *    深浅切，不按明暗模式：给浅色槽位选了深底主题，界面就按深色算。
+ * 3. `.island` / `.sunken`——浮动岛骨架的两块面（ADR 0011）。它们是形状不是颜色，
+ *    十几处复用，所以给了名字而不是每次堆一遍 utility。
  *
  * 组件里一律用语义 token，不要写死颜色——写死的那一刻就有一批主题是坏的。
  * 语义色的含义：
+ *   --app / --app-border：窗口底与岛的描边。界面是浮动岛骨架（docs/adr/0011）——
+ *     侧栏 / 主区 / 右面板都是浮在 --app 上的圆角面板，面板底一律 --background；
+ *   --tint / --tint-strong：主题 ANSI 蓝推出来的着色面与强调色，只给"当前选中"用
+ *     （选中的 tab、侧栏里当前项目、活动面板按钮），别拿它当装饰底；
  *   --success / --warning：会话三态（运行中 / 待接回 / 已丢失）各自成色，只作前景用，
  *     取自主题的 ANSI 绿 / 黄（对比不够时往字色掺）；
  *   --host-s / --host-l：主机身份色的饱和度与亮度，色相由 hostColor.ts 哈希；
@@ -26,10 +32,20 @@
 :root {
   color-scheme: light;
 
-  --radius: 0.5rem;
+  /* 岛的圆角。控件阶梯由它减出来（下面 @theme inline）：sm 8 / md 10 / lg 12 / xl 16。
+     一套半径贯穿岛、对话框、按钮、hover 块——同一个曲率是这套视觉的骨架。 */
+  --radius: 0.75rem;
 
   --background: #ffffff;
   --foreground: #171717;
+  /* 首帧兜底：derive.ts 会用主题色算出更准的值压过来。这里用相对颜色语法照它的
+     算法来（只减 OKLab 亮度、保留色度），所以 index.html 那段只写了 --background
+     的内联脚本也能得到同一个窗口底，React 接手时不跳色。第一行是给不认相对颜色
+     语法的浏览器留的兜底，认的会被第二行覆盖；近纯黑的主题 derive 会改成提亮，
+     那一帧的差是黑对黑。 */
+  --app: color-mix(in oklab, var(--background) 92.5%, #000000);
+  --app: oklab(from var(--background) calc(l - 0.05) a b);
+  --app-border: color-mix(in oklab, transparent 94%, #000000);
 }
 
 .dark {
@@ -37,6 +53,9 @@
 
   --background: #0a0a0a;
   --foreground: #fafafa;
+  --app: color-mix(in oklab, var(--background) 80%, #000000);
+  --app: oklab(from var(--background) calc(l - 0.07) a b);
+  --app-border: color-mix(in oklab, transparent 93%, var(--foreground));
 }
 
 @theme inline {
@@ -54,6 +73,11 @@
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-app: var(--app);
+  --color-app-border: var(--app-border);
+  --color-tint: var(--tint);
+  --color-tint-foreground: var(--tint-foreground);
+  --color-tint-strong: var(--tint-strong);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
@@ -115,9 +139,55 @@
   }
 }
 
+@layer components {
+  /*
+   * 浮动岛：侧栏 / 主区 / 右面板共用的面板底，浮在 --app 的窗口底上，彼此只隔一道
+   * 缝——分栏不再靠 1px 边框。投影只对浅色主题有用（深色里投影是黑的，落在更黑的
+   * --app 上等于没画），深色的边缘全靠 --app-border 那圈提亮描边撑，所以两者都给。
+   */
+  .island {
+    border-radius: var(--radius-lg);
+    background: var(--background);
+    box-shadow:
+      0 0 0 1px var(--app-border),
+      0 1px 2px -1px color-mix(in oklab, transparent 90%, #000000);
+  }
+
+  /*
+   * 拖起来的岛（拖拽中的 tab）：描边照旧，投影加深一档。**不能用 Tailwind 的
+   * `shadow-*`**——utilities 层的 box-shadow 会把 `.island` 那条整个替换掉，描边
+   * 跟着一起没，拖动中的选中 tab 只剩一块没边的白（与 `ring-*` 是同一个坑）。
+   * 投影的两段照 shadow-md 抄，换成 color-mix 好让深色主题也走同一套算法。
+   */
+  .island-lifted {
+    box-shadow:
+      0 0 0 1px var(--app-border),
+      0 4px 6px -1px color-mix(in oklab, transparent 90%, #000000),
+      0 2px 4px -2px color-mix(in oklab, transparent 90%, #000000);
+  }
+
+  /*
+   * 岛里再嵌一块（统计卡、表格、代码块、空状态）时用的凹陷面：借窗口底色，
+   * 层次比岛低一级。这套视觉里分层靠底色不靠线——同一块地方别再加边框，
+   * 白岛上的浅灰边框本来也几乎看不见。
+   */
+  .sunken {
+    border-radius: var(--radius-lg);
+    background: var(--app);
+  }
+}
+
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
+  }
+
+  /*
+   * lucide 默认 2px 笔画，在 13px 的界面里偏硬。1.75 配上它本来就是圆头圆角的
+   * 画法，图标才跟这套大圆角是一个语气。给了 size- 的图标不改，尺寸各处自己定。
+   */
+  svg.lucide {
+    stroke-width: 1.75;
   }
 
   html,
@@ -129,7 +199,8 @@
 
   body {
     /* 13px 是密度型界面的正文基准：目标用户天天用 tmux / vim */
-    @apply bg-background text-foreground font-sans text-[13px] leading-[1.35] antialiased;
+    /* 底是窗口底而不是面板底：桌面骨架铺的就是它，移动壳自己会盖满 */
+    @apply bg-app text-foreground font-sans text-[13px] leading-[1.35] antialiased;
   }
 
   /* 拖左右栏时：光标锁定 col-resize，并禁止选中文字（xterm 也会抢选区） */
@@ -143,21 +214,29 @@
     pointer-events: none;
   }
 
-  /* 拖 tab 时：光标锁定 grabbing，禁止选中。overflow 的 tablist 会裁掉一点阴影，跟 Chrome 一样。 */
-  body.tab-dragging,
-  body.tab-dragging * {
-    cursor: grabbing !important;
+  /* 拖列内的缝时同理，只是方向换成上下 */
+  body.row-resizing,
+  body.row-resizing * {
+    cursor: row-resize !important;
     user-select: none;
   }
-  body.tab-dragging canvas,
-  body.tab-dragging iframe {
+  body.row-resizing canvas,
+  body.row-resizing iframe {
     pointer-events: none;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    [data-tab-key] {
-      transition: none !important;
-    }
+  /*
+   * 拖窗口时：光标锁定 grabbing，禁止选中。canvas / iframe 要挡掉 pointer-events——
+   * 终端会把 pointermove 当选区拖拽吃掉，拖到一半窗口就"粘"在原地不动了。
+   */
+  body.pane-dragging,
+  body.pane-dragging * {
+    cursor: grabbing !important;
+    user-select: none;
+  }
+  body.pane-dragging canvas,
+  body.pane-dragging iframe {
+    pointer-events: none;
   }
 
   /* 界面文字的选区与终端选区同一套颜色；selection-foreground 是 cell-foreground 的主题保留原字色 */

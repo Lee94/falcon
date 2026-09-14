@@ -10,11 +10,24 @@
  * 语义色（destructive / success / warning）与高亮色取自 ANSI 16 色：先在普通色与
  * 亮色里挑对比度够的，都不够就往字色掺到 3:1——文字级可读性的底线；主题的红绿黄
  * 本来就是给终端里的文字用的，多数主题不需要掺。
+ *
+ * 界面是「浮动岛」骨架（docs/adr/0011）：--app 是窗口底，侧栏 / 主区 / 右面板都是
+ * 浮在它上面的圆角面板，面板底一律 --background（终端要的就是主题原底色，面板与
+ * 终端同色才不会在圆角边缘露出色差）。所以唯一能拉开层次的是 --app，它必须跟
+ * --background 差得看得见。
  */
 
 import type { ITheme } from "@xterm/xterm";
 import { appearanceFromHex, type TermAppearance } from "@falcon/shared";
-import { ensureContrast, mix, moreReadable, pickReadable, withAlpha } from "./color.js";
+import {
+  ensureContrast,
+  mix,
+  moreReadable,
+  perceptualLightness,
+  pickReadable,
+  shiftLightness,
+  withAlpha,
+} from "./color.js";
 import type { ThemeColors } from "./ghostty.js";
 
 export interface ResolvedTheme {
@@ -98,9 +111,31 @@ export function deriveTheme(colors: ThemeColors): ResolvedTheme {
   const magenta = sem(5);
   const cyan = sem(6);
 
+  // 窗口底。方向是「内容亮、外壳暗」（Nova / macOS 都是这个方向，凹陷感来自它）：
+  // 底色还压得动就压。压不动的（#000 那批）反过来提亮，凹陷感换成浮起感，圆角
+  // 一样看得见——提亮量要保证落到 L≈0.21，纯黑上 +0.05 还是黑。
+  // 只动亮度不动色度（shiftLightness）：Solarized 的暖米、Catppuccin 的紫灰、Nord
+  // 的蓝灰都要留在外壳上，那是整屏最大的一块颜色，洗成中性灰就没有主题了。
+  const bgL = perceptualLightness(bg);
+  const app =
+    bgL > 0.16
+      ? shiftLightness(bg, dark ? -0.07 : -0.05)
+      : shiftLightness(bg, Math.max(0.065, 0.21 - bgL));
+  // 岛的描边。深色靠提亮、浅色靠压暗，都只要一丝——真正分隔靠的是 --app 那道缝。
+  const appBorder = withAlpha(dark ? fg : "#000000", dark ? 0.1 : 0.06);
+
+  // 「当前选中」的着色面。取主题自己的 ANSI 蓝——界面不引入主题以外的色相，
+  // 单色主题里它自动退化成灰，不会有哪套主题被染坏。
+  const tint = mix(bg, blue, dark ? 0.22 : 0.12);
+
   const vars: Record<string, string> = {
     "--background": bg,
     "--foreground": fg,
+    "--app": app,
+    "--app-border": appBorder,
+    "--tint": tint,
+    "--tint-foreground": fg,
+    "--tint-strong": blue,
     "--card": dark ? tone(0.07) : bg,
     "--card-foreground": fg,
     "--popover": dark ? tone(0.15) : bg,

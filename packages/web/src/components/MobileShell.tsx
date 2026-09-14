@@ -12,6 +12,7 @@ import { ChevronDown, Ellipsis, Plus } from "lucide-react";
 import { useApp, isPendingId } from "../store.js";
 import { sshBar } from "../lib/hostColor.js";
 import { useActions } from "../lib/useActions.js";
+import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { siblingSession, swipeDir } from "../lib/mobileNav.js";
 import {
   extraKeySeq,
@@ -45,6 +46,7 @@ export function MobileShell() {
   const tabs = useApp((s) => s.tabs);
   const active = useApp((s) => s.active);
   const sessions = useApp((s) => s.sessions);
+  const sessionLabel = useSessionLabel();
   const pending = useApp((s) => s.pending);
   const projects = useApp((s) => s.projects);
   const selectedProjectId = useApp((s) => s.selectedProjectId);
@@ -114,7 +116,7 @@ export function MobileShell() {
     : session?.state;
 
   const iconBtn =
-    "grid size-11 shrink-0 place-items-center rounded-md text-muted-foreground outline-none active:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4.5";
+    "grid size-11 shrink-0 place-items-center rounded-md text-muted-foreground outline-none active:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4.5";
 
   return (
     <div
@@ -125,7 +127,7 @@ export function MobileShell() {
       <div className="shrink-0 bg-sidebar" style={{ paddingTop: "env(safe-area-inset-top)" }}>
         <div className="flex h-12 items-center gap-0.5 border-b pr-1 pl-1">
           <button
-            className="flex h-11 min-w-0 items-center gap-2 rounded-md px-2.5 outline-none active:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="flex h-11 min-w-0 items-center gap-2 rounded-md px-2.5 outline-none active:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring"
             aria-label={t("mobile.openSwitcher")}
             aria-haspopup="dialog"
             onClick={() => setSwitcherOpen(true)}
@@ -138,7 +140,7 @@ export function MobileShell() {
             </span>
             {(session || pendingEntry) && (
               <span className="truncate text-[13px] text-muted-foreground">
-                {session?.name ?? t("tab.creating")}
+                {session ? sessionLabel(session) : t("tab.creating")}
               </span>
             )}
             {/* 与 TabBar 同一条规矩：运行中不摆状态记号，异常才值得占位置 */}
@@ -238,7 +240,7 @@ function KeyCap({
   return (
     <button
       className={cn(
-        "h-10 min-w-0 flex-1 rounded-md border bg-popover font-mono text-xs text-foreground outline-none active:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        "h-10 min-w-0 flex-1 rounded-md border bg-popover font-mono text-xs text-foreground outline-none active:bg-accent focus-visible:ring-1 focus-visible:ring-ring",
         pressed && "border-ring bg-accent"
       )}
       aria-label={ariaLabel ?? label}

@@ -91,10 +91,11 @@ const EXTRA_SHELLS = ["csh", "mksh", "ash", "elvish", "xonsh", "nushell", "power
 /**
  * 判断一条前台命令是不是"就是 shell 自己在等输入"——关 tab 要不要拦的依据。
  *
- * 只有单个词、且 basename 是已知 shell（或该会话配置的 shell）才算空闲：
- * 带参数的如 `bash deploy.sh` 是在跑东西，得拦。登录 shell 的 `-zsh` 前缀
- * 与 Windows 的 `.exe` 后缀都要归一化掉。解析不出名字时按空闲放行——
- * 这套侦测是道保险，宁可放过不可把关 tab 变成每次两步。
+ * basename 是已知 shell（或该会话配置的 shell）才算空闲：带参数的如
+ * `bash deploy.sh` 是在跑东西，得拦；只跟登录 / 交互标志的 `/bin/zsh -l` 不是
+ * ——agent 会话的启动脚本 exec 出来就长这样（sessions/agent.ts），CLI 退出后
+ * 落回的就是它。登录 shell 的 `-zsh` 前缀与 Windows 的 `.exe` 后缀都要归一化掉。
+ * 解析不出名字时按空闲放行——这套侦测是道保险，宁可放过不可把关 tab 变成每次两步。
  */
 export function isShellCommand(command: string, sessionShell?: string | null): boolean {
   const trimmed = command.trim();
@@ -115,8 +116,11 @@ export function isShellCommand(command: string, sessionShell?: string | null): b
   // 不会把 `less /bin/bash` 这种真在跑的命令看漏。
   if (/\.exe$/i.test(trimmed) && isShell(trimmed)) return true;
   const tokens = trimmed.split(/\s+/);
-  if (tokens.length > 1) return false;
-  return isShell(tokens[0]);
+  const first = tokens[0];
+  if (first === undefined || !isShell(first)) return false;
+  // `-l` / `--login` / `-i` / 组合的 `-il` 都只是"这个 shell 是登录 / 交互的"，
+  // 不是在跑脚本
+  return tokens.slice(1).every((a) => /^--(?:login|interactive)$|^-[li]+$/.test(a));
 }
 
 /** 一次往返侦测宿主机上可用的 shell。探测失败不抛：至少还有默认项可选。 */

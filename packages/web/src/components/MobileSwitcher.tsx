@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Folder, Folders, GitBranch, Monitor, Plus, Server, Settings } from "lucide-react";
 import type { Project, SessionWithProject } from "@falcon/shared";
 import { useApp } from "../store.js";
+import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { checkoutLabel, groupServers, type ServerGroup } from "../lib/projectTree.js";
 import { cn } from "@/lib/utils";
 import { StatusMark, useStateLabel } from "./common/StatusMark.js";
@@ -89,7 +90,7 @@ export function MobileSwitcher({ onClose }: { onClose: () => void }) {
         <div className="shrink-0 border-t pt-1">
           {targetProject && (
             <button
-              className="flex h-12 w-full items-center gap-2.5 px-4 text-left text-[13px] outline-none active:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              className="flex h-12 w-full items-center gap-2.5 px-4 text-left text-[13px] outline-none active:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => create(targetProject.id)}
             >
               <Plus className="size-4 shrink-0 text-muted-foreground" />
@@ -99,7 +100,7 @@ export function MobileSwitcher({ onClose }: { onClose: () => void }) {
             </button>
           )}
           <button
-            className="flex h-12 w-full items-center gap-2.5 px-4 text-left text-[13px] outline-none active:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            className="flex h-12 w-full items-center gap-2.5 px-4 text-left text-[13px] outline-none active:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring"
             onClick={() => {
               onClose();
               openSettings();
@@ -207,6 +208,7 @@ function ProjectBlock({
   onCreate: (projectId: string) => void;
 }) {
   const { t } = useTranslation();
+  const sessionLabel = useSessionLabel();
   const mine = sessions.filter((s) => s.projectId === project.id);
   const RowIcon = worktree ? GitBranch : project.multi ? Folders : Folder;
 
@@ -228,7 +230,7 @@ function ProjectBlock({
       {mine.length === 0 ? (
         // 没有会话的项目给一条"新建"占位行——不然它在移动端就是死胡同
         <button
-          className="mx-2 flex h-12 w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground outline-none active:bg-accent/50 focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          className="mx-2 flex h-12 w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground outline-none active:bg-accent/50 focus-visible:ring-1 focus-visible:ring-ring"
           style={{ paddingLeft: 16 + depth * 16 }}
           onClick={() => onCreate(project.id)}
         >
@@ -240,13 +242,13 @@ function ProjectBlock({
           <button
             key={s.id}
             className={cn(
-              "mx-2 flex h-12 w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              "mx-2 flex h-12 w-[calc(100%-1rem)] items-center gap-2 rounded-md px-2 text-left outline-none focus-visible:ring-1 focus-visible:ring-ring",
               s.id === activeId ? "bg-accent" : "active:bg-accent/50"
             )}
             style={{ paddingLeft: 16 + depth * 16 }}
             onClick={() => onOpen(s.id)}
           >
-            <span className="min-w-0 flex-1 truncate text-[13px]">{s.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[13px]">{sessionLabel(s)}</span>
             {/* 运行中不摆状态；待接回 / 已丢失点整行即打开（顺带触发懒惰接回） */}
             {s.state !== "active" && (
               <span

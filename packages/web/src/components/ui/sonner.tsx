@@ -29,11 +29,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
       toastOptions={{
         classNames: {
           description: "whitespace-pre-line",
+          toast: "backdrop-blur-xl",
         },
       }}
       style={
         {
-          "--normal-bg": "var(--popover)",
+          // 半透明 + 背板模糊：toast 压在终端画面上，糊一层才不挡着底下在读的东西
+          "--normal-bg": "color-mix(in oklab, var(--popover) 82%, transparent)",
           "--normal-text": "var(--popover-foreground)",
           "--normal-border": "var(--border)",
           "--border-radius": "var(--radius)",

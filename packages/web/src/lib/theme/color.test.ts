@@ -12,6 +12,7 @@ import {
   perceptualLightness,
   pickReadable,
   rgbToOklab,
+  shiftLightness,
   toHex,
   withAlpha,
 } from "./color.js";
@@ -111,5 +112,32 @@ describe("pickReadable / moreReadable", () => {
   it("moreReadable 选黑白", () => {
     assert.equal(moreReadable("#ffffff", "#000000", "#cd3131"), "#ffffff");
     assert.equal(moreReadable("#1e1e2e", "#cdd6f4", "#f38ba8"), "#1e1e2e");
+  });
+});
+
+describe("shiftLightness", () => {
+  it("只动亮度，色度原样留着", () => {
+    // Solarized Light 的暖米底压暗后还得是暖的——往黑掺会把 a/b 一起拉平
+    const warm = "#fdf6e3";
+    const shaded = shiftLightness(warm, -0.05);
+    const a = rgbToOklab(parseHex(warm)!);
+    const b = rgbToOklab(parseHex(shaded)!);
+    assert.ok(Math.abs(b.L - (a.L - 0.05)) < 0.004, `${shaded} L=${b.L}`);
+    assert.ok(Math.abs(b.a - a.a) < 0.004 && Math.abs(b.b - a.b) < 0.004, shaded);
+  });
+  it("往黑掺会顺带洗掉色度，压同样多的亮度时差得出来", () => {
+    // Catppuccin Mocha 的紫灰底：压到同一个亮度，掺黑的那份蓝紫掉了三成
+    const bg = "#1e1e2e";
+    const before = rgbToOklab(parseHex(bg)!);
+    const shifted = rgbToOklab(parseHex(shiftLightness(bg, -0.07))!);
+    const mixed = rgbToOklab(parseHex(mix(bg, "#000000", 0.29))!);
+    assert.ok(Math.abs(shifted.L - mixed.L) < 0.01, `${shifted.L} vs ${mixed.L}`);
+    assert.ok(Math.abs(shifted.b - before.b) < 0.004, `${shifted.b} vs ${before.b}`);
+    assert.ok(Math.abs(mixed.b) < Math.abs(before.b) * 0.8, `${mixed.b} vs ${before.b}`);
+  });
+  it("两端截断，不出 0–1", () => {
+    assert.equal(shiftLightness("#ffffff", 0.5), "#ffffff");
+    assert.equal(shiftLightness("#000000", -0.5), "#000000");
+    assert.equal(shiftLightness("not-a-color", 0.1), "not-a-color");
   });
 });

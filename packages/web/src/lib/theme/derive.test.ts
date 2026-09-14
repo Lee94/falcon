@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { contrast, parseHex, perceptualLightness } from "./color.js";
+import { contrast, parseHex, perceptualLightness, rgbToOklab } from "./color.js";
 import { FALCON_DARK, FALCON_LIGHT, parseCatalogData } from "./catalog.js";
 import { deriveTheme, extendedAnsi } from "./derive.js";
 import { parseGhosttyTheme, resolveThemeColors } from "./ghostty.js";
@@ -100,6 +100,20 @@ describe("deriveTheme", () => {
       }
       assert.equal(t.appearance, e.appearance);
     }
+  });
+
+  it("窗口底与面板底在每套主题上都分得出，且保留主题的色调", () => {
+    const entries = [FALCON_LIGHT, FALCON_DARK, ...parseCatalogData(GHOSTTY_THEMES_DATA)];
+    for (const e of entries) {
+      const app = deriveTheme(e.colors).vars["--app"]!;
+      const gap = Math.abs(perceptualLightness(app) - perceptualLightness(e.colors.background));
+      // 差得比这少就看不出圆角了；近纯黑的主题是反过来提亮，绝对值一样管用
+      assert.ok(gap >= 0.045, `${e.name} app=${app} bg=${e.colors.background} gap=${gap}`);
+    }
+    // 暖底主题的窗口底还是暖的（只压了亮度）
+    const lux = deriveTheme(NOCTIS_LUX).vars["--app"]!;
+    const warm = rgbToOklab(parseHex(lux)!);
+    assert.ok(warm.b > 0.02, `${lux} b=${warm.b}`);
   });
 
   it("xterm ITheme 逐字段映射；选区保留原字色时 selectionForeground 缺省", () => {

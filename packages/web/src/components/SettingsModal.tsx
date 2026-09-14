@@ -112,7 +112,7 @@ export function SettingsModal() {
         <DialogTitle className="sr-only">{t("settings.title")}</DialogTitle>
         <nav
           aria-label={t("settings.title")}
-          className="flex w-56 shrink-0 flex-col border-r bg-sidebar px-3 py-4 text-sidebar-foreground"
+          className="flex w-56 shrink-0 flex-col bg-app/60 px-3 py-4 text-sidebar-foreground"
         >
           <div className="relative mb-4">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -147,10 +147,10 @@ export function SettingsModal() {
                         role="tab"
                         aria-selected={on}
                         className={cn(
-                          "flex h-8 w-full items-center gap-2 rounded-md px-2 text-[13px] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+                          "flex h-8 w-full items-center gap-2 rounded-lg px-2 text-[13px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-ring",
                           on
-                            ? "bg-accent font-medium text-accent-foreground"
-                            : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                            ? "bg-tint font-medium text-tint-foreground"
+                            : "text-muted-foreground hover:bg-background/70 hover:text-foreground"
                         )}
                         onClick={() => setTab(item.id)}
                       >
@@ -337,7 +337,7 @@ function TermPreview() {
   const theme = useApp((s) => s.activeTheme.xterm);
   return (
     <div
-      className="overflow-hidden rounded-md border"
+      className="overflow-hidden rounded-lg border"
       style={{ background: theme.background, color: theme.foreground }}
     >
       <pre

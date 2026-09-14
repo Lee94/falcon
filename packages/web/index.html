@@ -31,12 +31,18 @@
       样式表是异步加载的，所以这里也顺带把 html 的底色兜住。
     -->
     <style>
+      /* 首帧看得见的是窗口底（浮动岛骨架的最外层），不是面板底。算法与
+         src/styles.css / lib/theme/derive.ts 的 --app 一致（只减 OKLab 亮度、
+         保住色度），React 接手时不跳色；color-mix 那行是给不认相对颜色语法的
+         浏览器留的兜底，认的会被下一行覆盖。 */
       html {
-        background: var(--background, #ffffff);
+        background: color-mix(in oklab, var(--background, #ffffff) 92.5%, #000000);
+        background: oklab(from var(--background, #ffffff) calc(l - 0.05) a b);
         color-scheme: light;
       }
       html.dark {
-        background: var(--background, #0a0a0a);
+        background: color-mix(in oklab, var(--background, #0a0a0a) 80%, #000000);
+        background: oklab(from var(--background, #0a0a0a) calc(l - 0.07) a b);
         color-scheme: dark;
       }
     </style>

@@ -1,10 +1,11 @@
 import { useTranslation } from "react-i18next";
 import type { Project, SessionWithProject, SshHost } from "@falcon/shared";
-import { WORKTREE_ARCHIVE_TTL_DAYS } from "@falcon/shared";
+import { SESSION_AGENTS, WORKTREE_ARCHIVE_TTL_DAYS } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, type MenuItemSpec } from "../store.js";
 import { connLabel } from "./hostColor.js";
 import { chord } from "./shortcuts.js";
+import { useSessionLabel } from "./useSessionLabel.js";
 
 type TFunc = (key: string, options?: Record<string, unknown>) => string;
 
@@ -28,6 +29,7 @@ export function absoluteTime(ms: number): string {
  */
 export function useActions() {
   const { t } = useTranslation() as { t: TFunc };
+  const sessionLabel = useSessionLabel();
 
   const fail = (err: unknown) => {
     const store = useApp.getState();
@@ -65,7 +67,7 @@ export function useActions() {
 
   const terminate = (session: SessionWithProject) => {
     useApp.getState().askConfirm({
-      title: t("session.terminateTitle", { name: session.name }),
+      title: t("session.terminateTitle", { name: sessionLabel(session) }),
       body: t("session.terminateBody"),
       confirmLabel: t("session.terminateConfirm"),
       onConfirm: () =>
@@ -74,7 +76,10 @@ export function useActions() {
           () =>
             useApp
               .getState()
-              .toast({ kind: "danger", title: t("toast.terminated", { name: session.name }) })
+              .toast({
+                kind: "danger",
+                title: t("toast.terminated", { name: sessionLabel(session) }),
+              })
         ),
     });
   };
@@ -86,7 +91,7 @@ export function useActions() {
       title: t("session.terminateManyTitle", { n: picked.length }),
       body: t("session.terminateManyBody"),
       list: picked.map((s) => ({
-        name: s.name,
+        name: sessionLabel(s),
         state: s.state,
         meta: idleText(t, s.lastActiveAt),
       })),
@@ -166,7 +171,7 @@ export function useActions() {
       list: [
         ...kids.map((p) => ({ name: p.workingDir ?? p.name, meta: p.worktree?.branch })),
         ...live.map((s) => ({
-          name: s.name,
+          name: sessionLabel(s),
           state: s.state,
           meta: idleText(t, s.lastActiveAt),
         })),
@@ -223,7 +228,7 @@ export function useActions() {
         .join(" "),
       list: [
         ...live.map((s) => ({
-          name: s.name,
+          name: sessionLabel(s),
           state: s.state,
           meta: idleText(t, s.lastActiveAt),
         })),
@@ -288,7 +293,7 @@ export function useActions() {
         .filter(Boolean)
         .join(" "),
       list: live.map((s) => ({
-        name: s.name,
+        name: sessionLabel(s),
         state: s.state,
         meta: idleText(t, s.lastActiveAt),
       })),
@@ -436,6 +441,23 @@ export function useActions() {
     }
   };
 
+  /**
+   * 新建会话的菜单：普通终端 + 各家 CLI。侧栏的 ＋、命令面板、窗口标题栏右键共用一份，
+   * 省得三处各写一遍"有哪些 agent"。after 给了就插在那扇窗口所在列的右边。
+   */
+  const newSessionItems = (projectId: string, after?: string): MenuItemSpec[] => [
+    {
+      label: t("agent.terminal"),
+      kbd: chord("newTerminal"),
+      onSelect: () => void useApp.getState().newTerminal(projectId, { after }),
+    },
+    ...SESSION_AGENTS.map((agent, i) => ({
+      label: t(`agent.${agent}`),
+      separated: i === 0,
+      onSelect: () => void useApp.getState().newTerminal(projectId, { agent, after }),
+    })),
+  ];
+
   const projectMenuItems = (project: Project): MenuItemSpec[] => {
     const store = useApp.getState();
     // 已存档：只剩恢复与删除。其余动作（开终端、编辑）都以"项目还在服役"为前提
@@ -454,13 +476,10 @@ export function useActions() {
       ];
     }
     const items: MenuItemSpec[] = [
-      {
-        label: t("sidebar.newTerminal"),
-        kbd: chord("newTerminal"),
-        onSelect: () => void store.newTerminal(project.id),
-      },
+      ...newSessionItems(project.id),
       {
         label: t("project.filterInOverview"),
+        separated: true,
         onSelect: () => {
           store.setProjectFilter(project.id);
           store.setFilter("all");
@@ -569,6 +588,7 @@ export function useActions() {
     restoreWorktreeProject,
     deleteHost,
     copyConn,
+    newSessionItems,
     projectMenuItems,
     hostMenuItems,
     serverMenuItems,

@@ -26,7 +26,7 @@ export function ThemeChoice() {
     <div
       role="radiogroup"
       aria-label={t("theme.label")}
-      className="flex gap-0.5 rounded-md border p-0.5"
+      className="sunken flex gap-0.5 p-0.5"
     >
       {THEME_PREFS.map((pref) => {
         const Icon = THEME_ICONS[pref];
@@ -39,8 +39,8 @@ export function ThemeChoice() {
             variant="ghost"
             size="xs"
             className={cn(
-              "font-normal text-muted-foreground",
-              on && "bg-accent text-accent-foreground"
+              "font-normal text-muted-foreground hover:bg-transparent hover:text-foreground",
+              on && "island rounded-md font-medium text-foreground"
             )}
             onClick={() => setTheme(pref)}
           >

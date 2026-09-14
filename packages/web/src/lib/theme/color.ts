@@ -97,15 +97,27 @@ export function rgbToOklab(c: Rgb): Oklab {
   };
 }
 
-export function oklabToRgb(c: Oklab): Rgb {
+/** OKLab → 线性 sRGB，**不截断**：出了 0–1 就说明这个颜色不在 sRGB 色域里 */
+function oklabToLinear(c: Oklab): Rgb {
   const l = (c.L + 0.3963377774 * c.a + 0.2158037573 * c.b) ** 3;
   const m = (c.L - 0.1055613458 * c.a - 0.0638541728 * c.b) ** 3;
   const s = (c.L - 0.0894841775 * c.a - 1.291485548 * c.b) ** 3;
   return {
-    r: linearToSrgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
-    g: linearToSrgb(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
-    b: linearToSrgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+    r: 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    g: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    b: -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
   };
+}
+
+function inGamut(c: Oklab): boolean {
+  const { r, g, b } = oklabToLinear(c);
+  const ok = (v: number) => v >= -1e-4 && v <= 1 + 1e-4;
+  return ok(r) && ok(g) && ok(b);
+}
+
+export function oklabToRgb(c: Oklab): Rgb {
+  const lin = oklabToLinear(c);
+  return { r: linearToSrgb(lin.r), g: linearToSrgb(lin.g), b: linearToSrgb(lin.b) };
 }
 
 /** OKLab 感知亮度 0–1，比 WCAG 亮度更接近"看起来有多亮"，用来判主题深浅之外的排序 */
@@ -134,6 +146,30 @@ export function mix(a: string, b: string, t: number): string {
       b: la.b + (lb.b - la.b) * k,
     })
   );
+}
+
+/**
+ * 只动 OKLab 的亮度、不碰色度：把一块底色压暗 / 提亮，又不把它的色调洗成灰。
+ * 往黑掺会同时拉低 a/b，Solarized 的暖白、Catppuccin 的紫灰压两下就变中性灰了；
+ * 窗口底是整屏最大的一块颜色，主题的性格必须留在上面。
+ */
+export function shiftLightness(hex: string, delta: number): string {
+  const c = parseHex(hex);
+  if (!c) return hex;
+  const lab = rgbToOklab(c);
+  const L = Math.min(1, Math.max(0, lab.L + delta));
+  if (inGamut({ L, a: lab.a, b: lab.b })) return toHex(oklabToRgb({ L, a: lab.a, b: lab.b }));
+  // 高饱和的底色（Borland 那种纯蓝）压暗会掉出 sRGB，直接截断分量就等于没压够亮度。
+  // 二分把色度收到刚好回色域里：亮度优先保住——层次是靠亮度差看出来的，代价是
+  // 一点饱和度。
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 12; i++) {
+    const mid = (lo + hi) / 2;
+    if (inGamut({ L, a: lab.a * mid, b: lab.b * mid })) lo = mid;
+    else hi = mid;
+  }
+  return toHex(oklabToRgb({ L, a: lab.a * lo, b: lab.b * lo }));
 }
 
 /**

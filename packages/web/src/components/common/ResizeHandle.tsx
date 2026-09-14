@@ -107,10 +107,11 @@ function ResizeHandle({
       tabIndex={0}
       data-active={active || undefined}
       className={cn(
+        // 把手正好盖住两座岛之间那道缝（骨架的 gap-1.5），拖的是缝而不是岛的边缘
         "absolute inset-y-0 z-10 w-1.5 cursor-col-resize touch-none outline-none",
-        "after:absolute after:inset-y-0 after:left-1/2 after:w-0.5 after:-translate-x-1/2 after:bg-transparent",
+        "after:absolute after:inset-y-2 after:left-1/2 after:w-0.5 after:-translate-x-1/2 after:rounded-full after:bg-transparent after:transition-colors",
         "hover:after:bg-ring focus-visible:after:bg-ring data-[active]:after:bg-primary",
-        edge === "right" ? "-right-[3px]" : "-left-[3px]"
+        edge === "right" ? "-right-1.5" : "-left-1.5"
       )}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

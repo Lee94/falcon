@@ -7,6 +7,7 @@ import type {
   ProjectType,
   SessionForeground,
   SessionState,
+  SessionAgent,
   SessionWithProject,
   SshHost,
   SystemInfo,
@@ -36,19 +37,28 @@ import {
   type TermPref,
 } from "./lib/term.js";
 import { PANEL_WIDTH_DEFAULT, clampPanelWidth, parsePanelWidth } from "./lib/panelWidth.js";
+import { DIFF_KEY, fileKey, parsePaneKey, termKey } from "./lib/paneKey.js";
+import { sessionLabel } from "./lib/sessionTitle.js";
 import {
-  DIFF_KEY,
-  applyVisibleOrder,
-  defaultStripKeys,
-  fileKey,
-  insertAfter,
-  orderedStripKeys,
-  parseStripKey,
-  replaceKey,
-  termKey,
-  weaveOrder,
-  type StripFile,
-} from "./lib/tabStrip.js";
+  applyDrop,
+  column,
+  findPane,
+  insertColumn,
+  insertPane,
+  isPinned,
+  paneKeys,
+  pinPane,
+  removePane,
+  replacePane,
+  resolveSpot,
+  setColumnBasis,
+  setPaneBasis,
+  syncColumns,
+  unpinAll,
+  visibleColumns,
+  type ColumnLayout,
+  type DropSpot,
+} from "./lib/layout.js";
 
 export type ActiveView =
   | { kind: "overview" }
@@ -57,7 +67,7 @@ export type ActiveView =
   | { kind: "project" }
   /** Git 面板点开的文件差异（见 diffTab） */
   | { kind: "diff" }
-  /** 文件查看 tab（见 fileTabs）；path 用来区分同时打开的多个文件 */
+  /** 文件查看窗口（见 fileTab）；path 一并带着，好让排布 key 认得出是哪个文件 */
   | { kind: "file"; projectId: string; path: string };
 
 /**
@@ -87,10 +97,9 @@ export function tabProjectId(
 }
 
 /**
- * 文件查看 tab 的目标。不持久化：刷新后工作区的文件可能已经变了。
- *
- * 与 diffTab 不同——差异仍是单例预览，文件可以同时开多个（⌘P / 文件面板点开
- * 都是新增 tab；同一文件再点一次只是聚焦）。关掉只是收起视图，不碰会话。
+ * 文件查看窗口的目标。与 diffTab 一样是**单例预览**：再点一个文件，是同一扇窗口
+ * 换了内容（replacePane），不是新开一扇——工作区是列，不是一排 tab，每点一个文件
+ * 就多一列只会把终端挤没。不持久化：刷新后工作区的文件可能已经变了。
  */
 export interface FileTabTarget {
   projectId: string;
@@ -102,12 +111,22 @@ export function sameFile(a: FileTabTarget, b: FileTabTarget): boolean {
   return a.projectId === b.projectId && a.path === b.path;
 }
 
-export function visibleFileTabs(s: {
-  fileTabs: FileTabTarget[];
+/** 文件窗口在当前项目下是否可见（选了别的项目就藏起来，排布原样留着） */
+export function fileVisible(s: {
+  fileTab: FileTabTarget | null;
   selectedProjectId: string | null;
-}): FileTabTarget[] {
-  if (!s.selectedProjectId) return s.fileTabs;
-  return s.fileTabs.filter((f) => f.projectId === s.selectedProjectId);
+}): boolean {
+  if (!s.fileTab) return false;
+  return !s.selectedProjectId || s.fileTab.projectId === s.selectedProjectId;
+}
+
+/** 差异窗口同理 */
+export function diffVisible(s: {
+  diffTab: DiffTabTarget | null;
+  selectedProjectId: string | null;
+}): boolean {
+  if (!s.diffTab) return false;
+  return !s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId;
 }
 
 /** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
@@ -142,20 +161,43 @@ function fallbackActive(s: {
   sessions: SessionWithProject[];
   pending: PendingSession[];
   selectedProjectId: string | null;
-  fileTabs: FileTabTarget[];
+  fileTab: FileTabTarget | null;
   diffTab: DiffTabTarget | null;
 }): ActiveView {
   const rest = visibleTabs(s);
   if (rest.length) return { kind: "terminal", sessionId: rest[rest.length - 1]! };
-  const files = visibleFileTabs(s);
-  if (files.length) {
-    const f = files[files.length - 1]!;
-    return { kind: "file", projectId: f.projectId, path: f.path };
+  if (fileVisible(s)) {
+    return { kind: "file", projectId: s.fileTab!.projectId, path: s.fileTab!.path };
   }
-  if (s.diffTab && (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)) {
-    return { kind: "diff" };
-  }
+  if (diffVisible(s)) return { kind: "diff" };
   return s.selectedProjectId ? { kind: "project" } : { kind: "overview" };
+}
+
+/**
+ * 文件 / 差异窗口该落在哪一列。
+ *
+ * 两者共用同一座"查看列"：已经开着另一个查看窗口就落到它下面，否则在当前活动窗口
+ * 的右边另起一列。终端是工作区的主角，查看类窗口不该把它挤到看不见的地方去。
+ */
+function placeViewPane(
+  columns: ColumnLayout[],
+  key: string,
+  state: { fileTab: FileTabTarget | null; diffTab: DiffTabTarget | null; active: ActiveView }
+): ColumnLayout[] {
+  if (findPane(columns, key)) return columns;
+  const siblingKey =
+    key === DIFF_KEY
+      ? state.fileTab
+        ? fileKey(state.fileTab)
+        : null
+      : state.diffTab
+        ? DIFF_KEY
+        : null;
+  const sibling = siblingKey ? findPane(columns, siblingKey) : null;
+  if (sibling) return insertPane(columns, key, { col: sibling.col, index: sibling.index + 1 });
+  const current = activeKey(state.active);
+  const from = current ? findPane(columns, current) : null;
+  return insertColumn(columns, key, from ? from.col + 1 : columns.length);
 }
 
 function sameActive(a: ActiveView, b: ActiveView): boolean {
@@ -165,57 +207,69 @@ function sameActive(a: ActiveView, b: ActiveView): boolean {
   return true;
 }
 
-function stripSource(s: {
+interface PaneSource {
   tabs: string[];
   sessions: SessionWithProject[];
   pending: PendingSession[];
   selectedProjectId: string | null;
-  fileTabs: FileTabTarget[];
+  fileTab: FileTabTarget | null;
   diffTab: DiffTabTarget | null;
-}) {
-  return {
-    terminalIds: visibleTabs(s),
-    files: visibleFileTabs(s) as StripFile[],
-    hasDiff: !!(
-      s.diffTab &&
-      (!s.selectedProjectId || s.diffTab.projectId === s.selectedProjectId)
-    ),
-  };
 }
 
-/** 主区 tab 栏从左到右的可见 key。记住的拖拽顺序优先，新开的接到末尾。 */
-export function visibleStripKeys(s: {
-  tabs: string[];
-  sessions: SessionWithProject[];
-  pending: PendingSession[];
-  selectedProjectId: string | null;
-  fileTabs: FileTabTarget[];
-  diffTab: DiffTabTarget | null;
-  tabOrder: string[];
-}): string[] {
-  return orderedStripKeys(s.tabOrder, defaultStripKeys(stripSource(s)));
+/**
+ * 工作区里**所有**窗口的 key（含别的项目的）。排布与数据源的对账认它：
+ * 不在这里面的窗口一律从列里摘掉，在这里面却没排布的各自接一列。
+ */
+export function livePaneKeys(s: PaneSource): string[] {
+  const keys = s.tabs.map(termKey);
+  if (s.fileTab) keys.push(fileKey(s.fileTab));
+  if (s.diffTab) keys.push(DIFF_KEY);
+  return keys;
 }
 
-/** 切 tab 快捷键按 strip 顺序走，跟拖拽之后看到的一样 */
-function viewTabs(s: {
-  tabs: string[];
-  sessions: SessionWithProject[];
-  pending: PendingSession[];
-  selectedProjectId: string | null;
-  fileTabs: FileTabTarget[];
-  diffTab: DiffTabTarget | null;
-  tabOrder: string[];
-}): ActiveView[] {
-  const views: ActiveView[] = [];
-  for (const key of visibleStripKeys(s)) {
-    const item = parseStripKey(key);
-    if (!item) continue;
-    if (item.kind === "terminal") views.push({ kind: "terminal", sessionId: item.id });
-    else if (item.kind === "file") {
-      views.push({ kind: "file", projectId: item.projectId, path: item.path });
-    } else views.push({ kind: "diff" });
-  }
-  return views;
+/** 当前项目下该画出来的窗口 key */
+export function visiblePaneKeys(s: PaneSource): Set<string> {
+  const keys = new Set(visibleTabs(s).map(termKey));
+  if (fileVisible(s)) keys.add(fileKey(s.fileTab!));
+  if (diffVisible(s)) keys.add(DIFF_KEY);
+  return keys;
+}
+
+/** 画布此刻要画的列（别的项目的窗口过滤掉，空列不占位） */
+export function layoutColumns(s: PaneSource & { columns: ColumnLayout[] }): ColumnLayout[] {
+  const visible = visiblePaneKeys(s);
+  return visibleColumns(s.columns, (k) => visible.has(k));
+}
+
+/** key → 视图。切窗口的快捷键按排布顺序（从左到右、列内从上到下）走 */
+function paneView(key: string): ActiveView | null {
+  const item = parsePaneKey(key);
+  if (!item) return null;
+  if (item.kind === "terminal") return { kind: "terminal", sessionId: item.id };
+  if (item.kind === "file") return { kind: "file", projectId: item.projectId, path: item.path };
+  return { kind: "diff" };
+}
+
+function viewTabs(s: PaneSource & { columns: ColumnLayout[] }): ActiveView[] {
+  return paneKeys(layoutColumns(s)).flatMap((key) => {
+    const view = paneView(key);
+    return view ? [view] : [];
+  });
+}
+
+/** 当前活动视图对应的 key；总览 / 项目空页没有窗口 */
+export function activeKey(active: ActiveView): string | null {
+  if (active.kind === "terminal") return termKey(active.sessionId);
+  if (active.kind === "file") return fileKey(active);
+  if (active.kind === "diff") return DIFF_KEY;
+  return null;
+}
+
+/** 新建会话的可选项：开场 CLI 与落位 */
+export interface NewTerminalOptions {
+  agent?: SessionAgent;
+  /** 插在这扇窗口所在列的右边；缺省接到最右 */
+  after?: string;
 }
 
 export type OverviewFilter = "all" | SessionState;
@@ -227,6 +281,8 @@ export type SettingsTab = "appearance" | "account" | "hosts" | "about";
 export interface PendingSession {
   id: string;
   projectId: string;
+  /** 这扇窗口开出来会跑什么 CLI；undefined = 普通 shell */
+  agent?: SessionAgent;
   error?: string;
 }
 
@@ -334,6 +390,8 @@ export interface InstallSpec {
   projectId: string;
   /** 安装流程结束后是否继续创建会话（从「新建终端」进来时为 true） */
   thenCreate: boolean;
+  /** thenCreate 时要开的 CLI；缺省是普通 shell */
+  agent?: SessionAgent;
 }
 
 /** 从某台服务器新建项目时预填类型 / 主机，编辑已有项目时不用 */
@@ -372,32 +430,84 @@ export const selectSidebarVisible = (s: {
   sidebarAutoHidden: boolean;
 }) => s.sidebarOpen && !s.sidebarAutoHidden;
 
+/**
+ * 持久化的一列。列 id 不存——重建时现生成即可，它只在一次会话内当 React key 用；
+ * 文件 / 差异窗口也不存（刷新后它们本来就消失），落盘的只有终端。
+ */
+interface PersistedColumn {
+  basis: number | null;
+  panes: { key: string; basis: number | null }[];
+  /** 固定在最右（见 lib/layout 的 ColumnLayout.pinned）。只可能是最后一列 */
+  pinned?: boolean;
+}
+
 interface PersistedWorkspace {
   tabs: string[];
+  /** 主区排布：列 → 窗口。与 tabs 对账后才使用（见 syncColumns） */
+  columns: PersistedColumn[];
   active: ActiveView;
   sidebarOpen: boolean;
   rightOpen: boolean;
   rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
+  /**
+   * 哪些检出把会话行摊开了（key 是 projectId）。与 collapsed 反着来：**默认收起**，
+   * 只记"展开过的"。会话行是树里最长的一段，默认摊开会把侧栏挤满，而"开着哪些会话"
+   * 平时看检出行上的计数徽标就够了。
+   */
+  sessionsOpen: Record<string, boolean>;
   selectedProjectId: string | null;
   /** 侧栏是否显示已存档的附属项目。默认藏起来，存档就是为了少占地方 */
   showArchived: boolean;
   sidebarWidth: number;
   rightWidth: number;
+  /** 终端画布只显示当前活动的那一列（标题栏的最大化） */
+  termZoomed: boolean;
+}
+
+/** 落盘的排布可能来自旧版本或被手改过：认不出的形状一律丢掉，宁可退回"每个会话一列" */
+function parsePersistedColumns(raw: unknown): PersistedColumn[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PersistedColumn[] = [];
+  for (const col of raw) {
+    if (!col || typeof col !== "object") continue;
+    const { basis, panes } = col as { basis?: unknown; panes?: unknown };
+    if (!Array.isArray(panes)) continue;
+    const kept: PersistedColumn["panes"] = [];
+    for (const pane of panes) {
+      if (!pane || typeof pane !== "object") continue;
+      const { key, basis: h } = pane as { key?: unknown; basis?: unknown };
+      // pending id 活不过刷新；文件 / 差异也不落盘，这里一并挡住
+      if (typeof key !== "string" || !key.startsWith("t:") || isPendingId(key.slice(2))) continue;
+      kept.push({ key, basis: typeof h === "number" ? h : null });
+    }
+    if (kept.length)
+      out.push({
+        basis: typeof basis === "number" ? basis : null,
+        panes: kept,
+        pinned: (col as { pinned?: unknown }).pinned === true,
+      });
+  }
+  // 固定列必须是最后一列：中间那些（上一次落盘时后面还有别的列，重建时被丢掉了些）
+  // 一律降级成普通列，免得插新列的夹取（pinEdge）把整片右边都封死
+  return out.map((c, i) => (c.pinned && i < out.length - 1 ? { ...c, pinned: false } : c));
 }
 
 function loadWorkspace(): PersistedWorkspace {
   const fallback: PersistedWorkspace = {
     tabs: [],
+    columns: [],
     active: { kind: "overview" },
     sidebarOpen: true,
     rightOpen: false,
     rightPanel: "git",
     collapsed: {},
+    sessionsOpen: {},
     selectedProjectId: null,
     showArchived: false,
     sidebarWidth: PANEL_WIDTH_DEFAULT,
     rightWidth: PANEL_WIDTH_DEFAULT,
+    termZoomed: false,
   };
   try {
     const raw = localStorage.getItem(WORKSPACE_KEY) ?? localStorage.getItem(WORKSPACE_KEY_LEGACY);
@@ -406,6 +516,7 @@ function loadWorkspace(): PersistedWorkspace {
     return {
       // 持久化的 tab 里绝不该混进上一次的 pending id
       tabs: (parsed.tabs ?? []).filter((t) => typeof t === "string" && !isPendingId(t)),
+      columns: parsePersistedColumns(parsed.columns),
       active:
         parsed.active?.kind === "terminal" && typeof parsed.active.sessionId === "string"
           ? parsed.active
@@ -416,11 +527,13 @@ function loadWorkspace(): PersistedWorkspace {
       rightOpen: parsed.rightOpen === true,
       rightPanel: isRightPanelId(parsed.rightPanel) ? parsed.rightPanel : "git",
       collapsed: parsed.collapsed ?? {},
+      sessionsOpen: parsed.sessionsOpen ?? {},
       selectedProjectId:
         typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
       showArchived: parsed.showArchived === true,
       sidebarWidth: parsePanelWidth(parsed.sidebarWidth),
       rightWidth: parsePanelWidth(parsed.rightWidth),
+      termZoomed: parsed.termZoomed === true,
     };
   } catch {
     return fallback;
@@ -613,16 +726,16 @@ interface AppState {
   /** 打开的终端 tab（手动关掉 = 结束会话，见 closeTab），可能含 pending id */
   tabs: string[];
   /**
-   * 整条 tab 栏的混排顺序（终端 / 文件 / 差异的 strip key）。
-   * 不持久化：刷新后面板 tab 本来就会消失，终端顺序已经在 tabs 里。
+   * 主区排布：列 → 窗口（终端 / 文件 / 差异混排，见 lib/layout.ts）。
+   * 含**所有**项目的窗口，画之前按当前项目过滤（layoutColumns）；终端那部分持久化。
    */
-  tabOrder: string[];
+  columns: ColumnLayout[];
   active: ActiveView;
   pending: PendingSession[];
-  /** 差异查看 tab；null = 没开 */
+  /** 差异查看窗口；null = 没开 */
   diffTab: DiffTabTarget | null;
-  /** 已打开的文件查看 tab，从左到右 */
-  fileTabs: FileTabTarget[];
+  /** 文件查看窗口；null = 没开。单例，见 FileTabTarget */
+  fileTab: FileTabTarget | null;
 
   /** 明暗模式偏好（持久化）与它此刻实际解析成的槽位 */
   themePref: ThemePref;
@@ -646,9 +759,17 @@ interface AppState {
   rightWidth: number;
   /** 用户的右侧栏偏好（持久化）。默认关：第一次打开不该把终端挤窄 */
   rightOpen: boolean;
+  /**
+   * 终端画布的最大化（持久化）：只显示当前活动的那一列，其余列停在后台不卸载。
+   * 是画布级开关而不是某一列的属性：跟着 active 走，切 tab 仍只看一列，
+   * 像 tmux 的 zoom 那样"切走就还原"在 tab 栏驱动的界面里只会让人摸不着头脑。
+   */
+  termZoomed: boolean;
   /** 右侧打开的是哪一格 */
   rightPanel: RightPanelId;
   collapsed: Record<string, boolean>;
+  /** 摊开了会话行的检出（projectId → true）；默认收起，见 PersistedWorkspace */
+  sessionsOpen: Record<string, boolean>;
   /** 侧栏是否显示已存档的附属项目（持久化） */
   showArchived: boolean;
   /** 源项目 HEAD，按 projectId；附属项目用自己的 worktree.branch */
@@ -700,8 +821,12 @@ interface AppState {
   refreshChanges(): Promise<void>;
   /** WS 推过来的状态立刻写进列表，不等 5s 轮询——否则接回后仍显示「待接回」 */
   applySessionState(id: string, state: SessionState, deadReason?: DeadReason): void;
+  /** 同上，自动标题（前台命令）变了就地更新，侧栏与标题栏一起跟着换 */
+  applySessionTitle(id: string, title: string | null): void;
 
   openSession(sessionId: string): void;
+  /** 把输入焦点交给某扇窗口（点标题栏 / 点进画布）。终端用 openSession，它还要建 tab */
+  focusPane(key: string): void;
   /** 在差异 tab 里打开一个文件（就地替换上一个）。带 commit 则看那次提交的改动 */
   openDiff(
     projectId: string,
@@ -724,13 +849,22 @@ interface AppState {
   detachTab(id: string): void;
   /** 只把 tab 摘掉，不碰会话、不做任何引导——清除已丢失记录这类场景用它 */
   dropTab(id: string): void;
-  /** 拖拽松手：把可见 strip 的 from 挪到 to，隐藏项目的 tab 原地不动 */
-  moveStrip(from: number, to: number): void;
+  /** 拖拽松手：把一扇窗口挪到落点（落点按可见列量，见 lib/layout 的 resolveSpot） */
+  movePane(key: string, spot: DropSpot): void;
   /**
-   * 关掉一组 strip key（关闭其他 / 左 / 右）。文件和差异立刻收起；
+   * 固定 / 取消固定「这扇窗口所在的那一列」在最右：固定之后新开的窗口一律排在它
+   * 左边，拖拽也越不过去（见 lib/layout 的 pinEdge）。固定至多一列。
+   */
+  togglePinPane(key: string): void;
+  /** 拖列间的缝：只钉左边那一列的宽度，右边继续自适应。拖的途中不落盘 */
+  setColumnWidth(id: string, width: number | null): void;
+  /** 拖列内的缝：只钉上面那扇窗口的高度 */
+  setPaneHeight(key: string, height: number | null): void;
+  /**
+   * 关掉一组窗口（关闭其他 / 左 / 右）。文件和差异立刻收起；
    * 终端走 Terminate。有前台程序在跑时合成一次确认，避免连弹。
    */
-  closeStripKeys(keys: string[]): Promise<void>;
+  closePaneKeys(keys: string[]): Promise<void>;
   selectProject(projectId: string): void;
   showOverview(): void;
   focusTabAt(index: number): void;
@@ -750,9 +884,13 @@ interface AppState {
   setRightWidth(width: number): void;
   /** 松手 / 键盘调完宽度之后才落盘，拖的途中不要同步写 localStorage */
   persistLayout(): void;
+  /** 终端画布：只看当前一列 ⇄ 多列并排 */
+  toggleTermZoom(): void;
   /** 点同一格再关；点另一格则切过去 */
   toggleRightPanel(id?: RightPanelId): void;
   toggleCollapsed(key: string): void;
+  /** 摊开 / 收起某个检出下的会话行 */
+  toggleSessions(projectId: string): void;
   toggleShowArchived(): void;
   setFilter(filter: OverviewFilter): void;
   setProjectFilter(projectId: string | null): void;
@@ -782,8 +920,12 @@ interface AppState {
   openInstall(spec: InstallSpec): void;
   closeInstall(): void;
 
-  newTerminal(projectId: string, afterKey?: string): Promise<void>;
-  createSessionNow(projectId: string, afterKey?: string): Promise<void>;
+  /**
+   * 新建会话。默认自己独占一列接到最右；after 给了就插在那扇窗口所在列的右边。
+   * agent 让会话以 claude / codex / grok 开场（见 server/sessions/agent.ts）。
+   */
+  newTerminal(projectId: string, opts?: NewTerminalOptions): Promise<void>;
+  createSessionNow(projectId: string, opts?: NewTerminalOptions): Promise<void>;
   retryPending(pendingId: string): Promise<void>;
 
   handleApiError(err: unknown): void;
@@ -796,18 +938,28 @@ export const useApp = create<AppState>((set, get) => {
   const persist = () => {
     const {
       tabs,
+      columns,
       active,
       sidebarOpen,
       rightOpen,
       rightPanel,
       collapsed,
+      sessionsOpen,
       selectedProjectId,
       showArchived,
       sidebarWidth,
       rightWidth,
+      termZoomed,
     } = get();
     const payload: PersistedWorkspace = {
       tabs: tabs.filter((t) => !isPendingId(t)),
+      // 只落终端：pending 活不过刷新，文件 / 差异刷新后也不该原样复活
+      columns: columns.flatMap((c) => {
+        const panes = c.panes.filter(
+          (p) => p.key.startsWith("t:") && !isPendingId(p.key.slice(2))
+        );
+        return panes.length ? [{ basis: c.basis, panes, pinned: c.pinned === true }] : [];
+      }),
       // pending id 与两个查看 tab（diff / file）都活不过刷新，落成项目 / 总览视图
       active:
         active.kind === "diff" ||
@@ -821,10 +973,12 @@ export const useApp = create<AppState>((set, get) => {
       rightOpen,
       rightPanel,
       collapsed,
+      sessionsOpen,
       selectedProjectId,
       showArchived,
       sidebarWidth,
       rightWidth,
+      termZoomed,
     };
     const json = JSON.stringify(payload);
     // localStorage.setItem 是同步阻塞 API，轮询周期里内容多半没变，别白写
@@ -837,6 +991,9 @@ export const useApp = create<AppState>((set, get) => {
     }
   };
 
+  /** 会话在提示 / 确认框里叫什么。组件里用 useSessionLabel()，这里没有 hook 可用 */
+  const labelOf = (session: SessionWithProject) => sessionLabel(session, get().projects);
+
   return {
     authChecked: false,
     auth: null,
@@ -846,11 +1003,19 @@ export const useApp = create<AppState>((set, get) => {
     sessions: [],
 
     tabs: initialWorkspace.tabs,
-    tabOrder: initialWorkspace.tabs.map(termKey),
+    columns: syncColumns(
+      initialWorkspace.columns.map((c) => ({
+        ...column([]),
+        basis: c.basis,
+        panes: c.panes,
+        pinned: c.pinned === true,
+      })),
+      initialWorkspace.tabs.map(termKey)
+    ),
     active: initialWorkspace.active,
     pending: [],
     diffTab: null,
-    fileTabs: [],
+    fileTab: null,
 
     themePref: initialThemes.settings.mode,
     themeMode: resolveThemeMode(initialThemes.settings.mode, systemPrefersDark()),
@@ -865,8 +1030,10 @@ export const useApp = create<AppState>((set, get) => {
     sidebarWidth: initialWorkspace.sidebarWidth,
     rightWidth: initialWorkspace.rightWidth,
     rightOpen: initialWorkspace.rightOpen,
+    termZoomed: initialWorkspace.termZoomed,
     rightPanel: initialWorkspace.rightPanel,
     collapsed: initialWorkspace.collapsed,
+    sessionsOpen: initialWorkspace.sessionsOpen,
     showArchived: initialWorkspace.showArchived,
     heads: {},
     changes: {},
@@ -967,6 +1134,15 @@ export const useApp = create<AppState>((set, get) => {
       }));
     },
 
+    applySessionTitle(id, title) {
+      // 后端只在标题真的变了时才推，这里不必再比一次
+      set((s) => ({
+        sessions: s.sessions.map((x) =>
+          x.id === id ? { ...x, title: title ?? undefined } : x
+        ),
+      }));
+    },
+
     async refreshSessions() {
       try {
         const sessions = await api.listSessions();
@@ -976,21 +1152,21 @@ export const useApp = create<AppState>((set, get) => {
         const alive = new Set(sessions.map((s) => s.id));
         // dead 会话仍在列表里，因此恢复出来的 tab 不会被静默丢弃，只是显示为已丢失
         const keep = (id: string) => isPendingId(id) || alive.has(id);
-        set((state) => ({
-          sessions,
-          tabs: state.tabs.filter(keep),
-          tabOrder: state.tabOrder.filter((k) => {
-            const item = parseStripKey(k);
-            return item?.kind !== "terminal" || keep(item.id);
-          }),
-          active:
-            state.active.kind === "terminal" && !keep(state.active.sessionId)
-              ? state.selectedProjectId
-                ? { kind: "project" }
-                : { kind: "overview" }
-              : state.active,
-          selected: state.selected.filter((id) => alive.has(id)),
-        }));
+        set((state) => {
+          const tabs = state.tabs.filter(keep);
+          return {
+            sessions,
+            tabs,
+            columns: syncColumns(state.columns, livePaneKeys({ ...state, tabs })),
+            active:
+              state.active.kind === "terminal" && !keep(state.active.sessionId)
+                ? state.selectedProjectId
+                  ? { kind: "project" }
+                  : { kind: "overview" }
+                : state.active,
+            selected: state.selected.filter((id) => alive.has(id)),
+          };
+        });
         persist();
       } catch (err) {
         get().handleApiError(err);
@@ -1001,16 +1177,19 @@ export const useApp = create<AppState>((set, get) => {
       set((state) => {
         const projectId =
           tabProjectId(sessionId, state.sessions, state.pending) ?? state.selectedProjectId;
-        const already = state.tabs.includes(sessionId);
-        const key = termKey(sessionId);
+        const tabs = state.tabs.includes(sessionId)
+          ? state.tabs
+          : [...state.tabs, sessionId];
         return {
-          tabs: already ? state.tabs : [...state.tabs, sessionId],
-          tabOrder:
-            already || !state.tabOrder.length || state.tabOrder.includes(key)
-              ? state.tabOrder
-              : [...state.tabOrder, key],
+          tabs,
+          // 还没排布过（从侧栏 / 总览打开的已有会话）就自己接一列在最右
+          columns: syncColumns(state.columns, livePaneKeys({ ...state, tabs })),
           active: { kind: "terminal" as const, sessionId },
           selectedProjectId: projectId ?? state.selectedProjectId,
+          // 刚打开的会话要在侧栏里看得见：会话行默认收着，这里替用户摊开它那个检出
+          sessionsOpen: projectId
+            ? { ...state.sessionsOpen, [projectId]: true }
+            : state.sessionsOpen,
           paletteOpen: false, quickOpen: false,
           menu: null,
         };
@@ -1018,13 +1197,17 @@ export const useApp = create<AppState>((set, get) => {
       persist();
     },
 
+    focusPane(key) {
+      const view = paneView(key);
+      if (!view || sameActive(view, get().active)) return;
+      set({ active: view });
+      persist();
+    },
+
     openDiff(projectId, file, commit, repo) {
       set((state) => ({
         diffTab: { projectId, file, commit, repo },
-        tabOrder:
-          !state.tabOrder.length || state.tabOrder.includes(DIFF_KEY)
-            ? state.tabOrder
-            : [...state.tabOrder, DIFF_KEY],
+        columns: placeViewPane(state.columns, DIFF_KEY, state),
         active: { kind: "diff" as const },
       }));
     },
@@ -1040,7 +1223,7 @@ export const useApp = create<AppState>((set, get) => {
     closeDiff() {
       set((state) => ({
         diffTab: null,
-        tabOrder: state.tabOrder.filter((k) => k !== DIFF_KEY),
+        columns: removePane(state.columns, DIFF_KEY),
         ...(state.active.kind === "diff"
           ? { active: fallbackActive({ ...state, diffTab: null }) }
           : null),
@@ -1050,14 +1233,16 @@ export const useApp = create<AppState>((set, get) => {
     openFile(projectId, path) {
       set((state) => {
         const next = { projectId, path };
-        const exists = state.fileTabs.some((f) => sameFile(f, next));
         const key = fileKey(next);
+        const prev = state.fileTab;
+        // 已经开着一个文件：同一扇窗口换内容，位置与高度都不动
+        const columns =
+          prev && !sameFile(prev, next) && findPane(state.columns, fileKey(prev))
+            ? replacePane(state.columns, fileKey(prev), key)
+            : placeViewPane(state.columns, key, state);
         return {
-          fileTabs: exists ? state.fileTabs : [...state.fileTabs, next],
-          tabOrder:
-            exists || !state.tabOrder.length || state.tabOrder.includes(key)
-              ? state.tabOrder
-              : [...state.tabOrder, key],
+          fileTab: next,
+          columns,
           active: { kind: "file" as const, projectId, path },
           paletteOpen: false,
           quickOpen: false,
@@ -1068,19 +1253,14 @@ export const useApp = create<AppState>((set, get) => {
 
     closeFile(target) {
       set((state) => {
-        const closing =
-          target ??
-          (state.active.kind === "file"
-            ? { projectId: state.active.projectId, path: state.active.path }
-            : null);
-        if (!closing) return state;
-        const fileTabs = state.fileTabs.filter((f) => !sameFile(f, closing));
-        const wasActive =
-          state.active.kind === "file" && sameFile(state.active, closing);
+        const closing = target ?? state.fileTab;
+        // 指名要关的不是正开着的那个文件（比如改名后回收旧路径）：什么也不做
+        if (!closing || !state.fileTab || !sameFile(state.fileTab, closing)) return state;
+        const wasActive = state.active.kind === "file" && sameFile(state.active, closing);
         return {
-          fileTabs,
-          tabOrder: state.tabOrder.filter((k) => k !== fileKey(closing)),
-          ...(wasActive ? { active: fallbackActive({ ...state, fileTabs }) } : null),
+          fileTab: null,
+          columns: removePane(state.columns, fileKey(closing)),
+          ...(wasActive ? { active: fallbackActive({ ...state, fileTab: null }) } : null),
         };
       });
     },
@@ -1114,6 +1294,7 @@ export const useApp = create<AppState>((set, get) => {
       set({
         selectedProjectId: projectId,
         tabs,
+        columns: syncColumns(state.columns, livePaneKeys({ ...state, tabs })),
         active,
         menu: null,
         paletteOpen: false, quickOpen: false,
@@ -1125,75 +1306,53 @@ export const useApp = create<AppState>((set, get) => {
       set((state) => {
         const tabs = state.tabs.filter((t) => t !== id);
         const pending = state.pending.filter((p) => p.id !== id);
-        const tabOrder = state.tabOrder.filter((k) => k !== termKey(id));
+        const columns = removePane(state.columns, termKey(id));
         let active = state.active;
         if (active.kind === "terminal" && active.sessionId === id) {
           active = fallbackActive({ ...state, tabs, pending });
         }
-        return { tabs, tabOrder, active, pending };
+        return { tabs, columns, active, pending };
       });
       persist();
     },
 
-    moveStrip(from, to) {
+    movePane(key, spot) {
       const state = get();
-      const visible = visibleStripKeys(state);
-      if (
-        from === to ||
-        from < 0 ||
-        to < 0 ||
-        from >= visible.length ||
-        to >= visible.length
-      ) {
-        return;
-      }
-      const nextVisible = visible.slice();
-      const [moved] = nextVisible.splice(from, 1);
-      nextVisible.splice(to, 0, moved!);
-
-      const visTerm = new Set(
-        visible.flatMap((k) => {
-          const item = parseStripKey(k);
-          return item?.kind === "terminal" ? [item.id] : [];
-        })
+      // 落点是在**可见**列上量出来的，先翻成全量坐标再落
+      const columns = applyDrop(
+        state.columns,
+        key,
+        resolveSpot(state.columns, layoutColumns(state), spot)
       );
-      const newTerm = nextVisible.flatMap((k) => {
-        const item = parseStripKey(k);
-        return item?.kind === "terminal" ? [item.id] : [];
-      });
-      const visFile = new Set(
-        visible.flatMap((k) => {
-          const item = parseStripKey(k);
-          return item?.kind === "file" ? [`${item.projectId}:${item.path}`] : [];
-        })
-      );
-      const newFiles: FileTabTarget[] = nextVisible.flatMap((k) => {
-        const item = parseStripKey(k);
-        return item?.kind === "file" ? [{ projectId: item.projectId, path: item.path }] : [];
-      });
-
-      set({
-        tabOrder: weaveOrder(
-          state.tabOrder.length ? state.tabOrder : visible,
-          visible,
-          nextVisible
-        ),
-        tabs: applyVisibleOrder(state.tabs, newTerm, (id) => visTerm.has(id)),
-        fileTabs: applyVisibleOrder(state.fileTabs, newFiles, (f) =>
-          visFile.has(`${f.projectId}:${f.path}`)
-        ),
-      });
+      // 拖了等于没拖：不 set，省掉一轮终端重新量尺寸
+      if (columns === state.columns) return;
+      set({ columns });
       persist();
     },
 
-    async closeStripKeys(keys) {
+    togglePinPane(key) {
+      set((s) => ({
+        columns: isPinned(s.columns, key) ? unpinAll(s.columns) : pinPane(s.columns, key),
+      }));
+      persist();
+    },
+
+    setColumnWidth(id, width) {
+      set((s) => ({ columns: setColumnBasis(s.columns, id, width) }));
+    },
+
+    setPaneHeight(key, height) {
+      set((s) => ({ columns: setPaneBasis(s.columns, key, height) }));
+    },
+
+    async closePaneKeys(keys) {
       if (keys.length === 0) return;
       const state = get();
       const files: FileTabTarget[] = [];
       const termIds: string[] = [];
       let closeDiff = false;
       for (const key of keys) {
-        const item = parseStripKey(key);
+        const item = parsePaneKey(key);
         if (!item) continue;
         if (item.kind === "file") files.push({ projectId: item.projectId, path: item.path });
         else if (item.kind === "diff") closeDiff = true;
@@ -1240,7 +1399,7 @@ export const useApp = create<AppState>((set, get) => {
             get().dropTab(session.id);
             try {
               await api.terminateSession(session.id);
-              names.push(session.name);
+              names.push(labelOf(session));
             } catch (err) {
               get().handleApiError(err);
               get().toast({
@@ -1275,7 +1434,7 @@ export const useApp = create<AppState>((set, get) => {
       get().askConfirm({
         title:
           busy.length === 1
-            ? i18n.t("tab.busyTitle", { name: busy[0]!.session.name })
+            ? i18n.t("tab.busyTitle", { name: labelOf(busy[0]!.session) })
             : i18n.t("tab.closeBusyManyTitle", { n: busy.length }),
         body:
           busy.length === 1
@@ -1284,7 +1443,7 @@ export const useApp = create<AppState>((set, get) => {
         list:
           busy.length > 1
             ? busy.map((b) => ({
-                name: b.session.name,
+                name: labelOf(b.session),
                 state: b.session.state,
                 meta: b.command,
               }))
@@ -1319,7 +1478,7 @@ export const useApp = create<AppState>((set, get) => {
           await api.terminateSession(session.id);
           get().toast({
             kind: "danger",
-            title: i18n.t("toast.terminated", { name: session.name }),
+            title: i18n.t("toast.terminated", { name: labelOf(session) }),
             ...closeKillsHint(),
           });
         } catch (err) {
@@ -1349,7 +1508,7 @@ export const useApp = create<AppState>((set, get) => {
         return;
       }
       get().askConfirm({
-        title: i18n.t("tab.busyTitle", { name: session.name }),
+        title: i18n.t("tab.busyTitle", { name: labelOf(session) }),
         body: i18n.t("tab.busyBody", { command: fg.command }),
         footnote: i18n.t("tab.busyFootnote"),
         confirmLabel: i18n.t("session.terminateConfirm"),
@@ -1363,7 +1522,7 @@ export const useApp = create<AppState>((set, get) => {
       if (!session || session.state === "dead") return;
       get().toast({
         kind: "info",
-        title: i18n.t("toast.detachTitle", { name: session.name }),
+        title: i18n.t("toast.detachTitle", { name: labelOf(session) }),
         body: i18n.t("toast.detachBody"),
       });
     },
@@ -1468,6 +1627,11 @@ export const useApp = create<AppState>((set, get) => {
       persist();
     },
 
+    toggleTermZoom() {
+      set((s) => ({ termZoomed: !s.termZoomed }));
+      persist();
+    },
+
     toggleRightPanel(id = "git") {
       const { rightOpen, rightPanel } = get();
       if (rightOpen && rightPanel === id) {
@@ -1475,6 +1639,13 @@ export const useApp = create<AppState>((set, get) => {
       } else {
         set({ rightOpen: true, rightPanel: id });
       }
+      persist();
+    },
+
+    toggleSessions(projectId) {
+      set((s) => ({
+        sessionsOpen: { ...s.sessionsOpen, [projectId]: !s.sessionsOpen[projectId] },
+      }));
       persist();
     },
 
@@ -1614,7 +1785,7 @@ export const useApp = create<AppState>((set, get) => {
      * 新建终端。SSH 项目首次用时先走授权 + 安装；
      * 已拒绝过的主机不再打扰，直接建非持久会话。重新启用走命令面板。
      */
-    async newTerminal(projectId, afterKey) {
+    async newTerminal(projectId, opts) {
       const project = get().projects.find((p) => p.id === projectId);
       if (!project) return;
       set({ menu: null, paletteOpen: false, quickOpen: false });
@@ -1625,48 +1796,47 @@ export const useApp = create<AppState>((set, get) => {
             status.authorized === null ||
             (status.authorized === true && !status.installedVersion);
           if (needsSetup) {
-            get().openInstall({ projectId, thenCreate: true });
+            get().openInstall({ projectId, thenCreate: true, agent: opts?.agent });
             return;
           }
         } catch {
           // 查不到主机状态就照常建会话，由后端判定持久性
         }
       }
-      await get().createSessionNow(projectId, afterKey);
+      await get().createSessionNow(projectId, opts);
     },
 
-    async createSessionNow(projectId, afterKey) {
+    async createSessionNow(projectId, opts) {
       const pendingId = `${PENDING_PREFIX}${++pendingSeq}`;
       const key = termKey(pendingId);
       set((s) => {
-        const pending = [...s.pending, { id: pendingId, projectId }];
+        const pending = [...s.pending, { id: pendingId, projectId, agent: opts?.agent }];
         const tabs = [...s.tabs, pendingId];
-        const current = visibleStripKeys({ ...s, pending, tabs });
-        const without = current.filter((k) => k !== key);
-        const tabOrder = insertAfter(without, afterKey, key);
-        const visIds = new Set(visibleTabs({ ...s, pending, tabs }));
-        const orderedVis = tabOrder.flatMap((k) => {
-          const item = parseStripKey(k);
-          return item?.kind === "terminal" ? [item.id] : [];
-        });
+        // 默认独占一列接到最右；指名了 after 就插在那扇窗口所在列的右边
+        const at = opts?.after ? findPane(s.columns, opts.after) : null;
         return {
           pending,
-          tabs: applyVisibleOrder(tabs, orderedVis, (id) => visIds.has(id)),
-          tabOrder,
+          tabs,
+          columns: insertColumn(s.columns, key, at ? at.col + 1 : s.columns.length),
           active: { kind: "terminal" as const, sessionId: pendingId },
           selectedProjectId: projectId,
+          // 同 openSession：新开的终端不能建在一个收着的检出里
+          sessionsOpen: { ...s.sessionsOpen, [projectId]: true },
           menu: null,
           paletteOpen: false,
           quickOpen: false,
         };
       });
       try {
-        const session = await api.createSession(projectId, get().activeTheme.hint);
+        const session = await api.createSession(projectId, {
+          ...get().activeTheme.hint,
+          agent: opts?.agent,
+        });
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
           tabs: s.tabs.map((t) => (t === pendingId ? session.id : t)),
-          tabOrder: replaceKey(s.tabOrder, key, termKey(session.id)),
+          columns: replacePane(s.columns, key, termKey(session.id)),
           active:
             s.active.kind === "terminal" && s.active.sessionId === pendingId
               ? { kind: "terminal", sessionId: session.id }
@@ -1692,12 +1862,15 @@ export const useApp = create<AppState>((set, get) => {
         ),
       }));
       try {
-        const session = await api.createSession(entry.projectId, get().activeTheme.hint);
+        const session = await api.createSession(entry.projectId, {
+          ...get().activeTheme.hint,
+          agent: entry.agent,
+        });
         await get().refreshSessions();
         set((s) => ({
           pending: s.pending.filter((p) => p.id !== pendingId),
           tabs: s.tabs.map((t) => (t === pendingId ? session.id : t)),
-          tabOrder: replaceKey(s.tabOrder, termKey(pendingId), termKey(session.id)),
+          columns: replacePane(s.columns, termKey(pendingId), termKey(session.id)),
           active:
             s.active.kind === "terminal" && s.active.sessionId === pendingId
               ? { kind: "terminal", sessionId: session.id }
