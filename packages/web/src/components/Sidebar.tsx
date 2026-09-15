@@ -23,8 +23,10 @@ import {
   Settings,
   SquareTerminal,
 } from "lucide-react";
+import { toast } from "sonner";
 import type { Project, SessionWithProject } from "@falcon/shared";
 import { WORKTREE_ARCHIVE_TTL_MS } from "@falcon/shared";
+import { api } from "../api.js";
 import {
   useApp,
   type PendingSession,
@@ -43,7 +45,12 @@ import { StatusMark, type MarkState } from "./common/StatusMark.js";
 import { useSessionLabel } from "../lib/useSessionLabel.js";
 import { useActions } from "../lib/useActions.js";
 import { chord } from "../lib/shortcuts.js";
-import { hasMeegleWorkItemType, parseMeegleWorkItemDrag } from "../lib/meegleDrag.js";
+import {
+  hasMeegleWorkItemType,
+  parseMeegleWorkItemDrag,
+  type MeegleWorkItemDragPayload,
+} from "../lib/meegleDrag.js";
+import { meegleDisplayKey } from "../lib/meegleKey.js";
 import { cn, pollWhileVisible } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { menuAnchor, openContextMenu } from "./common/Menu.js";
@@ -696,6 +703,38 @@ function SessionRow({
   );
 }
 
+/**
+ * 拖过来的 payload 里只有原始工作项 id，带前缀的 Key 藏在详情的模板名里（见 meegleKey.ts）。
+ * 先按 id 把表单开出来，用户多半直接回车就把分支和目录名建错了，所以宁可等这一下详情
+ * ——服务端对详情有 5 分钟 TTL 缓存，通常是秒回。详情读不到就退回原始 id：
+ * 拖拽不能因为 Key 前缀查不到就整个失效，但要明说预填的是哪一种。
+ */
+async function openWorktreeFromMeegle(
+  sourceId: string,
+  payload: MeegleWorkItemDragPayload,
+  t: (key: string) => string
+) {
+  // 命中服务端缓存时详情几十毫秒就回来，立刻弹 loading 只是闪一下；慢了才值得交代在等什么
+  let notification: string | number | undefined;
+  const hint = setTimeout(() => {
+    notification = toast.loading(t("meegle.dropKeyLoading"));
+  }, 300);
+  const detail = await api.meegleWorkItem(payload.spaceKey, payload.id).catch((err: unknown) => {
+    useApp.getState().handleApiError(err);
+    return null;
+  });
+  clearTimeout(hint);
+  if (!detail) toast.warning(t("meegle.dropKeyFallback"), { id: notification });
+  else if (notification !== undefined) toast.dismiss(notification);
+  const key = detail ? meegleDisplayKey(detail) : payload.id;
+  useApp.getState().openWorktreeForm(sourceId, {
+    name: key,
+    branch: key,
+    mode: "new-branch",
+    startPoint: "HEAD",
+  });
+}
+
 function TreeRow({
   depth,
   expanded,
@@ -742,7 +781,6 @@ function TreeRow({
   meegleDrop?: { sourceId: string };
 }) {
   const { t } = useTranslation();
-  const openWorktreeForm = useApp((s) => s.openWorktreeForm);
   const [dropOver, setDropOver] = useState(false);
   const onDragOver = meegleDrop
     ? (e: DragEvent<HTMLDivElement>) => {
@@ -791,12 +829,7 @@ function TreeRow({
               setDropOver(false);
               const payload = parseMeegleWorkItemDrag(e.dataTransfer);
               if (!payload) return;
-              openWorktreeForm(meegleDrop.sourceId, {
-                name: payload.id,
-                branch: payload.id,
-                mode: "new-branch",
-                startPoint: "HEAD",
-              });
+              void openWorktreeFromMeegle(meegleDrop.sourceId, payload, (key) => t(key));
             }
           : undefined
       }

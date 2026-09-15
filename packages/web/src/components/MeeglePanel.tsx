@@ -51,6 +51,7 @@ import {
   writeMeegleCache,
 } from "../lib/meegleCache.js";
 import { canDragMeegleWorkItem, writeMeegleWorkItemDrag } from "../lib/meegleDrag.js";
+import { parseDrill, serializeDrill, type Drill } from "../lib/meegleDrill.js";
 import { useApp } from "../store.js";
 import { filterMeegleItems as filterItems, groupMeegleItems, meeglePage, type ItemGroup } from "../lib/meegleGroups.js";
 import { cn } from "@/lib/utils";
@@ -93,34 +94,12 @@ interface CachedPage<T> {
 
 const TAB_KEY = "falcon.meegle.tab";
 const SPACE_KEY = "falcon.meegle.space";
+const DRILL_KEY = "falcon.meegle.drill";
 const LOGIN_POLL_MS = 2000;
 const SEARCH_DEBOUNCE_MS = 350;
 
 type Tab = "todo" | "space" | "pins";
 const TABS: Tab[] = ["todo", "space", "pins"];
-
-/** 面板内的下钻栈。视图与全景视图共用一页，只是取数接口不同 */
-type Drill =
-  | {
-      kind: "view";
-      spaceKey: string;
-      spaceName?: string;
-      viewId: string;
-      label: string;
-      multi: boolean;
-      typeKey?: string;
-      typeName?: string;
-      url?: string;
-    }
-  | {
-      kind: "item";
-      spaceKey: string;
-      spaceName?: string;
-      id: string;
-      title: string;
-      typeKey?: string;
-      url?: string;
-    };
 
 interface PinsApi {
   pins: MeeglePin[] | null;
@@ -172,7 +151,7 @@ export function MeeglePanel() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [tab, setTab] = useState<Tab>(loadTab);
-  const [drill, setDrill] = useState<Drill[]>([]);
+  const [drill, setDrill] = useState<Drill[]>(() => parseDrill(loadPref(DRILL_KEY)));
   const [pins, setPins] = useState<MeeglePin[] | null>(() => peekMeegleCache<MeeglePin[]>("pins") ?? null);
   const [epoch, setEpoch] = useState(0);
   const lastUser = useRef<string | undefined>(undefined);
@@ -218,6 +197,8 @@ export function MeeglePanel() {
     if (lastUser.current && key && lastUser.current !== key) {
       clearMeegleCache();
       setEpoch((n) => n + 1);
+      // 换了账号，上次停的工作项 / 视图多半已经无权打开，回根页重来
+      setDrill([]);
     }
     if (key) lastUser.current = key;
   }, [status?.user?.key]);
@@ -418,6 +399,11 @@ export function MeeglePanel() {
     setDrill([]);
     savePref(TAB_KEY, next);
   };
+
+  // 关掉右侧栏面板就卸了（App.tsx），下次打开要停回原处：栈本身就是"打开位置"
+  useEffect(() => {
+    savePref(DRILL_KEY, serializeDrill(drill));
+  }, [drill]);
 
   const top = drill[drill.length - 1];
 

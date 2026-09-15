@@ -4,24 +4,30 @@ import type { MeegleWorkItemDetail } from "@falcon/shared";
 import { formatMeegleContext } from "./meegleContext.js";
 
 const detail: MeegleWorkItemDetail = {
-  id: "123",
+  id: "7105690993",
   name: "Broken chart",
   spaceKey: "space",
   typeKey: "issue",
+  template: "一般BUG",
   currentNodes: [{ name: "Fixing", owners: ["Private owner"] }],
   operators: ["Private operator"],
   roles: [{ name: "QA", members: ["Private tester"] }],
 };
 const t = (key: string) => key;
 
-test("AI context omits work item metadata and keeps only the useful content sections", () => {
-  const output = formatMeegleContext(detail, "2026-01-02T03:04:05Z", t);
-  assert.match(output, /^# Broken chart/);
+test("AI context leads with the prefixed work item key and drops routing metadata", () => {
+  const output = formatMeegleContext({ ...detail, description: "Steps" }, "2026-01-02T03:04:05Z", t);
+  assert.match(output, /^# g-7105690993 Broken chart\n/);
   assert.match(output, /meegle\.contextDescription/);
-  assert.match(output, /meegle\.contextAttachments/);
-  assert.match(output, /meegle\.contextComments/);
-  assert.doesNotMatch(output, /123|space|issue|2026-01-02|Fixing/);
+  assert.doesNotMatch(output, /space|issue|2026-01-02|Fixing/);
   assert.doesNotMatch(output, /Private/);
+});
+
+test("sections with nothing in them are omitted instead of spending tokens on placeholders", () => {
+  assert.equal(formatMeegleContext(detail, "now", t), "# g-7105690993 Broken chart\n");
+  const output = formatMeegleContext({ ...detail, description: "Original text" }, "now", t);
+  assert.ok(output.includes("Original text"));
+  assert.doesNotMatch(output, /contextAttachments|contextComments/);
 });
 
 test("AI context preserves description Markdown, attachments and comments", () => {
@@ -49,18 +55,26 @@ test("AI context preserves description Markdown, attachments and comments", () =
   assert.doesNotMatch(output, /\[图片\]/);
 });
 
-test("older details fall back to their available description without inventing data", () => {
-  const output = formatMeegleContext({ ...detail, description: "Original text" }, "now", t);
-  assert.ok(output.includes("Original text"));
-  assert.match(output, /contextUnavailable/);
+test("comments carrying neither text nor files do not open a section of their own", () => {
+  const output = formatMeegleContext({
+    ...detail,
+    comments: [{ content: "  ", createdAt: "2026-01-03 10:00:00" }],
+  }, "now", t);
+  assert.equal(output, "# g-7105690993 Broken chart\n");
 });
 
-test("incomplete comment reads are disclosed without discarding title and description", () => {
+test("incomplete reads are disclosed even when the section came back empty", () => {
   const output = formatMeegleContext({
     ...detail,
     description: "Original text",
     commentsUnavailable: true,
   }, "now", t);
   assert.ok(output.includes("Original text"));
+  assert.match(output, /meegle\.contextComments/);
   assert.match(output, /contextCommentsIncomplete/);
+});
+
+test("unknown templates keep the raw id in the heading rather than inventing a prefix", () => {
+  const output = formatMeegleContext({ ...detail, template: undefined }, "now", t);
+  assert.match(output, /^# 7105690993 Broken chart\n/);
 });
