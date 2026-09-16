@@ -1,0 +1,16 @@
+#!/bin/bash
+# pkg 的 postinstall 跑在 root 下。LaunchAgent 必须进当前坐在屏幕前的用户的
+# gui/<uid> 域，os.homedir() 也必须是他的家目录，否则会写到 /var/root。
+set -euo pipefail
+APP="$2/Falcon.app"
+BIN="$APP/Contents/Resources/falcon"
+if [ ! -x "$BIN" ]; then
+  echo "postinstall: 找不到 $BIN" >&2
+  exit 1
+fi
+USER_NAME=$(stat -f '%Su' /dev/console)
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
+  echo "postinstall: 没有可用的登录用户，跳过 service install。打开 Falcon.app 即可完成注册。"
+  exit 0
+fi
+sudo -u "$USER_NAME" -H "$BIN" service install

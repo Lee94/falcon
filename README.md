@@ -103,6 +103,15 @@ pnpm build:bin --target linux-x64,linux-arm64   # 交叉打包（或 --target al
 ./falcon-v0.1.0-linux-x64 --port 8080
 ```
 
+macOS 还可以打一份安装包（把 `Falcon.app` 装进 `/Applications`，并注册用户级 launchd 服务，默认 http://127.0.0.1:4923）：
+
+```bash
+pnpm build:pkg                 # 没有当前平台 SEA 就先打
+pnpm build:pkg --skip-bin      # 只用已有的 release/falcon-v*-darwin-*
+```
+
+产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。这台已经用 `--port 6789` / `~/.mojito` 跑着的不要拿它覆盖，会把服务改回默认端口。
+
 原理：esbuild 把 server 打成单个 bundle，与 node-pty 原生扩展、web 静态资源一起
 封进 Node SEA（Single Executable Application）blob，注入 nodejs.org 官方 Node
 二进制。首次运行把原生扩展与静态资源解压到 `<dataDir>/runtime/<内容哈希>/`，
