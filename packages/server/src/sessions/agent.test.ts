@@ -9,13 +9,15 @@ import {
 } from "./agent.js";
 
 describe("launcherBody（POSIX）", () => {
-  it("经登录 shell 跑 CLI，退出后 exec 回登录 shell", () => {
+  it("经交互登录 shell 跑 CLI，退出后 exec 回登录 shell", () => {
     const body = launcherBody("claude", "posix", "/bin/zsh");
     assert.ok(body.startsWith("#!/bin/sh\n"));
     assert.ok(body.includes("command -v claude"));
-    // 两处 shell：-l -c 外壳，与 CLI 退出后接手的那个
+    // 两处 shell：-i -l -c 外壳，与 CLI 退出后接手的那个
     assert.equal(body.split("'/bin/zsh'").length - 1, 2);
-    assert.ok(body.includes("-l -c "));
+    // 纯 -l -c 是非交互，zsh 不读 .zshrc，远端 ~/.local/bin 里的 claude 会找不到
+    assert.ok(body.includes("-i -l -c "));
+    assert.equal(body.split("-i -l").length - 1, 2);
   });
 
   it("绝不读 $SHELL——Windows 那条路径上它就是这个脚本自己，会递归", () => {
@@ -32,7 +34,7 @@ describe("launcherBody（POSIX）", () => {
   it("CLI 缺失只提示不失败：仍然落回 shell", () => {
     const body = launcherBody("codex", "posix", "/bin/sh");
     assert.ok(body.includes("else printf"));
-    assert.ok(body.includes("exec '/bin/sh' -l"));
+    assert.ok(body.includes("exec '/bin/sh' -i -l"));
   });
 });
 

@@ -21,9 +21,9 @@
 ## 实现要点
 
 - **纯函数在 `sessions/agent.ts`**：可执行名、脚本文件名、脚本内容、远端写入命令，全部零 I/O 且有单测；落盘分两条（本地 `node:fs`，远端一条 `mkdir && printf && chmod` / PowerShell `Set-Content`），照 `askpass/install.ts` 的样子写。
-- **POSIX 脚本走 `<shell> -l -c`**：登录 shell 才有用户 `~/.profile` / `~/.zshrc` 里的 PATH——`claude` 装在 `~/.local/bin`、`grok` 装在 `~/.grok/bin`、npm 全局装在 nvm 的 shim 目录，全靠它。
+- **POSIX 脚本走 `<shell> -i -l -c`**（三个 flag 分开写）：`-l` 读登录文件，`-i` 才读 `~/.zshrc`。纯 `zsh -l -c` 是 login 非交互，不读 `.zshrc`——PATH / nvm / `~/.local/bin` 写在那里的远端 Linux 上，表现为新建 Claude 会话变成「找不到 CLI、落回普通 shell」。macOS 本地往往靠 `/etc/zprofile` 的 path_helper 蒙对，所以本机验过不等于远端没问题。
 - **Windows 脚本（.cmd）的提示语只用 ASCII**：cmd 按 OEM 代码页读脚本文件，中文在默认 936 / 437 下必乱码。
 - **会话默认名跟着 agent 走**（`Claude 2` / `Grok 3` / `Terminal 1`），前端仍可传 `name` 覆盖。
 - **认不出的 `agent` 一律当普通终端**：宁可开出一个 shell，也不要 400 掉一个新会话。
 - **前端三处共用一份菜单**（`useActions.newSessionItems`）：侧栏 checkout 行的 ＋、命令面板、窗口标题栏右键的「在右侧新建终端」。侧栏的会话行按 `session.agent` 换图标（Bot / SquareTerminal）。
-- **未验证**：只在 macOS 本地宿主上真机验过（claude 2.1.270、grok 1.0.30 都能正常开出 TUI，codex 本机没装、走的是"找不到就提示并落回 shell"那条）。SSH 远端与 Windows 远端的脚本写入只有单测，没有真机跑过。
+- **未验证**：Windows 远端的脚本写入只有单测，没有真机跑过。POSIX SSH 远端验过：`zsh -l -c` 找不到 `~/.local/bin/claude`（PATH 在 `.zshrc`），改 `-i -l -c` 后 `command -v claude` 与 `claude --version` 都成功。

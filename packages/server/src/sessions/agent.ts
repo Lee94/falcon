@@ -52,20 +52,27 @@ export function localLauncherDir(dataDir: string): string {
 }
 
 /**
- * POSIX 启动脚本。真正干活的是 `<shell> -l -c`：
- * 登录 shell 才有用户 ~/.profile / ~/.zshrc 里的 PATH，CLI 装在 ~/.local/bin、
- * ~/.grok/bin、nvm 的 shim 目录下的情况全靠它。
+ * POSIX 启动脚本。真正干活的是 `<shell> -i -l -c`（三个 flag 分开写，
+ * 短参合并各 shell 不一，见 loginEnv.ts）：
+ *
+ * - `-l` 登录：读 ~/.profile / ~/.zprofile、/etc/zprofile（path_helper）。
+ * - `-i` 交互：不少人把 PATH / nvm / `~/.local/bin` 写在 ~/.zshrc 且用
+ *   `[[ $- == *i* ]]` 守卫。纯 `zsh -l -c` 是 login 非交互，不读 .zshrc——
+ *   远端 Linux 上 claude 装在 ~/.local/bin、PATH 只在 .zshrc 里，表现为
+ *   「新建 Claude 会话变成一句找不到、再落回普通 shell」。
+ *
+ * CLI 退出后 exec 的那个也带 `-i -l`，不靠「有 TTY 就算交互」这层默认。
  */
 function posixLauncherBody(agent: SessionAgent, shell: string): string {
   const bin = agentBin(agent);
   const inner =
     `if command -v ${bin} >/dev/null 2>&1; then ${bin}; ` +
     `else printf '%s\\n' ${quotePosix(`falcon: PATH 里找不到 ${bin}，先装好它再开这种会话。`)} >&2; fi; ` +
-    `exec ${quotePosix(shell)} -l`;
+    `exec ${quotePosix(shell)} -i -l`;
   return [
     "#!/bin/sh",
     `# falcon: 以 ${bin} 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。`,
-    `exec ${quotePosix(shell)} -l -c ${quotePosix(inner)}`,
+    `exec ${quotePosix(shell)} -i -l -c ${quotePosix(inner)}`,
     "",
   ].join("\n");
 }
