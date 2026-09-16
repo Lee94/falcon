@@ -412,7 +412,8 @@ export interface WorktreeFormPreset {
   name: string;
   branch: string;
   mode: "new-branch";
-  startPoint: "HEAD";
+  /** 缺省用源项目的 defaultWorktreeBranch，再缺省 HEAD */
+  startPoint: string;
 }
 
 /** 侧栏最后一层的 +N −M。只给脏工作区留条目，干净的不占位置 */

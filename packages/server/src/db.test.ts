@@ -30,6 +30,7 @@ function projectRow(overrides: Partial<ProjectRow> = {}): ProjectRow {
     worktree_created_by_mojito: null,
     worktree_archived_at: null,
     multi_repos: null,
+    default_worktree_branch: null,
     ...overrides,
   };
 }
@@ -108,6 +109,22 @@ describe("updateMultiRepos", () => {
     );
     db.updateMultiRepos("p1", [{ dir: "/tmp/evil" }]);
     assert.deepEqual(Db.parseMultiRepos(db.getProject("p1")!), stored);
+  });
+});
+
+describe("defaultWorktreeBranch", () => {
+  it("round-trips through insert / toProject / update", () => {
+    const db = tmpDb();
+    db.insertProject(projectRow({ default_worktree_branch: "main" }));
+    assert.equal(Db.toProject(db.getProject("p1")!).defaultWorktreeBranch, "main");
+
+    const row = db.getProject("p1")!;
+    db.updateProject({ ...row, default_worktree_branch: "origin/main" });
+    assert.equal(db.getProject("p1")!.default_worktree_branch, "origin/main");
+
+    db.updateProject({ ...db.getProject("p1")!, default_worktree_branch: null });
+    assert.equal(db.getProject("p1")!.default_worktree_branch, null);
+    assert.equal(Db.toProject(db.getProject("p1")!).defaultWorktreeBranch, undefined);
   });
 });
 

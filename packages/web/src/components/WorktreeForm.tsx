@@ -58,7 +58,9 @@ function SingleWorktreeForm({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const sourceName = useApp((s) => s.projects.find((p) => p.id === sourceId)?.name ?? "");
+  const project = useApp((s) => s.projects.find((p) => p.id === sourceId));
+  const sourceName = project?.name ?? "";
+  const defaultStart = project?.defaultWorktreeBranch || "HEAD";
   const refreshProjects = useApp((s) => s.refreshProjects);
   const refreshHosts = useApp((s) => s.refreshHosts);
   const toast = useApp((s) => s.toast);
@@ -67,7 +69,7 @@ function SingleWorktreeForm({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<"new-branch" | "existing-branch">(preset?.mode ?? "new-branch");
   const [newBranch, setNewBranch] = useState(preset?.branch ?? "");
-  const [startPoint, setStartPoint] = useState<string>(preset?.startPoint ?? "HEAD");
+  const [startPoint, setStartPoint] = useState<string>(preset?.startPoint ?? defaultStart);
   const [pickedRef, setPickedRef] = useState("");
   const [name, setName] = useState(preset?.name ?? "");
   const [dir, setDir] = useState("");
@@ -82,14 +84,23 @@ function SingleWorktreeForm({
       .then((r) => {
         if (!alive) return;
         setInfo(r);
+        const preferred = project?.defaultWorktreeBranch;
+        const prefer = preferred
+          ? r.branches.find(
+              (b) =>
+                !b.checkedOutAt && (b.name === preferred || b.localName === preferred)
+            )
+          : undefined;
         const first = r.branches.find((b) => !b.remote && !b.checkedOutAt);
-        setPickedRef(first?.name ?? r.branches.find((b) => !b.checkedOutAt)?.name ?? "");
+        setPickedRef(
+          prefer?.name ?? first?.name ?? r.branches.find((b) => !b.checkedOutAt)?.name ?? ""
+        );
       })
       .catch((err) => alive && setLoadError((err as Error).message));
     return () => {
       alive = false;
     };
-  }, [sourceId]);
+  }, [sourceId, project?.defaultWorktreeBranch]);
 
   const local = useMemo(() => (info?.branches ?? []).filter((b) => !b.remote), [info]);
   const remote = useMemo(() => (info?.branches ?? []).filter((b) => b.remote), [info]);
@@ -157,6 +168,10 @@ function SingleWorktreeForm({
   const startPointLabel = info?.headBranch
     ? t("worktree.startPointHead", { ref: info.headBranch })
     : t("worktree.startPointDetached", { sha: info?.headSha ?? "?" });
+  const startPointKnown =
+    startPoint === "HEAD" ||
+    local.some((b) => b.name === startPoint) ||
+    remote.some((b) => b.name === startPoint);
 
   const branchOption = (b: RepoBranch) => (
     <SelectItem key={b.name} value={b.name} disabled={!!b.checkedOutAt}>
@@ -227,6 +242,9 @@ function SingleWorktreeForm({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="HEAD">{startPointLabel}</SelectItem>
+                    {!startPointKnown && startPoint && (
+                      <SelectItem value={startPoint}>{startPoint}</SelectItem>
+                    )}
                     {local.length > 0 && (
                       <SelectGroup>
                         <SelectLabel>{t("worktree.groupLocal")}</SelectLabel>
@@ -399,7 +417,12 @@ function MultiWorktreeForm({
           err: true,
         };
       case "create":
-        return { text: t("multi.willCreate"), err: false };
+        return {
+          text: project.defaultWorktreeBranch
+            ? t("multi.willCreateFrom", { ref: project.defaultWorktreeBranch })
+            : t("multi.willCreate"),
+          err: false,
+        };
       case "checkout":
         return { text: t("multi.willCheckout"), err: false };
       case "branch-exists":

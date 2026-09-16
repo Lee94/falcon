@@ -127,6 +127,11 @@ export interface Project {
   worktree?: WorktreeInfo;
   /** 存在 ⇔ 这是多仓库项目（容器或批量派生的产物），见 MultiRepoInfo */
   multi?: MultiRepoInfo;
+  /**
+   * 派生附属项目时，新建分支默认从这个引用切出（本地名或 `origin/main` 这种远程名）。
+   * 空 = 当前 HEAD。只对源项目有意义；附属项目不能再派生。
+   */
+  defaultWorktreeBranch?: string;
   createdAt: number;
 }
 
@@ -155,6 +160,8 @@ export interface ProjectInput {
    * 派生产物的成员清单是删除目标，写入路径必须不可达（与 worktree 四列同罪）。
    */
   repos?: string[];
+  /** 派生时新建分支的默认基点。空 / 省略 = 当前 HEAD */
+  defaultWorktreeBranch?: string;
 }
 
 // ============ Worktree（附属项目） ============
@@ -305,10 +312,12 @@ export interface MultiRepoInfo {
 export const MULTI_REPO_MAX = 16;
 
 /**
- * 批量派生请求。与 WorktreeInput 刻意分开：没有 startPoint——每个成员的基点
- * 恒为**各自的** HEAD，跨成员挑一个共同基点没有意义；多一个 auto 模式，
- * 因为统一分支名跨 N 个仓库时"有的仓库已有这条分支、有的没有"是常态，
- * 没有 auto，全有或全无的语义会让混合状态永远派生不出来。
+ * 批量派生请求。与 WorktreeInput 刻意分开：请求体没有 startPoint——每个成员
+ * 的基点缺省是各自的 HEAD。源项目若配置了 defaultWorktreeBranch，服务端在
+ * 新建分支时用那个引用当共同基点（跨成员的 main / master 是常态；跨成员挑
+ * 某一个成员的 HEAD 才没有意义）。多一个 auto 模式，因为统一分支名跨 N 个
+ * 仓库时"有的仓库已有这条分支、有的没有"是常态，没有 auto，全有或全无的
+ * 语义会让混合状态永远派生不出来。
  */
 export interface MultiWorktreeInput {
   /** 留空则用分支名 */

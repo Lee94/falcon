@@ -118,7 +118,8 @@ function memberError(err: unknown, memberDir: string, leftover: string[] = []): 
 export async function deriveMultiWorktrees(
   host: GitHost,
   container: { name: string; members: MultiRepoMember[] },
-  input: MultiWorktreeInput
+  input: MultiWorktreeInput,
+  opts?: { startPoint?: string }
 ): Promise<MultiDeriveOutcome> {
   const git = host.git;
   const kind = host.kind;
@@ -282,6 +283,8 @@ export async function deriveMultiWorktrees(
         return addWorktree(host, mains[i]!, {
           mode: modes[i]!,
           branch,
+          // 只对 new-branch 有意义；existing-branch 路径会忽略
+          startPoint: opts?.startPoint,
           dir: targets[i]!,
         });
       });

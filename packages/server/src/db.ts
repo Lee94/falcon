@@ -45,6 +45,11 @@ export interface ProjectRow {
    * 派生行上它是删除目标清单——写入路径与 worktree 四列同样必须不可达。
    */
   multi_repos: string | null;
+  /**
+   * 源项目的派生基点。空 = 用当前 HEAD。不是删除护栏的判据，所以走 updateProject。
+   * 附属项目恒为 null（不能再派生）。
+   */
+  default_worktree_branch: string | null;
 }
 
 export interface SessionRow {
@@ -236,6 +241,8 @@ export class Db {
     this.addColumn("projects", "host_id", "TEXT");
     // 多仓库项目的成员清单（JSON）。容器与派生产物共用，语义由 source_project_id 判别
     this.addColumn("projects", "multi_repos", "TEXT");
+    // 源项目的派生基点。空 = HEAD。不是 worktree 四列那种删除护栏，用户可改。
+    this.addColumn("projects", "default_worktree_branch", "TEXT");
 
     // 端口转发规则挂在项目上（走该项目的 SshLink），不是解引用主机。
     // 不写 REFERENCES：本仓库外键从未开启，级联在应用层手写。
@@ -380,6 +387,7 @@ export class Db {
           }
         : undefined,
       multi: members ? { repos: members } : undefined,
+      defaultWorktreeBranch: row.default_worktree_branch ?? undefined,
       createdAt: row.created_at,
     };
   }
@@ -398,9 +406,9 @@ export class Db {
   insertProject(row: ProjectRow) {
     this.stmt(
         `INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos)
+           source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, default_worktree_branch)
          VALUES (@id, @name, @type, @working_dir, @shell, @ssh_host, @ssh_port, @ssh_username, @ssh_auth_method, @ssh_key_path, @ssh_secret_enc, @host_id, @created_at,
-           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito, @worktree_archived_at, @multi_repos)`
+           @source_project_id, @worktree_branch, @worktree_repo_dir, @worktree_created_by_mojito, @worktree_archived_at, @multi_repos, @default_worktree_branch)`
       )
       .run(bindRow(row));
   }
@@ -413,12 +421,13 @@ export class Db {
    * 去 rm -rf 任意路径"。附属项目的这些属性在创建时定死，此后只读；
    * ProjectInput 里也没有对应字段，所以这条从类型层面就够不到。
    * multi_repos 在派生行上是删除目标清单，同罪；容器改成员走 updateMultiRepos。
+   * default_worktree_branch 不在此列：它只是派生时的默认基点，改了改不了任何路径。
    */
   updateProject(row: ProjectRow) {
     this.stmt(
         `UPDATE projects SET name=@name, working_dir=@working_dir, shell=@shell, ssh_host=@ssh_host, ssh_port=@ssh_port,
          ssh_username=@ssh_username, ssh_auth_method=@ssh_auth_method, ssh_key_path=@ssh_key_path, ssh_secret_enc=@ssh_secret_enc,
-         host_id=@host_id
+         host_id=@host_id, default_worktree_branch=@default_worktree_branch
          WHERE id=@id`
       )
       .run(bindRow(row));

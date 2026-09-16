@@ -65,6 +65,9 @@ export function ProjectForm({
   /** 派生产物的成员由派生决定：只读展示，提交不带 repos（PUT 会拒） */
   const reposReadonly = Boolean(existing?.multi && existing.worktree);
   const [shell, setShell] = useState(existing?.shell ?? "");
+  const [defaultWorktreeBranch, setDefaultWorktreeBranch] = useState(
+    existing?.defaultWorktreeBranch ?? ""
+  );
   const [shellCustom, setShellCustom] = useState(false);
   const [shells, setShells] = useState<ShellsInfo | null>(null);
   const [hostId, setHostId] = useState(existing?.hostId ?? preset?.hostId ?? "");
@@ -182,6 +185,7 @@ export function ProjectForm({
       type,
       workingDir: next.workingDir || undefined,
       shell: shell || undefined,
+      defaultWorktreeBranch: defaultWorktreeBranch.trim() || undefined,
       // 派生产物的成员由派生决定，不上送（PUT 会拒）；容器每次全量替换
       repos: kind === "multi" && !reposReadonly ? cleanRepos : undefined,
       hostId: type === "ssh" && hostId ? hostId : undefined,
@@ -608,6 +612,22 @@ export function ProjectForm({
             )}
           </div>
         </Field>
+
+        {!existing?.worktree && (
+          <Field
+            label={t("project.defaultWorktreeBranch")}
+            htmlFor="project-wt-base"
+            hint={t("project.defaultWorktreeBranchHint")}
+          >
+            <Input
+              id="project-wt-base"
+              className="font-mono"
+              value={defaultWorktreeBranch}
+              onChange={(e) => setDefaultWorktreeBranch(e.target.value)}
+              placeholder={t("project.defaultWorktreeBranchPlaceholder")}
+            />
+          </Field>
+        )}
 
         {error && <p className="text-[13px] text-destructive">{error}</p>}
 

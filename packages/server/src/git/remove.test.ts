@@ -27,6 +27,7 @@ function row(overrides: Partial<ProjectRow> = {}): ProjectRow {
     worktree_created_by_mojito: 1,
     worktree_archived_at: null,
     multi_repos: null,
+    default_worktree_branch: null,
     ...overrides,
   };
 }

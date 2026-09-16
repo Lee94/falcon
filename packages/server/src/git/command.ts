@@ -790,6 +790,21 @@ export function isSafeRefName(name: string): boolean {
 }
 
 /**
+ * 项目上「默认 worktree 基点」的归一化。空 / 字面量 HEAD 都表示用当前 HEAD（存 null）。
+ * 形状不对或会改 argv 语义的名字返回 error，让路由 400，而不是静默丢掉用户填的值。
+ */
+export function parseDefaultWorktreeBranch(
+  raw: unknown
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw == null || raw === "") return { ok: true, value: null };
+  if (typeof raw !== "string") return { ok: false, error: "默认 worktree 基点必须是字符串" };
+  const s = raw.trim();
+  if (!s || s === "HEAD") return { ok: true, value: null };
+  if (!isSafeRefName(s)) return { ok: false, error: "默认 worktree 基点不合法" };
+  return { ok: true, value: s };
+}
+
+/**
  * `origin/main` + remotes `["origin"]` → `"main"`。多个远程时取最长前缀，
  * 避免 `origin` 把 `origin-backup/x` 切错。对不上或切完不合法就 null。
  */

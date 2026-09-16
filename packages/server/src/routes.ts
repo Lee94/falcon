@@ -77,7 +77,7 @@ import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
 import { ForwardConflictError } from "./sessions/forward.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
-import { parseGitOpInput } from "./git/command.js";
+import { parseDefaultWorktreeBranch, parseGitOpInput } from "./git/command.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
 import { gitHostFor, hostKeyOf } from "./git/host.js";
 import { repoLockKey, withRepoLock } from "./git/lock.js";
@@ -448,6 +448,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     } else {
       return "未知项目类型";
     }
+    const base = parseDefaultWorktreeBranch(input.defaultWorktreeBranch);
+    if (!base.ok) return base.error;
     return null;
   }
 
@@ -531,6 +533,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
     const ssh = resolveProjectSsh(input);
     if (!ssh.ok) return reply.code(400).send({ error: ssh.error });
+    const defaultBranch = parseDefaultWorktreeBranch(input.defaultWorktreeBranch);
+    const defaultWorktreeBranch = defaultBranch.ok ? defaultBranch.value : null;
 
     const row: ProjectRow = {
       id: crypto.randomUUID(),
@@ -550,6 +554,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       // repos 有值 ⇒ 多仓库容器。派生产物的 multi_repos（带 repoDir 的那种）
       // 同样只能经 worktrees 端点进来
       multi_repos: repos.repos ? JSON.stringify(repos.repos.map((dir) => ({ dir }))) : null,
+      default_worktree_branch: defaultWorktreeBranch,
     };
     db.insertProject(row);
     return Db.toProject(row);
@@ -590,6 +595,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
     const ssh = resolveProjectSsh(input, existing);
     if (!ssh.ok) return reply.code(400).send({ error: ssh.error });
+    const defaultBranch = parseDefaultWorktreeBranch(input.defaultWorktreeBranch);
+    const defaultWorktreeBranch = defaultBranch.ok ? defaultBranch.value : null;
 
     const row: ProjectRow = {
       ...existing,
@@ -597,6 +604,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       working_dir: input.workingDir?.trim() || null,
       shell: input.shell?.trim() || null,
       ...ssh.ssh,
+      // 附属项目不能再派生，这项对它们没有意义；仍照单全收，避免 PUT 形状因行而异
+      default_worktree_branch: defaultWorktreeBranch,
     };
     db.updateProject(row);
     if (container && repos.repos) {
@@ -1623,7 +1632,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if ((input as { startPoint?: unknown }).startPoint != null) {
       return reply
         .code(400)
-        .send({ error: "批量派生不支持指定基点，每个成员以各自的 HEAD 为基点" });
+        .send({ error: "批量派生不支持在请求里指定基点，新建分支用源项目的默认 worktree 基点" });
     }
     const branch = input.branch?.trim();
     if (!branch) return reply.code(400).send({ error: "分支名不能为空" });
@@ -1633,7 +1642,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       const outcome = await deriveMultiWorktrees(
         host,
         { name: src.name, members },
-        { ...input, branch }
+        { ...input, branch },
+        { startPoint: src.default_worktree_branch || undefined }
       );
       const row: ProjectRow = {
         id: crypto.randomUUID(),
@@ -1657,6 +1667,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         worktree_created_by_mojito: 1,
         worktree_archived_at: null,
         multi_repos: JSON.stringify(outcome.members),
+        default_worktree_branch: null,
       };
 
       // 集中目录清单：给 coding agent 的结构说明（见 virtualdir.ts）。写失败**不回滚**：
@@ -1814,6 +1825,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         worktree_created_by_mojito: 1,
         worktree_archived_at: null,
         multi_repos: null,
+        default_worktree_branch: null,
       };
       db.insertProject(row);
       return Db.toProject(row);

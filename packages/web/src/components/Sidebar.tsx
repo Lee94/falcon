@@ -727,11 +727,12 @@ async function openWorktreeFromMeegle(
   if (!detail) toast.warning(t("meegle.dropKeyFallback"), { id: notification });
   else if (notification !== undefined) toast.dismiss(notification);
   const key = detail ? meegleDisplayKey(detail) : payload.id;
+  const source = useApp.getState().projects.find((p) => p.id === sourceId);
   useApp.getState().openWorktreeForm(sourceId, {
     name: key,
     branch: key,
     mode: "new-branch",
-    startPoint: "HEAD",
+    startPoint: source?.defaultWorktreeBranch || "HEAD",
   });
 }
 

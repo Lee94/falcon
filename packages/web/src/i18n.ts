@@ -58,6 +58,10 @@ const zh = {
       shellAuto: "默认（自动侦测）",
       shellAutoDetected: "默认（{{shell}}）",
       shellCustom: "自定义…",
+      defaultWorktreeBranch: "默认 worktree 基点",
+      defaultWorktreeBranchHint:
+        "派生附属项目时，新建分支默认从这个引用切出。留空则用当前 HEAD。",
+      defaultWorktreeBranchPlaceholder: "HEAD",
       host: "主机",
       port: "端口",
       username: "用户名",
@@ -197,6 +201,7 @@ const zh = {
       modeAuto: "自动",
       memberOk: "可派生 · {{head}}",
       willCreate: "将从 HEAD 新建",
+      willCreateFrom: "将从 {{ref}} 新建",
       willCheckout: "将检出已有分支",
       memberBranchExists: "同名分支已存在（自动模式可检出它）",
       memberBranchMissing: "没有这条分支",

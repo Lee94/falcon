@@ -15,6 +15,7 @@ import {
   dropCommitArgs,
   fetchArgs,
   isSafeRefName,
+  parseDefaultWorktreeBranch,
   logPageArgs,
   mergeArgs,
   lsFilesIndexArgs,
@@ -414,6 +415,31 @@ describe("isSafeRefName", () => {
     assert.equal(isSafeRefName("a~1"), false);
     assert.equal(isSafeRefName("foo bar"), false);
     assert.equal(isSafeRefName("a^{}"), false);
+  });
+});
+
+describe("parseDefaultWorktreeBranch", () => {
+  it("treats empty and HEAD as unset", () => {
+    assert.deepEqual(parseDefaultWorktreeBranch(undefined), { ok: true, value: null });
+    assert.deepEqual(parseDefaultWorktreeBranch(null), { ok: true, value: null });
+    assert.deepEqual(parseDefaultWorktreeBranch(""), { ok: true, value: null });
+    assert.deepEqual(parseDefaultWorktreeBranch("  "), { ok: true, value: null });
+    assert.deepEqual(parseDefaultWorktreeBranch("HEAD"), { ok: true, value: null });
+    assert.deepEqual(parseDefaultWorktreeBranch(" HEAD "), { ok: true, value: null });
+  });
+
+  it("keeps a safe ref name", () => {
+    assert.deepEqual(parseDefaultWorktreeBranch("main"), { ok: true, value: "main" });
+    assert.deepEqual(parseDefaultWorktreeBranch(" origin/main "), {
+      ok: true,
+      value: "origin/main",
+    });
+  });
+
+  it("rejects names that would change argv meaning", () => {
+    assert.equal(parseDefaultWorktreeBranch("a..b").ok, false);
+    assert.equal(parseDefaultWorktreeBranch("-n").ok, false);
+    assert.equal(parseDefaultWorktreeBranch(1).ok, false);
   });
 });
 
