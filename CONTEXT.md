@@ -24,6 +24,10 @@ _Avoid_: Connection、Server、Remote（太宽）、Host（单独说会和 Zelli
 挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink，与终端会话独立。本地转发（ssh -L）在 falcon 后端监听、打到远端能到达的地址；远端转发（ssh -R）在远端监听、打回后端能到达的地址。规则持久化，启用中的隧道在链路断开后随 SSH 一起重连。
 _Avoid_: Tunnel（太宽）、Proxy / SOCKS（v1 不做动态转发）
 
+**Public Share（公网发布）**:
+把项目里一个 HTTP 服务经 Cloudflare Quick Tunnel 发到公网，得到一条临时的 `*.trycloudflare.com` URL。本地项目直接打本机端口；SSH 项目可选打本机或远端（远端先经 SSH 本地转发接到后端，再由本机的 cloudflared 发出去）。cloudflared 只在 falcon 后端本机跑，不往远端宿主机装。URL 随进程重启而变，不持久化。v1 只做 Quick Tunnel（无需 Cloudflare 账号），只代理 HTTP。
+_Avoid_: Tunnel（太宽，且 Port Forward 已占用「隧道」口语）、ngrok（具体竞品）、Share（太宽）
+
 **Worktree Project（附属项目）**:
 从一个 Project 派生出来的 Project，工作目录是源项目所在 git 仓库的一棵 worktree，检出另一条分支。与源项目共用同一台宿主机与同一份连接配置（local / ssh 跟着源项目走），但拥有独立的名称、独立的会话、独立的生命周期。目录由 falcon 在**仓库根**的同级创建（`<仓库基名>-<分支 slug>`），也只有 falcon 自己建的目录才会在删除时被清理。只能从普通 Project 派生一层。多仓库容器批量派生出的附属项目同时也是多仓库项目（multi 与 worktree 同时存在），删除按成员清单逐棵清理。
 _Avoid_: 子项目（暗示嵌套，实际是磁盘上的同级）、分支项目（附属项目不等于分支，分支可以换）、Clone / 副本（只有一份仓库，什么都没有复制）

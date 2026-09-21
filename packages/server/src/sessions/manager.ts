@@ -49,6 +49,7 @@ import {
 } from "./local.js";
 import { writeLocalLauncher } from "./agent.js";
 import { ForwardManager } from "./forward.js";
+import { ShareManager } from "./share.js";
 import { SshLink } from "./ssh.js";
 import {
   decideViewerAttach,
@@ -182,6 +183,7 @@ export class SessionManager {
   private sizeFlush = new Map<string, NodeJS.Timeout>();
 
   readonly forwards: ForwardManager;
+  readonly shares: ShareManager;
 
   constructor(
     private db: Db,
@@ -190,10 +192,12 @@ export class SessionManager {
     readonly askpass: AskpassHub
   ) {
     this.db.recoverSessionsOnStartup();
-    this.forwards = new ForwardManager(db, (projectId) => {
+    const linkFor = (projectId: string) => {
       const project = this.db.getProject(projectId);
       return project?.type === "ssh" ? this.getLink(project) : null;
-    });
+    };
+    this.forwards = new ForwardManager(db, linkFor);
+    this.shares = new ShareManager(db, dataDir, linkFor);
   }
 
   /**
@@ -276,7 +280,10 @@ export class SessionManager {
     if (!link) {
       link = new SshLink(project, this.db, this.secrets);
       link.on("down", () => this.handleLinkDown(project.id));
-      link.on("up", () => void this.forwards.onLinkUp(project.id));
+      link.on("up", () => {
+        void this.forwards.onLinkUp(project.id);
+        void this.shares.onLinkUp(project.id);
+      });
       this.links.set(project.id, link);
     } else {
       link.updateProject(project);
@@ -286,6 +293,7 @@ export class SessionManager {
 
   disposeLink(projectId: string) {
     this.forwards.stopAll(projectId);
+    this.shares.stopAll(projectId);
     this.links.get(projectId)?.dispose();
     this.links.delete(projectId);
     const rec = this.reconnects.get(projectId);
@@ -1137,12 +1145,15 @@ export class SessionManager {
       }
     }
     this.forwards.onLinkDown(projectId);
-    if (this.forwards.hasEnabled(projectId)) this.scheduleReconnect(projectId);
+    this.shares.onLinkDown(projectId);
+    if (this.forwards.hasEnabled(projectId) || this.shares.hasRemoteEnabled(projectId)) {
+      this.scheduleReconnect(projectId);
+    }
   }
 
   /**
    * SSH 断线自动重连：指数退避。
-   * 有待接回的持久会话，或还有启用的端口转发，就坚持——不再要求有人正在看。
+   * 有待接回的持久会话，或还有启用的端口转发 / 远端公网发布，就坚持——不再要求有人正在看。
    */
   private scheduleReconnect(projectId: string) {
     const existing = this.reconnects.get(projectId);
@@ -1160,7 +1171,8 @@ export class SessionManager {
           !e.terminating &&
           this.db.getSession(e.sessionId)?.state === "unverified"
       );
-    const wantsForward = () => this.forwards.hasEnabled(projectId);
+    const wantsForward = () =>
+      this.forwards.hasEnabled(projectId) || this.shares.hasRemoteEnabled(projectId);
 
     const tick = async () => {
       state.timer = null;

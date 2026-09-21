@@ -13,6 +13,7 @@ import type {
   SshHost,
   MeeglePin,
   MeeglePinKind,
+  ShareOrigin,
 } from "@falcon/shared";
 
 export interface ProjectRow {
@@ -88,6 +89,17 @@ export interface SshForwardRow {
   kind: string;
   bind_host: string;
   bind_port: number;
+  dest_host: string;
+  dest_port: number;
+  enabled: number;
+  created_at: number;
+}
+
+export interface PublicShareRow {
+  id: string;
+  project_id: string;
+  name: string | null;
+  origin: string;
   dest_host: string;
   dest_port: number;
   enabled: number;
@@ -254,6 +266,19 @@ export class Db {
         kind TEXT NOT NULL,
         bind_host TEXT NOT NULL,
         bind_port INTEGER NOT NULL,
+        dest_host TEXT NOT NULL,
+        dest_port INTEGER NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    // 公网发布规则挂在项目上（ADR 0014）。URL 是运行时事实，不入库。
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS public_shares (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT,
+        origin TEXT NOT NULL,
         dest_host TEXT NOT NULL,
         dest_port INTEGER NOT NULL,
         enabled INTEGER NOT NULL,
@@ -540,6 +565,7 @@ export class Db {
 
   deleteProject(id: string) {
     this.stmt("DELETE FROM ssh_forwards WHERE project_id = ?").run(id);
+    this.stmt("DELETE FROM public_shares WHERE project_id = ?").run(id);
     this.stmt("DELETE FROM sessions WHERE project_id = ?").run(id);
     this.stmt("DELETE FROM projects WHERE id = ?").run(id);
   }
@@ -625,6 +651,69 @@ export class Db {
 
   deleteForward(id: string) {
     this.stmt("DELETE FROM ssh_forwards WHERE id = ?").run(id);
+  }
+
+  // ---- 公网发布 ----
+
+  listShares(projectId: string): PublicShareRow[] {
+    return this.stmt("SELECT * FROM public_shares WHERE project_id = ? ORDER BY created_at ASC")
+      .all(projectId) as unknown as PublicShareRow[];
+  }
+
+  listEnabledShareProjectIds(): string[] {
+    const rows = this.stmt("SELECT DISTINCT project_id FROM public_shares WHERE enabled = 1")
+      .all() as { project_id: string }[];
+    return rows.map((r) => r.project_id);
+  }
+
+  getShare(id: string): PublicShareRow | undefined {
+    return this.stmt("SELECT * FROM public_shares WHERE id = ?").get(id) as
+      | PublicShareRow
+      | undefined;
+  }
+
+  findShareDest(
+    projectId: string,
+    origin: ShareOrigin,
+    destHost: string,
+    destPort: number,
+    exceptId?: string
+  ): PublicShareRow | undefined {
+    if (exceptId) {
+      return this.stmt(
+          `SELECT * FROM public_shares
+           WHERE project_id = ? AND origin = ? AND dest_host = ? AND dest_port = ? AND id != ?`
+        )
+        .get(projectId, origin, destHost, destPort, exceptId) as PublicShareRow | undefined;
+    }
+    return this.stmt(
+        `SELECT * FROM public_shares
+         WHERE project_id = ? AND origin = ? AND dest_host = ? AND dest_port = ?`
+      )
+      .get(projectId, origin, destHost, destPort) as PublicShareRow | undefined;
+  }
+
+  insertShare(row: PublicShareRow) {
+    this.stmt(
+        `INSERT INTO public_shares
+           (id, project_id, name, origin, dest_host, dest_port, enabled, created_at)
+         VALUES
+           (@id, @project_id, @name, @origin, @dest_host, @dest_port, @enabled, @created_at)`
+      )
+      .run(bindRow(row));
+  }
+
+  updateShare(row: PublicShareRow) {
+    this.stmt(
+        `UPDATE public_shares SET name=@name, origin=@origin, dest_host=@dest_host,
+           dest_port=@dest_port, enabled=@enabled
+         WHERE id=@id`
+      )
+      .run(bindRow(row));
+  }
+
+  deleteShare(id: string) {
+    this.stmt("DELETE FROM public_shares WHERE id = ?").run(id);
   }
 
   // ---- 飞书项目面板的固定列表 ----

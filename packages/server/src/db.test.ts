@@ -144,3 +144,24 @@ describe("guardDirsOf", () => {
     assert.deepEqual(Db.guardDirsOf(projectRow({ multi_repos: "broken" })), ["/w"]);
   });
 });
+
+describe("deleteProject", () => {
+  it("cascades public shares with the project", () => {
+    const db = tmpDb();
+    db.insertProject(projectRow());
+    db.insertShare({
+      id: "s1",
+      project_id: "p1",
+      name: null,
+      origin: "local",
+      dest_host: "127.0.0.1",
+      dest_port: 5173,
+      enabled: 1,
+      created_at: 1,
+    });
+    assert.equal(db.getShare("s1")?.dest_port, 5173);
+    db.deleteProject("p1");
+    assert.equal(db.getShare("s1"), undefined);
+    assert.equal(db.getProject("p1"), undefined);
+  });
+});

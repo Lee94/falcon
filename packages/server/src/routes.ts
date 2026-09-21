@@ -22,6 +22,8 @@ import type {
   MultiWorktreeInput,
   PortForward,
   PortForwardInput,
+  PublicShare,
+  PublicShareInput,
   ProjectInput,
   RepoInfo,
   SessionWithProject,
@@ -76,6 +78,7 @@ import {
 import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
 import { ForwardConflictError } from "./sessions/forward.js";
+import { ShareConflictError } from "./sessions/share.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { parseDefaultWorktreeBranch, parseGitOpInput } from "./git/command.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
@@ -1982,6 +1985,63 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     } catch (err) {
       const msg = (err as Error).message;
       if (msg === "转发规则不存在") return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  // ---- 公网发布（Cloudflare Quick Tunnel） ----
+
+  /**
+   * 规则挂在项目上（本地 / SSH 都行）。远端目标走该项目的 SshLink 接到本机，
+   * cloudflared 永远在 falcon 后端本机跑。环境事实写在每条规则的 state/error 里。
+   */
+  app.get("/api/projects/:id/shares", async (req, reply): Promise<PublicShare[] | void> => {
+    const { id } = req.params as { id: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    return manager.shares.list(id);
+  });
+
+  app.post("/api/projects/:id/shares", async (req, reply): Promise<PublicShare | void> => {
+    const { id } = req.params as { id: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      return await manager.shares.create(project, (req.body ?? {}) as PublicShareInput);
+    } catch (err) {
+      if (err instanceof ShareConflictError) return reply.code(409).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.patch("/api/projects/:id/shares/:shareId", async (req, reply): Promise<PublicShare | void> => {
+    const { id, shareId } = req.params as { id: string; shareId: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      return await manager.shares.update(
+        project,
+        shareId,
+        (req.body ?? {}) as Partial<PublicShareInput>
+      );
+    } catch (err) {
+      if (err instanceof ShareConflictError) return reply.code(409).send({ error: err.message });
+      const msg = (err as Error).message;
+      if (msg === "发布规则不存在") return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.delete("/api/projects/:id/shares/:shareId", async (req, reply) => {
+    const { id, shareId } = req.params as { id: string; shareId: string };
+    const project = db.getProject(id);
+    if (!project) return reply.code(404).send({ error: "项目不存在" });
+    try {
+      await manager.shares.remove(project, shareId);
+      return { ok: true };
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg === "发布规则不存在") return reply.code(404).send({ error: msg });
       return reply.code(400).send({ error: msg });
     }
   });

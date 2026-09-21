@@ -18,6 +18,8 @@ import type {
   PasteImageResult,
   PortForward,
   PortForwardInput,
+  PublicShare,
+  PublicShareInput,
   Project,
   ProjectInput,
   RepoInfo,
@@ -321,6 +323,14 @@ export const api = {
     request<PortForward>("PATCH", `/api/projects/${projectId}/forwards/${id}`, patch),
   deleteForward: (projectId: string, id: string) =>
     request<{ ok: true }>("DELETE", `/api/projects/${projectId}/forwards/${id}`),
+  listShares: (projectId: string) =>
+    request<PublicShare[]>("GET", `/api/projects/${projectId}/shares`),
+  createShare: (projectId: string, input: PublicShareInput) =>
+    request<PublicShare>("POST", `/api/projects/${projectId}/shares`, input),
+  updateShare: (projectId: string, id: string, patch: Partial<PublicShareInput>) =>
+    request<PublicShare>("PATCH", `/api/projects/${projectId}/shares/${id}`, patch),
+  deleteShare: (projectId: string, id: string) =>
+    request<{ ok: true }>("DELETE", `/api/projects/${projectId}/shares/${id}`),
   /** 派生：单仓库项目吃 WorktreeInput，多仓库容器吃 MultiWorktreeInput（服务端按项目分流） */
   createWorktree: (projectId: string, input: WorktreeInput | MultiWorktreeInput) =>
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),

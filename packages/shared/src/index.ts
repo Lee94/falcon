@@ -112,6 +112,41 @@ export interface PortForwardInput {
   enabled?: boolean;
 }
 
+// ============ Public Share（公网发布） ============
+
+/**
+ * 把项目里一个 HTTP 服务经 Cloudflare Quick Tunnel 发到公网。
+ *
+ * local：目标在 falcon 后端本机（本地项目只能走这条）。
+ * remote：目标在 SSH 项目的远端，先经 SSH 本地转发接到后端，再由本机 cloudflared 发出去。
+ * cloudflared 永远只在 falcon 后端本机跑。
+ */
+export type ShareOrigin = "local" | "remote";
+
+export interface PublicShare {
+  id: string;
+  projectId: string;
+  /** 可选备注，如 vite / storybook */
+  name?: string;
+  origin: ShareOrigin;
+  destHost: string;
+  destPort: number;
+  enabled: boolean;
+  state: ForwardState;
+  /** 当前这条 Quick Tunnel 的公网 URL。进程一重启就会变，不持久化。 */
+  publicUrl?: string;
+  error?: string;
+  createdAt: number;
+}
+
+export interface PublicShareInput {
+  name?: string;
+  origin: ShareOrigin;
+  destHost?: string;
+  destPort: number;
+  enabled?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
