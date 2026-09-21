@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import {
   WHEEL_GESTURE_GAP_MS,
   WheelAxisLock,
+  innerTakesWheel,
+  overflowCanConsume,
+  overflowScrollable,
   revealScrollLeft,
   settleTarget,
   wheelDeltaPx,
+  type OverflowBox,
 } from "./termCanvas.js";
 
 describe("WheelAxisLock", () => {
@@ -72,6 +76,90 @@ describe("wheelDeltaPx", () => {
     assert.equal(wheelDeltaPx(7, 0), 7);
     assert.equal(wheelDeltaPx(3, 1, 16), 48);
     assert.equal(wheelDeltaPx(-1, 2, 16, 640), -640);
+  });
+});
+
+function box(over: Partial<OverflowBox> = {}): OverflowBox {
+  return {
+    overflowX: "hidden",
+    overflowY: "hidden",
+    scrollLeft: 0,
+    scrollTop: 0,
+    clientWidth: 100,
+    clientHeight: 100,
+    scrollWidth: 100,
+    scrollHeight: 100,
+    ...over,
+  };
+}
+
+describe("overflowScrollable", () => {
+  it("auto / scroll / overlay 可滚，其余不行", () => {
+    assert.equal(overflowScrollable("auto"), true);
+    assert.equal(overflowScrollable("scroll"), true);
+    assert.equal(overflowScrollable("overlay"), true);
+    assert.equal(overflowScrollable("hidden"), false);
+    assert.equal(overflowScrollable("visible"), false);
+    assert.equal(overflowScrollable("clip"), false);
+  });
+});
+
+describe("overflowCanConsume", () => {
+  it("overflow hidden / 内容没溢出都不接", () => {
+    assert.equal(overflowCanConsume(box({ overflowY: "hidden", scrollHeight: 400 }), "y", 10), false);
+    assert.equal(overflowCanConsume(box({ overflowY: "auto" }), "y", 10), false);
+    assert.equal(overflowCanConsume(box({ overflowX: "auto", scrollWidth: 400 }), "y", 10), false);
+  });
+
+  it("delta 为 0 不接", () => {
+    assert.equal(overflowCanConsume(box({ overflowY: "auto", scrollHeight: 400 }), "y", 0), false);
+  });
+
+  it("纵向：还能往下 / 往上才接，贴边不接", () => {
+    const y = box({ overflowY: "auto", scrollHeight: 400 });
+    assert.equal(overflowCanConsume(y, "y", 10), true);
+    assert.equal(overflowCanConsume(y, "y", -10), false);
+    assert.equal(overflowCanConsume({ ...y, scrollTop: 50 }, "y", -10), true);
+    assert.equal(overflowCanConsume({ ...y, scrollTop: 300 }, "y", 10), false);
+    assert.equal(overflowCanConsume({ ...y, scrollTop: 300 }, "y", -10), true);
+  });
+
+  it("横向同理", () => {
+    const x = box({ overflowX: "scroll", scrollWidth: 400 });
+    assert.equal(overflowCanConsume(x, "x", 10), true);
+    assert.equal(overflowCanConsume(x, "x", -10), false);
+    assert.equal(overflowCanConsume({ ...x, scrollLeft: 20 }, "x", -10), true);
+    assert.equal(overflowCanConsume({ ...x, scrollLeft: 300 }, "x", 10), false);
+  });
+
+  it("亚像素贴边当不能滚", () => {
+    assert.equal(
+      overflowCanConsume(box({ overflowY: "auto", scrollHeight: 100.4, scrollTop: 0 }), "y", 10),
+      false
+    );
+    assert.equal(
+      overflowCanConsume(
+        box({ overflowX: "auto", scrollWidth: 400, clientWidth: 100, scrollLeft: 0.4 }),
+        "x",
+        -10
+      ),
+      false
+    );
+  });
+});
+
+describe("innerTakesWheel", () => {
+  it("从内到外任一还能滚就归内部", () => {
+    const inner = box({ overflowY: "hidden" });
+    const scroller = box({ overflowY: "auto", scrollHeight: 400 });
+    assert.equal(innerTakesWheel([inner, scroller], "y", 10), true);
+    assert.equal(innerTakesWheel([inner], "y", 10), false);
+  });
+
+  it("只认被问的那根轴", () => {
+    const y = box({ overflowY: "auto", scrollHeight: 400 });
+    assert.equal(innerTakesWheel([y], "x", 10), false);
+    assert.equal(innerTakesWheel([y], "y", 10), true);
   });
 });
 

@@ -33,6 +33,6 @@
 - **把手是绝对定位的窄条，压在缝上**（列缝 `CANVAS_GAP + 8px` 宽，窗口缝 8px 高），`after` 伪元素画那条线：hover 灰、拖动中 primary。拖的过程只改内存里的 `basis`，松手才 `persistLayout()`——每帧同步写 localStorage 会卡。
 - **拖拽的监听常驻 window**：pointerdown 只写 ref 不触发重渲，把监听挂在"拖拽中"这个 state 上就永远等不到第一次 pointermove。超过 4px 才算拖（否则是点了下标题栏），拖动期间 `body.pane-dragging` 把 canvas / iframe 的 pointer-events 关掉——终端会把 pointermove 当选区拖拽吃掉，窗口会"粘"在原地。
 - **持久化只落终端**：`columns` 里的文件 / 差异窗口与 pending id 都活不过刷新，落盘时过滤掉；恢复时列 id 现生成（它只在一次会话内当 React key 用），再与 `tabs` 对账一遍。认不出形状的排布整条丢掉，退回"每个会话一列"。
-- **画布的滚动层没变**：横向滚动仍然自己接管（`lib/termCanvas.ts` 的 `WheelAxisLock`、手势结束后的吸附、把活动列滚进视口），只是列的位置改从 frames 拿。
+- **画布的滚动层没变**：横向滚动仍然自己接管（`lib/termCanvas.ts` 的 `WheelAxisLock`、手势结束后的吸附、把活动列滚进视口），只是列的位置改从 frames 拿。窗口内部（文件 / 差异的 overflow-auto、xterm viewport）还能沿手势方向滚时，滚轮让给内部，画布不抢。
 - **无头截图的坑**：拖完之后在 `deviceScaleFactor: 2` 的无头 Chrome 截图里，终端的字看着被放大了 1.4 倍——那是截图缩放的伪影，同一份代码在 dpr=1 下截图完全正常，页面里读到的 `canvas.width / canvas.getBoundingClientRect().width` 也一直等于 dpr。排查终端渲染问题时不要只信 dpr=2 的截图。
 - **这些地方刻意没改**：移动壳（`MobileShell` 仍是全屏单终端 + 抽屉切换）；总览与项目空页仍是盖在画布上的覆盖层（它们没有"并排"的语义）；`tab.*` 那批 i18n key 名保留（文案说的仍是同一件事，改 key 名只会让翻译对不上）。

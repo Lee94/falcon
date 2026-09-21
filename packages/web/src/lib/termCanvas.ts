@@ -1,6 +1,7 @@
 /**
- * 工作画布（WorkCanvas）的滚动层纯函数：滚轮手势的轴向锁定、手势结束后的对齐目标、
- * 把活动列滚进视口。列宽与窗口高度这类排布几何在 lib/layout.ts，DOM 与事件接线在组件里。
+ * 工作画布（WorkCanvas）的滚动层纯函数：滚轮手势的轴向锁定、内部滚动容器是否
+ * 还能接这次滚轮、手势结束后的对齐目标、把活动列滚进视口。列宽与窗口高度这类
+ * 排布几何在 lib/layout.ts，DOM 与事件接线在组件里。
  */
 
 /**
@@ -67,6 +68,59 @@ export function wheelDeltaPx(delta: number, deltaMode: number, lineSize = 16, pa
   if (deltaMode === DOM_DELTA_LINE) return delta * lineSize;
   if (deltaMode === DOM_DELTA_PAGE) return delta * pageSize;
   return delta;
+}
+
+/**
+ * 窗口内部滚动容器的溢出度量。画布自己接管横向滚轮（见 WorkCanvas），但文件 /
+ * 差异是原生 overflow-auto，xterm 的 viewport 也是 DOM 滚动条——这些还能沿手势
+ * 方向滚时，事件必须留给内部，画布不能在 capture 里截走，也不能在 bubble 里
+ * preventDefault（那会取消内部的默认滚动）。
+ *
+ * overflow 用计算值：`visible` 的块即使 scrollWidth 更大也滚不动，不能当滚动容器。
+ */
+export interface OverflowBox {
+  overflowX: string;
+  overflowY: string;
+  scrollLeft: number;
+  scrollTop: number;
+  clientWidth: number;
+  clientHeight: number;
+  scrollWidth: number;
+  scrollHeight: number;
+}
+
+/** 贴边容差：亚像素 / 缩放会让 max - scrollLeft 剩 0.5px，不能当成还能滚 */
+const OVERFLOW_EDGE_PX = 1;
+
+/** `overlay` 是 Chrome 旧值，按可滚处理 */
+export function overflowScrollable(value: string): boolean {
+  return value === "auto" || value === "scroll" || value === "overlay";
+}
+
+/**
+ * 这个容器还能沿 axis 消化这次滚轮吗。正 delta = 增加 scroll 偏移（右 / 下），
+ * 与 WheelEvent 同号。
+ */
+export function overflowCanConsume(box: OverflowBox, axis: WheelAxis, deltaPx: number): boolean {
+  if (!Number.isFinite(deltaPx) || deltaPx === 0) return false;
+  if (axis === "x") {
+    if (!overflowScrollable(box.overflowX)) return false;
+    const max = box.scrollWidth - box.clientWidth;
+    if (max <= OVERFLOW_EDGE_PX) return false;
+    return deltaPx < 0 ? box.scrollLeft > OVERFLOW_EDGE_PX : box.scrollLeft < max - OVERFLOW_EDGE_PX;
+  }
+  if (!overflowScrollable(box.overflowY)) return false;
+  const max = box.scrollHeight - box.clientHeight;
+  if (max <= OVERFLOW_EDGE_PX) return false;
+  return deltaPx < 0 ? box.scrollTop > OVERFLOW_EDGE_PX : box.scrollTop < max - OVERFLOW_EDGE_PX;
+}
+
+/** 从内到外，任一容器还能沿该轴滚就归内部 */
+export function innerTakesWheel(boxes: OverflowBox[], axis: WheelAxis, deltaPx: number): boolean {
+  for (const box of boxes) {
+    if (overflowCanConsume(box, axis, deltaPx)) return true;
+  }
+  return false;
 }
 
 /**

@@ -33,9 +33,12 @@ import {
 import {
   WHEEL_GESTURE_GAP_MS,
   WheelAxisLock,
+  innerTakesWheel,
+  overflowScrollable,
   revealScrollLeft,
   settleTarget,
   wheelDeltaPx,
+  type OverflowBox,
 } from "../lib/termCanvas.js";
 import { connLabel, sshBar } from "../lib/hostColor.js";
 import { sessionTitle } from "../lib/sessionTitle.js";
@@ -68,6 +71,47 @@ type Frame = { x: number; y: number; width: number; height: number } | null;
 
 /** 窗口在列里的位置决定它裁哪几个角（列的圆角由底下那层岛出） */
 type Round = "all" | "top" | "bottom" | "none";
+
+/**
+ * 从事件目标往上走到画布（不含画布本身），收集可能接滚轮的内部容器。
+ *
+ * xterm 的滚动条在 `.xterm-viewport`，是 canvas 的兄弟不是祖先——滚轮打在
+ * screen/canvas 上时祖先链里没有它，得从 `.xterm` 再查一次。
+ */
+function innerOverflowBoxes(target: EventTarget | null, root: HTMLElement): OverflowBox[] {
+  const boxes: OverflowBox[] = [];
+  const seen = new Set<HTMLElement>();
+  const push = (el: HTMLElement) => {
+    if (el === root || seen.has(el)) return;
+    seen.add(el);
+    const style = getComputedStyle(el);
+    if (!overflowScrollable(style.overflowX) && !overflowScrollable(style.overflowY)) return;
+    boxes.push({
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      scrollLeft: el.scrollLeft,
+      scrollTop: el.scrollTop,
+      clientWidth: el.clientWidth,
+      clientHeight: el.clientHeight,
+      scrollWidth: el.scrollWidth,
+      scrollHeight: el.scrollHeight,
+    });
+  };
+
+  let node: Node | null = target instanceof Node ? target : null;
+  if (node && node.nodeType !== Node.ELEMENT_NODE) node = (node as CharacterData).parentElement;
+
+  while (node instanceof HTMLElement && node !== root) {
+    push(node);
+    if (node.classList.contains("xterm-screen") || node.classList.contains("xterm")) {
+      const host = node.classList.contains("xterm") ? node : node.parentElement;
+      const vp = host?.querySelector<HTMLElement>(":scope > .xterm-viewport");
+      if (vp) push(vp);
+    }
+    node = node.parentElement;
+  }
+  return boxes;
+}
 
 // ---------------- 标题栏 ----------------
 
@@ -310,6 +354,8 @@ function PaneSplitter({
  *   在终端上根本走不到；触控板两指滑动又几乎没有纯横向的事件；
  * - 所以按手势定轴：横向手势整段在 capture 阶段截下来改 scrollLeft，终端一条都
  *   看不见；纵向手势原样交给终端，只在 bubble 阶段兜住它没吃掉的事件；
+ * - 窗口内部（文件 / 差异的 overflow-auto、xterm 的 viewport）还能沿手势方向
+ *   滚时让给内部：capture 不截、bubble 也不 preventDefault（否则会取消原生滚动）；
  * - 不用 CSS scroll-snap：手动改 scrollLeft 会被当作程序化滚动立刻吸附。
  */
 export function WorkCanvas() {
@@ -476,19 +522,27 @@ export function WorkCanvas() {
     const onCapture = (e: WheelEvent) => {
       const axis = lock.classify({ deltaX: e.deltaX, deltaY: e.deltaY, timeStamp: e.timeStamp });
       if (axis !== "x") return;
+      const dx = wheelDeltaPx(e.deltaX, e.deltaMode, 16, el.clientWidth);
+      // 文件长行、差异、xterm viewport 自己还能横滚时别抢——内部优先
+      if (innerTakesWheel(innerOverflowBoxes(e.target, el), "x", dx)) return;
       // 横向手势整段归画布。没得滚也要 preventDefault：macOS 两指横滑在没人接的
       // 时候是浏览器的前进 / 后退手势，一不小心就把整个工作台翻走了
       e.stopPropagation();
       e.preventDefault();
       if (!scrollable()) return;
-      el.scrollLeft += wheelDeltaPx(e.deltaX, e.deltaMode, 16, el.clientWidth);
+      el.scrollLeft += dx;
       scheduleSettle();
     };
     // 纵向手势：终端没吃掉的事件（滚到头了、标题栏上、空隙里）会落到浏览器原生
-    // 滚动，事件里混着的 deltaX 就会让画布横漂几像素。画布上没有别的纵向可滚，
-    // 拦掉不损失任何东西
+    // 滚动，事件里混着的 deltaX 就会让画布横漂几像素。文件 / 差异是原生
+    // overflow-auto，default action 就是滚它们——内部还能滚时不能 preventDefault。
     const onBubble = (e: WheelEvent) => {
-      if (!e.defaultPrevented && scrollable()) e.preventDefault();
+      if (e.defaultPrevented || !scrollable()) return;
+      const boxes = innerOverflowBoxes(e.target, el);
+      const dx = wheelDeltaPx(e.deltaX, e.deltaMode, 16, el.clientWidth);
+      const dy = wheelDeltaPx(e.deltaY, e.deltaMode, 16, el.clientHeight);
+      if (innerTakesWheel(boxes, "x", dx) || innerTakesWheel(boxes, "y", dy)) return;
+      e.preventDefault();
     };
     el.addEventListener("wheel", onCapture, { capture: true, passive: false });
     el.addEventListener("wheel", onBubble, { passive: false });
@@ -605,7 +659,7 @@ export function WorkCanvas() {
         // -inset-px + p-px 是给岛的 1px 描边与投影留的呼吸位：列顶满高度，画布又是
         // 滚动容器（overflow 一裁两轴都裁），不留这 1px 的话画在 border box 外沿的
         // 东西全被切掉。往外扩 1px 再往里收 1px，列的尺寸与位置分毫不动。
-        "absolute -inset-px overflow-x-auto overflow-y-hidden overscroll-x-contain p-px [scrollbar-width:thin]",
+        "absolute -inset-px overflow-x-auto overflow-y-hidden overscroll-x-contain p-px",
         !showCanvas && "pointer-events-none"
       )}
     >
