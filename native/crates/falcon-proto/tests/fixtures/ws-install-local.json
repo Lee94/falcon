@@ -1,0 +1,17 @@
+[
+  {
+    "type": "stage",
+    "stage": "verifying",
+    "attempt": 1,
+    "command": "mkdir -p '/private/tmp/fal-fx-data/bin' '/private/tmp/fal-fx-data/zellij/sock' '/private/tmp/fal-fx-data/zellij/config' '/private/tmp/fal-fx-data/zellij/data' '/private/tmp/fal-fx-data/zellij/cache' '/private/tmp/fal-fx-data/zellij/layouts' && printf %s 'layout\n' > '/private/tmp/fal-fx-data/zellij/layouts/falcon.kdl' && printf %s 'default_mode \"locked\"\npane_frames false\nsimplified_ui true\nsession_serialization false\nscroll_buffer_size 10000\nmouse_mode true\nshow_startup_tips false\nshow_release_notes false\nkeybinds clear-defaults=true {\n}\n' > '/private/tmp/fal-fx-data/zellij/config/config.kdl'"
+  },
+  {
+    "type": "stage",
+    "stage": "verifying",
+    "attempt": 1,
+    "command": "'/private/tmp/fal-fx-data/bin/zellij-0.44.3' --version"
+  },
+  {
+    "type": "done"
+  }
+]

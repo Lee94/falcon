@@ -51,9 +51,8 @@ async function main() {
   // 本地 PTY 基底环境（login shell 解析 + locale 兜底）预热：
   // 结果按进程缓存，先跑起来，首个本地会话就不用等 login shell 启动
   void resolveLocalBaseEnv();
-  // 启用中的转发 / 公网发布是服务，后端重启后应自己把隧道拉起来，不等用户再开一次面板
-  void manager.forwards.restoreEnabled();
-  void manager.shares.restoreEnabled();
+  // 启用中的中转（转发 / 公网发布）是服务，后端重启后应自己把隧道拉起来，不等用户再去设置里点
+  manager.restoreRelays();
   // 持久会话在 DB 里被标成 unverified：自动接回，不要等用户挨个点
   void manager.resumeUnverified();
 

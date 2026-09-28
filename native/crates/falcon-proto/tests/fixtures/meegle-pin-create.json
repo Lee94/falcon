@@ -1,0 +1,11 @@
+{
+  "id": "e45b750c-aabc-421e-8476-358a80a14912",
+  "kind": "workitem",
+  "spaceKey": "fixture_space",
+  "spaceName": "Fixture",
+  "targetId": "1001",
+  "typeKey": "story",
+  "label": "登录页",
+  "url": "https://project.feishu.cn/fixture/story/detail/1001",
+  "createdAt": 1790240191794
+}

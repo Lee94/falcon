@@ -1,0 +1,12 @@
+{
+  "kind": "posix",
+  "default": "/bin/zsh",
+  "shells": [
+    "/bin/zsh",
+    "/bin/bash",
+    "/bin/sh",
+    "/bin/dash",
+    "/bin/ksh",
+    "/bin/tcsh"
+  ]
+}

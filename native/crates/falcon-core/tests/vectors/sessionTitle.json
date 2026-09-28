@@ -1,0 +1,73 @@
+{
+  "_about": [
+    "lib/sessionTitle.ts 的共享测试向量（设计文档 §6.3）：两个客户端必须给同一个会话起同一个名字。",
+    "ts 字段是 packages/web/src/lib/sessionTitle.test.ts 里的 describe > it；同一个 it 里有几句断言就拆成几条。",
+    "session 只写用到的字段（name / title / agent / projectId）；缺省的字段就是 TS 里的 undefined。",
+    "shellLabel 的 shell：字段缺省 = undefined，null = null，两者 TS 都测了。"
+  ],
+  "sessionTitle": [
+    {
+      "ts": "sessionTitle > prefers the hand-given name over everything",
+      "session": { "name": "打包机", "title": "pnpm build", "agent": "claude" },
+      "expected": "打包机"
+    },
+    {
+      "ts": "sessionTitle > falls back to the foreground command, then to the agent's CLI name",
+      "session": { "name": "", "title": "pnpm dev", "agent": "claude" },
+      "expected": "pnpm dev"
+    },
+    {
+      "ts": "sessionTitle > falls back to the foreground command, then to the agent's CLI name",
+      "session": { "name": "", "agent": "codex" },
+      "expected": "codex"
+    },
+    {
+      "ts": "sessionTitle > returns null for an idle unnamed shell — callers pick their own fallback",
+      "session": { "name": "" },
+      "expected": null
+    },
+    {
+      "ts": "sessionTitle > returns null for an idle unnamed shell — callers pick their own fallback",
+      "session": { "name": "   ", "title": "  " },
+      "expected": null
+    }
+  ],
+  "shellLabel": [
+    { "ts": "shellLabel > takes the command name off either separator", "shell": "/bin/zsh", "expected": "zsh" },
+    {
+      "ts": "shellLabel > takes the command name off either separator",
+      "shell": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "expected": "pwsh"
+    },
+    { "ts": "shellLabel > takes the command name off either separator", "shell": "bash", "expected": "bash" },
+    { "ts": "shellLabel > falls back when the project leaves the shell to the platform default", "expected": "shell" },
+    { "ts": "shellLabel > falls back when the project leaves the shell to the platform default", "shell": null, "expected": "shell" },
+    { "ts": "shellLabel > falls back when the project leaves the shell to the platform default", "shell": "/bin/", "expected": "shell" }
+  ],
+  "sessionLabel": [
+    {
+      "ts": "sessionLabel > falls back to the project's shell for an idle unnamed session",
+      "projects": [{ "id": "p1", "shell": "/bin/fish" }, { "id": "p2" }],
+      "session": { "name": "", "projectId": "p1" },
+      "expected": "fish"
+    },
+    {
+      "ts": "sessionLabel > falls back to the project's shell for an idle unnamed session",
+      "projects": [{ "id": "p1", "shell": "/bin/fish" }, { "id": "p2" }],
+      "session": { "name": "", "projectId": "p2" },
+      "expected": "shell"
+    },
+    {
+      "ts": "sessionLabel > falls back to the project's shell for an idle unnamed session",
+      "projects": [{ "id": "p1", "shell": "/bin/fish" }, { "id": "p2" }],
+      "session": { "name": "", "projectId": "gone" },
+      "expected": "shell"
+    },
+    {
+      "ts": "sessionLabel > never reaches the shell fallback once there is a title",
+      "projects": [{ "id": "p1", "shell": "/bin/fish" }, { "id": "p2" }],
+      "session": { "name": "", "title": "pnpm dev", "projectId": "p1" },
+      "expected": "pnpm dev"
+    }
+  ]
+}

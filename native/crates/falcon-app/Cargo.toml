@@ -1,0 +1,51 @@
+[package]
+name = "falcon-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "falcon-app"
+path = "src/main.rs"
+
+[features]
+default = ["webview"]
+# HTML 预览的原生 WebView（src/panels/file_view/html.rs）。关掉时退成"在浏览器中打开"的提示
+webview = ["dep:wry"]
+# 脚本化驱动（FALCON_AUTOMATE，见 src/automation.rs）。单开它不带 test-support，
+# 压测（frames 步骤）量到的才是真实 release 的开销
+automation = []
+# 调试截图：打开 gpui-kit 的 test-support 才有 Window::render_to_image（Metal 回读，
+# 锁屏时也能拿到画面）。见 src/snapshot.rs。test-support 会给元素多包一层观测，别拿它压测
+snapshot = ["automation", "gpui-kit/test-support", "dep:image"]
+
+[build-dependencies]
+woff2 = { package = "woff2-patched", version = "0.4" }
+bytes = "1"
+
+[dependencies]
+falcon-proto.workspace = true
+falcon-client.workspace = true
+falcon-term.workspace = true
+falcon-theme.workspace = true
+falcon-core.workspace = true
+gpui-kit = { workspace = true, features = ["tree-sitter-languages"] }
+# HTML 预览（ADR 0007）：直接用 wry 自己挂 WKWebView。版本跟 gpui-wry =0.6.6 锁的那份一致
+# （它是 gpui-kit 同批发布的 WebView 封装，但不重新导出 wry，接口也不够我们控导航 / 下载），
+# 升级 gpui-kit 时照它的 Cargo.toml 一起换
+wry = { package = "lb-wry", version = "=0.53.3", optional = true }
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+tokio.workspace = true
+rust-i18n = "4"
+url.workspace = true
+directories = "6"
+# 本地时区（文件修改时间、提交时间）：跨平台地按"那一刻"取偏移，夏令时两边都对
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }

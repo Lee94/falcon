@@ -24,6 +24,7 @@ import type {
   PortForwardInput,
   PublicShare,
   PublicShareInput,
+  RelayList,
   ProjectInput,
   RepoInfo,
   SessionWithProject,
@@ -77,8 +78,8 @@ import {
 } from "./paste.js";
 import type { SecretBox } from "./crypto.js";
 import type { Auth } from "./auth.js";
-import { ForwardConflictError } from "./sessions/forward.js";
-import { ShareConflictError } from "./sessions/share.js";
+import { ForwardNotFoundError } from "./sessions/forward.js";
+import { ShareNotFoundError } from "./sessions/share.js";
 import { hostAsProject, type SessionManager } from "./sessions/manager.js";
 import { parseDefaultWorktreeBranch, parseGitOpInput } from "./git/command.js";
 import { gitErrorLine, WorktreeError, worktreeFailureText } from "./git/error.js";
@@ -177,6 +178,18 @@ const WORKTREE_STATUS: Record<WorktreeFailure, number> = {
   "worktree-add-failed": 502,
   "link-failed": 502,
 };
+
+/** 主机的连接配置变没变（显示名不算）。变了才需要换掉它的 SshLink */
+function connChanged(a: SshHostRow, b: SshHostRow): boolean {
+  return (
+    a.host !== b.host ||
+    a.port !== b.port ||
+    a.username !== b.username ||
+    a.auth_method !== b.auth_method ||
+    a.key_path !== b.key_path ||
+    a.secret_enc !== b.secret_enc
+  );
+}
 
 
 export interface RouteDeps {
@@ -760,8 +773,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     };
     db.updateHost(row);
     db.updateProjectsFromHost(row);
-    // 凭据可能已经变了，丢掉浏览用的缓存连接
-    manager.disposeHostLink(id);
+    // 连接配置变了才换链路：只改显示名也拆一遍会让这台主机上的中转无端断一下
+    if (connChanged(existing, row)) {
+      await manager.disposeHostLink(id, { keepRelays: true });
+    }
     return Db.toSshHost(row, db.countProjectsByHost(id));
   });
 
@@ -773,8 +788,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (n > 0) {
       return reply.code(409).send({ error: `有 ${n} 个项目正在使用该主机，请先改绑或删除这些项目` });
     }
+    // 中转挂在主机上（ADR 0016），主机没了规则无处可挂：先停隧道再连同规则一起删
+    await manager.disposeHostLink(id, { keepRelays: false });
+    db.deleteRelaysOfHost(id);
     db.deleteHost(id);
-    manager.disposeHostLink(id);
     return { ok: true };
   });
 
@@ -1934,115 +1951,78 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     return Db.toProject(db.getProject(id)!);
   });
 
-  // ---- SSH 端口转发 ----
+  // ---- 中转：端口转发 + 公网发布（挂本机 / SSH Host，ADR 0016） ----
 
   /**
-   * 规则挂在项目上，隧道走该项目的 SshLink。
-   * 本地项目 400；环境事实（连不上、端口占用）写在每条规则的 state/error 里，
-   * 列表本身不因某条隧道失败而 5xx。
+   * 设置里的「中转」页一次拉全。环境事实（连不上、端口占用、cloudflared 起不来）
+   * 写在每条规则的 state/error 里，列表本身不因某条隧道失败而 5xx。
    */
-  app.get("/api/projects/:id/forwards", async (req, reply): Promise<PortForward[] | void> => {
-    const { id } = req.params as { id: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
-    if (project.type !== "ssh") return reply.code(400).send({ error: "只有 SSH 项目能做端口转发" });
-    return manager.forwards.list(id);
+  app.get("/api/relays", async (): Promise<RelayList> => {
+    return { forwards: manager.forwards.list(), shares: manager.shares.list() };
   });
 
-  app.post("/api/projects/:id/forwards", async (req, reply): Promise<PortForward | void> => {
-    const { id } = req.params as { id: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
+  /**
+   * 同端口的规则可以建多条；带 enabled 的写入会顺手停掉同端口的其它规则
+   * （见 relaySpec），所以前端写完要重拉整张列表，不能只替换这一行。
+   */
+  app.post("/api/forwards", async (req, reply): Promise<PortForward | void> => {
     try {
-      return await manager.forwards.create(project, (req.body ?? {}) as PortForwardInput);
+      return await manager.forwards.create((req.body ?? {}) as PortForwardInput);
     } catch (err) {
-      if (err instanceof ForwardConflictError) return reply.code(409).send({ error: err.message });
+      if (err instanceof ForwardNotFoundError) return reply.code(404).send({ error: err.message });
       return reply.code(400).send({ error: (err as Error).message });
     }
   });
 
-  app.patch("/api/projects/:id/forwards/:fwdId", async (req, reply): Promise<PortForward | void> => {
-    const { id, fwdId } = req.params as { id: string; fwdId: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
-    try {
-      return await manager.forwards.update(project, fwdId, (req.body ?? {}) as Partial<PortForwardInput>);
-    } catch (err) {
-      if (err instanceof ForwardConflictError) return reply.code(409).send({ error: err.message });
-      const msg = (err as Error).message;
-      if (msg === "转发规则不存在") return reply.code(404).send({ error: msg });
-      return reply.code(400).send({ error: msg });
-    }
-  });
-
-  app.delete("/api/projects/:id/forwards/:fwdId", async (req, reply) => {
-    const { id, fwdId } = req.params as { id: string; fwdId: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
-    try {
-      await manager.forwards.remove(project, fwdId);
-      return { ok: true };
-    } catch (err) {
-      const msg = (err as Error).message;
-      if (msg === "转发规则不存在") return reply.code(404).send({ error: msg });
-      return reply.code(400).send({ error: msg });
-    }
-  });
-
-  // ---- 公网发布（Cloudflare Quick Tunnel） ----
-
-  /**
-   * 规则挂在项目上（本地 / SSH 都行）。远端目标走该项目的 SshLink 接到本机，
-   * cloudflared 永远在 falcon 后端本机跑。环境事实写在每条规则的 state/error 里。
-   */
-  app.get("/api/projects/:id/shares", async (req, reply): Promise<PublicShare[] | void> => {
+  app.patch("/api/forwards/:id", async (req, reply): Promise<PortForward | void> => {
     const { id } = req.params as { id: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
-    return manager.shares.list(id);
-  });
-
-  app.post("/api/projects/:id/shares", async (req, reply): Promise<PublicShare | void> => {
-    const { id } = req.params as { id: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
     try {
-      return await manager.shares.create(project, (req.body ?? {}) as PublicShareInput);
+      return await manager.forwards.update(id, (req.body ?? {}) as Partial<PortForwardInput>);
     } catch (err) {
-      if (err instanceof ShareConflictError) return reply.code(409).send({ error: err.message });
+      if (err instanceof ForwardNotFoundError) return reply.code(404).send({ error: err.message });
       return reply.code(400).send({ error: (err as Error).message });
     }
   });
 
-  app.patch("/api/projects/:id/shares/:shareId", async (req, reply): Promise<PublicShare | void> => {
-    const { id, shareId } = req.params as { id: string; shareId: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
+  app.delete("/api/forwards/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
     try {
-      return await manager.shares.update(
-        project,
-        shareId,
-        (req.body ?? {}) as Partial<PublicShareInput>
-      );
+      await manager.forwards.remove(id);
+      return { ok: true };
     } catch (err) {
-      if (err instanceof ShareConflictError) return reply.code(409).send({ error: err.message });
-      const msg = (err as Error).message;
-      if (msg === "发布规则不存在") return reply.code(404).send({ error: msg });
-      return reply.code(400).send({ error: msg });
+      if (err instanceof ForwardNotFoundError) return reply.code(404).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
     }
   });
 
-  app.delete("/api/projects/:id/shares/:shareId", async (req, reply) => {
-    const { id, shareId } = req.params as { id: string; shareId: string };
-    const project = db.getProject(id);
-    if (!project) return reply.code(404).send({ error: "项目不存在" });
+  /** cloudflared 永远在 falcon 后端本机跑；挂 SSH Host 的先经主机链路接到本机 */
+  app.post("/api/shares", async (req, reply): Promise<PublicShare | void> => {
     try {
-      await manager.shares.remove(project, shareId);
+      return await manager.shares.create((req.body ?? {}) as PublicShareInput);
+    } catch (err) {
+      if (err instanceof ShareNotFoundError) return reply.code(404).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.patch("/api/shares/:id", async (req, reply): Promise<PublicShare | void> => {
+    const { id } = req.params as { id: string };
+    try {
+      return await manager.shares.update(id, (req.body ?? {}) as Partial<PublicShareInput>);
+    } catch (err) {
+      if (err instanceof ShareNotFoundError) return reply.code(404).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+
+  app.delete("/api/shares/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      await manager.shares.remove(id);
       return { ok: true };
     } catch (err) {
-      const msg = (err as Error).message;
-      if (msg === "发布规则不存在") return reply.code(404).send({ error: msg });
-      return reply.code(400).send({ error: msg });
+      if (err instanceof ShareNotFoundError) return reply.code(404).send({ error: err.message });
+      return reply.code(400).send({ error: (err as Error).message });
     }
   });
 

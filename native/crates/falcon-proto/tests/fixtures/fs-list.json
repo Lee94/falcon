@@ -1,0 +1,22 @@
+{
+  "path": "/private/tmp/fal-fx-repo",
+  "parent": "/private/tmp",
+  "home": "/Users/fay",
+  "roots": [
+    "/"
+  ],
+  "entries": [
+    {
+      "name": "assets",
+      "path": "/private/tmp/fal-fx-repo/assets"
+    },
+    {
+      "name": "src",
+      "path": "/private/tmp/fal-fx-repo/src"
+    },
+    {
+      "name": ".git",
+      "path": "/private/tmp/fal-fx-repo/.git"
+    }
+  ]
+}

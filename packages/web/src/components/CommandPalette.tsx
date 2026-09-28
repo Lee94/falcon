@@ -212,7 +212,6 @@ export function CommandPalette() {
     const filesOn = rightVisible && rightPanel === "files";
     const changesOn = rightVisible && rightPanel === "changes";
     const gitOn = rightVisible && rightPanel === "git";
-    const forwardOn = rightVisible && rightPanel === "forward";
     const meegleOn = rightVisible && rightPanel === "meegle";
     actionItems.push({
       key: `>${t("palette.toggleFilesOn")} ${t("palette.toggleFilesOff")}`,
@@ -236,11 +235,11 @@ export function CommandPalette() {
       run: () => store.toggleRightPanel("git"),
     });
     actionItems.push({
-      key: `>${t("palette.toggleForwardOn")} ${t("palette.toggleForwardOff")}`,
-      label: forwardOn ? t("palette.toggleForwardOn") : t("palette.toggleForwardOff"),
-      meta: chord("toggleForwardPanel"),
+      key: `>${t("palette.openRelays")}`,
+      label: t("palette.openRelays"),
+      meta: chord("openRelays"),
       icon: ArrowLeftRight,
-      run: () => store.toggleRightPanel("forward"),
+      run: () => store.openSettings("relays"),
     });
     actionItems.push({
       key: `>${t("palette.toggleMeegleOn")} ${t("palette.toggleMeegleOff")}`,

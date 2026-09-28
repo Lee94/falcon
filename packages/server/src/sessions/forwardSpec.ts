@@ -85,11 +85,6 @@ export function validateForwardInput(
   };
 }
 
-/** 同一条链路上，同方向同监听地址端口不能重复。 */
-export function forwardBindKey(kind: ForwardKind, bindHost: string, bindPort: number): string {
-  return `${kind}\0${bindHost}\0${bindPort}`;
-}
-
 export function formatForwardEndpoint(host: string, port: number): string {
   return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
 }

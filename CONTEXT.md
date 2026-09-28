@@ -20,12 +20,16 @@ _Avoid_: Connection、Server、Remote（太宽）、Host（单独说会和 Zelli
 **SSH Project（SSH 项目）**:
 以远程主机连接配置（主机、端口、凭据）定义的 Project；可选指定远端工作目录，不指定则使用登录默认目录。连接配置通常来自一台已保存的 SSH Host。
 
+**Relay（中转）**:
+端口转发与公网发布的统称。按**机器**挂，不跟项目走：挂载点是 falcon 后端本机，或一台已保存的 SSH Host；隧道走该主机自己的那条链路，与项目终端会话的链路互不牵连。同一端口可以存多条中转，同时只有一条生效——启用一条会自动停掉同端口的其它中转（端口冲突按监听真正落在哪台机器上算）。在设置的「中转」页管理。见 ADR 0016。
+_Avoid_: Tunnel（太宽）、代理 / Proxy（那是另一类东西）、服务器（SSH Host 的 Avoid 里已有 Server，本机与主机合称就说「机器」）
+
 **Port Forward（端口转发）**:
-挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink，与终端会话独立。本地转发（ssh -L）在 falcon 后端监听、打到远端能到达的地址；远端转发（ssh -R）在远端监听、打回后端能到达的地址。规则持久化，启用中的隧道在链路断开后随 SSH 一起重连。
+挂在 SSH Host 上的 TCP 隧道。本地转发（ssh -L）在 falcon 后端监听、打到远端能到达的地址；远端转发（ssh -R）在远端监听、打回后端能到达的地址。规则持久化，启用中的隧道在链路断开后随主机链路一起重连。本机没有端口转发。
 _Avoid_: Tunnel（太宽）、Proxy / SOCKS（v1 不做动态转发）
 
 **Public Share（公网发布）**:
-把项目里一个 HTTP 服务经 Cloudflare Quick Tunnel 发到公网，得到一条临时的 `*.trycloudflare.com` URL。本地项目直接打本机端口；SSH 项目可选打本机或远端（远端先经 SSH 本地转发接到后端，再由本机的 cloudflared 发出去）。cloudflared 只在 falcon 后端本机跑，不往远端宿主机装。URL 随进程重启而变，不持久化。v1 只做 Quick Tunnel（无需 Cloudflare 账号），只代理 HTTP。
+把一台机器上的 HTTP 服务经 Cloudflare Quick Tunnel 发到公网，得到一条临时的 `*.trycloudflare.com` URL。挂本机就直接打本机端口；挂 SSH Host 就先经该主机的链路接到后端，再由本机的 cloudflared 发出去。cloudflared 只在 falcon 后端本机跑，不往远端宿主机装。URL 随进程重启而变，不持久化。v1 只做 Quick Tunnel（无需 Cloudflare 账号），只代理 HTTP。
 _Avoid_: Tunnel（太宽，且 Port Forward 已占用「隧道」口语）、ngrok（具体竞品）、Share（太宽）
 
 **Worktree Project（附属项目）**:

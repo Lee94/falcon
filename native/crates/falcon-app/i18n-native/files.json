@@ -1,0 +1,14 @@
+{
+  "native": {
+    "files": {
+      "downloading": "正在下载 {{name}}（{{pct}}%）",
+      "downloaded": "已下载 {{name}}",
+      "downloadFailed": "下载 {{name}} 失败",
+      "downloadHere": "下载到这里",
+      "revealHint": "点这条通知在访达中显示",
+      "openInBrowser": "在浏览器中打开",
+      "dropHere": "松开即上传到这个文件夹",
+      "htmlNoWebview": "这个版本没有内嵌网页预览，用右上角的按钮在浏览器中打开。"
+    }
+  }
+}

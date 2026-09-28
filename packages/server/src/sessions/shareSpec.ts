@@ -1,9 +1,9 @@
-import type { PublicShareInput, ShareOrigin } from "@falcon/shared";
+import type { PublicShareInput } from "@falcon/shared";
 import { isValidPort, parseHost, parsePort } from "./forwardSpec.js";
 
+/** 挂在哪台机器上不在这里校验：那是创建时一次性的事，由 ShareManager 查主机表 */
 export interface NormalizedShare {
   name?: string;
-  origin: ShareOrigin;
   destHost: string;
   destPort: number;
   enabled: boolean;
@@ -12,18 +12,9 @@ export interface NormalizedShare {
 const NAME_MAX = 80;
 
 export function validateShareInput(
-  input: Partial<PublicShareInput> | null | undefined,
-  projectType: "local" | "ssh"
+  input: Partial<PublicShareInput> | null | undefined
 ): { ok: true; value: NormalizedShare } | { ok: false; error: string } {
   if (!input || typeof input !== "object") return { ok: false, error: "缺少发布配置" };
-
-  const origin = input.origin;
-  if (origin !== "local" && origin !== "remote") {
-    return { ok: false, error: "发布目标必须是 local 或 remote" };
-  }
-  if (origin === "remote" && projectType !== "ssh") {
-    return { ok: false, error: "只有 SSH 项目能发布远端端口" };
-  }
 
   const destPort = parsePort(input.destPort);
   if (destPort == null || !isValidPort(destPort)) {
@@ -45,14 +36,9 @@ export function validateShareInput(
     ok: true,
     value: {
       name,
-      origin,
       destHost,
       destPort,
       enabled: input.enabled !== false,
     },
   };
-}
-
-export function shareDestKey(origin: ShareOrigin, destHost: string, destPort: number): string {
-  return `${origin}\0${destHost}\0${destPort}`;
 }

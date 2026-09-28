@@ -19,6 +19,7 @@ import type {
   PortForward,
   PortForwardInput,
   PublicShare,
+  RelayList,
   PublicShareInput,
   Project,
   ProjectInput,
@@ -315,22 +316,18 @@ export const api = {
   removeFiles: (projectId: string, paths: string[]) =>
     request<FileRemoveResult>("POST", `/api/projects/${projectId}/remove`, { paths }),
 
-  listForwards: (projectId: string) =>
-    request<PortForward[]>("GET", `/api/projects/${projectId}/forwards`),
-  createForward: (projectId: string, input: PortForwardInput) =>
-    request<PortForward>("POST", `/api/projects/${projectId}/forwards`, input),
-  updateForward: (projectId: string, id: string, patch: Partial<PortForwardInput>) =>
-    request<PortForward>("PATCH", `/api/projects/${projectId}/forwards/${id}`, patch),
-  deleteForward: (projectId: string, id: string) =>
-    request<{ ok: true }>("DELETE", `/api/projects/${projectId}/forwards/${id}`),
-  listShares: (projectId: string) =>
-    request<PublicShare[]>("GET", `/api/projects/${projectId}/shares`),
-  createShare: (projectId: string, input: PublicShareInput) =>
-    request<PublicShare>("POST", `/api/projects/${projectId}/shares`, input),
-  updateShare: (projectId: string, id: string, patch: Partial<PublicShareInput>) =>
-    request<PublicShare>("PATCH", `/api/projects/${projectId}/shares/${id}`, patch),
-  deleteShare: (projectId: string, id: string) =>
-    request<{ ok: true }>("DELETE", `/api/projects/${projectId}/shares/${id}`),
+  // 中转挂在机器上（本机 / SSH Host），不挂项目（ADR 0016）。带 enabled 的写入会
+  // 顺手停掉同端口的其它规则，写完要重拉 listRelays，不能只替换这一行
+  listRelays: () => request<RelayList>("GET", "/api/relays"),
+  createForward: (input: PortForwardInput) =>
+    request<PortForward>("POST", "/api/forwards", input),
+  updateForward: (id: string, patch: Partial<Omit<PortForwardInput, "hostId">>) =>
+    request<PortForward>("PATCH", `/api/forwards/${id}`, patch),
+  deleteForward: (id: string) => request<{ ok: true }>("DELETE", `/api/forwards/${id}`),
+  createShare: (input: PublicShareInput) => request<PublicShare>("POST", "/api/shares", input),
+  updateShare: (id: string, patch: Partial<Omit<PublicShareInput, "hostId">>) =>
+    request<PublicShare>("PATCH", `/api/shares/${id}`, patch),
+  deleteShare: (id: string) => request<{ ok: true }>("DELETE", `/api/shares/${id}`),
   /** 派生：单仓库项目吃 WorktreeInput，多仓库容器吃 MultiWorktreeInput（服务端按项目分流） */
   createWorktree: (projectId: string, input: WorktreeInput | MultiWorktreeInput) =>
     request<Project>("POST", `/api/projects/${projectId}/worktrees`, input),

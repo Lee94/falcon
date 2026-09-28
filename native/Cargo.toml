@@ -1,0 +1,49 @@
+# Falcon 原生客户端（GPUI）。设计见 docs/design/gpui-client.md。
+#
+# 独立的 Cargo workspace，不进 pnpm workspace。GPUI 只出现在 falcon-app，
+# 其余 crate 不依赖 GPUI——GPUI 每次破坏性升级只波及一层。
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/falcon-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+falcon-proto = { path = "crates/falcon-proto" }
+falcon-client = { path = "crates/falcon-client" }
+falcon-term = { path = "crates/falcon-term" }
+falcon-theme = { path = "crates/falcon-theme" }
+falcon-core = { path = "crates/falcon-core" }
+
+# GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
+# gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同
+# gpui-wry），并按新快照对应的 zed commit 重新比对从 Zed 抄来的文件。
+gpui-kit = { version = "=0.6.6" }
+# zed@bcf6582（gpui-pre 0.3.6 的快照点）锁的 alacritty fork。抄来的 Zed 终端
+# 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+parking_lot = "0.12"
+futures = "0.3"
+bytes = "1"
+url = "2"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
+
+[profile.dev]
+# GPUI 在纯 debug 下帧时间很难看，依赖开一点优化，自己的代码保持可调试。
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,17 @@
+{
+  "available": true,
+  "branches": [
+    {
+      "name": "main",
+      "remote": false,
+      "head": true
+    }
+  ],
+  "tags": [
+    "v0.1.0"
+  ],
+  "authors": [
+    "Falcon Fixture"
+  ],
+  "me": "Falcon Fixture"
+}

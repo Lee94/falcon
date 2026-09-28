@@ -1,0 +1,4 @@
+{
+  "ok": false,
+  "detail": "fatal: No configured push destination.\nEither specify the URL from the command-line or configure a remote repository using\n\n    git remote add <name> <url>\n\nand then push using the remote name\n\n    git push <name>"
+}

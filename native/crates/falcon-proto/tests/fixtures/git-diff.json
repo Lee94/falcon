@@ -1,0 +1,5 @@
+{
+  "available": true,
+  "diff": "diff --git a/src/main.rs b/src/main.rs\nindex 7527576..107a0a7 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"hello, falcon\");\n }\n",
+  "truncated": false
+}

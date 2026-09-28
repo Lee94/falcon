@@ -1,0 +1,30 @@
+{
+  "available": true,
+  "sha": "5f939b11f3d98710131049f5597e14664daed9b9",
+  "short": "5f939b1",
+  "author": "Falcon Fixture",
+  "authorEmail": "fixture@example.com",
+  "authoredAt": 1788314400000,
+  "committer": "Falcon Fixture",
+  "committedAt": 1788314400000,
+  "parents": [
+    "875fa5408d532d3965dac828dbd68b570393614d"
+  ],
+  "refs": [
+    {
+      "name": "main",
+      "kind": "local",
+      "head": true
+    }
+  ],
+  "message": "docs: 补充说明\n",
+  "files": [
+    {
+      "status": "M",
+      "path": "README.md",
+      "added": 2,
+      "deleted": 0
+    }
+  ],
+  "fileCount": 1
+}

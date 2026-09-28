@@ -1,18 +1,23 @@
 /**
- * 公网发布运行时。规则在 DB，活着的 cloudflared 进程在内存。
+ * 公网发布运行时，挂在本机或 SSH Host 上（ADR 0016）。规则在 DB，活着的
+ * cloudflared 进程在内存。
  *
  * cloudflared 只在 falcon 后端本机跑。远端目标先在本机听一个临时端口、经
  * SSH forwardOut 打到远端，再把 Quick Tunnel 指到这个临时端口——远端宿主机
- * 上既没有 cloudflared，也不需要出网到 Cloudflare。
+ * 上既没有 cloudflared，也不需要出网到 Cloudflare。桥走主机自己的那条
+ * SshLink（SessionManager.getHostLink），与端口转发共用。
  *
  * URL 是 Quick Tunnel 的随机子域，不入库：进程一重启就会变，存下来只会骗人。
+ *
+ * 同一台机器上发同一个端口的规则可以有多条，同时只有一条 enabled，
+ * 做法与 ForwardManager 相同（见 relaySpec.shareSlot）。
  */
 
 import crypto from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import type { Duplex } from "node:stream";
-import type { ForwardState, PublicShare, PublicShareInput, ShareOrigin } from "@falcon/shared";
+import type { ForwardState, PublicShare, PublicShareInput } from "@falcon/shared";
 import { CloudflaredBinError, ensureCloudflared } from "../cloudflared/bin.js";
 import {
   extractMetricsAddr,
@@ -23,8 +28,9 @@ import {
   parseQuickTunnelMetrics,
   tunnelArgs,
 } from "../cloudflared/command.js";
-import type { Db, ProjectRow, PublicShareRow } from "../db.js";
+import type { Db, HostShareRow } from "../db.js";
 import { resolveLocalBaseEnv } from "./loginEnv.js";
+import { displacedBy, shareSlot } from "./relaySpec.js";
 import { validateShareInput } from "./shareSpec.js";
 import type { SshLink } from "./ssh.js";
 
@@ -34,8 +40,8 @@ const STOP_GRACE_MS = 2_000;
 
 interface LiveShare {
   id: string;
-  projectId: string;
-  origin: ShareOrigin;
+  /** null = 本机 */
+  hostId: string | null;
   destHost: string;
   destPort: number;
   child?: ChildProcess;
@@ -46,10 +52,11 @@ interface LiveShare {
   stopping?: boolean;
 }
 
-export class ShareConflictError extends Error {
-  constructor(message: string) {
+/** 规则或主机不存在。路由据此回 404 */
+export class ShareNotFoundError extends Error {
+  constructor(message = "发布规则不存在") {
     super(message);
-    this.name = "ShareConflictError";
+    this.name = "ShareNotFoundError";
   }
 }
 
@@ -58,90 +65,108 @@ export class ShareManager {
   private starting = new Map<string, Promise<void>>();
   private errors = new Map<string, string>();
   private urls = new Map<string, string>();
+  /** stop() 进行中的规则：startNow 在 spawn 前看一眼，别再起一个马上要杀的进程 */
+  private cancelled = new Set<string>();
 
   constructor(
     private db: Db,
     private dataDir: string,
-    private linkFor: (projectId: string) => SshLink | null
+    private linkFor: (hostId: string) => SshLink | null,
+    /** 远端目标连不上主机时请 SessionManager 退避重连 */
+    private wantReconnect: (hostId: string) => void
   ) {}
 
-  list(projectId: string): PublicShare[] {
-    return this.db.listShares(projectId).map((row) => this.toShare(row));
+  list(): PublicShare[] {
+    return this.db.listShares().map((row) => this.toShare(row));
   }
 
-  get(id: string): PublicShare | undefined {
-    const row = this.db.getShare(id);
-    return row ? this.toShare(row) : undefined;
+  /** 该主机上有没有要靠 SSH 链路维持的发布（本机的不算） */
+  hasEnabled(hostId: string): boolean {
+    return this.db.listShares().some((r) => r.host_id === hostId && r.enabled === 1);
   }
 
-  hasRemoteEnabled(projectId: string): boolean {
-    return this.db.listShares(projectId).some((r) => r.enabled === 1 && r.origin === "remote");
+  enabledHostIds(): string[] {
+    const ids = this.db
+      .listShares()
+      .filter((r) => r.enabled === 1 && r.host_id != null)
+      .map((r) => r.host_id!);
+    return [...new Set(ids)];
   }
 
-  async create(project: ProjectRow, input: PublicShareInput): Promise<PublicShare> {
-    const parsed = validateShareInput(input, project.type);
+  async create(input: PublicShareInput): Promise<PublicShare> {
+    let hostId: string | null = null;
+    if (input?.hostId != null && input.hostId !== "") {
+      if (typeof input.hostId !== "string" || !this.db.getHost(input.hostId)) {
+        throw new ShareNotFoundError("主机不存在");
+      }
+      hostId = input.hostId;
+    }
+    const parsed = validateShareInput(input);
     if (!parsed.ok) throw new Error(parsed.error);
-    this.assertDestFree(project.id, parsed.value, undefined);
 
-    const row: PublicShareRow = {
+    const row: HostShareRow = {
       id: crypto.randomUUID(),
-      project_id: project.id,
+      host_id: hostId,
       name: parsed.value.name ?? null,
-      origin: parsed.value.origin,
       dest_host: parsed.value.destHost,
       dest_port: parsed.value.destPort,
       enabled: parsed.value.enabled ? 1 : 0,
       created_at: Date.now(),
     };
+    const displaced = row.enabled === 1 ? this.displace(row) : [];
     this.db.insertShare(row);
     // 第一次会下载 ~20MB 的 cloudflared，await 会让 POST 卡一两分钟，
     // 面板以为表单死了。丢到后台，列表立刻是 starting，轮询接到 URL。
-    if (row.enabled === 1) void this.start(row.id).catch(() => {});
+    void this.stopMany(displaced).then(() => {
+      if (row.enabled === 1) return this.start(row.id).catch(() => {});
+    });
     return this.toShare(this.db.getShare(row.id)!);
   }
 
-  async update(
-    project: ProjectRow,
-    id: string,
-    patch: Partial<PublicShareInput>
-  ): Promise<PublicShare> {
+  async update(id: string, patch: Partial<PublicShareInput>): Promise<PublicShare> {
     const existing = this.db.getShare(id);
-    if (!existing || existing.project_id !== project.id) throw new Error("发布规则不存在");
-    const parsed = validateShareInput(
-      {
-        name: patch.name !== undefined ? patch.name : (existing.name ?? undefined),
-        origin: patch.origin ?? (existing.origin as ShareOrigin),
-        destHost: patch.destHost ?? existing.dest_host,
-        destPort: patch.destPort ?? existing.dest_port,
-        enabled: patch.enabled ?? existing.enabled === 1,
-      },
-      project.type
-    );
+    if (!existing) throw new ShareNotFoundError();
+    const parsed = validateShareInput({
+      name: patch.name !== undefined ? patch.name : (existing.name ?? undefined),
+      destHost: patch.destHost ?? existing.dest_host,
+      destPort: patch.destPort ?? existing.dest_port,
+      enabled: patch.enabled ?? existing.enabled === 1,
+    });
     if (!parsed.ok) throw new Error(parsed.error);
-    this.assertDestFree(project.id, parsed.value, id);
 
-    const next: PublicShareRow = {
+    const next: HostShareRow = {
       ...existing,
       name: parsed.value.name ?? null,
-      origin: parsed.value.origin,
       dest_host: parsed.value.destHost,
       dest_port: parsed.value.destPort,
       enabled: parsed.value.enabled ? 1 : 0,
     };
+    const displaced = next.enabled === 1 ? this.displace(next) : [];
     this.db.updateShare(next);
 
     await this.stop(id);
-    if (next.enabled === 1) void this.start(id).catch(() => {});
+    // 与新建同理丢到后台：起的时候可能要下载 cloudflared、连主机链路
+    if (next.enabled === 1) {
+      void this.stopMany(displaced)
+        .then(() => this.start(id))
+        .catch(() => {});
+    }
     return this.toShare(this.db.getShare(id)!);
   }
 
-  async remove(project: ProjectRow, id: string): Promise<void> {
-    const existing = this.db.getShare(id);
-    if (!existing || existing.project_id !== project.id) throw new Error("发布规则不存在");
+  async remove(id: string): Promise<void> {
+    if (!this.db.getShare(id)) throw new ShareNotFoundError();
     await this.stop(id);
     this.db.deleteShare(id);
     this.errors.delete(id);
     this.urls.delete(id);
+  }
+
+  /** 删主机前调用：停掉该主机的全部发布。规则由 Db.deleteRelaysOfHost 删 */
+  async forgetHost(hostId: string): Promise<void> {
+    const ids = this.db.listShares().filter((r) => r.host_id === hostId).map((r) => r.id);
+    await this.stopMany(ids);
+    for (const id of ids) this.errors.delete(id);
   }
 
   async start(id: string): Promise<void> {
@@ -156,50 +181,62 @@ export class ShareManager {
   }
 
   async stop(id: string): Promise<void> {
-    const inflight = this.starting.get(id);
-    if (inflight) await inflight.catch(() => {});
-    const live = this.live.get(id);
-    if (live) {
-      await this.teardown(live);
-      this.live.delete(id);
+    this.cancelled.add(id);
+    try {
+      // 已经 spawn 了就先杀：waitForUrl 见进程退出立刻放弃，不必干等最长 45s 的 URL
+      const live = this.live.get(id);
+      if (live) {
+        this.live.delete(id);
+        await this.teardown(live);
+      }
+      // 下载 cloudflared / 连 SSH 的那段打断不了，等它走到 spawn 前的检查点自己退出
+      const inflight = this.starting.get(id);
+      if (inflight) await inflight.catch(() => {});
+      const late = this.live.get(id);
+      if (late) {
+        this.live.delete(id);
+        await this.teardown(late);
+      }
+      this.urls.delete(id);
+    } finally {
+      this.cancelled.delete(id);
     }
-    this.urls.delete(id);
   }
 
-  stopAll(projectId: string) {
+  /** 链路要被换掉（改了凭据 / 删主机）：同步拆掉该主机的全部发布，不写错误 */
+  stopAll(hostId: string) {
     for (const live of [...this.live.values()]) {
-      if (live.projectId !== projectId) continue;
-      void this.teardown(live);
+      if (live.hostId !== hostId) continue;
       this.live.delete(live.id);
       this.urls.delete(live.id);
+      void this.teardown(live);
     }
     for (const [id, run] of this.starting) {
-      if (this.db.getShare(id)?.project_id === projectId) {
+      if (this.db.getShare(id)?.host_id === hostId) {
         void run.catch(() => {});
         this.starting.delete(id);
       }
     }
   }
 
-  onLinkDown(projectId: string) {
-    const remote = [...this.live.values()].filter(
-      (l) => l.projectId === projectId && l.origin === "remote"
-    );
-    for (const live of remote) {
-      void this.teardown(live);
-      this.live.delete(live.id);
-      this.urls.delete(live.id);
-    }
-    for (const row of this.db.listShares(projectId)) {
-      if (row.enabled === 1 && row.origin === "remote") {
-        this.errors.set(row.id, "SSH 链路断开");
-      }
+  onLinkDown(hostId: string) {
+    this.stopAll(hostId);
+    for (const row of this.db.listShares()) {
+      if (row.host_id === hostId && row.enabled === 1) this.errors.set(row.id, "SSH 链路断开");
     }
   }
 
-  async onLinkUp(projectId: string) {
-    for (const row of this.db.listShares(projectId)) {
-      if (row.enabled === 1 && row.origin === "remote") void this.start(row.id);
+  onLinkUp(hostId: string) {
+    for (const row of this.db.listShares()) {
+      if (row.host_id === hostId && row.enabled === 1) void this.start(row.id).catch(() => {});
+    }
+  }
+
+  markUnreachable(hostId: string, message: string) {
+    for (const row of this.db.listShares()) {
+      if (row.host_id === hostId && row.enabled === 1 && !this.live.has(row.id)) {
+        this.errors.set(row.id, message);
+      }
     }
   }
 
@@ -211,28 +248,24 @@ export class ShareManager {
     await Promise.all(lives.map((live) => this.teardown(live)));
   }
 
-  async restoreEnabled(): Promise<void> {
-    for (const projectId of this.db.listEnabledShareProjectIds()) {
-      const project = this.db.getProject(projectId);
-      if (!project) continue;
-      for (const row of this.db.listShares(projectId)) {
-        if (row.enabled !== 1) continue;
-        if (row.origin === "remote") {
-          const link = this.linkFor(projectId);
-          if (!link) {
-            this.errors.set(row.id, "项目不存在");
-            continue;
-          }
-          try {
-            await link.getClient();
-          } catch (err) {
-            this.errors.set(row.id, (err as Error).message);
-            continue;
-          }
-        }
-        void this.start(row.id);
-      }
+  /** 启动时拉起本机的发布。远端的等主机链路连上（"up"）时由 onLinkUp 拉 */
+  restoreLocal() {
+    for (const row of this.db.listShares()) {
+      if (row.host_id == null && row.enabled === 1) void this.start(row.id).catch(() => {});
     }
+  }
+
+  private displace(target: HostShareRow): string[] {
+    const ids = displacedBy(this.db.listShares(), target, shareSlot);
+    for (const id of ids) {
+      this.db.setShareEnabled(id, false);
+      this.errors.delete(id);
+    }
+    return ids;
+  }
+
+  private async stopMany(ids: string[]) {
+    await Promise.all(ids.map((id) => this.stop(id)));
   }
 
   private async startNow(id: string): Promise<void> {
@@ -245,8 +278,7 @@ export class ShareManager {
 
     const live: LiveShare = {
       id: row.id,
-      projectId: row.project_id,
-      origin: row.origin as ShareOrigin,
+      hostId: row.host_id,
       destHost: row.dest_host,
       destPort: row.dest_port,
     };
@@ -255,9 +287,17 @@ export class ShareManager {
       const bin = await ensureCloudflared(this.dataDir);
       let tunnelHost = row.dest_host;
       let tunnelPort = row.dest_port;
-      if (row.origin === "remote") {
-        const link = this.linkFor(row.project_id);
-        if (!link) throw new Error("项目不存在");
+      if (row.host_id != null) {
+        const link = this.linkFor(row.host_id);
+        if (!link) throw new Error("主机不存在");
+        // 先连上再开桥：桥的监听器本身不碰 SSH，不先连的话主机连不上也能拿到
+        // 一条公网 URL，点开才是 502
+        try {
+          await link.getClient();
+        } catch (err) {
+          this.wantReconnect(row.host_id);
+          throw err;
+        }
         live.bridge = await this.listenBridge(link, live);
         const addr = live.bridge.address();
         if (typeof addr !== "object" || !addr) throw new Error("本机桥没有绑到端口");
@@ -270,6 +310,11 @@ export class ShareManager {
         ...(await resolveLocalBaseEnv()),
         NO_AUTOUPDATE: "true",
       };
+      if (this.cancelled.has(id)) {
+        live.stopping = true;
+        await this.teardown(live);
+        return;
+      }
       const args = tunnelArgs({
         originUrl: originUrl(tunnelHost, tunnelPort),
         // Host 按真正的 origin 写，不是本机桥的临时端口——vite 认的是它自己的端口
@@ -301,9 +346,12 @@ export class ShareManager {
         if (live.bridge) void closeServer(live.bridge);
       });
     } catch (err) {
+      const cancelled = live.stopping === true;
       await this.teardown(live);
-      this.live.delete(id);
+      if (this.live.get(id) === live) this.live.delete(id);
       this.urls.delete(id);
+      // 我们自己杀的（停用 / 让位 / 重启）不是故障
+      if (cancelled) return;
       this.errors.set(id, err instanceof CloudflaredBinError ? err.message : (err as Error).message);
       throw err;
     }
@@ -362,36 +410,22 @@ export class ShareManager {
     }
   }
 
-  private assertDestFree(
-    projectId: string,
-    value: { origin: ShareOrigin; destHost: string; destPort: number },
-    exceptId: string | undefined
-  ) {
-    if (this.db.findShareDest(projectId, value.origin, value.destHost, value.destPort, exceptId)) {
-      throw new ShareConflictError(
-        `该项目已发布 ${value.origin === "local" ? "本机" : "远端"} ${value.destHost}:${value.destPort}`
-      );
-    }
-  }
-
-  private toShare(row: PublicShareRow): PublicShare {
+  private toShare(row: HostShareRow): PublicShare {
     const enabled = row.enabled === 1;
     let state: ForwardState = "stopped";
     if (enabled && this.live.has(row.id) && this.urls.has(row.id)) state = "active";
     else if (enabled && (this.starting.has(row.id) || this.live.has(row.id))) state = "starting";
     else if (enabled && this.errors.has(row.id)) state = "error";
-    else if (enabled) state = "stopped";
     return {
       id: row.id,
-      projectId: row.project_id,
+      hostId: row.host_id ?? undefined,
       name: row.name ?? undefined,
-      origin: row.origin as ShareOrigin,
       destHost: row.dest_host,
       destPort: row.dest_port,
       enabled,
       state,
-      publicUrl: this.urls.get(row.id),
-      error: this.errors.get(row.id),
+      publicUrl: enabled ? this.urls.get(row.id) : undefined,
+      error: enabled ? this.errors.get(row.id) : undefined,
       createdAt: row.created_at,
     };
   }

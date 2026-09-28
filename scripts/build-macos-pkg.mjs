@@ -2,10 +2,15 @@
 /**
  * 打一份 macOS 安装包（.pkg）：把 Falcon.app 装进 /Applications，postinstall
  * 以当前登录用户跑 `falcon service install`（用户级 LaunchAgent，不能用 root
- * 的 guid）。
+ * 的 guid），装过服务的话带上原 plist 里的 --host / --port / --data-dir。
+ *
+ * App 的可执行文件默认是原生客户端（native/，GPUI，设计见 docs/design/gpui-client.md）：
+ * 它启动时自己做 launcher.sh 那两步（service install → 等端口），然后直接连本机服务。
+ * `--launcher` 退回旧的 launcher.sh（注册服务后用浏览器打开 web 界面）。
  *
  *   pnpm build:pkg                 # 没有当前平台 SEA 就先 pnpm build:bin
  *   pnpm build:pkg --skip-bin      # 必须已有 release/falcon-v*-darwin-*
+ *   pnpm build:pkg --launcher      # App 里放 launcher.sh 而不是原生客户端
  *
  * 产物 release/Falcon-v<版本>-darwin-<arch>.pkg。无开发者证书，只做 ad-hoc
  * 签名——别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。
@@ -30,8 +35,10 @@ const VERSION = serverPkg.version;
 
 const argv = process.argv.slice(2);
 let skipBin = false;
+let useLauncher = false;
 for (const a of argv) {
   if (a === "--skip-bin") skipBin = true;
+  else if (a === "--launcher") useLauncher = true;
   else {
     console.error(`未知参数: ${a}`);
     process.exit(1);
@@ -112,9 +119,23 @@ try {
   fs.copyFileSync(seaBin, bundled);
   fs.chmodSync(bundled, 0o755);
 
-  const launcher = path.join(macos, "Falcon");
-  fs.copyFileSync(path.join(TEMPLATES, "launcher.sh"), launcher);
-  fs.chmodSync(launcher, 0o755);
+  // 读已装服务原参数的 shell 片段：postinstall 与 launcher.sh 都从 App 里 source 它，
+  // 所以不论 App 入口是原生客户端还是 launcher.sh 都要带上
+  fs.copyFileSync(
+    path.join(TEMPLATES, "service-args.sh"),
+    path.join(resources, "service-args.sh")
+  );
+
+  const exe = path.join(macos, "Falcon");
+  if (useLauncher) {
+    fs.copyFileSync(path.join(TEMPLATES, "launcher.sh"), exe);
+  } else {
+    // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
+    console.log("== cargo build --release -p falcon-app ==");
+    run("cargo", ["build", "--release", "-p", "falcon-app"], { cwd: path.join(ROOT, "native") });
+    fs.copyFileSync(path.join(ROOT, "native/target/release/falcon-app"), exe);
+  }
+  fs.chmodSync(exe, 0o755);
 
   const plist = fs
     .readFileSync(path.join(TEMPLATES, "Info.plist"), "utf8")

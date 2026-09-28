@@ -1,0 +1,13 @@
+{
+  "id": "71e0c52b-8041-4f8e-b7c8-fc6f2cbf7fb1",
+  "hostId": "2d07cfbc-9630-458b-97ef-311c145583bb",
+  "name": "postgres",
+  "kind": "local",
+  "bindHost": "127.0.0.1",
+  "bindPort": 45999,
+  "destHost": "127.0.0.1",
+  "destPort": 5432,
+  "enabled": false,
+  "state": "stopped",
+  "createdAt": 1790240177913
+}

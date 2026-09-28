@@ -1,0 +1,13 @@
+{
+  "installed": true,
+  "authenticated": true,
+  "host": "project.feishu.cn",
+  "expiresInMinutes": 119,
+  "bin": "/Users/fay/Code/mojito/node_modules/.pnpm/@lark-project+meegle@1.0.23/node_modules/@lark-project/meegle/bin/meegle-darwin-arm64",
+  "version": "1.0.23",
+  "user": {
+    "key": "user_redacted",
+    "name": "已脱敏",
+    "email": "redacted@example.com"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "2c40338e-ef25-4f23-b740-4d08cc4223ab",
+  "name": "fixture-ssh",
+  "type": "ssh",
+  "workingDir": "/srv/app",
+  "ssh": {
+    "host": "127.0.0.1",
+    "port": 1,
+    "username": "fixture",
+    "authMethod": "password",
+    "hasSecret": true
+  },
+  "hostId": "2d07cfbc-9630-458b-97ef-311c145583bb",
+  "createdAt": 1790240177079
+}

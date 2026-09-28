@@ -170,8 +170,13 @@ export function hostAsProject(host: SshHostRow): ProjectRow {
 
 export class SessionManager {
   private links = new Map<string, SshLink>();
-  /** 按 hostId 缓存，给还没有项目的「浏览远端目录」复用，避免每点一层就重连 */
+  /**
+   * 按 hostId 缓存的主机链路：「浏览远端目录」与中转（端口转发 / 远端公网发布）共用。
+   * 与项目链路（links）互不牵连——中转挂机器不挂项目（ADR 0016）。
+   */
   private hostLinks = new Map<string, SshLink>();
+  /** 主机链路的退避重连，只为还有启用中的中转而坚持；键是 hostId */
+  private hostReconnects = new Map<string, ReconnectState>();
   private entries = new Map<string, LiveEntry>();
   private reconnects = new Map<string, ReconnectState>();
   /** 本地持久会话的自动接回退避，键是 sessionId */
@@ -192,12 +197,13 @@ export class SessionManager {
     readonly askpass: AskpassHub
   ) {
     this.db.recoverSessionsOnStartup();
-    const linkFor = (projectId: string) => {
-      const project = this.db.getProject(projectId);
-      return project?.type === "ssh" ? this.getLink(project) : null;
+    const linkFor = (hostId: string) => {
+      const host = this.db.getHost(hostId);
+      return host ? this.getHostLink(host) : null;
     };
-    this.forwards = new ForwardManager(db, linkFor);
-    this.shares = new ShareManager(db, dataDir, linkFor);
+    const wantReconnect = (hostId: string) => this.scheduleHostReconnect(hostId);
+    this.forwards = new ForwardManager(db, linkFor, wantReconnect);
+    this.shares = new ShareManager(db, dataDir, linkFor, wantReconnect);
   }
 
   /**
@@ -280,10 +286,6 @@ export class SessionManager {
     if (!link) {
       link = new SshLink(project, this.db, this.secrets);
       link.on("down", () => this.handleLinkDown(project.id));
-      link.on("up", () => {
-        void this.forwards.onLinkUp(project.id);
-        void this.shares.onLinkUp(project.id);
-      });
       this.links.set(project.id, link);
     } else {
       link.updateProject(project);
@@ -292,8 +294,6 @@ export class SessionManager {
   }
 
   disposeLink(projectId: string) {
-    this.forwards.stopAll(projectId);
-    this.shares.stopAll(projectId);
     this.links.get(projectId)?.dispose();
     this.links.delete(projectId);
     const rec = this.reconnects.get(projectId);
@@ -302,23 +302,121 @@ export class SessionManager {
   }
 
   /**
-   * 已保存主机的浏览链路。改凭据或删主机时必须 dispose，否则会拿着旧密钥连。
-   * 不挂 reconnect：浏览不是会话，断了下次点再连。
+   * 已保存主机的链路：浏览远端目录与中转共用一条。改凭据或删主机时必须 dispose，
+   * 否则会拿着旧密钥连。
+   *
+   * 断线只为中转重连（scheduleHostReconnect）：浏览不是会话，断了下次点再连；
+   * 连上（"up"）时把该主机启用中的转发 / 发布拉起来。
    */
   getHostLink(host: SshHostRow): SshLink {
     let link = this.hostLinks.get(host.id);
     if (!link) {
-      link = new SshLink(hostAsProject(host), this.db, this.secrets);
-      this.hostLinks.set(host.id, link);
+      const created = new SshLink(hostAsProject(host), this.db, this.secrets);
+      // 只认还登记在册的那条：dispose 不会打断在途的 connect，被换下的旧链路
+      // 之后照样可能 "up" / "down"，不拦的话会拆掉新链路上的隧道
+      const current = () => this.hostLinks.get(host.id) === created;
+      created.on("down", () => {
+        if (!current()) return;
+        this.forwards.onLinkDown(host.id);
+        this.shares.onLinkDown(host.id);
+        this.scheduleHostReconnect(host.id);
+      });
+      created.on("up", () => {
+        if (!current()) {
+          created.dispose();
+          return;
+        }
+        this.forwards.onLinkUp(host.id);
+        this.shares.onLinkUp(host.id);
+      });
+      this.hostLinks.set(host.id, created);
+      link = created;
     } else {
       link.updateProject(hostAsProject(host));
     }
     return link;
   }
 
-  disposeHostLink(hostId: string) {
+  /**
+   * 丢掉主机链路（凭据改了 / 主机删了）。先停中转再 dispose——dispose 不发 "down"，
+   * 不停的话本机监听器还开着、指向一条已经没了的链路。
+   * 删主机时 keepRelays=false，规则由调用方随后删库；改凭据时拿新链路把启用中的
+   * 中转重新拉起来。
+   */
+  async disposeHostLink(hostId: string, opts: { keepRelays: boolean }): Promise<void> {
+    const rec = this.hostReconnects.get(hostId);
+    if (rec?.timer) clearTimeout(rec.timer);
+    this.hostReconnects.delete(hostId);
+    await Promise.all([this.forwards.forgetHost(hostId), this.shares.forgetHost(hostId)]);
     this.hostLinks.get(hostId)?.dispose();
     this.hostLinks.delete(hostId);
+    if (opts.keepRelays) void this.connectHost(hostId);
+  }
+
+  /** 后端启动时把启用中的中转拉起来：本机的公网发布直接起，挂主机的等链路连上 */
+  restoreRelays(): void {
+    this.shares.restoreLocal();
+    const hostIds = new Set([...this.forwards.enabledHostIds(), ...this.shares.enabledHostIds()]);
+    for (const hostId of hostIds) void this.connectHost(hostId);
+  }
+
+  private wantsHostLink(hostId: string): boolean {
+    return this.forwards.hasEnabled(hostId) || this.shares.hasEnabled(hostId);
+  }
+
+  /** 连一次主机链路。连上由 "up" 拉起中转；连不上把原因挂到规则上并退避重连 */
+  private async connectHost(hostId: string): Promise<void> {
+    if (!this.wantsHostLink(hostId)) return;
+    const host = this.db.getHost(hostId);
+    if (!host) return;
+    try {
+      await this.getHostLink(host).getClient();
+    } catch (err) {
+      const msg = (err as Error).message;
+      this.forwards.markUnreachable(hostId, msg);
+      this.shares.markUnreachable(hostId, msg);
+      this.scheduleHostReconnect(hostId);
+    }
+  }
+
+  /**
+   * 主机链路的指数退避重连，与项目的 scheduleReconnect 同一套节奏。
+   * 只要还有启用中的中转就坚持；全停了、主机删了就收手。
+   */
+  private scheduleHostReconnect(hostId: string) {
+    // 登记在册就说明有一轮活着（定时器在等，或 tick 正在连）：每条出口要么删登记、
+    // 要么重排定时器。不能像项目那样只看 timer——tick 在途时再排一个会跑出两轮
+    if (this.hostReconnects.has(hostId)) return;
+    const state: ReconnectState = { attempt: 0, timer: null };
+    this.hostReconnects.set(hostId, state);
+
+    // 每一步都先确认自己还是登记在册的那一轮：disposeHostLink 会清掉旧的一轮、
+    // 随后可能另起一轮，旧一轮在途的 tick 不能把新一轮的登记删掉
+    const mine = () => this.hostReconnects.get(hostId) === state;
+    const tick = async () => {
+      state.timer = null;
+      if (!mine()) return;
+      const host = this.db.getHost(hostId);
+      if (!host || !this.wantsHostLink(hostId)) {
+        this.hostReconnects.delete(hostId);
+        return;
+      }
+      state.attempt++;
+      try {
+        await this.getHostLink(host).getClient();
+        if (mine()) this.hostReconnects.delete(hostId);
+        return;
+      } catch (err) {
+        const msg = (err as Error).message;
+        this.forwards.markUnreachable(hostId, msg);
+        this.shares.markUnreachable(hostId, msg);
+      }
+      if (!mine()) return;
+      const delay = Math.min(RECONNECT_MAX_DELAY, 1000 * 2 ** Math.min(state.attempt - 1, 10));
+      state.timer = setTimeout(tick, delay);
+    };
+
+    state.timer = setTimeout(tick, 1000);
   }
 
   /**
@@ -1144,16 +1242,14 @@ export class SessionManager {
         this.markDead(entry, "link-lost");
       }
     }
-    this.forwards.onLinkDown(projectId);
-    this.shares.onLinkDown(projectId);
-    if (this.forwards.hasEnabled(projectId) || this.shares.hasRemoteEnabled(projectId)) {
-      this.scheduleReconnect(projectId);
-    }
+    // 待接回的持久会话由 markUnverified → kickAutoReattach 排重连；
+    // 中转不走项目链路（ADR 0016），这里不用再为它们坚持
   }
 
   /**
    * SSH 断线自动重连：指数退避。
-   * 有待接回的持久会话，或还有启用的端口转发 / 远端公网发布，就坚持——不再要求有人正在看。
+   * 有待接回的持久会话就坚持——不再要求有人正在看。中转挂在主机链路上，
+   * 重连见 scheduleHostReconnect。
    */
   private scheduleReconnect(projectId: string) {
     const existing = this.reconnects.get(projectId);
@@ -1171,13 +1267,10 @@ export class SessionManager {
           !e.terminating &&
           this.db.getSession(e.sessionId)?.state === "unverified"
       );
-    const wantsForward = () =>
-      this.forwards.hasEnabled(projectId) || this.shares.hasRemoteEnabled(projectId);
-
     const tick = async () => {
       state.timer = null;
       const waiting = targets();
-      if (waiting.length === 0 && !wantsForward()) {
+      if (waiting.length === 0) {
         this.reconnects.delete(projectId);
         return;
       }
@@ -1206,7 +1299,7 @@ export class SessionManager {
         const still = targets().filter(
           (e) => !(e.viewers.size > 0 && (e.cols == null || e.rows == null))
         );
-        if (still.length === 0 && !wantsForward()) {
+        if (still.length === 0) {
           this.reconnects.delete(projectId);
           return;
         }

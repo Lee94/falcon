@@ -1,0 +1,107 @@
+{
+  "_about": [
+    "lib/gitGraph.ts 的共享测试向量（设计文档 §6.3）。",
+    "ts 字段是 packages/web/src/lib/gitGraph.test.ts 里的 it（describe 都是 layoutCommitGraph）。",
+    "commits 是 TS 测试里 chain(...) 的简写：每项 [sha, ...parents]，单字母当 sha。",
+    "expected 是完整的 GraphRow 列表（TS 测试只断言了其中一部分，完整结果由 web 的实现跑出来，比断言更严）。"
+  ],
+  "layoutCommitGraph": [
+    {
+      "ts": "layoutCommitGraph > keeps a linear history in one lane",
+      "commits": [["c", "b"], ["b", "a"], ["a"]],
+      "expected": [
+        { "lane": 0, "width": 1, "segments": [{ "from": null, "to": 0, "lane": 0 }], "merge": false },
+        { "lane": 0, "width": 1, "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": null, "to": 0, "lane": 0 }], "merge": false },
+        { "lane": 0, "width": 1, "segments": [{ "from": 0, "to": null, "lane": 0 }], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > gives the second parent of a merge its own lane, then folds it back in",
+      "commits": [["m", "a", "b"], ["a", "r"], ["b", "r"], ["r"]],
+      "expected": [
+        { "lane": 0, "width": 2, "segments": [{ "from": null, "to": 0, "lane": 0 }, { "from": null, "to": 1, "lane": 1 }], "merge": true },
+        {
+          "lane": 0,
+          "width": 2,
+          "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": 1, "lane": 1 }, { "from": null, "to": 0, "lane": 0 }],
+          "merge": false
+        },
+        {
+          "lane": 1,
+          "width": 2,
+          "segments": [{ "from": 0, "to": 0, "lane": 0 }, { "from": 1, "to": null, "lane": 1 }, { "from": null, "to": 1, "lane": 1 }],
+          "merge": false
+        },
+        { "lane": 0, "width": 2, "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": null, "lane": 0 }], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > draws a pass-through for a lane that has nothing to do with this row",
+      "commits": [["m", "b", "side"], ["b", "r"], ["side", "r"], ["r"]],
+      "expected": [
+        { "lane": 0, "width": 2, "segments": [{ "from": null, "to": 0, "lane": 0 }, { "from": null, "to": 1, "lane": 1 }], "merge": true },
+        {
+          "lane": 0,
+          "width": 2,
+          "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": 1, "lane": 1 }, { "from": null, "to": 0, "lane": 0 }],
+          "merge": false
+        },
+        {
+          "lane": 1,
+          "width": 2,
+          "segments": [{ "from": 0, "to": 0, "lane": 0 }, { "from": 1, "to": null, "lane": 1 }, { "from": null, "to": 1, "lane": 1 }],
+          "merge": false
+        },
+        { "lane": 0, "width": 2, "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": null, "lane": 0 }], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > reuses the lane already waiting for a second parent instead of doubling it",
+      "commits": [["x", "m", "s"], ["m", "b", "s"], ["b", "s"], ["s"]],
+      "expected": [
+        { "lane": 0, "width": 2, "segments": [{ "from": null, "to": 0, "lane": 0 }, { "from": null, "to": 1, "lane": 1 }], "merge": true },
+        {
+          "lane": 0,
+          "width": 2,
+          "segments": [
+            { "from": 0, "to": null, "lane": 0 },
+            { "from": 1, "to": 1, "lane": 1 },
+            { "from": null, "to": 0, "lane": 0 },
+            { "from": null, "to": 1, "lane": 1 }
+          ],
+          "merge": true
+        },
+        {
+          "lane": 0,
+          "width": 2,
+          "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": 1, "lane": 1 }, { "from": null, "to": 0, "lane": 0 }],
+          "merge": false
+        },
+        { "lane": 0, "width": 2, "segments": [{ "from": 0, "to": null, "lane": 0 }, { "from": 1, "to": null, "lane": 0 }], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > stops at the page boundary rather than trailing a line into nothing",
+      "commits": [["b", "a"], ["a", "older"]],
+      "expected": [
+        { "lane": 0, "width": 1, "segments": [{ "from": null, "to": 0, "lane": 0 }], "merge": false },
+        { "lane": 0, "width": 1, "segments": [{ "from": 0, "to": null, "lane": 0 }], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > does not build a staircase when the results are unrelated (search / author filter)",
+      "commits": [["q", "q1"], ["w", "w1"], ["e", "e1"], ["r", "r1"]],
+      "expected": [
+        { "lane": 0, "width": 1, "segments": [], "merge": false },
+        { "lane": 0, "width": 1, "segments": [], "merge": false },
+        { "lane": 0, "width": 1, "segments": [], "merge": false },
+        { "lane": 0, "width": 1, "segments": [], "merge": false }
+      ]
+    },
+    {
+      "ts": "layoutCommitGraph > handles an empty page",
+      "commits": [],
+      "expected": []
+    }
+  ]
+}

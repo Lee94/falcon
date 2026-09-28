@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { Db, type ProjectRow } from "./db.js";
 
 function tmpDb(): Db {
@@ -145,23 +146,118 @@ describe("guardDirsOf", () => {
   });
 });
 
-describe("deleteProject", () => {
-  it("cascades public shares with the project", () => {
-    const db = tmpDb();
-    db.insertProject(projectRow());
-    db.insertShare({
-      id: "s1",
-      project_id: "p1",
-      name: null,
-      origin: "local",
-      dest_host: "127.0.0.1",
-      dest_port: 5173,
-      enabled: 1,
+describe("relays: 旧的按项目规则迁到主机", () => {
+  /**
+   * 先让 Db 建好全套 schema，再用第二条原始连接补出旧版的两张表与数据，
+   * 最后重新 new Db 触发迁移——与老用户升级时的顺序一致。
+   */
+  function legacyDir(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "falcon-db-"));
+    const seed = new Db(dir);
+    seed.insertHost({
+      id: "h1",
+      name: "linux",
+      host: "10.0.0.1",
+      port: 22,
+      username: "fay",
+      auth_method: "agent",
+      key_path: null,
+      secret_enc: null,
       created_at: 1,
     });
-    assert.equal(db.getShare("s1")?.dest_port, 5173);
-    db.deleteProject("p1");
-    assert.equal(db.getShare("s1"), undefined);
-    assert.equal(db.getProject("p1"), undefined);
+    // p1 绑了主机；p2 没绑但连接三元组对得上；p3 哪台都对不上
+    const ssh = { type: "ssh" as const, ssh_host: "10.0.0.1", ssh_port: 22, ssh_username: "fay" };
+    seed.insertProject(projectRow({ id: "p1", host_id: "h1", ...ssh }));
+    seed.insertProject(projectRow({ id: "p2", ...ssh }));
+    seed.insertProject(projectRow({ id: "p3", ...ssh, ssh_username: "bob" }));
+
+    const raw = new DatabaseSync(path.join(dir, "falcon.db"));
+    raw.exec(`
+      CREATE TABLE ssh_forwards (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT, kind TEXT NOT NULL,
+        bind_host TEXT NOT NULL, bind_port INTEGER NOT NULL, dest_host TEXT NOT NULL, dest_port INTEGER NOT NULL,
+        enabled INTEGER NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE public_shares (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT, origin TEXT NOT NULL,
+        dest_host TEXT NOT NULL, dest_port INTEGER NOT NULL, enabled INTEGER NOT NULL, created_at INTEGER NOT NULL);
+      INSERT INTO ssh_forwards VALUES
+        ('f1', 'p1', 'db', 'local', '127.0.0.1', 5432, '127.0.0.1', 5432, 1, 10),
+        ('f2', 'p2', NULL, 'local', '127.0.0.1', 5432, '127.0.0.1', 15432, 1, 20),
+        ('f3', 'p3', NULL, 'local', '127.0.0.1', 9000, '127.0.0.1', 9000, 1, 30);
+      INSERT INTO public_shares VALUES
+        ('s1', 'p1', NULL, 'remote', '127.0.0.1', 3000, 1, 10),
+        ('s2', 'p3', NULL, 'local', '127.0.0.1', 6789, 1, 20),
+        ('s3', 'p3', NULL, 'remote', '127.0.0.1', 3000, 1, 30);
+    `);
+    raw.close();
+    return dir;
+  }
+
+  it("moves rules onto hosts, keeps one enabled per port, drops what has no host", () => {
+    const db = new Db(legacyDir());
+    const forwards = db.listForwards();
+    assert.deepEqual(
+      forwards.map((f) => [f.id, f.host_id, f.enabled]),
+      [
+        ["f1", "h1", 1],
+        // 并到同一台机器后与 f1 抢本机 5432：留最早的 f1
+        ["f2", "h1", 0],
+      ]
+    );
+    const shares = db.listShares();
+    assert.deepEqual(
+      shares.map((s) => [s.id, s.host_id, s.enabled]),
+      [
+        ["s1", "h1", 1],
+        // origin=local 本来就是后端本机，与项目挂哪台主机无关
+        ["s2", null, 1],
+      ]
+    );
+  });
+
+  it("drops the legacy tables so it runs once, and is harmless on a fresh db", () => {
+    const dir = legacyDir();
+    new Db(dir);
+    const again = new Db(dir);
+    assert.equal(again.listForwards().length, 2);
+    const raw = new DatabaseSync(path.join(dir, "falcon.db"));
+    const legacy = raw
+      .prepare("SELECT name FROM sqlite_master WHERE name IN ('ssh_forwards', 'public_shares')")
+      .all();
+    raw.close();
+    assert.deepEqual(legacy, []);
+    assert.deepEqual(tmpDb().listForwards(), []);
+  });
+});
+
+describe("deleteRelaysOfHost", () => {
+  it("removes that host's forwards and shares, leaves 本机 and other hosts alone", () => {
+    const db = tmpDb();
+    const fwd = (id: string, host_id: string) => ({
+      id,
+      host_id,
+      name: null,
+      kind: "local",
+      bind_host: "127.0.0.1",
+      bind_port: 1,
+      dest_host: "127.0.0.1",
+      dest_port: 1,
+      enabled: 0,
+      created_at: 1,
+    });
+    const share = (id: string, host_id: string | null) => ({
+      id,
+      host_id,
+      name: null,
+      dest_host: "127.0.0.1",
+      dest_port: 1,
+      enabled: 0,
+      created_at: 1,
+    });
+    db.insertForward(fwd("f1", "h1"));
+    db.insertForward(fwd("f2", "h2"));
+    db.insertShare(share("s1", "h1"));
+    db.insertShare(share("s2", null));
+    db.deleteRelaysOfHost("h1");
+    assert.deepEqual(db.listForwards().map((f) => f.id), ["f2"]);
+    assert.deepEqual(db.listShares().map((s) => s.id), ["s2"]);
   });
 });

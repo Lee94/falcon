@@ -72,11 +72,21 @@ export type SshProbeResult =
   | { ok: true; kind: "posix" | "windows"; home: string }
   | { ok: false; error: string };
 
-// ============ Port Forward（SSH 端口转发） ============
+// ============ Relay（中转）：端口转发 + 公网发布 ============
 
 /**
- * 挂在 SSH 项目上的 TCP 隧道，走该项目的 SshLink。
+ * 中转按**机器**挂，不按项目：同一台机器上的几个项目共用一套通道，
+ * 隧道走该 SSH Host 自己的一条 SshLink，与项目终端会话的链路互不牵连。
  *
+ * 挂载点 = falcon 后端本机，或一台已保存的 SSH Host（hostId）。
+ * 本机只有公网发布；端口转发两头都要落在一条 SSH 链路上，只能挂 SSH Host。
+ *
+ * 允许存多条同端口的通道，但同时只能一条生效：启用其中一条时，后端先停掉
+ * 同端口的其它通道。端口冲突的范围按监听真正落在哪台机器上算（见 server 的
+ * relaySpec.ts）。
+ */
+
+/**
  * local：在 falcon 后端监听，经 SSH 打到远端能到达的地址（ssh -L）。
  * remote：在远端监听，打回后端能到达的地址（ssh -R）。
  */
@@ -87,7 +97,8 @@ export type ForwardState = "stopped" | "starting" | "active" | "error";
 
 export interface PortForward {
   id: string;
-  projectId: string;
+  /** 挂在哪台已保存的 SSH Host 上 */
+  hostId: string;
   /** 可选备注，如 vite / postgres */
   name?: string;
   kind: ForwardKind;
@@ -103,6 +114,8 @@ export interface PortForward {
 }
 
 export interface PortForwardInput {
+  /** 只在创建时生效；规则建好后不能换主机 */
+  hostId: string;
   name?: string;
   kind: ForwardKind;
   bindHost?: string;
@@ -112,23 +125,19 @@ export interface PortForwardInput {
   enabled?: boolean;
 }
 
-// ============ Public Share（公网发布） ============
-
 /**
- * 把项目里一个 HTTP 服务经 Cloudflare Quick Tunnel 发到公网。
+ * 把一台服务器上的 HTTP 服务经 Cloudflare Quick Tunnel 发到公网。
  *
- * local：目标在 falcon 后端本机（本地项目只能走这条）。
- * remote：目标在 SSH 项目的远端，先经 SSH 本地转发接到后端，再由本机 cloudflared 发出去。
+ * 本机（hostId 缺省）：直接打后端本机端口。
+ * SSH Host：目标在远端，先经 SSH 本地转发接到后端，再由本机 cloudflared 发出去。
  * cloudflared 永远只在 falcon 后端本机跑。
  */
-export type ShareOrigin = "local" | "remote";
-
 export interface PublicShare {
   id: string;
-  projectId: string;
+  /** 缺省 = falcon 后端本机 */
+  hostId?: string;
   /** 可选备注，如 vite / storybook */
   name?: string;
-  origin: ShareOrigin;
   destHost: string;
   destPort: number;
   enabled: boolean;
@@ -140,11 +149,18 @@ export interface PublicShare {
 }
 
 export interface PublicShareInput {
+  /** 只在创建时生效；缺省 = 本机 */
+  hostId?: string;
   name?: string;
-  origin: ShareOrigin;
   destHost?: string;
   destPort: number;
   enabled?: boolean;
+}
+
+/** 设置里「中转」页一次拉全：本机与所有 SSH Host 的转发与发布 */
+export interface RelayList {
+  forwards: PortForward[];
+  shares: PublicShare[];
 }
 
 export interface Project {

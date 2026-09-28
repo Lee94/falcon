@@ -1,0 +1,13 @@
+{
+  "path": "src",
+  "entries": [
+    {
+      "name": "main.rs",
+      "path": "src/main.rs",
+      "kind": "file",
+      "mtime": 1790240176,
+      "size": 45
+    }
+  ],
+  "truncated": false
+}

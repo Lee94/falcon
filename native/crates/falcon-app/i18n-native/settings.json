@@ -1,0 +1,19 @@
+{
+  "native": {
+    "settings": {
+      "keychain": "记住的密码",
+      "keychainHint": "存在系统钥匙串里：服务端重启后客户端用它自动重新登录，不用再输一遍。",
+      "keychainStored": "已存在钥匙串里",
+      "keychainEmpty": "没有保存",
+      "keychainForget": "忘记密码",
+      "keychainForgot": "已从钥匙串删除这台服务端的密码",
+      "serverUrl": "服务端地址",
+      "clientVersion": "客户端版本",
+      "uiZoom": "界面缩放",
+      "uiZoomHint": "同浏览器的 ⌘+ / ⌘−：文字、控件、间距一起缩放。终端字号在下面「终端」里单独调。",
+      "uiZoomIn": "放大",
+      "uiZoomOut": "缩小",
+      "uiZoomReset": "恢复 100%"
+    }
+  }
+}

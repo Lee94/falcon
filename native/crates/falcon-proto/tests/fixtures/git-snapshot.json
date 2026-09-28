@@ -1,0 +1,46 @@
+{
+  "remotes": [],
+  "files": [
+    {
+      "path": "src/main.rs",
+      "index": " ",
+      "work": "M"
+    },
+    {
+      "path": "notes.txt",
+      "index": "?",
+      "work": "?"
+    }
+  ],
+  "fileCount": 2,
+  "worktrees": [
+    {
+      "path": "/private/tmp/fal-fx-repo",
+      "branch": "main",
+      "head": "5f939b1",
+      "current": true
+    }
+  ],
+  "commits": [
+    {
+      "sha": "5f939b1",
+      "author": "Falcon Fixture",
+      "authoredAt": 1788314400000,
+      "subject": "docs: 补充说明"
+    },
+    {
+      "sha": "875fa54",
+      "author": "Falcon Fixture",
+      "authoredAt": 1788228000000,
+      "subject": "feat: 初始提交"
+    }
+  ],
+  "available": true,
+  "repoDir": "/private/tmp/fal-fx-repo",
+  "workDir": "/private/tmp/fal-fx-repo",
+  "headBranch": "main",
+  "headSha": "5f939b1",
+  "detached": false,
+  "ahead": null,
+  "behind": null
+}

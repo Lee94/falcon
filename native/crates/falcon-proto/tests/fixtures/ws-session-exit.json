@@ -1,0 +1,15 @@
+[
+  {
+    "type": "state",
+    "state": "active"
+  },
+  {
+    "type": "state",
+    "state": "dead",
+    "deadReason": "exited"
+  },
+  {
+    "type": "title",
+    "title": null
+  }
+]

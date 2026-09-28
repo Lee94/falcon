@@ -1,0 +1,98 @@
+{
+  "_about": [
+    "lib/projectTree.ts 的共享测试向量（设计文档 §6.3）：侧栏树的分组规则两个客户端只能有一份。",
+    "ts 字段是 packages/web/src/lib/projectTree.test.ts 里的 describe > it；同一个 it 里有几句断言就拆成几条。",
+    "projects / hosts 是线上形状（Project / SshHost 的 JSON）。",
+    "groupServers 的 expected 是整棵树的摘要：每个服务器分组的 key / kind / name，以及每个文件夹的源项目 id 与挂在它下面的附属项目 id。"
+  ],
+  "groupServers": [
+    {
+      "ts": "groupServers with multi-repo projects > a container is a source folder; its derived multi project nests under it",
+      "projects": [
+        {
+          "id": "c1",
+          "name": "组合",
+          "type": "local",
+          "createdAt": 0,
+          "multi": { "repos": [{ "dir": "/a/web" }, { "dir": "/a/srv" }] }
+        },
+        {
+          "id": "d1",
+          "name": "feat-x",
+          "type": "local",
+          "createdAt": 0,
+          "workingDir": "/a/组合-feat-x",
+          "multi": {
+            "repos": [
+              { "dir": "/a/组合-feat-x/web", "repoDir": "/a/web" },
+              { "dir": "/a/组合-feat-x/srv", "repoDir": "/a/srv" }
+            ]
+          },
+          "worktree": { "sourceProjectId": "c1", "branch": "feat/x", "repoDir": "", "createdByFalcon": true }
+        }
+      ],
+      "hosts": [],
+      "localName": "本机",
+      "showArchived": false,
+      "expected": [
+        { "key": "s:local", "kind": "local", "name": "本机", "folders": [{ "project": "c1", "worktrees": ["d1"] }] }
+      ]
+    },
+    {
+      "ts": "groupServers with multi-repo projects > an orphan derived multi project still renders as its own folder",
+      "projects": [
+        {
+          "id": "d1",
+          "name": "feat-x",
+          "type": "local",
+          "createdAt": 0,
+          "multi": { "repos": [{ "dir": "/x/web", "repoDir": "/a/web" }] },
+          "worktree": { "sourceProjectId": "gone", "branch": "feat/x", "repoDir": "", "createdByFalcon": true }
+        }
+      ],
+      "hosts": [],
+      "localName": "本机",
+      "showArchived": false,
+      "expected": [
+        { "key": "s:local", "kind": "local", "name": "本机", "folders": [{ "project": "d1", "worktrees": [] }] }
+      ]
+    }
+  ],
+  "checkoutLabel": [
+    {
+      "ts": "checkoutLabel > derived rows label by branch, even when they are multi",
+      "project": {
+        "id": "d",
+        "name": "n",
+        "type": "local",
+        "createdAt": 0,
+        "multi": { "repos": [] },
+        "worktree": { "sourceProjectId": "s", "branch": "feat/x", "repoDir": "", "createdByFalcon": true }
+      },
+      "expected": "feat/x"
+    },
+    {
+      "ts": "checkoutLabel > containers return empty — the caller supplies the repo-count label",
+      "project": { "id": "c", "name": "组合", "type": "local", "createdAt": 0, "multi": { "repos": [{ "dir": "/a" }] } },
+      "head": { "branch": "main" },
+      "expected": ""
+    },
+    {
+      "ts": "checkoutLabel > plain sources keep head branch / sha / name fallback",
+      "project": { "id": "p", "name": "web", "type": "local", "createdAt": 0 },
+      "head": { "branch": "main" },
+      "expected": "main"
+    },
+    {
+      "ts": "checkoutLabel > plain sources keep head branch / sha / name fallback",
+      "project": { "id": "p", "name": "web", "type": "local", "createdAt": 0 },
+      "head": { "sha": "abc123" },
+      "expected": "abc123"
+    },
+    {
+      "ts": "checkoutLabel > plain sources keep head branch / sha / name fallback",
+      "project": { "id": "p", "name": "web", "type": "local", "createdAt": 0 },
+      "expected": "web"
+    }
+  ]
+}

@@ -130,11 +130,14 @@ export function diffVisible(s: {
 }
 
 /** 右侧栏打开的是哪一格。加面板时在这里加一个 id，持久化形状不用改。 */
-export type RightPanelId = "git" | "changes" | "forward" | "files" | "meegle";
+export type RightPanelId = "git" | "changes" | "files" | "meegle";
 
-/** 持久化的布局可能来自旧版本，认不出的面板名一律退回默认 */
+/**
+ * 持久化的布局可能来自旧版本，认不出的面板名一律退回默认
+ * （"forward" 就是这样没的：转发并进了设置的「中转」页，ADR 0016）
+ */
 function isRightPanelId(v: unknown): v is RightPanelId {
-  return v === "git" || v === "changes" || v === "forward" || v === "files" || v === "meegle";
+  return v === "git" || v === "changes" || v === "files" || v === "meegle";
 }
 
 export const selectRightVisible = (s: { rightOpen: boolean }) => s.rightOpen;
@@ -275,7 +278,7 @@ export interface NewTerminalOptions {
 export type OverviewFilter = "all" | SessionState;
 
 /** 设置弹窗左侧模块。打开时记住上次停在哪一格 */
-export type SettingsTab = "appearance" | "account" | "hosts" | "about";
+export type SettingsTab = "appearance" | "account" | "hosts" | "relays" | "about";
 
 /** 还没拿到后端 id 的会话：tab 立刻出现并显示"正在建立会话…"，而不是等 REST 返回 */
 export interface PendingSession {

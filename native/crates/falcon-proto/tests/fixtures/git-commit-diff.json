@@ -1,0 +1,5 @@
+{
+  "available": true,
+  "diff": "diff --git a/README.md b/README.md\nindex 7344880..7548a23 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,5 @@\n # fixture\n \n 协议 fixture 用的临时仓库。\n+\n+第二段说明。\n",
+  "truncated": false
+}

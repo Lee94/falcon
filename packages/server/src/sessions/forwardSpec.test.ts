@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   formatForwardEndpoint,
-  forwardBindKey,
   isValidPort,
   parseHost,
   parsePort,
@@ -84,14 +83,7 @@ describe("validateForwardInput", () => {
   });
 });
 
-describe("forwardBindKey / formatForwardEndpoint", () => {
-  it("treats same bind on different kinds as distinct", () => {
-    assert.notEqual(
-      forwardBindKey("local", "127.0.0.1", 3000),
-      forwardBindKey("remote", "127.0.0.1", 3000)
-    );
-  });
-
+describe("formatForwardEndpoint", () => {
   it("brackets IPv6 so the port is readable", () => {
     assert.equal(formatForwardEndpoint("::1", 80), "[::1]:80");
     assert.equal(formatForwardEndpoint("127.0.0.1", 80), "127.0.0.1:80");

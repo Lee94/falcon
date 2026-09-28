@@ -1,5 +1,7 @@
 # 公网发布：Cloudflare Quick Tunnel
 
+> 挂载点已由 ADR 0016 改掉：规则不再挂项目，而是挂本机或一台已保存的 SSH Host（`origin` 字段随之去掉），远端桥走主机链路；界面从右侧栏搬进设置的「中转」页。下文决定二里的「该项目的 SshLink」、决定五整节按 0016 读。
+
 把项目里跑着的 HTTP 服务（vite / storybook / webhook 调试）发到公网，给同事或外部回调一个 HTTPS 地址。选 Cloudflare Quick Tunnel：一条命令、不用账号、不用开入站端口。
 
 ## 决定一：只做 Quick Tunnel，不做 Named Tunnel

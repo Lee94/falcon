@@ -1,0 +1,39 @@
+{
+  "available": true,
+  "commits": [
+    {
+      "sha": "5f939b11f3d98710131049f5597e14664daed9b9",
+      "short": "5f939b1",
+      "author": "Falcon Fixture",
+      "authorEmail": "fixture@example.com",
+      "authoredAt": 1788314400000,
+      "subject": "docs: 补充说明",
+      "parents": [
+        "875fa5408d532d3965dac828dbd68b570393614d"
+      ],
+      "refs": [
+        {
+          "name": "main",
+          "kind": "local",
+          "head": true
+        }
+      ]
+    },
+    {
+      "sha": "875fa5408d532d3965dac828dbd68b570393614d",
+      "short": "875fa54",
+      "author": "Falcon Fixture",
+      "authorEmail": "fixture@example.com",
+      "authoredAt": 1788228000000,
+      "subject": "feat: 初始提交",
+      "parents": [],
+      "refs": [
+        {
+          "name": "v0.1.0",
+          "kind": "tag"
+        }
+      ]
+    }
+  ],
+  "hasMore": false
+}

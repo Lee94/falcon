@@ -1,6 +1,6 @@
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Info, Palette, Search, Server, Shield, type LucideIcon } from "lucide-react";
+import { ArrowLeftRight, Info, Palette, Search, Server, Shield, type LucideIcon } from "lucide-react";
 import type { ITheme } from "@xterm/xterm";
 import type { SshAuthMethod, SshHost } from "@falcon/shared";
 import { api } from "../api.js";
@@ -49,6 +49,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { ThemeChoice } from "./common/ThemeToggle.js";
 import { ThemePicker } from "./ThemePicker.js";
 import { Field, Segmented } from "./common/Field.js";
+import { RelaysPane } from "./RelaysPane.js";
 
 interface TabDef {
   id: SettingsTab;
@@ -61,6 +62,7 @@ const TABS: TabDef[] = [
   { id: "account", group: "general", icon: Shield },
   { id: "about", group: "general", icon: Info },
   { id: "hosts", group: "connection", icon: Server },
+  { id: "relays", group: "connection", icon: ArrowLeftRight },
 ];
 
 const GROUPS: TabDef["group"][] = ["general", "connection"];
@@ -171,6 +173,7 @@ export function SettingsModal() {
           {active === "appearance" && <AppearancePane />}
           {active === "account" && <AccountPane />}
           {active === "hosts" && <HostsPane />}
+          {active === "relays" && <RelaysTab />}
           {active === "about" && <AboutPane />}
         </div>
       </DialogContent>
@@ -512,6 +515,16 @@ function HostsPane() {
   return (
     <SettingSection title={t("host.title")} description={t("host.hint")}>
       <HostList hosts={hosts} onAdd={() => openHostForm(null)} />
+    </SettingSection>
+  );
+}
+
+/** 中转页本体在 RelaysPane.tsx：它自己轮询，只在这一页开着时挂载 */
+function RelaysTab() {
+  const { t } = useTranslation();
+  return (
+    <SettingSection title={t("forward.title")} description={t("forward.hint")}>
+      <RelaysPane />
     </SettingSection>
   );
 }

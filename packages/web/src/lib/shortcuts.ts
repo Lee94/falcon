@@ -20,7 +20,8 @@ export type Command =
   | "toggleSidebar"
   | "toggleGitPanel"
   | "toggleChangesPanel"
-  | "toggleForwardPanel"
+  /** 打开设置里的「中转」页（原右侧转发面板，已并进设置，ADR 0016） */
+  | "openRelays"
   | "toggleFilesPanel"
   | "toggleMeeglePanel"
   | "reattach"
@@ -53,7 +54,7 @@ export function chord(cmd: Command, mac = isMac): string {
       return mac ? "⌘⇧G" : "Ctrl+Shift+G";
     case "toggleChangesPanel":
       return mac ? "⌘⇧U" : "Ctrl+Shift+U";
-    case "toggleForwardPanel":
+    case "openRelays":
       return mac ? "⌘⇧F" : "Ctrl+Shift+F";
     case "toggleFilesPanel":
       return mac ? "⌘⇧E" : "Ctrl+Shift+E";
@@ -85,7 +86,7 @@ export function altChord(cmd: Command, mac = isMac): string | null {
       return "Alt+G";
     case "toggleChangesPanel":
       return "Alt+U";
-    case "toggleForwardPanel":
+    case "openRelays":
       return "Alt+F";
     case "toggleFilesPanel":
       return "Alt+E";
@@ -113,7 +114,7 @@ const ALT_LETTERS: Record<string, Command> = {
   KeyB: "toggleSidebar",
   KeyG: "toggleGitPanel",
   KeyU: "toggleChangesPanel",
-  KeyF: "toggleForwardPanel",
+  KeyF: "openRelays",
   KeyE: "toggleFilesPanel",
   KeyM: "toggleMeeglePanel",
   KeyR: "reattach",
@@ -127,7 +128,7 @@ const MODSHIFT_LETTERS: Record<string, Command> = {
   KeyB: "toggleSidebar",
   KeyG: "toggleGitPanel",
   KeyU: "toggleChangesPanel",
-  KeyF: "toggleForwardPanel",
+  KeyF: "openRelays",
   KeyE: "toggleFilesPanel",
   KeyM: "toggleMeeglePanel",
   KeyR: "reattach",
@@ -147,7 +148,7 @@ const MAC_MODSHIFT_LETTERS: Record<string, Command> = {
   KeyP: "palette",
   KeyG: "toggleGitPanel",
   KeyU: "toggleChangesPanel",
-  KeyF: "toggleForwardPanel",
+  KeyF: "openRelays",
   KeyE: "toggleFilesPanel",
   KeyM: "toggleMeeglePanel",
 };

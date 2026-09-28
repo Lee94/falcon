@@ -1,0 +1,10 @@
+{
+  "paths": [
+    "notes.txt",
+    "README.md",
+    "assets/blob.bin",
+    "assets/logo.png",
+    "src/main.rs"
+  ],
+  "truncated": false
+}

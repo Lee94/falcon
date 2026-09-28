@@ -1,0 +1,463 @@
+{
+  "_about": [
+    "lib/layout.ts 的共享测试向量（设计文档 §6.3）。每条用例的 ts 字段是 packages/web/src/lib/layout.test.ts 里的 describe > it；",
+    "同一个 it 里有几句断言就拆成几条。",
+    "transforms：columns 是 TS 测试里 cols(...) 的简写（每列一组 key，列宽 / 窗口高都是 null，不固定）；",
+    "steps 依次作用在上一步的结果上，op 与 layout.ts 的导出函数同名：",
+    "  removePane{key} insertPane{key,col,index} insertColumn{key,at} replacePane{from,to} syncColumns{live}",
+    "  visibleColumns{visible: 可见 key 列表} pinPane{key} unpinAll setColumnBasis{col: 列下标 | id, basis} setPaneBasis{key,basis}",
+    "  applyDrop{key,spot}（spot 形状同 DropSpot）。",
+    "expect 只写 TS 断言过的东西：shape（每列的 key）、unchanged（最后一步 applyDrop 返回了原数组）、paneBasis{key: 高}、",
+    "  columnBasis（每列的宽）、pinEdge、isPinned{key: bool}、pinnedCount、paneKeys、findPane{key: {col,index} | null}、",
+    "  keyCount{key: 出现次数}、inputShape（最后一步之前的 shape——输入没被改动）。",
+    "数字里的 \"NaN\" / \"Infinity\" 是字符串，JSON 表示不了。"
+  ],
+  "constants": { "COLUMN_MIN_PX": 260, "PANE_MIN_PX": 96, "CANVAS_GAP_PX": 8, "COLUMN_EDGE_PX": 28 },
+  "transforms": [
+    {
+      "ts": "removePane > 摘掉窗口，列空了就不再占位",
+      "columns": [["a"], ["b", "c"]],
+      "steps": [{ "op": "removePane", "key": "a" }],
+      "expect": { "shape": [["b", "c"]] }
+    },
+    {
+      "ts": "removePane > 摘掉窗口，列空了就不再占位",
+      "columns": [["a"], ["b", "c"]],
+      "steps": [{ "op": "removePane", "key": "b" }],
+      "expect": { "shape": [["a"], ["c"]] }
+    },
+    {
+      "ts": "removePane > 不存在的 key 什么也不改",
+      "columns": [["a"]],
+      "steps": [{ "op": "removePane", "key": "zz" }],
+      "expect": { "shape": [["a"]] }
+    },
+    {
+      "ts": "insertPane / insertColumn > 插进指定列的指定格",
+      "columns": [["a", "b"]],
+      "steps": [{ "op": "insertPane", "key": "x", "col": 0, "index": 1 }],
+      "expect": { "shape": [["a", "x", "b"]] }
+    },
+    {
+      "ts": "insertPane / insertColumn > 同一个 key 不会同时出现两次：已经在别处就是移动",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "insertPane", "key": "c", "col": 0, "index": 0 }],
+      "expect": { "shape": [["c", "a", "b"]], "keyCount": { "c": 1 } }
+    },
+    {
+      "ts": "insertPane / insertColumn > 独占一列插在第 at 列的位置",
+      "columns": [["a"], ["b"]],
+      "steps": [{ "op": "insertColumn", "key": "x", "at": 1 }],
+      "expect": { "shape": [["a"], ["x"], ["b"]] }
+    },
+    {
+      "ts": "insertPane / insertColumn > 独占一列插在第 at 列的位置",
+      "columns": [["a"]],
+      "steps": [{ "op": "insertColumn", "key": "x", "at": 9 }],
+      "expect": { "shape": [["a"], ["x"]] }
+    },
+    {
+      "ts": "insertPane / insertColumn > 空排布里插一扇就是第一列",
+      "columns": [],
+      "steps": [{ "op": "insertPane", "key": "a", "col": 3, "index": 3 }],
+      "expect": { "shape": [["a"]] }
+    },
+    {
+      "ts": "replacePane > 就地换 key，位置与高度都留着",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [
+        { "op": "setPaneBasis", "key": "b", "basis": 200 },
+        { "op": "replacePane", "from": "b", "to": "b2" }
+      ],
+      "expect": { "shape": [["a", "b2"], ["c"]], "paneBasis": { "b2": 200 } }
+    },
+    {
+      "ts": "replacePane > 换成一个已经在别处的 key 时不留副本",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "replacePane", "from": "a", "to": "c" }],
+      "expect": { "shape": [["c", "b"]] }
+    },
+    {
+      "ts": "syncColumns > live 之外的窗口摘掉，空列消失",
+      "columns": [["a"], ["b", "c"]],
+      "steps": [{ "op": "syncColumns", "live": ["b"] }],
+      "expect": { "shape": [["b"]] }
+    },
+    {
+      "ts": "syncColumns > 还没排布的按给定顺序各自成一列，接在最右",
+      "columns": [["a"]],
+      "steps": [{ "op": "syncColumns", "live": ["a", "x", "y"] }],
+      "expect": { "shape": [["a"], ["x"], ["y"]] }
+    },
+    {
+      "ts": "syncColumns > 已排布的保持原位，不因为 live 的顺序被重排",
+      "columns": [["b", "a"]],
+      "steps": [{ "op": "syncColumns", "live": ["a", "b"] }],
+      "expect": { "shape": [["b", "a"]] }
+    },
+    {
+      "ts": "syncColumns > 没有变化时结构稳定（列宽照旧）",
+      "columns": [["a"], ["b"]],
+      "steps": [
+        { "op": "setColumnBasis", "id": "", "basis": null },
+        { "op": "syncColumns", "live": ["a", "b"] }
+      ],
+      "expect": { "shape": [["a"], ["b"]], "inputShape": [["a"], ["b"]] }
+    },
+    {
+      "ts": "visibleColumns > 只画可见的窗口，空列不占位，隐藏的仍留在原排布里",
+      "columns": [["a", "x"], ["y"], ["b"]],
+      "steps": [{ "op": "visibleColumns", "visible": ["a", "b"] }],
+      "expect": { "shape": [["a"], ["b"]], "inputShape": [["a", "x"], ["y"], ["b"]] }
+    },
+    {
+      "ts": "applyDrop > 落回原地返回原数组，调用方据此跳过一次 set",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "applyDrop", "key": "a", "spot": { "kind": "into", "col": 0, "index": 0 } }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "applyDrop > 落回原地返回原数组，调用方据此跳过一次 set",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "applyDrop", "key": "a", "spot": { "kind": "into", "col": 0, "index": 1 } }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "applyDrop > 落回原地返回原数组，调用方据此跳过一次 set",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "applyDrop", "key": "c", "spot": { "kind": "column", "at": 1 } }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "applyDrop > 落回原地返回原数组，调用方据此跳过一次 set",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "applyDrop", "key": "c", "spot": { "kind": "column", "at": 2 } }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "applyDrop > 同列内往下挪：摘掉自己之后下标补偿一格",
+      "columns": [["a", "b", "c"]],
+      "steps": [{ "op": "applyDrop", "key": "a", "spot": { "kind": "into", "col": 0, "index": 3 } }],
+      "expect": { "unchanged": false, "shape": [["b", "c", "a"]] }
+    },
+    {
+      "ts": "applyDrop > 独占列被摘掉后，它右边的列整体左移一格",
+      "columns": [["a"], ["b"], ["c", "d"]],
+      "steps": [{ "op": "applyDrop", "key": "a", "spot": { "kind": "into", "col": 2, "index": 0 } }],
+      "expect": { "unchanged": false, "shape": [["b"], ["a", "c", "d"]] }
+    },
+    {
+      "ts": "applyDrop > 独占列被摘掉后，它右边的列整体左移一格",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [{ "op": "applyDrop", "key": "a", "spot": { "kind": "column", "at": 3 } }],
+      "expect": { "unchanged": false, "shape": [["b"], ["c"], ["a"]] }
+    },
+    {
+      "ts": "applyDrop > 排布里没有的 key 原样返回",
+      "columns": [["a"]],
+      "steps": [{ "op": "applyDrop", "key": "zz", "spot": { "kind": "column", "at": 0 } }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "尺寸 > 按 id / key 改尺寸，不按下标",
+      "columns": [["a"], ["b"]],
+      "steps": [{ "op": "setColumnBasis", "col": 1, "basis": 320 }],
+      "expect": { "columnBasis": [null, 320] }
+    },
+    {
+      "ts": "尺寸 > 按 id / key 改尺寸，不按下标",
+      "columns": [["a"], ["b"]],
+      "steps": [{ "op": "setPaneBasis", "key": "b", "basis": 120 }],
+      "expect": { "paneBasis": { "b": 120 } }
+    },
+    {
+      "ts": "固定列 > 固定：摘出来独占一列钉在最右",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "pinPane", "key": "a" }],
+      "expect": { "shape": [["b"], ["c"], ["a"]], "pinEdge": 2, "isPinned": { "a": true, "c": false } }
+    },
+    {
+      "ts": "固定列 > 窗口高度跟着一起搬",
+      "columns": [["a", "b"]],
+      "steps": [
+        { "op": "setPaneBasis", "key": "a", "basis": 200 },
+        { "op": "pinPane", "key": "a" }
+      ],
+      "expect": { "shape": [["b"], ["a"]], "paneBasis": { "a": 200 } }
+    },
+    {
+      "ts": "固定列 > 至多固定一列：再固定一扇，旧的自动取消",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [
+        { "op": "pinPane", "key": "a" },
+        { "op": "pinPane", "key": "b" }
+      ],
+      "expect": { "shape": [["c"], ["a"], ["b"]], "pinnedCount": 1, "isPinned": { "b": true } }
+    },
+    {
+      "ts": "固定列 > 取消固定只清标记，列留在原地",
+      "columns": [["a"], ["b"]],
+      "steps": [{ "op": "pinPane", "key": "a" }, { "op": "unpinAll" }],
+      "expect": { "shape": [["b"], ["a"]], "pinEdge": 2, "isPinned": { "a": false } }
+    },
+    {
+      "ts": "固定列 > 固定列的窗口关掉之后，空列连同固定一起消失",
+      "columns": [["a"], ["b"]],
+      "steps": [
+        { "op": "pinPane", "key": "a" },
+        { "op": "removePane", "key": "a" }
+      ],
+      "expect": { "shape": [["b"]], "pinEdge": 1 }
+    },
+    {
+      "ts": "固定列 > 新列一律插在固定列左边",
+      "columns": [["a"], ["b"]],
+      "steps": [
+        { "op": "pinPane", "key": "b" },
+        { "op": "insertColumn", "key": "x", "at": 9 }
+      ],
+      "expect": { "shape": [["a"], ["x"], ["b"]] }
+    },
+    {
+      "ts": "固定列 > 新列一律插在固定列左边",
+      "columns": [["a"], ["b"]],
+      "steps": [
+        { "op": "pinPane", "key": "b" },
+        { "op": "syncColumns", "live": ["a", "b", "x"] }
+      ],
+      "expect": { "shape": [["a"], ["x"], ["b"]] }
+    },
+    {
+      "ts": "固定列 > 拖拽越不过固定列：落点夹到它左边",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [
+        { "op": "pinPane", "key": "c" },
+        { "op": "applyDrop", "key": "a", "spot": { "kind": "column", "at": 3 } }
+      ],
+      "expect": { "unchanged": false, "shape": [["b"], ["a"], ["c"]] }
+    },
+    {
+      "ts": "固定列 > 固定列里唯一的窗口拖到最右 = 没动",
+      "columns": [["a"], ["b"]],
+      "steps": [
+        { "op": "pinPane", "key": "b" },
+        { "op": "applyDrop", "key": "b", "spot": { "kind": "column", "at": 2 } }
+      ],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "findPane / paneKeys > 坐标与从左到右、列内从上到下的顺序",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [],
+      "expect": {
+        "findPane": { "c": { "col": 1, "index": 0 }, "zz": null },
+        "paneKeys": ["a", "b", "c"]
+      }
+    }
+  ],
+  "clampSpot": [
+    {
+      "ts": "固定列 > 拖拽越不过固定列：落点夹到它左边",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [{ "op": "pinPane", "key": "c" }],
+      "spot": { "kind": "column", "at": 3 },
+      "expected": { "kind": "column", "at": 2 }
+    },
+    {
+      "ts": "固定列 > 拖拽越不过固定列：落点夹到它左边",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [{ "op": "pinPane", "key": "c" }],
+      "spot": { "kind": "column", "at": 1 },
+      "expected": { "kind": "column", "at": 1 }
+    },
+    {
+      "ts": "固定列 > 拖拽越不过固定列：落点夹到它左边",
+      "columns": [["a"], ["b"], ["c"]],
+      "steps": [{ "op": "pinPane", "key": "c" }],
+      "spot": { "kind": "into", "col": 2, "index": 1 },
+      "expected": { "kind": "into", "col": 2, "index": 1 }
+    }
+  ],
+  "dropSpot": [
+    {
+      "ts": "dropSpot > 列身上按窗口中线决定插在第几格",
+      "rects": "two-columns",
+      "point": { "x": 200, "y": 100 },
+      "expected": { "kind": "into", "col": 0, "index": 0 }
+    },
+    {
+      "ts": "dropSpot > 列身上按窗口中线决定插在第几格",
+      "rects": "two-columns",
+      "point": { "x": 200, "y": 200 },
+      "expected": { "kind": "into", "col": 0, "index": 1 }
+    },
+    {
+      "ts": "dropSpot > 列身上按窗口中线决定插在第几格",
+      "rects": "two-columns",
+      "point": { "x": 200, "y": 500 },
+      "expected": { "kind": "into", "col": 0, "index": 2 }
+    },
+    {
+      "ts": "dropSpot > 列的左右边缘是「另起一列」",
+      "rects": "two-columns",
+      "point": { "x": 5, "y": 300 },
+      "expected": { "kind": "column", "at": 0 }
+    },
+    {
+      "ts": "dropSpot > 列的左右边缘是「另起一列」",
+      "rects": "two-columns",
+      "point": { "x": 395, "y": 300 },
+      "expected": { "kind": "column", "at": 1 }
+    },
+    {
+      "ts": "dropSpot > 列的左右边缘是「另起一列」",
+      "rects": "two-columns",
+      "point": { "x": 800, "y": 300 },
+      "expected": { "kind": "column", "at": 2 }
+    },
+    {
+      "ts": "dropSpot > 列之间的缝、最左最右之外也是另起一列",
+      "rects": "two-columns",
+      "point": { "x": 404, "y": 10 },
+      "expected": { "kind": "column", "at": 1 }
+    },
+    {
+      "ts": "dropSpot > 列之间的缝、最左最右之外也是另起一列",
+      "rects": "two-columns",
+      "point": { "x": -20, "y": 10 },
+      "expected": { "kind": "column", "at": 0 }
+    },
+    {
+      "ts": "dropSpot > 列之间的缝、最左最右之外也是另起一列",
+      "rects": "two-columns",
+      "point": { "x": 900, "y": 10 },
+      "expected": { "kind": "column", "at": 2 }
+    },
+    {
+      "ts": "dropSpot > 窄列上的边缘区按列宽收窄，列内始终落得进去",
+      "rects": [{ "left": 0, "right": 80, "panes": [{ "top": 0, "bottom": 100 }] }],
+      "point": { "x": 40, "y": 10 },
+      "expected": { "kind": "into", "col": 0, "index": 0 }
+    },
+    {
+      "ts": "dropSpot > 空画布只能另起一列",
+      "rects": [],
+      "point": { "x": 10, "y": 10 },
+      "expected": { "kind": "column", "at": 0 }
+    }
+  ],
+  "rects": {
+    "two-columns": [
+      { "left": 0, "right": 400, "panes": [{ "top": 0, "bottom": 300 }, { "top": 300, "bottom": 600 }] },
+      { "left": 408, "right": 808, "panes": [{ "top": 0, "bottom": 600 }] }
+    ]
+  },
+  "resolveSpot": [
+    {
+      "ts": "resolveSpot > 可见下标翻成全量下标（别的项目的窗口不参与计数）",
+      "columns": [["x"], ["a", "y", "b"]],
+      "visible": ["a", "b"],
+      "spot": { "kind": "into", "col": 0, "index": 1 },
+      "expected": { "kind": "into", "col": 1, "index": 2 }
+    },
+    {
+      "ts": "resolveSpot > 可见下标翻成全量下标（别的项目的窗口不参与计数）",
+      "columns": [["x"], ["a", "y", "b"]],
+      "visible": ["a", "b"],
+      "spot": { "kind": "into", "col": 0, "index": 2 },
+      "expected": { "kind": "into", "col": 1, "index": 3 }
+    },
+    {
+      "ts": "resolveSpot > 新列落点按 id 找锚，找不到就接到最右",
+      "columns": [["x"], ["a"], ["b"]],
+      "visible": ["a", "b"],
+      "spot": { "kind": "column", "at": 1 },
+      "expected": { "kind": "column", "at": 2 }
+    },
+    {
+      "ts": "resolveSpot > 新列落点按 id 找锚，找不到就接到最右",
+      "columns": [["x"], ["a"], ["b"]],
+      "visible": ["a", "b"],
+      "spot": { "kind": "column", "at": 2 },
+      "expected": { "kind": "column", "at": 3 }
+    }
+  ],
+  "clampColumnWidth": [
+    { "ts": "尺寸 > 列宽有下限，上限由画布给", "px": 10, "expected": 260 },
+    { "ts": "尺寸 > 列宽有下限，上限由画布给", "px": 500, "max": 400, "expected": 400 },
+    { "ts": "尺寸 > 列宽有下限，上限由画布给", "px": "NaN", "expected": 260 }
+  ],
+  "paneMaxHeight": [
+    { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "columnHeight": 600, "above": 0, "below": 1, "expected": 504 },
+    { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "columnHeight": 100, "above": 0, "below": 5, "expected": 96 }
+  ],
+  "clampPaneHeight": [
+    { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "px": 10, "max": 500, "expected": 96 },
+    { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "px": 900, "max": 500, "expected": 500 }
+  ],
+  "columnWidth": [
+    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 1, "viewportWidth": 1000, "expected": 1000 },
+    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 2, "viewportWidth": 1000, "expected": 640 },
+    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 3, "viewportWidth": 2000, "expected": 996 },
+    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": 320, "count": 3, "viewportWidth": 2000, "expected": 320 }
+  ],
+  "layoutFrames": [
+    {
+      "ts": "layoutFrames > 列从左到右排，缝算进总宽",
+      "columns": [["a"], ["b"]],
+      "steps": [],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [
+          { "x": 0, "width": 640, "panes": [{ "key": "a", "y": 0, "height": 600 }] },
+          { "x": 648, "width": 640, "panes": [{ "key": "b", "y": 0, "height": 600 }] }
+        ],
+        "width": 1288
+      }
+    },
+    {
+      "ts": "layoutFrames > 列内窗口平分列高，正好填满不留缝",
+      "columns": [["a", "b", "c"]],
+      "steps": [],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [
+          {
+            "x": 0,
+            "width": 1000,
+            "panes": [
+              { "key": "a", "y": 0, "height": 200 },
+              { "key": "b", "y": 200, "height": 200 },
+              { "key": "c", "y": 400, "height": 200 }
+            ]
+          }
+        ],
+        "width": 1000
+      }
+    },
+    {
+      "ts": "layoutFrames > 钉死高度的窗口按钉的算，剩下的分给自适应的",
+      "columns": [["a", "b"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 150 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [
+          { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 150 }, { "key": "b", "y": 150, "height": 450 }] }
+        ],
+        "width": 1000
+      }
+    },
+    {
+      "ts": "layoutFrames > 钉得太满时仍给每扇留出最小高度（宁可溢出也不给 0）",
+      "columns": [["a", "b"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 590 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [
+          { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 590 }, { "key": "b", "y": 590, "height": 96 }] }
+        ],
+        "width": 1000
+      }
+    }
+  ]
+}

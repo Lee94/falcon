@@ -1,0 +1,48 @@
+{
+  "_about": [
+    "lib/fileSearch.ts 的共享测试向量（设计文档 §6.3）：⌘P 对同一个查询两个客户端要排出同一个顺序。",
+    "ts 字段是 packages/web/src/lib/fileSearch.test.ts 里的 describe > it；同一个 it 里有几句断言就拆成几条。",
+    "filterFiles 的 expected 是完整的结果列表（TS 测试只断言了其中一部分，完整列表由 web 的实现跑出来，比断言更严）；",
+    "limit 缺省是 FILE_SEARCH_LIMIT（50）。"
+  ],
+  "basename": [
+    { "ts": "basename / dirname > splits on the last slash", "path": "src/lib/a.ts", "expected": "a.ts" },
+    { "ts": "basename / dirname > splits on the last slash", "path": "README.md", "expected": "README.md" }
+  ],
+  "dirname": [
+    { "ts": "basename / dirname > splits on the last slash", "path": "src/lib/a.ts", "expected": "src/lib" },
+    { "ts": "basename / dirname > splits on the last slash", "path": "README.md", "expected": "" }
+  ],
+  "filterFiles": [
+    {
+      "ts": "filterFiles > empty query returns the first N paths",
+      "paths": ["README.md", "src/index.ts", "src/lib/shortcuts.ts", "packages/web/src/store.ts", "packages/server/src/files.ts"],
+      "query": "",
+      "limit": 2,
+      "expected": ["README.md", "src/index.ts"]
+    },
+    {
+      "ts": "filterFiles > ranks basename prefix above a path substring",
+      "paths": ["README.md", "src/index.ts", "src/lib/shortcuts.ts", "packages/web/src/store.ts", "packages/server/src/files.ts"],
+      "query": "file",
+      "expected": ["packages/server/src/files.ts"]
+    },
+    {
+      "ts": "filterFiles > fuzzy subsequence on the filename",
+      "paths": ["README.md", "src/index.ts", "src/lib/shortcuts.ts", "packages/web/src/store.ts", "packages/server/src/files.ts"],
+      "query": "scts",
+      "expected": ["src/lib/shortcuts.ts", "src/index.ts", "packages/web/src/store.ts", "packages/server/src/files.ts"]
+    },
+    {
+      "ts": "filterFiles > drops non-matches",
+      "paths": ["README.md", "src/index.ts", "src/lib/shortcuts.ts", "packages/web/src/store.ts", "packages/server/src/files.ts"],
+      "query": "zzz",
+      "expected": []
+    }
+  ],
+  "scorePath": [
+    { "ts": "scorePath > exact basename wins over a path substring", "path": "src/a.ts", "needle": "a.ts", "expected": 0 },
+    { "ts": "scorePath > exact basename wins over a path substring", "path": "a.ts", "needle": "a.ts", "expected": 0 },
+    { "ts": "scorePath > exact basename wins over a path substring", "path": "src/a.ts.bak", "needle": "a.ts", "expected": 1 }
+  ]
+}

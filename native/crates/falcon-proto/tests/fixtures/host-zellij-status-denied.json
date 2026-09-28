@@ -1,0 +1,6 @@
+{
+  "authorized": false,
+  "verifiedDurable": null,
+  "defaultBaseUrl": "https://github.com/zellij-org/zellij/releases/download",
+  "requiredVersion": "0.44.3"
+}

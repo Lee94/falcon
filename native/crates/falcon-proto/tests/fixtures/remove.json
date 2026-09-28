@@ -1,0 +1,11 @@
+{
+  "removed": [
+    "uploads/hi.txt"
+  ],
+  "errors": [
+    {
+      "path": "../outside.txt",
+      "error": "路径不合法"
+    }
+  ]
+}

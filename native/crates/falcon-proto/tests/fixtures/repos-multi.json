@@ -1,0 +1,23 @@
+{
+  "members": [
+    {
+      "dir": "/private/tmp/fal-fx-repo",
+      "info": {
+        "derivable": true,
+        "repoDir": "/private/tmp/fal-fx-repo",
+        "headBranch": "main",
+        "branches": [
+          {
+            "name": "main",
+            "remote": false,
+            "checkedOutAt": "/private/tmp/fal-fx-repo",
+            "head": true,
+            "suggestedDir": "/private/tmp/fal-fx-repo-main",
+            "dirOccupied": false
+          }
+        ]
+      }
+    }
+  ],
+  "baseDir": "/private/tmp"
+}

@@ -13,7 +13,6 @@ import { ResizableSlot } from "./common/ResizeHandle.js";
 import { GitPanel } from "./GitPanel.js";
 import { ChangesPanel } from "./ChangesPanel.js";
 import { FilesPanel } from "./FilesPanel.js";
-import { ForwardPanel } from "./ForwardPanel.js";
 import { MeeglePanel } from "./MeeglePanel.js";
 import { WorkCanvas } from "./WorkCanvas.js";
 import { SessionOverview } from "./SessionOverview.js";
@@ -163,8 +162,8 @@ export function App() {
       case "toggleChangesPanel":
         s.toggleRightPanel("changes");
         return;
-      case "toggleForwardPanel":
-        s.toggleRightPanel("forward");
+      case "openRelays":
+        s.openSettings("relays");
         return;
       case "toggleFilesPanel":
         s.toggleRightPanel("files");
@@ -281,7 +280,6 @@ export function App() {
             {rightPanel === "files" && <FilesPanel />}
             {rightPanel === "changes" && <ChangesPanel />}
             {rightPanel === "git" && <GitPanel />}
-            {rightPanel === "forward" && <ForwardPanel />}
             {(rightPanel === "meegle" || meegleSeen) && (
               <div
                 className={cn(

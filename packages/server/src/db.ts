@@ -4,7 +4,6 @@ import path from "node:path";
 import { isSessionAgent } from "@falcon/shared";
 import type {
   DeadReason,
-  ForwardKind,
   MultiRepoMember,
   Project,
   Session,
@@ -13,8 +12,15 @@ import type {
   SshHost,
   MeeglePin,
   MeeglePinKind,
-  ShareOrigin,
 } from "@falcon/shared";
+import {
+  excessEnabled,
+  forwardSlot,
+  legacyForwardHost,
+  shareSlot,
+  type HostConn,
+  type LegacyProjectConn,
+} from "./sessions/relaySpec.js";
 
 export interface ProjectRow {
   id: string;
@@ -82,9 +88,10 @@ export interface SshHostRow {
   created_at: number;
 }
 
-export interface SshForwardRow {
+/** 端口转发规则，挂在已保存的 SSH Host 上（不是项目） */
+export interface HostForwardRow {
   id: string;
-  project_id: string;
+  host_id: string;
   name: string | null;
   kind: string;
   bind_host: string;
@@ -95,11 +102,12 @@ export interface SshForwardRow {
   created_at: number;
 }
 
-export interface PublicShareRow {
+/** 公网发布规则，挂在本机或已保存的 SSH Host 上（不是项目） */
+export interface HostShareRow {
   id: string;
-  project_id: string;
+  /** null = falcon 后端本机 */
+  host_id: string | null;
   name: string | null;
-  origin: string;
   dest_host: string;
   dest_port: number;
   enabled: number;
@@ -256,12 +264,14 @@ export class Db {
     // 源项目的派生基点。空 = HEAD。不是 worktree 四列那种删除护栏，用户可改。
     this.addColumn("projects", "default_worktree_branch", "TEXT");
 
-    // 端口转发规则挂在项目上（走该项目的 SshLink），不是解引用主机。
-    // 不写 REFERENCES：本仓库外键从未开启，级联在应用层手写。
+    // 中转（端口转发 + 公网发布）挂在机器上，不挂项目（ADR 0016）：
+    // host_forwards.host_id 是已保存的 SSH Host，host_shares.host_id 为 null 表示后端本机。
+    // 不写 REFERENCES：本仓库外键从未开启，删主机时的级联在应用层手写。
+    // 公网 URL 是运行时事实，不入库（ADR 0014）。
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS ssh_forwards (
+      CREATE TABLE IF NOT EXISTS host_forwards (
         id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
+        host_id TEXT NOT NULL,
         name TEXT,
         kind TEXT NOT NULL,
         bind_host TEXT NOT NULL,
@@ -271,20 +281,17 @@ export class Db {
         enabled INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
-    `);
-    // 公网发布规则挂在项目上（ADR 0014）。URL 是运行时事实，不入库。
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS public_shares (
+      CREATE TABLE IF NOT EXISTS host_shares (
         id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
+        host_id TEXT,
         name TEXT,
-        origin TEXT NOT NULL,
         dest_host TEXT NOT NULL,
         dest_port INTEGER NOT NULL,
         enabled INTEGER NOT NULL,
         created_at INTEGER NOT NULL
       );
     `);
+    this.migrateRelaysToHosts();
     // 飞书项目面板的固定列表（ADR 0010）。不挂在项目上：CLI 的登录态是整台机器一份
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS meegle_pins (
@@ -299,6 +306,98 @@ export class Db {
         created_at INTEGER NOT NULL
       );
     `);
+  }
+
+  /**
+   * 中转从「挂项目」改成「挂机器」（ADR 0016）：把旧表 ssh_forwards / public_shares
+   * 并进 host_forwards / host_shares，然后删掉旧表。
+   *
+   * 靠旧表在不在决定跑不跑，不用 settings 标记：老版本二进制若又建出旧表、加了规则，
+   * 下次启动照样并过来再删掉，不会丢。id 原样沿用，重复跑也只会 INSERT OR IGNORE。
+   * 落不到机器上的旧规则（项目没绑主机、也找不到连接三元组一样的已保存主机）无处
+   * 可挂，只能丢弃并打一行日志。
+   */
+  private migrateRelaysToHosts() {
+    const exists = (table: string) =>
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !=
+      null;
+    const hasForwards = exists("ssh_forwards");
+    const hasShares = exists("public_shares");
+    if (!hasForwards && !hasShares) return;
+
+    const hosts = this.db
+      .prepare("SELECT id, host, port, username FROM ssh_hosts")
+      .all() as unknown as HostConn[];
+    const projectConn = this.db.prepare(
+      "SELECT host_id, ssh_host, ssh_port, ssh_username FROM projects WHERE id = ?"
+    );
+    const hostOf = (projectId: string): string | null => {
+      const conn = projectConn.get(projectId) as LegacyProjectConn | undefined;
+      return conn ? legacyForwardHost(conn, hosts) : null;
+    };
+    const dropped: string[] = [];
+
+    this.db.exec("BEGIN");
+    try {
+      if (hasForwards) {
+        const insert = this.db.prepare(
+          `INSERT OR IGNORE INTO host_forwards
+             (id, host_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const rows = this.db.prepare("SELECT * FROM ssh_forwards").all() as Record<
+          string,
+          SQLInputValue
+        >[];
+        for (const r of rows) {
+          const hostId = hostOf(String(r.project_id));
+          if (!hostId) {
+            dropped.push(`转发 ${String(r.kind)} ${String(r.bind_port)}→${String(r.dest_port)}`);
+            continue;
+          }
+          insert.run(
+            r.id, hostId, r.name, r.kind, r.bind_host, r.bind_port,
+            r.dest_host, r.dest_port, r.enabled, r.created_at
+          );
+        }
+        this.db.exec("DROP TABLE ssh_forwards");
+      }
+      if (hasShares) {
+        const insert = this.db.prepare(
+          `INSERT OR IGNORE INTO host_shares
+             (id, host_id, name, dest_host, dest_port, enabled, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        );
+        const rows = this.db.prepare("SELECT * FROM public_shares").all() as Record<
+          string,
+          SQLInputValue
+        >[];
+        for (const r of rows) {
+          // origin=local 本来就是后端本机，与项目是本地还是 SSH 无关
+          const hostId = r.origin === "remote" ? hostOf(String(r.project_id)) : null;
+          if (r.origin === "remote" && !hostId) {
+            dropped.push(`公网发布 ${String(r.dest_port)}`);
+            continue;
+          }
+          insert.run(r.id, hostId, r.name, r.dest_host, r.dest_port, r.enabled, r.created_at);
+        }
+        this.db.exec("DROP TABLE public_shares");
+      }
+      // 几个项目的规则并到一台机器上，可能撞出同端口的两条 enabled：留最早的那条
+      const disableForward = this.db.prepare("UPDATE host_forwards SET enabled = 0 WHERE id = ?");
+      const forwards = this.db.prepare("SELECT * FROM host_forwards").all() as unknown as HostForwardRow[];
+      for (const id of excessEnabled(forwards, forwardSlot)) disableForward.run(id);
+      const disableShare = this.db.prepare("UPDATE host_shares SET enabled = 0 WHERE id = ?");
+      const shares = this.db.prepare("SELECT * FROM host_shares").all() as unknown as HostShareRow[];
+      for (const id of excessEnabled(shares, shareSlot)) disableShare.run(id);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    if (dropped.length > 0) {
+      console.warn(`[falcon] 中转迁移：${dropped.length} 条旧规则找不到所属主机，已丢弃：${dropped.join("，")}`);
+    }
   }
 
   /**
@@ -564,156 +663,96 @@ export class Db {
   }
 
   deleteProject(id: string) {
-    this.stmt("DELETE FROM ssh_forwards WHERE project_id = ?").run(id);
-    this.stmt("DELETE FROM public_shares WHERE project_id = ?").run(id);
     this.stmt("DELETE FROM sessions WHERE project_id = ?").run(id);
     this.stmt("DELETE FROM projects WHERE id = ?").run(id);
   }
 
-  // ---- SSH port forwards ----
+  // ---- 中转：端口转发（挂 SSH Host） ----
+  // 规则数量是个位数到几十，一律全表读、在 TS 里筛，不为每种查询各写一条 SQL。
 
-  listForwards(projectId: string): SshForwardRow[] {
-    return this.stmt("SELECT * FROM ssh_forwards WHERE project_id = ? ORDER BY created_at ASC")
-      .all(projectId) as unknown as SshForwardRow[];
+  listForwards(): HostForwardRow[] {
+    return this.stmt("SELECT * FROM host_forwards ORDER BY created_at ASC")
+      .all() as unknown as HostForwardRow[];
   }
 
-  listEnabledForwardProjectIds(): string[] {
-    const rows = this.stmt("SELECT DISTINCT project_id FROM ssh_forwards WHERE enabled = 1")
-      .all() as { project_id: string }[];
-    return rows.map((r) => r.project_id);
-  }
-
-  getForward(id: string): SshForwardRow | undefined {
-    return this.stmt("SELECT * FROM ssh_forwards WHERE id = ?").get(id) as
-      | SshForwardRow
+  getForward(id: string): HostForwardRow | undefined {
+    return this.stmt("SELECT * FROM host_forwards WHERE id = ?").get(id) as
+      | HostForwardRow
       | undefined;
   }
 
-  findForwardBind(
-    projectId: string,
-    kind: ForwardKind,
-    bindHost: string,
-    bindPort: number,
-    exceptId?: string
-  ): SshForwardRow | undefined {
-    if (exceptId) {
-      return this.stmt(
-          `SELECT * FROM ssh_forwards
-           WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ? AND id != ?`
-        )
-        .get(projectId, kind, bindHost, bindPort, exceptId) as SshForwardRow | undefined;
-    }
-    return this.stmt(
-        `SELECT * FROM ssh_forwards
-         WHERE project_id = ? AND kind = ? AND bind_host = ? AND bind_port = ?`
-      )
-      .get(projectId, kind, bindHost, bindPort) as SshForwardRow | undefined;
-  }
-
-  /** 本地转发绑在后端本机上，跨项目也不能抢同一个回环端口。 */
-  findLocalBindConflict(
-    bindHost: string,
-    bindPort: number,
-    exceptId?: string
-  ): SshForwardRow | undefined {
-    if (exceptId) {
-      return this.stmt(
-          `SELECT * FROM ssh_forwards
-           WHERE kind = 'local' AND bind_host = ? AND bind_port = ? AND id != ?`
-        )
-        .get(bindHost, bindPort, exceptId) as SshForwardRow | undefined;
-    }
-    return this.stmt(
-        `SELECT * FROM ssh_forwards
-         WHERE kind = 'local' AND bind_host = ? AND bind_port = ?`
-      )
-      .get(bindHost, bindPort) as SshForwardRow | undefined;
-  }
-
-  insertForward(row: SshForwardRow) {
+  insertForward(row: HostForwardRow) {
     this.stmt(
-        `INSERT INTO ssh_forwards
-           (id, project_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
+        `INSERT INTO host_forwards
+           (id, host_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
          VALUES
-           (@id, @project_id, @name, @kind, @bind_host, @bind_port, @dest_host, @dest_port, @enabled, @created_at)`
+           (@id, @host_id, @name, @kind, @bind_host, @bind_port, @dest_host, @dest_port, @enabled, @created_at)`
       )
       .run(bindRow(row));
   }
 
-  updateForward(row: SshForwardRow) {
+  /** host_id 不在 SET 里：规则建好后不能换主机 */
+  updateForward(row: HostForwardRow) {
     this.stmt(
-        `UPDATE ssh_forwards SET name=@name, kind=@kind, bind_host=@bind_host, bind_port=@bind_port,
+        `UPDATE host_forwards SET name=@name, kind=@kind, bind_host=@bind_host, bind_port=@bind_port,
            dest_host=@dest_host, dest_port=@dest_port, enabled=@enabled
          WHERE id=@id`
       )
       .run(bindRow(row));
   }
 
+  setForwardEnabled(id: string, enabled: boolean) {
+    this.stmt("UPDATE host_forwards SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  }
+
   deleteForward(id: string) {
-    this.stmt("DELETE FROM ssh_forwards WHERE id = ?").run(id);
+    this.stmt("DELETE FROM host_forwards WHERE id = ?").run(id);
   }
 
-  // ---- 公网发布 ----
+  // ---- 中转：公网发布（挂本机或 SSH Host） ----
 
-  listShares(projectId: string): PublicShareRow[] {
-    return this.stmt("SELECT * FROM public_shares WHERE project_id = ? ORDER BY created_at ASC")
-      .all(projectId) as unknown as PublicShareRow[];
+  listShares(): HostShareRow[] {
+    return this.stmt("SELECT * FROM host_shares ORDER BY created_at ASC")
+      .all() as unknown as HostShareRow[];
   }
 
-  listEnabledShareProjectIds(): string[] {
-    const rows = this.stmt("SELECT DISTINCT project_id FROM public_shares WHERE enabled = 1")
-      .all() as { project_id: string }[];
-    return rows.map((r) => r.project_id);
-  }
-
-  getShare(id: string): PublicShareRow | undefined {
-    return this.stmt("SELECT * FROM public_shares WHERE id = ?").get(id) as
-      | PublicShareRow
+  getShare(id: string): HostShareRow | undefined {
+    return this.stmt("SELECT * FROM host_shares WHERE id = ?").get(id) as
+      | HostShareRow
       | undefined;
   }
 
-  findShareDest(
-    projectId: string,
-    origin: ShareOrigin,
-    destHost: string,
-    destPort: number,
-    exceptId?: string
-  ): PublicShareRow | undefined {
-    if (exceptId) {
-      return this.stmt(
-          `SELECT * FROM public_shares
-           WHERE project_id = ? AND origin = ? AND dest_host = ? AND dest_port = ? AND id != ?`
-        )
-        .get(projectId, origin, destHost, destPort, exceptId) as PublicShareRow | undefined;
-    }
-    return this.stmt(
-        `SELECT * FROM public_shares
-         WHERE project_id = ? AND origin = ? AND dest_host = ? AND dest_port = ?`
-      )
-      .get(projectId, origin, destHost, destPort) as PublicShareRow | undefined;
-  }
-
-  insertShare(row: PublicShareRow) {
+  insertShare(row: HostShareRow) {
     this.stmt(
-        `INSERT INTO public_shares
-           (id, project_id, name, origin, dest_host, dest_port, enabled, created_at)
+        `INSERT INTO host_shares
+           (id, host_id, name, dest_host, dest_port, enabled, created_at)
          VALUES
-           (@id, @project_id, @name, @origin, @dest_host, @dest_port, @enabled, @created_at)`
+           (@id, @host_id, @name, @dest_host, @dest_port, @enabled, @created_at)`
       )
       .run(bindRow(row));
   }
 
-  updateShare(row: PublicShareRow) {
+  /** host_id 不在 SET 里：规则建好后不能换机器 */
+  updateShare(row: HostShareRow) {
     this.stmt(
-        `UPDATE public_shares SET name=@name, origin=@origin, dest_host=@dest_host,
-           dest_port=@dest_port, enabled=@enabled
+        `UPDATE host_shares SET name=@name, dest_host=@dest_host, dest_port=@dest_port, enabled=@enabled
          WHERE id=@id`
       )
       .run(bindRow(row));
   }
 
+  setShareEnabled(id: string, enabled: boolean) {
+    this.stmt("UPDATE host_shares SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  }
+
   deleteShare(id: string) {
-    this.stmt("DELETE FROM public_shares WHERE id = ?").run(id);
+    this.stmt("DELETE FROM host_shares WHERE id = ?").run(id);
+  }
+
+  /** 删主机时的级联。调用方先把活着的隧道停掉 */
+  deleteRelaysOfHost(hostId: string) {
+    this.stmt("DELETE FROM host_forwards WHERE host_id = ?").run(hostId);
+    this.stmt("DELETE FROM host_shares WHERE host_id = ?").run(hostId);
   }
 
   // ---- 飞书项目面板的固定列表 ----

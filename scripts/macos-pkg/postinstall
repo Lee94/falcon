@@ -4,8 +4,9 @@
 set -euo pipefail
 APP="$2/Falcon.app"
 BIN="$APP/Contents/Resources/falcon"
-if [ ! -x "$BIN" ]; then
-  echo "postinstall: 找不到 $BIN" >&2
+ARGS_SH="$APP/Contents/Resources/service-args.sh"
+if [ ! -x "$BIN" ] || [ ! -f "$ARGS_SH" ]; then
+  echo "postinstall: $APP 不完整（缺 Resources/falcon 或 service-args.sh）" >&2
   exit 1
 fi
 USER_NAME=$(stat -f '%Su' /dev/console)
@@ -13,4 +14,11 @@ if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ]; then
   echo "postinstall: 没有可用的登录用户，跳过 service install。打开 Falcon.app 即可完成注册。"
   exit 0
 fi
-sudo -u "$USER_NAME" -H "$BIN" service install
+
+# 装过服务就带上它原来的 --host / --port / --data-dir，为什么见 service-args.sh。
+# HOME 取 sudo -H 之后的值，与下面 service install 里 os.homedir() 看到的是同一个
+. "$ARGS_SH"
+USER_HOME=$(sudo -u "$USER_NAME" -H /bin/sh -c 'printf %s "$HOME"')
+read_service_args "$USER_HOME/Library/LaunchAgents/com.falcon.server.plist"
+echo "postinstall: service install ${SERVICE_ARGS[*]-}"
+sudo -u "$USER_NAME" -H "$BIN" service install ${SERVICE_ARGS[@]+"${SERVICE_ARGS[@]}"}
