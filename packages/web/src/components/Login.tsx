@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api.js";
+import { loginNext } from "../lib/loginNext.js";
 import { useApp } from "../store.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,12 @@ export function Login() {
     setFailed(false);
     try {
       await api.login(password);
+      // 从 px0 入口被送来登录的（多半是原生客户端交给系统浏览器的链接）：直接回去
+      const next = loginNext(window.location.search);
+      if (next) {
+        window.location.replace(next);
+        return;
+      }
       await init();
     } catch {
       setFailed(true);

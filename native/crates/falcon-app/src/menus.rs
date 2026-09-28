@@ -350,6 +350,17 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
         ];
     }
     let mut items = new_session_items(ws, &project.id, None);
+    // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器——不嵌进
+    // WebView，那得把登录 cookie 塞给它。浏览器没登录过时服务端会送去登录再回来。
+    // 没有工作目录（多仓库容器、未填目录的 SSH 项目）就没有东西可看，不给入口
+    if project.working_dir.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+        let url = format!(
+            "{}{}",
+            w.client.base_url().trim_end_matches('/'),
+            falcon_core::px0::px0_base_path(&project.id)
+        );
+        items.push(MenuItemSpec::new(t!("project.px0Review").to_string(), move |_, cx| cx.open_url(&url)).sep());
+    }
     {
         let ws = ws.clone();
         let pid = project.id.clone();

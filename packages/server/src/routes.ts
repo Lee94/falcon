@@ -227,9 +227,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     // px0 反代与 /api 同一口径（ADR 0017）：px0 自己没有任何鉴权，挡在它前面的只有这里
     if (url.startsWith("/px0/")) {
       if (auth.isAuthenticated(req)) return;
-      // 入口页是浏览器导航过来的：送回首页登录，登录后再从菜单打开
+      // 浏览器导航过来的（原生客户端把入口交给系统浏览器时，那边多半没登录过）：
+      // 送去首页登录，带上原地址，登录成功后回来（web 的 lib/loginNext.ts）
       if (req.method === "GET" && (req.headers.accept ?? "").includes("text/html")) {
-        return reply.redirect("/");
+        return reply.redirect(`/?next=${encodeURIComponent(url)}`);
       }
       return reply.code(401).send({ error: "未认证" });
     }

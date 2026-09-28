@@ -35,6 +35,8 @@ pub mod file_tree;
 pub mod file_search;
 /// 对应 web 的 lib/rawUrl.ts：原始字节地址
 pub mod raw_url;
+/// 对应 shared 的 px0BasePath：px0 审阅的挂载前缀
+pub mod px0;
 /// 对应 web 的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
 /// 对应 web 的 lib/gitGraph.ts：提交图泳道
