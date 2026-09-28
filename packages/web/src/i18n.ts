@@ -95,6 +95,7 @@ const zh = {
       delete: "删除项目…",
       edit: "编辑项目…",
       derive: "派生附属项目…",
+      px0Review: "用 px0 审阅",
       filterInOverview: "在总览中筛选此项目",
       deleteTitle: "删除项目「{{name}}」？",
       deleteBody: "将同时终止 {{n}} 个会话，其中正在运行的命令会被杀掉。这个操作不可撤销。",

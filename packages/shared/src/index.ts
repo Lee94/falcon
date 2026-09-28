@@ -215,6 +215,19 @@ export interface ProjectInput {
   defaultWorktreeBranch?: string;
 }
 
+// ============ px0 审阅（ADR 0017） ============
+
+/**
+ * px0 在 falcon 源下的挂载前缀，形如 `/px0/<项目 id>/`。
+ *
+ * 三处共用：服务端起 px0 时的 `-base-path`、反代路由、前端开新标签页的地址。
+ * px0 按 base path 存它的会话文件（打开的标签、草稿评论），用项目 id 当前缀，
+ * 重新拉起后标签页还在。
+ */
+export function px0BasePath(projectId: string): string {
+  return `/px0/${encodeURIComponent(projectId)}/`;
+}
+
 // ============ Worktree（附属项目） ============
 
 /**

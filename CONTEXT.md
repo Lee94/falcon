@@ -32,6 +32,10 @@ _Avoid_: Tunnel（太宽）、Proxy / SOCKS（v1 不做动态转发）
 把一台机器上的 HTTP 服务经 Cloudflare Quick Tunnel 发到公网，得到一条临时的 `*.trycloudflare.com` URL。挂本机就直接打本机端口；挂 SSH Host 就先经该主机的链路接到后端，再由本机的 cloudflared 发出去。cloudflared 只在 falcon 后端本机跑，不往远端宿主机装。URL 随进程重启而变，不持久化。v1 只做 Quick Tunnel（无需 Cloudflare 账号），只代理 HTTP。
 _Avoid_: Tunnel（太宽，且 Port Forward 已占用「隧道」口语）、ngrok（具体竞品）、Share（太宽）
 
+**px0 审阅（Review in px0）**:
+在项目的宿主机上拉起 [px0](https://github.com/px0-ai/px0)（一个面向代码审阅的浏览器 IDE），经 falcon 同源反代到 `/px0/<项目 id>/`，新标签页打开。px0 在哪台机器上跑就看哪台机器的目录，编辑交给那台机器上的 claude / codex，所以 SSH 项目的 px0 跑在远端、不在后端本机。一个项目最多一个实例，打开时按需拉起，标签页关了一阵子自动停。见 ADR 0017。
+_Avoid_: 预览（那是文件查看里的 HTML / 图片预览，ADR 0007）、Review 面板（它不是 falcon 里的一块面板，是另一个应用）
+
 **Worktree Project（附属项目）**:
 从一个 Project 派生出来的 Project，工作目录是源项目所在 git 仓库的一棵 worktree，检出另一条分支。与源项目共用同一台宿主机与同一份连接配置（local / ssh 跟着源项目走），但拥有独立的名称、独立的会话、独立的生命周期。目录由 falcon 在**仓库根**的同级创建（`<仓库基名>-<分支 slug>`），也只有 falcon 自己建的目录才会在删除时被清理。只能从普通 Project 派生一层。多仓库容器批量派生出的附属项目同时也是多仓库项目（multi 与 worktree 同时存在），删除按成员清单逐棵清理。
 _Avoid_: 子项目（暗示嵌套，实际是磁盘上的同级）、分支项目（附属项目不等于分支，分支可以换）、Clone / 副本（只有一份仓库，什么都没有复制）

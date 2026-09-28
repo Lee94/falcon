@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { Project, SessionWithProject, SshHost } from "@falcon/shared";
-import { SESSION_AGENTS, WORKTREE_ARCHIVE_TTL_DAYS } from "@falcon/shared";
+import { px0BasePath, SESSION_AGENTS, WORKTREE_ARCHIVE_TTL_DAYS } from "@falcon/shared";
 import { api } from "../api.js";
 import { useApp, type MenuItemSpec } from "../store.js";
 import { connLabel } from "./hostColor.js";
@@ -477,6 +477,18 @@ export function useActions() {
     }
     const items: MenuItemSpec[] = [
       ...newSessionItems(project.id),
+      // px0 审阅（ADR 0017）：新标签页打开，服务端在宿主机上按需拉起。
+      // 没有工作目录（多仓库容器、未填目录的 SSH 项目）就没有东西可看，不给入口
+      ...(project.workingDir
+        ? [
+            {
+              label: t("project.px0Review"),
+              separated: true,
+              // noopener：px0 是第三方前端，别让它拿到 falcon 这一页的 window.opener
+              onSelect: () => void window.open(px0BasePath(project.id), "_blank", "noopener"),
+            },
+          ]
+        : []),
       {
         label: t("project.filterInOverview"),
         separated: true,

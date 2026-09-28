@@ -1,0 +1,79 @@
+# 用 px0 审阅：宿主机上跑 px0，经 falcon 同源反代
+
+AI 在终端里写代码之后，瓶颈变成了看 diff、跳定义、给 agent 回话。[px0](https://github.com/px0-ai/px0) 是一个专做这件事的浏览器 IDE：一个 Go 单文件（约 12 MB，零运行时依赖），在哪台机器上跑就只看哪台机器上的目录，编辑一律交给那台机器上的 claude / codex 等 CLI。它天然适合 SSH 项目——缺的只是「装上、起来、让浏览器够得着、别让别人够得着」。
+
+现在项目行的菜单里多一项「用 px0 审阅」：新标签页打开 `/px0/<项目 id>/`，falcon 在项目的宿主机上按需拉起 px0，把请求反代过去。
+
+## 决定一：px0 跑在项目的宿主机上，不在后端本机
+
+px0 读文件走本地 fs、读 git 走本地 `git -C`，没有远程文件系统这层抽象；它派给 agent 的编辑也要在代码所在的机器上执行。所以 SSH 项目的 px0 必须跑在远端，和 agent 会话（ADR 0013）是同一个思路。本地项目就在后端本机 spawn。
+
+## 决定二：同源子路径 + 登录 cookie，不另开端口
+
+用户是本机与内网使用（2026-09 与用户确认）。px0 挂在 falcon 自己的源下（`/px0/<项目 id>/`，靠它的 `-base-path`），鉴权就是登录 cookie，onRequest 钩子把 `/px0/` 与 `/api/` 一视同仁。
+
+**代价要写明**：px0 的前端和 falcon 同源。它渲染仓库里的 Markdown 时原始 HTML 直通、只靠前端 sanitize；一旦 px0 有 XSS，拿到的就是整个 falcon（所有主机的终端）。这与 ADR 0007 给 HTML 预览定的沙箱立场相反，是有意接受的——前提是 falcon 只在本机 / 内网用。**要从公网访问 falcon 之前，先把 px0 挪到独立源**（另一个端口 + WS 的 Origin 校验 + 路径里的作用域令牌），别直接把这条路径暴露出去。
+
+px0 自己**没有任何鉴权**。它会改东西的 POST（派 agent 编辑——在宿主机上以 `claude --permission-mode acceptEdits` 执行一段提示、commit / push、写会话、PR 评论、装语言服务器）过一道 `localPost`：Host 必须是 IP 或 localhost，Origin 的 host 必须等于 Host；读文件、搜索、diff 这些 GET 什么都不查。经 falcon 反代后多了两层：登录 cookie（SameSite=Lax，跨站 POST 不带），以及照旧生效的 `localPost`（反代只替同源请求改写 Origin，见决定七）。
+
+## 决定三：px0 只听宿主机的 127.0.0.1，远端经 SSH 桥过来
+
+启动参数固定：`-host 127.0.0.1 -port 0 -no-open -no-telemetry -no-color -base-path /px0/<id>/ <工作目录>`。
+
+- `-port 0` 让系统挑空闲端口，端口从 stdout 的 `url: http://127.0.0.1:PORT/...` 那一行解析（不能加 `-quiet`，它连这一行一起吞了）。
+- `-no-telemetry`：px0 默认往 PostHog 报使用数据。
+- 远端的 px0 同样只听远端回环。后端本机 `listen(0)` 开一个桥，每条连接经项目链路 `forwardOut` 到远端 `127.0.0.1:PORT`（与公网发布的远端桥同一个做法，ADR 0014）。反代只认本机的一个端口，不区分本地 / 远端。
+- **宿主机上的其他用户能连到这个回环端口**，而 px0 没有鉴权。多用户共享的远端主机上别用这个功能——这是 px0 本身的限制，falcon 修不了。
+
+## 决定四：二进制由后端下载、校验、推到远端
+
+锁定版本（`px0/command.ts` 的 `PX0_VERSION`），**每个资产的 sha256 写死在源码里**：px0 是 0.1.x 的新项目，它的服务端没有鉴权、能直接驱动 agent 改代码，值得钉死字节，而不是信 release 页面上当下挂着的东西。
+
+- 后端从 GitHub release 下载对应平台的资产到 `<dataDir>/bin/<资产名>`，校验 sha256 后原子改名。已在且哈希对得上就不再下。后端所在机器下不了 GitHub 时，用户可以自己把同名文件放进去（照样校验）。
+- 远端：`uname -sm` 选资产（linux / darwin 的 amd64 / arm64），在后端本机准备好，经 `execWithInput` 的 stdin 推到远端 `<falcon 根>/bin/px0-<版本>`（先写 `.partial` 再改名）。已在且 `-version` 对得上就跳过。**不让远端自己下载**——与 Zellij 相反（ADR 0001），因为内网主机常常出不了网，而 12 MB 走一次 SSH 不算什么。
+- 本机可用 `FALCON_PX0_BIN` 指定自己的 px0（不校验版本），调试用。
+
+点「用 px0 审阅」本身就是授权：菜单项写明了会在宿主机上起 px0，不再走 Zellij 那套按主机记的安装授权。
+
+## 决定五：远端用带 pty 的 exec 通道起，通道一关 px0 就死
+
+远端命令是 `exec <登录 shell> -i -l -c 'exec <px0> ...'`：
+
+- 走登录 + 交互 shell，理由同 ADR 0013——PATH 里要有 claude / gh，`GITHUB_TOKEN` 这类变量多半写在 rc 文件里。
+- **要 pty**。没有 pty 时通道关闭不会给进程发任何信号，px0 只有等到下次往已关闭的 stdout 写东西才会吃 SIGPIPE，而它起来之后几乎不再打日志（按 sshd 的行为推断，没单独实测）。有 pty 时通道一关，px0 作为会话首进程收到 SIGHUP 退出（实测）：falcon 断链、崩溃、被杀，远端都不留孤儿。
+- 主动停止时先发 `signal TERM`（px0 会顺手关掉它拉起的语言服务器），2 秒后不管结果都关通道。
+
+**本机也挂在 pty 上**（node-pty，会话已经在用）：普通 `spawn` 的 px0 在后端被 `kill -9` 之后会留成孤儿（实测），而一个没人管的 px0 就是一个谁都能读仓库的服务。pty 主端随后端进程关闭，px0 收到 SIGHUP 退出，与远端同一个机制。cloudflared 没这么做，是因为孤儿 Quick Tunnel 的代价不同，这里不跟它看齐。
+
+## 决定六：打开即启动，没人用就停
+
+- 访问 `/px0/<id>/`（入口页）时如果没在跑就拉起来，并先回一个自动刷新的「正在启动」页，起好之后刷新进入 px0。起不来就在这页上显示原因和重试链接。入口页之外的路径不会触发启动：没在跑时回 503。
+- 一个项目最多一个 px0 实例。px0 的会话文件（打开的标签、草稿评论）按 base path 存在宿主机的 `~/.px0/sessions/`，用项目 id 做 base path，重新起来标签页还在。
+- px0 页面开着时总挂着一条 SSE（`/api/stream`），所以「没有在途请求且 15 分钟没有新请求」就等于标签页关了，届时停掉。项目删除时也停掉。
+
+## 决定七：反代只改两处
+
+- 请求：去掉 `cookie` / `authorization`（falcon 的登录令牌不该送进宿主机上的第三方进程），`host` 改成 `127.0.0.1`，去掉逐跳头。路径原样转发——px0 本来就认 `/px0/<id>/` 这个前缀。
+- 请求的 Origin：浏览器发来的是 falcon 的地址（内网里可能是主机名），原样转给 px0 过不了 `localPost`，所有会改东西的 POST 都是 403（实测）。**只有同源请求**（Origin 的 host 等于浏览器发来的 Host）才改写成 `http://127.0.0.1`；跨源的 Origin 原样转过去让 px0 照旧拒掉——同站不同端口的页面能带着 SameSite=Lax 的 cookie 发 POST，这道检查还有用。
+- 响应：px0 的 main 分支已经带上 CSP `frame-ancestors 'none'`，改写成 `'self'`，留出以后嵌进工作区窗口的余地；其余 CSP 原样保留（`script-src 'self'` 在同源下仍然有效）。去掉 `set-cookie`：px0 不用 cookie，而它与 falcon 同源，放行等于让它能改写 falcon 的登录 cookie。SSE 靠流式透传，不缓冲。
+- 每个请求一条新连接，不进 keep-alive 池：远端的连接是一条 forwardOut 通道。**不能写 `agent: false`**——Node 见到 false 会现造一个 Agent，用它自己的 createConnection 直连，我们给的那个被无视（实测 502）。
+
+## Considered Options
+
+- **独立源（另开端口）**：隔离更好，但 cookie 不按端口隔离、WS 握手不受 CORS 约束，另一个端口上的页面照样能带着 cookie 连 `/ws/sessions/:id`，要一起补 Origin 校验和作用域令牌；部署上还多一个端口要暴露。本机 / 内网场景下不值，见决定二的前提。
+- **嵌进 WorkCanvas 当一种窗口**：px0 本身就是一个完整的 IDE，塞进一列里太挤；而且要新增窗口类型、动 ADR 0012 的排布与持久化。v1 用新标签页，CSP 已经改写好，以后想嵌再做。
+- **让用户自己在终端里起 px0，配一条端口转发**：不改代码就能用，但只在浏览器和后端同机时通、没有鉴权、起停全靠手。
+- **远端自己下载 px0**：内网主机出不了网就没法用，见决定四。
+
+## 验证状态
+
+纯函数层（资产映射、sha256 表、argv、端口解析、远端安装 / 启动命令在本机 sh 上真跑、请求 / 响应头过滤、入口页）有单测。
+
+真机验过（2026-09-28，px0 0.1.10，独立端口的测试实例）：
+- 本地项目（macOS arm64）与 POSIX SSH 项目（Linux x86_64，登录 shell zsh，工作目录写成 `~/...`）：无头 Chrome 经反代打开 px0，文件树、diff、git 面板、SSE 推送都正常，控制台无报错；远端 px0 经交互登录 shell 找到了 claude。
+- 首次打开远端：下载 9 秒、推送 1 秒；之后 `-version` 对得上就跳过。
+- 同源 POST 200、跨源 POST 仍被 px0 拒（403）；设了密码后未登录的浏览器导航回首页、XHR 回 401。
+- 改项目工作目录 → 远端 px0 0.3 秒内退出（TERM 生效）；删项目 → 本地与远端都停；后端 `kill -9` → 本地与远端都不留 px0。
+- 重新拉起后打开的标签页还在（会话文件按 base path 存）。
+
+没验：15 分钟空闲回收（没等满）、macOS / arm64 远端、Windows 上的本机后端、老 OpenSSH 不支持 signal 请求时的 2 秒退路。Windows 宿主机不支持（入口页说明原因）；原生客户端还没有这个入口。

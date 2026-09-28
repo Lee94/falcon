@@ -140,6 +140,8 @@ import {
 import { DEFAULT_BASE_URL, ZELLIJ_VERSION } from "./zellij/version.js";
 import type { MeegleClient } from "./meegle/client.js";
 import { registerMeegleRoutes } from "./meegle/routes.js";
+import type { Px0Manager } from "./px0/manager.js";
+import { registerPx0Routes } from "./px0/routes.js";
 
 /**
  * WorktreeFailure → HTTP 码。
@@ -202,10 +204,11 @@ export interface RouteDeps {
   dataDir: string;
   askpass: AskpassHub;
   meegle: MeegleClient;
+  px0: Px0Manager;
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, auth, manager, secrets, askpass, meegle } = deps;
+  const { db, auth, manager, secrets, askpass, meegle, px0 } = deps;
 
   // 粘贴图片的请求体是原始图片字节。fastify 默认只认 JSON，这里按原样收成 Buffer
   app.addContentTypeParser(
@@ -221,6 +224,15 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   app.addHook("onRequest", async (req, reply) => {
     const url = req.url;
+    // px0 反代与 /api 同一口径（ADR 0017）：px0 自己没有任何鉴权，挡在它前面的只有这里
+    if (url.startsWith("/px0/")) {
+      if (auth.isAuthenticated(req)) return;
+      // 入口页是浏览器导航过来的：送回首页登录，登录后再从菜单打开
+      if (req.method === "GET" && (req.headers.accept ?? "").includes("text/html")) {
+        return reply.redirect("/");
+      }
+      return reply.code(401).send({ error: "未认证" });
+    }
     if (!url.startsWith("/api/")) return;
     if (url.startsWith("/api/auth/")) return;
     // 原始字节路由自己验作用域令牌（见下方 /raw/），cookie 在那里只是可选的加分项
@@ -642,6 +654,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     // 附属项目的 ssh_* 是从源项目复制来的（让 SshLink / getLink / GET host 全都
     // 不用改），代价就是这条手动传播。本地项目没有可传播的东西。
     if (row.type === "ssh") db.updateChildrenSsh(row.id, row);
+    // px0 开的是旧目录 / 旧 shell / 旧主机：停掉，下次打开按新配置起。只改名不打扰
+    if (
+      row.working_dir !== existing.working_dir ||
+      row.shell !== existing.shell ||
+      row.ssh_host !== existing.ssh_host ||
+      row.ssh_port !== existing.ssh_port ||
+      row.ssh_username !== existing.ssh_username
+    ) {
+      void px0.stop(row.id);
+    }
     // 连接配置可能已变化，废弃旧链路（不影响已附着的会话，直到下次断链）
     return Db.toProject(row);
   });
@@ -680,6 +702,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     } catch (err) {
       return reply.code(502).send({ error: `终止会话失败，未做任何清理：${(err as Error).message}` });
     }
+    // px0 同理：它开着 worktree 目录（索引、git 监听），先停再删
+    await Promise.all(targets.map((p) => px0.stop(p.id)));
 
     const doomed = new Set(targets.map((p) => p.id));
     // guardDirsOf 除 working_dir 外还收多仓库项目的成员路径——容器的成员是
@@ -1937,6 +1961,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         .code(502)
         .send({ error: `终止会话失败，未存档：${(err as Error).message}` });
     }
+    await px0.stop(id);
     db.setWorktreeArchived(id, Date.now());
     return Db.toProject(db.getProject(id)!);
   });
@@ -2210,4 +2235,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   // ---- 飞书项目（Meegle）----
   // 放在最后、鉴权钩子之后注册：这些路由同样只认登录 cookie
   registerMeegleRoutes(app, meegle, db);
+
+  // ---- px0 审阅（ADR 0017）----
+  registerPx0Routes(app, db, px0);
 }

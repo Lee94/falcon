@@ -17,6 +17,7 @@ import { startArchiveSweeper } from "./archive.js";
 import { registerRoutes } from "./routes.js";
 import { registerWs } from "./ws.js";
 import { MeegleClient } from "./meegle/client.js";
+import { Px0Manager } from "./px0/manager.js";
 import { ZELLIJ_VERSION } from "./zellij/version.js";
 
 const VERSION = "0.1.0";
@@ -62,6 +63,8 @@ async function main() {
 
   // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
   const meegle = new MeegleClient(app.log);
+  // px0 审阅（ADR 0017）：按项目按需拉起，本地 spawn / SSH 项目走项目链路
+  const px0 = new Px0Manager(config.dataDir, (row) => manager.getLink(row));
   registerRoutes(app, {
     db,
     auth,
@@ -71,6 +74,7 @@ async function main() {
     dataDir: config.dataDir,
     askpass,
     meegle,
+    px0,
   });
   registerWs(app, { auth, manager, db });
 
@@ -119,6 +123,8 @@ async function main() {
     stopArchiveSweeper();
     // cloudflared 是子进程，后端退出不会自动带走；不杀的话 Quick Tunnel 还会在公网挂着
     await manager.shares.shutdown();
+    // 本机的 px0 是子进程，同理；远端的随 SSH 通道关闭（pty 挂断）自己退出
+    await px0.shutdown();
     // 会话在 DB 中保持 active，下次启动由 recoverSessionsOnStartup 归类
     await app.close();
     process.exit(0);

@@ -70,6 +70,8 @@ interface RemoteProbe {
   hasTar: boolean;
   /** 远端登录 shell。项目没指定 shell 时用它，绝不留给 Zellij 自己猜——见 POSIX_PROBE */
   shell: string;
+  /** POSIX 的 `uname -sm` 原文；Windows 为 null。Zellij 以外的二进制（px0）按它选资产 */
+  uname: string | null;
 }
 
 /** 远端 Zellij 就绪状态。durable=false 时 reason 必定有值。 */
@@ -379,11 +381,21 @@ export class SshLink extends EventEmitter {
    * 同 exec，但把 ssh2 的通道原样交给调用方：写入端是命令的 stdin，读取端是 stdout，
    * `close` 事件带退出码。文件下载 / 上传（transfer.ts）按流走，"攒成字符串"装不下
    * 一个几百 MB 的文件。调用方必须把读端读起来——ssh2 要等读端 end 之后才发 close。
+   *
+   * pty：给命令分一个伪终端。常驻的远端服务（px0，ADR 0017）要它——没有 pty 时
+   * 通道关了 sshd 也不杀进程，有 pty 时通道一关进程就收到 SIGHUP。代价是 stderr
+   * 并进 stdout、换行变 \r\n。
    */
-  async execStream(commandLine: string): Promise<ClientChannel> {
+  async execStream(commandLine: string, opts?: { pty?: boolean }): Promise<ClientChannel> {
     const client = await this.getClient();
     return new Promise<ClientChannel>((resolve, reject) => {
-      client.exec(commandLine, (err, stream) => (err ? reject(err) : resolve(stream)));
+      const cb = (err: Error | undefined, stream: ClientChannel) =>
+        err ? reject(err) : resolve(stream);
+      if (opts?.pty) {
+        client.exec(commandLine, { pty: { term: "dumb", cols: 200, rows: 50 } }, cb);
+      } else {
+        client.exec(commandLine, cb);
+      }
     });
   }
 
@@ -391,9 +403,15 @@ export class SshLink extends EventEmitter {
    * 宿主机类型、家目录与默认 shell，供 git 层与 shell 侦测使用。
    * probe() 自带缓存，重复调用不产生往返；RemoteProbe 本身不外泄，只给出这几项事实。
    */
-  async hostFacts(): Promise<{ kind: HostKind; home: string; shell: string; root: string }> {
+  async hostFacts(): Promise<{
+    kind: HostKind;
+    home: string;
+    shell: string;
+    root: string;
+    uname: string | null;
+  }> {
     const p = await this.probe();
-    return { kind: p.kind, home: p.home, shell: p.shell, root: p.root };
+    return { kind: p.kind, home: p.home, shell: p.shell, root: p.root, uname: p.uname };
   }
 
   // ---- 探测与安装 ----
@@ -425,6 +443,7 @@ export class SshLink extends EventEmitter {
         downloader: p.downloader,
         hasTar: true,
         shell: p.shell,
+        uname: p.uname,
       };
       return this.probed;
     }
@@ -444,6 +463,7 @@ export class SshLink extends EventEmitter {
         downloader: w.downloader,
         hasTar: w.hasTar,
         shell: w.shell,
+        uname: null,
       };
       return this.probed;
     }
