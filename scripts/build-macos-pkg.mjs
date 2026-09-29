@@ -22,11 +22,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_ID, ICONS, macos as macosIconSvg, raster } from "./app-icons.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASE = path.join(ROOT, "release");
 const TEMPLATES = path.join(ROOT, "scripts", "macos-pkg");
-const FAVICON = path.join(ROOT, "packages/web/public/favicon.svg");
 
 const serverPkg = JSON.parse(
   fs.readFileSync(path.join(ROOT, "packages/server/package.json"), "utf8")
@@ -81,10 +81,9 @@ try {
   fs.mkdirSync(resources, { recursive: true });
   fs.mkdirSync(scripts, { recursive: true });
 
-  if (!fs.existsSync(FAVICON)) {
-    console.error(`缺少 ${path.relative(ROOT, FAVICON)}`);
-    process.exit(1);
-  }
+  // 默认应用图标的 macOS 版式（留边 + 投影，ADR 0018），图形定义在 app-icons.mjs，按每档尺寸现画。
+  // 装好的 App 没启动时 Dock / 访达显示它；启动后原生客户端再按服务端的选择换
+  const appIconSvg = macosIconSvg(ICONS[DEFAULT_ID]);
   const iconset = path.join(stage, "AppIcon.iconset");
   fs.mkdirSync(iconset);
   const sizes = [
@@ -100,15 +99,7 @@ try {
     [1024, "icon_512x512@2x.png"],
   ];
   for (const [px, name] of sizes) {
-    execFileSync("rsvg-convert", [
-      "-w",
-      String(px),
-      "-h",
-      String(px),
-      "-o",
-      path.join(iconset, name),
-      FAVICON,
-    ]);
+    raster(appIconSvg, path.join(iconset, name), px);
   }
   run("iconutil", ["-c", "icns", "-o", path.join(resources, "AppIcon.icns"), iconset]);
 

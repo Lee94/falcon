@@ -50,6 +50,7 @@ import { ThemeChoice } from "./common/ThemeToggle.js";
 import { ThemePicker } from "./ThemePicker.js";
 import { Field, Segmented } from "./common/Field.js";
 import { RelaysPane } from "./RelaysPane.js";
+import { AppIconPicker } from "./AppIconPicker.js";
 
 interface TabDef {
   id: SettingsTab;
@@ -210,6 +211,9 @@ function AppearancePane() {
             {t("theme.resetThemes")}
           </Button>
         </div>
+      </SettingSection>
+      <SettingSection title={t("appIcon.title")} description={t("appIcon.hint")}>
+        <AppIconPicker />
       </SettingSection>
       <SettingSection title={t("settings.terminalTitle")} description={t("settings.terminalHint")}>
         <SettingRow label={t("settings.termFont")} hint={t("settings.termFontHint")}>

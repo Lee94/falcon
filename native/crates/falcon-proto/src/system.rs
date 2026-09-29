@@ -185,3 +185,16 @@ mod tests {
         roundtrip::<Vec<AskpassPrompt>>(r#"[{"id":"a1","prompt":"[sudo] password for fay:"}]"#);
     }
 }
+
+/// `GET /api/app-icon`（ADR 0018）：服务端级的应用图标选择。
+///
+/// `selected` 是 shared `APP_ICON_IDS` 里的一个，或 `"custom"`；认 id 的活在
+/// falcon-core 的 `app_icon`，这里按字符串收，服务端加了新图标旧客户端也不至于解不开。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIconState {
+    pub selected: String,
+    /// 已上传的自定义图标的版本（内容哈希前缀），None = 没有
+    #[serde(default)]
+    pub custom: Option<String>,
+}

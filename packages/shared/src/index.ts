@@ -15,6 +15,24 @@ export {
 } from "./termEnv.js";
 export { TermModeTracker } from "./termModes.js";
 export { TtlCache, type TtlCacheEntry, type TtlCacheLoadOpts } from "./ttlCache.js";
+export {
+  APP_ICON_CUSTOM_SIZE,
+  APP_ICON_IDS,
+  DEFAULT_APP_ICON,
+  appIconLinks,
+  builtinIconUrl,
+  customIconUrl,
+  isAppIconChoice,
+  isBuiltinAppIcon,
+  resolveAppIcon,
+  webManifest,
+  type AppIconChoice,
+  type AppIconLinks,
+  type AppIconState,
+  type BuiltinAppIcon,
+  type BuiltinIconFile,
+  type ManifestIcon,
+} from "./appIcon.js";
 
 // ============ Project ============
 

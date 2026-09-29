@@ -18,7 +18,7 @@ webview = ["dep:wry"]
 automation = []
 # 调试截图：打开 gpui-kit 的 test-support 才有 Window::render_to_image（Metal 回读，
 # 锁屏时也能拿到画面）。见 src/snapshot.rs。test-support 会给元素多包一层观测，别拿它压测
-snapshot = ["automation", "gpui-kit/test-support", "dep:image"]
+snapshot = ["automation", "gpui-kit/test-support"]
 
 [build-dependencies]
 woff2 = { package = "woff2-patched", version = "0.4" }
@@ -48,4 +48,12 @@ directories = "6"
 # 本地时区（文件修改时间、提交时间）：跨平台地按"那一刻"取偏移，夏令时两边都对
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+# 自定义应用图标的缩放 / 编码 / 套 Dock 版式（app_icon.rs，ADR 0018）；调试截图也用它编 PNG。
+# 解码上传的图走 GPUI（它自带各格式解码与 SVG 光栅化），这里只要 PNG
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# 运行时换 Dock 图标（app_icon.rs）。版本跟 GPUI / wry 已经带进来的那份一致，不多编一套
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }

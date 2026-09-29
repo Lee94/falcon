@@ -13,6 +13,8 @@
 mod code;
 mod html;
 mod image;
+/// 设置里上传自定义应用图标也按扩展名认格式（app_icon.rs）
+pub(crate) use image::format_by_ext;
 mod markdown;
 
 use falcon_client::raw_url;

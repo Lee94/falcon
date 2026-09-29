@@ -1,4 +1,4 @@
-//! 设置（web 的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、
+//! 设置（web 的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、应用图标、
 //! 终端字体 / 字号 / 行高 / 光标）、账户（访问密码、钥匙串、退出登录）、远端主机、中转（端口转发
 //! 与公网发布，按机器管理，ADR 0016）、关于。
 //!
@@ -10,6 +10,7 @@
 //! 轮询，所以只在切到它时建、切走就丢（web 同样是切 tab 即卸载）。
 
 mod account;
+mod app_icon;
 mod appearance;
 mod hosts;
 mod relays;
@@ -133,7 +134,7 @@ impl SettingsView {
         })
         .detach();
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
-        let appearance = cx.new(|cx| appearance::AppearancePane::new(window, cx));
+        let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
         let account = cx.new(|cx| account::AccountPane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
         Self { ws, tab, search, appearance, account, hosts, relays: None }

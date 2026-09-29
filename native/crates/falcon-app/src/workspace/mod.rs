@@ -10,6 +10,7 @@
 //! store：GPUI 里它们由 `window.open_dialog` 等命令式打开，生命周期归 gpui-component 的 Root。
 
 pub mod actions;
+pub mod app_icon;
 pub mod persist;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -21,7 +22,7 @@ pub use falcon_core::workspace::{
     ActiveView, DiffCommit, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
     WorkspaceState, is_pending_id,
 };
-use falcon_proto::{AuthStatus, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
+use falcon_proto::{AppIconState, AuthStatus, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
 use gpui_kit::{AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::profiles::ServerProfile;
@@ -108,6 +109,13 @@ pub struct Workspace {
     /// 总览里勾选的会话（批量终止）
     pub selected: Vec<String>,
 
+    /// 应用图标（ADR 0018）：这台服务端上的选择；None = 还没取到
+    pub app_icon: Option<AppIconState>,
+    /// 已取回并套好 Dock 版式的自定义图
+    pub custom_icon: Option<app_icon::CustomIcon>,
+    /// 换 / 传 / 删应用图标的请求在路上
+    pub app_icon_busy: bool,
+
     /// 活着的终端视图：在 tabs 里就常驻（web 同样不卸载——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
     changes_in_flight: bool,
@@ -139,6 +147,9 @@ impl Workspace {
             overview_filter: None,
             overview_project: None,
             selected: Vec::new(),
+            app_icon: None,
+            custom_icon: None,
+            app_icon_busy: false,
             terminals: HashMap::new(),
             changes_in_flight: false,
             _tasks: Vec::new(),
@@ -294,6 +305,7 @@ impl Workspace {
                     }
                 }
                 this.refresh_changes(cx);
+                this.load_app_icon(cx);
                 cx.notify();
             })
             .ok();

@@ -26,6 +26,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": "http://localhost:4923",
+      // PWA 清单由服务端按所选应用图标现出（ADR 0018）
+      "/manifest.webmanifest": "http://localhost:4923",
       "/px0": "http://localhost:4923",
       "/ws": { target: "ws://localhost:4923", ws: true },
     },

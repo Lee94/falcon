@@ -15,6 +15,8 @@
 
 mod js;
 
+/// 对应 shared 的 appIcon.ts（客户端用得到的部分）+ 原生 Dock 版式的像素运算（ADR 0018）
+pub mod app_icon;
 /// 对应 web 的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）
 pub mod layout;
 /// 对应 web 的 lib/paneKey.ts：窗口 key 约定

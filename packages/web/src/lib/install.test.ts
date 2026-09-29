@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   canInstall,
   handleAppInstalled,
@@ -12,8 +9,6 @@ import {
   promptInstall,
   resetInstallPrompt,
 } from "./install.js";
-
-const here = dirname(fileURLToPath(import.meta.url));
 
 describe("isStandalone", () => {
   it("display-mode: standalone 算已安装", () => {
@@ -82,10 +77,6 @@ describe("meetsChromeInstallManifest", () => {
     assert.equal(meetsChromeInstallManifest({ ...ok, display: "browser" }), false);
   });
 
-  it("仓库里的 manifest 满足 Chrome 安装条件", () => {
-    const raw = readFileSync(join(here, "../../public/manifest.webmanifest"), "utf8");
-    assert.equal(meetsChromeInstallManifest(JSON.parse(raw)), true);
-  });
 });
 
 describe("promptInstall", () => {

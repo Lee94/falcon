@@ -18,6 +18,7 @@
 //! | `frames:<ms>[:refresh]` | 按 60Hz 手动画这么久（锁屏时模拟显示链路，压测要算上渲染开销），打印 p50 / p95 / 最慢；带 `:refresh` 时每帧无视视图缓存 |
 //! | `toast:<文本>` | 弹一条通知（验证通知层与对话框的上下关系） |
 //! | `snap:<路径.png>` | 截图（Metal 回读，锁屏也能拿到） |
+//! | `dock:<路径.tiff>` | 从 AppKit 读回当前 Dock 图标存成 TIFF（macOS；验应用图标，ADR 0018） |
 //! | `quit` | 退出 |
 //!
 //! 例：`FALCON_AUTOMATE="ready;select:mojito;new-terminal;wait:2500;type:echo 你好\r;wait:800;snap:/tmp/t.png;quit"`
@@ -295,6 +296,11 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                 ms(at(0.95)),
                 ms(at(1.0))
             );
+        }
+        #[cfg(target_os = "macos")]
+        "dock" => {
+            let tiff = cx.update(|_| crate::app_icon::current_dock_tiff());
+            std::fs::write(arg, tiff.ok_or("读不到 Dock 图标")?).map_err(|e| e.to_string())?;
         }
         "toast" => {
             let _ = window.update(cx, |_, window, cx| {

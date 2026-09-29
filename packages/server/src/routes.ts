@@ -142,6 +142,7 @@ import type { MeegleClient } from "./meegle/client.js";
 import { registerMeegleRoutes } from "./meegle/routes.js";
 import type { Px0Manager } from "./px0/manager.js";
 import { registerPx0Routes } from "./px0/routes.js";
+import { AppIcons, registerAppIconRoutes } from "./appIcon.js";
 
 /**
  * WorktreeFailure → HTTP 码。
@@ -238,6 +239,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (url.startsWith("/api/auth/")) return;
     // 原始字节路由自己验作用域令牌（见下方 /raw/），cookie 在那里只是可选的加分项
     if ((req.routeOptions.config as { rawToken?: boolean } | undefined)?.rawToken) return;
+    // 应用图标的取图路由（ADR 0018）：登录页的标签页图标、浏览器拉 PWA 图标都不带登录态
+    if ((req.routeOptions.config as { publicAsset?: boolean } | undefined)?.publicAsset) return;
     if ((req.routeOptions.config as { askpassHelper?: boolean } | undefined)?.askpassHelper) {
       return;
     }
@@ -2239,4 +2242,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   // ---- px0 审阅（ADR 0017）----
   registerPx0Routes(app, db, px0);
+
+  // ---- 应用图标（ADR 0018）----
+  registerAppIconRoutes(app, new AppIcons(db, deps.dataDir));
 }

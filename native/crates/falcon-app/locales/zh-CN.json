@@ -896,7 +896,7 @@
     "group_general": "常规",
     "group_connection": "连接",
     "tab_appearance": "外观",
-    "tab_appearance_keys": "主题 ghostty 配色 明暗 深色 浅色 字体 字号 终端 光标 引擎 rio 实验 webgpu gpu canvas 渲染器",
+    "tab_appearance_keys": "主题 ghostty 配色 明暗 深色 浅色 字体 字号 终端 光标 引擎 rio 实验 webgpu gpu canvas 渲染器 图标 应用图标 icon logo favicon dock",
     "tab_account": "账户",
     "tab_account_keys": "密码 账户 登录",
     "tab_hosts": "远端主机",
@@ -935,6 +935,28 @@
     "installAppAction": "安装",
     "installed": "已作为应用运行",
     "installUnavailable": "在 Chrome 菜单里选「安装 Falcon…」。仅 localhost 或 HTTPS 可安装。"
+  },
+  "appIcon": {
+    "title": "应用图标",
+    "hint": "浏览器标签页、安装成应用的 PWA、iOS 主屏幕和原生客户端的 Dock 都用它。选择存在服务端，连这台服务端的所有设备一起换；已安装的应用要等浏览器下次检查清单才换。",
+    "name_emberwing": "橙翼",
+    "name_voltwing": "电翼",
+    "name_voltwing_spark": "电翼 · 电光",
+    "name_voltwing_night": "电翼 · 深夜",
+    "name_voltwing_ivory": "电翼 · 羽白",
+    "name_glyph": "鸟字",
+    "name_flash": "一闪",
+    "name_thunderbird": "雷鸟",
+    "custom": "自定义",
+    "customHint": "自定义图标：PNG / JPG / WebP / SVG 都行，等比缩放成 512×512，不裁切，空出的地方透明。",
+    "upload": "上传图片…",
+    "replace": "换一张…",
+    "remove": "移除自定义",
+    "loadFailed": "读取应用图标设置失败",
+    "saveFailed": "更换应用图标失败",
+    "uploadFailed": "自定义图标上传失败",
+    "removeFailed": "移除自定义图标失败",
+    "decodeFailed": "这张图片读不出来"
   },
   "term": {
     "copy": "复制",
@@ -1012,7 +1034,8 @@
       "uiZoomHint": "同浏览器的 ⌘+ / ⌘−：文字、控件、间距一起缩放。终端字号在下面「终端」里单独调。",
       "uiZoomIn": "放大",
       "uiZoomOut": "缩小",
-      "uiZoomReset": "恢复 100%"
+      "uiZoomReset": "恢复 100%",
+      "appIconDockNote": "装好的 App 没启动时，Dock 与访达里是安装包自带的默认图标；启动并连上服务端后才换成这里选的。"
     },
     "menu": {
       "settings": "设置…",

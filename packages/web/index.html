@@ -14,9 +14,13 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <title>Falcon</title>
+    <!--
+      应用图标可在设置里换（ADR 0018）：这两条指向服务端，按当前选择跳到对应图片，
+      页面不用等 JS 就是对的；设置里换了之后由 lib/appIcon.ts 直接改 href。清单也由服务端现出。
+    -->
     <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" href="/api/app-icon/favicon" />
+    <link rel="apple-touch-icon" href="/api/app-icon/apple-touch-icon" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />

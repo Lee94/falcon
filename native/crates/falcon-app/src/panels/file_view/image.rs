@@ -403,7 +403,7 @@ fn hint(text: String, ui: &Ui) -> impl IntoElement {
 }
 
 /// 服务端没给（或给了认不出的）Content-Type 时按扩展名猜
-fn format_by_ext(path: &str) -> Option<ImageFormat> {
+pub(crate) fn format_by_ext(path: &str) -> Option<ImageFormat> {
     let ext = path.rsplit('.').next()?.to_lowercase();
     Some(match ext.as_str() {
         "png" => ImageFormat::Png,

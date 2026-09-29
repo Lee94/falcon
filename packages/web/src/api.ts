@@ -1,4 +1,6 @@
 import type {
+  AppIconChoice,
+  AppIconState,
   AuthStatus,
   DeleteProjectResult,
   FsListing,
@@ -419,20 +421,29 @@ export const api = {
   meegleUnpin: (id: string) =>
     request<{ ok: true }>("DELETE", `/api/meegle/pins/${encodeURIComponent(id)}`),
   /** 图片按原始字节直传，Content-Type 就是图片类型，不走 JSON 包装 */
-  pasteImage: async (id: string, blob: Blob): Promise<PasteImageResult> => {
-    const res = await fetch(`/api/sessions/${id}/paste-image`, {
-      method: "POST",
-      headers: { "Content-Type": blob.type },
-      body: blob,
-      credentials: "same-origin",
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new ApiRequestError(
-        (data as { error?: string }).error ?? `HTTP ${res.status}`,
-        res.status
-      );
-    }
-    return data as PasteImageResult;
-  },
+  pasteImage: (id: string, blob: Blob) =>
+    rawImage<PasteImageResult>("POST", `/api/sessions/${id}/paste-image`, blob),
+  appIcon: () => request<AppIconState>("GET", "/api/app-icon"),
+  setAppIcon: (selected: AppIconChoice) =>
+    request<AppIconState>("PUT", "/api/app-icon", { selected }),
+  /** 传规整好的 512 PNG（lib/appIcon.ts 的 normalizeIconImage），上传即选中 */
+  uploadAppIcon: (png: Blob) => rawImage<AppIconState>("PUT", "/api/app-icon/custom", png),
+  removeCustomAppIcon: () => request<AppIconState>("DELETE", "/api/app-icon/custom"),
 };
+
+async function rawImage<T>(method: string, url: string, blob: Blob): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": blob.type },
+    body: blob,
+    credentials: "same-origin",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiRequestError(
+      (data as { error?: string }).error ?? `HTTP ${res.status}`,
+      res.status
+    );
+  }
+  return data as T;
+}

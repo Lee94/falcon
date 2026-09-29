@@ -88,15 +88,8 @@ async function main() {
     process.env.MOJITO_WEB_DIST ??
     path.resolve(here, "../../web/dist");
   if (fs.existsSync(path.join(webDist, "index.html"))) {
-    await app.register(fastifyStatic, {
-      root: webDist,
-      setHeaders(res, filePath) {
-        // mime-db 不一定带 .webmanifest；Chrome 认这个类型才把清单当 PWA 清单
-        if (filePath.endsWith(".webmanifest")) {
-          res.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
-        }
-      },
-    });
+    // PWA 清单不在这里：图标跟着设置走，由 appIcon.ts 的路由现出（ADR 0018）
+    await app.register(fastifyStatic, { root: webDist });
     app.setNotFoundHandler((req, reply) => {
       if (
         req.method === "GET" &&

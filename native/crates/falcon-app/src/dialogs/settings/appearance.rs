@@ -1,5 +1,5 @@
-//! 外观：明暗模式、浅 / 深两个主题槽位（ADR 0006）、终端字体 / 字号 / 行高 / 光标 / 闪烁
-//! 与预览。web 的 AppearancePane。
+//! 外观：明暗模式、浅 / 深两个主题槽位（ADR 0006）、应用图标（ADR 0018，app_icon.rs）、
+//! 终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。web 的 AppearancePane。
 //!
 //! web 还有一节"实验性 · 终端渲染引擎（xterm.js / Rio）"：原生只有一套终端渲染，这一节不画；
 //! 偏好 JSON 里的 `engine` 字段原样保留（falcon-core 的 TermPref 读写不丢值），换回浏览器
@@ -27,6 +27,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
+use super::app_icon::AppIconPicker;
 use super::widgets::{SegOption, rows, section, segmented};
 use crate::dialogs::theme_picker::ThemePicker;
 use crate::fonts;
@@ -34,6 +35,7 @@ use crate::menus::{MenuItemSpec, to_popup};
 use crate::prefs::Prefs;
 use crate::theme::{TermPrefs, TerminalLook, ThemeState, Ui, radius};
 use crate::ui::icon;
+use crate::workspace::Workspace;
 use crate::zoom::zpx;
 
 /// 读偏好文件里的 `falcon.term`（没有再看旧名 `mojito.term`），过一遍 falcon-core 的清洗
@@ -52,6 +54,7 @@ fn font_label(id: TermFontId) -> String {
 }
 
 pub struct AppearancePane {
+    app_icon: Entity<AppIconPicker>,
     light: Entity<ThemePicker>,
     dark: Entity<ThemePicker>,
     term: TermPref,
@@ -61,8 +64,9 @@ pub struct AppearancePane {
 }
 
 impl AppearancePane {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(ws: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let term = load_term(cx);
+        let app_icon = cx.new(|cx| AppIconPicker::new(ws, cx));
         let light = cx.new(|cx| ThemePicker::new(ThemeMode::Light, window, cx));
         let dark = cx.new(|cx| ThemePicker::new(ThemeMode::Dark, window, cx));
         let custom_font = cx.new(|cx| {
@@ -105,7 +109,7 @@ impl AppearancePane {
             }
         })
         .detach();
-        Self { light, dark, term, custom_font, font_size, line_height }
+        Self { app_icon, light, dark, term, custom_font, font_size, line_height }
     }
 
     /// web 的 `setTerm(patch)`：合并 → 清洗 → 落盘，终端立即换上
@@ -426,6 +430,7 @@ impl Render for AppearancePane {
             .flex()
             .flex_col()
             .child(self.render_theme_section(cx))
+            .child(self.app_icon.clone())
             .child(self.render_term_section(cx))
     }
 }

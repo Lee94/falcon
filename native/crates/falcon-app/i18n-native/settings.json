@@ -13,7 +13,8 @@
       "uiZoomHint": "同浏览器的 ⌘+ / ⌘−：文字、控件、间距一起缩放。终端字号在下面「终端」里单独调。",
       "uiZoomIn": "放大",
       "uiZoomOut": "缩小",
-      "uiZoomReset": "恢复 100%"
+      "uiZoomReset": "恢复 100%",
+      "appIconDockNote": "装好的 App 没启动时，Dock 与访达里是安装包自带的默认图标；启动并连上服务端后才换成这里选的。"
     }
   }
 }

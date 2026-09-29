@@ -4,6 +4,7 @@
 //! `t!`（locales/zh-CN.json，由 native/scripts/export-i18n.mjs 从 web 的 i18n.ts 导出）。
 
 mod actions;
+mod app_icon;
 #[cfg(feature = "automation")]
 mod automation;
 mod canvas;

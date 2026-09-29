@@ -1,54 +1,43 @@
 #!/usr/bin/env node
 /**
- * 从 public/favicon.svg 栅格化 Chrome / iOS 安装图标。
+ * 生成全部内置应用图标（ADR 0018）。图形定义在 scripts/app-icons.mjs，这里只管出文件：
+ *
+ *   packages/web/public/icons/<id>/icon-{192,512}.png      圆角方块：标签页图标、设置里的预览、PWA purpose=any
+ *   packages/web/public/icons/<id>/maskable-{192,512}.png  PWA purpose=maskable
+ *   packages/web/public/icons/<id>/apple-touch-icon.png    iOS 主屏幕（满版方块，系统自己裁角）
+ *   native/crates/falcon-app/assets/app-icons/<id>.png     原生客户端运行时的 Dock 图标（macOS 版式）
+ *
+ * 标签页图标用 PNG 不用 SVG：默认图标是栅格插画，塞进 SVG 就是一个 1MB 多的 favicon。
+ * 安装包的 AppIcon.icns 由 build-macos-pkg.mjs 直接从 app-icons.mjs 现画，不在这里出。
  *
  *   node scripts/gen-icons.mjs
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ICONS, macos, maskable, raster, rounded, square } from "./app-icons.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SRC = path.join(ROOT, "packages/web/public/favicon.svg");
-const OUT = path.join(ROOT, "packages/web/public/icons");
+const WEB_OUT = path.join(ROOT, "packages/web/public/icons");
+const NATIVE_OUT = path.join(ROOT, "native/crates/falcon-app/assets/app-icons");
 
-// 俯冲猎鹰：两翼对称、身体是向下的菱，跟上一版两片叶子一样是「中间一根 + 左右两瓣」，
-// 16px 仍能认出剪影。颜色是两档金，深底跟 PWA theme-color / 深色主题对齐。
-const MARK = `
-  <g transform="translate(256 240)">
-    <path fill="#c9a024" d="M-200-72L-16-20 2 40-96 8Z"/>
-    <path fill="#e0b63a" d="M200-72L16-20-2 40 96 8Z"/>
-    <path fill="#e4c878" d="M0-6-34 32 0 176Z"/>
-    <path fill="#f3d99a" d="M0-6 34 32 0 176Z"/>
-    <path fill="#c9a024" d="M0-108-32-26 0 2 32-26Z"/>
-    <path fill="#f3d99a" d="M0-50-12-12 0 4 12-12Z"/>
-  </g>
-`;
+// 从头出：删掉的图标不留旧文件（旧版平铺的 icons/icon-192.png 等也一并清掉）
+fs.rmSync(WEB_OUT, { recursive: true, force: true });
+fs.rmSync(NATIVE_OUT, { recursive: true, force: true });
+fs.rmSync(path.join(ROOT, "packages/web/public/favicon.svg"), { force: true });
+fs.mkdirSync(NATIVE_OUT, { recursive: true });
 
-function svg(inner) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${inner}</svg>\n`;
+for (const [id, icon] of Object.entries(ICONS)) {
+  const dir = path.join(WEB_OUT, id);
+  fs.mkdirSync(dir, { recursive: true });
+  const any = rounded(icon);
+  const mask = maskable(icon);
+  raster(any, path.join(dir, "icon-192.png"), 192);
+  raster(any, path.join(dir, "icon-512.png"), 512);
+  raster(mask, path.join(dir, "maskable-192.png"), 192);
+  raster(mask, path.join(dir, "maskable-512.png"), 512);
+  raster(square(icon), path.join(dir, "apple-touch-icon.png"), 180);
+  raster(macos(icon), path.join(NATIVE_OUT, `${id}.png`), 512);
 }
 
-function raster(svgText, dest, size) {
-  execFileSync("rsvg-convert", ["-w", String(size), "-h", String(size), "-o", dest], {
-    input: svgText,
-  });
-}
-
-fs.mkdirSync(OUT, { recursive: true });
-
-const any = svg(`<rect width="512" height="512" rx="112" fill="#0a0a0a"/>${MARK}`);
-const maskable = svg(
-  `<rect width="512" height="512" fill="#0a0a0a"/><g transform="translate(256 256) scale(0.72) translate(-256 -256)">${MARK}</g>`
-);
-
-fs.writeFileSync(SRC, any);
-
-raster(any, path.join(OUT, "icon-192.png"), 192);
-raster(any, path.join(OUT, "icon-512.png"), 512);
-raster(maskable, path.join(OUT, "icon-maskable-192.png"), 192);
-raster(maskable, path.join(OUT, "icon-maskable-512.png"), 512);
-raster(maskable, path.join(OUT, "apple-touch-icon.png"), 180);
-
-console.log(`wrote icons → ${path.relative(ROOT, OUT)}`);
+console.log(`wrote ${Object.keys(ICONS).length} icons → ${path.relative(ROOT, WEB_OUT)}, ${path.relative(ROOT, NATIVE_OUT)}`);
