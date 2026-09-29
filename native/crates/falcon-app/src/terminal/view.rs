@@ -88,6 +88,16 @@ impl SessionSink for Sink {
 #[derive(Clone, Copy, Debug)]
 struct SelectionDrag;
 
+/// `TerminalView::reported_held` 里每个键占的位
+fn button_bit(b: MouseButton) -> u8 {
+    match b {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 4,
+        _ => 0,
+    }
+}
+
 /// xterm.js 的光标闪烁间隔
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
@@ -107,6 +117,10 @@ pub struct TerminalView {
     reporter: MouseReporter,
     wheel: WheelAccumulator,
     dragging: Option<SelectionDrag>,
+    /// 在这扇终端里按下、已经报给程序的键（[`button_bit`] 的位）。拖动与松开只报这些键：
+    /// 在标题栏 / 侧栏按下再拖过来的，程序没见过那次按下，收到带键的移动就当成在拖选
+    /// （zellij 会直接起一段选区），松开就把那段选区复制走
+    reported_held: u8,
     hovered_link: Option<HoveredLink>,
     pub conn: ConnState,
     /// WS 断开后第几次自动重连（0 = 没断）
@@ -202,6 +216,7 @@ impl TerminalView {
             reporter: MouseReporter::new(),
             wheel: WheelAccumulator::new(),
             dragging: None,
+            reported_held: 0,
             hovered_link: None,
             conn: ConnState::Connecting,
             ws_retry: 0,
@@ -564,6 +579,7 @@ impl TerminalView {
         };
         if self.reporting(&e.modifiers) {
             self.report(MouseAction::Down, button, e.position, &e.modifiers);
+            self.reported_held |= button_bit(e.button);
             cx.stop_propagation();
             return;
         }
@@ -593,8 +609,14 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if e.pressed_button.is_none() {
+            // 空手移动：之前按着的键肯定都松了（兜住没收到的松开）
+            self.reported_held = 0;
+        }
         if self.reporting(&e.modifiers) {
             let button = match e.pressed_button {
+                // 按下不在这里（拖窗口标题栏、拖分隔条经过这扇终端）：一条都不报
+                Some(b) if self.reported_held & button_bit(b) == 0 => return,
                 Some(MouseButton::Left) => TermMouseButton::Left,
                 Some(MouseButton::Middle) => TermMouseButton::Middle,
                 Some(MouseButton::Right) => TermMouseButton::Right,
@@ -618,6 +640,9 @@ impl TerminalView {
         }
     }
 
+    /// 松开：落在终端上（on_mouse_up）或终端外（on_mouse_up_out）都走这里。按下时报过的键
+    /// 松开也要报，松在外面也一样（位置夹到网格边上）——不然程序以为键一直按着，选区收不了尾；
+    /// 没报过按下的（别处按下、拖过来松开的）一律不报
     fn mouse_up(&mut self, e: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let button = match e.button {
             MouseButton::Left => TermMouseButton::Left,
@@ -625,8 +650,14 @@ impl TerminalView {
             MouseButton::Right => TermMouseButton::Right,
             _ => return,
         };
-        if self.reporting(&e.modifiers) {
-            self.report(MouseAction::Up, button, e.position, &e.modifiers);
+        let bit = button_bit(e.button);
+        if self.reported_held & bit != 0 {
+            self.reported_held &= !bit;
+            if self.reporting(&e.modifiers) {
+                self.report(MouseAction::Up, button, e.position, &e.modifiers);
+                return;
+            }
+        } else if self.reporting(&e.modifiers) {
             return;
         }
         if self.dragging.take().is_some() {
@@ -932,6 +963,9 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.on_drop_paths(paths, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::term::Copy, _, cx| this.copy(cx)))

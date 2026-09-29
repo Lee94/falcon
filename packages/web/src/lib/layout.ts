@@ -225,9 +225,13 @@ export function visibleColumns(
 export const CANVAS_GAP_PX = 8;
 
 /**
- * 自适应列的宽度：一列时占满；两列及以上每列 max(半屏, min(全屏, 640))——
+ * 列宽：一列时占满；两列及以上钉死的按钉的算，自适应的每列 max(半屏, min(全屏, 640))——
  * 宽屏并排两列，再多的往右排，已在场的列不会因为新开第三列而被挤窄。
  * 640 = 40rem，与设计里其它"一栏内容"的上限同一个数。
+ *
+ * 只剩一列时连钉死的宽度也不认：把手只长在列与列之间，最后一列没有；而只有一扇窗口时
+ * 最大化按钮也藏了。并排时拖窄的列在邻居关掉 / 切到只有它的项目之后，就会窄窄地停在
+ * 左边、右边空一大片，没有任何办法拉回来。basis 不清掉，再有列进来时照旧按它排。
  */
 export function columnWidth(
   column: ColumnLayout,
@@ -235,8 +239,8 @@ export function columnWidth(
   viewportWidth: number,
   gap = CANVAS_GAP_PX
 ): number {
-  if (column.basis != null) return column.basis;
   if (count <= 1) return viewportWidth;
+  if (column.basis != null) return column.basis;
   return Math.max((viewportWidth - gap) / 2, Math.min(viewportWidth, 640));
 }
 
@@ -286,24 +290,22 @@ export function layoutFrames(
 /**
  * 列内各窗口的高度：钉死的按钉死的算，其余平分剩下的；除不尽的零头给最后一扇
  * 自适应窗口，免得列底留一条一像素的缝。
+ *
+ * 一扇自适应的都没有（钉了上面那扇之后把下面的关掉 / 拖走，只剩一扇时最常见）就让最后
+ * 一扇收尾：把手只长在两扇之间，最后一扇的底边拖不动，按钉的高度排就会在列底留一截
+ * 永远填不上的空。
  */
 function paneFrames(panes: PaneLayout[], height: number): PaneFrame[] {
   const fixed = panes.reduce((n, p) => n + (p.basis ?? 0), 0);
   const autos = panes.filter((p) => p.basis == null).length;
   const each = autos > 0 ? Math.max(PANE_MIN_PX, (height - fixed) / autos) : 0;
-  let lastAuto = -1;
-  panes.forEach((p, i) => {
-    if (p.basis == null) lastAuto = i;
-  });
+  const lastAuto = panes.map((p) => p.basis == null).lastIndexOf(true);
+  const filler = lastAuto >= 0 ? lastAuto : panes.length - 1;
   const out: PaneFrame[] = [];
   let y = 0;
   panes.forEach((p, i) => {
     const h =
-      p.basis != null
-        ? p.basis
-        : i === lastAuto
-          ? Math.max(PANE_MIN_PX, height - y)
-          : each;
+      i === filler ? Math.max(PANE_MIN_PX, height - y) : p.basis != null ? p.basis : each;
     out.push({ key: p.key, y: Math.round(y), height: Math.round(h) });
     y += h;
   });

@@ -399,7 +399,8 @@
     { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 1, "viewportWidth": 1000, "expected": 1000 },
     { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 2, "viewportWidth": 1000, "expected": 640 },
     { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 3, "viewportWidth": 2000, "expected": 996 },
-    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": 320, "count": 3, "viewportWidth": 2000, "expected": 320 }
+    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": 320, "count": 3, "viewportWidth": 2000, "expected": 320 },
+    { "ts": "layoutFrames > 只剩一列时不认钉死的宽度，照样占满", "basis": 427, "count": 1, "viewportWidth": 1000, "expected": 1000 }
   ],
   "layoutFrames": [
     {
@@ -455,6 +456,38 @@
       "expected": {
         "columns": [
           { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 590 }, { "key": "b", "y": 590, "height": 96 }] }
+        ],
+        "width": 1000
+      }
+    },
+    {
+      "ts": "layoutFrames > 只剩一列时不认钉死的宽度，照样占满",
+      "columns": [["a"]],
+      "steps": [{ "op": "setColumnBasis", "col": 0, "basis": 427 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }],
+        "width": 1000
+      }
+    },
+    {
+      "ts": "layoutFrames > 一扇自适应的都没有时最后一扇收尾，列底不留空",
+      "columns": [["a"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 150 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }],
+        "width": 1000
+      }
+    },
+    {
+      "ts": "layoutFrames > 一扇自适应的都没有时最后一扇收尾，列底不留空",
+      "columns": [["a", "b"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 150 }, { "op": "setPaneBasis", "key": "b", "basis": 200 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "expected": {
+        "columns": [
+          { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 150 }, { "key": "b", "y": 150, "height": 450 }] }
         ],
         "width": 1000
       }

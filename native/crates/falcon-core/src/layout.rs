@@ -288,17 +288,21 @@ pub fn visible_columns(columns: &[ColumnLayout], visible: impl Fn(&str) -> bool)
 /// 列间距，与画布上的 gap 同一个数
 pub const CANVAS_GAP_PX: f64 = 8.0;
 
-/// 自适应列的宽度：一列时占满；两列及以上每列 max(半屏, min(全屏, 640))——
+/// 列宽：一列时占满；两列及以上钉死的按钉的算，自适应的每列 max(半屏, min(全屏, 640))——
 /// 宽屏并排两列，再多的往右排，已在场的列不会因为新开第三列而被挤窄。
 /// 640 = 40rem，与设计里其它"一栏内容"的上限同一个数。
 ///
+/// 只剩一列时连钉死的宽度也不认：把手只长在列与列之间，最后一列没有；而只有一扇窗口时
+/// 最大化按钮也藏了。并排时拖窄的列在邻居关掉 / 切到只有它的项目之后，就会窄窄地停在
+/// 左边、右边空一大片，没有任何办法拉回来。basis 不清掉，再有列进来时照旧按它排。
+///
 /// `gap` 在 TS 里缺省是 [`CANVAS_GAP_PX`]。
 pub fn column_width(column: &ColumnLayout, count: usize, viewport_width: f64, gap: f64) -> f64 {
-    if let Some(basis) = column.basis {
-        return basis;
-    }
     if count <= 1 {
         return viewport_width;
+    }
+    if let Some(basis) = column.basis {
+        return basis;
     }
     js_max((viewport_width - gap) / 2.0, js_min(viewport_width, 640.0))
 }
@@ -355,17 +359,21 @@ pub fn layout_frames(columns: &[ColumnLayout], viewport: Viewport, gap: f64) -> 
 
 /// 列内各窗口的高度：钉死的按钉死的算，其余平分剩下的；除不尽的零头给最后一扇
 /// 自适应窗口，免得列底留一条一像素的缝。
+///
+/// 一扇自适应的都没有（钉了上面那扇之后把下面的关掉 / 拖走，只剩一扇时最常见）就让最后
+/// 一扇收尾：把手只长在两扇之间，最后一扇的底边拖不动，按钉的高度排就会在列底留一截
+/// 永远填不上的空。
 fn pane_frames(panes: &[PaneLayout], height: f64) -> Vec<PaneFrame> {
     let fixed: f64 = panes.iter().map(|p| p.basis.unwrap_or(0.0)).sum();
     let autos = panes.iter().filter(|p| p.basis.is_none()).count();
     let each = if autos > 0 { js_max(PANE_MIN_PX, (height - fixed) / autos as f64) } else { 0.0 };
-    let last_auto = panes.iter().rposition(|p| p.basis.is_none());
+    let filler = panes.iter().rposition(|p| p.basis.is_none()).or(panes.len().checked_sub(1));
     let mut out = Vec::with_capacity(panes.len());
     let mut y = 0.0;
     for (i, p) in panes.iter().enumerate() {
         let h = match p.basis {
+            _ if Some(i) == filler => js_max(PANE_MIN_PX, height - y),
             Some(b) => b,
-            None if Some(i) == last_auto => js_max(PANE_MIN_PX, height - y),
             None => each,
         };
         out.push(PaneFrame { key: p.key.clone(), y: js_round(y), height: js_round(h) });

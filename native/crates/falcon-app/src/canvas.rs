@@ -60,8 +60,8 @@ pub struct Canvas {
     scroll: ScrollHandle,
     drag: Option<Drag>,
     resize: Option<Resize>,
-    /// 上一帧的活动窗口：换了就把它所在的列滚进视口
-    revealed: Option<String>,
+    /// 上次把活动窗口滚进视口时的（活动窗口, 列形状, 视口宽）：任何一项变了就再滚一次
+    revealed: Option<(Option<String>, String, i32)>,
 }
 
 impl Canvas {
@@ -194,6 +194,16 @@ impl Canvas {
     // ---------------- 鼠标：拖窗口 / 拖缝 ----------------
 
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 左键已经松了还在"拖"：松手那一下没传到画布（别的元素 stop_propagation 了 mouse_up，
+        // 或者松在了窗口外），状态就残留下来，之后空手一晃窗口就跟着跑。按"没拖成"收掉
+        if e.pressed_button != Some(MouseButton::Left) && (self.drag.is_some() || self.resize.is_some()) {
+            if self.resize.take().is_some() {
+                self.ws.read(cx).persist();
+            }
+            self.drag = None;
+            cx.notify();
+            return;
+        }
         if let Some(resize) = &self.resize {
             match resize {
                 Resize::Column { id, start_x, start_width } => {
@@ -252,11 +262,19 @@ impl Render for Canvas {
         };
         // 画布上不止一扇窗口时，才需要给活动的那扇标题栏着色
         let mark_active = pane_count > 1;
-        // 活动窗口换了：把它所在的列滚进视口（web termCanvas.ts 的 revealScrollLeft）。画布量出
-        // 自己的宽度之前不算：开窗第一帧视口是 0，算出来的滚动量是错的，记下"已滚过"就再也不试了——
-        // 重启后活动窗口停在视口外，看上去就是没有选中的那扇（web 的 effect 也依赖 viewport.width）
-        if active_key != self.revealed && self.bounds.size.width > px(0.) {
-            self.revealed = active_key.clone();
+        // 活动窗口换了、列的成员与顺序变了、视口宽变了：把它所在的列滚进视口（web 的
+        // revealScrollLeft，effect 依赖同样是 activeKey / shape / viewport.width）。只认活动窗口
+        // 不够：最大化时内容只剩一屏宽，滚动量被夹回 0，还原之后活动窗口就半截露在视口外。
+        // 画布量出自己的宽度之前不算：开窗第一帧视口是 0，算出来的滚动量是错的，记下"已滚过"
+        // 就再也不试了——重启后活动窗口停在视口外，看上去就是没有选中的那扇
+        let shape = columns
+            .iter()
+            .map(|c| format!("{}:{}", c.id, c.panes.iter().map(|p| p.key.as_str()).collect::<Vec<_>>().join(",")))
+            .collect::<Vec<_>>()
+            .join("|");
+        let reveal = Some((active_key.clone(), shape, f32::from(self.bounds.size.width) as i32));
+        if reveal != self.revealed && self.bounds.size.width > px(0.) {
+            self.revealed = reveal;
             if let Some(key) = &active_key
                 && let Some(col) = frames.columns.iter().find(|c| c.panes.iter().any(|p| &p.key == key))
             {
@@ -434,6 +452,15 @@ impl Render for Canvas {
         }
         root
     }
+}
+
+/// 标题栏上按钮的 mouse_down 截在按钮上（web 的 `isolate`）。不截的话它冒到标题栏，标题栏把
+/// 这一下当成"开始拖窗口"记下来；按钮的 on_click 又 stop_propagation 了 mouse_up，画布收不到
+/// 松手，拖拽状态就一直挂着——点完最大化 / 还原，窗口跟着指针走。连点两下也会被标题栏当成
+/// 双击再切一次最大化。同一元素上冒泡阶段是后注册的先跑：on_click 记"按下"的那个监听注册
+/// 在 on_mouse_down 之后，先于这里执行，按钮自己的点击不受影响
+fn isolate(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
 }
 
 /// `on_prepaint` 的回调：记下画布的矩形，尺寸变了就再画一帧（首帧 / 窗口缩放）
@@ -734,7 +761,8 @@ impl Canvas {
                         w.toggle_term_zoom(cx);
                     });
                 },
-            ));
+            )
+            .on_mouse_down(MouseButton::Left, isolate));
         }
         header = header.child(crate::ui::icon_button(
             SharedString::from(format!("pane-close-{key}")),
@@ -756,7 +784,8 @@ impl Canvas {
                     PaneItem::Diff { .. } => w.close_diff(cx),
                 });
             },
-        ));
+        )
+        .on_mouse_down(MouseButton::Left, isolate));
         let header = header.context_menu(move |m, _, _| to_popup(m, menu.clone()));
 
         // ---- 内容 ----

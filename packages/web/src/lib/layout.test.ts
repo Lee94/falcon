@@ -246,6 +246,26 @@ describe("layoutFrames", () => {
     assert.equal(columnWidth({ ...column([]), basis: 320 }, 3, 2000), 320);
   });
 
+  it("只剩一列时不认钉死的宽度，照样占满", () => {
+    // 最后一列没有把手，只剩它一列时再按钉的宽度排就拉不回来了
+    assert.equal(columnWidth({ ...column([]), basis: 427 }, 1, 1000), 1000);
+    const frames = layoutFrames([{ ...column(["a"]), basis: 427 }], viewport);
+    assert.equal(frames.columns[0]!.width, 1000);
+  });
+
+  it("一扇自适应的都没有时最后一扇收尾，列底不留空", () => {
+    // 钉了上面那扇再把下面的关掉：只剩一扇钉死的
+    const alone = layoutFrames(setPaneBasis(cols(["a"]), "a", 150), viewport).columns[0]!.panes;
+    assert.deepEqual(alone, [{ key: "a", y: 0, height: 600 }]);
+    // 全钉死：前面的照钉的排，最后一扇吃掉剩下的
+    let columns = setPaneBasis(cols(["a", "b"]), "a", 150);
+    columns = setPaneBasis(columns, "b", 200);
+    assert.deepEqual(layoutFrames(columns, viewport).columns[0]!.panes, [
+      { key: "a", y: 0, height: 150 },
+      { key: "b", y: 150, height: 450 },
+    ]);
+  });
+
   it("列从左到右排，缝算进总宽", () => {
     const frames = layoutFrames(cols(["a"], ["b"]), viewport);
     assert.equal(frames.columns[0]!.x, 0);
