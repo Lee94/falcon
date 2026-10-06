@@ -125,6 +125,10 @@ pnpm build:win --skip-cargo    # 只用已有的 native/target/release/falcon-ap
 需要 VS 生成工具（rc.exe 给 exe 编图标与版本信息）和 Inno Setup 6（`winget install JRSoftware.InnoSetup --scope user`，
 或用 `FALCON_ISCC` 指到 ISCC.exe）。没有代码签名，别人机器上 SmartScreen 会拦，「更多信息 → 仍要运行」即可。
 
+GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令：推 `v*` tag 时 Windows 安装包与
+macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上；Actions 页手动触发只出构建产物、不发版。
+包里的版本号仍取 `packages/server/package.json`（pkg）与 `native/Cargo.toml`（setup.exe），打 tag 前先改好。
+
 原理：esbuild 把 server 打成单个 bundle，与 node-pty 原生扩展、web 静态资源一起
 封进 Node SEA（Single Executable Application）blob，注入 nodejs.org 官方 Node
 二进制。首次运行把原生扩展与静态资源解压到 `<dataDir>/runtime/<内容哈希>/`，

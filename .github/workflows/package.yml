@@ -1,0 +1,112 @@
+# 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）与 macOS（.pkg，原生客户端 +
+# Resources 里的 SEA 服务）。打法与本机一样，直接跑 pnpm build:win / pnpm build:pkg，脚本是唯一真相。
+#
+# - 推 v* tag：两个包都打完后建 GitHub Release 并挂上；
+# - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版。
+#
+# 都没有签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，与本机打的包一样。
+name: package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # native/.cargo/config.toml 把 crates.io 换成 rsproxy 镜像，是给开发机绕 Clash fake-ip 的；
+      # runner 网络正常，直连 crates.io 更稳
+      - name: Drop crates.io mirror
+        shell: bash
+        run: rm -f native/.cargo/config.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      # build-windows-installer.mjs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      # 安装包脚本只用 node 标准库，exe 的图标 / 字体取自仓库里已生成的文件，不用 pnpm install。
+      # rc.exe 来自 runner 自带的 VS 生成工具
+      - name: Build installer
+        run: node scripts/build-windows-installer.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: falcon-windows
+          path: release/*.exe
+          if-no-files-found: error
+
+  macos:
+    # Apple Silicon；Intel 机器的包要另起一个 macos-13 的 job
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        run: rm -f native/.cargo/config.toml
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.2
+
+      # SEA 注入的就是这个 Node（build-binary.mjs 默认取 process.version）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+
+      # app-icons.mjs 用 rsvg-convert 现画 AppIcon 的各档尺寸
+      - name: Install librsvg
+        run: brew install librsvg
+
+      - run: pnpm install --frozen-lockfile
+
+      # 没有 SEA 产物时 build:pkg 会先 pnpm build:bin（含 pnpm build）
+      - name: Build pkg
+        run: pnpm build:pkg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: falcon-macos
+          path: release/*.pkg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
