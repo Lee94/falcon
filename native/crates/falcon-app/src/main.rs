@@ -31,6 +31,7 @@ mod terminal;
 mod theme;
 mod ui;
 mod window;
+mod window_controls;
 mod workspace;
 mod zoom;
 

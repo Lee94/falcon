@@ -192,6 +192,21 @@ impl Render for ConnectView {
                             .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
                     ),
             )
+            // 顶上 40 的留白在 macOS 是给红绿灯的；Windows 上在这条里铺拖动区 + 三颗窗口按钮
+            .when(cfg!(windows), |d| {
+                let strip = zpx(40.);
+                d.relative().child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(strip)
+                        .flex()
+                        .child(crate::window_controls::drag_area(div().id("connect-drag").flex_1().h_full()))
+                        .children(crate::window_controls::controls(strip, window, cx)),
+                )
+            })
             .children(Root::render_dialog_layer(window, cx))
             .children(
                 // 通知必须压在对话框上面（设置里点「检测连接」的结果就是在对话框开着时弹的）。

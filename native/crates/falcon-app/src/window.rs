@@ -1,7 +1,7 @@
 //! 一台 falcon 服务端的窗口：浮动岛骨架（ADR 0011）——窗口底铺 `app`，侧栏 / 主区 / 右面板
 //! 是浮在上面的圆角岛，之间只有一道 6px 的缝；右侧活动栏不成岛，图标直接落在窗口底上。
 //!
-//! 顶上一条 36px 的标题条是原生独有的：放 macOS 的红绿灯、写明这是哪台 falcon 服务端
+//! 顶上一条 36px 的标题条是原生独有的：放 macOS 的红绿灯（Windows 上是自绘的三颗窗口按钮）、写明这是哪台 falcon 服务端
 //! （"身份先于内容"——远处的服务端要让人一眼认出来，别把命令敲错机器），也是拖窗口的地方。
 
 use gpui_kit::component::Root;
@@ -204,20 +204,23 @@ impl ServerWindow {
         }
     }
 
-    fn render_title_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
         let profile = &ws.profile;
         let name = display_name(profile);
+        // 文字区就是拖动区；Windows 上右边再贴最小化 / 最大化 / 关闭（window_controls.rs），
+        // 两者是兄弟而不是嵌套，按钮的命中区不会被拖动区盖住
         let mut strip = div()
-            .id("title-strip")
-            .h(px(TITLE_STRIP))
-            .flex_none()
+            .id("title-strip-drag")
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .flex()
             .items_center()
             .gap_2()
-            // 红绿灯占的位置
-            .pl(px(84.))
+            // macOS 留出红绿灯占的位置
+            .pl(px(if cfg!(target_os = "macos") { 84. } else { 12. }))
             .pr_3()
             .text_xs()
             .text_color(ui.muted_foreground)
@@ -228,7 +231,13 @@ impl ServerWindow {
                 strip = strip.child(div().text_color(ui.warning).child(t!("native.server.plaintext").to_string()));
             }
         }
-        strip
+        div()
+            .id("title-strip")
+            .h(px(TITLE_STRIP))
+            .flex_none()
+            .flex()
+            .child(crate::window_controls::drag_area(strip))
+            .children(crate::window_controls::controls(px(TITLE_STRIP), window, cx))
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -488,7 +497,7 @@ impl Render for ServerWindow {
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.ws.update(cx, |w, cx| w.focus_tab_at(8, cx))))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| dialogs::settings::open(&this.ws, Default::default(), window, cx)))
             .on_action(cx.listener(|this, _: &NewProject, window, cx| dialogs::project_form::open(&this.ws, None, Default::default(), window, cx)))
-            .child(self.render_title_strip(cx))
+            .child(self.render_title_strip(window, cx))
             .child(body)
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
