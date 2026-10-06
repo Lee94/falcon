@@ -197,6 +197,12 @@ export function App() {
       case "prevTab":
         s.cycleTab(-1);
         return;
+      case "nextCanvas":
+        s.stepCanvas(1);
+        return;
+      case "prevCanvas":
+        s.stepCanvas(-1);
+        return;
       default: {
         const n = Number(cmd.slice(3));
         if (Number.isInteger(n)) s.focusTabAt(n - 1);

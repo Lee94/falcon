@@ -154,8 +154,23 @@ impl Workspace {
             changes_in_flight: false,
             _tasks: Vec::new(),
         };
+        // 画布的收尾挂在自己的每次通知上（web 挂在 store 订阅上的 settleCanvases）：会改排布 /
+        // 焦点 / 可见性的动作有十几处，每处各调一遍迟早漏一处，新列就一直没有画布
+        cx.observe_self(|this, cx| this.settle_canvases(cx)).detach();
         this.start(cx);
         this
+    }
+
+    /// 还没分画布的列分好（排不下就自动另起一块），记下当前画布与每块的焦点。分了画布就
+    /// 落盘；有任何变化就再通知一次（下一轮 settle 收敛成无事可做，不会转圈）
+    pub(crate) fn settle_canvases(&mut self, cx: &mut Context<Self>) {
+        let settled = self.state.settle_canvases(&self.sessions);
+        if settled.columns {
+            self.persist();
+        }
+        if settled.changed {
+            cx.notify();
+        }
     }
 
     /// 轮询在这里起；认证 / 首次加载由窗口触发 [`Self::init`]（本机服务要先确认起来了）

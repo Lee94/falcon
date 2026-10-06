@@ -463,6 +463,8 @@ impl Render for ServerWindow {
             .on_action(cx.listener(|this, _: &Overview, _, cx| this.ws.update(cx, |w, cx| w.show_overview(cx))))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.ws.update(cx, |w, cx| w.cycle_tab(1, cx))))
             .on_action(cx.listener(|this, _: &PrevTab, _, cx| this.ws.update(cx, |w, cx| w.cycle_tab(-1, cx))))
+            .on_action(cx.listener(|this, _: &NextCanvas, _, cx| this.ws.update(cx, |w, cx| w.step_canvas(1, cx))))
+            .on_action(cx.listener(|this, _: &PrevCanvas, _, cx| this.ws.update(cx, |w, cx| w.step_canvas(-1, cx))))
             .on_action(cx.listener(|this, _: &Tab1, _, cx| this.ws.update(cx, |w, cx| w.focus_tab_at(0, cx))))
             .on_action(cx.listener(|this, _: &Tab2, _, cx| this.ws.update(cx, |w, cx| w.focus_tab_at(1, cx))))
             .on_action(cx.listener(|this, _: &Tab3, _, cx| this.ws.update(cx, |w, cx| w.focus_tab_at(2, cx))))

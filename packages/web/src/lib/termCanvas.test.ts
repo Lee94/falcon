@@ -1,13 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  CANVAS_SWIPE_PX,
+  CanvasSwipe,
   WHEEL_GESTURE_GAP_MS,
   WheelAxisLock,
   innerTakesWheel,
   overflowCanConsume,
   overflowScrollable,
-  revealScrollLeft,
-  settleTarget,
   wheelDeltaPx,
   type OverflowBox,
 } from "./termCanvas.js";
@@ -163,50 +163,35 @@ describe("innerTakesWheel", () => {
   });
 });
 
-describe("settleTarget", () => {
-  const lefts = [0, 400, 800];
-
-  it("离最近列边不超过 proximity 才吸附", () => {
-    assert.equal(settleTarget(30, lefts, 80, 800), 0);
-    assert.equal(settleTarget(370, lefts, 80, 800), 400);
-    assert.equal(settleTarget(200, lefts, 80, 800), null);
+describe("CanvasSwipe", () => {
+  it("累计横移过了门槛才翻，一段手势至多翻一块", () => {
+    const swipe = new CanvasSwipe();
+    const step = CANVAS_SWIPE_PX / 4;
+    assert.equal(swipe.push(step, 0), 0);
+    assert.equal(swipe.push(step, 16), 0);
+    assert.equal(swipe.push(step, 32), 0);
+    assert.equal(swipe.push(step, 48), 1);
+    // 惯性尾巴还在同一段手势里：不再翻
+    for (let t = 64; t < 600; t += 16) assert.equal(swipe.push(step * 4, t), 0);
   });
 
-  it("已经对齐就不动", () => {
-    assert.equal(settleTarget(400, lefts, 80, 800), null);
-    assert.equal(settleTarget(400.4, lefts, 80, 800), null);
+  it("停顿之后是新手势，可以再翻；方向跟着累计的符号走", () => {
+    const swipe = new CanvasSwipe();
+    assert.equal(swipe.push(CANVAS_SWIPE_PX, 0), 1);
+    assert.equal(swipe.push(-CANVAS_SWIPE_PX, WHEEL_GESTURE_GAP_MS + 1), -1);
   });
 
-  it("最后一列吸不到边时按能滚到的最远处算", () => {
-    assert.equal(settleTarget(560, lefts, 80, 600), 600);
-    assert.equal(settleTarget(770, lefts, 80, 600), null);
+  it("来回抖动抵消掉，不翻", () => {
+    const swipe = new CanvasSwipe();
+    for (let i = 0; i < 20; i++) {
+      assert.equal(swipe.push(i % 2 ? -30 : 30, i * 16), 0);
+    }
   });
 
-  it("没有列时不动", () => {
-    assert.equal(settleTarget(100, [], 80, 800), null);
-  });
-});
-
-describe("revealScrollLeft", () => {
-  it("整列可见不动", () => {
-    assert.equal(revealScrollLeft({ scrollLeft: 0, viewport: 1000, left: 0, width: 500 }), null);
-    assert.equal(revealScrollLeft({ scrollLeft: 0, viewport: 1000, left: 500, width: 500 }), null);
-  });
-
-  it("左边露不全对齐左边，右边露不全对齐右边", () => {
-    assert.equal(revealScrollLeft({ scrollLeft: 300, viewport: 1000, left: 0, width: 500 }), 0);
-    assert.equal(
-      revealScrollLeft({ scrollLeft: 0, viewport: 1000, left: 1000, width: 500 }),
-      500
-    );
-    assert.equal(
-      revealScrollLeft({ scrollLeft: 0, viewport: 1000, left: 800, width: 500 }),
-      300
-    );
-  });
-
-  it("列比视口宽时对齐左边", () => {
-    assert.equal(revealScrollLeft({ scrollLeft: 0, viewport: 500, left: 600, width: 640 }), 600);
-    assert.equal(revealScrollLeft({ scrollLeft: 600, viewport: 500, left: 600, width: 640 }), null);
+  it("这段手势被窗口内部接走过，整段都不翻", () => {
+    const swipe = new CanvasSwipe();
+    swipe.hold(0);
+    assert.equal(swipe.push(CANVAS_SWIPE_PX * 3, 16), 0);
+    assert.equal(swipe.push(CANVAS_SWIPE_PX * 3, 16 + WHEEL_GESTURE_GAP_MS + 1), 1);
   });
 });

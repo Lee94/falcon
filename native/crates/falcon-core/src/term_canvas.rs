@@ -1,5 +1,8 @@
-//! 工作画布的滚动层纯函数：滚轮手势的轴向锁定、内部滚动容器是否还能接这次滚轮、
-//! 手势结束后的对齐目标、把活动列滚进视口。对应 web 的 `lib/termCanvas.ts`。
+//! 工作画布的滚轮层纯函数：滚轮手势的轴向锁定、内部滚动容器是否还能接这次滚轮、
+//! 横向手势翻画布。对应 web 的 `lib/termCanvas.ts`。
+//!
+//! 画布本身不再滚动（一块画布一屏，见 [`crate::layout::canvas_groups`]），横向手势
+//! 的用处从"滚画布"变成"翻到左 / 右一块画布"。
 //!
 //! 列宽与窗口高度这类排布几何在 [`crate::layout`]，事件接线在视图层。
 
@@ -148,54 +151,60 @@ pub fn inner_takes_wheel(boxes: &[OverflowBox], axis: WheelAxis, delta_px: f64) 
     boxes.iter().any(|b| overflow_can_consume(b, axis, delta_px))
 }
 
-/// 手势结束后的对齐目标：离最近一条列左边不超过 proximity 才吸过去，否则停在原地。
+/// 一段横向手势累计横移超过这么多才翻画布：比随手的横漂大，又不用滑满一屏
+pub const CANVAS_SWIPE_PX: f64 = 80.0;
+
+/// 横向手势翻画布：一段手势（含 macOS 的惯性尾巴）至多翻一块，累计横移过了门槛才翻。
+/// 逐事件翻的话，触控板一次滑动几十条事件会一口气翻到底。
 ///
-/// - `lefts`：各列左边相对画布内容原点的偏移
-/// - `max_scroll`：可滚的最远处；最后一列吸不到边时按它算
-///
-/// 返回目标滚动偏移；`None` = 不用动。
-pub fn settle_target(scroll_left: f64, lefts: &[f64], proximity: f64, max_scroll: f64) -> Option<f64> {
-    let mut best: Option<f64> = None;
-    let mut best_dist = f64::INFINITY;
-    for &left in lefts {
-        let target = left.max(0.0).min(max_scroll.max(0.0));
-        let dist = (target - scroll_left).abs();
-        if dist < best_dist {
-            best_dist = dist;
-            best = Some(target);
+/// 手势的切分与 [`WheelAxisLock`] 同一个口径：静默超过 [`WHEEL_GESTURE_GAP_MS`] 算新手势。
+/// 这段手势里只要有一条被窗口内部（文件长行、差异）吃掉过，整段都不翻——横着滚
+/// 一个宽文件滚到头、手还没停，不该顺势把画布也翻走。
+#[derive(Debug, Clone)]
+pub struct CanvasSwipe {
+    sum: f64,
+    done: bool,
+    last: f64,
+}
+
+impl Default for CanvasSwipe {
+    fn default() -> Self {
+        CanvasSwipe { sum: 0.0, done: false, last: f64::NEG_INFINITY }
+    }
+}
+
+impl CanvasSwipe {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn touch(&mut self, time_stamp: f64) {
+        if time_stamp - self.last > WHEEL_GESTURE_GAP_MS {
+            self.sum = 0.0;
+            self.done = false;
         }
+        self.last = time_stamp;
     }
-    if best_dist > proximity || best_dist < 1.0 {
-        return None;
-    }
-    best
-}
 
-/// 把一列滚进视口需要的滚动偏移：已经整列可见就不动；在左边露不全就对齐左边，
-/// 在右边露不全就对齐右边（列比视口还宽时也按左边对齐）。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Reveal {
-    pub scroll_left: f64,
-    /// 画布内容区宽度
-    pub viewport: f64,
-    /// 列相对内容原点的偏移与宽度
-    pub left: f64,
-    pub width: f64,
-}
+    /// 喂一条归给画布的横向事件。返回 1 = 翻到右边一块，-1 = 左边一块，0 = 不翻
+    pub fn push(&mut self, delta_px: f64, time_stamp: f64) -> i64 {
+        self.touch(time_stamp);
+        if self.done || !delta_px.is_finite() {
+            return 0;
+        }
+        self.sum += delta_px;
+        if self.sum.abs() < CANVAS_SWIPE_PX {
+            return 0;
+        }
+        self.done = true;
+        if self.sum > 0.0 { 1 } else { -1 }
+    }
 
-pub fn reveal_scroll_left(r: Reveal) -> Option<f64> {
-    let Reveal { scroll_left, viewport, left, width } = r;
-    if width >= viewport {
-        return if (scroll_left - left).abs() < 1.0 { None } else { Some(left) };
+    /// 这段手势被窗口内部接走了：剩下的事件都不翻
+    pub fn hold(&mut self, time_stamp: f64) {
+        self.touch(time_stamp);
+        self.done = true;
     }
-    if left < scroll_left {
-        return Some(left);
-    }
-    let right = left + width;
-    if right > scroll_left + viewport {
-        return Some(right - viewport);
-    }
-    None
 }
 
 #[cfg(test)]
@@ -348,41 +357,42 @@ mod tests {
     }
 
     #[test]
-    fn settle_target_snaps_only_within_proximity() {
-        let lefts = [0.0, 400.0, 800.0];
-        assert_eq!(settle_target(30.0, &lefts, 80.0, 800.0), Some(0.0));
-        assert_eq!(settle_target(370.0, &lefts, 80.0, 800.0), Some(400.0));
-        assert_eq!(settle_target(200.0, &lefts, 80.0, 800.0), None);
-        // 已经对齐就不动
-        assert_eq!(settle_target(400.0, &lefts, 80.0, 800.0), None);
-        assert_eq!(settle_target(400.4, &lefts, 80.0, 800.0), None);
-        // 最后一列吸不到边时按能滚到的最远处算
-        assert_eq!(settle_target(560.0, &lefts, 80.0, 600.0), Some(600.0));
-        assert_eq!(settle_target(770.0, &lefts, 80.0, 600.0), None);
-        // 没有列时不动
-        assert_eq!(settle_target(100.0, &[], 80.0, 800.0), None);
-    }
-
-    fn reveal(scroll_left: f64, viewport: f64, left: f64, width: f64) -> Option<f64> {
-        reveal_scroll_left(Reveal { scroll_left, viewport, left, width })
+    fn swipe_flips_once_per_gesture_after_the_threshold() {
+        let mut swipe = CanvasSwipe::new();
+        let step = CANVAS_SWIPE_PX / 4.0;
+        assert_eq!(swipe.push(step, 0.0), 0);
+        assert_eq!(swipe.push(step, 16.0), 0);
+        assert_eq!(swipe.push(step, 32.0), 0);
+        assert_eq!(swipe.push(step, 48.0), 1);
+        // 惯性尾巴还在同一段手势里：不再翻
+        let mut t = 64.0;
+        while t < 600.0 {
+            assert_eq!(swipe.push(step * 4.0, t), 0);
+            t += 16.0;
+        }
     }
 
     #[test]
-    fn reveal_leaves_fully_visible_columns_alone() {
-        assert_eq!(reveal(0.0, 1000.0, 0.0, 500.0), None);
-        assert_eq!(reveal(0.0, 1000.0, 500.0, 500.0), None);
+    fn swipe_after_a_pause_is_a_new_gesture_and_follows_the_sign() {
+        let mut swipe = CanvasSwipe::new();
+        assert_eq!(swipe.push(CANVAS_SWIPE_PX, 0.0), 1);
+        assert_eq!(swipe.push(-CANVAS_SWIPE_PX, WHEEL_GESTURE_GAP_MS + 1.0), -1);
     }
 
     #[test]
-    fn reveal_aligns_the_clipped_side() {
-        assert_eq!(reveal(300.0, 1000.0, 0.0, 500.0), Some(0.0));
-        assert_eq!(reveal(0.0, 1000.0, 1000.0, 500.0), Some(500.0));
-        assert_eq!(reveal(0.0, 1000.0, 800.0, 500.0), Some(300.0));
+    fn swipe_jitter_cancels_out() {
+        let mut swipe = CanvasSwipe::new();
+        for i in 0..20 {
+            let d = if i % 2 == 1 { -30.0 } else { 30.0 };
+            assert_eq!(swipe.push(d, i as f64 * 16.0), 0);
+        }
     }
 
     #[test]
-    fn reveal_aligns_left_when_the_column_is_wider_than_the_viewport() {
-        assert_eq!(reveal(0.0, 500.0, 600.0, 640.0), Some(600.0));
-        assert_eq!(reveal(600.0, 500.0, 600.0, 640.0), None);
+    fn swipe_held_by_an_inner_scroller_never_flips() {
+        let mut swipe = CanvasSwipe::new();
+        swipe.hold(0.0);
+        assert_eq!(swipe.push(CANVAS_SWIPE_PX * 3.0, 16.0), 0);
+        assert_eq!(swipe.push(CANVAS_SWIPE_PX * 3.0, 16.0 + WHEEL_GESTURE_GAP_MS + 1.0), 1);
     }
 }

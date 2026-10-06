@@ -1,7 +1,10 @@
 /**
- * 工作画布（WorkCanvas）的滚动层纯函数：滚轮手势的轴向锁定、内部滚动容器是否
- * 还能接这次滚轮、手势结束后的对齐目标、把活动列滚进视口。列宽与窗口高度这类
- * 排布几何在 lib/layout.ts，DOM 与事件接线在组件里。
+ * 工作画布（WorkCanvas）的滚轮层纯函数：滚轮手势的轴向锁定、内部滚动容器是否
+ * 还能接这次滚轮、横向手势翻画布。列宽与窗口高度这类排布几何在 lib/layout.ts，
+ * DOM 与事件接线在组件里。
+ *
+ * 画布本身不再滚动（一块画布一屏，见 lib/layout.ts 的 canvasGroups），横向手势
+ * 的用处从"滚画布"变成"翻到左 / 右一块画布"。
  */
 
 /**
@@ -123,52 +126,43 @@ export function innerTakesWheel(boxes: OverflowBox[], axis: WheelAxis, deltaPx: 
   return false;
 }
 
-/**
- * 手势结束后的对齐目标：离最近一条列左边不超过 proximity 才吸过去，否则停在原地。
- * 用 CSS scroll-snap 做不到：手动改 scrollLeft 会被 Chrome 当作程序化滚动立刻吸附，
- * 触控板每条事件才几像素，永远滚不出吸附半径。
- *
- * @param lefts 各列左边相对画布内容盒原点的偏移（已扣 padding）
- * @param maxScroll scrollWidth - clientWidth；最后一列吸不到边时按能滚到的最远处算
- * @returns 目标 scrollLeft；null = 不用动
- */
-export function settleTarget(
-  scrollLeft: number,
-  lefts: number[],
-  proximity: number,
-  maxScroll: number
-): number | null {
-  let best: number | null = null;
-  let bestDist = Number.POSITIVE_INFINITY;
-  for (const left of lefts) {
-    const target = Math.min(Math.max(0, left), Math.max(0, maxScroll));
-    const dist = Math.abs(target - scrollLeft);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = target;
-    }
-  }
-  if (best === null || bestDist > proximity || bestDist < 1) return null;
-  return best;
-}
+/** 一段横向手势累计横移超过这么多才翻画布：比随手的横漂大，又不用滑满一屏 */
+export const CANVAS_SWIPE_PX = 80;
 
 /**
- * 把一列滚进视口需要的 scrollLeft：已经整列可见就不动；在左边露不全就对齐左边，
- * 在右边露不全就对齐右边（列比视口还宽时也按左边对齐）。
+ * 横向手势翻画布：一段手势（含 macOS 的惯性尾巴）至多翻一块，累计横移过了门槛才翻。
+ * 逐事件翻的话，触控板一次滑动几十条事件会一口气翻到底。
  *
- * @param viewport 画布内容盒宽度（clientWidth 扣掉左右 padding）
- * @param left / width 列相对内容盒原点的偏移与宽度
+ * 手势的切分与 WheelAxisLock 同一个口径：静默超过 WHEEL_GESTURE_GAP_MS 算新手势。
+ * 这段手势里只要有一条被窗口内部（文件长行、差异）吃掉过，整段都不翻——横着滚
+ * 一个宽文件滚到头、手还没停，不该顺势把画布也翻走。
  */
-export function revealScrollLeft(opts: {
-  scrollLeft: number;
-  viewport: number;
-  left: number;
-  width: number;
-}): number | null {
-  const { scrollLeft, viewport, left, width } = opts;
-  if (width >= viewport) return Math.abs(scrollLeft - left) < 1 ? null : left;
-  if (left < scrollLeft) return left;
-  const right = left + width;
-  if (right > scrollLeft + viewport) return right - viewport;
-  return null;
+export class CanvasSwipe {
+  private sum = 0;
+  private done = false;
+  private last = Number.NEGATIVE_INFINITY;
+
+  private touch(timeStamp: number): void {
+    if (timeStamp - this.last > WHEEL_GESTURE_GAP_MS) {
+      this.sum = 0;
+      this.done = false;
+    }
+    this.last = timeStamp;
+  }
+
+  /** 喂一条归给画布的横向事件。返回 1 = 翻到右边一块，-1 = 左边一块，0 = 不翻 */
+  push(deltaPx: number, timeStamp: number): -1 | 0 | 1 {
+    this.touch(timeStamp);
+    if (this.done || !Number.isFinite(deltaPx)) return 0;
+    this.sum += deltaPx;
+    if (Math.abs(this.sum) < CANVAS_SWIPE_PX) return 0;
+    this.done = true;
+    return this.sum > 0 ? 1 : -1;
+  }
+
+  /** 这段手势被窗口内部接走了：剩下的事件都不翻 */
+  hold(timeStamp: number): void {
+    this.touch(timeStamp);
+    this.done = true;
+  }
 }

@@ -41,11 +41,17 @@ import { DIFF_KEY, fileKey, parsePaneKey, termKey } from "./lib/paneKey.js";
 import { sessionLabel } from "./lib/sessionTitle.js";
 import {
   applyDrop,
+  assignCanvases,
+  canvasEnd,
+  canvasGroups,
+  canvasIndex,
   column,
   findPane,
   insertColumn,
   insertPane,
   isPinned,
+  moveToCanvas,
+  orderByCanvas,
   paneKeys,
   pinPane,
   removePane,
@@ -56,6 +62,7 @@ import {
   syncColumns,
   unpinAll,
   visibleColumns,
+  type CanvasGroup,
   type ColumnLayout,
   type DropSpot,
 } from "./lib/layout.js";
@@ -180,12 +187,13 @@ function fallbackActive(s: {
  * 文件 / 差异窗口该落在哪一列。
  *
  * 两者共用同一座"查看列"：已经开着另一个查看窗口就落到它下面，否则在当前活动窗口
- * 的右边另起一列。终端是工作区的主角，查看类窗口不该把它挤到看不见的地方去。
+ * 的右边另起一列。终端是工作区的主角，查看类窗口不该把它挤到看不见的地方去——
+ * 当前画布排不下就另起一块画布（assignCanvases），已在场的终端不会被挤窄。
  */
 function placeViewPane(
   columns: ColumnLayout[],
   key: string,
-  state: { fileTab: FileTabTarget | null; diffTab: DiffTabTarget | null; active: ActiveView }
+  state: CanvasSource & { fileTab: FileTabTarget | null; diffTab: DiffTabTarget | null }
 ): ColumnLayout[] {
   if (findPane(columns, key)) return columns;
   const siblingKey =
@@ -198,9 +206,7 @@ function placeViewPane(
         : null;
   const sibling = siblingKey ? findPane(columns, siblingKey) : null;
   if (sibling) return insertPane(columns, key, { col: sibling.col, index: sibling.index + 1 });
-  const current = activeKey(state.active);
-  const from = current ? findPane(columns, current) : null;
-  return insertColumn(columns, key, from ? from.col + 1 : columns.length);
+  return insertColumn(columns, key, newColumnAt({ ...state, columns }, activeKey(state.active)));
 }
 
 function sameActive(a: ActiveView, b: ActiveView): boolean {
@@ -238,10 +244,83 @@ export function visiblePaneKeys(s: PaneSource): Set<string> {
   return keys;
 }
 
-/** 画布此刻要画的列（别的项目的窗口过滤掉，空列不占位） */
+/**
+ * 画布此刻要画的列（别的项目的窗口过滤掉，空列不占位），按画布一块接一块排好、
+ * 固定列在最后——切窗口的快捷键（⌘1…9、上一个 / 下一个）就按这个顺序走。
+ */
 export function layoutColumns(s: PaneSource & { columns: ColumnLayout[] }): ColumnLayout[] {
   const visible = visiblePaneKeys(s);
-  return visibleColumns(s.columns, (k) => visible.has(k));
+  return orderByCanvas(visibleColumns(s.columns, (k) => visible.has(k)));
+}
+
+/** 判断画布要用到的那部分状态 */
+type CanvasSource = PaneSource & {
+  columns: ColumnLayout[];
+  active: ActiveView;
+  canvasId: string | null;
+};
+
+/** 当前视图里的画布（每块的列已含接在最右的固定列） */
+export function viewCanvases(s: PaneSource & { columns: ColumnLayout[] }): CanvasGroup[] {
+  return canvasGroups(layoutColumns(s));
+}
+
+/**
+ * 正在显示的那块画布的 id：活动窗口所在的那块；活动窗口在固定列里就是上一次显示的
+ * 那块（canvasId）。当前视图一扇窗口都没有时 null。
+ */
+export function currentCanvas(s: CanvasSource): string | null {
+  const groups = viewCanvases(s);
+  if (groups.length === 0) return null;
+  return groups[canvasIndex(groups, activeKey(s.active), s.canvasId)]!.id;
+}
+
+/**
+ * 关掉一扇窗口之后焦点交给谁：同一块画布上它左边（或上面）那扇，它是第一扇就交给
+ * 下一扇——别让关一扇窗口把人甩到另一块画布上去。这块画布关空了，就去左边那块
+ * （没有就右边那块）上次停的那扇。固定列不接（它每块都有，交给它看不出该停在哪块）。
+ * 关的是固定列里的窗口，就按当前显示的那块算。都没有返回 null，交给 fallbackActive。
+ *
+ * 要在摘掉之前调：s 里还得有这扇窗口。
+ */
+function neighborActive(
+  s: CanvasSource & { canvasFocus: Record<string, string> },
+  key: string
+): ActiveView | null {
+  const groups = viewCanvases(s);
+  if (groups.length === 0) return null;
+  const keysOf = (g: CanvasGroup) => paneKeys(g.columns.filter((c) => !c.pinned));
+  const home = groups.findIndex((g) => keysOf(g).includes(key));
+  const at = home >= 0 ? home : canvasIndex(groups, activeKey(s.active), s.canvasId);
+  const own = keysOf(groups[at]!);
+  const rest = own.filter((k) => k !== key);
+  if (rest.length) {
+    const i = own.indexOf(key);
+    return paneView(i > 0 ? own[i - 1]! : rest[0]!);
+  }
+  for (const g of [groups[at - 1], groups[at + 1]]) {
+    if (!g) continue;
+    const keys = keysOf(g);
+    const remembered = s.canvasFocus[g.id];
+    const pick = remembered && keys.includes(remembered) ? remembered : keys[keys.length - 1];
+    if (pick) return paneView(pick);
+  }
+  return null;
+}
+
+/**
+ * 新开的一列插在排布的哪个下标：after 那扇窗口所在列的右边；没给 after（或它在固定列
+ * 里——固定列在排布里永远是最后一列，接在它后面就跑到最后一块画布去了）就接在当前
+ * 画布的最后一列后面。先往眼前这块里放，排不下 assignCanvases 会紧跟着它另起一块。
+ * 当前视图里一扇窗口都没有就接到最右。
+ */
+function newColumnAt(s: CanvasSource, after?: string | null): number {
+  if (after) {
+    const at = findPane(s.columns, after);
+    if (at && !s.columns[at.col]!.pinned) return at.col + 1;
+  }
+  const canvas = currentCanvas(s);
+  return (canvas ? canvasEnd(s.columns, canvas) : null) ?? s.columns.length;
 }
 
 /** key → 视图。切窗口的快捷键按排布顺序（从左到右、列内从上到下）走 */
@@ -450,6 +529,8 @@ interface PersistedColumn {
   panes: { key: string; basis: number | null }[];
   /** 固定在最右（见 lib/layout 的 ColumnLayout.pinned）。只可能是最后一列 */
   pinned?: boolean;
+  /** 所在画布（见 lib/layout 的 ColumnLayout.canvas）。旧版本没有，读回来按还没分处理 */
+  canvas?: string;
 }
 
 interface PersistedWorkspace {
@@ -482,7 +563,7 @@ function parsePersistedColumns(raw: unknown): PersistedColumn[] {
   const out: PersistedColumn[] = [];
   for (const col of raw) {
     if (!col || typeof col !== "object") continue;
-    const { basis, panes } = col as { basis?: unknown; panes?: unknown };
+    const { basis, panes, canvas } = col as { basis?: unknown; panes?: unknown; canvas?: unknown };
     if (!Array.isArray(panes)) continue;
     const kept: PersistedColumn["panes"] = [];
     for (const pane of panes) {
@@ -497,6 +578,7 @@ function parsePersistedColumns(raw: unknown): PersistedColumn[] {
         basis: typeof basis === "number" ? basis : null,
         panes: kept,
         pinned: (col as { pinned?: unknown }).pinned === true,
+        ...(typeof canvas === "string" && canvas ? { canvas } : null),
       });
   }
   // 固定列必须是最后一列：中间那些（上一次落盘时后面还有别的列，重建时被丢掉了些）
@@ -741,6 +823,18 @@ interface AppState {
    * 含**所有**项目的窗口，画之前按当前项目过滤（layoutColumns）；终端那部分持久化。
    */
   columns: ColumnLayout[];
+  /**
+   * 画布宽（WorkCanvas 量出来报上来的，不持久化）。新列排不排得下要按它算；
+   * 0 = 还没量出来，这时不分画布（见 settleCanvases）。
+   */
+  canvasWidth: number;
+  /**
+   * 上一次显示的画布（不持久化）。平时就是活动窗口所在的那块，用不着它；活动窗口在
+   * 固定列里时（每块画布都有它）靠它知道该显示哪块。由 settleCanvases 跟着 active 更新。
+   */
+  canvasId: string | null;
+  /** 每块画布上一次停在哪扇窗口（canvas id → pane key，不持久化）：切回来时把焦点还给它 */
+  canvasFocus: Record<string, string>;
   active: ActiveView;
   pending: PendingSession[];
   /** 差异查看窗口；null = 没开 */
@@ -867,7 +961,18 @@ interface AppState {
    * 左边，拖拽也越不过去（见 lib/layout 的 pinEdge）。固定至多一列。
    */
   togglePinPane(key: string): void;
-  /** 拖列间的缝：只钉左边那一列的宽度，右边继续自适应。拖的途中不落盘 */
+  /**
+   * 把一扇窗口挪到另一块画布（独占一列接在那块最右）；null = 新开一块，紧跟在当前
+   * 画布后面。焦点跟着它走，画布也就切过去了。
+   */
+  movePaneToCanvas(key: string, canvas: string | null): void;
+  /** 切到某块画布：焦点交给它上次停的那扇窗口；活动窗口在固定列里就只换画布、焦点不动 */
+  showCanvas(id: string): void;
+  /** 切到左 / 右一块画布（不回绕）。画布条、横向手势、快捷键都走它 */
+  stepCanvas(delta: number): void;
+  /** WorkCanvas 量到的画布宽 */
+  setCanvasWidth(width: number): void;
+  /** 拖列间的缝：只钉左边那一列的宽度，右边跟着让。拖的途中不落盘 */
   setColumnWidth(id: string, width: number | null): void;
   /** 拖列内的缝：只钉上面那扇窗口的高度 */
   setPaneHeight(key: string, height: number | null): void;
@@ -969,7 +1074,10 @@ export const useApp = create<AppState>((set, get) => {
         const panes = c.panes.filter(
           (p) => p.key.startsWith("t:") && !isPendingId(p.key.slice(2))
         );
-        return panes.length ? [{ basis: c.basis, panes, pinned: c.pinned === true }] : [];
+        if (!panes.length) return [];
+        const pinned = c.pinned === true;
+        // 固定列在每块画布上都有，它的画布不记
+        return [{ basis: c.basis, panes, pinned, ...(c.canvas && !pinned ? { canvas: c.canvas } : null) }];
       }),
       // pending id 与两个查看 tab（diff / file）都活不过刷新，落成项目 / 总览视图
       active:
@@ -1020,9 +1128,13 @@ export const useApp = create<AppState>((set, get) => {
         basis: c.basis,
         panes: c.panes,
         pinned: c.pinned === true,
+        ...(c.canvas ? { canvas: c.canvas } : null),
       })),
       initialWorkspace.tabs.map(termKey)
     ),
+    canvasWidth: 0,
+    canvasId: null,
+    canvasFocus: {},
     active: initialWorkspace.active,
     pending: [],
     diffTab: null,
@@ -1236,7 +1348,10 @@ export const useApp = create<AppState>((set, get) => {
         diffTab: null,
         columns: removePane(state.columns, DIFF_KEY),
         ...(state.active.kind === "diff"
-          ? { active: fallbackActive({ ...state, diffTab: null }) }
+          ? {
+              active:
+                neighborActive(state, DIFF_KEY) ?? fallbackActive({ ...state, diffTab: null }),
+            }
           : null),
       }));
     },
@@ -1271,7 +1386,13 @@ export const useApp = create<AppState>((set, get) => {
         return {
           fileTab: null,
           columns: removePane(state.columns, fileKey(closing)),
-          ...(wasActive ? { active: fallbackActive({ ...state, fileTab: null }) } : null),
+          ...(wasActive
+            ? {
+                active:
+                  neighborActive(state, fileKey(closing)) ??
+                  fallbackActive({ ...state, fileTab: null }),
+              }
+            : null),
         };
       });
     },
@@ -1320,7 +1441,7 @@ export const useApp = create<AppState>((set, get) => {
         const columns = removePane(state.columns, termKey(id));
         let active = state.active;
         if (active.kind === "terminal" && active.sessionId === id) {
-          active = fallbackActive({ ...state, tabs, pending });
+          active = neighborActive(state, termKey(id)) ?? fallbackActive({ ...state, tabs, pending });
         }
         return { tabs, columns, active, pending };
       });
@@ -1346,6 +1467,47 @@ export const useApp = create<AppState>((set, get) => {
         columns: isPinned(s.columns, key) ? unpinAll(s.columns) : pinPane(s.columns, key),
       }));
       persist();
+    },
+
+    movePaneToCanvas(key, canvas) {
+      const s = get();
+      const columns = moveToCanvas(s.columns, key, canvas, currentCanvas(s));
+      if (columns === s.columns) return;
+      set({ columns, active: paneView(key) ?? s.active });
+      persist();
+    },
+
+    showCanvas(id) {
+      const s = get();
+      const group = viewCanvases(s).find((g) => g.id === id);
+      if (!group) return;
+      const key = activeKey(s.active);
+      const shown = (k: string) =>
+        group.columns.some((c) => !c.pinned && c.panes.some((p) => p.key === k));
+      if (key && shown(key)) return;
+      // 输入停在固定列里：它在每块画布上都有，只换画布、焦点不动
+      if (key && isPinned(s.columns, key) && group.columns.some((c) => c.pinned)) {
+        if (s.canvasId !== id) set({ canvasId: id });
+        return;
+      }
+      const remembered = s.canvasFocus[id];
+      const target =
+        remembered && shown(remembered)
+          ? remembered
+          : group.columns.find((c) => !c.pinned)?.panes[0]?.key;
+      if (target) get().focusPane(target);
+    },
+
+    stepCanvas(delta) {
+      const s = get();
+      const groups = viewCanvases(s);
+      const at = canvasIndex(groups, activeKey(s.active), s.canvasId) + delta;
+      const next = groups[at];
+      if (next) get().showCanvas(next.id);
+    },
+
+    setCanvasWidth(width) {
+      if (get().canvasWidth !== width) set({ canvasWidth: width });
     },
 
     setColumnWidth(id, width) {
@@ -1828,12 +1990,17 @@ export const useApp = create<AppState>((set, get) => {
       set((s) => {
         const pending = [...s.pending, { id: pendingId, projectId, agent: opts?.agent }];
         const tabs = [...s.tabs, pendingId];
-        // 默认独占一列接到最右；指名了 after 就插在那扇窗口所在列的右边
-        const at = opts?.after ? findPane(s.columns, opts.after) : null;
+        // 默认独占一列接在当前画布的最右（排不下另起一块，见 assignCanvases）；指名了
+        // after 就插在那扇窗口所在列的右边。开在别的项目里就接到最右——当前画布是这个
+        // 项目的，与它无关
+        const at =
+          projectId === s.selectedProjectId || opts?.after
+            ? newColumnAt(s, opts?.after)
+            : s.columns.length;
         return {
           pending,
           tabs,
-          columns: insertColumn(s.columns, key, at ? at.col + 1 : s.columns.length),
+          columns: insertColumn(s.columns, key, at),
           active: { kind: "terminal" as const, sessionId: pendingId },
           selectedProjectId: projectId,
           // 同 openSession：新开的终端不能建在一个收着的检出里
@@ -1909,6 +2076,58 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
   };
+});
+
+/**
+ * 画布的收尾，挂在 store 的订阅上——每次 set 之后都过一遍，跟 syncColumns 一样不能漏：
+ *
+ * 1. 还没分画布的可见列分好（assignCanvases）：新开的终端、对账补进来的会话、取消固定的
+ *    列、旧版本落盘的排布。"当前画布排不下就自动新开一块"就发生在这一步。分了就落盘。
+ * 2. 记下正在显示哪块（canvasId）、每块上次停在哪扇窗口（canvasFocus）。
+ *
+ * 做成一个订阅而不是在每个 set 里各算一遍：会改 columns / active / 可见性的 set 有十几处，
+ * 漏一处新列就一直没有画布（显示上跟着左边那一列挤着，见 canvasGroups）。
+ */
+function settleCanvases(s: AppState): Partial<AppState> | null {
+  const visible = visiblePaneKeys(s);
+  const columns = assignCanvases(s.columns, (k) => visible.has(k), s.canvasWidth);
+  const key = activeKey(s.active);
+  const group = key
+    ? viewCanvases({ ...s, columns }).find((g) =>
+        g.columns.some((c) => !c.pinned && c.panes.some((p) => p.key === key))
+      )
+    : undefined;
+  const patch: Partial<AppState> = {};
+  if (columns !== s.columns) patch.columns = columns;
+  if (group && s.canvasId !== group.id) patch.canvasId = group.id;
+  if (group && key && s.canvasFocus[group.id] !== key) {
+    // 顺手清掉已经没有了的画布
+    const live = new Set(columns.map((c) => c.canvas));
+    const focus: Record<string, string> = {};
+    for (const [id, k] of Object.entries(s.canvasFocus)) if (live.has(id)) focus[id] = k;
+    patch.canvasFocus = { ...focus, [group.id]: key };
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+useApp.subscribe((s, prev) => {
+  if (
+    s.columns === prev.columns &&
+    s.active === prev.active &&
+    s.canvasWidth === prev.canvasWidth &&
+    s.selectedProjectId === prev.selectedProjectId &&
+    s.tabs === prev.tabs &&
+    s.sessions === prev.sessions &&
+    s.pending === prev.pending &&
+    s.fileTab === prev.fileTab &&
+    s.diffTab === prev.diffTab
+  ) {
+    return;
+  }
+  const patch = settleCanvases(s);
+  if (!patch) return;
+  useApp.setState(patch);
+  if (patch.columns) useApp.getState().persistLayout();
 });
 
 // index.html 的内联脚本只写了底色 / 字色与 .dark，整套 token 在这里落；

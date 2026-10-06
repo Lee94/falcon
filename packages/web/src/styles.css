@@ -238,6 +238,10 @@
   body.pane-dragging iframe {
     pointer-events: none;
   }
+  /* 缝上的把手也挡掉：它的 hover 竖线跟落点指示线长得一样，拖过缝时会被当成落点 */
+  body.pane-dragging [role="separator"] {
+    pointer-events: none;
+  }
 
   /* 界面文字的选区与终端选区同一套颜色；selection-foreground 是 cell-foreground 的主题保留原字色 */
   ::selection {

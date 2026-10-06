@@ -79,7 +79,7 @@ impl Workspace {
     // ---------------- 文件 / 差异窗口 ----------------
 
     pub fn open_file(&mut self, project_id: &str, path: &str, cx: &mut Context<Self>) {
-        self.state.open_file(project_id, path);
+        self.state.open_file(project_id, path, &self.sessions);
         self.commit(true, cx);
     }
 
@@ -101,7 +101,7 @@ impl Workspace {
             file,
             commit,
             repo,
-        });
+        }, &self.sessions);
         self.commit(true, cx);
     }
 
@@ -260,6 +260,36 @@ impl Workspace {
         self.commit(false, cx);
     }
 
+    /// 把一扇窗口挪到另一块画布（`None` = 新开一块，紧跟在当前画布后面）。焦点跟着它走
+    pub fn move_pane_to_canvas(&mut self, key: &str, canvas: Option<&str>, cx: &mut Context<Self>) {
+        if self.state.move_pane_to_canvas(key, canvas, &self.sessions) {
+            self.commit(true, cx);
+        }
+    }
+
+    /// 切到某块画布（画布条上点数字）：焦点交给它上次停的那扇窗口
+    pub fn show_canvas(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.state.show_canvas(id, &self.sessions) {
+            self.commit(true, cx);
+        }
+    }
+
+    /// 切到左 / 右一块画布（横向手势、快捷键），不回绕
+    pub fn step_canvas(&mut self, delta: i64, cx: &mut Context<Self>) {
+        if self.state.step_canvas(delta, &self.sessions) {
+            self.commit(true, cx);
+        }
+    }
+
+    /// 画布量到的宽：新列排不排得下按它算。当场就把还没分的列分好，不等通知之后的
+    /// observe_self——宽是画布在 prepaint 里报上来的，同一帧接着排版就该用分好的画布
+    pub fn set_canvas_width(&mut self, width: f64, cx: &mut Context<Self>) {
+        if self.state.set_canvas_width(width) {
+            self.settle_canvases(cx);
+            cx.notify();
+        }
+    }
+
     /// 拖的途中不落盘，松手时由调用方 `persist()`
     pub fn set_column_width(&mut self, id: &str, width: Option<f64>, cx: &mut Context<Self>) {
         self.state.set_column_width(id, width);
@@ -341,7 +371,7 @@ impl Workspace {
     }
 
     pub fn create_session_now(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<String>, cx: &mut Context<Self>) {
-        let pending_id = self.state.begin_pending(project_id, agent, after.as_deref());
+        let pending_id = self.state.begin_pending(project_id, agent, after.as_deref(), &self.sessions);
         self.commit(false, cx);
         self.spawn_create(pending_id, project_id.to_string(), agent, cx);
     }

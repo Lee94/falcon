@@ -6,10 +6,13 @@
 use falcon_core::file_search::{FILE_SEARCH_LIMIT, basename, dirname, filter_files, score_path};
 use falcon_core::git_graph::{GraphCommit, GraphRow, layout_commit_graph};
 use falcon_core::layout::{
-    COLUMN_EDGE_PX, COLUMN_MIN_PX, CANVAS_GAP_PX, CanvasFrames, ColumnLayout, ColumnRect, DropSpot, PANE_MIN_PX, PaneAt,
-    Point, Viewport, apply_drop, clamp_column_width, clamp_pane_height, clamp_spot, column, column_width, drop_spot,
-    find_pane, insert_column, insert_pane, is_pinned, layout_frames, pane_keys, pane_max_height, pin_edge, pin_pane,
-    remove_pane, replace_pane, resolve_spot, set_column_basis, set_pane_basis, sync_columns, unpin_all, visible_columns,
+    COLUMN_EDGE_PX, COLUMN_FIT_PX, COLUMN_MIN_PX, CANVAS_GAP_PX, CanvasFrames, ColumnLayout, ColumnRect, DropSpot,
+    PANE_MIN_PX, PaneAt, Point, ThumbRect, Viewport, apply_drop, assign_canvases, canvas_fits, canvas_groups,
+    canvas_index, canvas_thumb, canvas_thumb_size,
+    clamp_column_width, clamp_pane_height, clamp_spot, column, column_max_width, column_widths, drop_spot, find_pane,
+    insert_column, insert_pane, is_pinned, layout_frames, move_to_canvas, order_by_canvas, pane_keys, pane_max_height,
+    pin_edge, pin_pane, remove_pane, replace_pane, resolve_spot, set_column_basis, set_pane_basis, sync_columns,
+    unpin_all, visible_columns,
 };
 use falcon_core::project_tree::{ProjectHead, checkout_label, group_servers};
 use falcon_core::session_title::{ProjectShell, session_label, session_title, shell_label};
@@ -73,8 +76,39 @@ fn strings(v: &Value) -> Vec<String> {
 
 // ---------------- layout ----------------
 
+/// 一列是 key 数组，或者 `{ keys, canvas?, basis? }`（多画布的用例要指定列在哪块画布上）
 fn cols(groups: &Value) -> Vec<ColumnLayout> {
-    groups.as_array().expect("列").iter().map(|g| column(strings(g), None)).collect()
+    groups
+        .as_array()
+        .expect("列")
+        .iter()
+        .map(|g| match g {
+            Value::Object(o) => {
+                let mut c = column(strings(&o["keys"]), o.get("basis").and_then(opt_num_ref));
+                c.canvas = o.get("canvas").and_then(Value::as_str).map(str::to_string);
+                c
+            }
+            other => column(strings(other), None),
+        })
+        .collect()
+}
+
+fn opt_num_ref(v: &Value) -> Option<f64> {
+    opt_num(v)
+}
+
+/// 画布的分组形状：每块画布 → 每列的 key（画布 id 现生成，不比）
+fn canvases(columns: &[ColumnLayout]) -> Vec<Vec<Vec<String>>> {
+    canvas_groups(columns).iter().map(|g| shape(&g.columns)).collect()
+}
+
+fn canvases_of(v: &Value) -> Vec<Vec<Vec<String>>> {
+    v.as_array().expect("canvases").iter().map(shape_of).collect()
+}
+
+/// `null` 或字符串
+fn opt_str(v: &Value) -> Option<&str> {
+    v.as_str()
 }
 
 fn shape(columns: &[ColumnLayout]) -> Vec<Vec<String>> {
@@ -96,7 +130,7 @@ fn apply_step(columns: &[ColumnLayout], step: &Value) -> (Vec<ColumnLayout>, Opt
     let out = match step["op"].as_str().expect("op") {
         "removePane" => remove_pane(columns, s("key")),
         "insertPane" => insert_pane(columns, s("key"), PaneAt { col: u("col"), index: u("index") }),
-        "insertColumn" => insert_column(columns, s("key"), u("at")),
+        "insertColumn" => insert_column(columns, s("key"), u("at"), step.get("canvas").and_then(Value::as_str)),
         "replacePane" => replace_pane(columns, s("from"), s("to")),
         "syncColumns" => sync_columns(columns, &strings(&step["live"])),
         "visibleColumns" => {
@@ -115,6 +149,25 @@ fn apply_step(columns: &[ColumnLayout], step: &Value) -> (Vec<ColumnLayout>, Opt
         "setPaneBasis" => set_pane_basis(columns, s("key"), opt_num(&step["basis"])),
         "applyDrop" => {
             return match apply_drop(columns, s("key"), spot(&step["spot"])) {
+                Some(next) => (next, Some(false)),
+                None => (columns.to_vec(), Some(true)),
+            };
+        }
+        "assignCanvases" => {
+            let visible = step.get("visible").map(strings);
+            let result = assign_canvases(
+                columns,
+                |k| visible.as_ref().is_none_or(|v| v.iter().any(|x| x == k)),
+                num(&step["width"]),
+                CANVAS_GAP_PX,
+            );
+            return match result {
+                Some(next) => (next, Some(false)),
+                None => (columns.to_vec(), Some(true)),
+            };
+        }
+        "moveToCanvas" => {
+            return match move_to_canvas(columns, s("key"), opt_str(&step["target"]), opt_str(&step["after"])) {
                 Some(next) => (next, Some(false)),
                 None => (columns.to_vec(), Some(true)),
             };
@@ -149,6 +202,7 @@ fn layout_vectors() {
 
     let c = &v["constants"];
     f.check(c, "COLUMN_MIN_PX", COLUMN_MIN_PX, num(&c["COLUMN_MIN_PX"]));
+    f.check(c, "COLUMN_FIT_PX", COLUMN_FIT_PX, num(&c["COLUMN_FIT_PX"]));
     f.check(c, "PANE_MIN_PX", PANE_MIN_PX, num(&c["PANE_MIN_PX"]));
     f.check(c, "CANVAS_GAP_PX", CANVAS_GAP_PX, num(&c["CANVAS_GAP_PX"]));
     f.check(c, "COLUMN_EDGE_PX", COLUMN_EDGE_PX, num(&c["COLUMN_EDGE_PX"]));
@@ -191,6 +245,21 @@ fn layout_vectors() {
                     for (k, n) in want.as_object().expect("keyCount") {
                         let count = pane_keys(&after).iter().filter(|x| *x == k).count();
                         f.check(case, &format!("keyCount[{k}]"), count, n.as_u64().expect("n") as usize);
+                    }
+                }
+                "canvases" => f.check(case, "canvases", canvases(&after), canvases_of(want)),
+                "orderByCanvas" => f.check(case, "orderByCanvas", pane_keys(&order_by_canvas(&after)), strings(want)),
+                "unassigned" => f.check(
+                    case,
+                    "unassigned",
+                    after.iter().enumerate().filter(|(_, c)| c.canvas.is_none()).map(|(i, _)| i).collect::<Vec<_>>(),
+                    want.as_array().expect("unassigned").iter().map(|i| i.as_u64().expect("下标") as usize).collect(),
+                ),
+                "sameCanvas" => {
+                    for pair in want.as_array().expect("sameCanvas") {
+                        let (i, j) = (pair[0].as_u64().expect("i") as usize, pair[1].as_u64().expect("j") as usize);
+                        let (a, b) = (&after[i].canvas, &after[j].canvas);
+                        f.check(case, &format!("sameCanvas[{i},{j}]"), a.is_some() && a == b, true);
                     }
                 }
                 "findPane" => {
@@ -250,13 +319,41 @@ fn layout_vectors() {
         f.check(case, "paneMaxHeight", got, num(&case["expected"]));
     }
 
-    for case in cases(&v, "columnWidth") {
+    for case in cases(&v, "columnWidths") {
         total += 1;
-        let mut c = column(Vec::<String>::new(), None);
-        c.basis = opt_num(&case["basis"]);
-        let gap = case.get("gap").map(num).unwrap_or(CANVAS_GAP_PX);
-        let count = case["count"].as_u64().expect("count") as usize;
-        f.check(case, "columnWidth", column_width(&c, count, num(&case["viewportWidth"]), gap), num(&case["expected"]));
+        let columns = bases(&case["bases"]);
+        let want: Vec<f64> = case["expected"].as_array().expect("expected").iter().map(num).collect();
+        f.check(case, "columnWidths", column_widths(&columns, num(&case["width"]), CANVAS_GAP_PX), want);
+    }
+
+    for case in cases(&v, "columnMaxWidth") {
+        total += 1;
+        let got = column_max_width(num(&case["width"]), num(&case["left"]), num(&case["right"]));
+        f.check(case, "columnMaxWidth", got, num(&case["expected"]));
+    }
+
+    for case in cases(&v, "canvasFits") {
+        total += 1;
+        let got = canvas_fits(&bases(&case["bases"]), num(&case["width"]), CANVAS_GAP_PX);
+        f.check(case, "canvasFits", got, case["expected"].as_bool().expect("bool"));
+    }
+
+    for case in cases(&v, "canvasIndex") {
+        total += 1;
+        let (_, columns, _) = run_steps(case);
+        let groups = canvas_groups(&columns);
+        let got = canvas_index(&groups, opt_str(&case["active"]), opt_str(&case["remembered"]));
+        f.check(case, "canvasIndex", got, case["expected"].as_u64().expect("下标") as usize);
+    }
+
+    for case in cases(&v, "resolveSpotOnCanvas") {
+        total += 1;
+        let (_, columns, _) = run_steps(case);
+        let shown = canvas_groups(&columns)[case["group"].as_u64().expect("group") as usize].columns.clone();
+        let resolved = resolve_spot(&columns, &shown, spot(&case["spot"]));
+        f.check(case, "resolveSpot", resolved.clone(), spot(&case["expected"]));
+        let dropped = apply_drop(&columns, case["dropKey"].as_str().expect("dropKey"), resolved).unwrap_or(columns);
+        f.check(case, "dropCanvases", canvases(&dropped), canvases_of(&case["dropCanvases"]));
     }
 
     for case in cases(&v, "layoutFrames") {
@@ -273,7 +370,32 @@ fn layout_vectors() {
         f.check(case, "layoutFrames", normalize_numbers(got), normalize_numbers(case["expected"].clone()));
     }
 
+    for case in cases(&v, "canvasThumbSize") {
+        total += 1;
+        let viewport: Viewport = serde_json::from_value(case["viewport"].clone()).expect("viewport");
+        let want: Viewport = serde_json::from_value(case["expected"].clone()).expect("expected");
+        f.check(case, "canvasThumbSize", canvas_thumb_size(viewport), want);
+    }
+
+    for case in cases(&v, "canvasThumb") {
+        total += 1;
+        let (_, columns, _) = run_steps(case);
+        let viewport: Viewport = serde_json::from_value(case["viewport"].clone()).expect("viewport");
+        let size: Viewport = serde_json::from_value(case["size"].clone()).expect("size");
+        let want: Vec<ThumbRect> = serde_json::from_value(case["expected"].clone()).expect("expected");
+        f.check(case, "canvasThumb", canvas_thumb(&columns, viewport, size, 1.0), want);
+    }
+
     f.finish("layout.json", total);
+}
+
+/// 只关心列宽的用例：每列一个 basis（`null` = 自适应）
+fn bases(v: &Value) -> Vec<ColumnLayout> {
+    v.as_array()
+        .expect("bases")
+        .iter()
+        .map(|b| column(Vec::<String>::new(), opt_num(b)))
+        .collect()
 }
 
 /// JSON 里 `640` 与 `640.0` 是同一个数

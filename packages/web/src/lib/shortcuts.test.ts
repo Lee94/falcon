@@ -113,12 +113,21 @@ describe("matchCommand: 其余 VS Code 对齐的键仍在", () => {
     [false, "KeyB", { ctrl: true, shift: true }, "toggleSidebar"],
     [false, "Tab", { ctrl: true }, "nextTab"],
     [false, "Tab", { ctrl: true, shift: true }, "prevTab"],
+    [true, "BracketRight", { meta: true, alt: true }, "nextCanvas"],
+    [true, "BracketLeft", { meta: true, alt: true }, "prevCanvas"],
+    [true, "BracketRight", { alt: true, shift: true }, "nextCanvas"],
+    [false, "BracketRight", { alt: true, shift: true }, "nextCanvas"],
+    [false, "BracketLeft", { alt: true, shift: true }, "prevCanvas"],
   ];
   for (const [mac, code, mods, cmd] of cases) {
     it(`${mac ? "Mac" : "Win"} ${code} → ${cmd}`, () => {
       assert.equal(hit(mac, code, mods), cmd);
     });
   }
+
+  it("翻画布不用 Ctrl+Alt（Win 上那是 AltGr，会吞掉键盘上打出来的字符）", () => {
+    assert.equal(hit(false, "BracketRight", { ctrl: true, alt: true }), null);
+  });
 
   it("不抢终端的裸 Ctrl+字母", () => {
     assert.equal(hit(false, "KeyC", { ctrl: true }), null);

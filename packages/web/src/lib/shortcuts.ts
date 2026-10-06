@@ -28,6 +28,9 @@ export type Command =
   | "overview"
   | "nextTab"
   | "prevTab"
+  /** 切到右 / 左一块画布（见 lib/layout 的 canvasGroups） */
+  | "nextCanvas"
+  | "prevCanvas"
   /** 切到第 N 个 tab，N 为 1–9 */
   | `tab${number}`;
 
@@ -68,6 +71,12 @@ export function chord(cmd: Command, mac = isMac): string {
       return mac ? "⌘⇧]" : "Ctrl+Tab";
     case "prevTab":
       return mac ? "⌘⇧[" : "Ctrl+Shift+Tab";
+    // 与切 tab 的 ⌘⇧] / ⌘⇧[ 同一对键，换成 ⌥。Win/Linux 不能用 Ctrl+Alt：
+    // 那是 AltGr，德语键盘上 AltGr + 这颗键打的是 ~
+    case "nextCanvas":
+      return mac ? "⌘⌥]" : "Alt+Shift+]";
+    case "prevCanvas":
+      return mac ? "⌘⌥[" : "Alt+Shift+[";
     default:
       return `${mac ? "⌘" : "Alt+"}${cmd.slice(3)}`;
   }
@@ -103,6 +112,10 @@ export function altChord(cmd: Command, mac = isMac): string | null {
       return "Alt+]";
     case "prevTab":
       return "Alt+[";
+    case "nextCanvas":
+      return mac ? "Alt+Shift+]" : null;
+    case "prevCanvas":
+      return mac ? "Alt+Shift+[" : null;
     default:
       return null;
   }
@@ -195,6 +208,13 @@ export function matchCommand(e: KeyboardEvent, mac = isMac): Command | null {
     return "newTerminal";
   }
 
+  // 翻画布：Alt+Shift+] / [ 两平台都认（Win/Linux 的主键位、Mac 的别名）
+  if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    if (code === "BracketRight") return "nextCanvas";
+    if (code === "BracketLeft") return "prevCanvas";
+    return null;
+  }
+
   // Alt 别名（两个平台都有），浏览器不会截走
   if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
     const d = digit(code);
@@ -205,6 +225,11 @@ export function matchCommand(e: KeyboardEvent, mac = isMac): Command | null {
   }
 
   if (!mod) return null;
+
+  if (mac && e.altKey && !e.shiftKey) {
+    if (code === "BracketRight") return "nextCanvas";
+    if (code === "BracketLeft") return "prevCanvas";
+  }
 
   if (e.shiftKey) {
     if (mac) {

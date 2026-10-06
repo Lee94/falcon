@@ -144,6 +144,8 @@ pub fn chord(action: &str) -> &'static str {
         "overview" => "⌘0",
         "nextTab" => "⌘⇧]",
         "prevTab" => "⌘⇧[",
+        "nextCanvas" => "⌘⌥]",
+        "prevCanvas" => "⌘⌥[",
         _ => "",
     };
     #[cfg(not(target_os = "macos"))]
@@ -162,6 +164,8 @@ pub fn chord(action: &str) -> &'static str {
         "overview" => "Alt+0",
         "nextTab" => "Ctrl+Tab",
         "prevTab" => "Ctrl+Shift+Tab",
+        "nextCanvas" => "Alt+Shift+]",
+        "prevCanvas" => "Alt+Shift+[",
         _ => "",
     };
 }

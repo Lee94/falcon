@@ -37,13 +37,16 @@ pub enum Command {
     Overview,
     NextTab,
     PrevTab,
+    /// 切到右 / 左一块画布（见 [`crate::layout::canvas_groups`]）
+    NextCanvas,
+    PrevCanvas,
     /// 切到第 N 个窗口，N 为 1–9
     Tab(u8),
 }
 
 impl Command {
     /// 固定的那些（不含 `Tab(n)`），web 的书写顺序
-    pub const FIXED: [Command; 14] = [
+    pub const FIXED: [Command; 16] = [
         Command::Palette,
         Command::QuickOpen,
         Command::NewTerminal,
@@ -58,9 +61,11 @@ impl Command {
         Command::Overview,
         Command::NextTab,
         Command::PrevTab,
+        Command::NextCanvas,
+        Command::PrevCanvas,
     ];
 
-    /// 全部命令：固定的 14 个 + tab1…tab9
+    /// 全部命令：固定的 16 个 + tab1…tab9
     pub fn all() -> Vec<Command> {
         Self::FIXED.into_iter().chain((1..=9).map(Command::Tab)).collect()
     }
@@ -82,6 +87,8 @@ impl Command {
             Command::Overview => "overview".into(),
             Command::NextTab => "nextTab".into(),
             Command::PrevTab => "prevTab".into(),
+            Command::NextCanvas => "nextCanvas".into(),
+            Command::PrevCanvas => "prevCanvas".into(),
             Command::Tab(n) => format!("tab{n}"),
         }
     }
@@ -137,6 +144,8 @@ pub fn shortcut_defs() -> Vec<ShortcutDef> {
         def(Overview, Some("palette.overview"), Navigation),
         def(NextTab, None, Navigation),
         def(PrevTab, None, Navigation),
+        def(NextCanvas, None, Navigation),
+        def(PrevCanvas, None, Navigation),
     ];
     out.extend((1..=9).map(|n| def(Tab(n), None, Navigation)));
     out
@@ -278,6 +287,16 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
             b(if mac { Keystroke::new("[").cmd().shift() } else { Keystroke::new("tab").ctrl().shift() }, Primary),
             b(Keystroke::new("[").alt(), BrowserAlias),
         ],
+        // 与切窗口的 ⌘⇧] / ⌘⇧[ 同一对键，换成 ⌥。Win/Linux 不能用 Ctrl+Alt：那是 AltGr，
+        // 德语键盘上 AltGr + 这颗键打的是 ~。Alt+Shift 在 Win/Linux 是主键位，在 mac 是 web 的别名
+        Command::NextCanvas | Command::PrevCanvas => {
+            let key = if cmd == Command::NextCanvas { "]" } else { "[" };
+            if mac {
+                vec![b(Keystroke::new(key).cmd().alt(), Primary), b(Keystroke::new(key).alt().shift(), BrowserAlias)]
+            } else {
+                vec![b(Keystroke::new(key).alt().shift(), Primary)]
+            }
+        }
     }
 }
 
@@ -302,6 +321,8 @@ pub fn chord(cmd: Command, mac: bool) -> String {
         Command::Overview => pick("⌘0", "Alt+0"),
         Command::NextTab => pick("⌘⇧]", "Ctrl+Tab"),
         Command::PrevTab => pick("⌘⇧[", "Ctrl+Shift+Tab"),
+        Command::NextCanvas => pick("⌘⌥]", "Alt+Shift+]"),
+        Command::PrevCanvas => pick("⌘⌥[", "Alt+Shift+["),
         Command::Tab(n) => format!("{}{n}", if mac { "⌘" } else { "Alt+" }),
     }
 }
@@ -329,7 +350,9 @@ pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
         Command::QuickOpen => "Alt+P",
         Command::NextTab => "Alt+]",
         Command::PrevTab => "Alt+[",
-        Command::Overview | Command::Tab(_) => return None,
+        Command::NextCanvas if mac => "Alt+Shift+]",
+        Command::PrevCanvas if mac => "Alt+Shift+[",
+        Command::NextCanvas | Command::PrevCanvas | Command::Overview | Command::Tab(_) => return None,
     })
 }
 
@@ -458,6 +481,15 @@ pub fn match_command(e: &KeyEventLike, mac: bool) -> Option<Command> {
         return Some(Command::NewTerminal);
     }
 
+    // 翻画布：Alt+Shift+] / [ 两平台都认（Win/Linux 的主键位、Mac 的别名）
+    if e.alt && e.shift && !e.ctrl && !e.meta {
+        return match code.as_str() {
+            "BracketRight" => Some(Command::NextCanvas),
+            "BracketLeft" => Some(Command::PrevCanvas),
+            _ => None,
+        };
+    }
+
     // Alt 别名（两个平台都有）
     if e.alt && !e.ctrl && !e.meta && !e.shift {
         if let Some(d) = digit(&code) {
@@ -472,6 +504,14 @@ pub fn match_command(e: &KeyEventLike, mac: bool) -> Option<Command> {
 
     if !modifier {
         return None;
+    }
+
+    if mac && e.alt && !e.shift {
+        match code.as_str() {
+            "BracketRight" => return Some(Command::NextCanvas),
+            "BracketLeft" => return Some(Command::PrevCanvas),
+            _ => {}
+        }
     }
 
     if e.shift {
@@ -615,7 +655,7 @@ mod tests {
 
     #[test]
     fn remaining_vs_code_aligned_keys() {
-        let cases: [(bool, &str, Mods, Command); 12] = [
+        let cases: [(bool, &str, Mods, Command); 17] = [
             (true, "KeyB", META, Command::ToggleSidebar),
             (true, "KeyE", META_SHIFT, Command::ToggleFilesPanel),
             (true, "KeyG", META_SHIFT, Command::ToggleGitPanel),
@@ -628,10 +668,21 @@ mod tests {
             (false, "KeyB", CTRL_SHIFT, Command::ToggleSidebar),
             (false, "Tab", CTRL, Command::NextTab),
             (false, "Tab", CTRL_SHIFT, Command::PrevTab),
+            (true, "BracketRight", Mods { meta: true, alt: true, ..Default::default() }, Command::NextCanvas),
+            (true, "BracketLeft", Mods { meta: true, alt: true, ..Default::default() }, Command::PrevCanvas),
+            (true, "BracketRight", Mods { alt: true, shift: true, ..Default::default() }, Command::NextCanvas),
+            (false, "BracketRight", Mods { alt: true, shift: true, ..Default::default() }, Command::NextCanvas),
+            (false, "BracketLeft", Mods { alt: true, shift: true, ..Default::default() }, Command::PrevCanvas),
         ];
         for (mac, code, mods, cmd) in cases {
             assert_eq!(hit(mac, code, mods), Some(cmd), "{} {code} → {}", if mac { "Mac" } else { "Win" }, cmd.id());
         }
+    }
+
+    #[test]
+    fn canvas_keys_do_not_use_ctrl_alt() {
+        // Win 上 Ctrl+Alt 是 AltGr，会吞掉键盘上打出来的字符
+        assert_eq!(hit(false, "BracketRight", Mods { ctrl: true, alt: true, ..Default::default() }), None);
     }
 
     #[test]
@@ -665,10 +716,17 @@ mod tests {
                 let aliases: Vec<Binding> =
                     bindings(cmd, mac).into_iter().filter(|b| b.role == BindingRole::BrowserAlias).collect();
                 for a in &aliases {
-                    assert!(a.keystroke.alt && !a.keystroke.cmd && !a.keystroke.ctrl && !a.keystroke.shift);
+                    // 翻画布的别名是 Alt+Shift（Alt+] / [ 已经是切窗口的别名）
+                    let shift_ok = matches!(cmd, Command::NextCanvas | Command::PrevCanvas) || !a.keystroke.shift;
+                    assert!(a.keystroke.alt && !a.keystroke.cmd && !a.keystroke.ctrl && shift_ok);
                 }
-                // 主键位本身就是 Alt 的（非 mac 的 quickOpen / overview / tabN）不再另标别名
-                if !mac && matches!(cmd, Command::QuickOpen | Command::Overview | Command::Tab(_)) {
+                // 主键位本身就是 Alt 的（非 mac 的 quickOpen / overview / tabN / 翻画布）不再另标别名
+                if !mac
+                    && matches!(
+                        cmd,
+                        Command::QuickOpen | Command::Overview | Command::Tab(_) | Command::NextCanvas | Command::PrevCanvas
+                    )
+                {
                     assert!(aliases.is_empty(), "{}", cmd.id());
                 }
             }

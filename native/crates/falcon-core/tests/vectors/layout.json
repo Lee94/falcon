@@ -10,9 +10,18 @@
     "expect 只写 TS 断言过的东西：shape（每列的 key）、unchanged（最后一步 applyDrop 返回了原数组）、paneBasis{key: 高}、",
     "  columnBasis（每列的宽）、pinEdge、isPinned{key: bool}、pinnedCount、paneKeys、findPane{key: {col,index} | null}、",
     "  keyCount{key: 出现次数}、inputShape（最后一步之前的 shape——输入没被改动）。",
-    "数字里的 \"NaN\" / \"Infinity\" 是字符串，JSON 表示不了。"
+    "数字里的 \"NaN\" / \"Infinity\" 是字符串，JSON 表示不了。",
+    "多画布（ADR 0012「多画布」）：columns 里的一列也可以写成对象 {keys, canvas?, basis?}；op 另有 assignCanvases{width, visible?}（返回原数组时 unchanged=true）、moveToCanvas{key,target,after}（同上）、insertColumn 可带 canvas；",
+    "  expect 另有 canvases（canvasGroups 的分组形状，不比画布 id）、orderByCanvas（按画布排好后的 paneKeys）、unassigned（还没分画布的列下标）、sameCanvas（[[i,j]] 两列同一块）。TS 里平分的那句用 600 宽（584/3 除不尽），serde_json 不开 float_roundtrip 时读回来差一个 ulp，这里换成 616 宽。",
+    "画布缩略图：canvasThumbSize{viewport} → {width,height}；canvasThumb{columns,steps,viewport,size} → 每扇窗口的矩形（gap 用 TS 的缺省 1）。"
   ],
-  "constants": { "COLUMN_MIN_PX": 260, "PANE_MIN_PX": 96, "CANVAS_GAP_PX": 8, "COLUMN_EDGE_PX": 28 },
+  "constants": {
+    "COLUMN_MIN_PX": 260,
+    "COLUMN_FIT_PX": 560,
+    "PANE_MIN_PX": 96,
+    "CANVAS_GAP_PX": 8,
+    "COLUMN_EDGE_PX": 28
+  },
   "transforms": [
     {
       "ts": "removePane > 摘掉窗口，列空了就不再占位",
@@ -253,6 +262,158 @@
         "findPane": { "c": { "col": 1, "index": 0 }, "zz": null },
         "paneKeys": ["a", "b", "c"]
       }
+    },
+    {
+      "ts": "画布 > 按画布分组，固定列接在每一块的最右",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "expect": { "canvases": [[["a"], ["b"], ["p"]], [["c"], ["p"]]] }
+    },
+    {
+      "ts": "画布 > 按画布分组，固定列接在每一块的最右",
+      "columns": [["p"]],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "expect": { "canvases": [[["p"]]] }
+    },
+    {
+      "ts": "画布 > 还没分画布的列先跟着左边那一列走",
+      "columns": [{ "keys": ["a"], "canvas": "v0" }, { "keys": ["b"], "canvas": "v1" }, ["x"]],
+      "steps": [],
+      "expect": { "canvases": [[["a"]], [["b"], ["x"]]] }
+    },
+    {
+      "ts": "画布 > 排得下就跟左边那一列同一块，排不下自动另起一块",
+      "columns": [["a"], ["b"], ["c"], ["d"]],
+      "steps": [{ "op": "assignCanvases", "width": 1128 }],
+      "expect": { "canvases": [[["a"], ["b"]], [["c"], ["d"]]], "unchanged": false }
+    },
+    {
+      "ts": "画布 > 排得下就跟左边那一列同一块，排不下自动另起一块",
+      "columns": [["a"], ["b"], ["c"], ["d"]],
+      "steps": [
+        { "op": "assignCanvases", "width": 1128 },
+        { "op": "assignCanvases", "width": 1128 }
+      ],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "画布 > 另起的新画布紧跟在原来那块后面：插在块中间的列挪到块尾",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" }
+      ],
+      "steps": [
+        { "op": "insertColumn", "key": "x", "at": 1 },
+        { "op": "assignCanvases", "width": 1128 }
+      ],
+      "expect": { "canvases": [[["a"], ["b"]], [["x"]], [["c"]]], "paneKeys": ["a", "b", "x", "c"] }
+    },
+    {
+      "ts": "画布 > 固定列也占画布宽：有它在，每块少放一列",
+      "columns": [["a"], ["b"], ["p"]],
+      "steps": [
+        { "op": "pinPane", "key": "p" },
+        { "op": "assignCanvases", "width": 1128 }
+      ],
+      "expect": { "canvases": [[["a"], ["p"]], [["b"], ["p"]]] }
+    },
+    {
+      "ts": "画布 > 只分看得见的列；画布宽还没量出来什么也不做",
+      "columns": [["a"], ["x"], ["b"]],
+      "steps": [{ "op": "assignCanvases", "width": 1128, "visible": ["a", "b"] }],
+      "expect": { "unassigned": [1], "sameCanvas": [[0, 2]] }
+    },
+    {
+      "ts": "画布 > 只分看得见的列；画布宽还没量出来什么也不做",
+      "columns": [["a"], ["x"], ["b"]],
+      "steps": [{ "op": "assignCanvases", "width": 0 }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "画布 > 分过的不再动：窗口缩窄之后已在场的列留在原来那块",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v0" }
+      ],
+      "steps": [{ "op": "assignCanvases", "width": 300 }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "画布 > 取消固定之后重新分：最后一块放得下就进去，放不下另起一块",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }, { "op": "unpinAll" }, { "op": "assignCanvases", "width": 1128 }],
+      "expect": { "canvases": [[["a"]], [["b"], ["p"]]] }
+    },
+    {
+      "ts": "画布 > 取消固定之后重新分：最后一块放得下就进去，放不下另起一块",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["c"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }, { "op": "unpinAll" }, { "op": "assignCanvases", "width": 1128 }],
+      "expect": { "canvases": [[["a"]], [["b"], ["c"]], [["p"]]] }
+    },
+    {
+      "ts": "画布 > 按画布排好顺序：块挨着块，固定列在最后",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" },
+        { "keys": ["b"], "canvas": "v0" }
+      ],
+      "steps": [],
+      "expect": { "orderByCanvas": ["a", "b", "c"] }
+    },
+    {
+      "ts": "画布 > 挪到另一块画布：独占一列接在那块的最右",
+      "columns": [
+        { "keys": ["a", "b"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" }
+      ],
+      "steps": [{ "op": "moveToCanvas", "key": "b", "target": "v1", "after": null }],
+      "expect": { "canvases": [[["a"]], [["c"], ["b"]]], "unchanged": false }
+    },
+    {
+      "ts": "画布 > 挪到另一块画布：独占一列接在那块的最右",
+      "columns": [
+        { "keys": ["a", "b"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" }
+      ],
+      "steps": [{ "op": "moveToCanvas", "key": "c", "target": "v1", "after": null }],
+      "expect": { "unchanged": true }
+    },
+    {
+      "ts": "画布 > 挪到新画布：紧跟在 after 那块后面",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v0" },
+        { "keys": ["c"], "canvas": "v1" }
+      ],
+      "steps": [{ "op": "moveToCanvas", "key": "a", "target": null, "after": "v0" }],
+      "expect": { "canvases": [[["b"]], [["a"]], [["c"]]] }
+    },
+    {
+      "ts": "画布 > 挪到新画布：紧跟在 after 那块后面",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["p"], "canvas": "v1" }
+      ],
+      "steps": [
+        { "op": "pinPane", "key": "p" },
+        { "op": "moveToCanvas", "key": "p", "target": null, "after": null }
+      ],
+      "expect": { "pinnedCount": 0, "canvases": [[["a"]], [["p"]]] }
     }
   ],
   "clampSpot": [
@@ -395,25 +556,78 @@
     { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "px": 10, "max": 500, "expected": 96 },
     { "ts": "尺寸 > 窗口高度的上限要给下面每扇留出最小高度", "px": 900, "max": 500, "expected": 500 }
   ],
-  "columnWidth": [
-    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 1, "viewportWidth": 1000, "expected": 1000 },
-    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 2, "viewportWidth": 1000, "expected": 640 },
-    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": null, "count": 3, "viewportWidth": 2000, "expected": 996 },
-    { "ts": "layoutFrames > 一列占满，多列按 max(半屏, min(全屏, 640))", "basis": 320, "count": 3, "viewportWidth": 2000, "expected": 320 },
-    { "ts": "layoutFrames > 只剩一列时不认钉死的宽度，照样占满", "basis": 427, "count": 1, "viewportWidth": 1000, "expected": 1000 }
+  "columnWidths": [
+    {
+      "ts": "layoutFrames > 一列占满，多列平分画布宽，正好铺满不溢出",
+      "bases": [null],
+      "width": 1000,
+      "expected": [1000]
+    },
+    {
+      "ts": "layoutFrames > 一列占满，多列平分画布宽，正好铺满不溢出",
+      "bases": [null, null],
+      "width": 1000,
+      "expected": [496, 496]
+    },
+    {
+      "ts": "layoutFrames > 一列占满，多列平分画布宽，正好铺满不溢出",
+      "bases": [320, null],
+      "width": 1000,
+      "expected": [320, 672]
+    },
+    {
+      "ts": "layoutFrames > 只剩一列时不认钉死的宽度，照样占满",
+      "bases": [427],
+      "width": 1000,
+      "expected": [1000]
+    },
+    {
+      "ts": "layoutFrames > 一列自适应的都没有时最后一列收尾，画布右边不留空",
+      "bases": [300, 300],
+      "width": 1000,
+      "expected": [300, 692]
+    },
+    {
+      "ts": "layoutFrames > 挤不下时钉了宽的按超出下限的部分让位，再不够就平分",
+      "bases": [700, null],
+      "width": 800,
+      "expected": [532, 260]
+    },
+    {
+      "ts": "layoutFrames > 挤不下时钉了宽的按超出下限的部分让位，再不够就平分",
+      "bases": [null, null, null],
+      "width": 616,
+      "expected": [200, 200, 200]
+    }
+  ],
+  "columnMaxWidth": [
+    {
+      "ts": "layoutFrames > 列缝的把手最多拖到给右边每列留够下限",
+      "width": 1000,
+      "left": 0,
+      "right": 1,
+      "expected": 732
+    },
+    {
+      "ts": "layoutFrames > 列缝的把手最多拖到给右边每列留够下限",
+      "width": 400,
+      "left": 0,
+      "right": 3,
+      "expected": 260
+    }
   ],
   "layoutFrames": [
     {
-      "ts": "layoutFrames > 列从左到右排，缝算进总宽",
-      "columns": [["a"], ["b"]],
+      "ts": "layoutFrames > 列从左到右排，左右边取整，最后一列的右边贴着画布右边",
+      "columns": [["a"], ["b"], ["c"]],
       "steps": [],
       "viewport": { "width": 1000, "height": 600 },
       "expected": {
         "columns": [
-          { "x": 0, "width": 640, "panes": [{ "key": "a", "y": 0, "height": 600 }] },
-          { "x": 648, "width": 640, "panes": [{ "key": "b", "y": 0, "height": 600 }] }
-        ],
-        "width": 1288
+          { "x": 0, "width": 328, "panes": [{ "key": "a", "y": 0, "height": 600 }] },
+          { "x": 336, "width": 328, "panes": [{ "key": "b", "y": 0, "height": 600 }] },
+          { "x": 672, "width": 328, "panes": [{ "key": "c", "y": 0, "height": 600 }] }
+        ]
       }
     },
     {
@@ -432,8 +646,7 @@
               { "key": "c", "y": 400, "height": 200 }
             ]
           }
-        ],
-        "width": 1000
+        ]
       }
     },
     {
@@ -444,8 +657,7 @@
       "expected": {
         "columns": [
           { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 150 }, { "key": "b", "y": 150, "height": 450 }] }
-        ],
-        "width": 1000
+        ]
       }
     },
     {
@@ -456,8 +668,7 @@
       "expected": {
         "columns": [
           { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 590 }, { "key": "b", "y": 590, "height": 96 }] }
-        ],
-        "width": 1000
+        ]
       }
     },
     {
@@ -466,8 +677,7 @@
       "steps": [{ "op": "setColumnBasis", "col": 0, "basis": 427 }],
       "viewport": { "width": 1000, "height": 600 },
       "expected": {
-        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }],
-        "width": 1000
+        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }]
       }
     },
     {
@@ -476,8 +686,7 @@
       "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 150 }],
       "viewport": { "width": 1000, "height": 600 },
       "expected": {
-        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }],
-        "width": 1000
+        "columns": [{ "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 600 }] }]
       }
     },
     {
@@ -488,9 +697,144 @@
       "expected": {
         "columns": [
           { "x": 0, "width": 1000, "panes": [{ "key": "a", "y": 0, "height": 150 }, { "key": "b", "y": 150, "height": 450 }] }
-        ],
-        "width": 1000
+        ]
       }
+    }
+  ],
+  "canvasFits": [
+    {
+      "ts": "画布 > 排不排得下：钉了宽的按钉的算，自适应的按舒展线算，一列永远排得下",
+      "bases": [null, null],
+      "width": 1128,
+      "expected": true
+    },
+    {
+      "ts": "画布 > 排不排得下：钉了宽的按钉的算，自适应的按舒展线算，一列永远排得下",
+      "bases": [null, null],
+      "width": 1127,
+      "expected": false
+    },
+    {
+      "ts": "画布 > 排不排得下：钉了宽的按钉的算，自适应的按舒展线算，一列永远排得下",
+      "bases": [null],
+      "width": 10,
+      "expected": true
+    },
+    {
+      "ts": "画布 > 排不排得下：钉了宽的按钉的算，自适应的按舒展线算，一列永远排得下",
+      "bases": [300, null],
+      "width": 868,
+      "expected": true
+    }
+  ],
+  "canvasIndex": [
+    {
+      "ts": "画布 > 正在显示哪一块：活动窗口所在的那块；它在固定列里就沿用上一次的",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "active": "b",
+      "remembered": null,
+      "expected": 1
+    },
+    {
+      "ts": "画布 > 正在显示哪一块：活动窗口所在的那块；它在固定列里就沿用上一次的",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "active": "p",
+      "remembered": "v1",
+      "expected": 1
+    },
+    {
+      "ts": "画布 > 正在显示哪一块：活动窗口所在的那块；它在固定列里就沿用上一次的",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "active": "p",
+      "remembered": "gone",
+      "expected": 0
+    },
+    {
+      "ts": "画布 > 正在显示哪一块：活动窗口所在的那块；它在固定列里就沿用上一次的",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "active": null,
+      "remembered": null,
+      "expected": 0
+    }
+  ],
+  "resolveSpotOnCanvas": [
+    {
+      "ts": "画布 > 拖拽落点：另起的一列落在当前那块画布上，认左边的列当锚、不认固定列",
+      "columns": [
+        { "keys": ["a"], "canvas": "v0" },
+        { "keys": ["b"], "canvas": "v1" },
+        { "keys": ["p"], "canvas": "v2" }
+      ],
+      "steps": [{ "op": "pinPane", "key": "p" }],
+      "group": 0,
+      "spot": { "kind": "column", "at": 1 },
+      "expected": { "kind": "column", "at": 1, "canvas": "v0" },
+      "dropKey": "b",
+      "dropCanvases": [[["a"], ["b"], ["p"]]]
+    }
+  ],
+  "canvasThumbSize": [
+    {
+      "ts": "画布 > 缩略图：高固定，宽按画布宽高比，夹在上下限之间",
+      "viewport": { "width": 1500, "height": 1000 },
+      "expected": { "width": 24, "height": 16 }
+    },
+    {
+      "ts": "画布 > 缩略图：高固定，宽按画布宽高比，夹在上下限之间",
+      "viewport": { "width": 5000, "height": 500 },
+      "expected": { "width": 40, "height": 16 }
+    },
+    {
+      "ts": "画布 > 缩略图：高固定，宽按画布宽高比，夹在上下限之间",
+      "viewport": { "width": 300, "height": 1000 },
+      "expected": { "width": 20, "height": 16 }
+    },
+    {
+      "ts": "画布 > 缩略图：高固定，宽按画布宽高比，夹在上下限之间",
+      "viewport": { "width": 0, "height": 0 },
+      "expected": { "width": 24, "height": 16 }
+    }
+  ],
+  "canvasThumb": [
+    {
+      "ts": "画布 > 缩略图按格子缩：列之间、上下两扇之间各留 1px，整张正好铺满",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 300 }],
+      "viewport": { "width": 1000, "height": 600 },
+      "size": { "width": 24, "height": 16 },
+      "expected": [
+        { "key": "a", "x": 0, "y": 0, "width": 12, "height": 8 },
+        { "key": "b", "x": 0, "y": 9, "width": 12, "height": 7 },
+        { "key": "c", "x": 13, "y": 0, "width": 11, "height": 16 }
+      ]
+    },
+    {
+      "ts": "画布 > 缩略图按格子缩：列之间、上下两扇之间各留 1px，整张正好铺满",
+      "columns": [["a", "b"], ["c"]],
+      "steps": [{ "op": "setPaneBasis", "key": "a", "basis": 300 }],
+      "viewport": { "width": 0, "height": 0 },
+      "size": { "width": 24, "height": 16 },
+      "expected": []
     }
   ]
 }

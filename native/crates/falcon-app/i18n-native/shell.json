@@ -23,6 +23,8 @@
       "overview": "会话总览",
       "nextTab": "下一个窗口",
       "prevTab": "上一个窗口",
+      "nextCanvas": "下一块画布",
+      "prevCanvas": "上一块画布",
       "zoomIn": "放大",
       "zoomOut": "缩小",
       "zoomReset": "实际大小"

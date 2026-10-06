@@ -18,8 +18,9 @@ use serde_json::Value;
 
 use crate::js::{js_num, js_truthy};
 use crate::layout::{
-    ColumnLayout, DropSpot, PaneAt, PaneLayout, apply_drop, column, find_pane, insert_column, insert_pane,
-    is_pinned, pane_keys, pin_pane, remove_pane, replace_pane, resolve_spot, set_column_basis, set_pane_basis,
+    CANVAS_GAP_PX, CanvasGroup, ColumnLayout, DropSpot, PaneAt, PaneLayout, apply_drop, assign_canvases, canvas_end,
+    canvas_groups, canvas_index, column, find_pane, insert_column, insert_pane, is_pinned, move_to_canvas,
+    order_by_canvas, pane_keys, pin_pane, remove_pane, replace_pane, resolve_spot, set_column_basis, set_pane_basis,
     sync_columns, unpin_all, visible_columns,
 };
 use crate::pane_key::{DIFF_KEY, PaneItem, file_key, parse_pane_key, term_key};
@@ -138,6 +139,9 @@ pub struct PersistedColumn {
     /// 固定在最右（见 [`ColumnLayout::pinned`]）。只可能是最后一列。web 落盘时恒写这个字段
     #[serde(default)]
     pub pinned: bool,
+    /// 所在画布（见 [`ColumnLayout::canvas`]）。旧版本没有，读回来按还没分处理；固定列不记
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<String>,
 }
 
 /// `falcon.workspace` 的形状（字段名、嵌套、顺序与 web 的 `JSON.stringify` 一致）
@@ -209,6 +213,7 @@ pub fn parse_persisted_columns(raw: Option<&Value>) -> Vec<PersistedColumn> {
                 basis: col.get("basis").and_then(Value::as_f64),
                 panes: kept,
                 pinned: col.get("pinned") == Some(&Value::Bool(true)),
+                canvas: col.get("canvas").and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_string),
             });
         }
     }
@@ -286,7 +291,13 @@ pub fn restore_columns(ws: &PersistedWorkspace) -> Vec<ColumnLayout> {
     let columns: Vec<ColumnLayout> = ws
         .columns
         .iter()
-        .map(|c| ColumnLayout { basis: c.basis, panes: c.panes.clone(), pinned: c.pinned, ..column(Vec::<String>::new(), None) })
+        .map(|c| ColumnLayout {
+            basis: c.basis,
+            panes: c.panes.clone(),
+            pinned: c.pinned,
+            canvas: c.canvas.clone(),
+            ..column(Vec::<String>::new(), None)
+        })
         .collect();
     let live: Vec<String> = ws.tabs.iter().map(|t| term_key(t)).collect();
     sync_columns(&columns, &live)
@@ -416,7 +427,24 @@ pub struct WorkspaceState {
     pub multi_repo: BTreeMap<String, String>,
     /// 侧栏当前选中的项目；主区只显示它下面的窗口。`None` = 在总览
     pub selected_project_id: Option<String>,
+    /// 画布宽（画布量出来报上来的，不持久化）。新列排不排得下要按它算；
+    /// 0 = 还没量出来，这时不分画布（见 [`WorkspaceState::settle_canvases`]）。
+    pub canvas_width: f64,
+    /// 上一次显示的画布（不持久化）。平时就是活动窗口所在的那块，用不着它；活动窗口在
+    /// 固定列里时（每块画布都有它）靠它知道该显示哪块。由 settle_canvases 跟着 active 更新。
+    pub canvas_id: Option<String>,
+    /// 每块画布上一次停在哪扇窗口（canvas id → pane key，不持久化）：切回来时把焦点还给它
+    pub canvas_focus: BTreeMap<String, String>,
     pending_seq: u64,
+}
+
+/// [`WorkspaceState::settle_canvases`] 改了什么
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Settled {
+    /// 分了画布：排布变了，要落盘
+    pub columns: bool,
+    /// 有任何改动（含当前画布 / 每块的焦点记忆）：要重画
+    pub changed: bool,
 }
 
 impl Default for WorkspaceState {
@@ -447,6 +475,9 @@ impl WorkspaceState {
             show_archived: ws.show_archived,
             multi_repo: BTreeMap::new(),
             selected_project_id: ws.selected_project_id.clone(),
+            canvas_width: 0.0,
+            canvas_id: None,
+            canvas_focus: BTreeMap::new(),
             pending_seq: 0,
         }
     }
@@ -459,7 +490,9 @@ impl WorkspaceState {
             .filter_map(|c| {
                 let panes: Vec<PaneLayout> =
                     c.panes.iter().filter(|p| p.key.starts_with("t:") && !is_pending_id(&p.key[2..])).cloned().collect();
-                (!panes.is_empty()).then_some(PersistedColumn { basis: c.basis, panes, pinned: c.pinned })
+                // 固定列在每块画布上都有，它的画布不记
+                let canvas = if c.pinned { None } else { c.canvas.clone() };
+                (!panes.is_empty()).then_some(PersistedColumn { basis: c.basis, panes, pinned: c.pinned, canvas })
             })
             .collect();
         let active = match &self.active {
@@ -546,10 +579,41 @@ impl WorkspaceState {
         keys
     }
 
-    /// 画布此刻要画的列（别的项目的窗口过滤掉，空列不占位）
+    /// 画布此刻要画的列（别的项目的窗口过滤掉，空列不占位），按画布一块接一块排好、
+    /// 固定列在最后——切窗口的快捷键（⌘1…9、上一个 / 下一个）就按这个顺序走。
     pub fn layout_columns(&self, sessions: &[SessionWithProject]) -> Vec<ColumnLayout> {
         let visible = self.visible_pane_keys(sessions);
-        visible_columns(&self.columns, |k| visible.contains(k))
+        order_by_canvas(&visible_columns(&self.columns, |k| visible.contains(k)))
+    }
+
+    /// 当前视图里的画布（每块的列已含接在最右的固定列）
+    pub fn view_canvases(&self, sessions: &[SessionWithProject]) -> Vec<CanvasGroup> {
+        canvas_groups(&self.layout_columns(sessions))
+    }
+
+    /// 正在显示的那块画布的 id：活动窗口所在的那块；活动窗口在固定列里就是上一次显示的
+    /// 那块（`canvas_id`）。当前视图一扇窗口都没有时 `None`。
+    pub fn current_canvas(&self, sessions: &[SessionWithProject]) -> Option<String> {
+        let groups = self.view_canvases(sessions);
+        if groups.is_empty() {
+            return None;
+        }
+        let key = active_key(&self.active);
+        let at = canvas_index(&groups, key.as_deref(), self.canvas_id.as_deref());
+        Some(groups[at].id.clone())
+    }
+
+    /// 新开的一列插在排布的哪个下标：`after` 那扇窗口所在列的右边；没给 `after`（或它在
+    /// 固定列里——固定列在排布里永远是最后一列，接在它后面就跑到最后一块画布去了）就接在
+    /// 当前画布的最后一列后面。先往眼前这块里放，排不下 [`assign_canvases`] 会紧跟着它
+    /// 另起一块。当前视图里一扇窗口都没有就接到最右。
+    fn new_column_at(&self, after: Option<&str>, sessions: &[SessionWithProject]) -> usize {
+        if let Some(at) = after.and_then(|k| find_pane(&self.columns, k))
+            && !self.columns[at.col].pinned
+        {
+            return at.col + 1;
+        }
+        self.current_canvas(sessions).and_then(|c| canvas_end(&self.columns, &c)).unwrap_or(self.columns.len())
     }
 
     /// 按排布顺序可以切到的视图（切窗口的快捷键走这个）
@@ -598,8 +662,9 @@ impl WorkspaceState {
     /// 文件 / 差异窗口该落在哪一列。
     ///
     /// 两者共用同一座"查看列"：已经开着另一个查看窗口就落到它下面，否则在当前活动窗口
-    /// 的右边另起一列。终端是工作区的主角，查看类窗口不该把它挤到看不见的地方去。
-    fn place_view_pane(&self, key: &str) -> Vec<ColumnLayout> {
+    /// 的右边另起一列。终端是工作区的主角，查看类窗口不该把它挤到看不见的地方去——
+    /// 当前画布排不下就另起一块画布（[`assign_canvases`]），已在场的终端不会被挤窄。
+    fn place_view_pane(&self, key: &str, sessions: &[SessionWithProject]) -> Vec<ColumnLayout> {
         if find_pane(&self.columns, key).is_some() {
             return self.columns.clone();
         }
@@ -611,8 +676,8 @@ impl WorkspaceState {
         if let Some(sibling) = sibling_key.and_then(|k| find_pane(&self.columns, &k)) {
             return insert_pane(&self.columns, key, PaneAt { col: sibling.col, index: sibling.index + 1 });
         }
-        let from = active_key(&self.active).and_then(|k| find_pane(&self.columns, &k));
-        insert_column(&self.columns, key, from.map(|f| f.col + 1).unwrap_or(self.columns.len()))
+        let at = self.new_column_at(active_key(&self.active).as_deref(), sessions);
+        insert_column(&self.columns, key, at, None)
     }
 
     fn resync(&mut self) {
@@ -667,15 +732,27 @@ impl WorkspaceState {
     }
 
     /// 新建会话的第一步（web `createSessionNow` 发请求之前的 `set`）：先摆一扇 pending
-    /// 窗口。默认独占一列接到最右；`after` 给了就插在那扇窗口所在列的右边。新开的终端
-    /// 不能建在一个收着的检出里，顺手摊开。返回 pending id。
-    pub fn begin_pending(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<&str>) -> String {
+    /// 窗口。默认独占一列接在当前画布的最右（排不下另起一块，见 [`assign_canvases`]）；
+    /// `after` 给了就插在那扇窗口所在列的右边。开在别的项目里就接到最右——当前画布是
+    /// 这个项目的，与它无关。新开的终端不能建在一个收着的检出里，顺手摊开。返回 pending id。
+    pub fn begin_pending(
+        &mut self,
+        project_id: &str,
+        agent: Option<SessionAgent>,
+        after: Option<&str>,
+        sessions: &[SessionWithProject],
+    ) -> String {
+        // 位置按加 pending 之前的状态算（web 在同一个 set 里用的也是旧状态）
+        let at = if self.selected_project_id.as_deref() == Some(project_id) || after.is_some() {
+            self.new_column_at(after, sessions)
+        } else {
+            self.columns.len()
+        };
         self.pending_seq += 1;
         let pending_id = format!("{PENDING_PREFIX}{}", self.pending_seq);
         self.pending.push(PendingSession { id: pending_id.clone(), project_id: project_id.to_string(), agent, error: None });
         self.tabs.push(pending_id.clone());
-        let at = after.and_then(|k| find_pane(&self.columns, k)).map(|p| p.col + 1).unwrap_or(self.columns.len());
-        self.columns = insert_column(&self.columns, &term_key(&pending_id), at);
+        self.columns = insert_column(&self.columns, &term_key(&pending_id), at, None);
         self.active = ActiveView::Terminal { session_id: pending_id.clone() };
         self.selected_project_id = Some(project_id.to_string());
         self.sessions_open.insert(project_id.to_string(), true);
@@ -725,8 +802,8 @@ impl WorkspaceState {
     // ---- reducer：查看窗口 ----
 
     /// 在差异窗口里打开一个文件，就地替换上一个（web `openDiff`）
-    pub fn open_diff(&mut self, target: DiffTabTarget) {
-        self.columns = self.place_view_pane(DIFF_KEY);
+    pub fn open_diff(&mut self, target: DiffTabTarget, sessions: &[SessionWithProject]) {
+        self.columns = self.place_view_pane(DIFF_KEY, sessions);
         self.diff_tab = Some(target);
         self.active = ActiveView::Diff;
     }
@@ -749,14 +826,14 @@ impl WorkspaceState {
 
     /// 打开工作目录里的一个文件（web `openFile`）：已经开着一个文件时是同一扇窗口换内容，
     /// 位置与高度都不动
-    pub fn open_file(&mut self, project_id: &str, path: &str) {
+    pub fn open_file(&mut self, project_id: &str, path: &str, sessions: &[SessionWithProject]) {
         let next = FileTabTarget { project_id: project_id.to_string(), path: path.to_string() };
         let key = next.key();
         self.columns = match &self.file_tab {
             Some(prev) if !same_file(prev, &next) && find_pane(&self.columns, &prev.key()).is_some() => {
                 replace_pane(&self.columns, &prev.key(), &key)
             }
-            _ => self.place_view_pane(&key),
+            _ => self.place_view_pane(&key, sessions),
         };
         self.file_tab = Some(next);
         self.active = ActiveView::File { project_id: project_id.to_string(), path: path.to_string() };
@@ -882,7 +959,107 @@ impl WorkspaceState {
         self.columns = if is_pinned(&self.columns, key) { unpin_all(&self.columns) } else { pin_pane(&self.columns, key) };
     }
 
-    /// 拖列间的缝：只钉左边那一列的宽度，右边继续自适应。拖的途中不落盘
+    /// 把一扇窗口挪到另一块画布（web `movePaneToCanvas`）：独占一列接在那块最右；`None` =
+    /// 新开一块，紧跟在当前画布后面。焦点跟着它走，画布也就切过去了。返回有没有动；动了
+    /// web 落盘。
+    pub fn move_pane_to_canvas(&mut self, key: &str, canvas: Option<&str>, sessions: &[SessionWithProject]) -> bool {
+        let current = self.current_canvas(sessions);
+        let Some(columns) = move_to_canvas(&self.columns, key, canvas, current.as_deref()) else { return false };
+        self.columns = columns;
+        if let Some(view) = pane_view(key) {
+            self.active = view;
+        }
+        true
+    }
+
+    /// 切到某块画布（web `showCanvas`）：焦点交给它上次停的那扇窗口；活动窗口在固定列里
+    /// 就只换画布、焦点不动。返回有没有变；焦点变了 web 落盘（focusPane 里）。
+    pub fn show_canvas(&mut self, id: &str, sessions: &[SessionWithProject]) -> bool {
+        let groups = self.view_canvases(sessions);
+        let Some(group) = groups.iter().find(|g| g.id == id) else { return false };
+        let shown = |k: &str| group.columns.iter().any(|c| !c.pinned && c.panes.iter().any(|p| p.key == k));
+        let key = active_key(&self.active);
+        if key.as_deref().is_some_and(shown) {
+            return false;
+        }
+        // 输入停在固定列里：它在每块画布上都有，只换画布、焦点不动
+        if let Some(key) = &key
+            && is_pinned(&self.columns, key)
+            && group.columns.iter().any(|c| c.pinned)
+        {
+            if self.canvas_id.as_deref() == Some(id) {
+                return false;
+            }
+            self.canvas_id = Some(id.to_string());
+            return true;
+        }
+        let remembered = self.canvas_focus.get(id).filter(|k| shown(k)).cloned();
+        let target = remembered.or_else(|| {
+            group.columns.iter().find(|c| !c.pinned).and_then(|c| c.panes.first()).map(|p| p.key.clone())
+        });
+        target.is_some_and(|k| self.focus_pane(&k))
+    }
+
+    /// 切到左 / 右一块画布，不回绕（web `stepCanvas`）。画布条、横向手势、快捷键都走它
+    pub fn step_canvas(&mut self, delta: i64, sessions: &[SessionWithProject]) -> bool {
+        let groups = self.view_canvases(sessions);
+        let key = active_key(&self.active);
+        let at = canvas_index(&groups, key.as_deref(), self.canvas_id.as_deref()) as i64 + delta;
+        match usize::try_from(at).ok().and_then(|i| groups.get(i)) {
+            Some(next) => {
+                let id = next.id.clone();
+                self.show_canvas(&id, sessions)
+            }
+            None => false,
+        }
+    }
+
+    /// 画布量到的宽。返回有没有变
+    pub fn set_canvas_width(&mut self, width: f64) -> bool {
+        if self.canvas_width == width {
+            return false;
+        }
+        self.canvas_width = width;
+        true
+    }
+
+    /// 画布的收尾（web 挂在 store 订阅上的 `settleCanvases`）——每次会改 columns / active /
+    /// 可见性的变更之后都要过一遍，跟 [`sync_columns`] 一样不能漏：
+    ///
+    /// 1. 还没分画布的可见列分好（[`assign_canvases`]）：新开的终端、对账补进来的会话、取消
+    ///    固定的列、旧版本落盘的排布。"当前画布排不下就自动新开一块"就发生在这一步。
+    /// 2. 记下正在显示哪块（`canvas_id`）、每块上次停在哪扇窗口（`canvas_focus`）。
+    ///
+    /// app 层在工作区每次通知之后统一调它（observe_self），而不是在每个动作里各调一遍。
+    pub fn settle_canvases(&mut self, sessions: &[SessionWithProject]) -> Settled {
+        let mut out = Settled::default();
+        let visible = self.visible_pane_keys(sessions);
+        if let Some(columns) = assign_canvases(&self.columns, |k| visible.contains(k), self.canvas_width, CANVAS_GAP_PX) {
+            self.columns = columns;
+            out.columns = true;
+            out.changed = true;
+        }
+        let Some(key) = active_key(&self.active) else { return out };
+        let group = self
+            .view_canvases(sessions)
+            .into_iter()
+            .find(|g| g.columns.iter().any(|c| !c.pinned && c.panes.iter().any(|p| p.key == key)));
+        let Some(group) = group else { return out };
+        if self.canvas_id.as_deref() != Some(group.id.as_str()) {
+            self.canvas_id = Some(group.id.clone());
+            out.changed = true;
+        }
+        if self.canvas_focus.get(&group.id) != Some(&key) {
+            // 顺手清掉已经没有了的画布
+            let live: HashSet<&str> = self.columns.iter().filter_map(|c| c.canvas.as_deref()).collect();
+            self.canvas_focus.retain(|id, _| live.contains(id.as_str()));
+            self.canvas_focus.insert(group.id, key);
+            out.changed = true;
+        }
+        out
+    }
+
+    /// 拖列间的缝：只钉左边那一列的宽度，右边跟着让。拖的途中不落盘
     pub fn set_column_width(&mut self, id: &str, width: Option<f64>) {
         self.columns = set_column_basis(&self.columns, id, width);
     }
@@ -1046,7 +1223,7 @@ mod tests {
     fn persisted_json_matches_the_web_shape() {
         let mut ws = WorkspaceState::from_persisted(&load_workspace(Some(r#"{"tabs":["s1"]}"#)));
         ws.selected_project_id = Some("p".into());
-        ws.open_file("p", "a.ts");
+        ws.open_file("p", "a.ts", &[]);
         ws.collapsed.insert("s:local".into(), true);
         let out = serialize_workspace(&ws.persisted());
         assert_eq!(
@@ -1079,7 +1256,7 @@ mod tests {
         ws.open_session("s1", &sessions);
         assert_eq!(ws.selected_project_id.as_deref(), Some("p"));
         assert_eq!(ws.sessions_open.get("p"), Some(&true));
-        let pid = ws.begin_pending("p", Some(SessionAgent::Claude), Some("t:s1"));
+        let pid = ws.begin_pending("p", Some(SessionAgent::Claude), Some("t:s1"), &sessions);
         assert_eq!(pid, "pending:1");
         assert_eq!(shape(&ws.columns), [vec!["t:s1"], vec!["t:pending:1"]]);
         // pending 不落盘，焦点落成项目空页
@@ -1104,7 +1281,7 @@ mod tests {
         ws.open_session("s2", &sessions);
         ws.focus_pane("t:s1");
         // 文件在活动窗口右边另起一列；差异落到文件下面
-        ws.open_file("p", "a.ts");
+        ws.open_file("p", "a.ts", &sessions);
         assert_eq!(shape(&ws.columns), [vec!["t:s1"], vec!["f:p:a.ts"], vec!["t:s2"]]);
         let diff = DiffTabTarget {
             project_id: "p".into(),
@@ -1112,10 +1289,10 @@ mod tests {
             commit: None,
             repo: None,
         };
-        ws.open_diff(diff);
+        ws.open_diff(diff, &sessions);
         assert_eq!(shape(&ws.columns), [vec!["t:s1"], vec!["f:p:a.ts", "d"], vec!["t:s2"]]);
         // 换一个文件是同一扇窗口换内容
-        ws.open_file("p", "b.ts");
+        ws.open_file("p", "b.ts", &sessions);
         assert_eq!(shape(&ws.columns)[1], ["f:p:b.ts", "d"]);
         // 关掉正看着的差异：先落到最近的可见终端，不是旁边的文件
         ws.show_diff();
@@ -1196,7 +1373,7 @@ mod tests {
         let sessions = vec![session("a", "p", 1), session("b", "p", 2)];
         ws.open_session("a", &sessions);
         ws.open_session("b", &sessions);
-        let pid = ws.begin_pending("p", None, None);
+        let pid = ws.begin_pending("p", None, None, &sessions);
         ws.apply_sessions(&sessions[..1]);
         assert_eq!(ws.tabs, ["a", pid.as_str()]);
         assert_eq!(pane_keys(&ws.columns), ["t:a", "t:pending:1"]);
@@ -1211,6 +1388,133 @@ mod tests {
         ws.apply_projects(&[archived]);
         assert_eq!(ws.selected_project_id, None);
         assert_eq!(ws.active, ActiveView::Overview);
+    }
+
+    /// 画布按宽并排两列自适应（见 layout 的 COLUMN_FIT_PX）
+    const TWO: f64 = crate::layout::COLUMN_FIT_PX * 2.0 + crate::layout::CANVAS_GAP_PX;
+
+    fn canvases(ws: &WorkspaceState, sessions: &[SessionWithProject]) -> Vec<Vec<Vec<String>>> {
+        ws.view_canvases(sessions)
+            .iter()
+            .map(|g| g.columns.iter().map(|c| c.panes.iter().map(|p| p.key.clone()).collect()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn settle_assigns_canvases_once_the_width_is_known() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
+        let mut ws = WorkspaceState::default();
+        for id in ["a", "b", "c"] {
+            ws.open_session(id, &sessions);
+        }
+        // 还没量出画布宽：不分，显示上都挤在一块
+        assert_eq!(ws.settle_canvases(&sessions), Settled { columns: false, changed: true });
+        assert_eq!(canvases(&ws, &sessions).len(), 1);
+        assert!(ws.set_canvas_width(TWO));
+        let settled = ws.settle_canvases(&sessions);
+        assert!(settled.columns && settled.changed);
+        assert_eq!(canvases(&ws, &sessions), [vec![vec!["t:a"], vec!["t:b"]], vec![vec!["t:c"]]]);
+        // 收敛之后再跑一遍什么也不变
+        assert_eq!(ws.settle_canvases(&sessions), Settled::default());
+        // 当前画布跟着活动窗口（c 在第二块）
+        assert_eq!(ws.current_canvas(&sessions), Some(ws.view_canvases(&sessions)[1].id.clone()));
+        // 画布落盘，读回来还是同两块
+        let saved = ws.persisted();
+        assert!(saved.columns.iter().all(|c| c.canvas.is_some()));
+        let back = WorkspaceState::from_persisted(&load_workspace(Some(&serialize_workspace(&saved))));
+        assert_eq!(canvases(&back, &sessions), canvases(&ws, &sessions));
+    }
+
+    #[test]
+    fn new_terminals_fill_the_current_canvas_before_opening_a_new_one() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
+        let mut ws = WorkspaceState::default();
+        for id in ["a", "b", "c"] {
+            ws.open_session(id, &sessions);
+        }
+        ws.set_canvas_width(TWO);
+        ws.settle_canvases(&sessions);
+        // 回到第一块（已满）开一个：另起一块紧跟在它后面，不跑到 c 那块
+        ws.focus_pane("t:a");
+        ws.settle_canvases(&sessions);
+        let pid = ws.begin_pending("p", None, None, &sessions);
+        ws.settle_canvases(&sessions);
+        let pending = format!("t:{pid}");
+        assert_eq!(
+            canvases(&ws, &sessions),
+            [vec![vec!["t:a".to_string()], vec!["t:b".into()]], vec![vec![pending.clone()]], vec![vec!["t:c".into()]]]
+        );
+        // 在第三块（只有 c，放得下）开一个：就落在 c 旁边
+        ws.focus_pane("t:c");
+        ws.settle_canvases(&sessions);
+        let pid2 = ws.begin_pending("p", None, None, &sessions);
+        ws.settle_canvases(&sessions);
+        assert_eq!(canvases(&ws, &sessions)[2], [vec!["t:c".to_string()], vec![format!("t:{pid2}")]]);
+    }
+
+    #[test]
+    fn show_and_step_canvas_return_focus_to_where_it_was() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
+        let mut ws = WorkspaceState::default();
+        for id in ["a", "b", "c"] {
+            ws.open_session(id, &sessions);
+        }
+        ws.set_canvas_width(TWO);
+        ws.settle_canvases(&sessions);
+        ws.focus_pane("t:b");
+        ws.settle_canvases(&sessions);
+        assert!(ws.step_canvas(1, &sessions));
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "c".into() });
+        ws.settle_canvases(&sessions);
+        // 已经在最右一块：不回绕
+        assert!(!ws.step_canvas(1, &sessions));
+        // 切回第一块：焦点还给上次停的 b，而不是第一扇 a
+        assert!(ws.step_canvas(-1, &sessions));
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "b".into() });
+        // 点正在显示的那块：什么也不做
+        ws.settle_canvases(&sessions);
+        let first = ws.view_canvases(&sessions)[0].id.clone();
+        assert!(!ws.show_canvas(&first, &sessions));
+    }
+
+    #[test]
+    fn with_focus_in_the_pinned_column_switching_canvas_keeps_focus() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("x", "p", 3)];
+        let mut ws = WorkspaceState::default();
+        for id in ["a", "b", "x"] {
+            ws.open_session(id, &sessions);
+        }
+        ws.toggle_pin_pane("t:x");
+        ws.set_canvas_width(TWO);
+        ws.settle_canvases(&sessions);
+        // 固定列也占宽：每块只放一列 + 固定列
+        assert_eq!(
+            canvases(&ws, &sessions),
+            [vec![vec!["t:a"], vec!["t:x"]], vec![vec!["t:b"], vec!["t:x"]]]
+        );
+        ws.focus_pane("t:x");
+        ws.settle_canvases(&sessions);
+        let second = ws.view_canvases(&sessions)[1].id.clone();
+        assert!(ws.show_canvas(&second, &sessions));
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "x".into() });
+        assert_eq!(ws.current_canvas(&sessions).as_deref(), Some(second.as_str()));
+    }
+
+    #[test]
+    fn move_pane_to_canvas_follows_the_pane() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2)];
+        let mut ws = WorkspaceState::default();
+        ws.open_session("a", &sessions);
+        ws.open_session("b", &sessions);
+        ws.set_canvas_width(TWO);
+        ws.settle_canvases(&sessions);
+        assert_eq!(canvases(&ws, &sessions).len(), 1);
+        assert!(ws.move_pane_to_canvas("t:a", None, &sessions));
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "a".into() });
+        assert_eq!(canvases(&ws, &sessions), [vec![vec!["t:b"]], vec![vec!["t:a"]]]);
+        // 本来就独占一列待在那块上：没动
+        let own = ws.view_canvases(&sessions)[1].id.clone();
+        assert!(!ws.move_pane_to_canvas("t:a", Some(&own), &sessions));
     }
 
     #[test]

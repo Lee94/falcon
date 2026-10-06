@@ -1,25 +1,35 @@
 //! 主区工作画布（web 的 `components/WorkCanvas.tsx`，ADR 0012）：窗口排成从左到右的列，每列从上
 //! 到下若干扇，列宽与窗口高度都能拖，抓标题栏能把窗口拖到别的列或另起一列。
 //!
-//! 与 web 的差别只有一处：web 必须"每扇窗口绝对定位、DOM 顺序恒定"，因为 xterm 的画布换过父
-//! 节点渲染尺寸就毁了；GPUI 的终端元素每帧按快照重画，挂在树的哪个位置都一样，这条约束不存在。
-//! 这里仍按 `layout_frames` 算出的坐标绝对定位，只是为了与 web 共用同一套几何纯函数（列宽公式、
-//! 窗口平分、拖拽落点），两边的排布行为一致。
+//! **不横向滚动**：列分在一块块画布上（[`ColumnLayout::canvas`]），一次只显示一块，一块正好一屏宽
+//! （列平分视口）。新开的列在当前画布排不下就自动另起一块（工作区的 settle_canvases）。有两块以上
+//! 时底下出一条画布条：点数字切过去，把窗口拖到数字上就挪到那块，拖到 ＋ 上就新开一块。两指横滑 /
+//! 快捷键也能翻。固定列在每块画布的最右都有。
 //!
-//! 不在场的窗口（别的项目的）不画，但它的终端视图仍活在工作区里：解析照跑，只省渲染。
+//! 与 web 的差别：web 必须"每扇窗口绝对定位、DOM 顺序恒定"，因为 xterm 的画布换过父节点渲染尺寸
+//! 就毁了；GPUI 的终端元素每帧按快照重画，挂在树的哪个位置都一样，这条约束不存在。这里仍按
+//! `layout_frames` 算出的坐标绝对定位，只是为了与 web 共用同一套几何纯函数（列宽公式、窗口平分、
+//! 拖拽落点），两边的排布行为一致。
+//!
+//! 不在场的窗口（别的项目的、别的画布上的）不画，但它的终端视图仍活在工作区里：解析照跑，只省渲染。
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Instant;
 
 use falcon_core::layout::{
-    self, CANVAS_GAP_PX, ColumnLayout, ColumnRect, DropSpot, PaneRect, Viewport,
+    self, CANVAS_GAP_PX, CanvasGroup, ColumnLayout, ColumnRect, DropSpot, PaneRect, Viewport,
 };
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
+use falcon_core::term_canvas::{CanvasSwipe, WheelAxis, WheelAxisLock, WheelSample};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::ElementExt;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, CursorStyle, Div, Entity, FontWeight, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
+    AnyElement, App, Bounds, Context, CursorStyle, Div, Entity, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, Window, div, px,
 };
 use rust_i18n::t;
@@ -37,9 +47,11 @@ const DRAG_SLOP: f32 = 4.;
 /// 把手压在缝上，够点得中又不挡住窗口
 const HANDLE: f32 = 8.;
 const HEADER_H: f32 = 28.;
+/// 拖到画布条上"新画布"那一格
+const NEW_CANVAS: &str = "+";
 
 enum Resize {
-    Column { id: String, start_x: Pixels, start_width: f64 },
+    Column { id: String, start_x: Pixels, start_width: f64, max: f64 },
     Pane { key: String, start_y: Pixels, start_height: f64, max: f64 },
 }
 
@@ -49,19 +61,38 @@ struct Drag {
     start: Point<Pixels>,
     pos: Point<Pixels>,
     moved: bool,
+    /// 压在画布条的哪一格上（画布 id 或 [`NEW_CANVAS`]）；`None` = 落在画布上，看落点
+    target: Option<String>,
+}
+
+/// 画布此刻要画的东西
+struct Shown {
+    /// 当前视图的各块画布
+    groups: Vec<CanvasGroup>,
+    /// 正在显示第几块
+    current: usize,
+    /// 这一块上画出来的列（最大化时只剩活动那一扇）
+    columns: Vec<ColumnLayout>,
 }
 
 pub struct Canvas {
     ws: Entity<Workspace>,
     file_view: Option<Entity<FileView>>,
     diff_view: Option<Entity<DiffView>>,
-    /// 画布内容盒（窗口坐标）；几何都从它算
+    /// 画布内容区（窗口坐标，不含上方的画布条）；几何都从它算
     bounds: Bounds<Pixels>,
-    scroll: ScrollHandle,
+    /// 整个画布（含画布条）的左上角，窗口坐标。拖拽标签挂在最外层，按它换算——画布条在
+    /// 上方时它与 `bounds.origin` 差一条画布条的高
+    root_origin: Point<Pixels>,
     drag: Option<Drag>,
     resize: Option<Resize>,
-    /// 上次把活动窗口滚进视口时的（活动窗口, 列形状, 视口宽）：任何一项变了就再滚一次
-    revealed: Option<(Option<String>, String, i32)>,
+    /// 横向手势翻画布（web 的 WheelAxisLock + CanvasSwipe）
+    wheel: WheelAxisLock,
+    swipe: CanvasSwipe,
+    /// 滚轮事件不带时间戳，按这个起点量毫秒
+    epoch: Instant,
+    /// 画布条上各格的矩形（窗口坐标），prepaint 时记下，拖拽落点靠它命中。每次 render 清空重记
+    targets: Rc<RefCell<Vec<(String, Bounds<Pixels>)>>>,
 }
 
 impl Canvas {
@@ -76,10 +107,13 @@ impl Canvas {
             file_view: None,
             diff_view: None,
             bounds: Bounds::default(),
-            scroll: ScrollHandle::new(),
+            root_origin: Point::default(),
             drag: None,
             resize: None,
-            revealed: None,
+            wheel: WheelAxisLock::new(),
+            swipe: CanvasSwipe::new(),
+            epoch: Instant::now(),
+            targets: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -133,35 +167,29 @@ impl Canvas {
         }
     }
 
-    /// 画布此刻要画的列：当前项目的；最大化时只留活动那一扇（它不在场就当没最大化）
-    fn columns(&self, cx: &App) -> Vec<ColumnLayout> {
+    /// 当前视图的画布、正在显示哪块、这块上画哪些列。最大化时只留活动那一扇（它不在场就当
+    /// 没最大化）
+    fn shown(&self, cx: &App) -> Shown {
         let ws = self.ws.read(cx);
-        let visible = ws.visible_columns();
-        if !ws.state.term_zoomed {
-            return visible;
-        }
-        let Some(active) = ws.active_key() else {
-            return visible;
+        let groups = layout::canvas_groups(&ws.visible_columns());
+        let active = ws.active_key();
+        let current = layout::canvas_index(&groups, active.as_deref(), ws.state.canvas_id.as_deref());
+        let shown = groups.get(current).map(|g| g.columns.clone()).unwrap_or_default();
+        let columns = match active.as_deref().filter(|_| ws.state.term_zoomed).and_then(|k| {
+            layout::find_pane(&shown, k).map(|at| (at, k))
+        }) {
+            Some((at, _)) => {
+                let col = &shown[at.col];
+                vec![ColumnLayout { basis: None, panes: vec![col.panes[at.index].clone()], ..col.clone() }]
+            }
+            None => shown,
         };
-        let Some(at) = layout::find_pane(&visible, &active) else {
-            return visible;
-        };
-        let col = &visible[at.col];
-        vec![ColumnLayout {
-            id: col.id.clone(),
-            basis: None,
-            panes: vec![col.panes[at.index].clone()],
-            pinned: col.pinned,
-        }]
+        Shown { groups, current, columns }
     }
 
-    /// 指针（窗口坐标）→ 画布内容坐标（加上横向滚动）
+    /// 指针（窗口坐标）→ 画布内容坐标
     fn to_content(&self, p: Point<Pixels>) -> (f64, f64) {
-        let offset = self.scroll.offset();
-        (
-            f32::from(p.x - self.bounds.origin.x - offset.x) as f64,
-            f32::from(p.y - self.bounds.origin.y - offset.y) as f64,
-        )
+        (f32::from(p.x - self.bounds.origin.x) as f64, f32::from(p.y - self.bounds.origin.y) as f64)
     }
 
     fn rects(&self, columns: &[ColumnLayout]) -> Vec<ColumnRect> {
@@ -191,6 +219,21 @@ impl Canvas {
         layout::clamp_spot(columns, spot)
     }
 
+    /// 指针压在画布条的哪一格上
+    fn hit_target(&self, pos: Point<Pixels>) -> Option<String> {
+        let slop = px(4.);
+        self.targets
+            .borrow()
+            .iter()
+            .find(|(_, b)| {
+                pos.x >= b.origin.x - slop
+                    && pos.x <= b.origin.x + b.size.width + slop
+                    && pos.y >= b.origin.y - slop
+                    && pos.y <= b.origin.y + b.size.height + slop
+            })
+            .map(|(id, _)| id.clone())
+    }
+
     // ---------------- 鼠标：拖窗口 / 拖缝 ----------------
 
     fn on_mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -206,8 +249,8 @@ impl Canvas {
         }
         if let Some(resize) = &self.resize {
             match resize {
-                Resize::Column { id, start_x, start_width } => {
-                    let w = layout::clamp_column_width(start_width + f32::from(e.position.x - *start_x) as f64, f64::INFINITY);
+                Resize::Column { id, start_x, start_width, max } => {
+                    let w = layout::clamp_column_width(start_width + f32::from(e.position.x - *start_x) as f64, *max);
                     let id = id.clone();
                     self.ws.update(cx, |w_, cx| w_.set_column_width(&id, Some(w), cx));
                 }
@@ -219,6 +262,7 @@ impl Canvas {
             }
             return;
         }
+        let target = self.hit_target(e.position);
         if let Some(drag) = &mut self.drag {
             if !drag.moved {
                 let d = (e.position.x - drag.start.x).abs() + (e.position.y - drag.start.y).abs();
@@ -228,11 +272,12 @@ impl Canvas {
                 drag.moved = true;
             }
             drag.pos = e.position;
+            drag.target = target;
             cx.notify();
         }
     }
 
-    fn on_mouse_up(&mut self, _e: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, e: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.resize.take().is_some() {
             // 拖的途中不落盘，松手才写（web 同样的节制）
             self.ws.read(cx).persist();
@@ -240,12 +285,59 @@ impl Canvas {
         }
         if let Some(drag) = self.drag.take() {
             if drag.moved {
-                let columns = self.columns(cx);
-                let spot = self.current_spot(&columns, drag.pos);
-                self.ws.update(cx, |w, cx| w.move_pane(&drag.key, spot, cx));
+                match self.hit_target(e.position).or(drag.target) {
+                    Some(target) => {
+                        let canvas = (target != NEW_CANVAS).then_some(target);
+                        self.ws.update(cx, |w, cx| w.move_pane_to_canvas(&drag.key, canvas.as_deref(), cx));
+                    }
+                    None => {
+                        let columns = self.shown(cx).columns;
+                        let spot = self.current_spot(&columns, drag.pos);
+                        self.ws.update(cx, |w, cx| w.move_pane(&drag.key, spot, cx));
+                    }
+                }
             }
             cx.notify();
         }
+    }
+
+    /// 横向手势翻画布（web WorkCanvas 的 wheel 监听）。终端只接纵向为主的事件，横向为主的不
+    /// stop_propagation，冒泡到这里；文件 / 差异是 GPUI 的滚动容器，它们的滚动监听也不拦，这里
+    /// 拿不到"内部还能不能横滚"（web 是查 DOM 的 overflow），按指针在不在文件 / 差异窗口上保守
+    /// 处理：在上面就整段手势都不翻，免得横着看长行时把画布翻走。
+    fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // GPUI 的 delta 与 DOM 反号（正 = 内容往下 / 右移），换成 DOM 的口径：正 = 往右翻
+        let (dx, dy) = match e.delta {
+            ScrollDelta::Pixels(p) => (-f32::from(p.x) as f64, -f32::from(p.y) as f64),
+            ScrollDelta::Lines(l) => (-l.x as f64 * 16.0, -l.y as f64 * 16.0),
+        };
+        let now = self.epoch.elapsed().as_secs_f64() * 1000.0;
+        if self.wheel.classify(WheelSample { delta_x: dx, delta_y: dy, time_stamp: now }) != Some(WheelAxis::X) {
+            return;
+        }
+        if self.over_scrollable_view(e.position, cx) {
+            self.swipe.hold(now);
+            return;
+        }
+        let step = self.swipe.push(dx, now);
+        if step != 0 {
+            self.ws.update(cx, |w, cx| w.step_canvas(step, cx));
+        }
+    }
+
+    /// 指针是不是压在文件 / 差异窗口上（它们可能自己要横滚）
+    fn over_scrollable_view(&self, pos: Point<Pixels>, cx: &App) -> bool {
+        let (x, y) = self.to_content(pos);
+        let columns = self.shown(cx).columns;
+        layout::layout_frames(&columns, self.viewport(), CANVAS_GAP_PX).columns.iter().any(|c| {
+            x >= c.x
+                && x <= c.x + c.width
+                && c.panes.iter().any(|p| {
+                    y >= p.y
+                        && y <= p.y + p.height
+                        && matches!(parse_pane_key(&p.key), Some(PaneItem::File { .. } | PaneItem::Diff { .. }))
+                })
+        })
     }
 }
 
@@ -253,7 +345,7 @@ impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_views(window, cx);
         let ui = Ui::global(cx).clone();
-        let columns = self.columns(cx);
+        let Shown { groups, current, columns } = self.shown(cx);
         let frames = layout::layout_frames(&columns, self.viewport(), CANVAS_GAP_PX);
         let (active_key, show_canvas, pane_count) = {
             let ws = self.ws.read(cx);
@@ -262,37 +354,25 @@ impl Render for Canvas {
         };
         // 画布上不止一扇窗口时，才需要给活动的那扇标题栏着色
         let mark_active = pane_count > 1;
-        // 活动窗口换了、列的成员与顺序变了、视口宽变了：把它所在的列滚进视口（web 的
-        // revealScrollLeft，effect 依赖同样是 activeKey / shape / viewport.width）。只认活动窗口
-        // 不够：最大化时内容只剩一屏宽，滚动量被夹回 0，还原之后活动窗口就半截露在视口外。
-        // 画布量出自己的宽度之前不算：开窗第一帧视口是 0，算出来的滚动量是错的，记下"已滚过"
-        // 就再也不试了——重启后活动窗口停在视口外，看上去就是没有选中的那扇
-        let shape = columns
-            .iter()
-            .map(|c| format!("{}:{}", c.id, c.panes.iter().map(|p| p.key.as_str()).collect::<Vec<_>>().join(",")))
-            .collect::<Vec<_>>()
-            .join("|");
-        let reveal = Some((active_key.clone(), shape, f32::from(self.bounds.size.width) as i32));
-        if reveal != self.revealed && self.bounds.size.width > px(0.) {
-            self.revealed = reveal;
-            if let Some(key) = &active_key
-                && let Some(col) = frames.columns.iter().find(|c| c.panes.iter().any(|p| &p.key == key))
-            {
-                let scroll_left = -f32::from(self.scroll.offset().x) as f64;
-                if let Some(next) = falcon_core::term_canvas::reveal_scroll_left(falcon_core::term_canvas::Reveal {
-                    scroll_left,
-                    viewport: self.viewport().width,
-                    left: col.x,
-                    width: col.width,
-                }) {
-                    self.scroll.set_offset(gpui_kit::point(px(-(next as f32)), px(0.)));
-                }
+        let shown_keys: Vec<String> = layout::pane_keys(&columns);
+        // 画布条的格子每帧重记（prepaint 里填）
+        self.targets.borrow_mut().clear();
+
+        // 每扇（非固定的）窗口在第几块画布上、哪些窗口独占一块（"移到新画布"对它等于没动）
+        let canvas_ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
+        let mut canvas_of: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut solo: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (i, g) in groups.iter().enumerate() {
+            let keys: Vec<&String> = g.columns.iter().filter(|c| !c.pinned).flat_map(|c| c.panes.iter().map(|p| &p.key)).collect();
+            if keys.len() == 1 {
+                solo.insert(keys[0].clone());
+            }
+            for k in keys {
+                canvas_of.insert(k.clone(), i);
             }
         }
-        let shown_keys: Vec<String> = layout::pane_keys(&columns);
-        let content_w = frames.width.max(self.viewport().width) as f32;
 
-        let mut content = div().relative().h_full().w(px(content_w));
+        let mut content = div().relative().size_full();
 
         // 列的底：岛的圆角与面板底色在这一层，窗口浮在上面
         for col in &frames.columns {
@@ -318,6 +398,11 @@ impl Render for Canvas {
                     (false, false) => Round::None,
                 };
                 let pinned = columns[ci].pinned;
+                let place = CanvasPlace {
+                    ids: &canvas_ids,
+                    at: canvas_of.get(&pane.key).copied(),
+                    alone: solo.contains(&pane.key),
+                };
                 let el = self.pane(
                     &pane.key,
                     Bounds::new(
@@ -329,6 +414,7 @@ impl Render for Canvas {
                     mark_active,
                     pinned,
                     &shown_keys,
+                    place,
                     cx,
                 );
                 content = content.child(el);
@@ -336,13 +422,16 @@ impl Render for Canvas {
         }
 
         // 缝上的把手：列之间一条竖的，列内每两扇窗口之间一条横的
-        let height = self.viewport().height;
+        let viewport = self.viewport();
+        let height = viewport.height;
+        let ncols = frames.columns.len();
         for (ci, col) in frames.columns.iter().enumerate() {
-            if ci + 1 < frames.columns.len() {
+            if ci + 1 < ncols {
                 let id = col.id.clone();
                 let id2 = col.id.clone();
                 let width = col.width;
-                let ws = self.ws.clone();
+                // 画布不横向滚动，拖宽一列就是挤右边的：右边每列都要留够下限
+                let max = layout::column_max_width(viewport.width, col.x, (ncols - ci - 1) as f64);
                 content = content.child(
                     div()
                         .id(SharedString::from(format!("col-split-{}", col.id)))
@@ -361,13 +450,10 @@ impl Render for Canvas {
                                 });
                                 return;
                             }
-                            this.resize = Some(Resize::Column { id: id.clone(), start_x: e.position.x, start_width: width });
+                            this.resize = Some(Resize::Column { id: id.clone(), start_x: e.position.x, start_width: width, max });
                             cx.stop_propagation();
                         }))
-                        .tooltip(|window, cx| Tooltip::new(t!("pane.resizeColumn").to_string()).build(window, cx))
-                        .on_click(move |_, _, _| {
-                            let _ = &ws;
-                        }),
+                        .tooltip(|window, cx| Tooltip::new(t!("pane.resizeColumn").to_string()).build(window, cx)),
                 );
             }
             let np = col.panes.len();
@@ -400,35 +486,76 @@ impl Render for Canvas {
             }
         }
 
-        // 拖拽中的落点指示线与跟手的标签
-        if let Some(drag) = self.drag.as_ref().filter(|d| d.moved) {
+        let dragging = self.drag.as_ref().filter(|d| d.moved);
+        // 拖拽中的落点指示线（压在画布条上时不画：松手是挪到那块画布，不是落在这里）
+        if let Some(drag) = dragging.filter(|d| d.target.is_none()) {
             let spot = self.current_spot(&columns, drag.pos);
             if let Some(line) = drop_indicator(spot, &self.rects(&columns), &ui) {
                 content = content.child(line);
             }
         }
 
+        let pager = groups.len() > 1;
+        // "新画布"那一格：拖的窗口独占一块画布时挪去新画布等于没动，不出
+        let new_target = dragging.is_some_and(|d| !solo.contains(&d.key));
+        let hot = dragging.and_then(|d| d.target.clone());
+
+        let mut area = div()
+            .id("work-canvas-area")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .on_prepaint(cx.listener_prepaint())
+            .child(content);
+        if columns.is_empty() && show_canvas {
+            area = area.child(self.empty_state(cx));
+        }
+        let thumb = layout::canvas_thumb_size(viewport);
+        if !pager && new_target {
+            // 只有一块画布、没有画布条：在画布顶上（标题栏下面）浮一个"新画布"落点
+            area = area.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(zpx(36.))
+                    .flex()
+                    .justify_center()
+                    .child(self.new_canvas_target(hot.as_deref() == Some(NEW_CANVAS), true, thumb, &ui)),
+            );
+        }
+
         let mut root = div()
             .id("work-canvas")
             .size_full()
             .relative()
-            .overflow_x_scroll()
-            // 只接横向手势（web 的 WheelAxisLock）。不加的话 GPUI 会把只开了横向滚动的容器上的
-            // 纵向滚轮换算成横滚，而它的滚动监听从不 stop_propagation——在差异 / 文件 / 没有回滚
-            // 的终端里纵向滚一下，整个画布就跟着横漂
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.scroll)
-            .on_prepaint(cx.listener_prepaint())
+            .flex()
+            .flex_col()
+            .on_prepaint(cx.listener_root_origin())
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up));
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
         if !show_canvas {
             root = root.invisible();
         }
-        root = root.child(content);
+        if pager {
+            let bar = PagerState {
+                groups: &groups,
+                current,
+                viewport,
+                active: active_key.as_deref(),
+                dragging: dragging.is_some(),
+                new_target,
+                hot: hot.as_deref(),
+            };
+            root = root.child(self.pager(bar, &ui, cx));
+        }
+        root = root.child(area);
 
-        if let Some(drag) = self.drag.as_ref().filter(|d| d.moved) {
-            let local = drag.pos - self.bounds.origin;
+        if let Some(drag) = dragging {
+            let local = drag.pos - self.root_origin;
             root = root.child(
                 div()
                     .absolute()
@@ -446,11 +573,197 @@ impl Render for Canvas {
                     .child(drag.label.clone()),
             );
         }
-
-        if columns.is_empty() && show_canvas {
-            root = root.child(self.empty_state(cx));
-        }
         root
+    }
+}
+
+/// 一扇窗口在画布之间的位置（右键菜单的"移到画布 N / 移到新画布"要用）
+#[derive(Clone, Copy)]
+struct CanvasPlace<'a> {
+    /// 当前视图的各块画布
+    ids: &'a [String],
+    /// 它在第几块上；固定列里的是 `None`（每块都有它）
+    at: Option<usize>,
+    /// 独占一块画布（那块上没有别的窗口，固定列不算）
+    alone: bool,
+}
+
+/// 画布条要画的东西（web `CanvasPager` 的 props）
+struct PagerState<'a> {
+    groups: &'a [CanvasGroup],
+    /// 正在显示第几块
+    current: usize,
+    /// 画布内容区：缩略图的宽高比与几何都照它
+    viewport: Viewport,
+    /// 活动窗口（当前那块缩略图里加深它）
+    active: Option<&'a str>,
+    dragging: bool,
+    /// 拖拽中出不出"新画布"那一格：拖的窗口独占一块画布时挪去新画布等于没动，不出
+    new_target: bool,
+    /// 拖拽中指针压着的那一格
+    hot: Option<&'a str>,
+}
+
+/// 缩略图里窗口块的颜色：(普通窗口, 着重的那扇)，web `THUMB_TONE` 的同一套比例
+fn thumb_tone(ui: &Ui, hot: bool, on: bool) -> (Hsla, Hsla) {
+    if hot {
+        (ui.primary_foreground.opacity(0.45), ui.primary_foreground.opacity(0.85))
+    } else if on {
+        (ui.tint_strong.opacity(0.35), ui.tint_strong)
+    } else {
+        (ui.muted_foreground.opacity(0.30), ui.muted_foreground.opacity(0.65))
+    }
+}
+
+impl Canvas {
+    /// 画布条：主区顶上靠左、窗口底上的一排**布局缩略图**（不成岛，与右侧活动栏同一个做法），只在
+    /// 两块以上时出现。每张图按这块画布真实的列与窗口等比缩小（[`layout::canvas_thumb`]），一眼
+    /// 看出哪块是"左右两个终端"、哪块是"一列叠三扇"。当前那块着色，正在输入的那扇加深；别的
+    /// 画布加深它上次停的那扇——点过去焦点就落在那。点图切过去；拖窗口时图是落点（挪到那块
+    /// 画布），末尾多一格 ＋（新开一块）。
+    fn pager(&self, st: PagerState<'_>, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+        let keys_hint = t!(
+            "canvas.switchHint",
+            next = crate::ui::chord("nextCanvas"),
+            prev = crate::ui::chord("prevCanvas")
+        )
+        .to_string();
+        let size = layout::canvas_thumb_size(st.viewport);
+        let mut row = div().flex().items_center().gap(zpx(6.));
+        for (i, g) in st.groups.iter().enumerate() {
+            let on = i == st.current;
+            let hot = st.dragging && st.hot == Some(g.id.as_str());
+            // 提示里列出这块画布上有什么（固定列每块都有，不列）
+            let (names, remembered): (Vec<String>, Option<String>) = {
+                let ws = self.ws.read(cx);
+                (
+                    g.columns
+                        .iter()
+                        .filter(|c| !c.pinned)
+                        .flat_map(|c| c.panes.iter().map(|p| pane_label(ws, &p.key)))
+                        .collect(),
+                    ws.state.canvas_focus.get(&g.id).cloned(),
+                )
+            };
+            let emphasis = if on { st.active.map(str::to_string) } else { remembered };
+            let tip: SharedString =
+                format!("{}\n{}", t!("canvas.pageTitle", n = i + 1, names = names.join(" · ")), keys_hint).into();
+
+            let (weak, strong) = thumb_tone(ui, hot, on);
+            let mut thumb = div().relative().w(zpx(size.width as f32)).h(zpx(size.height as f32));
+            for r in layout::canvas_thumb(&g.columns, st.viewport, size, 1.0) {
+                let color = if emphasis.as_deref() == Some(r.key.as_str()) { strong } else { weak };
+                thumb = thumb.child(
+                    div()
+                        .absolute()
+                        .left(zpx(r.x as f32))
+                        .top(zpx(r.y as f32))
+                        .w(zpx(r.width as f32))
+                        .h(zpx(r.height as f32))
+                        .rounded(zpx(1.))
+                        .bg(color),
+                );
+            }
+
+            let id = g.id.clone();
+            let ws = self.ws.clone();
+            // 外框比图本身每边大 2px，留出着色底与圆角
+            let mut cell = div()
+                .id(SharedString::from(format!("canvas-thumb-{}", g.id)))
+                .flex_none()
+                .p(zpx(2.))
+                .rounded(zpx(4.))
+                .cursor_pointer()
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| ws.update(cx, |w, cx| w.show_canvas(&id, cx)))
+                .on_prepaint(self.record_target(&g.id))
+                .child(thumb);
+            // 拖拽命中时不能带 hover 的底色：指针正压在上面，hover 会盖过高亮
+            cell = if hot {
+                cell.bg(ui.primary)
+            } else if on {
+                cell.bg(ui.tint)
+            } else {
+                cell.hover(|s| s.bg(ui.background.opacity(0.6)))
+            };
+            row = row.child(cell);
+        }
+        if st.dragging && st.new_target {
+            row = row.child(self.new_canvas_target(st.hot == Some(NEW_CANVAS), false, size, ui));
+        }
+        // 靠左排：贴着画布的左边起头。别改回居中——拖拽一开始末尾才冒出 ＋，居中的话整排会
+        // 左移，指针底下的那一格就换了人
+        div().flex_none().mb(zpx(6.)).h(zpx(20.)).flex().items_center().child(row).into_any_element()
+    }
+
+    /// 拖窗口时"新开一块画布"的落点。画布条上是一张与缩略图同尺寸的虚线框；`lifted` = 只有一块
+    /// 画布、没有画布条时浮在画布顶上，带字、像拖拽标签那样托起来
+    fn new_canvas_target(&self, hot: bool, lifted: bool, size: Viewport, ui: &Ui) -> AnyElement {
+        if !lifted {
+            let mut el = div()
+                .id("canvas-thumb-new")
+                // 外框与缩略图格子一样大：图本身 + 每边 2px
+                .w(zpx(size.width as f32 + 4.))
+                .h(zpx(size.height as f32 + 4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(zpx(4.))
+                .border_1()
+                .border_dashed()
+                .on_prepaint(self.record_target(NEW_CANVAS))
+                .tooltip(|window, cx| Tooltip::new(t!("canvas.new").to_string()).build(window, cx))
+                .child(icon(IconName::Plus).size(zpx(12.)));
+            el = if hot {
+                el.border_color(ui.primary).bg(ui.primary).text_color(ui.primary_foreground)
+            } else {
+                el.border_color(ui.muted_foreground.opacity(0.5)).text_color(ui.muted_foreground)
+            };
+            return el.into_any_element();
+        }
+        let mut el = div()
+            .id("canvas-thumb-new")
+            .h(zpx(28.))
+            .px(zpx(10.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(zpx(4.))
+            .rounded(radius::SM)
+            .text_xs()
+            .bg(ui.popover)
+            .shadow_md()
+            .on_prepaint(self.record_target(NEW_CANVAS))
+            .child(icon(IconName::Plus).size(zpx(12.)))
+            .child(t!("canvas.new").to_string());
+        el = if hot { el.bg(ui.primary).text_color(ui.primary_foreground) } else { el.text_color(ui.muted_foreground) };
+        el.into_any_element()
+    }
+
+    /// prepaint 时记下画布条这一格的矩形，拖拽落点按它命中
+    fn record_target(&self, id: &str) -> impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static {
+        let targets = self.targets.clone();
+        let id = id.to_string();
+        move |bounds, _, _| targets.borrow_mut().push((id.clone(), bounds))
+    }
+}
+
+/// 窗口叫什么（菜单标题、拖拽标签、画布条的提示）。不能空着——它要说清"你在操作谁"，
+/// 空闲会话兜底回项目名。标题栏不用它：那一格空着是正常的
+fn pane_label(ws: &Workspace, key: &str) -> String {
+    match parse_pane_key(key) {
+        Some(PaneItem::Terminal { id, .. }) => ws
+            .session(&id)
+            .map(|s| crate::labels::session_title(s).unwrap_or_else(|| s.project_name.clone()))
+            .unwrap_or_else(|| t!("tab.creating").to_string()),
+        Some(PaneItem::File { path, .. }) => basename(&path),
+        Some(PaneItem::Diff { .. }) => ws
+            .state
+            .diff_tab
+            .as_ref()
+            .map(|d| basename(&d.file.path))
+            .unwrap_or_else(|| t!("tab.diff").to_string()),
+        None => String::new(),
     }
 }
 
@@ -466,9 +779,21 @@ fn isolate(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
 /// `on_prepaint` 的回调：记下画布的矩形，尺寸变了就再画一帧（首帧 / 窗口缩放）
 trait PrepaintListener {
     fn listener_prepaint(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
+    /// 记下整个画布（含画布条）的左上角
+    fn listener_root_origin(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
 }
 
 impl PrepaintListener for Context<'_, Canvas> {
+    fn listener_root_origin(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)> {
+        let this = self.entity().downgrade();
+        Box::new(move |bounds, _, cx| {
+            if let Some(this) = this.upgrade() {
+                // 只用来换算拖拽标签的位置，不触发重画
+                this.update(cx, |c, _| c.root_origin = bounds.origin);
+            }
+        })
+    }
+
     fn listener_prepaint(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)> {
         let this = self.entity().downgrade();
         Box::new(move |bounds, _, cx| {
@@ -478,6 +803,9 @@ impl PrepaintListener for Context<'_, Canvas> {
                         let resized = c.bounds.size != bounds.size;
                         c.bounds = bounds;
                         if resized {
+                            // 新列排不排得下按画布宽算，报给工作区（它会顺手把还没分的列分好）
+                            let width = f32::from(bounds.size.width) as f64;
+                            c.ws.update(cx, |w, cx| w.set_canvas_width(width, cx));
                             cx.notify();
                         }
                     }
@@ -534,7 +862,7 @@ fn active_ring(round: Round, ui: &Ui) -> Div {
 
 fn drop_indicator(spot: DropSpot, rects: &[ColumnRect], ui: &Ui) -> Option<AnyElement> {
     match spot {
-        DropSpot::Column { at } => {
+        DropSpot::Column { at, .. } => {
             let before = rects.get(at);
             let after = if at > 0 { rects.get(at - 1) } else { None };
             let x = before.map(|b| b.left - 4.).or(after.map(|a| a.right + 4.))?;
@@ -620,6 +948,7 @@ impl Canvas {
         mark_active: bool,
         pinned: bool,
         shown_keys: &[String],
+        place: CanvasPlace,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ui = Ui::global(cx).clone();
@@ -636,20 +965,7 @@ impl Canvas {
         };
         let project = project_id.as_deref().and_then(|p| ws.project(p)).cloned();
 
-        // 菜单标题不能空着（它要说清"你在操作谁"），空闲会话兜底回项目名
-        let label = match &item {
-            PaneItem::Terminal { id, .. } => ws
-                .session(id)
-                .map(|s| crate::labels::session_title(s).unwrap_or_else(|| s.project_name.clone()))
-                .unwrap_or_else(|| t!("tab.creating").to_string()),
-            PaneItem::File { path, .. } => basename(path),
-            PaneItem::Diff { .. } => ws
-                .state
-                .diff_tab
-                .as_ref()
-                .map(|d| basename(&d.file.path))
-                .unwrap_or_else(|| t!("tab.diff").to_string()),
-        };
+        let label = pane_label(ws, key);
 
         // ---- 标题栏内容 ----
         let mut info = div().flex().flex_1().min_w_0().items_center().gap(zpx(6.));
@@ -694,7 +1010,7 @@ impl Canvas {
         }
 
         // ---- 标题栏菜单（右键） ----
-        let menu = self.pane_menu(&item, key, project_id.as_deref(), pinned, shown_keys, cx);
+        let menu = self.pane_menu(&item, key, project_id.as_deref(), pinned, shown_keys, place, cx);
         let zoomable = shown_keys.len() > 1 || ws.state.term_zoomed;
         let zoomed = ws.state.term_zoomed;
 
@@ -738,6 +1054,7 @@ impl Canvas {
                     start: e.position,
                     pos: e.position,
                     moved: false,
+                    target: None,
                 });
                 this.ws.update(cx, |w, cx| w.focus_pane(&key_drag, cx));
                 this.focus_pane(&key_drag, window, cx);
@@ -922,6 +1239,7 @@ impl Canvas {
         project_id: Option<&str>,
         pinned: bool,
         shown_keys: &[String],
+        place: CanvasPlace,
         _cx: &App,
     ) -> Vec<MenuItemSpec> {
         let mut items = Vec::new();
@@ -952,6 +1270,30 @@ impl Canvas {
             items.push(MenuItemSpec::new(t!("session.rename").to_string(), move |window, cx| {
                 crate::dialogs::rename::open(&ws, &id, window, cx)
             }));
+        }
+        // 换画布：别的每一块各一项，再加"新画布"——已经独占一块的窗口挪去新画布等于没动，不给
+        let mut moves: Vec<MenuItemSpec> = Vec::new();
+        if place.ids.len() > 1 {
+            for (i, id) in place.ids.iter().enumerate() {
+                if Some(i) == place.at {
+                    continue;
+                }
+                let ws = self.ws.clone();
+                let (k, id) = (key.to_string(), id.clone());
+                moves.push(MenuItemSpec::new(t!("pane.moveToCanvas", n = i + 1).to_string(), move |_, cx| {
+                    ws.update(cx, |w, cx| w.move_pane_to_canvas(&k, Some(&id), cx))
+                }));
+            }
+        }
+        if place.at.is_none() || !place.alone {
+            let ws = self.ws.clone();
+            let k = key.to_string();
+            moves.push(MenuItemSpec::new(t!("pane.moveToNewCanvas").to_string(), move |_, cx| {
+                ws.update(cx, |w, cx| w.move_pane_to_canvas(&k, None, cx))
+            }));
+        }
+        for (i, m) in moves.into_iter().enumerate() {
+            items.push(if i == 0 { m.sep() } else { m });
         }
         {
             let ws = self.ws.clone();
