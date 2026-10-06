@@ -24,6 +24,12 @@ snapshot = ["automation", "gpui-kit/test-support"]
 woff2 = { package = "woff2-patched", version = "0.4" }
 bytes = "1"
 
+# Windows：exe 自带图标与版本信息（build.rs 的 windows_resources）。按构建机 cfg 挂——
+# 没有从 macOS 交叉编 Windows 的需求，mac 上就不多编这两个
+[target.'cfg(windows)'.build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+winresource = "0.1"
+
 [dependencies]
 falcon-proto.workspace = true
 falcon-client.workspace = true

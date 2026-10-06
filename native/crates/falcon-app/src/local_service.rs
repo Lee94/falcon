@@ -15,11 +15,11 @@
 //!
 //! Windows 上没有本机服务（SEA 不支持 Windows 目标，见 README），这一段只有 macOS 实现。
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// 捆绑的服务程序：`Falcon.app/Contents/Resources/falcon`
-fn bundled_server() -> Option<PathBuf> {
+#[cfg(target_os = "macos")]
+fn bundled_server() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let contents = exe.parent()?.parent()?;
     let bin = contents.join("Resources").join("falcon");

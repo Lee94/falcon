@@ -114,6 +114,17 @@ pnpm build:pkg --skip-bin      # 只用已有的 release/falcon-v*-darwin-*
 
 产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。这台已经用 `--port 6789` / `~/.mojito` 跑着的不要拿它覆盖，会把服务改回默认端口。
 
+Windows 只能打原生客户端的安装包（服务端不支持 Windows，装好后在客户端里连别处的 falcon 服务）：
+
+```bash
+pnpm build:win                 # cargo build --release + Inno Setup
+pnpm build:win --skip-cargo    # 只用已有的 native/target/release/falcon-app.exe
+```
+
+产物 `release/Falcon-v<版本>-win32-x64-setup.exe`，默认按当前用户装、不要管理员。必须在 Windows 上打：
+需要 VS 生成工具（rc.exe 给 exe 编图标与版本信息）和 Inno Setup 6（`winget install JRSoftware.InnoSetup --scope user`，
+或用 `FALCON_ISCC` 指到 ISCC.exe）。没有代码签名，别人机器上 SmartScreen 会拦，「更多信息 → 仍要运行」即可。
+
 原理：esbuild 把 server 打成单个 bundle，与 node-pty 原生扩展、web 静态资源一起
 封进 Node SEA（Single Executable Application）blob，注入 nodejs.org 官方 Node
 二进制。首次运行把原生扩展与静态资源解压到 `<dataDir>/runtime/<内容哈希>/`，

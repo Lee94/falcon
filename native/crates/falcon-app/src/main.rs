@@ -3,6 +3,10 @@
 //! 一台 falcon 服务端一个窗口；本机服务由 App 托管（local_service.rs）。界面文案一律走
 //! `t!`（locales/zh-CN.json，由 native/scripts/export-i18n.mjs 从 web 的 i18n.ts 导出）。
 
+// Windows release：GUI 子系统，双击 / 开始菜单启动时不再带出一个黑色控制台窗口。代价是日志
+// （eprintln）没处去了——要看日志用 debug 构建（`cargo run -p falcon-app`），它仍是控制台程序
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod actions;
 mod app_icon;
 #[cfg(feature = "automation")]

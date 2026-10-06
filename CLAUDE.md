@@ -12,6 +12,7 @@ pnpm dev:web        # vite，5173，/api 与 /ws 代理到 4923
 pnpm build:bin      # Node SEA 单文件，产物在 release/（详见 README）
 pnpm build:native   # 原生客户端（native/，Rust + GPUI）release 构建
 pnpm build:pkg      # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的 SEA 服务
+pnpm build:win      # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
 ```
 
 ### 门禁：typecheck + 单元测试
