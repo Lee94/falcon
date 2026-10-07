@@ -1,0 +1,18 @@
+[package]
+name = "falcon-scroll"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+# 与 packages/server/src/zellij/version.ts 的 ZELLIJ_VERSION 同步升级：插件 API 跟着
+# zellij 版本走，跨版本加载不保证兼容
+[dependencies]
+zellij-tile = "=0.45.1"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -8,7 +8,7 @@
  * 配置了自定义 base URL 的用户会在 UI 上看到明确警告。
  */
 
-export const ZELLIJ_VERSION = "0.44.3";
+export const ZELLIJ_VERSION = "0.45.1";
 
 /** 官方发行地址；每台主机可在 zellij_hosts 表中覆盖 */
 export const DEFAULT_BASE_URL = "https://github.com/zellij-org/zellij/releases/download";

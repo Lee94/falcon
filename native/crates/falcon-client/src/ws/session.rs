@@ -58,6 +58,9 @@ pub enum SessionEvent {
     Title(Option<String>),
     /// sudo / SSH askpass 在等密码：弹对话框，答复走 `FalconClient::answer_askpass`
     Askpass { id: String, prompt: String },
+    /// 滚动位置（ADR 0019），回应 [`SessionSocket::scroll`]，也可能是别的 Viewer 问出来的
+    /// （服务端广播）。单位是 zellij 的显示行，含义见 `ServerMessage::Scroll`。
+    Scroll { position: u32, length: u32, rows: u32 },
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
     /// 断线期间 `send_input` 的内容会被丢掉（与 web 一致：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
@@ -121,6 +124,8 @@ enum Cmd {
     Resize(u16, u16),
     /// 已经序列化好的 appearance 消息
     Appearance(String),
+    /// 已经序列化好的 scroll 消息
+    Scroll(String),
     ReconnectNow,
     Close,
 }
@@ -211,6 +216,15 @@ impl SessionSocket {
         }
     }
 
+    /// 滚动条（ADR 0019）：`None` 问一次滚动位置，`Some(n)` 让 zellij 滚到「视口下方
+    /// 还剩 n 行」处。回话是 [`SessionEvent::Scroll`]；会话不支持时没有回话。没连着时
+    /// 直接丢掉——位置是一问一答的瞬时状态，攒到重连后再问没有意义。
+    pub fn scroll(&self, seek: Option<u32>) {
+        if let Ok(json) = serde_json::to_string(&ClientMessage::Scroll { seek }) {
+            let _ = self.cmd.send(Cmd::Scroll(json));
+        }
+    }
+
     /// 立即重连并重置退避：系统唤醒、网络恢复、用户点「立即重连」时调。
     ///
     /// 正在等退避 / 停在未认证时马上发起连接；正在连着时发一个 ping 探活（睡眠前的
@@ -298,8 +312,8 @@ impl Driver {
                 self.unauthorized_streak = 0;
                 Offline::ConnectNow
             }
-            // 断线期间的输入丢掉，理由见 SessionEvent::Disconnected
-            Some(Cmd::Input(_)) => Offline::Continue,
+            // 断线期间的输入丢掉，理由见 SessionEvent::Disconnected；滚动查询同理
+            Some(Cmd::Input(_)) | Some(Cmd::Scroll(_)) => Offline::Continue,
             Some(Cmd::Resize(c, r)) => {
                 self.size = Some((c, r));
                 Offline::Continue
@@ -503,6 +517,7 @@ impl Driver {
                             self.appearance = Some(a.clone());
                             ws.send(Message::text(a)).await.is_ok()
                         }
+                        Cmd::Scroll(json) => ws.send(Message::text(json)).await.is_ok(),
                         Cmd::ReconnectNow => {
                             if !probing {
                                 probing = true;
@@ -552,6 +567,9 @@ impl Driver {
             ServerMessage::Error { message } => SessionEvent::Error(message),
             ServerMessage::Title { title } => SessionEvent::Title(title),
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
+            ServerMessage::Scroll { position, length, rows } => {
+                SessionEvent::Scroll { position, length, rows }
+            }
             ServerMessage::Unknown => return,
         };
         self.emit(ev);

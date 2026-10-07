@@ -75,6 +75,10 @@ async function main() {
     "\n提醒：Zellij 的 CLIENT_SERVER_CONTRACT_VERSION 若在此版本改变，" +
       "宿主机上已有的会话将无法接回。发版前请确认 CHANGELOG。"
   );
+  console.log(
+    `\n滚动位置插件（ADR 0019）的 zellij-tile 要同步改成 =${version}` +
+      "（packages/server/zellij-plugin/Cargo.toml），再跑 pnpm build:zellij-plugin。"
+  );
 }
 
 main().catch((err) => {

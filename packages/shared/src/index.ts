@@ -926,7 +926,12 @@ export type ClientMessage =
       appearance: TermAppearance;
       background?: string;
       foreground?: string;
-    };
+    }
+  /**
+   * 滚动条（ADR 0019）：不带 seek 是问一次滚动位置，带 seek 是滚到「视口下方还剩
+   * seek 行」处。回话是广播给所有 Viewer 的 `{type:"scroll"}`；会话不支持时没有回话。
+   */
+  | { type: "scroll"; seek?: number };
 
 /**
  * 终端数据走二进制帧，不走 JSON：1 字节类型头 + UTF-8 载荷。
@@ -946,6 +951,12 @@ export type ServerMessage =
   | { type: "error"; message: string }
   /** 前台命令变了（含变空），UI 据此换会话的自动标题 */
   | { type: "title"; title: string | null }
+  /**
+   * 滚动位置（ADR 0019），单位都是显示行。position = 视口下方的行数（0 = 在底部）；
+   * length = 视口上方 + 下方的行数，0 = 没有可滚的历史；rows = 视口高度。
+   * 滑块：总长 length + rows，上方 length - position。
+   */
+  | { type: "scroll"; position: number; length: number; rows: number }
   /** sudo / SSH askpass：helper 在等密码，弹网页对话框 */
   | { type: "askpass"; id: string; prompt: string };
 

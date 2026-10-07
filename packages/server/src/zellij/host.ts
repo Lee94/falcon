@@ -122,6 +122,8 @@ export function hostLayout(
     cacheDir: j(zellij, "cache"),
     layoutDir: j(zellij, "layouts"),
     layoutFile: j(zellij, "layouts", "falcon.kdl"),
+    scrollConfigFile: j(zellij, "config", "scroll.kdl"),
+    scrollPluginFile: j(zellij, "plugins", "falcon-scroll.wasm"),
   };
 }
 

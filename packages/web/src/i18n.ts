@@ -1012,6 +1012,7 @@ const zh = {
       gpuReasonLost: "GPU 设备丢失",
       pasteImageFailed: "图片上传失败",
       pasteImageTooLarge: "图片超过 {{max}} MB 上限",
+      scrollbar: "终端滚动条",
       font_berkeley: "Berkeley Mono TX-02",
       font_ioskeley: "IoskeleyMonoTerm Nerd Font Mono",
       font_maple: "Maple Mono NL NF CN",

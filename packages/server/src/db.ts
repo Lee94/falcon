@@ -74,6 +74,12 @@ export interface SessionRow {
   rows: number | null;
   /** 开场跑的 CLI（claude / codex / grok）；null = 普通 shell */
   agent: string | null;
+  /**
+   * 1 = 建会话时滚动位置插件已就位，会话用 scroll.kdl 那套配置（ADR 0019）；
+   * 0 / null（升级前建的）= 老配置。接回时必须照建会话时的那套来：拿新配置去接回
+   * 跑在老 zellij 上的会话会画出整圈边框（见 zcmd.scrollConfigBody）。
+   */
+  scroll_plugin: number | null;
 }
 
 export interface SshHostRow {
@@ -243,6 +249,7 @@ export class Db {
     this.addColumn("sessions", "cols", "INTEGER");
     this.addColumn("sessions", "rows", "INTEGER");
     this.addColumn("sessions", "agent", "TEXT");
+    this.addColumn("sessions", "scroll_plugin", "INTEGER");
     // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
     this.stmt("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'")
       .run();
@@ -913,8 +920,8 @@ export class Db {
 
   insertSession(row: SessionRow) {
     this.stmt(
-        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows, agent)
-         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows, @agent)`
+        `INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows, agent, scroll_plugin)
+         VALUES (@id, @project_id, @name, @state, @durable, @dead_reason, @non_durable_reason, @created_at, @last_active_at, @cols, @rows, @agent, @scroll_plugin)`
       )
       .run(bindRow(row));
   }

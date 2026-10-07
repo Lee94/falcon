@@ -1,0 +1,14 @@
+# 插件只有一个目标平台，免得每次都要写 --target
+[build]
+target = "wasm32-wasip1"
+
+# 同 native/.cargo/config.toml：这台开发机上 Clash 的 fake-ip 把 index.crates.io
+# 解析坏了，只在本目录换成 rsproxy 的稀疏索引。网络正常的机器删掉这一段即可。
+[source.crates-io]
+replace-with = "rsproxy"
+
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

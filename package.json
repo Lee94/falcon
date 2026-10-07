@@ -13,6 +13,7 @@
     "dev:web": "pnpm --filter @falcon/web dev",
     "start": "node packages/server/dist/index.js",
     "update-zellij": "node scripts/update-zellij.mjs",
+    "build:zellij-plugin": "node scripts/build-zellij-plugin.mjs",
     "vendor-berkeley-mono": "node scripts/vendor-berkeley-mono.mjs",
     "vendor-ioskeley-mono": "node scripts/vendor-ioskeley-mono.mjs",
     "vendor-maple-mono": "node scripts/vendor-maple-mono.mjs",

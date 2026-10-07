@@ -57,6 +57,8 @@ pub mod reason;
 pub mod term_fit;
 /// 对应 web 的 lib/termCanvas.ts：画布滚轮轴向锁定、吸附、滚进视口
 pub mod term_canvas;
+/// 对应 web 的 lib/termScroll.ts：终端滚动条的滑块几何（ADR 0019）
+pub mod term_scroll;
 /// 对应 web 的 lib/pasteImage.ts：粘贴 / 拖入图片的判定
 pub mod paste_image;
 /// 对应 web 的 lib/term.ts：终端偏好模型（falcon.term）

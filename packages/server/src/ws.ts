@@ -142,6 +142,13 @@ export function registerWs(
       } else if (msg.type === "appearance") {
         const hint = sanitizeColorHint(msg);
         if (hint.appearance) manager.setAppearance(id, hint.appearance, hint);
+      } else if (msg.type === "scroll") {
+        // 认不出的 seek 当成只问位置：宁可多回一次位置，也不要乱滚
+        const seek =
+          typeof msg.seek === "number" && Number.isFinite(msg.seek) && msg.seek >= 0
+            ? msg.seek
+            : undefined;
+        manager.scroll(id, seek);
       }
     });
 

@@ -23,12 +23,14 @@ import {
   takeStickyCtrl,
 } from "../lib/termInput.js";
 import { writeBrowserClipboard } from "../lib/osc52.js";
+import { hasWheelReport } from "../lib/termScroll.js";
 import { imageFromClipboard, imagesFromDrop, quoteForPrompt } from "../lib/pasteImage.js";
 import { useActions } from "../lib/useActions.js";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Banner } from "./common/Banner.js";
 import { openContextMenu } from "./common/Menu.js";
+import { TerminalScrollbar, type TerminalScrollbarHandle } from "./TerminalScrollbar.js";
 
 const GPU_REASON_KEY: Record<WebGpuFailReason, string> = {
   unsupported: "term.gpuReasonUnsupported",
@@ -74,6 +76,9 @@ export function TerminalView({
   const termRef = useRef<TermAdapter | null>(null);
   const applySizeRef = useRef<(rebuild?: boolean) => boolean>(() => false);
   const sendAppearanceRef = useRef<() => void>(() => undefined);
+  const scrollbarRef = useRef<TerminalScrollbarHandle>(null);
+  /** 问滚动位置 / 让 zellij 滚过去，由主 effect 填充（要用它那条 socket） */
+  const scrollRequestRef = useRef<(seek?: number) => void>(() => undefined);
   const refreshSessions = useApp((s) => s.refreshSessions);
   const session = useApp((s) => s.sessions.find((x) => x.id === sessionId));
   const project = useApp((s) => s.projects.find((p) => p.id === session?.projectId));
@@ -139,6 +144,8 @@ export function TerminalView({
     let retryTimer: number | null = null;
     /** 最近一次有效 SGR 鼠标报文的坐标，触摸惯性期的 NaN 报文靠它修 */
     let lastMouseCoord: string | null = null;
+    /** 滚轮连发时合并成一次位置查询 */
+    let wheelProbeTimer: number | null = null;
 
     // 引擎、初始外观都在这里定死；之后的外观切换交给下面那个 effect 走
     // applyAppearance（xterm 就地改 options，rio 内部重建），不断 WS
@@ -156,6 +163,7 @@ export function TerminalView({
           const repaired = repairMouseReport(data, lastMouseCoord);
           if (repaired === null) return;
           lastMouseCoord = mouseReportCoord(repaired) ?? lastMouseCoord;
+          if (hasWheelReport(repaired)) onWheelReport();
           // 移动端键位条的粘滞 Ctrl 在这里落地：点亮后下一个字符转控制字节。
           // 桌面端 Ctrl 永远不点亮，等于恒等变换
           ws.send(JSON.stringify({ type: "input", data: takeStickyCtrl(repaired) }));
@@ -198,6 +206,26 @@ export function TerminalView({
       sentCols = adapter.cols;
       sentRows = adapter.rows;
       ws.send(JSON.stringify({ type: "resize", cols: adapter.cols, rows: adapter.rows }));
+    };
+
+    /** 滚动条（ADR 0019）：不带参数问位置，带参数让 zellij 滚到「视口下方还剩 seek 行」处 */
+    const requestScroll = (seek?: number) => {
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify(seek == null ? { type: "scroll" } : { type: "scroll", seek }));
+    };
+    scrollRequestRef.current = requestScroll;
+
+    /**
+     * 用户在滚：滚动条亮起来，并在这一串滚轮之后问一次位置。zellij 滚完才知道滚到了
+     * 哪，所以稍等一拍再问；连着滚时每拍最多问一次（服务端也会合并在飞的请求）。
+     */
+    const onWheelReport = () => {
+      scrollbarRef.current?.poke();
+      if (wheelProbeTimer != null) return;
+      wheelProbeTimer = window.setTimeout(() => {
+        wheelProbeTimer = null;
+        requestScroll();
+      }, 60);
     };
 
     const sendAppearance = () => {
@@ -287,6 +315,8 @@ export function TerminalView({
               attachError: msg.state === "active" ? null : v.attachError,
             }));
             useApp.getState().applySessionState(sessionId, msg.state, msg.deadReason);
+            // 接上了就先问一次：不支持滚动条的会话不会回话，滚动条也就不出现
+            if (msg.state === "active") requestScroll();
             break;
           case "reconnecting":
             setView((v) => ({ ...v, reconnectAttempt: msg.attempt }));
@@ -299,6 +329,13 @@ export function TerminalView({
             break;
           case "askpass":
             useApp.getState().pushAskpass({ id: msg.id, prompt: msg.prompt });
+            break;
+          case "scroll":
+            scrollbarRef.current?.update({
+              position: msg.position,
+              length: msg.length,
+              rows: msg.rows,
+            });
             break;
         }
       };
@@ -405,7 +442,9 @@ export function TerminalView({
       window.removeEventListener("online", retryNow);
       document.removeEventListener("visibilitychange", onVisible);
       if (retryTimer != null) clearTimeout(retryTimer);
+      if (wheelProbeTimer != null) clearTimeout(wheelProbeTimer);
       retryNowRef.current = () => undefined;
+      scrollRequestRef.current = () => undefined;
       document.fonts.removeEventListener("loadingdone", afterFonts);
       host.removeEventListener("mouseup", copySelection);
       host.removeEventListener("paste", onPasteCapture, true);
@@ -617,13 +656,17 @@ export function TerminalView({
       {/* 输入被禁用这件事要看得见 */}
       <div
         className={cn(
-          "terminal-host min-h-0 flex-1 py-1.5 pl-2 transition-opacity",
+          "terminal-host relative min-h-0 flex-1 py-1.5 pl-2 transition-opacity",
           view.session !== "active" && "opacity-55"
         )}
         style={{ backgroundColor: palette.background ?? undefined }}
         onContextMenu={onTermContextMenu}
       >
         <div ref={containerRef} className="h-full" />
+        <TerminalScrollbar
+          ref={scrollbarRef}
+          onRequest={(seek) => scrollRequestRef.current(seek)}
+        />
       </div>
     </>
   );

@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use falcon_client::{FalconClient, SessionEvent, SessionSink, SessionSocket};
+use falcon_core::term_scroll::{self, MIN_THUMB_PX, ScrollState};
 use falcon_term::alacritty_terminal::index::Side;
 use falcon_term::alacritty_terminal::selection::SelectionType;
 use falcon_term::alacritty_terminal::term::TermMode;
@@ -22,10 +23,10 @@ use futures::StreamExt;
 use gpui_kit::prelude::FluentBuilder as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{
-    App, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
+    App, Bounds, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Styled, Task, Window, div,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
 };
 
 use super::element::{HoveredLink, TerminalElement, TerminalGeometry};
@@ -101,6 +102,57 @@ fn button_bit(b: MouseButton) -> u8 {
 /// xterm.js 的光标闪烁间隔
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
+/// 滚过之后滚动条亮多久（web 的 LINGER_MS）
+const SCROLL_LINGER: Duration = Duration::from_millis(1200);
+/// 滚动条亮着时隔多久再问一次位置：期间输出还在涨，历史长度会变
+const SCROLL_REFRESH: Duration = Duration::from_millis(1000);
+/// 一串滚轮之后稍等一拍再问位置（zellij 滚完才知道滚到了哪），连发时每拍至多一次
+const SCROLL_PROBE_DELAY: Duration = Duration::from_millis(60);
+/// 拖滑块时发 seek 的最小间隔。服务端会把在飞期间的请求合并成最后一个，这里只是少发点
+const SEEK_INTERVAL: Duration = Duration::from_millis(16);
+
+/// 拖滑块中：滑块先跟手（本地像素），不等服务端回话
+#[derive(Clone, Copy, Debug)]
+struct ScrollDrag {
+    start_y: f32,
+    start_top: f32,
+    top: f32,
+}
+
+/// 滚动条（ADR 0019，web 的 TerminalScrollbar.tsx）。滚动发生在宿主机的 zellij 里，
+/// 位置是问服务端才知道的：滚轮、悬停、拖动时问，平时不问。
+#[derive(Default)]
+struct Scrollbar {
+    /// 服务端推来的位置；None = 从没收到过回话（会话不支持），整个不画
+    state: Option<ScrollState>,
+    /// 轨道在窗口里的位置（画的时候量）
+    track: Option<Bounds<Pixels>>,
+    /// 刚滚过、还亮着
+    lit: bool,
+    lit_epoch: usize,
+    hover: bool,
+    drag: Option<ScrollDrag>,
+    /// 松手后到下一次回话之前，滑块停在松手处
+    settle_top: Option<f32>,
+    probe_pending: bool,
+    last_seek: Option<Instant>,
+    refresh_epoch: usize,
+}
+
+impl Scrollbar {
+    fn visible(&self) -> bool {
+        self.lit || self.hover || self.drag.is_some()
+    }
+
+    /// 当前状态下的轨道高度与滑块几何
+    fn geometry(&self) -> Option<(ScrollState, f32, term_scroll::ThumbGeometry)> {
+        let state = self.state?;
+        let track = f32::from(self.track?.size.height);
+        let geo = term_scroll::thumb_geometry(state, track, f32::from(zpx(MIN_THUMB_PX)))?;
+        Some((state, track, geo))
+    }
+}
+
 pub struct TerminalView {
     pub session_id: String,
     client: FalconClient,
@@ -122,6 +174,7 @@ pub struct TerminalView {
     /// （zellij 会直接起一段选区），松开就把那段选区复制走
     reported_held: u8,
     hovered_link: Option<HoveredLink>,
+    scrollbar: Scrollbar,
     pub conn: ConnState,
     /// WS 断开后第几次自动重连（0 = 没断）
     ws_retry: u32,
@@ -218,6 +271,7 @@ impl TerminalView {
             dragging: None,
             reported_held: 0,
             hovered_link: None,
+            scrollbar: Scrollbar::default(),
             conn: ConnState::Connecting,
             ws_retry: 0,
             attach_error: None,
@@ -287,6 +341,10 @@ impl TerminalView {
                     SessionState::Dead => ConnState::Dead(dead_reason.map(|r| r.as_str().to_string())),
                     _ => ConnState::Active,
                 };
+                // 接上了就先问一次滚动位置：不支持滚动条的会话不会回话，滚动条也就不出现
+                if conn == ConnState::Active {
+                    self.socket.scroll(None);
+                }
                 self.set_conn(conn, cx);
                 cx.emit(TerminalViewEvent::State { state, dead_reason });
             }
@@ -298,6 +356,11 @@ impl TerminalView {
                 cx.notify();
             }
             SessionEvent::Askpass { id, prompt } => cx.emit(TerminalViewEvent::Askpass { id, prompt }),
+            SessionEvent::Scroll { position, length, rows } => {
+                self.scrollbar.state = Some(ScrollState { position, length, rows });
+                self.scrollbar.settle_top = None;
+                cx.notify();
+            }
             SessionEvent::Output(_) | SessionEvent::Replay(_) => {}
         }
     }
@@ -609,6 +672,11 @@ impl TerminalView {
     }
 
     fn mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // 拖滑块：指针离开那一窄条后照样跟（挂在整扇终端上）
+        if self.scrollbar.drag.is_some() {
+            self.scrollbar_drag(e, cx);
+            return;
+        }
         if e.pressed_button.is_none() {
             // 空手移动：之前按着的键肯定都松了（兜住没收到的松开）
             self.reported_held = 0;
@@ -644,6 +712,10 @@ impl TerminalView {
     /// 松开也要报，松在外面也一样（位置夹到网格边上）——不然程序以为键一直按着，选区收不了尾；
     /// 没报过按下的（别处按下、拖过来松开的）一律不报
     fn mouse_up(&mut self, e: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if e.button == MouseButton::Left && self.scrollbar.drag.is_some() {
+            self.scrollbar_release(cx);
+            return;
+        }
         let button = match e.button {
             MouseButton::Left => TermMouseButton::Left,
             MouseButton::Middle => TermMouseButton::Middle,
@@ -697,6 +769,7 @@ impl TerminalView {
                 let (row, col, _) = geo.cell_at(e.position);
                 if let Some(bytes) = wheel_report(dir > 0, row, col, &e.modifiers, mouse.encoding) {
                     self.send(bytes);
+                    self.poke_scrollbar(cx);
                 }
             }
             cx.stop_propagation();
@@ -753,6 +826,192 @@ impl TerminalView {
             }
         }
         None
+    }
+}
+
+// ---------- 滚动条（ADR 0019） ----------
+
+impl TerminalView {
+    /// 用户刚滚过：亮一会儿，并在这一串滚轮之后问一次位置
+    fn poke_scrollbar(&mut self, cx: &mut Context<Self>) {
+        let was_visible = self.scrollbar.visible();
+        self.scrollbar.lit = true;
+        self.scrollbar.lit_epoch = self.scrollbar.lit_epoch.wrapping_add(1);
+        let epoch = self.scrollbar.lit_epoch;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLL_LINGER).await;
+            this.update(cx, |this, cx| {
+                if this.scrollbar.lit_epoch == epoch {
+                    this.scrollbar.lit = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        if !self.scrollbar.probe_pending {
+            self.scrollbar.probe_pending = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SCROLL_PROBE_DELAY).await;
+                this.update(cx, |this, _| {
+                    this.scrollbar.probe_pending = false;
+                    this.socket.scroll(None);
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if !was_visible {
+            self.start_scroll_refresh(cx);
+        }
+        cx.notify();
+    }
+
+    /// 亮着期间隔一阵再问一次；不亮了就停。换一轮时旧的那个自己退出（epoch 对不上）
+    fn start_scroll_refresh(&mut self, cx: &mut Context<Self>) {
+        self.scrollbar.refresh_epoch = self.scrollbar.refresh_epoch.wrapping_add(1);
+        let epoch = self.scrollbar.refresh_epoch;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(SCROLL_REFRESH).await;
+                let keep = this
+                    .update(cx, |this, _| {
+                        if this.scrollbar.refresh_epoch != epoch || !this.scrollbar.visible() {
+                            return false;
+                        }
+                        this.socket.scroll(None);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn scrollbar_hover(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        let was_visible = self.scrollbar.visible();
+        self.scrollbar.hover = *hovered;
+        if *hovered {
+            self.socket.scroll(None);
+            if !was_visible {
+                self.start_scroll_refresh(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 按在轨道上：抓住滑块；按在滑块外则让滑块中心跳到按下处，然后照样可以接着拖
+    fn scrollbar_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // 别让终端拿去起选区 / 报给程序
+        cx.stop_propagation();
+        let (Some(track), Some((_, track_h, geo))) = (self.scrollbar.track, self.scrollbar.geometry()) else {
+            return;
+        };
+        let y = f32::from(e.position.y - track.origin.y);
+        let grabbed = y >= geo.top && y <= geo.top + geo.height;
+        let start_top = if grabbed { geo.top } else { (y - geo.height / 2.0).clamp(0.0, track_h - geo.height) };
+        let was_visible = self.scrollbar.visible();
+        self.scrollbar.drag = Some(ScrollDrag { start_y: f32::from(e.position.y), start_top, top: start_top });
+        if !grabbed {
+            self.seek_to(start_top, true);
+        }
+        if !was_visible {
+            self.start_scroll_refresh(cx);
+        }
+        cx.notify();
+    }
+
+    fn scrollbar_drag(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let (Some(drag), Some((_, track_h, geo))) = (self.scrollbar.drag, self.scrollbar.geometry()) else {
+            return;
+        };
+        if e.pressed_button != Some(MouseButton::Left) {
+            // 松开没收到（松在窗口外）：当作已经松了
+            self.scrollbar_release(cx);
+            return;
+        }
+        let next = (drag.start_top + f32::from(e.position.y) - drag.start_y).clamp(0.0, track_h - geo.height);
+        if next != drag.top {
+            self.scrollbar.drag = Some(ScrollDrag { top: next, ..drag });
+            self.seek_to(next, false);
+            cx.notify();
+        }
+    }
+
+    fn scrollbar_release(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.scrollbar.drag.take() {
+            // 节流可能吞掉了最后一下，松手时补发落点
+            self.seek_to(drag.top, true);
+            self.scrollbar.settle_top = Some(drag.top);
+            cx.notify();
+        }
+    }
+
+    /// 滑块顶边拖到 top 处：换算成行数，让 zellij 滚过去
+    fn seek_to(&mut self, top: f32, force: bool) {
+        let Some((state, track_h, geo)) = self.scrollbar.geometry() else {
+            return;
+        };
+        let now = Instant::now();
+        if !force && self.scrollbar.last_seek.is_some_and(|t| now - t < SEEK_INTERVAL) {
+            return;
+        }
+        self.scrollbar.last_seek = Some(now);
+        self.socket.scroll(Some(term_scroll::position_for_thumb_top(state, track_h, geo.height, top)));
+    }
+
+    /// 叠在终端右缘的那一窄条。没有可滚的历史（含 vim 这类备用屏程序）时不画，
+    /// 不挡终端最右一列的点击
+    fn scrollbar_overlay(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let state = self.scrollbar.state?;
+        if state.length == 0 {
+            return None;
+        }
+        let ui = crate::theme::Ui::global(cx).clone();
+        let view = cx.entity();
+        let measure = canvas(
+            move |bounds, _, cx| {
+                view.update(cx, |this, cx| {
+                    if this.scrollbar.track != Some(bounds) {
+                        this.scrollbar.track = Some(bounds);
+                        cx.notify();
+                    }
+                })
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let mut strip = div()
+            .id("term-scrollbar")
+            .absolute()
+            .top(zpx(6.))
+            .bottom(zpx(6.))
+            .right_0()
+            .w(zpx(10.))
+            .on_hover(cx.listener(Self::scrollbar_hover))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::scrollbar_down))
+            .child(measure);
+        if let Some((_, _, geo)) = self.scrollbar.geometry() {
+            let sb = &self.scrollbar;
+            let top = sb.drag.map(|d| d.top).or(sb.settle_top).unwrap_or(geo.top);
+            let strong = sb.hover || sb.drag.is_some();
+            strip = strip.child(
+                div()
+                    .absolute()
+                    .right(zpx(2.))
+                    .w(zpx(6.))
+                    .top(px(top))
+                    .h(px(geo.height))
+                    .rounded_full()
+                    .bg(ui.foreground.opacity(if strong { 0.45 } else { 0.25 }))
+                    .when(!sb.visible(), |d| d.invisible()),
+            );
+        }
+        Some(strip.into_any_element())
     }
 }
 
@@ -946,6 +1205,7 @@ impl Render for TerminalView {
             self.hovered_link.clone(),
         );
         let banner = self.banner(cx);
+        let scrollbar = self.scrollbar_overlay(cx);
         let items = self.context_items(cx);
         let dim = self.conn != ConnState::Active && self.conn != ConnState::Connecting;
         use gpui_kit::component::menu::ContextMenuExt;
@@ -954,6 +1214,7 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus)
             .size_full()
+            .relative()
             .bg(look.palette.background)
             .on_key_down(cx.listener(Self::key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -975,6 +1236,7 @@ impl Render for TerminalView {
             // 输入被禁用这件事要看得见（web 同样压到 0.55）
             .when(dim, |d| d.opacity(0.55))
             .child(element)
+            .children(scrollbar)
             .context_menu(move |menu, _, _| crate::menus::to_popup(menu, items.clone()));
         div().size_full().flex().flex_col().children(banner).child(div().flex_1().min_h_0().child(body))
     }

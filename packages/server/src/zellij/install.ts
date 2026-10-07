@@ -21,7 +21,13 @@ import {
   type HostKind,
   type HostLayout,
 } from "./host.js";
-import { CONFIG_BODY, LAYOUT_BODY, versionArgs, versionMatches } from "./command.js";
+import {
+  CONFIG_BODY,
+  LAYOUT_BODY,
+  scrollConfigBody,
+  versionArgs,
+  versionMatches,
+} from "./command.js";
 import { downloadUrl, type ZellijTarget } from "./version.js";
 
 export interface ExecResult {
@@ -408,6 +414,10 @@ function cleanup(kind: HostKind, tmpDir: string): string {
  * 单独一步执行，好把"家目录不可写"跟"下载失败"区分开来报给用户。
  * 每次都跑（哪怕二进制已经装好）：成本是一次往返，换来的是用户误删
  * layout 文件后能自愈——少了它 Zellij 会直接以 IoError 退出。
+ *
+ * POSIX 上顺带写滚动位置插件的会话配置（scroll.kdl）：带插件的会话接回时 `--config`
+ * 指着它，文件不在 zellij 直接起不来，所以同样每次都写。插件本体（.wasm）不在这里，
+ * 它要经 stdin 推、还要预写授权，见 sessions/scrollPlugin.ts。Windows 远端不走插件。
  */
 function ensureDirsScript(kind: HostKind, layout: HostLayout): string {
   const dirs = [
@@ -429,7 +439,8 @@ function ensureDirsScript(kind: HostKind, layout: HostLayout): string {
   return (
     `mkdir -p ${dirs.map(quotePosix).join(" ")} && ` +
     `printf %s ${quotePosix(LAYOUT_BODY)} > ${quotePosix(layout.layoutFile)} && ` +
-    `printf %s ${quotePosix(CONFIG_BODY)} > ${quotePosix(layout.configFile)}`
+    `printf %s ${quotePosix(CONFIG_BODY)} > ${quotePosix(layout.configFile)} && ` +
+    `printf %s ${quotePosix(scrollConfigBody(layout.scrollPluginFile))} > ${quotePosix(layout.scrollConfigFile)}`
   );
 }
 

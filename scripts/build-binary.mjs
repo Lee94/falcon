@@ -190,6 +190,13 @@ for (const target of targets) {
     process.exit(1);
   }
   assets.push({ key: "bin/meegle", src: meegleBin, mode: 0o755 });
+  // 滚动位置插件（ADR 0019）：提交在仓库里的产物，各平台同一份 wasm
+  const scrollPlugin = path.join(ROOT, "packages/server/assets/falcon-scroll.wasm");
+  if (!fs.existsSync(scrollPlugin)) {
+    console.error(`缺少 ${scrollPlugin}，先跑 pnpm build:zellij-plugin`);
+    process.exit(1);
+  }
+  assets.push({ key: "zellij/falcon-scroll.wasm", src: scrollPlugin, mode: 0o644 });
 
   const hasher = crypto.createHash("sha256");
   hasher.update(`${VERSION}\0${target}\0`);
@@ -268,6 +275,11 @@ if (seaMode) {
   const inheritedMeegle = process.env.FALCON_MEEGLE_BIN;
   if (!inheritedMeegle || !fs.existsSync(inheritedMeegle)) {
     process.env.FALCON_MEEGLE_BIN = path.join(runtimeDir, "bin", "meegle");
+  }
+  // 滚动位置插件同理（packages/server/src/sessions/scrollPlugin.ts 的 resolveScrollPlugin）
+  const inheritedPlugin = process.env.FALCON_ZELLIJ_PLUGIN;
+  if (!inheritedPlugin || !fs.existsSync(inheritedPlugin)) {
+    process.env.FALCON_ZELLIJ_PLUGIN = path.join(runtimeDir, "zellij", "falcon-scroll.wasm");
   }
   anchor = path.join(runtimeDir, "sea-loader.cjs");
 } else {

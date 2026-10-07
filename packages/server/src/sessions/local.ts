@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import * as pty from "@lydell/node-pty";
 import { applyTermPtyEnv, type NonDurableReason, type TermAppearance } from "@falcon/shared";
 import { prependPath } from "../askpass/install.js";
@@ -19,6 +20,7 @@ import { localTarget } from "../zellij/version.js";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
 import { resolveLocalBaseEnv } from "./loginEnv.js";
+import { ensureLocalScrollPlugin } from "./scrollPlugin.js";
 
 export type { NonDurableReason };
 
@@ -34,6 +36,8 @@ export interface LocalZellij {
   /** 失败详情（命令 stderr 或异常消息），供用户判断该修什么再重试 */
   detail?: string;
   layout?: HostLayout;
+  /** 滚动位置插件已就位且已预授权（ADR 0019）；新会话据此决定用哪套配置 */
+  scroll?: boolean;
 }
 
 let prepared: LocalZellij | null = null;
@@ -74,7 +78,9 @@ export async function prepareLocalZellij(
       onStage,
       signal,
     });
-    prepared = { durable: true, layout };
+    // 插件部署失败不挡开会话，新会话退回老配置（没有滚动条）而已
+    const scroll = localKind() === "posix" && ensureLocalScrollPlugin(layout, target);
+    prepared = { durable: true, layout, scroll };
   } catch (err) {
     const failed: LocalZellij = {
       durable: false,
@@ -169,6 +175,57 @@ export async function localForeground(
   return zcmd.parseClientRunningCommand(res.stdout);
 }
 
+/** 会话里 terminal pane 的数字 id（滚动位置插件按它找 pane）；问不到为 null */
+export async function localTerminalPane(
+  layout: HostLayout,
+  sessionId: string
+): Promise<number | null> {
+  const res = await zellij(layout, zcmd.listPanesArgs(layout, sessionId));
+  if (res.code !== 0) return null;
+  const id = zcmd.parseTerminalPaneId(res.stdout);
+  return id ? zcmd.parseTerminalPaneNumber(id) : null;
+}
+
+/** 插件没回话（会话里没有插件、或卡住了）时最多等多久 */
+const SCROLL_PIPE_TIMEOUT_MS = 3000;
+
+/**
+ * 问滚动位置插件（ADR 0019）。会话里没有插件时回 null。
+ *
+ * 不走 localExec：它 spawn 出来的 stdin 是个不关的管道，而 `zellij pipe` 在 stdin 不是
+ * 终端时要读到 EOF 才退出（见 zcmd.scrollPipeArgs），会一直挂着。
+ */
+export function localScrollPipe(
+  layout: HostLayout,
+  sessionId: string,
+  pane: number,
+  seek?: number
+): Promise<zcmd.ScrollPosition | null> {
+  const commandLine = buildCommandLine(
+    localKind(),
+    [layout.bin, ...zcmd.scrollPipeArgs(layout, sessionId, pane, seek)],
+    zcmd.zellijEnv(layout)
+  );
+  return new Promise((resolve) => {
+    const out: Buffer[] = [];
+    const proc = spawn(commandLine, {
+      shell: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => proc.kill(), SCROLL_PIPE_TIMEOUT_MS);
+    proc.stdout?.on("data", (d: Buffer) => out.push(d));
+    proc.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      resolve(zcmd.parseScrollReply(Buffer.concat(out).toString("utf8")));
+    });
+  });
+}
+
 export async function localKill(layout: HostLayout, sessionId: string): Promise<void> {
   await zellij(layout, zcmd.deleteSessionArgs(layout, sessionId)).catch(() => {});
 }
@@ -199,6 +256,8 @@ export interface LocalAttachOptions {
   appearance?: TermAppearance;
   /** sudo askpass 包装所在目录，会插到 PATH 最前；缺省不注入 */
   askpassBin?: string;
+  /** 会话用带滚动位置插件的配置（ADR 0019），见 zcmd.SessionProfile */
+  scroll?: boolean;
 }
 
 export async function attachLocal(
@@ -226,6 +285,7 @@ export async function attachLocal(
         cwd: opts.cwd,
         // 始终显式给 shell：Zellij 在 $SHELL 缺失时 pane 起不来（见 POSIX_PROBE 注释）
         shell: opts.shell ?? defaultLocalShell(),
+        scroll: opts.scroll,
       }),
       {
         name: "xterm-256color",

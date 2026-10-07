@@ -121,6 +121,14 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         foreground: Option<String>,
     },
+    /// 滚动条（ADR 0019）：`seek` 缺省是问一次滚动位置，给了是让 zellij 滚到
+    /// 「视口下方还剩 seek 行」处。回话是广播的 [`ServerMessage::Scroll`]；会话不支持
+    /// （非持久、升级前用老配置建的）时没有回话。
+    #[serde(rename = "scroll")]
+    Scroll {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seek: Option<u32>,
+    },
 }
 
 /// 服务端 → 客户端（会话通道）的控制消息。output / replay 见 `TERM_FRAME_*` 二进制帧。
@@ -154,6 +162,10 @@ pub enum ServerMessage {
     /// `POST /api/askpass/:id/answer`
     #[serde(rename = "askpass")]
     Askpass { id: String, prompt: String },
+    /// 滚动位置（ADR 0019），单位都是 zellij 的显示行。position = 视口下方的行数
+    /// （0 = 在底部）；length = 视口上方 + 下方，0 = 没有可滚的历史；rows = 视口高度。
+    #[serde(rename = "scroll")]
+    Scroll { position: u32, length: u32, rows: u32 },
     /// 本版本不认识的控制消息（服务端比客户端新）。只在反序列化时出现，忽略即可。
     #[serde(rename = "unknown", other)]
     Unknown,
@@ -256,6 +268,10 @@ mod tests {
             r##"{"type":"appearance","appearance":"dark","background":"#0a0a0a","foreground":"#fafafa"}"##,
         );
         roundtrip::<ClientMessage>(r#"{"type":"appearance","appearance":"light"}"#);
+        let q = roundtrip::<ClientMessage>(r#"{"type":"scroll"}"#);
+        assert_eq!(q, ClientMessage::Scroll { seek: None });
+        let k = roundtrip::<ClientMessage>(r#"{"type":"scroll","seek":250}"#);
+        assert_eq!(k, ClientMessage::Scroll { seek: Some(250) });
     }
 
     #[test]
@@ -286,6 +302,8 @@ mod tests {
         roundtrip::<ServerMessage>(
             r#"{"type":"askpass","id":"ap-1","prompt":"fay@box's password:"}"#,
         );
+        let sc = roundtrip::<ServerMessage>(r#"{"type":"scroll","position":97,"length":473,"rows":30}"#);
+        assert_eq!(sc, ServerMessage::Scroll { position: 97, length: 473, rows: 30 });
     }
 
     #[test]

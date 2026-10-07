@@ -54,6 +54,10 @@ export interface ZellijPaths {
   cacheDir: string;
   /** ~/.falcon/zellij/layouts/falcon.kdl —— 见 LAYOUT_BODY */
   layoutFile: string;
+  /** ~/.falcon/zellij/config/scroll.kdl —— 带滚动位置插件的会话用的配置，见 scrollConfigBody */
+  scrollConfigFile: string;
+  /** ~/.falcon/zellij/plugins/falcon-scroll.wasm —— 滚动位置插件（ADR 0019） */
+  scrollPluginFile: string;
 }
 
 /**
@@ -86,19 +90,58 @@ export const LAYOUT_BODY = `layout
  * keybinds clear-defaults 是纵深防御：万一模式没设上，至少所有键位都是空的，
  * 用户按 Ctrl+p / Ctrl+n 不会莫名掉进 pane 模式。
  *
+ * scroll_mode_sync false 是 0.45 起必须的（#5299 引入、#5532 才给开关）：默认
+ * 开着时滚轮上翻会把会话隐式切进 Scroll 模式，而我们清空了全部键位，Scroll 模式
+ * 下没绑定的键**直接被吞掉**——实测（0.45.1）滚一下再敲 `echo x⏎`，shell 什么都
+ * 没收到，视口也不回底，看上去就是终端卡死。关掉后与 0.44 一致：一敲键就回到底部、
+ * 按键照常透传。0.44.3 读到这一行不报错（实测），新旧二进制共用同一份文件无碍。
+ *
  * 目录是 falcon 独占的，不会读到用户自己的 Zellij 配置。
  */
-export const CONFIG_BODY = `default_mode "locked"
-pane_frames false
+export const CONFIG_BODY = configBody("pane_frames false");
+
+/**
+ * 带滚动位置插件的会话用的配置（ADR 0019），经 `--config` 指给 zellij，与 config.kdl
+ * 只差两处：
+ *
+ * - 边框样式是 titles 而不是 `pane_frames false`：插件要的 ActivePaneScroll 事件只在
+ *   titles 样式（且 tab 里只有一个 pane）时才发，`pane_frames false` 会把样式压成 None。
+ *   单 pane 时 titles 样式不画标题行、滚动时也不画 `SCROLL:` 指示（实测 0.45.1），
+ *   外观与关掉边框一致。
+ * - `load_plugins` 让插件随会话以后台插件启动（没有 pane）。不能靠 `zellij pipe
+ *   --plugin` 现拉，理由见插件源码顶部。
+ *
+ * **为什么是另一个文件而不是改 config.kdl**：升级前建的会话跑在 0.44.3 的 server 上，
+ * 接回时客户端会把配置带过去，0.44.3 不认识 titles 样式、又没了 `pane_frames false`，
+ * 实测会给老会话画上整圈边框。所以老会话照旧读 config.kdl，只有建会话时插件已就位的
+ * 新会话才指向这份（sessions.scroll_plugin 记着），zellij 的配置热重载也各管各的文件。
+ */
+export function scrollConfigBody(pluginFile: string): string {
+  return configBody(
+    `pane_frame_style "titles"`,
+    `load_plugins {\n    ${kdlString(`file:${pluginFile}`)}\n}\n`
+  );
+}
+
+function configBody(frames: string, extra = ""): string {
+  return `default_mode "locked"
+${frames}
 simplified_ui true
 session_serialization false
 scroll_buffer_size ${SCROLL_BUFFER}
+scroll_mode_sync false
 mouse_mode true
 show_startup_tips false
 show_release_notes false
 keybinds clear-defaults=true {
 }
-`;
+${extra}`;
+}
+
+/** KDL 字符串字面量：反斜杠与双引号转义（只给 POSIX 路径用，Windows 不走插件） */
+function kdlString(s: string): string {
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
 
 /**
  * 运行时环境变量。
@@ -119,6 +162,20 @@ function globalArgs(paths: ZellijPaths): string[] {
   return ["--data-dir", paths.dataDir];
 }
 
+/** 会话用哪套配置。scroll = 带滚动位置插件（见 scrollConfigBody），否则是 config.kdl */
+export interface SessionProfile {
+  cwd?: string;
+  shell?: string;
+  scroll?: boolean;
+}
+
+/** attach 用的全局参数：带插件的会话另指配置文件 */
+function attachGlobalArgs(paths: ZellijPaths, opts: SessionProfile): string[] {
+  return opts.scroll
+    ? [...globalArgs(paths), "--config", paths.scrollConfigFile]
+    : globalArgs(paths);
+}
+
 /**
  * 会话级 options。作为 `attach` 的子命令附加，CLI 值优先于配置文件。
  *
@@ -127,10 +184,7 @@ function globalArgs(paths: ZellijPaths): string[] {
  * - session-serialization false：关掉复活序列化。开着的话被杀的 session 会以
  *   `(EXITED - attach to resurrect)` 留在 `zellij ls` 里，污染存活判断。
  */
-function sessionOptions(
-  paths: ZellijPaths,
-  opts: { cwd?: string; shell?: string }
-): string[] {
+function sessionOptions(paths: ZellijPaths, opts: SessionProfile): string[] {
   const args = [
     "options",
     "--default-layout",
@@ -138,14 +192,18 @@ function sessionOptions(
     paths.layoutFile,
     "--default-mode",
     "locked",
-    "--pane-frames",
-    "false",
+    // 边框样式两套配置各不相同，理由见 scrollConfigBody。带插件的会话**不能**再传
+    // --pane-frames false：它会把 titles 样式压成 None，插件就收不到滚动事件
+    ...(opts.scroll ? ["--pane-frame-style", "titles"] : ["--pane-frames", "false"]),
     "--simplified-ui",
     "true",
     "--session-serialization",
     "false",
     "--scroll-buffer-size",
     String(SCROLL_BUFFER),
+    // 理由见 CONFIG_BODY；两处都写，与其它项同一口径（CLI 管新建，config 管接回）
+    "--scroll-mode-sync",
+    "false",
     // 鼠标上报**只能**由 config.kdl 的 mouse_mode true 开启，这里绝不能传
     // --mouse-mode。实测（0.44.3）：CLI 传 --mouse-mode true 时客户端反而
     // 永远不发 ?1000h（与传 false 同效，疑似上游 bug）；不传时每次 attach
@@ -177,10 +235,10 @@ function sessionOptions(
 export function attachArgs(
   paths: ZellijPaths,
   sessionId: string,
-  opts: { cwd?: string; shell?: string }
+  opts: SessionProfile
 ): string[] {
   return [
-    ...globalArgs(paths),
+    ...attachGlobalArgs(paths, opts),
     "attach",
     zellijSessionName(sessionId),
     "--create",
@@ -198,10 +256,10 @@ export function attachArgs(
 export function createBackgroundArgs(
   paths: ZellijPaths,
   sessionId: string,
-  opts: { cwd?: string; shell?: string }
+  opts: SessionProfile
 ): string[] {
   return [
-    ...globalArgs(paths),
+    ...attachGlobalArgs(paths, opts),
     "attach",
     zellijSessionName(sessionId),
     "--create-background",
@@ -330,6 +388,101 @@ export function dumpScreenArgs(
     "--pane-id",
     paneId,
   ];
+}
+
+// ---------------- 滚动位置插件（ADR 0019） ----------------
+
+/** 插件监听的管道名；插件源码在 packages/server/zellij-plugin */
+const SCROLL_PIPE = "falcon-scroll";
+
+/** 滚动位置：两个数与 zellij 边框上的 `SCROLL: position/length` 同口径 */
+export interface ScrollPosition {
+  /** 视口下方的显示行数，0 = 在底部 */
+  position: number;
+  /** 视口上方的显示行数 + position；0 = 没有可滚的历史（含备用屏里的全屏程序） */
+  length: number;
+}
+
+/**
+ * 问插件要滚动位置（`get`），或让它滚到「视口下方还剩 position 行」处（`seek`，
+ * 回的是滚完后的位置）。pane 是 terminal pane 的数字 id，见 parseTerminalPaneNumber。
+ *
+ * **按名字广播，不带 `--plugin`**：带上的话，会话里没有这个插件时（升级前建的老会话、
+ * 插件没部署上）zellij 会现场拉起一个浮动 pane 实例，而且那条管道会挂着不退出（实测）。
+ * 广播时没人认领就直接放行，回话为空。
+ *
+ * 执行方必须给 stdin 一个 EOF：stdin 不是终端时 CLI 收到放行后还要把 stdin 读到头
+ * 才退出（zellij-client 的 pipe_client），SSH exec 与默认的 spawn 都不会自己关。
+ */
+export function scrollPipeArgs(
+  paths: ZellijPaths,
+  sessionId: string,
+  pane: number,
+  seek?: number
+): string[] {
+  const payload = seek == null ? `get ${pane}` : `seek ${pane} ${Math.max(0, Math.round(seek))}`;
+  return [
+    ...globalArgs(paths),
+    "--session",
+    zellijSessionName(sessionId),
+    "pipe",
+    "--name",
+    SCROLL_PIPE,
+    "--",
+    payload,
+  ];
+}
+
+/** 插件的回话一行 `<position> <length>`；空（会话里没有插件）或认不出就是 null */
+export function parseScrollReply(stdout: string): ScrollPosition | null {
+  const m = stdout.trim().match(/^(\d+) (\d+)$/);
+  if (!m) return null;
+  const position = Number(m[1]);
+  const length = Number(m[2]);
+  return position <= length ? { position, length } : null;
+}
+
+/** `terminal_3` → 3。scrollPipeArgs 要的是数字 id */
+export function parseTerminalPaneNumber(paneId: string): number | null {
+  const m = paneId.match(/^terminal_(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+/** 插件要的权限，与插件 load() 里 request_permission 的清单一致 */
+const SCROLL_PERMISSIONS = [
+  "ReadApplicationState",
+  "ChangeApplicationState",
+  "ReadCliPipes",
+  "ReadPaneContents",
+];
+
+/**
+ * zellij 的插件授权缓存 permissions.kdl 在宿主机上的位置。
+ *
+ * 位置由 directories crate 的 ProjectDirs 定：Linux 跟 XDG_CACHE_HOME 走（zellijEnv 把它
+ * 指进了 falcon 自己的 cache 目录），macOS 是写死的 ~/Library/Caches/… 改不了——会和
+ * 用户自己的 zellij 共用这个文件，所以只追加、不覆盖。
+ */
+export function scrollPermissionsFile(
+  paths: ZellijPaths,
+  os: "linux" | "darwin",
+  home: string
+): string {
+  return os === "darwin"
+    ? `${home.replace(/\/+$/, "")}/Library/Caches/org.Zellij-Contributors.Zellij/permissions.kdl`
+    : `${paths.cacheDir}/zellij/permissions.kdl`;
+}
+
+/**
+ * 预授权条目。后台插件请求权限时 zellij 先查这个缓存，命中就直接批；没命中会弹授权
+ * 界面——后台插件没有 pane，弹了也没人能点，插件就永远拿不到权限。
+ *
+ * 键是插件路径**本身**，不带 `file:` 前缀（RunPluginLocation::File 的 Display 就是
+ * 路径；带前缀的话匹配不上，实测踩过）。
+ */
+export function scrollPermissionsEntry(pluginFile: string): string {
+  const body = SCROLL_PERMISSIONS.map((p) => `    ${p}\n`).join("");
+  return `${kdlString(pluginFile)} {\n${body}}\n`;
 }
 
 /**

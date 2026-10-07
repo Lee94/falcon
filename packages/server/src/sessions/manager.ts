@@ -30,6 +30,7 @@ import {
   writeLocalManifest,
 } from "../virtualdir.js";
 import { RingBuffer } from "../ringbuffer.js";
+import type { ScrollPosition } from "../zellij/command.js";
 import type { HostLayout } from "../zellij/host.js";
 import type { StageFn } from "../zellij/install.js";
 import type { Backend } from "./backend.js";
@@ -41,6 +42,8 @@ import {
   attachLocal,
   defaultLocalShell,
   localForeground,
+  localScrollPipe,
+  localTerminalPane,
   localHasSession,
   localKill,
   peekLocalZellij,
@@ -101,6 +104,8 @@ export interface DurableState {
   /** 失败详情，供 UI 显示"到底卡在哪"，用户据此决定是修环境还是直接重试 */
   detail?: string;
   layout?: HostLayout;
+  /** 滚动位置插件已就位（ADR 0019）；新会话据此用带插件的配置 */
+  scroll?: boolean;
 }
 
 interface LiveEntry {
@@ -133,6 +138,14 @@ interface LiveEntry {
   titleTimer: NodeJS.Timeout | null;
   /** 探测在飞：Viewer 进出与输出可能同时点火，只许有一条在跑 */
   titleProbing: boolean;
+  /** 会话用带滚动位置插件的配置建的（sessions.scroll_plugin），见 scroll() */
+  scroll: boolean;
+  /** 插件按它找 pane；首次查询时问一次 list-panes 缓存下来 */
+  scrollPane: number | null;
+  /** 查询在飞：同一时刻只跑一条 */
+  scrollBusy: boolean;
+  /** 排着的请求：只剩最后一个。seek 缺省 = 只问位置 */
+  scrollWant: { seek?: number } | null;
 }
 
 interface ReconnectState {
@@ -244,6 +257,7 @@ export class SessionManager {
         reason: local.reason,
         detail: local.detail,
         layout: local.layout,
+        scroll: local.scroll,
       };
     }
 
@@ -264,6 +278,7 @@ export class SessionManager {
       reason: remote.reason,
       detail: remote.detail,
       layout: remote.layout,
+      scroll: remote.scroll,
     };
   }
 
@@ -530,6 +545,8 @@ export class SessionManager {
       cols: null,
       rows: null,
       agent: agent ?? null,
+      // 建会话这一刻定终身：接回时必须照这套配置来，见 SessionRow.scroll_plugin
+      scroll_plugin: prep.durable && prep.scroll ? 1 : 0,
     };
 
     const entry = this.liveEntry({
@@ -537,6 +554,7 @@ export class SessionManager {
       projectId: project.id,
       durable: prep.durable,
       layout: prep.layout ?? null,
+      scroll: row.scroll_plugin === 1,
       appearance: hint?.appearance,
       background: hint?.background,
       foreground: hint?.foreground,
@@ -640,6 +658,7 @@ export class SessionManager {
       ),
       appearance: entry.appearance,
       askpassBin,
+      scroll: row.scroll_plugin === 1,
     };
 
     const result =
@@ -797,6 +816,55 @@ export class SessionManager {
     } finally {
       entry.titleProbing = false;
     }
+  }
+
+  // ---------- 滚动条（ADR 0019） ----------
+
+  /**
+   * Viewer 要滚动位置（seek 缺省），或要滚到「视口下方还剩 seek 行」处。结果广播给
+   * 所有 Viewer——大家看的是同一个 zellij 视口。
+   *
+   * 不支持的会话（非持久、升级前用老配置建的）直接不理：前端收不到回话就不画滚动条。
+   * 单飞：一条在飞时后来的请求只记最后一个，seek 压过只问位置（seek 本身也回位置），
+   * 拖滑块时几十个 seek 只会落地头尾几个。
+   */
+  scroll(sessionId: string, seek?: number) {
+    const entry = this.entries.get(sessionId);
+    if (!entry?.scroll || !entry.backend || !entry.layout) return;
+    entry.scrollWant = seek != null ? { seek } : (entry.scrollWant ?? {});
+    if (!entry.scrollBusy) void this.runScroll(entry);
+  }
+
+  private async runScroll(entry: LiveEntry) {
+    entry.scrollBusy = true;
+    try {
+      while (entry.scrollWant) {
+        const { seek } = entry.scrollWant;
+        entry.scrollWant = null;
+        const pos = await this.scrollPipe(entry, seek).catch(() => null);
+        // 查询期间会话可能已被终止，entry 也可能被重建过
+        if (this.entries.get(entry.sessionId) !== entry) return;
+        if (pos) this.broadcast(entry, { type: "scroll", ...pos, rows: entry.rows ?? 0 });
+      }
+    } finally {
+      entry.scrollBusy = false;
+    }
+  }
+
+  private async scrollPipe(entry: LiveEntry, seek?: number): Promise<ScrollPosition | null> {
+    const layout = entry.layout;
+    const project = this.db.getProject(entry.projectId);
+    if (!layout || !project) return null;
+    if (project.type === "local") {
+      entry.scrollPane ??= await localTerminalPane(layout, entry.sessionId);
+      if (entry.scrollPane == null) return null;
+      return localScrollPipe(layout, entry.sessionId, entry.scrollPane, seek);
+    }
+    const link = this.links.get(project.id);
+    if (!link?.isConnected()) return null; // 不为一次查询去重建链路
+    entry.scrollPane ??= await link.terminalPane(layout, entry.sessionId);
+    if (entry.scrollPane == null) return null;
+    return link.scrollPipe(layout, entry.sessionId, entry.scrollPane, seek);
   }
 
   private clearTitle(entry: LiveEntry) {
@@ -1009,6 +1077,7 @@ export class SessionManager {
       projectId: row.project_id,
       durable: row.durable === 1,
       layout: null,
+      scroll: row.scroll_plugin === 1,
       cols: size?.cols ?? null,
       rows: size?.rows ?? null,
     });
@@ -1021,6 +1090,7 @@ export class SessionManager {
     projectId: string;
     durable: boolean;
     layout: HostLayout | null;
+    scroll?: boolean;
     cols?: number | null;
     rows?: number | null;
     appearance?: TermAppearance;
@@ -1049,6 +1119,10 @@ export class SessionManager {
       title: null,
       titleTimer: null,
       titleProbing: false,
+      scroll: init.scroll ?? false,
+      scrollPane: null,
+      scrollBusy: false,
+      scrollWant: null,
     };
     entry.osc = new OscColorGate(() => ({
       appearance: entry.appearance,

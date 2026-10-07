@@ -50,6 +50,7 @@ import { askpassBinDir, posixWriteAskpassCommand } from "../askpass/install.js";
 import type { AttachResult, Backend, BackendCallbacks } from "./backend.js";
 import { normalizeCaptured, SessionGoneError } from "./backend.js";
 import type { NonDurableReason } from "./local.js";
+import { ensureRemoteScrollPlugin } from "./scrollPlugin.js";
 
 export { SessionGoneError };
 
@@ -82,6 +83,8 @@ export interface RemoteZellij {
   detail?: string;
   layout?: HostLayout;
   kind: HostKind;
+  /** 滚动位置插件已就位且已预授权（ADR 0019）；新会话据此决定用哪套配置 */
+  scroll?: boolean;
 }
 
 /**
@@ -559,7 +562,12 @@ export class SshLink extends EventEmitter {
         }
       }
 
-      this.zellij = { durable: true, layout, kind: probe.kind };
+      // 插件部署失败不挡开会话，新会话退回老配置（没有滚动条）而已
+      const scroll =
+        probe.kind === "posix"
+          ? await ensureRemoteScrollPlugin(this, layout, probe.target, probe.home)
+          : false;
+      this.zellij = { durable: true, layout, kind: probe.kind, scroll };
     } catch (err) {
       const failed: RemoteZellij = {
         durable: false,
@@ -680,6 +688,39 @@ export class SshLink extends EventEmitter {
     return normalizeCaptured(res.stdout.replace(/\s+$/, "") + "\n");
   }
 
+  /** 会话里 terminal pane 的数字 id（滚动位置插件按它找 pane）；问不到为 null */
+  async terminalPane(layout: HostLayout, sessionId: string): Promise<number | null> {
+    const res = await this.zellijExec(layout, zcmd.listPanesArgs(layout, sessionId));
+    if (res.code !== 0) return null;
+    const id = zcmd.parseTerminalPaneId(res.stdout);
+    return id ? zcmd.parseTerminalPaneNumber(id) : null;
+  }
+
+  /**
+   * 问滚动位置插件（ADR 0019）。会话里没有插件时回 null。
+   *
+   * 走 execWithInput 而不是 exec：前者写完即 EOF，`zellij pipe` 在 stdin 不是终端时
+   * 要读到 EOF 才退出（见 zcmd.scrollPipeArgs），exec 的 stdin 一直开着会挂住通道。
+   * 每次一条短命 channel，不常驻：sshd 默认 MaxSessions 10，会话的 PTY 已经各占一条。
+   */
+  async scrollPipe(
+    layout: HostLayout,
+    sessionId: string,
+    pane: number,
+    seek?: number
+  ): Promise<zcmd.ScrollPosition | null> {
+    const kind = this.probed?.kind ?? "posix";
+    const res = await this.execWithInput(
+      buildCommandLine(
+        kind,
+        [layout.bin, ...zcmd.scrollPipeArgs(layout, sessionId, pane, seek)],
+        zcmd.zellijEnv(layout)
+      ),
+      ""
+    );
+    return zcmd.parseScrollReply(res.stdout);
+  }
+
   async killSession(layout: HostLayout, sessionId: string): Promise<void> {
     await this.zellijExec(layout, zcmd.deleteSessionArgs(layout, sessionId)).catch(
       () => {}
@@ -707,6 +748,8 @@ export class SshLink extends EventEmitter {
       rows: number;
       appearance?: TermAppearance;
       askpassBin?: string;
+      /** 会话用带滚动位置插件的配置（ADR 0019），见 zcmd.SessionProfile */
+      scroll?: boolean;
     },
     cb: BackendCallbacks
   ): Promise<AttachResult> {
@@ -751,6 +794,7 @@ export class SshLink extends EventEmitter {
               ...zcmd.createBackgroundArgs(layout, opts.sessionId, {
                 cwd: opts.cwd,
                 shell,
+                scroll: opts.scroll,
               }),
             ],
             { ...zcmd.zellijEnv(layout), ...termEnv, ...(shell ? { SHELL: shell } : {}) },
@@ -779,6 +823,7 @@ export class SshLink extends EventEmitter {
               cwd: opts.cwd,
               // 项目没指定就用探测到的登录 shell，不能不传
               shell: opts.shell ?? this.probed?.shell,
+              scroll: opts.scroll,
             }),
           ],
           { ...zcmd.zellijEnv(layout), ...termEnv },
