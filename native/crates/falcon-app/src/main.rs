@@ -62,10 +62,8 @@ fn main() {
             })
             .detach();
 
-            let open = profiles::Profiles::global(cx).last_open();
-            for profile in open {
-                window::open_server_window(profile, cx);
-            }
+            let profile = profiles::Profiles::global(cx).startup_profile();
+            window::open_server_window(profile, cx);
             cx.activate(true);
         });
 }

@@ -54,7 +54,6 @@ pub fn open_server_window(profile: ServerProfile, cx: &mut App) {
             }
             #[cfg(not(feature = "automation"))]
             let _ = ws_out;
-            remember_open_windows(cx);
         }
         Err(err) => log::error!("开窗口失败：{err:#}"),
     }
@@ -76,22 +75,6 @@ pub fn display_name(profile: &ServerProfile) -> String {
     } else {
         profile.name.clone()
     }
-}
-
-/// 下次启动原样打开这些窗口
-fn remember_open_windows(cx: &mut App) {
-    let ids: Vec<String> = cx
-        .windows()
-        .into_iter()
-        .filter_map(|w| w.downcast::<Root>())
-        .filter_map(|w| {
-            w.read(cx)
-                .ok()
-                .and_then(|root| root.view().clone().downcast::<ServerWindow>().ok())
-                .map(|v| v.read(cx).ws.read(cx).profile.id.clone())
-        })
-        .collect();
-    cx.global_mut::<crate::profiles::Profiles>().set_open(ids);
 }
 
 pub struct ServerWindow {
@@ -126,13 +109,12 @@ impl ServerWindow {
         let panels = cx.new(|cx| PanelHost::new(ws.clone(), window, cx));
         let login = cx.new(|cx| LoginView::new(ws.clone(), window, cx));
 
-        let mut subs = vec![
+        let subs = vec![
             cx.observe(&ws, |_, _, cx| cx.notify()),
             cx.subscribe_in(&ws, window, Self::on_workspace_event),
             // 系统切明暗：跟随系统时重新派生主题
             cx.observe_window_appearance(window, |_, window, cx| crate::theme::on_window_appearance(window, cx)),
         ];
-        subs.push(cx.on_release(|_, cx| remember_open_windows(cx)));
 
         // 本机服务先确认起来了再初始化（SEA 首次启动要解压 runtime）；远处的直接连
         if local {

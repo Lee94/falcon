@@ -82,9 +82,12 @@ impl ServerProfile {
 struct ProfilesFile {
     #[serde(default)]
     profiles: Vec<ServerProfile>,
-    /// 上次开着的窗口（下次启动原样打开）
+    /// 上次连上的服务端（认证通过、进到工作区），下次启动就开它。不记"退出时开着哪些窗口"：
+    /// GPUI 退出时（`App::shutdown`）先清空全部窗口再逐个释放，释放回调里看到的窗口列表
+    /// 永远是空的，正常退出根本记不住；而且开着却没连上的窗口（Windows 上没有本机服务，
+    /// "本机"必然连不上）也不该下次再开一遍
     #[serde(default)]
-    open: Vec<String>,
+    last_connected: Option<String>,
 }
 
 pub struct Profiles {
@@ -136,17 +139,22 @@ impl Profiles {
         self.file.profiles.iter().find(|p| p.id == id)
     }
 
-    pub fn last_open(&self) -> Vec<ServerProfile> {
-        let open: Vec<_> = self
-            .file
-            .open
-            .iter()
-            .filter_map(|id| self.get(id).cloned())
-            .collect();
-        if open.is_empty() {
-            self.get(LOCAL_PROFILE_ID).cloned().into_iter().collect()
-        } else {
-            open
+    /// 启动时开哪台：上次连上的那台（配置已被删就算了），没有就是本机
+    pub fn startup_profile(&self) -> ServerProfile {
+        self.file
+            .last_connected
+            .as_deref()
+            .and_then(|id| self.get(id))
+            .or_else(|| self.get(LOCAL_PROFILE_ID))
+            .cloned()
+            .expect("本机配置在 init 里补齐，永远存在")
+    }
+
+    /// 某台服务端连上了（认证通过）：记下来，下次启动默认开它
+    pub fn mark_connected(&mut self, id: &str) {
+        if self.file.last_connected.as_deref() != Some(id) {
+            self.file.last_connected = Some(id.to_string());
+            self.save();
         }
     }
 
@@ -166,15 +174,10 @@ impl Profiles {
             p.store_password(None);
         }
         self.file.profiles.retain(|p| p.id != id);
-        self.file.open.retain(|o| o != id);
-        self.save();
-    }
-
-    pub fn set_open(&mut self, ids: Vec<String>) {
-        if self.file.open != ids {
-            self.file.open = ids;
-            self.save();
+        if self.file.last_connected.as_deref() == Some(id) {
+            self.file.last_connected = None;
         }
+        self.save();
     }
 
     fn save(&self) {

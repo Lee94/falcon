@@ -284,6 +284,8 @@ impl Workspace {
                     cx.notify();
                 } else {
                     this.auth_phase = AuthPhase::Ready;
+                    // 连上了才记作下次启动的默认服务端：连不上 / 停在登录页的不算
+                    cx.global_mut::<crate::profiles::Profiles>().mark_connected(&this.profile.id);
                     this.load_all(cx);
                 }
             })
