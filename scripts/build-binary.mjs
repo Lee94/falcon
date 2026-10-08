@@ -141,11 +141,21 @@ await esbuild.build({
 });
 const bundleSrc = fs.readFileSync(bundlePath, "utf8").replace(/^#!.*\n/, "");
 
-// node-pty 主包（纯 JS 部分，平台无关）的真实目录
+// node-pty 主包（纯 JS 部分，平台无关）的真实目录。不能 resolve `<包>/package.json`：
+// 1.2 起包里声明了 exports 且没导出 ./package.json（ERR_PACKAGE_PATH_NOT_EXPORTED），
+// 只能从入口文件往上找名字对得上的 package.json
 const serverRequire = createRequire(path.join(ROOT, "packages/server/package.json"));
-const ptyPkgDir = path.dirname(
-  fs.realpathSync(serverRequire.resolve("@lydell/node-pty/package.json"))
-);
+function pkgDirOf(name) {
+  let dir = path.dirname(fs.realpathSync(serverRequire.resolve(name)));
+  for (;;) {
+    const pj = path.join(dir, "package.json");
+    if (fs.existsSync(pj) && readJson(pj).name === name) return dir;
+    const up = path.dirname(dir);
+    if (up === dir) throw new Error(`找不到 ${name} 的 package.json`);
+    dir = up;
+  }
+}
+const ptyPkgDir = pkgDirOf("@lydell/node-pty");
 const ptyVersion = readJson(path.join(ptyPkgDir, "package.json")).version;
 // 飞书项目面板的数据源：npm 包自带六个平台的静态二进制，按目标各取一个
 const meeglePkgDir = path.dirname(

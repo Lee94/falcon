@@ -16,10 +16,12 @@ export default defineConfig({
     exclude: ["rioterm"],
   },
   build: {
-    // 默认 target（≈es2020）会让 esbuild 压缩时降级 `||=`，而 xterm.js 6.x 的
+    // Vite 6 的默认 target（≈es2020）会让 esbuild 压缩时降级 `||=`，而 xterm.js 6.x 的
     // enum 产物 `let r;(te=>…)(r||={})` 在 rollup+esbuild 组合下会被错误重命名成
     // `void 0||(i={})`（i 未声明），zellij 一发 DECRQM 查询 requestMode 就抛
     // ReferenceError、终端全空白。es2022 下 `||=` 原样保留，绕开该压缩 bug。
+    // Vite 8 换成了 rolldown + oxc 压缩，默认 target 也不再降级 `||=`（2026-10 升级时
+    // 查过产物：没有 `void 0||(` 形态，`||={}` 原样保留），仍显式钉住，别让 target 回落。
     target: "es2022",
   },
   server: {
