@@ -20,7 +20,7 @@ import { MeegleClient } from "./meegle/client.js";
 import { Px0Manager } from "./px0/manager.js";
 import { ZELLIJ_VERSION } from "./zellij/version.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 async function main() {
   // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器

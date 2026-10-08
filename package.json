@@ -1,7 +1,7 @@
 {
   "name": "falcon-workspace",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "scripts": {
     "build": "pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build && pnpm --filter @falcon/web build",
     "build:bin": "node scripts/build-binary.mjs",

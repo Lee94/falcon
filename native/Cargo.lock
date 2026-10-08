@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "falcon-proto",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2123,7 +2123,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-theme"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
