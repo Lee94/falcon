@@ -49,8 +49,8 @@ describe("downloadUrl", () => {
 describe("parseCloudflaredVersion", () => {
   it("reads the semver out of --version output", () => {
     assert.equal(
-      parseCloudflaredVersion("cloudflared version 2026.9.1 (built 2026-09-11-1234 UTC)"),
-      "2026.9.1"
+      parseCloudflaredVersion("cloudflared version 2026.10.0 (built 2026-10-05-17:37 UTC)"),
+      "2026.10.0"
     );
     assert.equal(parseCloudflaredVersion("not a version"), null);
   });

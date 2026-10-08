@@ -4,7 +4,7 @@
  * 纯函数，零 I/O。CLI 只在 falcon 后端本机 spawn（远端 HTTP 服务先经 SSH
  * 本地转发接到本机），直接 spawn 不经 shell，argv 数组没有转义问题。
  *
- * 脾气（2026.9.1 文档 / 源码对过）：
+ * 脾气（2026.10.0 实测 / 2026.9.1 文档与源码对过）：
  * - Quick Tunnel 是 `cloudflared tunnel --url http://127.0.0.1:PORT`，不需要
  *   Cloudflare 账号。得到的是随机 `*.trycloudflare.com`，进程一退出 URL 作废。
  * - 公网 URL 打在 stderr 的 ASCII 框里；metrics 端口上还有 `/quicktunnel`
@@ -14,7 +14,7 @@
  *   公网 Host 是 trycloudflare.com 时会 403。回环目标一律改写成 localhost。
  */
 
-export const CLOUDFLARED_VERSION = "2026.9.1";
+export const CLOUDFLARED_VERSION = "2026.10.0";
 
 export const DEFAULT_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/download";
 
@@ -72,7 +72,7 @@ export function downloadUrl(
   return `${baseUrl.replace(/\/+$/, "")}/${version}/${asset.name}`;
 }
 
-/** `cloudflared --version` → 2026.9.1。对不上就当没装好，触发重下。 */
+/** `cloudflared --version` → 2026.10.0。对不上就当没装好，触发重下。 */
 export function parseCloudflaredVersion(text: string): string | null {
   const m = text.match(/cloudflared version\s+(\d+\.\d+\.\d+)/i);
   return m?.[1] ?? null;

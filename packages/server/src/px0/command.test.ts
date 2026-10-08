@@ -82,7 +82,7 @@ describe("parseListenPort", () => {
   it("reads the url line of px0's banner", () => {
     const banner = [
       "",
-      "px0 0.1.10",
+      "px0 0.1.16",
       "  workspace:  /Users/fay/Code/mojito",
       "  url:        http://127.0.0.1:55342/px0/abc/",
       "",
@@ -106,7 +106,7 @@ describe("parseListenPort", () => {
 });
 
 describe("px0Args", () => {
-  it("binds loopback on a free port, no browser, no telemetry", () => {
+  it("binds loopback on a free port, no browser, no telemetry, no self-update", () => {
     const args = px0Args({ basePath: "/px0/p1/", dir: "/srv/app" });
     const flag = (name: string) => args[args.indexOf(name) + 1];
     assert.equal(flag("-host"), "127.0.0.1");
@@ -114,6 +114,8 @@ describe("px0Args", () => {
     assert.equal(flag("-base-path"), "/px0/p1/");
     assert.ok(args.includes("-no-open"));
     assert.ok(args.includes("-no-telemetry"));
+    // 0.1.11 起默认启动时自我更新、原地重新 exec，换掉钉死哈希的二进制
+    assert.ok(args.includes("-no-update"));
     // -quiet 会把 url 行也吞掉，端口就解析不出来了
     assert.ok(!args.includes("-quiet"));
     assert.equal(args.at(-1), "/srv/app");

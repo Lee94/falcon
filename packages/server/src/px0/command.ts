@@ -4,25 +4,28 @@
  * 纯函数，零 I/O。本机直接 spawn argv 数组；远端只支持 POSIX，命令行在这里用
  * quotePosix 拼好交给 SshLink（Windows 宿主机 v1 不做，见 ADR）。
  *
- * 脾气（v0.1.10 实测 / 源码对过）：
+ * 脾气（v0.1.16 实测 / 源码对过）：
  * - **没有任何鉴权**。会改东西的 POST（派 agent 编辑、commit / push、写会话、PR 评论、
  *   装语言服务器）过它的 localPost：Host 必须是 IP 或 localhost、Origin 的 host 必须
  *   等于 Host；读文件 / 搜索 / diff 这些 GET 什么都不查。只能听 127.0.0.1，前面必须
  *   挡着 falcon 的登录（反代怎么对付 localPost 见 proxy.ts）。
  * - `-port 0` 让系统挑端口；端口只能从 stdout 的 `url: http://127.0.0.1:PORT/...`
  *   那一行读。`-quiet` 会连这一行一起吞掉，不能加。
- * - 遥测默认开（PostHog），`-no-telemetry` 关。每天还会查一次 GitHub 上的新版本，
- *   只打印提示、不自己换二进制，不用管。
+ * - 遥测默认开（PostHog），`-no-telemetry` 关。
+ * - 0.1.11 起**默认启动时自我更新**：下新版换掉自己的二进制再原地重新 exec，
+ *   `-no-update` 关。必须关：字节是钉死 sha256 的（换掉就绕过了校验，远端下次
+ *   `-version` 对不上还会被我们重推）、进程是挂在 pty 上收尸的、端口是从首次启动的
+ *   stdout 里读的——重启一次这三件事都会落空。
  * - 不带 `-no-open` 会去开宿主机上的浏览器。
  * - `-base-path` 之下的一切（静态资源、`/api/*`、SSE 的 `/api/stream`）都挂在这个前缀里，
  *   反代原样转发路径即可，不用改写。
- * - `-version` 打印 `px0 0.1.10 (linux/amd64)`。
+ * - `-version` 打印 `px0 0.1.16 (linux/amd64)`。
  */
 
 import { joinPath } from "../git/path.js";
 import { quotePosix } from "../zellij/host.js";
 
-export const PX0_VERSION = "0.1.10";
+export const PX0_VERSION = "0.1.16";
 
 export const DEFAULT_BASE_URL = "https://github.com/px0-ai/px0/releases/download";
 
@@ -42,14 +45,14 @@ export interface Px0Target {
  * 升级 PX0_VERSION 时一起换。只列我们支持的六个平台。
  */
 export const PX0_SHA256: Readonly<Record<string, string>> = {
-  "px0-0.1.10-darwin-amd64": "1d24a458d4ad5c2bda0d3af2b29ad4f7481e786267d4a414593bff0625e82e13",
-  "px0-0.1.10-darwin-arm64": "703a22ed9cc51172b033ac6747b7c61d711f812a271732b0a0832da374c9063a",
-  "px0-0.1.10-linux-amd64": "8abe9591f3c6b5277a97837ad8f20df873b6f67b44075cf2acb059e97a86731a",
-  "px0-0.1.10-linux-arm64": "b021e0d416d393cd3008facbee61addd80764af0c62a18feba2f2e6a05f39c60",
-  "px0-0.1.10-windows-amd64.exe":
-    "8d81cfb5eff135c82f73a8e15cec7a5a6ea4987580df0a5ea4b312ec58339766",
-  "px0-0.1.10-windows-arm64.exe":
-    "c1cc0d4026ff34643247d3f13503d720c4b66fcd230bacbf376ad81c3ea9f5d4",
+  "px0-0.1.16-darwin-amd64": "de1b4e99f240f73c87aaf60b3c87209ca6135b1b493c758f7bc38c7c17713ab3",
+  "px0-0.1.16-darwin-arm64": "0c40d3af1f0634cd67ee1a2231abc1a20919c0b595f46db252aea0225edcf0fc",
+  "px0-0.1.16-linux-amd64": "7d9051f6358a820ea165b9459ff84c1fdca0a62d5394077827d082724e48b015",
+  "px0-0.1.16-linux-arm64": "c62c9c2a7abf21f2ace2731c091a5f51b6d416c333116cde3e7d3888bbf78f09",
+  "px0-0.1.16-windows-amd64.exe":
+    "b5e5258771607caf40c484a05f2a89ca609b548c9b52c4454ea4753c31597b5c",
+  "px0-0.1.16-windows-arm64.exe":
+    "52497563e3e67b57a69da9cdc536e06f4faf1d84ec86bbaf6c3229c8e3e1cc6c",
 };
 
 function archOf(machine: string): Px0Arch | null {
@@ -82,7 +85,7 @@ export function localPx0Target(
   return null;
 }
 
-/** GitHub release 资产名，如 px0-0.1.10-linux-amd64 / px0-0.1.10-windows-amd64.exe */
+/** GitHub release 资产名，如 px0-0.1.16-linux-amd64 / px0-0.1.16-windows-amd64.exe */
 export function px0AssetName(target: Px0Target, version = PX0_VERSION): string {
   return `px0-${version}-${target.os}-${target.arch}${target.os === "windows" ? ".exe" : ""}`;
 }
@@ -95,7 +98,7 @@ export function px0DownloadUrl(
   return `${baseUrl.replace(/\/+$/, "")}/v${version}/${asset}`;
 }
 
-/** `px0 -version` → 0.1.10。对不上就当没装好，重推一份 */
+/** `px0 -version` → 0.1.16。对不上就当没装好，重推一份 */
 export function parsePx0Version(text: string): string | null {
   const m = text.match(/px0\s+v?(\d+\.\d+\.\d+)/);
   return m?.[1] ?? null;
@@ -130,6 +133,8 @@ export function px0Args(input: Px0ArgsInput): string[] {
     "0",
     "-no-open",
     "-no-telemetry",
+    // 不许它自我更新：钉死的字节、pty 收尸、从 stdout 读端口都靠进程不被换掉（见文件头）
+    "-no-update",
     "-no-color",
     "-base-path",
     input.basePath,
