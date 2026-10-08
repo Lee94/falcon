@@ -207,11 +207,6 @@ impl Render for ConnectView {
                         .children(crate::window_controls::controls(strip, window, cx)),
                 )
             })
-            .children(Root::render_dialog_layer(window, cx))
-            .children(
-                // 通知必须压在对话框上面（设置里点「检测连接」的结果就是在对话框开着时弹的）。
-                // 按绘制顺序排在对话框层后面并不够——实测仍被设置对话框盖住，推迟到最后画才稳
-                Root::render_notification_layer(window, cx).map(|layer| gpui_kit::deferred(layer).with_priority(100)),
-            )
+            // 对话框与通知层由 Root 的插件挂（gpui-component 0.7 起），这里不画，见 window.rs / toasts.rs
     }
 }

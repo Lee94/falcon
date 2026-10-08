@@ -1,6 +1,6 @@
 //! 按键 → 终端字节（legacy xterm 编码）。
 //!
-//! 抄自 Zed：zed-industries/zed@bcf6582ce3500df93a8a39366640173e6786cea6
+//! 抄自 Zed：zed-industries/zed@279fe070bb389b79652e52065b2f001edcc0b11b
 //! 的 `crates/terminal/src/mappings/keys.rs`（GPL-3.0-or-later，Copyright Zed Industries）。
 //! 改动：`gpui::Keystroke` 换成本 crate 的 [`crate::keystroke::Keystroke`]（falcon-term 不依赖
 //! GPUI），Zed 自己的 `Modes` 换成 alacritty 的 `TermMode`（位名一致）。映射表本身一字未改。

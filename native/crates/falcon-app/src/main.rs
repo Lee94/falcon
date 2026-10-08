@@ -29,6 +29,7 @@ mod sidebar;
 mod snapshot;
 mod terminal;
 mod theme;
+mod toasts;
 mod ui;
 mod window;
 mod window_controls;
@@ -46,6 +47,7 @@ fn main() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx| {
             gpui_kit::init(cx);
+            toasts::init(cx);
             fonts::register(cx);
             http::install(cx);
             prefs::Prefs::init(cx);

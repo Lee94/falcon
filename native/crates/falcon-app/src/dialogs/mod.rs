@@ -26,6 +26,7 @@ use gpui_kit::{App, SharedString, Window, div};
 use rust_i18n::t;
 
 use crate::theme::Ui;
+use crate::toasts::ToastExt;
 use crate::ui::{Mark, status_mark};
 use crate::workspace::{Toast, ToastKind};
 use crate::zoom::zpx;
@@ -125,5 +126,5 @@ pub fn show_toast(toast: &Toast, window: &mut Window, cx: &mut App) {
     if toast.sticky || matches!(toast.kind, ToastKind::Warning) {
         n = n.autohide(false);
     }
-    window.push_notification(n, cx);
+    window.push_toast(n, cx);
 }

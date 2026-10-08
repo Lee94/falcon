@@ -304,8 +304,8 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
         }
         "toast" => {
             let _ = window.update(cx, |_, window, cx| {
-                use gpui_kit::component::WindowExt;
-                window.push_notification(gpui_kit::component::notification::Notification::info(arg.to_string()), cx);
+                use crate::toasts::ToastExt;
+                window.push_toast(gpui_kit::component::notification::Notification::info(arg.to_string()), cx);
             });
         }
         "quit" => cx.update(|cx| cx.quit()),

@@ -481,12 +481,7 @@ impl Render for ServerWindow {
             .on_action(cx.listener(|this, _: &NewProject, window, cx| dialogs::project_form::open(&this.ws, None, Default::default(), window, cx)))
             .child(self.render_title_strip(window, cx))
             .child(body)
-            .children(Root::render_sheet_layer(window, cx))
-            .children(Root::render_dialog_layer(window, cx))
-            .children(
-                // 通知必须压在对话框上面（设置里点「检测连接」的结果就是在对话框开着时弹的）。
-                // 按绘制顺序排在对话框层后面并不够——实测仍被设置对话框盖住，推迟到最后画才稳
-                Root::render_notification_layer(window, cx).map(|layer| gpui_kit::deferred(layer).with_priority(100)),
-            )
+            // 抽屉 / 对话框层不在这里画：gpui-component 0.7 起由 Root 的插件（gpui_kit::init 里注册）
+            // 挂在应用内容之上。通知走我们自己挂的那份（toasts.rs），推迟到对话框之后画
     }
 }

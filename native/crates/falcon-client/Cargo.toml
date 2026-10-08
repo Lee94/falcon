@@ -24,13 +24,14 @@ percent-encoding = "2"
 # 加密后端用 ring——workspace 里别的 crate 已经带着它，不再引入 aws-lc-sys 那一套 C 构建。
 # 证书校验走 rustls-platform-verifier，认系统信任库：用户在钥匙串里信任的自签证书也能用。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-platform-verifier = "0.6"
+rustls-platform-verifier = "0.7"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
-# reqwest 关掉默认 TLS（native-tls），只开 rustls 的"手动根证书"变体：根证书与校验器
-# 都由我们用 use_preconfigured_tls 交进去（见 tls.rs），它自己不带 webpki-roots。
+# reqwest 0.13 的默认 TLS 是 rustls + aws-lc-rs：关掉默认，只开不挑加密后端的
+# `rustls-no-provider`——ClientConfig（ring 后端、根证书与校验器）由我们用
+# use_preconfigured_tls 交进去（见 tls.rs），它自己不带 aws-lc-sys / webpki-roots。
 # 不开 http2：falcon 服务端只讲 HTTP/1.1，反代后面也一样；少一个 h2 依赖。
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "stream", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json"] }
 
 # WS 只要握手，TLS 自己接（tokio-rustls）：tokio-tungstenite 的 rustls 支持挂在
 # 双下划线的私有 feature 上，而且会顺带拉 webpki-roots / native-certs。

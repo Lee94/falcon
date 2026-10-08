@@ -103,9 +103,9 @@ server 是 I/O 密集型，瓶颈不在 Node；会话持久性的全部承诺（
 ### 决定三：GPUI 走 gpui-kit 的锁定版本；Zed 的代码按文件抄，不按 crate 依赖
 
 - 官方 `gpui` 在 crates.io 停在 0.2.2（2025-10），平台层 crate 全是 `publish = false`。能用的渠道是 zed 仓库 git rev，或 Longbridge 每周发的 `gpui-pre` 快照。
-- **直接依赖 `gpui-kit` 总包 0.6.x**（开 component 与 assets 两个 feature），不自己拼单个 crate。它一个依赖就把 `gpui-pre`、`gpui-pre-platform`（窗口 / 应用启动器，光有 `gpui-pre` 起不来窗口）、`gpui-base`、`gpui-component`、默认资源锁在同一版本上，其中 `gpui-pre` 系列是 `=` 精确锁。自己分别依赖这五个 crate，只会多出"版本没对齐"这一类错误。组件层（`gpui-component`）提供 Input / TextArea / 代码编辑器（tree-sitter 高亮）、Tree、VirtualList、DataTable、Resizable、Popover / Menu / Dialog / Sheet、Tabs、Command、Markdown、图表；WebView 另加同版本的 `gpui-wry`。**升级 GPUI 就是升级 gpui-kit，是一次有意的发版动作**（与 rioterm 锁精确版本同理）。
+- **直接依赖 `gpui-kit` 总包 0.7.x**（开 component 与 assets 两个 feature），不自己拼单个 crate。它一个依赖就把 `gpui-pre`、`gpui-pre-platform`（窗口 / 应用启动器，光有 `gpui-pre` 起不来窗口）、`gpui-base`、`gpui-component`、默认资源锁在同一版本上，其中 `gpui-pre` 系列是 `=` 精确锁。自己分别依赖这五个 crate，只会多出"版本没对齐"这一类错误。组件层（`gpui-component`）提供 Input / TextArea / 代码编辑器（tree-sitter 高亮）、Tree、VirtualList、DataTable、Resizable、Popover / Menu / Dialog / Sheet、Tabs、Command、Markdown、图表；WebView 另加同版本的 `gpui-wry`。**升级 GPUI 就是升级 gpui-kit，是一次有意的发版动作**（与 rioterm 锁精确版本同理）。
 - **Zed 的代码可以抄（个人使用，`native/` 整体声明 GPL-3.0-or-later），但只按文件抄，不当 crate 依赖**：Zed 的 `terminal` crate 牵着 `settings` / `theme` / `task` / `util` / `release_channel` 一串内部 crate，而且会带进第二份 `gpui`（zed git 版），与 gpui-component 用的 `gpui-pre` 是两个互不相认的 crate，类型对不上。所以：
-  - 从 **`gpui-pre` 对应的那个 zed commit**（0.3.6 ↔ zed@bcf6582，升级时一起换）抄文件，API 天然对齐；
+  - 从 **`gpui-pre` 对应的那个 zed commit**（0.3.8 ↔ zed@279fe07，升级时一起换；最初落地时是 0.3.6 ↔ zed@bcf6582）抄文件，API 天然对齐；
   - 抄来的文件保留原版权头，首行注明"出自 zed@<commit> 的 <路径>"，改动处照本仓库的注释习惯写"为什么"；
   - `alacritty_terminal` 跟着那个 commit 用 Zed 的 fork rev，省掉抄来的代码对上游 API 的适配。
 - 要抄的清单与改法见 §3.4 / §3.5 / §3.6。**tty7**（l0ng-ai/tty7，Apache-2.0，gpui + gpui-component + alacritty_terminal 的终端工作台，形态与我们高度重合）同样值得逐段读。

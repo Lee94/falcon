@@ -20,7 +20,6 @@ use std::time::Duration;
 use falcon_client::{ApiError, FalconClient};
 use falcon_core::file_path::{deepest_upload_dirs, rel_dir};
 use falcon_core::file_search::basename;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::Sizable;
@@ -32,6 +31,7 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use crate::dialogs::{self, ConfirmOpts};
+use crate::toasts::ToastExt;
 use crate::workspace::{ToastKind, Workspace};
 
 /// 通知 id 的类型标签：同一个 key 再推一次就是"就地换成成功 / 失败"
@@ -73,7 +73,8 @@ impl ProgressNote {
 
     fn push(&self, window: &mut Window, cx: &mut App) {
         let label = self.label.clone();
-        window.push_notification(
+        window.push_keyed_toast(
+            self.key.clone(),
             Notification::new()
                 .id1::<TransferNote>(self.key.clone())
                 .autohide(false)
@@ -92,7 +93,7 @@ impl ProgressNote {
     }
 
     fn dismiss(&self, window: &mut Window, cx: &mut App) {
-        window.remove_notification1::<TransferNote>(self.key.clone(), cx);
+        window.dismiss_toast(&self.key, cx);
     }
 
     fn success(&self, title: String, body: Option<String>, reveal: Option<PathBuf>, window: &mut Window, cx: &mut App) {
@@ -103,11 +104,12 @@ impl ProgressNote {
         if let Some(path) = reveal {
             n = n.on_click(move |_, _, cx| cx.reveal_path(&path));
         }
-        window.push_notification(n, cx);
+        window.push_keyed_toast(self.key.clone(), n, cx);
     }
 
     fn fail(&self, title: String, body: String, window: &mut Window, cx: &mut App) {
-        window.push_notification(
+        window.push_keyed_toast(
+            self.key.clone(),
             Notification::error(body).title(title).id1::<TransferNote>(self.key.clone()),
             cx,
         );

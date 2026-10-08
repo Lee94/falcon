@@ -31,6 +31,7 @@ use rust_i18n::t;
 
 use crate::dialogs::project_form::kit::{self, OptState, Opt, Options, Tone, Tr, disclosure, error_line, field, note};
 use crate::theme::{Ui, radius};
+use crate::toasts::ToastExt;
 use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
 
@@ -330,7 +331,7 @@ impl InstallView {
                     })
             });
         }
-        window.push_notification(n, cx);
+        window.push_toast(n, cx);
     }
 
     fn allow(&mut self, window: &mut Window, cx: &mut Context<Self>) {

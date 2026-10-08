@@ -23,8 +23,8 @@ falcon-core = { path = "crates/falcon-core" }
 # GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
 # gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同
 # gpui-wry），并按新快照对应的 zed commit 重新比对从 Zed 抄来的文件。
-gpui-kit = { version = "=0.6.6" }
-# zed@bcf6582（gpui-pre 0.3.6 的快照点）锁的 alacritty fork。抄来的 Zed 终端
+gpui-kit = { version = "=0.7.1" }
+# zed@279fe07（gpui-pre 0.3.8 的快照点）锁的 alacritty fork。抄来的 Zed 终端
 # 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 
@@ -37,7 +37,7 @@ parking_lot = "0.12"
 futures = "0.3"
 bytes = "1"
 url = "2"
-base64 = "0.22"
+base64 = "0.23"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 
 [profile.dev]

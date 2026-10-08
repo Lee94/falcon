@@ -37,6 +37,7 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use crate::theme::{ThemeState, Ui, hsla, radius};
+use crate::toasts::ToastExt;
 use crate::ui::icon;
 use crate::zoom::zpx;
 
@@ -73,7 +74,7 @@ fn copy_button(id: &'static str, colors: ThemeColors) -> Button {
         .tooltip(t!("theme.copyGhostty").to_string())
         .on_click(move |_, window, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(serialize_ghostty_theme(&colors)));
-            window.push_notification(Notification::success(t!("theme.copied").to_string()), cx);
+            window.push_toast(Notification::success(t!("theme.copied").to_string()), cx);
         })
 }
 

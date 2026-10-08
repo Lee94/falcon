@@ -1,6 +1,6 @@
 //! 终端画面元素：把一份 [`falcon_term::Snapshot`] 排版绘制出来，并挂 IME 输入处理器。
 //!
-//! 以 Zed 的 `crates/terminal_view/src/terminal_element.rs`（zed-industries/zed@bcf6582，
+//! 以 Zed 的 `crates/terminal_view/src/terminal_element.rs`（zed-industries/zed@279fe07，
 //! GPL-3.0-or-later，Copyright Zed Industries）为底本改写：`BatchedTextRun`（同样式相邻格合成
 //! 一段 run，`shape_line` 带 force_width 排成等宽网格）、`LayoutRect` / 背景区合并、块元素字符
 //! 自己画成矩形（`▀▄█░▒▓`、象限、六分块）、`TerminalInputHandler` 都来自那里。剥掉的：
