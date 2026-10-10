@@ -13,11 +13,6 @@
     "start": "cd native && cargo run --release -p falcon-server",
     "update-zellij": "node scripts/update-zellij.mjs",
     "build:zellij-plugin": "node scripts/build-zellij-plugin.mjs",
-    "vendor-berkeley-mono": "node scripts/vendor-berkeley-mono.mjs",
-    "vendor-ioskeley-mono": "node scripts/vendor-ioskeley-mono.mjs",
-    "vendor-maple-mono": "node scripts/vendor-maple-mono.mjs",
-    "vendor-nerd-symbols": "node scripts/vendor-nerd-symbols.mjs",
-    "vendor-ghostty-themes": "node scripts/vendor-ghostty-themes.mjs",
     "gen-icons": "node scripts/gen-icons.mjs"
   },
   "engines": {

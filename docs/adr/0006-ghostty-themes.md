@@ -28,7 +28,7 @@
 - **选择器只列与槽位同明暗的主题**（按 catalog 的 appearance，即底色亮度）：`.dark` 按底色亮度切，深色槽位选进一套浅色主题整站就翻成浅色界面，"深色主题"这个设置名不副实。自定义编辑器不设限——贴进来的是什么就是什么，那是用户明确要的。
 - **选择器的 Popover 要 `modal`**：它开在设置对话框里，Radix Dialog 的 react-remove-scroll 把 portal 到 body 的弹层当成"对话框外"，滚轮一律 preventDefault，列表滚不动（直接赋 scrollTop 能动，是事件被拦不是 CSS）。modal 让 Popover 自己再压一层滚动锁到栈顶，锁的范围就是弹层本身；点外关闭、点选、进编辑器都不受影响。
 - **旧偏好迁移**：`falcon.theme`（明暗模式字符串）直接带过来；`falcon.term.themeId` 能对上 Ghostty 名字的（14 个）在首次启动异步拉目录后补进对应槽位，Campbell / Light+ 没有对应，落回 Falcon 默认。`sanitizeTermPref` 现在直接丢掉 themeId。
-- **内置目录的产物格式**：每行 `名字 \t 22 个不带 # 的 rrggbb`，77KB / gz 31KB，独立 chunk 只在打开选择器时拉；`ghostty-themes.meta.ts` 单独给设置页显示条数与来源。`pnpm vendor-ghostty-themes` 优先读本机 `Ghostty.app/Contents/Resources/ghostty/themes`（就是用户那个 Ghostty 认的主题），没装才去 GitHub 稀疏克隆。
+- **内置目录的产物格式**：每行 `名字 \t 22 个不带 # 的 rrggbb`，77KB / gz 31KB，独立 chunk 只在打开选择器时拉；`ghostty-themes.meta.ts` 单独给设置页显示条数与来源。`cargo xtask vendor-themes`（原 `pnpm vendor-ghostty-themes`）优先读本机 `Ghostty.app/Contents/Resources/ghostty/themes`（就是用户那个 Ghostty 认的主题），没装才去 GitHub 稀疏克隆。
 
 ## 供应链与授权
 
@@ -46,5 +46,5 @@
 
 - `styles.css` 里不再有两套颜色；新增语义色去 `derive.ts` 加一条派生规则并补测试，别回到 CSS 写死。
 - 主题的深浅与明暗模式是两个概念（CONTEXT.md 已收录），代码里 `themeMode` 是槽位、`activeTheme.appearance` 是深浅，别混用。
-- Ghostty 升级新增主题时跑一次 `pnpm vendor-ghostty-themes` 再提交产物；目录条数变了测试会提醒。
+- Ghostty 升级新增主题时跑一次 `cargo xtask vendor-themes` 再提交产物；目录条数变了测试会提醒。
 - 明确不做（可后补）：主题随会话 / 项目区分；自定义主题多套并存（现在一个槽位只存一套自定义）；从 Ghostty 配置文件路径直接读取（浏览器拿不到本机文件，只能贴）。

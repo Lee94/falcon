@@ -1,6 +1,6 @@
 //! 内置主题目录：Falcon 自己的两套默认 + Ghostty 1.3.1 内置的 463 套（`lib/theme/catalog.ts`）。
 //!
-//! Ghostty 那份数据由 `scripts/vendor-ghostty-themes.mjs` 从 Ghostty.app（或 GitHub）
+//! Ghostty 那份数据由 `cargo xtask vendor-themes` 从 Ghostty.app（或 GitHub）
 //! 生成到 `data/ghostty-themes.tsv`，编译期 `include_str!` 嵌进来（77KB 文本），
 //! **启动时一行都不解析**：
 //!
@@ -26,7 +26,7 @@ use crate::pref::ThemeMode;
 include!("../data/ghostty-themes.meta.rs");
 
 /// 内置 Ghostty 主题数据：每行 `名字 \t 22 个不带 # 的 rrggbb`，顺序是
-/// bg fg cursor cursorText selBg selFg palette0..15（与 scripts/vendor-ghostty-themes.mjs
+/// bg fg cursor cursorText selBg selFg palette0..15（与 xtask/src/themes.rs
 /// 的 KEYS 一致）。与 web 的 `GHOSTTY_THEMES_DATA` 逐字节相同。
 pub const GHOSTTY_THEMES_DATA: &str = include_str!("../data/ghostty-themes.tsv");
 
