@@ -19,6 +19,7 @@ pub mod relays;
 pub mod sessions;
 pub mod static_files;
 pub mod system;
+pub mod worktrees;
 pub mod ws;
 
 use std::sync::Arc;
@@ -128,6 +129,7 @@ fn protected_router() -> Router<AppState> {
         .merge(projects::router())
         .merge(relays::router())
         .merge(git_routes::router())
+        .merge(worktrees::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）

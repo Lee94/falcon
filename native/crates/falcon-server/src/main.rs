@@ -51,6 +51,8 @@ fn main() -> anyhow::Result<()> {
             engine.sessions.restore_relays();
             // 持久会话在 DB 里被标成 unverified：自动接回，不要等用户挨个点
             engine.sessions.resume_unverified();
+            // 存档到期的附属项目由后台清扫自动删除，不等用户下次打开界面
+            falcon_server::archive::start_archive_sweeper(engine);
         },
     )?;
     {
