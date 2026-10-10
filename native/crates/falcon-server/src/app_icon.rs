@@ -12,24 +12,23 @@
 //! 复用 falcon-core 的 `app_icon`：图标 id 表、默认图标、`custom` 字面量、自定义图边长、
 //! `is_builtin`；线上形状 `AppIconState` 用 falcon-proto 的。
 //!
-//! `AppIcons` 读写 settings 走 [`SettingsStore`]（S2 的 Db 实现它），文件操作照 TS 直接做。
+//! `AppIcons` 读写 settings 走 [`SettingsStore`]（与 auth 共用同一个 trait，Db 实现它），
+//! 文件操作照 TS 直接做（同步 std::fs；路由在阻塞线程池上调它们）。
 //!
-//! 留到 S2 的：`registerAppIconRoutes`（8 条路由：取 / 改选择、上传 / 删除自定义图、
-//! `custom.png`、favicon / apple-touch 跳转、`/manifest.webmanifest`，以及 `publicAsset` 放行）。
-//! 路由里用到的纯判断（缓存头、拒收的状态码）在 [`custom_icon_cache_control`] /
-//! [`custom_icon_reject_status`]。
+//! 路由（TS 的 `registerAppIconRoutes`）在 `api/app_icon.rs`；那边用到的纯判断（缓存头、
+//! 拒收的状态码）在 [`custom_icon_cache_control`] / [`custom_icon_reject_status`]。
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
 pub use falcon_core::app_icon::{APP_ICON_CUSTOM_SIZE, APP_ICON_IDS, CUSTOM, DEFAULT_APP_ICON};
 pub use falcon_proto::AppIconState;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub use crate::auth::SettingsStore;
 use crate::term_env::js;
 
 // ---------------- shared/appIcon.ts ----------------
@@ -243,32 +242,6 @@ pub fn custom_icon_cache_control(v: Option<&str>, current: Option<&str>) -> &'st
     }
 }
 
-/// settings 表的读写（TS 的 `Db.getSetting` / `setSetting`）。S2 的 Db 实现它。
-pub trait SettingsStore {
-    /// 没有这一行时 None
-    fn get_setting(&self, key: &str) -> Result<Option<String>>;
-    /// 有就改、没有就插（`INSERT … ON CONFLICT(key) DO UPDATE`）
-    fn set_setting(&self, key: &str, value: &str) -> Result<()>;
-}
-
-impl<T: SettingsStore + ?Sized> SettingsStore for &T {
-    fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        (**self).get_setting(key)
-    }
-    fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        (**self).set_setting(key, value)
-    }
-}
-
-impl<T: SettingsStore + ?Sized> SettingsStore for std::sync::Arc<T> {
-    fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        (**self).get_setting(key)
-    }
-    fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        (**self).set_setting(key, value)
-    }
-}
-
 /// 应用图标的存取：选择在 settings 表，自定义图在 `<dataDir>/app-icon/custom.png`
 pub struct AppIcons<S> {
     db: S,
@@ -284,60 +257,66 @@ impl<S: SettingsStore> AppIcons<S> {
     }
 
     /// 自定义图的版本；库里记着但文件没了（被手动删掉）也当没有
-    fn custom_version(&self) -> Result<Option<String>> {
-        let v = self.db.get_setting(CUSTOM_KEY)?;
-        Ok(v.filter(|v| !v.is_empty() && self.file.exists()))
+    fn custom_version(&self) -> Option<String> {
+        self.db.get_setting(CUSTOM_KEY).filter(|v| !v.is_empty() && self.file.exists())
     }
 
-    pub fn state(&self) -> Result<AppIconState> {
-        let custom = self.custom_version()?;
-        let stored = self.db.get_setting(SELECTED_KEY)?;
-        Ok(AppIconState { selected: resolve_app_icon(stored.as_deref(), custom.as_deref()).to_string(), custom })
+    pub fn state(&self) -> AppIconState {
+        let custom = self.custom_version();
+        let stored = self.db.get_setting(SELECTED_KEY);
+        AppIconState { selected: resolve_app_icon(stored.as_deref(), custom.as_deref()).to_string(), custom }
     }
 
     /// 返回 None = 这个选择不成立（未知 id，或选自定义但还没传图）
-    pub fn select(&self, choice: Option<&Value>) -> Result<Option<AppIconState>> {
+    pub fn select(&self, choice: Option<&Value>) -> Option<AppIconState> {
         let Some(Value::String(choice)) = choice.filter(|c| is_app_icon_choice(Some(c))) else {
-            return Ok(None);
+            return None;
         };
-        if choice == CUSTOM && self.custom_version()?.is_none() {
-            return Ok(None);
+        if choice == CUSTOM && self.custom_version().is_none() {
+            return None;
         }
-        self.db.set_setting(SELECTED_KEY, choice)?;
-        self.state().map(Some)
+        self.db.set_setting(SELECTED_KEY, choice);
+        Some(self.state())
     }
 
-    /// 存下自定义图并选中它。先写临时文件再改名：中途失败不留半张图
-    pub fn save_custom(&self, buf: &[u8]) -> Result<AppIconState> {
+    /// 存下自定义图并选中它。先写临时文件再改名：中途失败不留半张图。
+    ///
+    /// 临时名带随机段：Node 版只带 pid（单线程，同一进程里两次保存不会交错），这里的路由跑在
+    /// 多线程运行时上，两次并发上传会写同一个临时文件、互相截断
+    pub fn save_custom(&self, buf: &[u8]) -> io::Result<AppIconState> {
         let digest = Sha256::digest(buf);
         let version: String = digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..16].to_string();
         fs::create_dir_all(&self.dir)?;
+        let mut tag = [0u8; 4];
+        rand::fill(&mut tag[..]);
         let mut tmp = self.file.as_os_str().to_owned();
-        tmp.push(format!(".{}.tmp", std::process::id()));
+        tmp.push(format!(".{}.{}.tmp", std::process::id(), hex::encode(tag)));
         let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, buf)?;
-        fs::rename(&tmp, &self.file)?;
-        self.db.set_setting(CUSTOM_KEY, &version)?;
-        self.db.set_setting(SELECTED_KEY, CUSTOM)?;
-        self.state()
+        if let Err(e) = fs::write(&tmp, buf).and_then(|()| fs::rename(&tmp, &self.file)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        self.db.set_setting(CUSTOM_KEY, &version);
+        self.db.set_setting(SELECTED_KEY, CUSTOM);
+        Ok(self.state())
     }
 
     /// 删掉自定义图；正选着它就回默认（state() 的 resolve 自己会回落，这里把库也改干净）
-    pub fn remove_custom(&self) -> Result<AppIconState> {
+    pub fn remove_custom(&self) -> io::Result<AppIconState> {
         match fs::remove_file(&self.file) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         }
-        self.db.set_setting(CUSTOM_KEY, "")?;
-        if self.db.get_setting(SELECTED_KEY)?.as_deref() == Some(CUSTOM) {
-            self.db.set_setting(SELECTED_KEY, "")?;
+        self.db.set_setting(CUSTOM_KEY, "");
+        if self.db.get_setting(SELECTED_KEY).as_deref() == Some(CUSTOM) {
+            self.db.set_setting(SELECTED_KEY, "");
         }
-        self.state()
+        Ok(self.state())
     }
 
-    pub fn custom_file(&self) -> Result<Option<PathBuf>> {
-        Ok(self.custom_version()?.map(|_| self.file.clone()))
+    pub fn custom_file(&self) -> Option<PathBuf> {
+        self.custom_version().map(|_| self.file.clone())
     }
 }
 
@@ -345,8 +324,8 @@ impl<S: SettingsStore> AppIcons<S> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     fn state(selected: &str, custom: Option<&str>) -> AppIconState {
         AppIconState { selected: selected.into(), custom: custom.map(Into::into) }
@@ -497,17 +476,16 @@ mod tests {
         buf
     }
 
-    /// 测试用的 settings 表（TS 用的是真 Db；Db 在 S2）
+    /// 测试用的 settings 表（TS 用的是真 Db）
     #[derive(Default)]
-    struct MemSettings(RefCell<HashMap<String, String>>);
+    struct MemSettings(Mutex<HashMap<String, String>>);
 
     impl SettingsStore for MemSettings {
-        fn get_setting(&self, key: &str) -> Result<Option<String>> {
-            Ok(self.0.borrow().get(key).cloned())
+        fn get_setting(&self, key: &str) -> Option<String> {
+            self.0.lock().unwrap().get(key).cloned()
         }
-        fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-            self.0.borrow_mut().insert(key.into(), value.into());
-            Ok(())
+        fn set_setting(&self, key: &str, value: &str) {
+            self.0.lock().unwrap().insert(key.into(), value.into());
         }
     }
 
@@ -556,17 +534,17 @@ mod tests {
     fn app_icons_default_when_never_set() {
         // 没设置过是默认图标
         let (icons, _dir) = tmp_icons();
-        assert_eq!(icons.state().unwrap(), state("emberwing", None));
+        assert_eq!(icons.state(), state("emberwing", None));
     }
 
     #[test]
     fn app_icons_select_builtin_and_reject_unknown_or_custom_without_image() {
         // 选内置图标；未知 id、还没传图时选自定义都不成立
         let (icons, _dir) = tmp_icons();
-        assert_eq!(icons.select(Some(&json!("flash"))).unwrap(), Some(state("flash", None)));
-        assert_eq!(icons.select(Some(&json!("nope"))).unwrap(), None);
-        assert_eq!(icons.select(Some(&json!("custom"))).unwrap(), None);
-        assert_eq!(icons.state().unwrap().selected, "flash");
+        assert_eq!(icons.select(Some(&json!("flash"))), Some(state("flash", None)));
+        assert_eq!(icons.select(Some(&json!("nope"))), None);
+        assert_eq!(icons.select(Some(&json!("custom"))), None);
+        assert_eq!(icons.state().selected, "flash");
     }
 
     #[test]
@@ -581,11 +559,11 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("app-icon").join("custom.png")).unwrap(), png);
 
         // 改选内置再选回自定义，图还在
-        icons.select(Some(&json!("glyph"))).unwrap();
-        assert_eq!(icons.select(Some(&json!("custom"))).unwrap().map(|s| s.selected).as_deref(), Some("custom"));
+        icons.select(Some(&json!("glyph")));
+        assert_eq!(icons.select(Some(&json!("custom"))).map(|s| s.selected).as_deref(), Some("custom"));
 
         assert_eq!(icons.remove_custom().unwrap(), state("emberwing", None));
-        assert_eq!(icons.custom_file().unwrap(), None);
+        assert_eq!(icons.custom_file(), None);
     }
 
     #[test]
@@ -594,7 +572,7 @@ mod tests {
         let (icons, dir) = tmp_icons();
         icons.save_custom(&fake_png(256, 256)).unwrap();
         fs::remove_file(dir.path().join("app-icon").join("custom.png")).unwrap();
-        assert_eq!(icons.state().unwrap(), state("emberwing", None));
+        assert_eq!(icons.state(), state("emberwing", None));
     }
 
     #[test]

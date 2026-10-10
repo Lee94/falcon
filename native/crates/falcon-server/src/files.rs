@@ -9,18 +9,16 @@
 //!
 //! 命令构造是纯函数（list_command / read_command / mkdir_command 等）、输出解析
 //! 也是（parse_entries / parse_read / classify），照 git 与 zellij 那两套的分层
-//! 来，测试只打这一层。
+//! 来，测试主要打这一层。mkdir / rename / remove 开头那段路径运算与护栏另拆成
+//! [`mkdir_target`] / [`rename_target`] / [`remove_target`]（TS 里是内联在 async 函数里的），
+//! 远端失败时 `remoteError(res.stdout || res.stderr, res.stderr.trim() || …)` 这个反复出现的
+//! 写法收成 [`remote_failure`]。
 //!
-//! ## S1 只移纯函数
-//!
-//! 留到 S5 的函数（TS 名）：`listLocal`、`listWorkspace`、`indexLocal`、`indexWorkspace`、
-//! `readLocal`、`readWorkspaceBytes`、`readWorkspaceFile`、`mkdirWorkspace`、`mkdirLocal`、
-//! `renameWorkspace`、`renameLocal`、`removeWorkspace`、`removeLocal`、`execTimed`，以及
-//! 类型 `FileHost` / `ExecChannel` / `ExecStreamFn`——它们要 ExecFn、流式 exec 或本机
-//! 文件系统。它们调用的纯函数都在这里；mkdir / rename / remove 开头那段路径运算与
-//! 护栏另拆成 [`mkdir_target`] / [`rename_target`] / [`remove_target`]（TS 里是内联在
-//! async 函数里的），远端失败时 `remoteError(res.stdout || res.stderr, res.stderr.trim() || …)`
-//! 这个反复出现的写法收成 [`remote_failure`]，S5 直接调。
+//! 运行时那一半（[`list_workspace`] 等）对 [`FileHost`] 分两路：本地直接读写本机文件系统
+//! （阻塞调用一律进 `spawn_blocking`——Node 版是 libuv 线程池上的 fs.promises，不占事件
+//! 循环；这里调用方多半在会话引擎的单线程 LocalSet 上，更不能堵），远端走宿主机 exec。
+//! 远端执行器攥着 `Rc` 的链路状态，所以这些 async 函数都是 `!Send` 的，路由经
+//! `engine.call` 在引擎上跑它们。
 //!
 //! 错误：TS 一律 `throw new Error(中文消息)`，路由按**消息原文**分状态码（见
 //! [`FileError`]）。这里换成枚举，`Display` 与 TS 的消息逐字一致。
@@ -28,16 +26,18 @@
 use std::cmp::Ordering;
 use std::io;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use falcon_proto::{
-    FilePreview, WORKSPACE_INDEX_CAP, WORKSPACE_LIST_CAP, WORKSPACE_RAW_CAP, WorkspaceEntry, WorkspaceEntryKind,
-    WorkspaceIndex, WorkspaceListing,
+    FileOpResult, FilePreview, FileRemoveError, FileRemoveResult, WORKSPACE_FILE_CAP, WORKSPACE_INDEX_CAP,
+    WORKSPACE_LIST_CAP, WORKSPACE_RAW_CAP, WorkspaceEntry, WorkspaceEntryKind, WorkspaceIndex, WorkspaceListing,
 };
 use regex::Regex;
+use tokio_util::sync::CancellationToken;
 
-use crate::exec::ExecResult;
+use crate::exec::{Exec, ExecResult, LocalBoxFuture};
 use crate::git::path::{dirname_of, is_ancestor, join_path, normalize_sep, same_path};
+use crate::sessions::ssh::SshLink;
 use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 pub const LIST_TIMEOUT: Duration = Duration::from_millis(15_000);
@@ -831,6 +831,346 @@ pub fn remove_target(kind: HostKind, root: &str, rel: &str) -> Result<RemoveTarg
     Ok(RemoveTarget { path, full })
 }
 
+// ---------------- 执行环境 ----------------
+
+/// 远端命令的流式通道：写入端是命令的 stdin，读取端是 stdout，`ExitStatus` 带退出码
+/// （TS 的 `ExecChannel`：ssh2 的 ClientChannel 正是这个形状）。下载 / 上传（transfer.rs）
+/// 按流走，exec 那种"攒成字符串"的形状装不下一个几百 MB 的文件。
+///
+/// russh 的 Channel 是 `Send` 的：可以从会话引擎里拿出来，在 HTTP 处理器的线程上读写。
+pub type ExecChannel = russh::Channel<russh::client::Msg>;
+
+/// 远端宿主机：攒成字符串的 exec 之外，还要流式通道（TS 的 `ExecStreamFn`）。
+/// 正式实现是 [`SshLink`]；测试里用一个经本机 sh 跑命令的假远端，把远端脚本也跑一遍。
+pub trait RemoteHost: Exec {
+    fn exec_stream<'a>(&'a self, command_line: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>>;
+}
+
+impl RemoteHost for SshLink {
+    fn exec_stream<'a>(&'a self, command_line: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
+        // 不要 pty：下载 / 上传要的是原样的字节流，pty 会把 \n 改成 \r\n、把 stderr 并进来
+        Box::pin(SshLink::exec_stream(self, command_line, false))
+    }
+}
+
+/// 执行环境。本地不走 exec——node_modules 那种目录用 shell 循环列会慢到没法用
+#[derive(Clone, Copy)]
+pub enum FileHost<'a> {
+    Local { kind: HostKind },
+    Remote { kind: HostKind, remote: &'a dyn RemoteHost },
+}
+
+impl FileHost<'_> {
+    pub fn kind(&self) -> HostKind {
+        match self {
+            FileHost::Local { kind } | FileHost::Remote { kind, .. } => *kind,
+        }
+    }
+}
+
+/// 带超时的远端 exec（TS 的 `execTimed`）。超时报 `timeout_msg`，exec 本身起不来（链路故障）
+/// 报 "SSH 连接失败：…"；非零退出码照 ExecFn 的铁律原样返回，由调用方查 `code`。
+///
+/// 超时先经取消令牌让执行器收尾（远端关通道、本地杀进程），再等一小会儿就放手——
+/// 链路卡在握手里时执行器根本看不到令牌，不能一直等它
+pub(crate) async fn exec_timed(
+    exec: &dyn Exec,
+    command: &str,
+    timeout: Duration,
+    timeout_msg: &str,
+) -> Result<ExecResult, FileError> {
+    let token = CancellationToken::new();
+    let fut = exec.exec(command, Some(&token));
+    tokio::pin!(fut);
+    let res = tokio::select! {
+        r = &mut fut => r,
+        () = tokio::time::sleep(timeout) => {
+            token.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(2), &mut fut).await;
+            return Err(FileError::Other(timeout_msg.to_string()));
+        }
+    };
+    res.map_err(|e| FileError::Other(format!("SSH 连接失败：{e:#}")))
+}
+
+/// 本机文件系统的阻塞调用挪到阻塞线程池上跑（tokio 的 current_thread 运行时也有这个池）
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, FileError> + Send + 'static) -> Result<T, FileError> {
+    tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(FileError::Other(e.to_string())))
+}
+
+/// `Math.floor(stat.mtimeMs / 1000)`：Unix 秒，1970 年以前的向下取整成负数
+fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    match meta.modified() {
+        Ok(t) => match t.duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs() as i64,
+            Err(e) => -(e.duration().as_secs_f64().ceil() as i64),
+        },
+        Err(_) => 0,
+    }
+}
+
+// ---------------- 列目录（运行时） ----------------
+
+fn list_local(kind: HostKind, dir: &str, rel: &str) -> Result<WorkspaceListing, FileError> {
+    let dirents = std::fs::read_dir(dir).map_err(|e| local_error(&e, "无法读取该目录"))?;
+    let mut entries = Vec::new();
+    for ent in dirents.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        let full = join_path(kind, &[dir, &name]);
+        // 跟过去看：指向目录的链接算 dir。断掉的链接当文件，size / mtime 用 lstat
+        let st = match std::fs::metadata(&full).or_else(|_| std::fs::symlink_metadata(&full)) {
+            Ok(st) => st,
+            Err(_) => continue,
+        };
+        let is_dir = st.is_dir();
+        entries.push(WorkspaceEntry {
+            path: rel_join(rel, &name),
+            name,
+            kind: if is_dir { WorkspaceEntryKind::Dir } else { WorkspaceEntryKind::File },
+            size: (!is_dir).then(|| st.len()),
+            mtime: Some(mtime_secs(&st)),
+        });
+    }
+    Ok(cap_entries(entries, rel))
+}
+
+/// 列工作目录里的一层。`rel` 为空表示工作目录本身
+pub async fn list_workspace(host: &FileHost<'_>, root: &str, rel: Option<&str>) -> Result<WorkspaceListing, FileError> {
+    let rel_path = rel_segments(rel)?.join("/");
+    let kind = host.kind();
+    let dir = resolve_inside(kind, root, rel)?;
+    let FileHost::Remote { remote, .. } = *host else {
+        return blocking(move || list_local(kind, &dir, &rel_path)).await;
+    };
+    let res = exec_timed(remote, &list_command(kind, &dir), LIST_TIMEOUT, "读取超时").await?;
+    if !res.ok() {
+        return Err(remote_failure(&res, "无法读取该目录"));
+    }
+    Ok(cap_entries(parse_entries(&res.stdout, &rel_path), &rel_path))
+}
+
+// ---------------- 文件索引（运行时） ----------------
+
+fn index_local(kind: HostKind, root: &str) -> WorkspaceIndex {
+    let mut paths = Vec::new();
+    let mut stack = vec![String::new()];
+    while let Some(rel) = stack.pop() {
+        let dir = if rel.is_empty() {
+            root.to_string()
+        } else {
+            let parts: Vec<&str> = std::iter::once(root).chain(rel.split('/')).collect();
+            join_path(kind, &parts)
+        };
+        let Ok(dirents) = std::fs::read_dir(&dir) else { continue };
+        for ent in dirents.flatten() {
+            // DirEntry::file_type 不跟符号链接（同 Node 的 Dirent）
+            let Ok(ft) = ent.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if INDEX_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            let child = rel_join(&rel, &name);
+            if ft.is_dir() {
+                stack.push(child);
+                continue;
+            }
+            paths.push(child);
+            if paths.len() >= WORKSPACE_INDEX_CAP {
+                return WorkspaceIndex { paths, truncated: true };
+            }
+        }
+    }
+    WorkspaceIndex { paths, truncated: false }
+}
+
+/// 非 git 项目的兜底：遍历工作目录，跳过 INDEX_SKIP_DIRS
+pub async fn index_workspace(host: &FileHost<'_>, root: &str) -> Result<WorkspaceIndex, FileError> {
+    let kind = host.kind();
+    let dir = resolve_inside(kind, root, Some(""))?;
+    let FileHost::Remote { remote, .. } = *host else {
+        return blocking(move || Ok(index_local(kind, &dir))).await;
+    };
+    let res = exec_timed(remote, &index_command(kind, &dir), INDEX_TIMEOUT, "读取超时").await?;
+    if !res.ok() {
+        return Err(remote_failure(&res, "无法读取该目录"));
+    }
+    Ok(parse_index_lines(&res.stdout, &dir, kind))
+}
+
+// ---------------- 读文件（运行时） ----------------
+
+fn read_local(file: &str, cap: u64) -> Result<ReadResult, FileError> {
+    use std::io::Read as _;
+    let stat = std::fs::metadata(file).map_err(|e| local_error(&e, "读不到该文件"))?;
+    if stat.is_dir() {
+        return Err(FileError::IsDir);
+    }
+    let size = stat.len();
+    let want = size.min(cap);
+    // 只要大小（图片）就不开文件了
+    if want == 0 {
+        return Ok(ReadResult { size, bytes: Vec::new() });
+    }
+    let handle = std::fs::File::open(file).map_err(|e| local_error(&e, "读不到该文件"))?;
+    let mut bytes = Vec::with_capacity(want as usize);
+    handle.take(want).read_to_end(&mut bytes).map_err(|e| local_error(&e, "读不到该文件"))?;
+    Ok(ReadResult { size, bytes })
+}
+
+/// 读工作目录里一个文件的前 cap 个字节，连同真实大小与文件名（最后一段）。查看 tab 与
+/// 原始字节路由共用：前者对文本取 WORKSPACE_FILE_CAP、对图片取 0（只要大小），后者取
+/// WORKSPACE_RAW_CAP；下载取 0（只为在响应头发出之前把错误判掉）。
+pub async fn read_workspace_bytes(
+    host: &FileHost<'_>,
+    root: &str,
+    rel: &str,
+    cap: u64,
+) -> Result<(String, ReadResult), FileError> {
+    let segs = rel_segments(Some(rel))?;
+    let Some(name) = segs.last().cloned() else {
+        return Err(FileError::InvalidPath);
+    };
+    let kind = host.kind();
+    let file = resolve_inside(kind, root, Some(rel))?;
+    let FileHost::Remote { remote, .. } = *host else {
+        let read = blocking(move || read_local(&file, cap)).await?;
+        return Ok((name, read));
+    };
+    let timeout = if cap > WORKSPACE_FILE_CAP { RAW_TIMEOUT } else { READ_TIMEOUT };
+    let res = exec_timed(remote, &read_command(kind, &file, cap), timeout, "读取超时").await?;
+    if !res.ok() {
+        return Err(remote_failure(&res, "读不到该文件"));
+    }
+    Ok((name, parse_read(&res.stdout)?))
+}
+
+/// 读工作目录里的一个文件，供查看 tab 渲染
+pub async fn read_workspace_file(host: &FileHost<'_>, root: &str, rel: &str) -> Result<FilePreview, FileError> {
+    let segs = rel_segments(Some(rel))?;
+    let name = segs.last().map(String::as_str).unwrap_or("");
+    // 图片的字节浏览器会自己去原始字节路由取，这里只要大小；`head -c 0` 与
+    // PowerShell 那个 0 字节循环都是合法的空读
+    let cap = if image_mime_of(name).is_some() { 0 } else { WORKSPACE_FILE_CAP };
+    let (name, read) = read_workspace_bytes(host, root, rel, cap).await?;
+    Ok(classify(&name, read.size, &read.bytes))
+}
+
+// ---------------- 改目录（运行时） ----------------
+
+pub async fn mkdir_workspace(
+    host: &FileHost<'_>,
+    root: &str,
+    rel: &str,
+    recursive: bool,
+) -> Result<FileOpResult, FileError> {
+    let kind = host.kind();
+    let MkdirTarget { path, dir, parent } = mkdir_target(kind, root, rel)?;
+    let FileHost::Remote { remote, .. } = *host else {
+        blocking(move || mkdir_local(&dir, &parent, recursive)).await?;
+        return Ok(FileOpResult { path });
+    };
+    let res = exec_timed(remote, &mkdir_command(kind, &dir, &parent, recursive), MKDIR_TIMEOUT, "操作超时").await?;
+    if !res.ok() {
+        return Err(remote_failure(&res, "无法创建文件夹"));
+    }
+    Ok(FileOpResult { path })
+}
+
+fn mkdir_local(dir: &str, parent: &str, recursive: bool) -> Result<(), FileError> {
+    if !recursive {
+        let pst = std::fs::metadata(parent).map_err(|e| local_error(&e, "上级目录不可访问"))?;
+        if !pst.is_dir() {
+            return Err(FileError::NotDir);
+        }
+    }
+    // create_dir_all 遇到已存在的目录算成功、已存在的文件报 AlreadyExists（"同名文件已存在"），
+    // 与 Node 的 mkdir({ recursive: true }) 一致
+    let res = if recursive { std::fs::create_dir_all(dir) } else { std::fs::create_dir(dir) };
+    res.map_err(|e| local_error(&e, "无法创建文件夹"))
+}
+
+pub async fn rename_workspace(
+    host: &FileHost<'_>,
+    root: &str,
+    rel: &str,
+    name: &str,
+) -> Result<FileOpResult, FileError> {
+    let kind = host.kind();
+    let RenameTarget { path, src, dst, unchanged } = rename_target(kind, root, rel, name)?;
+    if unchanged {
+        return Ok(FileOpResult { path });
+    }
+    let FileHost::Remote { remote, .. } = *host else {
+        blocking(move || rename_local(&src, &dst)).await?;
+        return Ok(FileOpResult { path });
+    };
+    let res = exec_timed(remote, &rename_command(kind, &src, &dst), RENAME_TIMEOUT, "操作超时").await?;
+    if !res.ok() {
+        return Err(remote_failure(&res, "无法重命名"));
+    }
+    Ok(FileOpResult { path })
+}
+
+fn rename_local(src: &str, dst: &str) -> Result<(), FileError> {
+    std::fs::symlink_metadata(src).map_err(|e| local_error(&e, "路径不存在或不可访问"))?;
+    match std::fs::symlink_metadata(dst) {
+        Ok(_) => return Err(FileError::Exists),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(local_error(&e, "无法重命名")),
+    }
+    std::fs::rename(src, dst).map_err(|e| local_error(&e, "无法重命名"))
+}
+
+/// 删除工作目录里的若干项。每条单独试，互不挡住；失败的连同 rel 原文记进 errors
+pub async fn remove_workspace<S: AsRef<str>>(
+    host: &FileHost<'_>,
+    root: &str,
+    rels: &[S],
+) -> FileRemoveResult {
+    let kind = host.kind();
+    let mut removed = Vec::new();
+    let mut errors = Vec::new();
+    for rel in collapse_remove_paths(rels) {
+        let outcome = async {
+            let RemoveTarget { path, full } = remove_target(kind, root, &rel)?;
+            match *host {
+                FileHost::Local { .. } => blocking(move || remove_local(&full)).await?,
+                FileHost::Remote { remote, .. } => {
+                    let res = exec_timed(remote, &remove_command(kind, &full), REMOVE_TIMEOUT, "操作超时").await?;
+                    if !res.ok() {
+                        return Err(remote_failure(&res, "无法删除"));
+                    }
+                }
+            }
+            Ok(path)
+        }
+        .await;
+        match outcome {
+            Ok(path) => removed.push(path),
+            Err(e) => errors.push(FileRemoveError { path: rel, error: e.to_string() }),
+        }
+    }
+    FileRemoveResult { removed, errors }
+}
+
+/// `fs.rm(full, { recursive: true, force: false })`：按 lstat 判断，符号链接只删链接本身、
+/// 不跟过去（工作目录里一条指向 /etc 的链接被删掉，不该把 /etc 带走）；目录递归删，
+/// `remove_dir_all` 同样不穿越里面的符号链接
+fn remove_local(full: &str) -> Result<(), FileError> {
+    let meta = std::fs::symlink_metadata(full).map_err(|e| local_error(&e, "无法删除"))?;
+    let res = if meta.is_dir() {
+        std::fs::remove_dir_all(full)
+    } else {
+        // Windows 上指向目录的符号链接 / junction 要用 remove_dir 删
+        let is_link = meta.file_type().is_symlink();
+        std::fs::remove_file(full).or_else(|e| if is_link { std::fs::remove_dir(full) } else { Err(e) })
+    };
+    res.map_err(|e| local_error(&e, "无法删除"))
+}
+
 // ---------------- JS 语义的几处小工具 ----------------
 //
 // 照抄 TS 时 Rust 标准库里同名的东西语义不一样，差异收在这里（与 falcon-core 的 js.rs
@@ -1386,5 +1726,181 @@ mod tests {
     fn collapse_sorts_by_utf16_like_js() {
         // U+FF01 在 UTF-16 里排在增补平面（代理对 0xD83D…）之后，码点序正相反
         assert_eq!(collapse_remove_paths(&["\u{ff01}", "\u{1f600}"]), ["\u{1f600}", "\u{ff01}"]);
+    }
+}
+
+/// 运行时：本地那一路直接打本机文件系统；远端那一路用一个经本机 `sh` 执行命令的假远端，
+/// POSIX 远端脚本（ls / stat / find / head | base64 / mkdir / mv / rm）真跑一遍，
+/// 两路的结果对拍。Windows 远端只能真机验。
+#[cfg(all(test, unix))]
+pub(crate) mod runtime_tests {
+    use super::*;
+    use crate::exec::local_exec;
+    use std::path::Path;
+
+    /// 假远端：命令交给本机 sh（与 SSH exec 同样是"一条命令行 → code / stdout / stderr"）
+    pub(crate) struct ShRemote;
+
+    impl Exec for ShRemote {
+        fn exec<'a>(
+            &'a self,
+            command_line: &'a str,
+            cancel: Option<&'a CancellationToken>,
+        ) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>> {
+            Box::pin(async move { Ok(local_exec(command_line, cancel).await) })
+        }
+    }
+
+    impl RemoteHost for ShRemote {
+        fn exec_stream<'a>(&'a self, _: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
+            Box::pin(async { anyhow::bail!("测试里没有 SSH 通道") })
+        }
+    }
+
+    /// 链路坏掉的远端：exec 本身起不来
+    struct DeadRemote;
+
+    impl Exec for DeadRemote {
+        fn exec<'a>(&'a self, _: &'a str, _: Option<&'a CancellationToken>) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>> {
+            Box::pin(async { anyhow::bail!("连接被拒绝") })
+        }
+    }
+
+    const LOCAL: FileHost<'static> = FileHost::Local { kind: HostKind::Posix };
+    const REMOTE: FileHost<'static> = FileHost::Remote { kind: HostKind::Posix, remote: &ShRemote };
+
+    fn tmp() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_string_lossy().into_owned();
+        (dir, root)
+    }
+
+    fn write(root: &str, rel: &str, content: impl AsRef<[u8]>) {
+        let p = Path::new(root).join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_local_and_remote_agree() {
+        let (_dir, root) = tmp();
+        write(&root, "b.txt", "hello");
+        write(&root, "中文 名.md", "x");
+        write(&root, ".github/ci.yml", "y");
+        write(&root, "src/a.rs", "z");
+        let local = list_workspace(&LOCAL, &root, None).await.unwrap();
+        let remote = list_workspace(&REMOTE, &root, None).await.unwrap();
+        assert_eq!(local, remote);
+        let names: Vec<&str> = local.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [".github", "src", "b.txt", "中文 名.md"]);
+        assert_eq!(local.entries[2].size, Some(5));
+        assert!(local.entries[2].mtime.unwrap() > 1_600_000_000);
+
+        let sub = list_workspace(&REMOTE, &root, Some("src")).await.unwrap();
+        assert_eq!((sub.path.as_str(), sub.entries[0].path.as_str()), ("src", "src/a.rs"));
+        for host in [LOCAL, REMOTE] {
+            assert_eq!(list_workspace(&host, &root, Some("nope")).await.unwrap_err(), FileError::NotFound);
+            assert_eq!(list_workspace(&host, &root, Some("b.txt")).await.unwrap_err(), FileError::NotDir);
+            assert_eq!(list_workspace(&host, &root, Some("../x")).await.unwrap_err(), FileError::InvalidPath);
+        }
+    }
+
+    #[tokio::test]
+    async fn index_local_and_remote_agree() {
+        let (_dir, root) = tmp();
+        for f in ["a.txt", "src/lib.rs", "src/deep/x.rs", "node_modules/p/i.js", "dist/o.js", ".git/HEAD"] {
+            write(&root, f, "1");
+        }
+        let mut local = index_workspace(&LOCAL, &root).await.unwrap();
+        let mut remote = index_workspace(&REMOTE, &root).await.unwrap();
+        local.paths.sort();
+        remote.paths.sort();
+        assert_eq!(local, remote);
+        assert_eq!(local.paths, ["a.txt", "src/deep/x.rs", "src/lib.rs"]);
+        assert!(!local.truncated);
+    }
+
+    #[tokio::test]
+    async fn read_local_and_remote_agree() {
+        let (_dir, root) = tmp();
+        write(&root, "t.txt", "你好\n");
+        write(&root, "bin.dat", [1u8, 0, 2, 3]);
+        write(&root, "p.png", [0x89u8; 10]);
+        for host in [LOCAL, REMOTE] {
+            assert_eq!(
+                read_workspace_file(&host, &root, "t.txt").await.unwrap(),
+                FilePreview::Text { text: "你好\n".into(), size: 7, truncated: false }
+            );
+            assert_eq!(read_workspace_file(&host, &root, "bin.dat").await.unwrap(), FilePreview::Binary { size: 4 });
+            assert_eq!(
+                read_workspace_file(&host, &root, "p.png").await.unwrap(),
+                FilePreview::Image { mime: "image/png".into(), size: 10 }
+            );
+            // 只取前 cap 字节，大小照报真实的
+            let (name, read) = read_workspace_bytes(&host, &root, "t.txt", 3).await.unwrap();
+            assert_eq!((name.as_str(), read.size, read.bytes.as_slice()), ("t.txt", 7, "你".as_bytes()));
+            assert_eq!(read_workspace_bytes(&host, &root, "", 3).await.unwrap_err(), FileError::InvalidPath);
+            assert_eq!(read_workspace_file(&host, &root, "nope").await.unwrap_err(), FileError::NotFound);
+        }
+        std::fs::create_dir(Path::new(&root).join("d")).unwrap();
+        assert_eq!(read_workspace_file(&LOCAL, &root, "d").await.unwrap_err(), FileError::IsDir);
+        assert_eq!(read_workspace_file(&REMOTE, &root, "d").await.unwrap_err(), FileError::IsDir);
+    }
+
+    #[tokio::test]
+    async fn mkdir_rename_remove_local_and_remote() {
+        for host in [LOCAL, REMOTE] {
+            let (_dir, root) = tmp();
+            assert_eq!(mkdir_workspace(&host, &root, "a", false).await.unwrap().path, "a");
+            assert_eq!(mkdir_workspace(&host, &root, "a", false).await.unwrap_err(), FileError::Exists);
+            assert_eq!(mkdir_workspace(&host, &root, "x/y", false).await.unwrap_err(), FileError::NotFound);
+            assert_eq!(mkdir_workspace(&host, &root, "x/y", true).await.unwrap().path, "x/y");
+            assert!(mkdir_workspace(&host, &root, "x/y", true).await.is_ok());
+            write(&root, "f", "1");
+            assert_eq!(mkdir_workspace(&host, &root, "f", true).await.unwrap_err(), FileError::Exists);
+
+            assert_eq!(rename_workspace(&host, &root, "f", "g").await.unwrap().path, "g");
+            assert_eq!(rename_workspace(&host, &root, "g", "a").await.unwrap_err(), FileError::Exists);
+            assert_eq!(rename_workspace(&host, &root, "nope", "z").await.unwrap_err(), FileError::NotFound);
+            assert_eq!(rename_workspace(&host, &root, "x/y", "z").await.unwrap().path, "x/z");
+            assert!(Path::new(&root).join("x/z").is_dir());
+
+            // 指向工作目录外的链接只删链接本身
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("keep"), "k").unwrap();
+            std::os::unix::fs::symlink(outside.path(), Path::new(&root).join("link")).unwrap();
+            let res = remove_workspace(&host, &root, &["x", "x/z", "link", "nope", "", "a/../.."]).await;
+            assert_eq!(res.removed, ["link", "x"]);
+            assert_eq!(
+                res.errors,
+                [
+                    FileRemoveError { path: "a/../..".into(), error: "路径不合法".into() },
+                    FileRemoveError { path: "nope".into(), error: "路径不存在或不可访问".into() },
+                ]
+            );
+            assert!(outside.path().join("keep").is_file());
+            assert!(Path::new(&root).is_dir());
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_timed_reports_timeouts_and_link_failures() {
+        let started = std::time::Instant::now();
+        let err = exec_timed(&ShRemote, "sleep 5", Duration::from_millis(100), "操作超时").await.unwrap_err();
+        assert_eq!(err.to_string(), "操作超时");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let err = exec_timed(&DeadRemote, "true", LIST_TIMEOUT, "读取超时").await.unwrap_err();
+        assert_eq!(err.to_string(), "SSH 连接失败：连接被拒绝");
+        // 非零退出码是正常返回值
+        let res = exec_timed(&ShRemote, "exit 3", LIST_TIMEOUT, "读取超时").await.unwrap();
+        assert_eq!(res.code, Some(3));
+        let host = FileHost::Remote { kind: HostKind::Posix, remote: &DeadRemote };
+        assert_eq!(list_workspace(&host, "/r", None).await.unwrap_err().to_string(), "SSH 连接失败：连接被拒绝");
+    }
+
+    impl RemoteHost for DeadRemote {
+        fn exec_stream<'a>(&'a self, _: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
+            Box::pin(async { anyhow::bail!("连接被拒绝") })
+        }
     }
 }

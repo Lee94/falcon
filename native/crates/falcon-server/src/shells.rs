@@ -5,16 +5,15 @@
 //! POSIX 是探测到的登录 shell（见 POSIX_PROBE），Windows 一律 PowerShell
 //! （见 WINDOWS_PROBE_SCRIPT / defaultLocalShell）——选"默认"就等于不设覆盖。
 //!
-//! 留到 S3 的函数：`detectShells`（要走执行器）。它的纯逻辑——"探测失败就只剩默认项、
-//! 成功就解析 stdout 且无视退出码"——拆成了 [`shells_from_probe`]，S3 的 detect_shells
-//! 只需 `shells_from_probe(kind, default, exec(shells_probe(kind)).await.ok().as_ref())`。
+//! [`detect_shells`] 的纯逻辑——"探测失败就只剩默认项、成功就解析 stdout 且无视退出码"——
+//! 拆成了 [`shells_from_probe`]，测试打那一层。
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use falcon_proto::ShellsInfo;
 
-use crate::exec::ExecResult;
+use crate::exec::{Exec, ExecResult};
 use crate::zellij::host::{HostKind, encode_powershell};
 
 /// 常见 POSIX shell。bash/zsh/fish 覆盖绝大多数；pwsh 是跨平台 PowerShell
@@ -178,6 +177,12 @@ pub fn is_shell_command(command: &str, session_shell: Option<&str>) -> bool {
 pub fn shells_from_probe(kind: HostKind, default_shell: &str, res: Option<&ExecResult>) -> ShellsInfo {
     let found = res.map(|r| parse_shell_list(kind, &r.stdout)).unwrap_or_default();
     merge_shells(kind, default_shell, &found)
+}
+
+/// 一次往返侦测宿主机上可用的 shell。探测失败不抛：至少还有默认项可选。
+pub async fn detect_shells(exec: &dyn Exec, kind: HostKind, default_shell: &str) -> ShellsInfo {
+    let res = exec.exec(shells_probe(kind), None).await.ok();
+    shells_from_probe(kind, default_shell, res.as_ref())
 }
 
 // ---------------- JS 语义的私有小工具 ----------------
