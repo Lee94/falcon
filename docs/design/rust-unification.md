@@ -121,7 +121,7 @@ gpui-kit 0.7.1 的 Web 后端就是 Zed `crates/gpui_web` 的重发（`gpui-pre-
 
 | 期 | 内容 | 验收 |
 |---|---|---|
-| **S0 对拍基建** | `falcon-server` 骨架；TS 向量导出脚本（照 `export-ghostty-themes.mjs` 的路子，用 tsx 跑 TS 纯函数落盘 JSON）；`gen-fixtures.mjs` 与 native e2e 的服务端入口参数化（Node / Rust 二选一） | 向量导出跑通，Rust 侧有读向量的测试骨架 |
+| **S0 对拍基建** | `falcon-server` 骨架；TS 向量导出脚本（照 `export-ghostty-themes.mjs` 的路子，用 tsx 跑 TS 纯函数落盘 JSON）；`gen-fixtures.mjs`（现为 `cargo xtask fixtures`）与 native e2e 的服务端入口参数化（Node / Rust 二选一） | 向量导出跑通，Rust 侧有读向量的测试骨架 |
 | **S1 纯函数层** | zellij command / host、git path / command、termEnv、relay / forward / share spec、viewerArbiter、termSize、agent、askpass scripts、shells、virtualdir、paste、cloudflared / px0 / meegle 的 command、px0 头过滤、base64 行编解码、appIcon | 约 30 个测试文件、380 个以上用例的向量**逐字节**通过：发到宿主机的命令串、kdl、启动脚本差一个字节，老会话就可能接不回 |
 | **S2 基础与 HTTP 骨架** | config、crypto、auth、db；axum 鉴权分组、静态托管、错误形状；auth / system / app-icon / hosts / projects 的增删改查 | **Rust 打开现有 `falcon.db` + `secret.key` 并解密出主机凭据**；对应路由 fixture 一致 |
 | **S3 执行层** | localExec（ExecFn 语义：非零退出码是正常返回值）；SshLink（russh：connect、TOFU、exec、stdin EOF、流式通道、两个方向的转发）；probe；zellij install / prepare；`/ws/install` | §2 决定四列的 SSH 四项实测通过 |
@@ -173,7 +173,7 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 
 ### 5.2 契约与端到端
 
-- **fixture**：`native/scripts/gen-fixtures.mjs` 对 Node 与 Rust 服务端各跑一遍，落盘的响应必须一致（排除时间戳、随机 id 等字段）。
+- **fixture**：fixture 生成（原 `native/scripts/gen-fixtures.mjs`，现为 `cargo xtask fixtures`）对 Node 与 Rust 服务端各跑一遍，落盘的响应必须一致（排除时间戳、随机 id 等字段）。
 - **native e2e**（`FALCON_E2E=1`）的服务端入口参数化，两个后端各跑一遍。
 - **接回测试**：持久会话本来就设计成能扛过后端重启。用 TS 版建会话，停掉，再在同一个数据目录上启动 Rust 版，会话原样接回、回放正确、输入正常。这是对 Zellij 命令、会话名、配置文件、DB 兼容性最强的一次性检验。
 - 会话 / SSH / Zellij 仍然只能真机验，和现在的口径一致。
@@ -298,7 +298,7 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 | 浏览器版 GPUI 客户端连 Rust 服务端 | 打开会话、回放、中英文输入正常 |
 | React 前端连 Rust 服务端 | 新建终端、中文输入、侧栏改动徽标、修改面板提交、历史面板、文件面板与文件查看；控制台与服务端日志都没有报错 |
 | 原生 e2e（`FALCON_E2E_SERVER=rust`） | 同一套断言两边都过：设密码、REST 401 与 WS 4401 自动重登、两次重启后接回、Terminate |
-| 协议 fixture 对拍（`gen-fixtures.mjs` 对 Rust 跑 + `compare-fixtures.mjs`） | 98 个响应的结构（键集合、值类型、数组长度）全部一致；剩下的只有少数类型的 JSON 键序（serde 按 falcon-proto 的字段序写，客户端不依赖键序） |
+| 协议 fixture 对拍（`gen-fixtures.mjs` 对 Rust 跑 + `compare-fixtures.mjs`；现为 `cargo xtask fixtures` / `cargo xtask compare-fixtures`） | 98 个响应的结构（键集合、值类型、数组长度）全部一致；剩下的只有少数类型的 JSON 键序（serde 按 falcon-proto 的字段序写，客户端不依赖键序） |
 | SSH（隔离环境：测试 sshd 用 `SetEnv HOME` 把远端家目录换成 `native/target/h`） | 主机试连、Zellij 远端安装（`/ws/install` 分阶段）、建持久会话、杀掉 SSH 连接 → 数秒内自动重连接回且历史还在、重启 Rust 服务端 → 启动即接回、本地端口转发经隧道可用并随停用拆掉 |
 | 附属项目（临时 git 仓库） | 派生、目标占用 409、禁止二级派生、删除前预检看得到脏文件、存档 / 恢复、删除时 worktree 目录随之清掉 |
 | px0 | 首次打开下载钉哈希的二进制、状态页、启动后经反代可用；服务端 SIGTERM 时子进程被收掉 |
@@ -314,7 +314,7 @@ SSH Windows 远端没有环境，未测。
 - 陈旧的 `FALCON_MEEGLE_BIN` / `FALCON_WEB_DIST`（从旧版 falcon 终端继承来的）指向不存在的路径时忽略，不挡路。
 - 修掉的 TS 缺陷：`files.ts` 在 Windows 宿主机上反斜杠 `..` 能逃出工作目录（**线上 Node 版仍有，Windows 宿主机受影响**）；`repo.ts` 的 drop / squash / reword 在 `rev-parse HEAD` 失败时把任何提交当成 HEAD（会 `reset --hard` 掉未提交的改动）；中转的若干竞态（停用时等长连接、并发启停漏杀 cloudflared）；meegle 登录超时在设备码出现前触发会失效。
 
-**删除 Node 版（2026-10-10，用户拍板）**：`packages/server`、SEA 脚本（`build-binary.mjs`）、esbuild / postject 依赖一并删掉；最后一个带 TS 原文的提交是 `fd9022a`。随之挪动的：滚动插件源码 → `native/zellij-plugin`（不进 Cargo 工作区），产物 → `native/crates/falcon-server/assets/`；`@lark-project/meegle` 与 `tsx` → 仓库根的 devDependencies；`pnpm build:bin` 改跑 `build-server.mjs`，`build:pkg` 随之打进 Rust 服务端；版本号改取仓库根 `package.json`；原生 e2e 与 `gen-fixtures.mjs` 只认 Rust 服务端，协议 fixture 已由它重新生成。工作区里 `packages/server` 那组未提交的 viewerArbiter 改动（逻辑已在 Rust 版里）删除前收进了 `git stash`。
+**删除 Node 版（2026-10-10，用户拍板）**：`packages/server`、SEA 脚本（`build-binary.mjs`）、esbuild / postject 依赖一并删掉；最后一个带 TS 原文的提交是 `fd9022a`。随之挪动的：滚动插件源码 → `native/zellij-plugin`（不进 Cargo 工作区），产物 → `native/crates/falcon-server/assets/`；`@lark-project/meegle` 与 `tsx` → 仓库根的 devDependencies；`pnpm build:bin` 改跑 `build-server.mjs`，`build:pkg` 随之打进 Rust 服务端；版本号改取仓库根 `package.json`；原生 e2e 与 `gen-fixtures.mjs`（现为 `cargo xtask fixtures`）只认 Rust 服务端，协议 fixture 已由它重新生成。工作区里 `packages/server` 那组未提交的 viewerArbiter 改动（逻辑已在 Rust 版里）删除前收进了 `git stash`。
 
 **剩下的**
 

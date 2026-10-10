@@ -1,6 +1,6 @@
 {
-  "id": "eef99f1e-59e9-4cd3-bc5a-5a4c1eee348c",
-  "hostId": "9da676c8-9ad9-4c42-859b-28df63a74f90",
+  "id": "cbeee675-23e0-4993-9d46-e797d0ea7c7f",
+  "hostId": "f363b690-6aa8-4311-8142-ce6677e2fe55",
   "name": "pg",
   "kind": "local",
   "bindHost": "127.0.0.1",
@@ -9,5 +9,5 @@
   "destPort": 5432,
   "enabled": false,
   "state": "stopped",
-  "createdAt": 1791646868630
+  "createdAt": 1791650626022
 }
