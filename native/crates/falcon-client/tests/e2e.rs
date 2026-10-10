@@ -5,7 +5,13 @@
 //! ```text
 //! pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build   # 仓库根目录
 //! cd native && FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored --nocapture
+//!
+//! # 对 Rust 服务端（docs/design/rust-unification.md S 线）：先 cargo build -p falcon-server
+//! cd native && FALCON_E2E=1 FALCON_E2E_SERVER=rust cargo test -p falcon-client --test e2e -- --ignored --nocapture
 //! ```
+//!
+//! `FALCON_E2E_SERVER=rust` 起 `native/target/debug/falcon-server`（`FALCON_E2E_SERVER_BIN` 可改指），
+//! 缺省起 Node 版。两边同一套断言——协议冻结期间（决定三）它们必须对同一个客户端表现一致。
 //!
 //! 流程：拉起服务端（空数据目录、4940–4999 的空闲端口）→ 认证状态 → 建本地项目 → 建会话
 //! → 开 SessionSocket（连上前就设好外观与尺寸）→ 收到回放与 state active → 敲
@@ -53,12 +59,7 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     let step = |msg: &str| eprintln!("[{:>6.2}s] {msg}", t0.elapsed().as_secs_f64());
 
     let root = repo_root();
-    let entry = root.join("packages/server/dist/index.js");
-    assert!(
-        entry.exists(),
-        "没有 {}：先在仓库根目录跑 pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build",
-        entry.display()
-    );
+    let entry = server_entry(&root);
     let tag = std::process::id();
     let data = PathBuf::from(format!("/private/tmp/fal-e2e-{tag}"));
     let work = PathBuf::from(format!("/private/tmp/fal-e2e-{tag}-w"));
@@ -318,16 +319,40 @@ fn strip_ansi(s: &str) -> String {
 
 // ---------------- 服务端进程 ----------------
 
+/// 被测的服务端：Node 版的 dist 入口，或 Rust 版的可执行文件
+#[derive(Clone)]
+enum Entry {
+    Node(PathBuf),
+    Rust(PathBuf),
+}
+
+fn server_entry(root: &Path) -> Entry {
+    if std::env::var("FALCON_E2E_SERVER").as_deref() == Ok("rust") {
+        let bin = std::env::var_os("FALCON_E2E_SERVER_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("native/target/debug/falcon-server"));
+        assert!(bin.exists(), "没有 {}：先 cargo build -p falcon-server", bin.display());
+        return Entry::Rust(bin);
+    }
+    let entry = root.join("packages/server/dist/index.js");
+    assert!(
+        entry.exists(),
+        "没有 {}：先在仓库根目录跑 pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build",
+        entry.display()
+    );
+    Entry::Node(entry)
+}
+
 struct Server {
     child: Option<Child>,
-    entry: PathBuf,
+    entry: Entry,
     data: PathBuf,
     port: u16,
 }
 
 impl Server {
-    fn start(entry: &Path, data: &Path, port: u16) -> Server {
-        let mut s = Server { child: None, entry: entry.to_owned(), data: data.to_owned(), port };
+    fn start(entry: &Entry, data: &Path, port: u16) -> Server {
+        let mut s = Server { child: None, entry: entry.clone(), data: data.to_owned(), port };
         s.start_again();
         s
     }
@@ -340,9 +365,15 @@ impl Server {
             .append(true)
             .open(self.data.join("server.log"))
             .unwrap();
-        let mut cmd = Command::new(node());
-        cmd.arg(&self.entry)
-            .args(["--host", "127.0.0.1", "--port", &self.port.to_string(), "--data-dir"])
+        let mut cmd = match &self.entry {
+            Entry::Node(entry) => {
+                let mut cmd = Command::new(node());
+                cmd.arg(entry);
+                cmd
+            }
+            Entry::Rust(bin) => Command::new(bin),
+        };
+        cmd.args(["--host", "127.0.0.1", "--port", &self.port.to_string(), "--data-dir"])
             .arg(&self.data)
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
@@ -356,7 +387,7 @@ impl Server {
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", "en_US.UTF-8");
         }
-        self.child = Some(cmd.spawn().expect("起 node 失败"));
+        self.child = Some(cmd.spawn().expect("起服务端失败"));
     }
 
     /// SIGTERM（服务端会优雅退出：会话在库里保持 active，zellij 继续跑），等它真退了。
