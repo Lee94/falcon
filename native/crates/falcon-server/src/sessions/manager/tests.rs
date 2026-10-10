@@ -213,6 +213,8 @@ fn foreground_and_title_follow_the_running_command() {
         let mut a = Peer::new();
         h.mgr.add_viewer(&s.id, a.viewer.clone());
         h.mgr.resize(&s.id, a.id(), 80, 24);
+        // 等 shell 出提示符再问：fork 之后、exec 之前前台进程还顶着测试二进制的名字
+        a.wait("提示符", has_output("$")).await;
         assert!(!h.mgr.foreground(&s.id).await.busy);
         h.mgr.input(&s.id, a.id(), "sleep 30\n");
         let mut fg = SessionForeground { busy: false, command: None };

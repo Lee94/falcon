@@ -28,6 +28,9 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::backend::{Backend, BackendCallbacks, SessionGoneError};
+use super::forward::ForwardManager;
+use super::relay::{LinkFor, WantReconnect};
+use super::share::ShareManager;
 use super::local::{
     LocalHost, attach_local, default_local_shell, local_foreground, local_has_session, local_kill, local_scroll_pipe,
     local_terminal_pane,
@@ -152,20 +155,6 @@ impl From<anyhow::Error> for SessionError {
             SessionError::Failed(e.to_string())
         }
     }
-}
-
-/// 中转（端口转发 / 公网发布）在主机链路上的钩子。ForwardManager 与 ShareManager 实现它，
-/// manager 只管把主机链路的 up / down / 连不上转告给它们（ADR 0016）
-pub trait RelayHost {
-    fn has_enabled(&self, host_id: &str) -> bool;
-    fn enabled_host_ids(&self) -> Vec<String>;
-    fn on_link_down(&self, host_id: &str);
-    fn on_link_up(&self, host_id: &str);
-    fn mark_unreachable(&self, host_id: &str, message: &str);
-    /// 主机链路要丢了（改凭据 / 删主机）：先把挂在它上面的中转停掉
-    fn forget_host<'a>(&'a self, host_id: &'a str) -> LocalBoxFuture<'a, ()>;
-    /// 后端启动时把本机上的中转拉起来（只有公网发布有）
-    fn restore_local(&self) {}
 }
 
 struct EntryState {
@@ -344,31 +333,64 @@ pub struct SessionManager {
     last_touch: RefCell<HashMap<String, i64>>,
     /// resize 落库的合并窗口：拖窗时前端逐帧发 resize，不能每次都同步 fsync
     size_flush: RefCell<HashSet<String>>,
-    relays: RefCell<Vec<Rc<dyn RelayHost>>>,
+    /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
+    pub forwards: Rc<ForwardManager>,
+    pub shares: Rc<ShareManager>,
     me: Weak<SessionManager>,
 }
 
 impl SessionManager {
     pub fn new(db: Arc<Db>, secrets: Arc<SecretBox>, data_dir: PathBuf, askpass: Arc<AskpassHub>) -> Rc<Self> {
         db.recover_sessions_on_startup();
-        Rc::new_cyclic(|me| SessionManager {
-            local: LocalHost::new(data_dir.clone()),
-            db,
-            secrets,
-            data_dir,
-            askpass,
-            links: RefCell::default(),
-            host_links: RefCell::default(),
-            host_reconnects: RefCell::default(),
-            entries: RefCell::default(),
-            reconnects: RefCell::default(),
-            local_reattach: RefCell::default(),
-            virtual_dirs: RefCell::default(),
-            last_touch: RefCell::default(),
-            size_flush: RefCell::default(),
-            relays: RefCell::default(),
-            me: me.clone(),
-        })
+        let mgr = Rc::new_cyclic(|me: &Weak<SessionManager>| {
+            let link_for: LinkFor = {
+                let me = me.clone();
+                Rc::new(move |host_id: &str| {
+                    let me = me.upgrade()?;
+                    let host = me.db.get_host(host_id)?;
+                    Some(me.get_host_link(&host))
+                })
+            };
+            let want_reconnect: WantReconnect = {
+                let me = me.clone();
+                Rc::new(move |host_id: &str| {
+                    if let Some(me) = me.upgrade() {
+                        me.schedule_host_reconnect(host_id);
+                    }
+                })
+            };
+            SessionManager {
+                forwards: ForwardManager::new(db.clone(), link_for.clone(), want_reconnect.clone()),
+                shares: ShareManager::new(db.clone(), data_dir.clone(), link_for, want_reconnect),
+                local: LocalHost::new(data_dir.clone()),
+                db,
+                secrets,
+                data_dir,
+                askpass,
+                links: RefCell::default(),
+                host_links: RefCell::default(),
+                host_reconnects: RefCell::default(),
+                entries: RefCell::default(),
+                reconnects: RefCell::default(),
+                local_reattach: RefCell::default(),
+                virtual_dirs: RefCell::default(),
+                last_touch: RefCell::default(),
+                size_flush: RefCell::default(),
+                me: me.clone(),
+            }
+        });
+        // cloudflared 拿的是 login 解析过的基底环境（与本地 PTY 同一份），不是服务进程自己的
+        let weak = Rc::downgrade(&mgr);
+        mgr.shares.set_base_env(Rc::new(move || {
+            let weak = weak.clone();
+            Box::pin(async move {
+                match weak.upgrade() {
+                    Some(me) => me.local.base_env().await,
+                    None => Rc::new(Vec::new()),
+                }
+            })
+        }));
+        mgr
     }
 
     fn me(&self) -> Rc<Self> {
@@ -385,15 +407,6 @@ impl SessionManager {
 
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
-    }
-
-    /// 挂上中转（引擎建好 ForwardManager / ShareManager 之后调）
-    pub fn add_relay_host(&self, relay: Rc<dyn RelayHost>) {
-        self.relays.borrow_mut().push(relay);
-    }
-
-    fn relays(&self) -> Vec<Rc<dyn RelayHost>> {
-        self.relays.borrow().clone()
     }
 
     fn entry(&self, session_id: &str) -> Option<Rc<LiveEntry>> {
@@ -549,9 +562,8 @@ impl SessionManager {
             let host_id = host.id.clone();
             created.on_down(move || {
                 let Some(me) = current() else { return };
-                for r in me.relays() {
-                    r.on_link_down(&host_id);
-                }
+                me.forwards.on_link_down(&host_id);
+                me.shares.on_link_down(&host_id);
                 me.schedule_host_reconnect(&host_id);
             });
         }
@@ -565,9 +577,8 @@ impl SessionManager {
                     }
                     return;
                 };
-                for r in me.relays() {
-                    r.on_link_up(&host_id);
-                }
+                me.forwards.on_link_up(&host_id);
+                me.shares.on_link_up(&host_id);
             });
         }
         self.host_links.borrow_mut().insert(host.id.clone(), created.clone());
@@ -583,8 +594,7 @@ impl SessionManager {
         if let Some(rec) = rec {
             rec.timer.clear();
         }
-        let relays = self.relays();
-        futures::future::join_all(relays.iter().map(|r| r.forget_host(host_id))).await;
+        futures::future::join(self.forwards.forget_host(host_id), self.shares.forget_host(host_id)).await;
         let link = self.host_links.borrow_mut().remove(host_id);
         if let Some(link) = link {
             link.dispose();
@@ -598,16 +608,11 @@ impl SessionManager {
 
     /// 后端启动时把启用中的中转拉起来：本机的公网发布直接起，挂主机的等链路连上
     pub fn restore_relays(&self) {
-        let relays = self.relays();
-        for r in &relays {
-            r.restore_local();
-        }
+        self.shares.restore_local();
         let mut host_ids: Vec<String> = Vec::new();
-        for r in &relays {
-            for id in r.enabled_host_ids() {
-                if !host_ids.contains(&id) {
-                    host_ids.push(id);
-                }
+        for id in self.forwards.enabled_host_ids().into_iter().chain(self.shares.enabled_host_ids()) {
+            if !host_ids.contains(&id) {
+                host_ids.push(id);
             }
         }
         for host_id in host_ids {
@@ -617,13 +622,12 @@ impl SessionManager {
     }
 
     fn wants_host_link(&self, host_id: &str) -> bool {
-        self.relays().iter().any(|r| r.has_enabled(host_id))
+        self.forwards.has_enabled(host_id) || self.shares.has_enabled(host_id)
     }
 
     fn mark_host_unreachable(&self, host_id: &str, message: &str) {
-        for r in self.relays() {
-            r.mark_unreachable(host_id, message);
-        }
+        self.forwards.mark_unreachable(host_id, message);
+        self.shares.mark_unreachable(host_id, message);
     }
 
     /// 连一次主机链路。连上由 "up" 拉起中转；连不上把原因挂到规则上并退避重连

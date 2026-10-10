@@ -71,10 +71,14 @@ fn main() -> anyhow::Result<()> {
         );
         // 不走 graceful shutdown：会话的 WS 连接不会自己断，等它们就永远退不出去。
         // 会话在 DB 中保持 active，下次启动由 recover_sessions_on_startup 归类
+        let engine = state.engine.clone();
         tokio::select! {
             res = axum::serve(listener, api::app(state)) => res?,
             () = shutdown_signal() => {}
         }
+        // cloudflared 是子进程，后端退出不会自动带走；不杀的话 Quick Tunnel 还会在公网挂着
+        let stop = engine.call(|e| async move { e.sessions.shares.shutdown().await });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
         anyhow::Ok(())
     })
 }

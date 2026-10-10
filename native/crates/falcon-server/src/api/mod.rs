@@ -14,6 +14,7 @@ pub mod error;
 pub mod hosts;
 pub mod input;
 pub mod projects;
+pub mod relays;
 pub mod sessions;
 pub mod static_files;
 pub mod system;
@@ -124,6 +125,7 @@ fn protected_router() -> Router<AppState> {
         .merge(system::router())
         .merge(hosts::router())
         .merge(projects::router())
+        .merge(relays::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
