@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
         askpass.set_on_prompt(move |p| engine.send(move |e| e.sessions.broadcast_askpass(&p)));
     }
     // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
-    let meegle = falcon_server::meegle::client::MeegleClient::from_env();
+    let meegle = falcon_server::meegle::client::MeegleClient::for_server(&config.data_dir);
     let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

@@ -297,6 +297,11 @@ impl MeegleClient {
         Self::new(resolve_meegle_bin(|k| std::env::var(k).ok()), local_base_env_fn())
     }
 
+    /// 服务进程用：可执行文件按 [`super::bin::resolve_for_server`] 找（含发布构建里内置的那份）
+    pub fn for_server(data_dir: &std::path::Path) -> Self {
+        Self::new(super::bin::resolve_for_server(data_dir), local_base_env_fn())
+    }
+
     fn build(bin: String, base_env: BaseEnvFn, timing: Timing) -> Self {
         log::info!("meegle CLI: {bin}");
         MeegleClient {

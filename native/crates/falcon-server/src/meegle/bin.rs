@@ -7,11 +7,12 @@
 //! 不经它的 meegle.js 包装——省一个 node 进程，也躲开包装脚本里的更新提示逻辑。
 //!
 //! 解析顺序：
-//! 1. FALCON_MEEGLE_BIN —— 显式指定。单文件发布时 SEA bootstrap 把二进制释放到
-//!    runtime 目录后也用它指入（scripts/build-binary.mjs），因为 bundle 里没有
-//!    node_modules 可供解析；
-//! 2. 依赖包里本平台的二进制 —— pnpm 安装的开发 / dist 运行方式；
-//! 3. PATH 上的 `meegle` —— 用户自己 npm -g 装的，兜底。
+//! 1. FALCON_MEEGLE_BIN —— 显式指定（文件得真的在：Node 版 SEA 把它设进自己的环境，
+//!    从旧版 falcon 终端里起的进程会继承一个早已清掉的 runtime 路径）；
+//! 2. 编进二进制的那份（`embed-meegle` feature，发布构建）—— 首次用时释放到
+//!    `<dataDir>/bin/meegle-<内容哈希>`；
+//! 3. 依赖包里本平台的二进制 —— pnpm 安装的源码树（开发构建）；
+//! 4. PATH 上的 `meegle` —— 用户自己 npm -g 装的，兜底。
 //!
 //! # 与 TS 的差别
 //!
@@ -46,6 +47,68 @@ pub fn bundled_package_dirs() -> Vec<PathBuf> {
 /// `env` 读环境变量（生产上是 `|k| std::env::var(k).ok()`）
 pub fn resolve_meegle_bin(env: impl Fn(&str) -> Option<String>) -> String {
     resolve_with(env(MEEGLE_BIN_ENV), &bundled_package_dirs())
+}
+
+/// 服务进程用的完整解析：显式指定 > 编进二进制的那份 > 依赖包 > PATH
+pub fn resolve_for_server(data_dir: &Path) -> String {
+    let explicit = std::env::var(MEEGLE_BIN_ENV).ok().filter(|b| !b.is_empty());
+    if let Some(bin) = &explicit {
+        if Path::new(bin).is_file() {
+            return bin.clone();
+        }
+        log::warn!("{MEEGLE_BIN_ENV} 指向的文件不存在，忽略：{bin}");
+    }
+    if let Some(bin) = embedded::extract(data_dir) {
+        return bin.to_string_lossy().into_owned();
+    }
+    resolve_with(None, &bundled_package_dirs())
+}
+
+/// 编进二进制的 meegle CLI（发布构建）。构建时 `FALCON_EMBED_MEEGLE_BIN` 指向本平台那个二进制
+pub mod embedded {
+    use std::path::{Path, PathBuf};
+
+    #[cfg(feature = "embed-meegle")]
+    static BYTES: &[u8] = include_bytes!(env!("FALCON_EMBED_MEEGLE_BIN"));
+
+    /// 释放到 `<dataDir>/bin/meegle-<内容哈希前 12 位>` 并返回路径；没编进来时 None。
+    /// 名字带哈希：升级后内容变了自然换一个文件，不去覆盖可能正在跑的旧版本
+    pub fn extract(data_dir: &Path) -> Option<PathBuf> {
+        #[cfg(feature = "embed-meegle")]
+        {
+            use sha2::Digest as _;
+            let tag = hex::encode(sha2::Sha256::digest(BYTES));
+            let dir = data_dir.join("bin");
+            let dest = dir.join(format!("meegle-{}{}", &tag[..12], std::env::consts::EXE_SUFFIX));
+            if dest.metadata().is_ok_and(|m| m.len() == BYTES.len() as u64) {
+                return Some(dest);
+            }
+            let write = || -> std::io::Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                // 先写临时文件再改名：两个进程同时释放也不会看到半截文件
+                let tmp = dir.join(format!(".meegle-{}.tmp-{}", &tag[..12], std::process::id()));
+                std::fs::write(&tmp, BYTES)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+                }
+                std::fs::rename(&tmp, &dest)
+            };
+            return match write() {
+                Ok(()) => Some(dest),
+                Err(e) => {
+                    log::warn!("释放内置的 meegle CLI 失败（{}）：{e}", dest.display());
+                    None
+                }
+            };
+        }
+        #[cfg(not(feature = "embed-meegle"))]
+        {
+            let _ = data_dir;
+            None
+        }
+    }
 }
 
 fn resolve_with(explicit: Option<String>, package_dirs: &[PathBuf]) -> String {

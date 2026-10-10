@@ -63,3 +63,6 @@ libc = "0.2.190"
 # 把前端产物编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_WEB_DIR 指向产物目录（绝对路径），
 # 运行时 FALCON_WEB_DIST 仍可覆盖
 embed-web = ["dep:rust-embed"]
+# 把本平台的 meegle CLI 编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_MEEGLE_BIN 指向它（绝对路径），
+# 运行时首次用到时释放到 <dataDir>/bin/
+embed-meegle = []
