@@ -35,6 +35,9 @@ hex = "0.4.3"
 subtle = "2.6.1"
 axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa", "flate2", "des"] }
+sha2 = "0.11.0"
 
 [dev-dependencies]
 tempfile = "3"
