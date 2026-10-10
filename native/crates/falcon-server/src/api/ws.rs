@@ -26,6 +26,9 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/ws/install/{project_id}", get(install)).route("/ws/sessions/{id}", get(session))
 }
 
+/// 写端一次 flush 最多攒几帧
+const WRITE_BATCH: usize = 64;
+
 fn upgrade(ws: WebSocketUpgrade) -> WebSocketUpgrade {
     ws.max_message_size(WS_MAX_PAYLOAD_BYTES).max_frame_size(WS_MAX_PAYLOAD_BYTES)
 }
@@ -161,16 +164,38 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
 
     // 写端：引擎投来的帧依次写进 socket，写完一帧减一次计数（= bufferedAmount 的等价物）。
     // Viewer 被引擎丢掉（会话不存在 / 连接已断）时 channel 关闭，写端随之结束
+    //
+    // 连着到的几帧攒成一次 flush（Node 的 ws 也是同一轮事件循环里的 send 合成一次写）：
+    // 少几次 syscall，也让"state dead + title null"这种成对的控制消息落在同一段 TCP 里
     let writer = tokio::spawn(async move {
-        while let Some(frame) = out.rx.recv().await {
-            let msg = match &frame {
-                ViewerFrame::Text(t) => Message::Text(t.clone().into()),
-                ViewerFrame::Binary(b) => Message::Binary(b.clone()),
-            };
-            let res = sink.send(msg).await;
-            out.written(&frame);
-            if res.is_err() {
-                break;
+        let to_msg = |frame: &ViewerFrame| match frame {
+            ViewerFrame::Text(t) => Message::Text(t.clone().into()),
+            ViewerFrame::Binary(b) => Message::Binary(b.clone()),
+        };
+        'outer: while let Some(first) = out.rx.recv().await {
+            let mut batch = vec![first];
+            while batch.len() < WRITE_BATCH {
+                match out.rx.try_recv() {
+                    Ok(f) => batch.push(f),
+                    Err(_) => break,
+                }
+            }
+            let mut ok = true;
+            for frame in &batch {
+                if sink.feed(to_msg(frame)).await.is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                ok = sink.flush().await.is_ok();
+            }
+            // 写完（或 socket 已死、丢掉了）才减计数：这就是 bufferedAmount 的口径
+            for frame in &batch {
+                out.written(frame);
+            }
+            if !ok {
+                break 'outer;
             }
         }
         sink
