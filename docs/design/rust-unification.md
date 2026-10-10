@@ -286,7 +286,7 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 
 ## 11. S 线进展（2026-10-10）
 
-分支 `rust-server`。`native/crates/falcon-server` 已覆盖 Node 版的全部路由（文件浏览 / 传输 / 应用图标那一组在合入中），`cargo test -p falcon-server` 六百多个用例，零警告。
+分支 `rust-server`。`native/crates/falcon-server` 已覆盖 Node 版的全部路由，`cargo test -p falcon-server` 689 个用例，零警告。
 
 **执行模型（S4 定下来的）**：会话核心不改写成多线程，而是保留 Node 事件循环的语义——`engine.rs` 在一条专用线程上起 current_thread runtime + LocalSet，SessionManager、SshLink、中转、px0 全是 `Rc` / `RefCell`；axum 处理器经 `EngineHandle::call` 把闭包投进引擎、拿 oneshot 等结果，WS 的 input / resize 经 `send` 保序投递。阻塞的 PTY 读写各开线程；SQLite 照 Node 版直接同步调。好处是 manager.ts 里那些依赖"同步段不会被打断"的状态机（单飞、`attaching`、重连登记在册检查）可以逐行照搬；HTTP 处理器被丢掉（客户端断开）不会打断引擎里在跑的写操作。
 
@@ -296,6 +296,9 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 |---|---|
 | Node 建的本地持久会话 → 停 Node → 同一数据目录起 Rust | 自动接回（unverified → active），回放里有 Node 时期的输出，之后输入正常 |
 | 浏览器版 GPUI 客户端连 Rust 服务端 | 打开会话、回放、中英文输入正常 |
+| React 前端连 Rust 服务端 | 新建终端、中文输入、侧栏改动徽标、修改面板提交、历史面板、文件面板与文件查看；控制台与服务端日志都没有报错 |
+| 原生 e2e（`FALCON_E2E_SERVER=rust`） | 同一套断言两边都过：设密码、REST 401 与 WS 4401 自动重登、两次重启后接回、Terminate |
+| 协议 fixture 对拍（`gen-fixtures.mjs` 对 Rust 跑 + `compare-fixtures.mjs`） | 98 个响应的结构（键集合、值类型、数组长度）全部一致；剩下的只有少数类型的 JSON 键序（serde 按 falcon-proto 的字段序写，客户端不依赖键序） |
 | SSH（隔离环境：测试 sshd 用 `SetEnv HOME` 把远端家目录换成 `native/target/h`） | 主机试连、Zellij 远端安装（`/ws/install` 分阶段）、建持久会话、杀掉 SSH 连接 → 数秒内自动重连接回且历史还在、重启 Rust 服务端 → 启动即接回、本地端口转发经隧道可用并随停用拆掉 |
 | 附属项目（临时 git 仓库） | 派生、目标占用 409、禁止二级派生、删除前预检看得到脏文件、存档 / 恢复、删除时 worktree 目录随之清掉 |
 | px0 | 首次打开下载钉哈希的二进制、状态页、启动后经反代可用；服务端 SIGTERM 时子进程被收掉 |
@@ -313,10 +316,10 @@ SSH Windows 远端没有环境，未测。
 
 **剩下的**
 
-1. 合入文件路由（fs / shells / files / raw / transfer / app-icon），React 前端整体手测一遍。
-2. 切换：macOS pkg 的 Resources 换成 `pnpm build:server` 的产物（文件名已对齐，`build-macos-pkg.mjs` 只差不再调 `build:bin`）；在真实数据目录上切换要用户点头。
-3. 删 `packages/server` 与 SEA 脚本——工作区里 `packages/server` 有未提交的改动（viewerArbiter 那一组，已移植进 Rust），删之前要用户处理。Zellij 滚动插件的产物与 meegle 依赖要先挪出 `packages/server`。
-4. fixture 改由 Rust 服务端生成。
+1. 切换：macOS pkg 的 Resources 换成 `pnpm build:server` 的产物（文件名已对齐，`build-macos-pkg.mjs` 只差不再调 `build:bin`）；在真实数据目录上切换要用户点头。
+2. 删 `packages/server` 与 SEA 脚本——工作区里 `packages/server` 有未提交的改动（viewerArbiter 那一组，已移植进 Rust），删之前要用户处理。Zellij 滚动插件的产物与 meegle 依赖要先挪出 `packages/server`。
+3. fixture 改由 Rust 服务端生成。
+4. 已知风险：russh 按到达而不是按消费放大通道窗口、每条通道的队列有界，慢的下载客户端可能拖住整条 SSH 链路（终端也在上面）；Node 的 ssh2 是逐通道流控。大文件下载在弱网上要实测。
 
 ---
 
