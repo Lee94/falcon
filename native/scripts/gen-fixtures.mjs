@@ -21,6 +21,11 @@
  *   node native/scripts/gen-fixtures.mjs
  *   (cd native && cargo test -p falcon-proto --test fixtures)
  *
+ * 对拍 Rust 服务端（S 线）：落到别的目录，再用 compare-fixtures.mjs 逐个比形状
+ *   FALCON_FIXTURE_SERVER_BIN=native/target/debug/falcon-server FALCON_FIXTURE_OUT=/tmp/fx-rs \
+ *     node native/scripts/gen-fixtures.mjs
+ *   node native/scripts/compare-fixtures.mjs native/crates/falcon-proto/tests/fixtures /tmp/fx-rs
+ *
  * 几个坑：
  *   - 数据目录必须是短路径：zellij 的 IPC socket 全路径在 macOS 上限 104 字节，
  *     长路径会让会话建完立刻 exited。所以一律放 /private/tmp/fal-fx-*。
@@ -42,7 +47,12 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SERVER = path.join(ROOT, "packages/server/dist/index.js");
-const OUT = path.join(ROOT, "native/crates/falcon-proto/tests/fixtures");
+// FALCON_FIXTURE_SERVER_BIN：改起 Rust 服务端（native/target/debug/falcon-server 之类）；
+// FALCON_FIXTURE_OUT：落到别的目录，好与 Node 版的 fixture 逐个比形状（S 线对拍用）
+const SERVER_BIN = process.env.FALCON_FIXTURE_SERVER_BIN;
+const OUT = process.env.FALCON_FIXTURE_OUT
+  ? path.resolve(process.env.FALCON_FIXTURE_OUT)
+  : path.join(ROOT, "native/crates/falcon-proto/tests/fixtures");
 
 const TMP = "/private/tmp";
 const DATA = `${TMP}/fal-fx-data`;
@@ -69,7 +79,8 @@ main().catch((err) => {
 });
 
 async function main() {
-  if (!fs.existsSync(SERVER)) {
+  if (SERVER_BIN ? !fs.existsSync(SERVER_BIN) : !fs.existsSync(SERVER)) {
+    if (SERVER_BIN) throw new Error(`没找到 ${SERVER_BIN}：先 cargo build -p falcon-server`);
     throw new Error(`没找到 ${SERVER}：先在仓库根目录跑 pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build`);
   }
   cleanupDirs();
@@ -572,11 +583,10 @@ function startServer(port) {
   );
   env.LANG ??= "en_US.UTF-8";
   const log = fs.openSync(path.join(DATA, "server.log"), "a");
-  const child = spawn(
-    process.execPath,
-    [SERVER, "--host", "127.0.0.1", "--port", String(port), "--data-dir", DATA],
-    { env, stdio: ["ignore", log, log] }
-  );
+  const args = ["--host", "127.0.0.1", "--port", String(port), "--data-dir", DATA];
+  const child = SERVER_BIN
+    ? spawn(SERVER_BIN, args, { env, stdio: ["ignore", log, log] })
+    : spawn(process.execPath, [SERVER, ...args], { env, stdio: ["ignore", log, log] });
   child.on("exit", (code, signal) => {
     if (server === child) console.error(`服务端提前退出：code=${code} signal=${signal}，日志在 ${DATA}/server.log`);
   });
