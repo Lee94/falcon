@@ -8,12 +8,17 @@
 //! - `/px0/` 与 `/api/` 同一口径，没登录的浏览器导航送去 `/?next=` 登录；
 //! - 其余 `/api/*` 一律要登录 cookie，挂在 [`protected_router`] 上。
 
+pub mod app_icon;
 pub mod askpass;
 pub mod auth_routes;
+pub mod body;
 pub mod error;
+pub mod files;
 pub mod sessions;
 pub mod static_files;
 pub mod system;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod ws;
 
 use std::sync::Arc;
@@ -107,14 +112,20 @@ pub fn app(state: AppState) -> Router {
     router.with_state(state)
 }
 
-/// 不走登录 cookie、各自验身份的路由（S5 / S6 填：raw、app-icon、askpass helper）
+/// 不走登录 cookie、各自验身份的路由：原始字节（作用域令牌）、应用图标的取图路由
+/// （publicAsset，含不在 /api 下的 PWA 清单）、askpass helper（Bearer）
 fn public_router() -> Router<AppState> {
-    Router::new().merge(askpass::helper_router())
+    Router::new().merge(askpass::helper_router()).merge(files::raw_router()).merge(app_icon::public_router())
 }
 
 /// 要登录的 `/api/*`（S4 起逐组填进来）
 fn protected_router() -> Router<AppState> {
-    Router::new().merge(sessions::router()).merge(askpass::router()).merge(system::router())
+    Router::new()
+        .merge(sessions::router())
+        .merge(askpass::router())
+        .merge(system::router())
+        .merge(files::router())
+        .merge(app_icon::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
