@@ -23,10 +23,7 @@
 //!   `\d` 只是 ASCII 数字；Rust 的 `(?i)` / `\s` / `\d` 都是 Unicode 语义，所以写成显式字符类
 //!   （见文件末的 `js`）。
 //!
-//! 留到 S6 的函数（下载与进程管理）：`bin.ts` 的 `bundledBinName`、`installPath`、
-//! `CloudflaredBinError`、`ensureCloudflared`、`ensureNow`、`downloadLocked`、
-//! `findExtractedBinary`、`fetchToFile`、`versionOf`、`whichCloudflared`（连同
-//! `bin.test.ts`）；进程生命周期在 `sessions/share.ts`。
+//! 下载与定位（`bin.ts`）在 `bin.rs`；进程生命周期在 `sessions/share.rs`。
 
 use std::sync::LazyLock;
 
