@@ -1,13 +1,13 @@
 //! 应用图标（ADR 0018）：内置几套可选，也能上传一张自定义图片。移植自
-//! `packages/shared/src/appIcon.ts`（选择的归一、地址、PWA 清单）与
+//! `packages/shared/src/appIcon.ts`（选择的归一、地址）与
 //! `packages/server/src/appIcon.ts`（PNG 头校验、`AppIcons` 的存取）。
 //!
-//! 选择是**服务端级**的：存在 settings 表里，连这台服务端的所有浏览器（标签页图标、PWA 清单、
-//! iOS 主屏幕）与原生客户端（Dock）看到的是同一个图标。自定义图片落在
-//! `<dataDir>/app-icon/custom.png`。
+//! 选择是**服务端级**的：存在 settings 表里，连这台服务端的所有浏览器（标签页图标）与原生
+//! 客户端（Dock）看到的是同一个图标。自定义图片落在 `<dataDir>/app-icon/custom.png`。
+//! PWA（清单、maskable 与 iOS 主屏幕图标）2026-10-11 删掉了：浏览器版只做桌面浏览器的标签页。
 //!
-//! 内置图标的图形在 scripts/app-icons.mjs（gen-icons.mjs 出文件），产物按 id 分目录放在 web 的
-//! public/icons/<id>/ 下（原生另有一份 macOS 版式的 PNG 嵌进二进制）。这里只管 id、地址与清单。
+//! 内置图标的图形在 native/xtask/src/icons.rs（`cargo xtask icons` 出文件），产物按 id 分目录放在
+//! native/web/icons/<id>/ 下（原生另有一份 macOS 版式的 PNG 嵌进二进制）。这里只管 id 与地址。
 //!
 //! 复用 falcon-core 的 `app_icon`：图标 id 表、默认图标、`custom` 字面量、自定义图边长、
 //! `is_builtin`；线上形状 `AppIconState` 用 falcon-proto 的。
@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 
 pub use falcon_core::app_icon::{APP_ICON_CUSTOM_SIZE, APP_ICON_IDS, CUSTOM, DEFAULT_APP_ICON};
 pub use falcon_proto::AppIconState;
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -53,136 +52,26 @@ pub fn resolve_app_icon(stored: Option<&str>, custom: Option<&str>) -> &'static 
     stored.and_then(|s| APP_ICON_IDS.iter().find(|id| **id == s)).copied().unwrap_or(DEFAULT_APP_ICON)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinIconFile {
-    Icon192,
-    Icon512,
-    Maskable192,
-    Maskable512,
-    AppleTouchIcon,
-}
-
-impl BuiltinIconFile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BuiltinIconFile::Icon192 => "icon-192.png",
-            BuiltinIconFile::Icon512 => "icon-512.png",
-            BuiltinIconFile::Maskable192 => "maskable-192.png",
-            BuiltinIconFile::Maskable512 => "maskable-512.png",
-            BuiltinIconFile::AppleTouchIcon => "apple-touch-icon.png",
-        }
-    }
-}
-
-pub fn builtin_icon_url(id: &str, file: BuiltinIconFile) -> String {
-    format!("/icons/{id}/{}", file.as_str())
+/// 内置图标的标签页图标：圆角方块的 192 PNG（不用 SVG：默认图标是栅格插画，做成 SVG 就是
+/// 1MB 多的 favicon）
+pub fn builtin_icon_url(id: &str) -> String {
+    format!("/icons/{id}/icon-192.png")
 }
 
 pub fn custom_icon_url(version: &str) -> String {
     format!("/api/app-icon/custom.png?v={}", js::encode_uri_component(version))
 }
 
-/// 当前选择落到页面上的几个地址：标签页图标、iOS 主屏幕。
-/// 标签页图标用 192 的 PNG 而不是 SVG：默认图标是栅格插画，做成 SVG 就是 1MB 多的 favicon
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppIconLinks {
-    pub favicon: String,
-    pub apple_touch: String,
-}
-
-/// `state.selected === "custom" && state.custom`：选了自定义且确实有图（JS 真值）
-fn custom_version_of(state: &AppIconState) -> Option<&str> {
-    if state.selected == CUSTOM { state.custom.as_deref().filter(|c| !c.is_empty()) } else { None }
-}
-
-/// 落到内置图标上的 id：选的是 custom（却没有图）时回默认
-fn builtin_id_of(state: &AppIconState) -> &str {
-    if state.selected == CUSTOM { DEFAULT_APP_ICON } else { &state.selected }
-}
-
-pub fn app_icon_links(state: &AppIconState) -> AppIconLinks {
-    if let Some(version) = custom_version_of(state) {
-        let url = custom_icon_url(version);
-        return AppIconLinks { favicon: url.clone(), apple_touch: url };
+/// 当前选择落到页面上的标签页图标地址。选了自定义且确实有图（JS 真值）就是那张，
+/// 否则是内置的（选的是 custom 却没有图时回默认）
+pub fn favicon_url(state: &AppIconState) -> String {
+    if state.selected == CUSTOM
+        && let Some(version) = state.custom.as_deref().filter(|c| !c.is_empty())
+    {
+        return custom_icon_url(version);
     }
-    let id = builtin_id_of(state);
-    AppIconLinks {
-        favicon: builtin_icon_url(id, BuiltinIconFile::Icon192),
-        apple_touch: builtin_icon_url(id, BuiltinIconFile::AppleTouchIcon),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ManifestIconPurpose {
-    Any,
-    Maskable,
-}
-
-/// 清单里的一张图标。字段顺序即 JSON 里的顺序（与 TS 的对象字面量一致）
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManifestIcon {
-    pub src: String,
-    pub sizes: String,
-    #[serde(rename = "type")]
-    pub mime: String,
-    pub purpose: ManifestIconPurpose,
-}
-
-/// `webManifest()` 的返回值。字段顺序即 `JSON.stringify` 的输出顺序，别调换
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WebManifest {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub short_name: &'static str,
-    pub description: &'static str,
-    pub start_url: &'static str,
-    pub scope: &'static str,
-    pub display: &'static str,
-    pub background_color: &'static str,
-    pub theme_color: &'static str,
-    pub lang: &'static str,
-    pub categories: [&'static str; 2],
-    pub icons: Vec<ManifestIcon>,
-}
-
-fn manifest_icon(src: String, edge: u32, purpose: ManifestIconPurpose) -> ManifestIcon {
-    ManifestIcon { src, sizes: format!("{edge}x{edge}"), mime: "image/png".into(), purpose }
-}
-
-/// PWA 清单（以前是 public/manifest.webmanifest 静态文件）。图标跟着选择走，所以由服务端现出。
-///
-/// 自定义图标只有一张 512 的 any：Chrome 的安装条件是「至少一张 ≥144px 的 any 图标」，
-/// 够了；用户随手传的图不是照 maskable 安全区画的，不冒充 maskable。
-pub fn web_manifest(state: &AppIconState) -> WebManifest {
-    use BuiltinIconFile::*;
-    use ManifestIconPurpose::*;
-    let icons = if let Some(version) = custom_version_of(state) {
-        vec![manifest_icon(custom_icon_url(version), APP_ICON_CUSTOM_SIZE, Any)]
-    } else {
-        let id = builtin_id_of(state);
-        vec![
-            manifest_icon(builtin_icon_url(id, Icon192), 192, Any),
-            manifest_icon(builtin_icon_url(id, Icon512), 512, Any),
-            manifest_icon(builtin_icon_url(id, Maskable192), 192, Maskable),
-            manifest_icon(builtin_icon_url(id, Maskable512), 512, Maskable),
-        ]
-    };
-    WebManifest {
-        id: "/",
-        name: "Falcon",
-        short_name: "Falcon",
-        description: "持久化终端工作台",
-        start_url: "/",
-        scope: "/",
-        display: "standalone",
-        background_color: "#0a0a0a",
-        theme_color: "#0a0a0a",
-        lang: "zh-CN",
-        categories: ["developer", "utilities"],
-        icons,
-    }
+    let id = if state.selected == CUSTOM { DEFAULT_APP_ICON } else { &state.selected };
+    builtin_icon_url(id)
 }
 
 // ---------------- server/appIcon.ts ----------------
@@ -368,86 +257,31 @@ mod tests {
         assert!(!is_app_icon_choice(Some(&json!(1))));
     }
 
-    // describe("appIconLinks")
+    // describe("appIconLinks")（PWA 删掉后只剩标签页图标）
 
     #[test]
-    fn app_icon_links_builtin_uses_rounded_192_png_and_full_bleed_apple_touch() {
-        // 内置图标：标签页用圆角的 192 png，iOS 用满版 png
-        assert_eq!(
-            app_icon_links(&state("glyph", None)),
-            AppIconLinks {
-                favicon: "/icons/glyph/icon-192.png".into(),
-                apple_touch: "/icons/glyph/apple-touch-icon.png".into(),
-            }
-        );
+    fn favicon_builtin_uses_rounded_192_png() {
+        // 内置图标：标签页用圆角的 192 png
+        assert_eq!(favicon_url(&state("glyph", None)), "/icons/glyph/icon-192.png");
     }
 
     #[test]
-    fn app_icon_links_custom_url_carries_the_version() {
+    fn favicon_custom_url_carries_the_version() {
         // 自定义图标的地址带版本，换图就换地址
-        let links = app_icon_links(&state("custom", Some("0f3c")));
-        assert_eq!(links.favicon, "/api/app-icon/custom.png?v=0f3c");
-        assert_eq!(links.apple_touch, links.favicon);
+        assert_eq!(favicon_url(&state("custom", Some("0f3c"))), "/api/app-icon/custom.png?v=0f3c");
     }
 
     #[test]
-    fn app_icon_links_uploaded_custom_but_builtin_selected_uses_builtin() {
+    fn favicon_uploaded_custom_but_builtin_selected_uses_builtin() {
         // 上传过自定义但选的是内置，用内置的
-        assert_eq!(app_icon_links(&state("flash", Some("0f3c"))).favicon, "/icons/flash/icon-192.png");
-    }
-
-    // describe("webManifest")
-
-    #[test]
-    fn web_manifest_builtin_has_any_and_maskable_in_two_sizes() {
-        // 内置图标给齐 any / maskable 各两档
-        let m = web_manifest(&state("voltwing-night", None));
-        let got: Vec<String> = m
-            .icons
-            .iter()
-            .map(|i| {
-                let purpose = if i.purpose == ManifestIconPurpose::Any { "any" } else { "maskable" };
-                format!("{purpose} {} {}", i.sizes, i.src)
-            })
-            .collect();
-        assert_eq!(
-            got,
-            [
-                "any 192x192 /icons/voltwing-night/icon-192.png",
-                "any 512x512 /icons/voltwing-night/icon-512.png",
-                "maskable 192x192 /icons/voltwing-night/maskable-192.png",
-                "maskable 512x512 /icons/voltwing-night/maskable-512.png",
-            ]
-        );
+        assert_eq!(favicon_url(&state("flash", Some("0f3c"))), "/icons/flash/icon-192.png");
     }
 
     #[test]
-    fn web_manifest_custom_has_a_single_512_any() {
-        // 自定义图标只有一张 512 的 any
-        let m = web_manifest(&state("custom", Some("0f3c")));
-        assert_eq!(
-            m.icons,
-            vec![ManifestIcon {
-                src: "/api/app-icon/custom.png?v=0f3c".into(),
-                sizes: "512x512".into(),
-                mime: "image/png".into(),
-                purpose: ManifestIconPurpose::Any,
-            }]
-        );
-    }
-
-    // 以下不在 TS 测试里：JSON 与 TS 的 JSON.stringify 逐字节一致（期望值由 tsx 实跑得到）
-
-    #[test]
-    fn web_manifest_json_matches_ts_byte_for_byte() {
-        let builtin = r##"{"id":"/","name":"Falcon","short_name":"Falcon","description":"持久化终端工作台","start_url":"/","scope":"/","display":"standalone","background_color":"#0a0a0a","theme_color":"#0a0a0a","lang":"zh-CN","categories":["developer","utilities"],"icons":[{"src":"/icons/voltwing-night/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icons/voltwing-night/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"/icons/voltwing-night/maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"/icons/voltwing-night/maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}]}"##;
-        let custom = r##"{"id":"/","name":"Falcon","short_name":"Falcon","description":"持久化终端工作台","start_url":"/","scope":"/","display":"standalone","background_color":"#0a0a0a","theme_color":"#0a0a0a","lang":"zh-CN","categories":["developer","utilities"],"icons":[{"src":"/api/app-icon/custom.png?v=0f3c","sizes":"512x512","type":"image/png","purpose":"any"}]}"##;
-        assert_eq!(serde_json::to_string(&web_manifest(&state("voltwing-night", None))).unwrap(), builtin);
-        assert_eq!(serde_json::to_string(&web_manifest(&state("custom", Some("0f3c")))).unwrap(), custom);
-        assert_eq!(
-            serde_json::to_string(&app_icon_links(&state("custom", None))).unwrap(),
-            r#"{"favicon":"/icons/emberwing/icon-192.png","appleTouch":"/icons/emberwing/apple-touch-icon.png"}"#
-        );
+    fn js_compat_edges() {
+        // 选了 custom 却没有图（含删过后存的空串）回默认
+        assert_eq!(favicon_url(&state("custom", None)), "/icons/emberwing/icon-192.png");
+        assert_eq!(favicon_url(&state("custom", Some(""))), "/icons/emberwing/icon-192.png");
         assert_eq!(custom_icon_url("a b/中"), "/api/app-icon/custom.png?v=a%20b%2F%E4%B8%AD");
         assert_eq!(resolve_app_icon(Some("custom"), Some("")), "emberwing");
         assert_eq!(resolve_app_icon(Some(""), None), "emberwing");

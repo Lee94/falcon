@@ -280,7 +280,7 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 | **待定**：浏览器版的语法高亮（tree-sitter 编不到 wasm） | 倾向 C3 用 syntect 的纯 Rust 正则后端；首版可以无高亮 | — |
 | wasm-opt | 不用：压缩后反而变大（§9） | 实测 |
 | 浏览器版工具链 | rustup stable + wasm32-unknown-unknown，wasm-bindgen-cli 与 Cargo.lock 同版本；不需要 nightly | 实测 |
-| **待定**：PWA | 倾向删掉安装入口，保留服务端的 manifest / 图标路由（标签页图标仍要用） | — |
+| PWA | 删掉（2026-10-11）：清单、maskable 与 iOS 主屏幕图标都去掉，只留标签页图标的跳转路由（ADR 0018 后记） | 用户 |
 
 ---
 

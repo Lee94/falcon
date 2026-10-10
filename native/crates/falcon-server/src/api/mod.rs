@@ -126,7 +126,7 @@ pub fn app(state: AppState) -> Router {
 }
 
 /// 不走登录 cookie、各自验身份的路由：原始字节（作用域令牌）、应用图标的取图路由
-/// （publicAsset，含不在 /api 下的 PWA 清单）、askpass helper（Bearer）
+/// （publicAsset）、askpass helper（Bearer）
 fn public_router() -> Router<AppState> {
     Router::new().merge(askpass::helper_router()).merge(files::raw_router()).merge(app_icon::public_router())
 }

@@ -58,3 +58,9 @@ id 列表在 shared 的 `APP_ICON_IDS`（顺序即设置里的顺序）、falcon
 - Dock 图标整个 App 只有一个，几台服务端各开一个窗口、各选了不同图标时，最后取到 / 改过的那台说了算。
 
 锁屏时截不到屏幕，自动化加了 `dock:<路径.tiff>` 步骤，从 AppKit 读回当前的 Dock 图标——验的是 AppKit 真收下了，不只是我们调了。
+
+## 后记（2026-10-11）：PWA 删掉了
+
+浏览器版换成 GPUI（wasm）、移动端去掉之后，"装成 PWA"没人用了（设计文档 rust-unification.md §10 的待定项，用户拍板删）。随之去掉的：宿主页的 `<link rel="manifest">`、服务端的 `/manifest.webmanifest` 与 `/api/app-icon/apple-touch-icon`、每套图标的 `maskable-{192,512}.png` 与 `apple-touch-icon.png`（`cargo xtask icons` 不再出）。保留的：标签页图标（`/api/app-icon/favicon` 按选择跳到 `icon-192.png` 或自定义图）、`icon-512.png`（Windows exe 的图标从它缩出来）、原生的 Dock 图标。已经装过的 PWA 会打不开清单，删掉重新用浏览器标签页打开即可。
+
+同一天图标的生成从 `scripts/app-icons.mjs` / `gen-icons.mjs` 挪进了 `cargo xtask icons`（native/xtask/src/icons.rs），产物路径改成 `native/web/icons/` 与 `native/crates/falcon-ui/assets/app-icons/`，安装包的 AppIcon 由 `cargo xtask pkg` 现画；上文的脚本名与 `public/` 路径是当时的。

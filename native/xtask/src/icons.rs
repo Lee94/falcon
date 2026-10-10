@@ -9,13 +9,12 @@
 //! 最短往返表示），同一个 rsvg-convert 画出来的 PNG 因此也相同。
 //!
 //! 出的文件：
-//! - `native/web/icons/<id>/icon-{192,512}.png`       圆角方块：标签页图标、设置里的预览、PWA purpose=any
-//! - `native/web/icons/<id>/maskable-{192,512}.png`   PWA purpose=maskable
-//! - `native/web/icons/<id>/apple-touch-icon.png`     iOS 主屏幕（满版方块，系统自己裁角）
+//! - `native/web/icons/<id>/icon-{192,512}.png`       圆角方块：浏览器版的标签页图标（192）、Windows exe 的图标（512）
 //! - `native/crates/falcon-ui/assets/app-icons/<id>.png`   原生客户端运行时的 Dock 图标（macOS 版式）
 //!
 //! 标签页图标用 PNG 不用 SVG：默认图标是栅格插画，塞进 SVG 就是一个 1MB 多的 favicon。
-//! 安装包的 AppIcon.icns 由 `cargo xtask pkg` 直接从这里现画，不在这里出。
+//! 安装包的 AppIcon.icns 由 `cargo xtask pkg` 直接从这里现画，不在这里出。PWA 用的 maskable
+//! 与 iOS 主屏幕图标（满版方块）随 PWA 在 2026-10-11 删掉了。
 
 use std::path::Path;
 
@@ -186,20 +185,9 @@ fn scaled(k: f64, inner: &str) -> String {
     format!(r#"<g transform="translate(512 512) scale({k}) translate(-512 -512)">{inner}</g>"#)
 }
 
-/// 圆角方块，圆角 229（1024 网格）：标签页图标、设置里的预览、PWA purpose=any
+/// 圆角方块，圆角 229（1024 网格）：标签页图标、Windows exe 的图标
 pub fn rounded(icon: &Icon) -> String {
     svg(icon, &format!(r#"<rect width="1024" height="1024" rx="229" fill="{}"/>{}"#, icon.bg, icon.mark), "")
-}
-
-/// 满版方块：iOS 主屏幕自己裁超椭圆，给它圆角反而露出四个角的底色
-pub fn square(icon: &Icon) -> String {
-    svg(icon, &format!(r#"<rect width="1024" height="1024" fill="{}"/>{}"#, icon.bg, icon.mark), "")
-}
-
-/// maskable：安全区是直径 80% 的圆（r = 409.6）。图形缩到 0.84 才完整落进去——
-/// 最紧的圆形遮罩也切不到翼尖和尾尖。
-pub fn maskable(icon: &Icon) -> String {
-    svg(icon, &format!(r#"<rect width="1024" height="1024" fill="{}"/>{}"#, icon.bg, scaled(0.84, &icon.mark)), "")
 }
 
 /// macOS 版式（Big Sur 起的图标网格）：824 见方的圆角块居中、四周留透明边、带一点投影。
@@ -249,12 +237,8 @@ pub fn run(args: &[String]) -> Result<()> {
         let dir = web_out.join(id);
         std::fs::create_dir_all(&dir)?;
         let any = rounded(icon);
-        let mask = maskable(icon);
         raster(&any, &dir.join("icon-192.png"), 192)?;
         raster(&any, &dir.join("icon-512.png"), 512)?;
-        raster(&mask, &dir.join("maskable-192.png"), 192)?;
-        raster(&mask, &dir.join("maskable-512.png"), 512)?;
-        raster(&square(icon), &dir.join("apple-touch-icon.png"), 180)?;
         raster(&macos(icon), &native_out.join(format!("{id}.png")), 512)?;
     }
     let rel = |p: &Path| p.strip_prefix(root()).unwrap_or(p).display().to_string();
@@ -272,7 +256,6 @@ mod tests {
         let side = 1024.0 * 0.8;
         assert_eq!(format!("{side} {}", (1024.0 - side) / 2.0), "819.2 102.39999999999998");
         assert_eq!(format!("{}", 824.0 / 1024.0), "0.8046875");
-        assert_eq!(format!("{}", 0.84), "0.84");
     }
 
     #[test]
