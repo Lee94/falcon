@@ -188,6 +188,13 @@ pub fn rel_segments(rel: Option<&str>) -> Result<Vec<String>, FileError> {
 /// 而挡下来反而会让 monorepo 里常见的软链目录变成一堆打不开的死项。
 pub fn resolve_inside(kind: HostKind, root: &str, rel: Option<&str>) -> Result<String, FileError> {
     let segs = rel_segments(rel)?;
+    // 与 Node 版的一处刻意差别（修掉的漏洞）：Windows 上 `\` 也是分隔符，rel_segments 只按 `/`
+    // 切，`a\..\..\Windows` 会整段当成一个"名字"混过去；拼成路径后 `..` 原样留在里面，
+    // 下面的 is_ancestor 只比字面段（`..` 也算一段）照样放行，而 .NET / Win32 会把它解析掉——
+    // 删除就能递归到工作目录外面。Windows 宿主机上把每段再按 `\` 拆开查一遍
+    if kind == HostKind::Windows && segs.iter().flat_map(|s| s.split('\\')).any(|p| p == "." || p == "..") {
+        return Err(FileError::InvalidPath);
+    }
     let base = normalize_sep(kind, root);
     if segs.is_empty() {
         return Ok(base);
@@ -983,6 +990,18 @@ fn decode_base64_lenient(s: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Node 版的漏洞：Windows 上反斜杠分隔的 `..` 能绕过护栏（见 resolve_inside 的注释）
+    #[test]
+    fn windows_backslash_dotdot_cannot_escape_workspace() {
+        let root = "C:\\code\\repo";
+        assert!(resolve_inside(HostKind::Windows, root, Some("a\\..\\..\\..\\Windows")).is_err());
+        assert!(resolve_inside(HostKind::Windows, root, Some("a/b\\..")).is_err());
+        assert!(resolve_inside(HostKind::Windows, root, Some(".\\x")).is_err());
+        assert_eq!(resolve_inside(HostKind::Windows, root, Some("a\\b")).unwrap(), "C:\\code\\repo\\a\\b");
+        // POSIX 上反斜杠是合法的文件名字符，`a\..` 就是一个叫这名字的文件，不拦
+        assert!(resolve_inside(HostKind::Posix, "/code/repo", Some("a\\..")).is_ok());
+    }
     use crate::zellij::host::tests::decode;
     use base64::Engine as _;
 
