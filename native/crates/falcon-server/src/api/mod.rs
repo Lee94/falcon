@@ -11,6 +11,8 @@
 pub mod askpass;
 pub mod auth_routes;
 pub mod error;
+pub mod hosts;
+pub mod input;
 pub mod sessions;
 pub mod static_files;
 pub mod system;
@@ -114,7 +116,11 @@ fn public_router() -> Router<AppState> {
 
 /// 要登录的 `/api/*`（S4 起逐组填进来）
 fn protected_router() -> Router<AppState> {
-    Router::new().merge(sessions::router()).merge(askpass::router()).merge(system::router())
+    Router::new()
+        .merge(sessions::router())
+        .merge(askpass::router())
+        .merge(system::router())
+        .merge(hosts::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
