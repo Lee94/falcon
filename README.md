@@ -60,13 +60,13 @@ D:\code\
 
 ## 快速开始
 
-服务端与客户端都是 Rust（`native/`，一个 Cargo workspace）：服务端 `falcon-server`，客户端 `falcon-app` 一套代码出原生桌面与浏览器（wasm）两种产物。从源码跑只需要 Rust 工具链（浏览器版另要 `rustup target add wasm32-unknown-unknown` 与同版本的 `wasm-bindgen-cli`，见 `native/scripts/build-web.sh`）。构建 / 打包任务都是 `cargo xtask <命令>`（`native/xtask`，`cargo xtask --help` 列全部）：
+服务端与客户端都是 Rust（`native/`，一个 Cargo workspace）：服务端 `falcon-server`，客户端一套界面（`falcon-ui`）出原生桌面（`falcon-desktop`）与浏览器（wasm，`falcon-web`）两种产物。从源码跑只需要 Rust 工具链（浏览器版另要 `rustup target add wasm32-unknown-unknown` 与同版本的 `wasm-bindgen-cli`，见 `native/scripts/build-web.sh`）。构建 / 打包任务都是 `cargo xtask <命令>`（`native/xtask`，`cargo xtask --help` 列全部）：
 
 ```bash
 cd native
 cargo xtask web                       # 浏览器版客户端，产物 native/target-wasm/dist
 cargo run --release -p falcon-server  # 服务端，托管上面那份产物
-cargo run -p falcon-app               # 或者直接开原生客户端
+cargo run -p falcon-desktop           # 或者直接开原生客户端
 ```
 
 打开 http://localhost:4923 。注意不带参数时用的是默认数据目录 `~/.falcon`——和装好的服务同一个，试跑另起一个时带上 `--port` / `--data-dir`（`cd native && cargo run -p falcon-server -- --port 4950 --data-dir /tmp/fal`）。
@@ -89,7 +89,7 @@ cargo run -p falcon-app               # 或者直接开原生客户端
 cd native
 cargo run -p falcon-server     # 开发服务端
 cargo xtask web                # 改了客户端后重编浏览器版，刷新页面即可
-cargo run -p falcon-app        # 原生客户端连本机服务
+cargo run -p falcon-desktop    # 原生客户端连本机服务
 cargo xtask meegle             # 开发构建要用「飞书项目」面板时，先取一次锁定版本的 meegle CLI
 ```
 
@@ -123,7 +123,7 @@ Windows 只能打原生客户端的安装包（服务端不支持 Windows，装�
 
 ```bash
 cargo xtask win                # cargo build --release + Inno Setup
-cargo xtask win --skip-cargo   # 只用已有的 native/target/release/falcon-app.exe
+cargo xtask win --skip-cargo   # 只用已有的 native/target/release/falcon-desktop.exe
 ```
 
 产物 `release/Falcon-v<版本>-win32-x64-setup.exe`，默认按当前用户装、不要管理员。必须在 Windows 上打：
@@ -220,8 +220,10 @@ native/
 │   ├── falcon-term/     终端：alacritty_terminal + 按键 / 鼠标 / 滚轮编码
 │   ├── falcon-theme/    主题系统（Ghostty 主题、界面色派生）
 │   ├── falcon-core/     客户端纯逻辑（列式工作区排布、会话标题、快捷键……）
-│   ├── falcon-app/      GPUI 界面（原生桌面与浏览器两种入口）
-│   └── falcon-web/      浏览器版的 wasm 薄壳
+│   ├── falcon-platform/ 平台能力接口（偏好、服务端来源、钥匙串、下载、HTML 预览……）
+│   ├── falcon-ui/       GPUI 界面（不写平台分支，只认 falcon-platform）
+│   ├── falcon-desktop/  原生客户端：入口 + 平台能力的原生实现
+│   └── falcon-web/      浏览器版：wasm 入口 + 平台能力的浏览器实现
 ├── web/                 浏览器版的宿主页与内置图标
 ├── zellij-plugin/       滚动位置插件（wasm32-wasip1）
 ├── xtask/               构建 / 打包 / 资源生成任务（cargo xtask）

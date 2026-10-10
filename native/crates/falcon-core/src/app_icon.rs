@@ -1,5 +1,5 @@
 //! 应用图标（ADR 0018）：shared 的 `appIcon.ts` 里客户端用得到的部分，加上原生独有的
-//! Dock 版式运算（像素级的纯函数；解码 / 缩放 / 编码在 falcon-app，那里有 image crate）。
+//! Dock 版式运算（像素级的纯函数；解码 / 缩放 / 编码在 falcon-ui，那里有 image crate）。
 
 /// 内置图标，顺序即设置里的排列顺序。与 native/xtask/src/icons.rs 一一对应
 pub const APP_ICON_IDS: [&str; 8] = [

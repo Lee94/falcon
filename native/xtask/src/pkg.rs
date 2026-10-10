@@ -96,9 +96,9 @@ fn build(skip_bin: bool, use_launcher: bool) -> Result<()> {
         copy_exec(&templates.join("launcher.sh"), &exe)?;
     } else {
         // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
-        println!("== cargo build --release -p falcon-app ==");
-        util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
-        copy_exec(&native().join("target/release/falcon-app"), &exe)?;
+        println!("== cargo build --release -p falcon-desktop ==");
+        util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
+        copy_exec(&native().join("target/release/falcon-desktop"), &exe)?;
     }
 
     let plist = std::fs::read_to_string(templates.join("Info.plist"))?.replace("__VERSION__", ver);

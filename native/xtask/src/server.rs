@@ -63,7 +63,7 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
 
     // ---- 3. cargo ----
     // 发布产物不带调试信息（工作区的 release profile 为原生客户端留着 debuginfo）。改 profile 会让
-    // 依赖全部重编，所以单独一个 target 目录，不跟 falcon-app 的 release 缓存互相冲掉
+    // 依赖全部重编，所以单独一个 target 目录，不跟原生客户端的 release 缓存互相冲掉
     let target_dir = native().join("target-server");
     let mut cargo_args: Vec<String> = [
         "build",

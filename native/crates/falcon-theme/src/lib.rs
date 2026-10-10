@@ -18,7 +18,7 @@
 //!
 //! 不在这里的：把颜色落到界面上（web 的 apply.ts 写 DOM；原生由 app 层把强类型字段
 //! 转成 gpui 的 Hsla 喂给自己的组件与 gpui-component 的 Theme）、跟随系统明暗
-//! （GPUI 的 `window.appearance()`）、按槽位缓存派生结果——都归 falcon-app。
+//! （GPUI 的 `window.appearance()`）、按槽位缓存派生结果——都归 falcon-ui。
 //!
 //! 典型用法：
 //!

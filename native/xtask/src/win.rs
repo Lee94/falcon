@@ -6,13 +6,13 @@
 //!
 //! ```text
 //! cargo xtask win                 # cargo build --release，再编安装包
-//! cargo xtask win --skip-cargo    # 只用已有的 native/target/release/falcon-app.exe
+//! cargo xtask win --skip-cargo    # 只用已有的 native/target/release/falcon-desktop.exe
 //! ```
 //!
 //! 产物 release/Falcon-v<版本>-win32-x64-setup.exe。没有代码签名证书，别人机器上
 //! SmartScreen 会拦，「更多信息 → 仍要运行」即可。
 //!
-//! 必须在 Windows 上跑：exe 的图标与版本信息由 falcon-app 的 build.rs 经 rc.exe 编进去
+//! 必须在 Windows 上跑：exe 的图标与版本信息由 falcon-desktop 的 build.rs 经 rc.exe 编进去
 //! （Windows SDK，随 VS 生成工具装）；安装包要 Inno Setup 6 的 ISCC.exe——
 //! `winget install JRSoftware.InnoSetup --scope user`，或用 FALCON_ISCC 指到它。
 //! 安装脚本在 native/xtask/assets/windows-installer/Falcon.iss。
@@ -41,10 +41,10 @@ pub fn run(args: &[String]) -> Result<()> {
 
     if !skip_cargo {
         // crates.io 走 native/.cargo/config.toml 里的镜像配置
-        println!("== cargo build --release -p falcon-app ==");
-        util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
+        println!("== cargo build --release -p falcon-desktop ==");
+        util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
     }
-    let exe = native().join("target/release/falcon-app.exe");
+    let exe = native().join("target/release/falcon-desktop.exe");
     if !exe.is_file() {
         bail!("找不到 {}，先去掉 --skip-cargo 跑一遍", rel(&exe));
     }
@@ -54,12 +54,12 @@ pub fn run(args: &[String]) -> Result<()> {
     let build_dir = native().join("target/release/build");
     let icon = std::fs::read_dir(&build_dir)?
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("falcon-app-"))
+        .filter(|e| e.file_name().to_string_lossy().starts_with("falcon-desktop-"))
         .map(|e| e.path().join("out/falcon.ico"))
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .max_by_key(|(t, _)| *t)
         .map(|(_, p)| p)
-        .context("target/release/build/falcon-app-*/out/ 里没有 falcon.ico，build.rs 没走 Windows 资源那一段？")?;
+        .context("target/release/build/falcon-desktop-*/out/ 里没有 falcon.ico，build.rs 没走 Windows 资源那一段？")?;
 
     // 版本跟原生客户端走（exe 版本信息里也是这个，同一个工作区版本）
     let ver = version();

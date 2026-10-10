@@ -1,0 +1,10 @@
+[package]
+name = "falcon-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Falcon 客户端的平台能力接口（docs/design/rust-unification.md 决定六）：falcon-ui 只认这里的 trait，原生（falcon-desktop）与浏览器（falcon-web）各实现一份"
+
+[dependencies]
+gpui-kit.workspace = true

@@ -4,8 +4,9 @@
 //! 收满这个数才把它那边的临时文件改名到位。两头都不会留下悄悄截断的文件。
 //!
 //! 落盘 / 读本机文件的两条（[`FalconClient::download_to_file`]、
-//! [`FalconClient::upload_file`]）只在原生上有：浏览器里没有本机路径，下载交给
-//! `<a download>`、上传读 `File`（docs/design/rust-unification.md 附录 B）。
+//! [`FalconClient::upload_file`]）只在原生上真有：浏览器里没有本机路径，下载交给
+//! `<a download>`、上传读 `File`（docs/design/rust-unification.md 附录 B），wasm 上这两个
+//! 方法照样在（签名一致、直接报错），界面层不用按 target 分支。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +57,8 @@ pub(crate) use native::file_body;
 
 #[cfg(not(target_family = "wasm"))]
 mod native;
+#[cfg(target_family = "wasm")]
+mod web;
 
 impl FalconClient {
     /// web 的 `downloadUrl`：`/api/projects/:id/download?path=` 这个路径（不含基址）。

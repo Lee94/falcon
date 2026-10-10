@@ -1,5 +1,5 @@
 //! falcon-proto：falcon 的线上协议类型，服务端（falcon-server）与客户端（falcon-client /
-//! falcon-app）共用这一份。原是 `packages/shared/src/index.ts` 的手写镜像（设计文档
+//! falcon-ui）共用这一份。原是 `packages/shared/src/index.ts` 的手写镜像（设计文档
 //! `docs/design/gpui-client.md` 决定五）；TS 一侧删除后（原文在提交 `9c9d045`）这里就是
 //! **协议的唯一真相来源**。`tests/fixtures/` 是 `cargo xtask fixtures` 从真服务端落盘的
 //! 响应：改了线上形状就重生 fixture，契约测试保证服务端写出的 JSON 这边读得回来。

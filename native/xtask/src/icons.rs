@@ -3,7 +3,7 @@
 //!
 //! 每个图标 = 底色 `bg`（SVG fill，可以是渐变引用）+ 画在 1024 网格上的 `mark`（+ 可选 `defs`）。
 //! id 列表与 falcon-core 的 `APP_ICON_IDS`（native/crates/falcon-core/src/app_icon.rs）一一对应
-//! （falcon-app 有测试对账）。光栅化用 rsvg-convert（librsvg）。
+//! （falcon-ui 有测试对账）。光栅化用 rsvg-convert（librsvg）。
 //!
 //! 生成的 SVG 文本与原 JS 逐字相同（数字按 JS 的 `${x}` 规则输出：Rust 的 f64 Display 也是
 //! 最短往返表示），同一个 rsvg-convert 画出来的 PNG 因此也相同。
@@ -12,7 +12,7 @@
 //! - `native/web/icons/<id>/icon-{192,512}.png`       圆角方块：标签页图标、设置里的预览、PWA purpose=any
 //! - `native/web/icons/<id>/maskable-{192,512}.png`   PWA purpose=maskable
 //! - `native/web/icons/<id>/apple-touch-icon.png`     iOS 主屏幕（满版方块，系统自己裁角）
-//! - `native/crates/falcon-app/assets/app-icons/<id>.png`  原生客户端运行时的 Dock 图标（macOS 版式）
+//! - `native/crates/falcon-ui/assets/app-icons/<id>.png`   原生客户端运行时的 Dock 图标（macOS 版式）
 //!
 //! 标签页图标用 PNG 不用 SVG：默认图标是栅格插画，塞进 SVG 就是一个 1MB 多的 favicon。
 //! 安装包的 AppIcon.icns 由 `cargo xtask pkg` 直接从这里现画，不在这里出。
@@ -239,7 +239,7 @@ pub fn run(args: &[String]) -> Result<()> {
         bail!("未知参数：{a}");
     }
     let web_out = native().join("web/icons");
-    let native_out = native().join("crates/falcon-app/assets/app-icons");
+    let native_out = native().join("crates/falcon-ui/assets/app-icons");
     // 从头出：删掉的图标不留旧文件
     let _ = std::fs::remove_dir_all(&web_out);
     let _ = std::fs::remove_dir_all(&native_out);

@@ -1,6 +1,6 @@
 # Falcon 全面 Rust 化：Rust 服务端 + gpui-kit 统一客户端
 
-> 状态：**C0 完成**（测量结果见 §9）；**S 线完成、Node 服务端已删除**（2026-10-10，见 §11；TS 原文在提交 `fd9022a`）；**React 前端与 shared 已提前删除**（2026-10-10，用户拍板，见 §12；TS 原文在提交 `9c9d045`），C1–C3 变成在浏览器版上补回功能 · 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
+> 状态：**C0 完成**（测量结果见 §9）；**S 线完成、Node 服务端已删除**（2026-10-10，见 §11；TS 原文在提交 `fd9022a`）；**React 前端与 shared 已提前删除**（2026-10-10，用户拍板，见 §12；TS 原文在提交 `9c9d045`），C1–C3 变成在浏览器版上补回功能；**C1 拆层完成**（2026-10-11，见 §14）；构建任务全部换成 `cargo xtask`（§13） · 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
 >
 > 术语一律沿用 [CONTEXT.md](../../CONTEXT.md)。"falcon 服务端"指跑着 falcon server 的那台机器，与**宿主机**、**远端主机**是三件事（同 [gpui-client.md](./gpui-client.md) §0）。
 
@@ -139,7 +139,7 @@ gpui-kit 0.7.1 的 Web 后端就是 Zed `crates/gpui_web` 的重发（`gpui-pre-
 | 期 | 内容 | 验收 |
 |---|---|---|
 | **C0 wasm spike** ✅ | 不重构，用最小的 cfg 把"登录 → 一扇终端"编到 wasm 并跑起来：单线程 gpui-web、web-sys WebSocket、alacritty 补丁、web-time | 量出 wasm 体积（原始 / brotli，不含 CJK）、冷 / 热启动时间、键入回显延迟；中文 IME 在 Chrome / Safari 上能上屏；WebGPU 与 WebGL2 都能画。**结果写进本文 §9**，体积或 IME 有硬伤就先补 fork 再往下走。实际做到了整个 falcon-app 编到 wasm，见 §9 |
-| **C1 拆层** | 拆出 falcon-platform / falcon-ui / falcon-desktop；时间统一 web-time；键位改为运行时调 `falcon_core::shortcuts`（删掉三处 `cfg(target_os = "macos")`） | 桌面版行为不变：`cargo test --workspace`、e2e、截图自动化全绿 |
+| **C1 拆层** ✅ | 拆出 falcon-platform / falcon-ui / falcon-desktop（做法与差别见 §14）；时间统一 web-time；键位改为运行时调 `falcon_core::shortcuts`（删掉三处 `cfg(target_os = "macos")`） | 桌面版行为不变：`cargo test --workspace`、e2e、截图自动化全绿 |
 | **C2 falcon-client 双传输** | 执行器胶水、`MaybeSend`、按 target 选 HTTP 实现、浏览器 cookie 罐模式（`token()` 恒为 None，401 直接推 LoginRequired）、web-sys WebSocket、会话 Driver 改写成 futures + Timer（浏览器不能发 ping，改用 online / visibilitychange 触发重连）、上传走 XHR（有进度）、下载走 `<a download>` | wasm-bindgen-test 加 headless 浏览器跑通登录、建会话、收发帧 |
 | **C3 falcon-web 功能对齐** | 附录 B 的全部缺口；宿主页（首帧主题脚本、加载页、manifest）；字体异步加载；外链图片的服务端代理路由；Web 版语法高亮（§10 待定） | 按 [gpui-client.md](./gpui-client.md) §5 的功能表，在桌面浏览器上逐项走通 |
 | **C4 删除** | 删 `packages/web`、移动端、`packages/shared`、pnpm workspace 里随之失效的部分；README / CLAUDE.md / CONTEXT.md / ADR 更新 | 仓库里不再有 React；`pnpm build` 只剩构建脚本，或改成 cargo / just |
@@ -182,7 +182,7 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 
 ## 6. 工程结构
 
-- Cargo workspace 新增 `falcon-server`、`falcon-platform`、`falcon-ui`、`falcon-desktop`、`falcon-web`。`falcon-app` 在 C1 拆完后消失。
+- Cargo workspace 新增 `falcon-server`、`falcon-platform`、`falcon-ui`、`falcon-desktop`、`falcon-web`。`falcon-app` 在 C1 拆完后消失（2026-10-11，§14）。
 - `native/.cargo/config.toml` 的 rsproxy 镜像照用。wasm 需要 `rustup target add wasm32-unknown-unknown`，还要一份与 lock 文件版本一致的 `wasm-bindgen-cli`。
 - 服务端进入 GPL-3.0-or-later 的 workspace，整个产品随之 GPL（个人使用，与 `native/` 的既有立场一致）。
 - 门禁：`cargo check` / `cargo test --workspace` 保持零警告；新增 `cargo check -p falcon-web --target wasm32-unknown-unknown`。React 删除之前，`tsc` 门禁照旧。
@@ -341,6 +341,29 @@ SSH Windows 远端没有环境，未测。
 - **meegle CLI**：不再经 pnpm 装。`xtask/src/meegle.rs` 锁版本与 npm 的 `dist.integrity`（sha512），直接从 npm 仓库下 tarball、校验后解出本平台二进制到 `native/.cache/meegle/bin/`；发布构建照旧编进服务端，开发构建的服务端按这个目录兜底（原来是仓库根的 `node_modules`）。
 - **外部工具照旧是外部工具**：rsvg-convert、pkgbuild / iconutil / codesign、ISCC、curl；字体子集化从 npm 的 subset-font（HarfBuzz 的 wasm 版）换成同一个 HarfBuzz 的 `hb-subset` 命令行，WOFF2 压缩换成 Google 的 `woff2_compress`。`native/scripts/build-web.sh` 留着（bash），`native/web/index.html` 里的首帧主题脚本留着（宿主页必须的那几十行）。
 - **对拍**：图标产物逐字节相同（SVG 文本按 JS 的数字格式输出），pkg 的 AppIcon.icns 与 Node 脚本打的逐字节相同、包结构一致；滚动插件重编出来的 wasm 与提交的相同；Zellij 版本校验对 GitHub 实跑过。
+
+---
+
+## 14. C1 拆层（2026-10-11）
+
+`falcon-app` 拆成四个 crate，界面层不再写 target cfg：
+
+| crate | 内容 |
+|---|---|
+| `falcon-platform` | `Platform` trait 与少量数据类型：`PlatformInfo`（mac / windows / browser）、偏好（KvStore：整份读入、单键写回）、工作区（按配置 id）、`ServerSource`（页面的源 / 配置表 + 本机地址）、配置表读写、访问密码、`LocalService`、`FontSource`、`Downloads`、`HtmlView`、应用图标。经 GPUI global 挂（`install` / `get`） |
+| `falcon-ui` | 原 falcon-app 的全部界面（约 2.9 万行），只认 falcon-platform；字体 build.rs、内置图标、文案都在这里 |
+| `falcon-desktop` | bin：入口、日志、HTTP 客户端、数据目录 JSON、钥匙串、launchd 托管、wry 网页视图、AppKit Dock、Windows 资源 build.rs |
+| `falcon-web` | cdylib：wasm 入口、localStorage、页面的源、`<a download>`（DOM 胶水在 `src/dom.rs`） |
+
+**与决定六的差别**：
+
+- 连接窗口、服务端配置的增删、automation / snapshot 留在 falcon-ui：它们是 GPUI 界面、要碰界面内部，挪进 falcon-desktop 得把一大片内部 API 变成 pub。浏览器里不注册"连接到…"动作（`PlatformInfo::browser`），automation / snapshot 仍是 feature，由 falcon-desktop 的同名 feature 打开。
+- FilePicker / Upload 没进 trait：选文件走 GPUI 自己的 `prompt_for_paths`（浏览器上它返回错误），`download_to_file` / `upload_file` 在 falcon-client 的 wasm 上照样有、直接报错——执行器与传输的差异归 falcon-client（`block_in_place` 也挪了过去），界面层只看 `Platform::downloads()` 决定"自己写盘"还是"交给浏览器"。C3 补浏览器上传时再加 trait 方法。
+- 回退字体的字节由原生平台交回界面层（`FontSource::Embedded(falcon_ui::embedded_fallback_fonts())`）：界面层若自己按运行时分支选，两条路都会被链接进 wasm，浏览器版从 18.9MB 涨到 42MB（实测）。
+
+**顺带修掉的**：键位改成运行时按 `PlatformInfo::mac` 从 falcon-core 的快捷键表取（删掉 actions.rs / ui.rs / changes.rs 里三处 `cfg(target_os = "macos")`）——之前浏览器版按编译目标判断，Mac 上的浏览器拿到的是 Ctrl+Shift 键位；浏览器里另外注册表里的 Alt 别名（`BindingRole::BrowserAlias`，绕开 ⌘T / ⌘W 这类保留键；mac 浏览器上的 Option 组合要等 fork 透出 `event.code`，附录 B）。
+
+**验收**：`cargo check --workspace --tests`（含 `--features snapshot`、`--no-default-features`）零警告；`cargo test --workspace` 1233 个全过（与拆层前同数）；wasm 18.9MB（拆层前 18.8MB）；原生截图自动化（登录、选项目、新建终端、中文、⌘⇧P、Dock 图标读回、工作区落盘）与浏览器版（Chrome：回放、输入、中文、⌘⇧P）都走通。
 
 ---
 

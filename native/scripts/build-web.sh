@@ -32,7 +32,7 @@ fi
 target_dir="$here/target-wasm"
 out="$target_dir/dist"
 
-# 从 cargo 的 JSON 消息里取 falcon-app 构建脚本的 OUT_DIR（解好的 TTF 在那儿）
+# 从 cargo 的 JSON 消息里取 falcon-ui 构建脚本的 OUT_DIR（解好的 TTF 在那儿）
 fonts_dir="$(
   cargo build --profile web --target wasm32-unknown-unknown --target-dir "$target_dir" -p falcon-web \
     --message-format=json-render-diagnostics |
@@ -44,12 +44,12 @@ for line in sys.stdin:
         m = json.loads(line)
     except ValueError:
         continue
-    if m.get("reason") == "build-script-executed" and m.get("package_id", "").find("falcon-app") >= 0:
+    if m.get("reason") == "build-script-executed" and m.get("package_id", "").find("falcon-ui") >= 0:
         out = m["out_dir"]
 print(out)
 '
 )"
-[[ -n "$fonts_dir" ]] || { echo "没拿到 falcon-app 的 OUT_DIR" >&2; exit 1; }
+[[ -n "$fonts_dir" ]] || { echo "没拿到 falcon-ui 的 OUT_DIR" >&2; exit 1; }
 
 rm -rf "$out"
 mkdir -p "$out/fonts" "$out/assets"
@@ -70,7 +70,7 @@ fi
 cp web/index.html "$out/"
 # 内置应用图标（cargo xtask icons 的产物）：服务端的 /api/app-icon/* 与 PWA 清单都指向 /icons/<id>/…
 cp -R web/icons "$out/icons"
-# 浏览器版只嵌了正文字体，其余按需拉（falcon-app/src/fonts.rs）
+# 浏览器版只嵌了正文字体，其余按需拉（falcon-ui/src/fonts.rs）
 for f in IoskeleyMonoTerm.ttf MapleMonoNL-NF-CN.ttf SymbolsNerdFontMono.ttf; do
   cp "$fonts_dir/$f" "$out/fonts/"
 done

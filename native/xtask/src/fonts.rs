@@ -8,7 +8,7 @@
 //! cargo xtask vendor-fonts nerd     [--out <目录>]
 //! ```
 //!
-//! 产物落在 `native/assets/fonts/<字族>/`、已进仓库：falcon-app 的 build.rs 把这里的 woff2
+//! 产物落在 `native/assets/fonts/<字族>/`、已进仓库：falcon-ui 的 build.rs 把这里的 woff2
 //! 解成 TTF（原生嵌进二进制，浏览器版按需拉）。只在升级字库时跑。`--out` 把产物写到别处——
 //! 试跑 / 比对时用，免得直接覆盖仓库里那份。
 //!
@@ -235,7 +235,7 @@ const IOSKELEY_RANGES: &[(u32, u32)] = &[
 /// maple-font 官方 Release 的 Maple Mono NL NF CN，只抽 Regular 压成 woff2。
 ///
 /// 完整 CN 包上百 MB，不能整包提交。粗体由渲染端合成（等宽字体的合成粗体不改变字符步进），
-/// 省一份 6.3MB 的下载。falcon-app 的 build.rs 把它解成 TTF：原生客户端嵌进二进制，浏览器版
+/// 省一份 6.3MB 的下载。falcon-ui 的 build.rs 把它解成 TTF：原生客户端嵌进二进制，浏览器版
 /// 运行时按需拉。
 fn maple(out: &Path) -> Result<()> {
     const VERSION: &str = "v7.9";

@@ -2355,41 +2355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "falcon-app"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "directories",
- "falcon-client",
- "falcon-core",
- "falcon-proto",
- "falcon-term",
- "falcon-theme",
- "futures",
- "gpui-kit",
- "image",
- "keyring",
- "lb-wry",
- "log",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "parking_lot",
- "rust-i18n",
- "serde",
- "serde_json",
- "tokio",
- "url",
- "wasm-bindgen",
- "web-sys",
- "web-time",
- "winresource",
- "woff2-patched",
-]
-
-[[package]]
 name = "falcon-client"
 version = "0.1.1"
 dependencies = [
@@ -2429,6 +2394,37 @@ dependencies = [
  "serde",
  "serde_json",
  "web-time",
+]
+
+[[package]]
+name = "falcon-desktop"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "directories",
+ "falcon-client",
+ "falcon-core",
+ "falcon-platform",
+ "falcon-ui",
+ "futures",
+ "gpui-kit",
+ "image",
+ "keyring",
+ "lb-wry",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "serde_json",
+ "url",
+ "winresource",
+]
+
+[[package]]
+name = "falcon-platform"
+version = "0.1.1"
+dependencies = [
+ "gpui-kit",
 ]
 
 [[package]]
@@ -2507,11 +2503,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "falcon-ui"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "falcon-client",
+ "falcon-core",
+ "falcon-platform",
+ "falcon-proto",
+ "falcon-term",
+ "falcon-theme",
+ "futures",
+ "gpui-kit",
+ "image",
+ "log",
+ "parking_lot",
+ "rust-i18n",
+ "serde",
+ "serde_json",
+ "url",
+ "web-time",
+ "woff2-patched",
+]
+
+[[package]]
 name = "falcon-web"
 version = "0.1.1"
 dependencies = [
- "falcon-app",
+ "falcon-platform",
+ "falcon-ui",
+ "gpui-kit",
+ "log",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

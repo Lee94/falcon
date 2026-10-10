@@ -1,0 +1,52 @@
+[package]
+name = "falcon-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Falcon 原生客户端（macOS / Windows）：入口与平台能力的原生实现，界面在 falcon-ui"
+
+[[bin]]
+name = "falcon-desktop"
+path = "src/main.rs"
+
+[features]
+default = ["webview"]
+# HTML 预览的原生 WebView（src/html_view.rs）。关掉时界面退成"在浏览器中打开"的提示
+webview = ["dep:wry"]
+# 脚本化驱动与调试截图（falcon-ui 的 src/automation.rs / src/snapshot.rs）
+automation = ["falcon-ui/automation"]
+snapshot = ["automation", "falcon-ui/snapshot"]
+
+# Windows：exe 自带图标与版本信息（build.rs 的 windows_resources）。按构建机 cfg 挂——
+# 没有从 macOS 交叉编 Windows 的需求，mac 上就不多编这两个
+[target.'cfg(windows)'.build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+winresource = "0.1"
+
+[dependencies]
+falcon-ui.workspace = true
+falcon-platform.workspace = true
+falcon-client.workspace = true
+falcon-core.workspace = true
+gpui-kit.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+url.workspace = true
+directories = "6"
+# 4.x 的默认 `v1` feature 保留 3.x 的 Entry 接口，底下换成 keyring-core + 各平台独立的 store crate；
+# 存储口径与 3.x 的 apple-native / windows-native 一致（登录钥匙串的 generic password，
+# service / account 两个属性；Windows 凭据名 `<user>.<service>`），升级前存的密码照样读得到
+keyring = "4"
+# HTML 预览（ADR 0007）：直接用 wry 自己挂 WKWebView。版本跟 gpui-wry =0.7.1 锁的那份一致
+# （它是 gpui-kit 同批发布的 WebView 封装，但不重新导出 wry，接口也不够我们控导航 / 下载），
+# 升级 gpui-kit 时照它的 Cargo.toml 一起换
+wry = { package = "lb-wry", version = "=0.53.3", optional = true }
+
+# 运行时换 Dock 图标（src/dock.rs）。版本跟 GPUI / wry 已经带进来的那份一致，不多编一套
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }

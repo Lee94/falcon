@@ -1,13 +1,15 @@
-# Falcon 原生客户端（GPUI）。设计见 docs/design/gpui-client.md。
+# Falcon 的 Cargo workspace：服务端（falcon-server）、客户端（原生 falcon-desktop + 浏览器 falcon-web，
+# 界面在 falcon-ui）与构建任务（xtask）。客户端设计见 docs/design/gpui-client.md 与 rust-unification.md。
 #
-# 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。GPUI 只出现在 falcon-app，
-# 其余 crate 不依赖 GPUI——GPUI 每次破坏性升级只波及一层。
+# 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。GPUI 只出现在客户端的
+# falcon-platform / falcon-ui / falcon-desktop / falcon-web 四个 crate，其余 crate 不依赖 GPUI——
+# GPUI 每次破坏性升级只波及这一层。
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
 # 滚动位置插件（ADR 0019）是独立的 wasm32-wasip1 crate，有自己的 Cargo.lock，不进工作区
 exclude = ["zellij-plugin"]
-default-members = ["crates/falcon-app"]
+default-members = ["crates/falcon-desktop"]
 
 [workspace.package]
 version = "0.1.1"
@@ -21,6 +23,8 @@ falcon-client = { path = "crates/falcon-client" }
 falcon-term = { path = "crates/falcon-term" }
 falcon-theme = { path = "crates/falcon-theme" }
 falcon-core = { path = "crates/falcon-core" }
+falcon-platform = { path = "crates/falcon-platform" }
+falcon-ui = { path = "crates/falcon-ui" }
 
 # GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
 # gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同

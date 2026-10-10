@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 命令
 
-整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端 `falcon-app`（原生桌面 + 浏览器 wasm 两种产物）都在里面。构建 / 打包 / 资源生成任务在 `native/xtask`（`cargo xtask`，别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），仓库里没有 Node / JS 依赖。
+整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端（界面 `falcon-ui`，原生入口 `falcon-desktop`、浏览器入口 `falcon-web`）都在里面。构建 / 打包 / 资源生成任务在 `native/xtask`（`cargo xtask`，别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），仓库里没有 Node / JS 依赖。
 
 ```bash
 cd native
@@ -13,7 +13,7 @@ cargo run -p falcon-server  # 开发服务端（4923，默认数据目录 ~/.fal
 cargo xtask meegle          # 开发构建要用飞书项目面板时先取一次锁定版本的 meegle CLI（落在 native/.cache/meegle/，服务端自己找得到）
 cargo xtask web             # 浏览器版客户端（GPUI → wasm），产物 native/target-wasm/dist；开发构建的服务端缺省就托管它
 cargo xtask server          # 服务端发布单文件（先 web，再把浏览器版与 meegle CLI 编进去），产物 release/falcon-v<版本>-<平台>
-cargo build --release -p falcon-app   # 原生客户端 release 构建
+cargo build --release -p falcon-desktop   # 原生客户端 release 构建
 cargo xtask pkg             # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
 cargo xtask win             # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
 cargo xtask zellij-plugin   # 重编滚动位置插件（ADR 0019），产物提交在 native/crates/falcon-server/assets/；只在改插件或升 zellij 时跑
@@ -68,30 +68,30 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - Windows 远端的所有命令走 `powershell -EncodedCommand`（UTF-16LE + base64）。
 - 测 SSH 只用隔离的 sshd（`SetEnv HOME=` 指到临时短路径），别对自己真实的家目录跑 probe / 安装；开发实例端口用 4940–4999、数据目录用短路径（zellij socket 上限 104 字节），从 falcon 终端里起要 `env -u FALCON_WEB_DIST -u FALCON_MEEGLE_BIN -u FALCON_SESSION_ID`。
 
-### client（`native/crates/falcon-app` 及其下层 crate）
+### client（`native/crates/falcon-ui` / `falcon-platform` / `falcon-desktop` / `falcon-web` 及其下层 crate）
 
-Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id` + 登录 cookie）。一套代码两种产物：原生桌面（`src/main.rs` → `run_desktop`）与浏览器 wasm（`falcon-web` 薄壳 → `run_web`，服务端托管）。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，浏览器版在 `docs/design/rust-unification.md`（附录 B 是浏览器端还没补齐的缺口），改动前先读。
+Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id` + 登录 cookie）。一套界面两种产物（设计文档决定六，C1 拆层）：界面全在 `falcon-ui`，**不写 target cfg**——凡是"这台机器上有没有 / 怎么做"的事（偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、字体来源、下载、HTML 预览视图、应用图标、是不是 mac 键位）都问 `falcon-platform` 的 `Platform` trait（`falcon_platform::get(cx)`）；原生实现与入口在 `falcon-desktop`（数据目录 JSON、钥匙串、launchd 托管、wry、AppKit Dock、Windows 资源），浏览器实现与 wasm 入口在 `falcon-web`（localStorage、页面的源、`<a download>`，DOM 胶水在 `src/dom.rs`，服务端托管产物）。新的平台差异先加进 trait，别在 falcon-ui 里写 `cfg(target_family/target_os)`；执行器层面的差异（`block_in_place`、`MaybeSend`）在 falcon-client 里。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，浏览器版在 `docs/design/rust-unification.md`（附录 B 是浏览器端还没补齐的缺口），改动前先读。
 
 ```bash
 cd native
-cargo run -p falcon-app                         # 连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
+cargo run -p falcon-desktop                     # 连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
 ./scripts/build-web.sh                          # 浏览器版，产物 target-wasm/dist
 ```
 
 - **crates.io 走 `native/.cargo/config.toml` 里的 rsproxy 镜像**：这台机器上 Clash 的 fake-ip 把 index.crates.io 解析坏了。网络正常的机器删掉那一段即可。
-- 分层：`falcon-proto`（协议类型）→ `falcon-client`（REST / WS，与执行器无关的 future，原生上自带 tokio 运行时，浏览器上走 fetch / `web_sys::WebSocket`）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + 鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（主题系统：Ghostty 主题文件即数据模型、浅深双槽位、整套界面色由一套主题派生，ADR 0006 / 0011）→ `falcon-core`（与 GPUI 无关的纯逻辑：列式工作区排布 `layout.rs`、窗口 key `pane_key.rs`、会话标题 `session_title.rs`、快捷键、文件路径 / 搜索 / 树、git 图等；`tests/vectors/` 是回归向量）→ `falcon-app`（唯一依赖 GPUI 的 crate）。**纯逻辑一律放下层 crate**，GPUI 升级只波及 falcon-app。
+- 分层：`falcon-proto`（协议类型）→ `falcon-client`（REST / WS，与执行器无关的 future，原生上自带 tokio 运行时，浏览器上走 fetch / `web_sys::WebSocket`）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + 鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（主题系统：Ghostty 主题文件即数据模型、浅深双槽位、整套界面色由一套主题派生，ADR 0006 / 0011）→ `falcon-core`（与 GPUI 无关的纯逻辑：列式工作区排布 `layout.rs`、窗口 key `pane_key.rs`、会话标题 `session_title.rs`、快捷键、文件路径 / 搜索 / 树、git 图等；`tests/vectors/` 是回归向量）→ `falcon-platform` / `falcon-ui` / `falcon-desktop` / `falcon-web`（只有这四个依赖 GPUI）。**纯逻辑一律放下层 crate**，GPUI 升级只波及这一层。
 - GPUI 走 `gpui-kit` 总包（`=` 精确锁版本）；Zed 的终端代码按文件抄（`terminal/element.rs`、`falcon-term/src/keys.rs`，文件头注明出处 commit），不按 crate 依赖——会带进第二份 gpui。`native/` 因此是 GPL-3.0-or-later。`native/vendor/` 下的 alacritty_terminal 与 gpui-pre-web 是带补丁的 fork，改动清单在各自 Cargo.toml 顶部，升级 gpui-kit 时重放。
-- 文案：`t!("key")`，**界面上不允许硬编码中文**。共用文案在 `falcon-app/locales/zh-CN.json`（v1 只有中文），原生 / 平台独有的放 `falcon-app/i18n-native/<区域>.json`，挂在 `native.<区域>` 下。
+- 文案：`t!("key")`，**界面上不允许硬编码中文**。共用文案在 `falcon-ui/locales/zh-CN.json`（v1 只有中文），原生 / 平台独有的放 `falcon-ui/i18n-native/<区域>.json`，挂在 `native.<区域>` 下。
 - 界面色**只准用 falcon-theme 派生出的语义 token**，不许写死颜色；新增语义色去 `falcon-theme/src/derive.rs` 加。派生规则有冻结的金标准 fixture（`tests/derive_golden.rs`），有意改规则要连 fixture 一起改并写清楚。**深浅按主题底色亮度切，不按系统明暗**。内置主题 = Falcon 两套 + Ghostty 全部 463 套（`falcon-theme/data/`，`cargo xtask vendor-themes` 从本机 Ghostty.app 或 GitHub 重新生成）。
 - 界面骨架是**浮动岛**（ADR 0011）：窗口底上浮着侧栏 / 主区 / 右面板几块圆角面板，之间只有一道缝，**不要加分栏边框**；岛里再嵌一块用"借窗口底色"的下沉块，也不要用边框。主区是**列式工作区**（ADR 0012）：窗口排成列、每列可叠多扇、列分在一块块画布上、不横向滚动，排布与拖拽落点的纯函数在 `falcon-core/src/layout.rs`，改之前先读 ADR 0012。
 - 会话**默认不起名**（`name` 空串），界面显示的是自动标题：手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名（`falcon-core/src/session_title.rs`）。列表里各处必须叫同一个名字；窗口标题栏例外——它右边就是完整工作目录，没标题时那一格空着，别编占位名。前台命令由服务端探测后经 WS 的 `{type:"title"}` 推来（只在有 Viewer 时探、2.5s 节流、后台会话的标题会陈旧）。
-- 字体：`falcon-app/build.rs` 把 `native/assets/fonts/` 里的 woff2（`cargo xtask vendor-fonts <berkeley|ioskeley|maple|nerd>` 从官方发行包生成、已进仓库；要 woff2_compress 与 hb-subset）解成 TTF：原生嵌进二进制，浏览器版只嵌正文字体、其余由 build-web.sh 拷进产物按需拉（GPUI 不认 WOFF2）。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
-- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `native/xtask/src/icons.rs`，`cargo xtask icons` 出浏览器版的 `native/web/icons/`（服务端 `/api/app-icon/*` 与 PWA 清单跳到这里）与原生的 `falcon-app/assets/app-icons/`；增删图标要同时改 `xtask/src/icons.rs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-app 有测试对账）。
-- **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-app --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-app/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。浏览器版用 Chrome DevTools 驱动：canvas 上的合成指针事件在 DPR 2 时坐标要乘 2，键盘输入用真实按键（`type_text`）而不是合成 KeyboardEvent。
+- 字体：`falcon-ui/build.rs` 把 `native/assets/fonts/` 里的 woff2（`cargo xtask vendor-fonts <berkeley|ioskeley|maple|nerd>` 从官方发行包生成、已进仓库；要 woff2_compress 与 hb-subset）解成 TTF：原生嵌进二进制，浏览器版只嵌正文字体、其余由 build-web.sh 拷进产物按需拉（`Platform::font_source`；GPUI 不认 WOFF2）。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
+- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `native/xtask/src/icons.rs`，`cargo xtask icons` 出浏览器版的 `native/web/icons/`（服务端 `/api/app-icon/*` 与 PWA 清单跳到这里）与原生的 `falcon-ui/assets/app-icons/`；增删图标要同时改 `xtask/src/icons.rs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-ui 有测试对账）。
+- **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-desktop --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-ui/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。浏览器版用 Chrome DevTools 驱动：canvas 上的合成指针事件在 DPR 2 时坐标要乘 2，键盘输入用真实按键（`type_text`）而不是合成 KeyboardEvent。
 - **压测用 `--features automation --release`**（不带 snapshot 的 test-support）：`frames:<ms>` 以 60Hz 手动画并打印帧耗时 p50 / p95，`frames:<ms>:refresh` 无视视图缓存。侧栏与右侧面板是 `cached` 视图（ADR 0015），新加的大块视图照此办理。
-- **浏览器版**：平台差异写 `cfg(target_family = "wasm")`，DOM 胶水放 `falcon-app/src/web.rs`。几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable + `wasm32-unknown-unknown`，wasm-bindgen-cli 与 Cargo.lock 同版本（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。宿主页是 `native/web/index.html`（首帧主题脚本、manifest、favicon）。
-- HTML 预览：原生走默认开启的 `webview` feature（`--no-default-features` 退成"在浏览器中打开"）；字节一律走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007），沙箱不给 allow-same-origin、凭据是只能读该项目文件的作用域令牌，别为了"方便"放宽。
-- **通知一律走 `falcon-app/src/toasts.rs` 的 `ToastExt`**，不用组件库的 `push_notification`（它的通知层会被对话框盖住，见 ADR 0015）。
+- **浏览器版**：几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable + `wasm32-unknown-unknown`，wasm-bindgen-cli 与 Cargo.lock 同版本（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。宿主页是 `native/web/index.html`（首帧主题脚本、manifest、favicon）。
+- HTML 预览：界面只管摆位置，网页视图由平台给（`Platform::html_view`）；原生是 falcon-desktop 默认开启的 `webview` feature（wry，`--no-default-features` 退成"在浏览器中打开"），浏览器版的 iframe 叠层在 C3；字节一律走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007），沙箱不给 allow-same-origin、凭据是只能读该项目文件的作用域令牌，别为了"方便"放宽。
+- **通知一律走 `falcon-ui/src/toasts.rs` 的 `ToastExt`**，不用组件库的 `push_notification`（它的通知层会被对话框盖住，见 ADR 0015）。
 - **界面尺寸写 `zoom::zpx(..)`，不写 `px(..)`**：界面缩放（⌘+ / ⌘−）= rem 与 zpx 一起乘倍数；`px` 只留给画布几何、终端画面、窗口外框这类真实像素（`zoom.rs` 顶部有清单）。`theme.font_size` 就是 rem，必须是 16 × 倍数，别再拿它当正文字号。
 
 ## 约定

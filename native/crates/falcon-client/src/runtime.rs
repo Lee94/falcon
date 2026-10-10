@@ -23,6 +23,19 @@ pub trait MaybeSend {}
 #[cfg(target_family = "wasm")]
 impl<T: ?Sized> MaybeSend for T {}
 
+/// 在会话回调里做一段重活（解析 4MB 回放）。原生上回调跑在网络运行时的 worker 上，用
+/// `block_in_place` 让 tokio 把这个 worker 上的其他任务挪走（回调约定：别长时间占着网络
+/// worker）；浏览器里只有主线程，就地跑。都是在当前线程上同步执行——回调的顺序不变
+#[cfg(not(target_family = "wasm"))]
+pub fn block_in_place<R>(f: impl FnOnce() -> R) -> R {
+    tokio::task::block_in_place(f)
+}
+
+#[cfg(target_family = "wasm")]
+pub fn block_in_place<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
 /// 后台跑一个驱动循环（会话 / 安装 socket），不等结果。
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
