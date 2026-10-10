@@ -27,6 +27,8 @@
 //! 留到 S5 的函数（要读写本机文件）：`writeLocalManifest`（本地直接覆盖写清单）、
 //! `removeLocalVirtualDir`（本地清理虚拟目录，ENOENT 视为 gone、其他失败落 left）。
 
+use std::path::Path;
+
 use base64::Engine as _;
 
 use crate::git::path::join_path;
@@ -174,6 +176,33 @@ pub fn central_manifest_files(project_name: &str, branch: &str, members: &[Centr
 }
 
 // ---------------- 写入 ----------------
+
+/// 本地：逐个写清单文件（覆盖写，天然幂等）
+pub fn write_local_manifest(dir: &Path, files: &[ManifestFile]) -> std::io::Result<()> {
+    for f in files {
+        let target = f.rel.iter().fold(dir.to_path_buf(), |p, seg| p.join(seg));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&target, &f.content)?;
+    }
+    Ok(())
+}
+
+/// 本地清理，口径同 [`posix_remove_virtual_dir_command`]：只删固定文件 + 非递归 rmdir。
+/// 返回 true = 目录已不在；false = 还在（内有其他文件）
+pub fn remove_local_virtual_dir(dir: &Path) -> bool {
+    for rel in VIRTUAL_DIR_FILES {
+        // ENOENT = 本来就没有；其他错误留给下面的 rmdir 去失败
+        let _ = std::fs::remove_file(rel.iter().fold(dir.to_path_buf(), |p, seg| p.join(seg)));
+    }
+    // 不存在或非空都不要紧，只影响最外层 rmdir 的结果
+    let _ = std::fs::remove_dir(dir.join(".claude"));
+    match std::fs::remove_dir(dir) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
 
 /// POSIX：一条命令建目录 + 逐文件 printf 覆盖写（ensureDirsScript 同款）。
 /// 内容经 quotePosix 内联，单引号里的换行由 sh 原样保留；rel 段是我们自己的

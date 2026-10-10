@@ -12,6 +12,7 @@ pub mod cloudflared;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod engine;
 pub mod exec;
 pub mod files;
 pub mod fs;

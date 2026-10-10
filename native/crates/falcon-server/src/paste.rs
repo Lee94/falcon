@@ -6,10 +6,7 @@
 //! POSIX 用 `cat > file` 收 stdin 原始字节；Windows 的 exec 通道对二进制
 //! 不可靠，改收 base64 再在 PowerShell 里解码。
 //!
-//! 移植自 `packages/server/src/paste.ts`，这一轮只移纯函数（命令构造、类型映射、文件名）。
-//!
-//! 留到 S5 的函数：`writeLocalPasteFile`（本地会话直接写 `<dataDir>/paste`，含同款的
-//! 24 小时陈旧清理；要读写本机文件）。
+//! 移植自 `packages/server/src/paste.ts`。
 
 use crate::git::path::join_path;
 use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
@@ -83,6 +80,27 @@ pub fn windows_write_command(dir: &str, file_path: &str) -> String {
 /// 与 Rust 的 `str::trim` 差这两个码点
 fn js_trim(s: &str) -> &str {
     s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
+}
+
+/// 本地会话：直接写进 `<dataDir>/paste`，清理逻辑与远端一致
+pub fn write_local_paste_file(data_dir: &std::path::Path, ext: &str, data: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let dir = data_dir.join("paste");
+    std::fs::create_dir_all(&dir)?;
+
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(u64::from(MAX_AGE_HOURS) * 3600);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            // 清理是顺手的事，失败不挡写入
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_file() && meta.modified().is_ok_and(|m| m < cutoff) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let file = dir.join(paste_file_name(ext));
+    std::fs::write(&file, data)?;
+    Ok(file)
 }
 
 #[cfg(test)]

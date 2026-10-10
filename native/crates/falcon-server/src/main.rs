@@ -1,15 +1,17 @@
 //! falcon 服务端（Rust）的可执行入口。对应 `packages/server/src/index.ts`。
 //!
-//! 现在只有 S2 的骨架：配置、数据库、加密、鉴权与 `/api/auth/*`、静态资源。会话、git、文件、
-//! 中转等路由随 S3–S6 逐步接上（docs/design/rust-unification.md）。
+//! 已接上：配置、数据库、加密、鉴权、静态资源（S2），会话引擎与会话 / WS / askpass 路由（S4）。
+//! git、文件、中转等路由随 S5–S6 逐步接上（docs/design/rust-unification.md）。
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use falcon_server::api::{self, AppState};
+use falcon_server::askpass::hub::AskpassHub;
 use falcon_server::config::{is_loopback, parse_args};
 use falcon_server::crypto::SecretBox;
 use falcon_server::db::Db;
+use falcon_server::engine::{self, EngineDeps};
 use falcon_server::zellij::version::ZELLIJ_VERSION;
 
 fn main() -> anyhow::Result<()> {
@@ -19,17 +21,39 @@ fn main() -> anyhow::Result<()> {
     let loopback = is_loopback(&config.host);
 
     let db = Arc::new(Db::open(&config.data_dir)?);
-    let secrets = SecretBox::open(&config.data_dir)?;
-    db.recover_sessions_on_startup();
-    let state = AppState::new(config.clone(), db, secrets);
+    let secrets = Arc::new(SecretBox::open(&config.data_dir)?);
 
-    if !loopback && !state.auth.password_set() {
+    if !loopback && !falcon_server::auth::Auth::new(db.clone(), loopback).password_set() {
         eprintln!(
             "拒绝启动：绑定 {}（非 localhost）但尚未设置访问密码。\n请先在 localhost 上启动并通过界面设置密码，再对外绑定。",
             config.host
         );
         std::process::exit(1);
     }
+
+    let askpass = Arc::new(AskpassHub::new());
+    askpass.set_origin(&format!("http://127.0.0.1:{}", config.port));
+    // 会话引擎：SessionManager 的构造里做启动恢复（上次 active 的会话归类为 unverified / dead）
+    let (engine, _engine_thread) = engine::spawn(
+        EngineDeps { db: db.clone(), secrets: secrets.clone(), data_dir: config.data_dir.clone(), askpass: askpass.clone() },
+        |engine| {
+            let sessions = engine.sessions.clone();
+            // 本地 PTY 基底环境（login shell 解析 + locale 兜底）预热：
+            // 结果按进程缓存，先跑起来，首个本地会话就不用等 login shell 启动
+            tokio::task::spawn_local(async move {
+                sessions.local.base_env().await;
+            });
+            // 启用中的中转（转发 / 公网发布）是服务，后端重启后应自己把隧道拉起来，不等用户再去设置里点
+            engine.sessions.restore_relays();
+            // 持久会话在 DB 里被标成 unverified：自动接回，不要等用户挨个点
+            engine.sessions.resume_unverified();
+        },
+    )?;
+    {
+        let engine = engine.clone();
+        askpass.set_on_prompt(move |p| engine.send(move |e| e.sessions.broadcast_askpass(&p)));
+    }
+    let state = AppState::new(config.clone(), db, secrets, askpass, engine);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -41,8 +65,12 @@ fn main() -> anyhow::Result<()> {
             config.port,
             config.data_dir.display()
         );
-        axum::serve(listener, api::app(state)).with_graceful_shutdown(shutdown_signal()).await?;
+        // 不走 graceful shutdown：会话的 WS 连接不会自己断，等它们就永远退不出去。
         // 会话在 DB 中保持 active，下次启动由 recover_sessions_on_startup 归类
+        tokio::select! {
+            res = axum::serve(listener, api::app(state)) => res?,
+            () = shutdown_signal() => {}
+        }
         anyhow::Ok(())
     })
 }

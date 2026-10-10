@@ -52,6 +52,11 @@ pub fn parse_args(argv: &[String], env: impl Fn(&str) -> Option<String>) -> anyh
     }
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("建数据目录 {} 失败", config.data_dir.display()))?;
+    // 与 Node 版的出入：相对路径在这里就解析成绝对路径。数据目录会拼进 Zellij 二进制、
+    // 启动脚本、askpass 包装的路径里；node-pty 的 execvp 对带斜杠的相对路径按 cwd 解析，
+    // portable-pty 却只在 PATH 里找，相对的 `target/fd/bin/zellij` 会 spawn 失败
+    config.data_dir = std::path::absolute(&config.data_dir)
+        .with_context(|| format!("解析数据目录 {} 失败", config.data_dir.display()))?;
     Ok(config)
 }
 

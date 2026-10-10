@@ -8,9 +8,13 @@
 //! - `/px0/` 与 `/api/` 同一口径，没登录的浏览器导航送去 `/?next=` 登录；
 //! - 其余 `/api/*` 一律要登录 cookie，挂在 [`protected_router`] 上。
 
+pub mod askpass;
 pub mod auth_routes;
 pub mod error;
+pub mod sessions;
 pub mod static_files;
+pub mod system;
+pub mod ws;
 
 use std::sync::Arc;
 
@@ -21,10 +25,12 @@ use axum::http::{HeaderMap, Method};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 
+use crate::askpass::hub::AskpassHub;
 use crate::auth::{Auth, COOKIE_NAME};
 use crate::config::ServerConfig;
 use crate::crypto::SecretBox;
 use crate::db::Db;
+use crate::engine::EngineHandle;
 use error::ApiError;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -39,7 +45,10 @@ pub struct Inner {
     pub config: ServerConfig,
     pub db: Arc<Db>,
     pub auth: Auth<Arc<Db>>,
-    pub secrets: SecretBox,
+    pub secrets: Arc<SecretBox>,
+    pub askpass: Arc<AskpassHub>,
+    /// 会话引擎（LocalSet 上的 SessionManager 等），见 engine.rs
+    pub engine: EngineHandle,
 }
 
 impl std::ops::Deref for AppState {
@@ -51,10 +60,16 @@ impl std::ops::Deref for AppState {
 }
 
 impl AppState {
-    pub fn new(config: ServerConfig, db: Arc<Db>, secrets: SecretBox) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        db: Arc<Db>,
+        secrets: Arc<SecretBox>,
+        askpass: Arc<AskpassHub>,
+        engine: EngineHandle,
+    ) -> Self {
         let loopback = crate::config::is_loopback(&config.host);
         let auth = Auth::new(db.clone(), loopback);
-        AppState { inner: Arc::new(Inner { config, db, auth, secrets }) }
+        AppState { inner: Arc::new(Inner { config, db, auth, secrets, askpass, engine }) }
     }
 
     /// 请求带来的登录 cookie 有没有效（不需要认证的部署恒为 true）
@@ -79,6 +94,7 @@ pub fn app(state: AppState) -> Router {
     let web_dist = static_files::web_dist();
     let mut router = Router::new()
         .merge(auth_routes::router())
+        .merge(ws::router())
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)));
     router = match web_dist {
@@ -93,12 +109,12 @@ pub fn app(state: AppState) -> Router {
 
 /// 不走登录 cookie、各自验身份的路由（S5 / S6 填：raw、app-icon、askpass helper）
 fn public_router() -> Router<AppState> {
-    Router::new()
+    Router::new().merge(askpass::helper_router())
 }
 
 /// 要登录的 `/api/*`（S4 起逐组填进来）
 fn protected_router() -> Router<AppState> {
-    Router::new()
+    Router::new().merge(sessions::router()).merge(askpass::router()).merge(system::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）

@@ -57,6 +57,21 @@ pub fn local_launcher_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("agents")
 }
 
+/// 本地宿主：写脚本，返回绝对路径。每次附着都重写（理由见 manager 的 session_shell）
+pub fn write_local_launcher(data_dir: &Path, agent: SessionAgent, shell: &str) -> std::io::Result<PathBuf> {
+    let dir = local_launcher_dir(data_dir);
+    std::fs::create_dir_all(&dir)?;
+    let kind = if cfg!(windows) { HostKind::Windows } else { HostKind::Posix };
+    let file = dir.join(launcher_name(agent, kind));
+    std::fs::write(&file, launcher_body(agent, kind, shell))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(file)
+}
+
 /// POSIX 启动脚本。真正干活的是 `<shell> -i -l -c`（三个 flag 分开写，
 /// 短参合并各 shell 不一，见 login_env.rs）：
 ///

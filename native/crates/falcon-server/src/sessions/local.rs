@@ -62,7 +62,7 @@ pub struct LocalZellij {
 }
 
 impl LocalZellij {
-    fn non_durable(reason: NonDurableReason, detail: Option<String>) -> Self {
+    pub(crate) fn non_durable(reason: NonDurableReason, detail: Option<String>) -> Self {
         LocalZellij { durable: false, reason: Some(reason), detail, layout: None, scroll: false }
     }
 }
@@ -146,6 +146,19 @@ impl LocalHost {
     /// 重试用：清掉缓存的准备结果
     pub fn reset(&self) {
         self.prepared.borrow_mut().take();
+    }
+
+    /// 测试用：直接给定准备结果，不去装 Zellij
+    #[cfg(test)]
+    pub(crate) fn set_prepared(&self, state: LocalZellij) {
+        *self.prepared.borrow_mut() = Some(state);
+    }
+
+    /// 测试用：直接给定基底环境，不去跑用户的 login shell（那会执行用户真实的 rc 文件）
+    #[cfg(test)]
+    pub(crate) fn set_base_env(&self, env: Vec<(String, String)>) {
+        let f: LocalBoxFuture<'static, _> = Box::pin(std::future::ready(Rc::new(env)));
+        *self.base_env.borrow_mut() = Some(f.shared());
     }
 
     /// 本地 PTY 的基底环境（缓存）。附着时每次 await 它；启动时预热一次，首个本地会话
@@ -527,9 +540,18 @@ fn process_name_of(pid: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// 测试用的最小环境：PATH 与 HOME，别的一概不带（不跑 login shell）
+    pub(crate) fn test_env() -> Vec<(String, String)> {
+        vec![
+            ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            ("HOME".into(), std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())),
+            ("LANG".into(), "en_US.UTF-8".into()),
+        ]
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn pty_round_trip_and_exit() {
@@ -538,6 +560,7 @@ mod tests {
             .run_until(async {
                 let dir = tempfile::tempdir().unwrap();
                 let host = LocalHost::new(dir.path().to_path_buf());
+                host.set_base_env(test_env());
                 let out = Rc::new(RefCell::new(String::new()));
                 let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<()>();
                 let exit_tx = RefCell::new(Some(exit_tx));

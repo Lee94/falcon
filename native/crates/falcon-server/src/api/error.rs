@@ -66,6 +66,12 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<crate::engine::EngineGone> for ApiError {
+    fn from(err: crate::engine::EngineGone) -> Self {
+        ApiError::internal(err)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
