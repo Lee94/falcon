@@ -1,8 +1,9 @@
-//! 与 web 对拍：`tests/fixtures/*` 由 `native/scripts/export-ghostty-themes.mjs` 直接跑
-//! web 的 TS 源码生成（deriveTheme / JSON.stringify），这里要求 Rust 的输出逐字相同。
+//! 派生规则的回归基线：`tests/fixtures/*` 是当年直接跑 web 的 TS 源码（deriveTheme /
+//! JSON.stringify）生成的（导出脚本随 React 前端一起删了：
+//! `git show 9c9d045:native/scripts/export-ghostty-themes.mjs`），这里要求 Rust 的输出逐字相同。
 //!
-//! 红了的意思是两边分叉了。TS 是真相来源：如果是 web 改了规则后重跑了导出脚本，
-//! 照着 TS 改 Rust；如果 TS 没动，就是 Rust 改错了。别为了变绿去改 fixture。
+//! 红了的意思是派生规则变了。是有意改规则，就连同这份 fixture 一起改并在提交里写清楚；
+//! 不是，就是改错了。别为了变绿去改 fixture。
 
 use falcon_theme::{FALCON_THEMES, ThemeSettings, derive_theme, load_catalog};
 

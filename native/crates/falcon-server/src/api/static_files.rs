@@ -1,6 +1,5 @@
-//! 前端产物托管。切换（S7）时托管的还是 React 版（packages/web/dist），C 线收尾后换成浏览器版
-//! （native/web 的宿主页 + wasm + 字体 + 图标，`native/scripts/build-web.sh` 的产物）——
-//! 托管层不关心是哪一个，只认目录里有 index.html。
+//! 前端产物托管：浏览器版客户端（native/web 的宿主页 + wasm + 字体 + 图标，
+//! `native/scripts/build-web.sh` 的产物）。托管层只认目录里有 index.html。
 //!
 //! 来源的优先级：`FALCON_WEB_DIST`（要真有 index.html）> 编进二进制的那份（`embed-web`
 //! feature，构建时 `FALCON_EMBED_WEB_DIR` 指定）> 开发构建的默认产物目录。
@@ -17,6 +16,7 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeader;
 
 /// `FALCON_WEB_DIST`（旧名 `MOJITO_WEB_DIST`）优先，否则开发构建的默认产物目录。
 /// 目录里没有 index.html 就当不存在——环境变量多半是从 falcon 终端里继承来的陈旧值
@@ -104,14 +104,18 @@ pub async fn embedded_service(req: Request) -> Response {
     (headers, bytes.into_owned()).into_response()
 }
 
-pub fn service(dir: PathBuf) -> ServeDir<axum::routing::MethodRouter> {
+/// 目录托管。ServeDir 只发 Last-Modified 不发 Cache-Control，浏览器会按启发式缓存把宿主页
+/// 存上一阵——换了前端（比如 React 换成浏览器版）之后还拿着旧页面。一律 `no-cache`：
+/// 每次都带着 Last-Modified 回来问一声，没变就是 304，不多传字节
+pub fn service(dir: PathBuf) -> SetResponseHeader<ServeDir<axum::routing::MethodRouter>, HeaderValue> {
     let index = dir.join("index.html");
-    ServeDir::new(dir).append_index_html_on_directories(true).fallback(axum::routing::any(
+    let serve = ServeDir::new(dir).append_index_html_on_directories(true).fallback(axum::routing::any(
         move |req: Request| {
             let index = index.clone();
             async move { spa_fallback(&index, req).await }
         },
-    ))
+    ));
+    SetResponseHeader::if_not_present(serve, CACHE_CONTROL, HeaderValue::from_static("no-cache"))
 }
 
 async fn spa_fallback(index: &Path, req: Request) -> Response {

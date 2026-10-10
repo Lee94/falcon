@@ -8,11 +8,11 @@
  *
  * 产物 release/falcon-v<版本>-<平台>，build-macos-pkg.mjs 把它放进 Falcon.app 的 Resources，
  * `falcon service install` 再把它拷到 <dataDir>/bin/falcon。不需要首次运行的解压步骤：
- *   - web 产物（rust-embed）与 Zellij 滚动插件直接从二进制里服务；
+ *   - 浏览器版客户端（native/scripts/build-web.sh 的产物，rust-embed）与 Zellij 滚动插件
+ *     直接从二进制里服务；
  *   - 内置的 meegle CLI 编进二进制，首次用到时释放到 <dataDir>/bin/meegle-<内容哈希>。
  *
- * 前端仍是 React 版（packages/web/dist）；C 线收尾后换成浏览器版 GPUI 的产物
- * （native/target-wasm/dist），托管层不关心是哪一个（docs/design/rust-unification.md）。
+ * 浏览器版要 rustup 的 wasm32-unknown-unknown target 与同版本的 wasm-bindgen-cli（见 build-web.sh）。
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -60,15 +60,14 @@ function run(cmd, args, opts = {}) {
   execFileSync(cmd, args, { stdio: "inherit", cwd: ROOT, ...opts });
 }
 
-// ---- 1. web 产物 ----
-const webDist = path.join(ROOT, "packages/web/dist");
+// ---- 1. 浏览器版客户端（GPUI 编到 wasm）----
+const webDist = path.join(NATIVE, "target-wasm/dist");
 if (!skipWeb) {
-  console.log("== 构建 web（shared → web） ==");
-  run("pnpm", ["--filter", "@falcon/shared", "build"]);
-  run("pnpm", ["--filter", "@falcon/web", "build"]);
+  console.log("== 构建浏览器版（native/scripts/build-web.sh） ==");
+  run(path.join(NATIVE, "scripts/build-web.sh"), []);
 }
 if (!fs.existsSync(path.join(webDist, "index.html"))) {
-  console.error("packages/web/dist 缺少 index.html，请先构建 web");
+  console.error("native/target-wasm/dist 缺少 index.html，先跑 native/scripts/build-web.sh");
   process.exit(1);
 }
 

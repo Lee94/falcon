@@ -4,42 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 命令
 
+整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端 `falcon-app`（原生桌面 + 浏览器 wasm 两种产物）都在里面。仓库根的 pnpm 只装打包脚本要用的两样东西（内嵌进服务端的 meegle CLI、字体子集化）。
+
 ```bash
 pnpm install
-pnpm build          # shared → web，顺序不能反：workspace:* 指向 shared/dist
 pnpm dev:server     # cargo run -p falcon-server（4923，默认数据目录 ~/.falcon——那是日常在用的实例，开发另起要带 --port / --data-dir）
-pnpm dev:web        # vite，5173，/api 与 /ws 代理到 4923
-pnpm build:bin      # 服务端发布单文件（内嵌 web 产物与 meegle CLI），产物 release/falcon-v<版本>-<平台>
-pnpm build:native   # 原生客户端（native/，Rust + GPUI）release 构建
+pnpm build:web      # 浏览器版客户端（GPUI → wasm），产物 native/target-wasm/dist；开发构建的服务端缺省就托管它
+pnpm build:bin      # 服务端发布单文件（先 build:web，再把浏览器版与 meegle CLI 编进去），产物 release/falcon-v<版本>-<平台>
+pnpm build:native   # 原生客户端 release 构建
 pnpm build:pkg      # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
 pnpm build:win      # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
 pnpm build:zellij-plugin  # 重编滚动位置插件（ADR 0019），产物提交在 native/crates/falcon-server/assets/；只在改插件或升 zellij 时跑
 ```
 
-### 门禁：编译 + 单元测试
+### 门禁：零警告编译 + 单元测试
 
-服务端是 Rust（`native/crates/falcon-server`），门禁是零警告编译加单测；前端没有 ESLint / Prettier / Biome，静态门禁是 `tsc`：
-
-```bash
-cd native && cargo check -p falcon-server --tests && cargo test -p falcon-server
-pnpm --filter @falcon/web typecheck     # web 的 build 也会先跑一遍 --noEmit
-```
-
-shared / web 的测试用 `node:test`，但**必须经 tsx 跑**——源码里的相对 import 一律带 `.js` 后缀，`node --test` 不会把 `./x.js` 解析到 `x.ts`，会 `ERR_MODULE_NOT_FOUND`。tsx 装在仓库根上：
+没有 clippy / rustfmt 要求，但保持零警告：
 
 ```bash
-pnpm exec tsx --test "packages/shared/src/**/*.test.ts" "packages/web/src/**/*.test.ts"
-
-# 单文件 / 单用例
-pnpm exec tsx --test packages/web/src/lib/layout.test.ts
-pnpm exec tsx --test --test-name-pattern "pinEdge" packages/web/src/lib/layout.test.ts
+cd native
+cargo check --workspace --tests
+cargo test --workspace     # 与单独 -p 跑都要绿：GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序
+cargo test -p falcon-server --lib sessions::manager   # 单个模块；--test-name-pattern 那套换成 cargo 的名字过滤
 ```
 
-服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。真机链路另有两道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + zellij，走设密码、自动重登、两次重启接回）；`node native/scripts/gen-fixtures.mjs` 重生协议 fixture（配 `compare-fixtures.mjs` 可在改服务端前后比形状）。SSH 远端与 Windows 远端没有自动化测试，改动那些要在真机上验。
+服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。真机链路另有两道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + zellij，走设密码、自动重登、两次重启接回）；`node native/scripts/gen-fixtures.mjs` 重生协议 fixture（配 `compare-fixtures.mjs` 可在改服务端前后比形状）。SSH 远端、Windows 远端与浏览器里的真实交互（IME、剪贴板、拖放）没有自动化测试，改动那些要在真机上验。
 
 ## 架构
 
-`packages/shared`（TS）是协议类型的唯一真相来源，web 直接用；Rust 侧（服务端与原生客户端）用 `native/crates/falcon-proto` 这份手写镜像，改协议两边同一个提交落地、重生 fixture。VT 模式跟踪也有两份口径一致的实现：shared 的 `termModes.ts`（rio 鼠标上报）与 `falcon-proto::term_modes`（服务端回放前缀）。
+协议类型的唯一真相来源是 `native/crates/falcon-proto`，服务端与客户端用同一份；`tests/fixtures/` 是 `gen-fixtures.mjs` 从真服务端落盘的响应，改协议就重生 fixture。VT 模式跟踪 `falcon-proto::term_modes` 也是两边共用（服务端回放前缀与客户端鼠标上报）。原 TS 实现（`packages/server`、`packages/web`、`packages/shared`）已删除，ADR 与注释里提到的 `*.ts` 在提交 `9c9d045`（`packages/web`、`packages/shared`）与 `fd9022a`（`packages/server`）里。
 
 ### 数据流
 
@@ -71,57 +64,34 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - Windows 远端的所有命令走 `powershell -EncodedCommand`（UTF-16LE + base64）。
 - 测 SSH 只用隔离的 sshd（`SetEnv HOME=` 指到临时短路径），别对自己真实的家目录跑 probe / 安装；开发实例端口用 4940–4999、数据目录用短路径（zellij socket 上限 104 字节），从 falcon 终端里起要 `env -u FALCON_WEB_DIST -u FALCON_MEEGLE_BIN -u FALCON_SESSION_ID`。
 
-### web
+### client（`native/crates/falcon-app` 及其下层 crate）
 
-- 界面骨架是**浮动岛**（ADR 0011）：桌面最外层铺 `--app`（窗口底），侧栏 / 主区内容 / 右面板都是浮在它上面的圆角面板（`styles.css` 的 `.island`），之间只有一道 6px 的缝——**不要再加分栏边框**；岛里再嵌一块（统计卡、表格、代码块、分段控件的槽）用 `.sunken`（借窗口底色），**也不要用边框**。`.island` 的面板底一律 `--background`，终端要的就是主题原底色，面板与它同色圆角边缘才不露色差。画布上一列是一座岛，列里每扇窗口自己裁对应的角。圆角走 `--radius`（12px）减出来的阶梯（sm 8 / md 10 / lg 12 / xl 16），别写死半径。「当前选中」用 `--tint`（主题 ANSI 蓝推的弱着色面），hover 用灰，两者都是内缩的圆角块。
-- 主区是**列式工作区**（ADR 0012）：`WorkCanvas.tsx` 把窗口（终端 / 文件 / 差异）排成从左到右的列，每列可叠多扇，列宽与窗口高度都能拖，抓标题栏能拖到别的列或另起一列。**不横向滚动**：列分在一块块画布上（`ColumnLayout.canvas`），一次显示一块、铺满视口，新列排不下就自动另起一块（store 订阅里的 `settleCanvases` → `assignCanvases`），两块以上时顶上出画布条（每块画一张布局缩略图，`canvasThumb`）；固定列在每块上都有。**没有顶部 tab 栏**——新建入口在侧栏每个 checkout 行的 ＋（菜单含各家 CLI），"开着哪些会话"列在侧栏树里（**会话行默认收起**，checkout 行尾巴上只摆一个计数徽标 + 最重的异常状态；展开状态存 `store.sessionsOpen`，新建 / 打开会话时自动摊开那个 checkout）。排布模型在 `store.columns`，纯函数在 `lib/layout.ts`（增删移 / 与数据源对账 `syncColumns` / 按项目过滤 / 拖拽落点 / 像素几何 / 固定列——`pinned` 的列永远是最后一列，插列与拖拽落点一律夹到 `pinEdge()` 之前），窗口的 key 约定在 `lib/paneKey.ts`。**每扇窗口都绝对定位、DOM 顺序恒定**：xterm 的画布换过父节点渲染尺寸就毁（整屏空白 + 字被拉大），改排布只准改 left/top/width/height，改之前先读 ADR 0012。
-- `store.ts` 是单个 zustand store，含全部 UI 态与持久化的工作区布局（含列排布）；`lib/useActions.ts` 集中所有菜单项 / 命令面板动作。
-- `components/ui/` 是 shadcn 生成物，`components/common/` 是本项目封装（Menu / ConfirmDialog / Field 等），业务组件在 `components/` 顶层。
-- 终端滚动条（`TerminalScrollbar.tsx`，ADR 0019）是叠在终端右缘、与引擎无关的浮层：位置靠 WS 的 `{type:"scroll"}` 问服务端，滚轮（在 onData 里认 SGR 滚轮报文）/ 悬停 / 拖动时才问，平时不画。几何纯函数在 `lib/termScroll.ts`，原生 `falcon-core/src/term_scroll.rs` 同口径。
-- `TerminalView.tsx` 只面向 `lib/termAdapter.ts` 接口，底下是 xterm.js（默认）或 rioterm（实验性，Rust VT 核心编译成 WASM，动态 import）。
-- `lib/rio/` 是 rio 引擎的自持装配层（ADR 0005）：`open.ts` 复刻了 rioterm 的 `open()`（键鼠 / IME / 滚轮 / 剪贴板接线，换字体只换渲染器、Terminal 不动），`renderer.ts` 是渲染器契约，`webgpu/` 是自研 WebGPU 渲染器（不可用时回落 rioterm 自带 canvas），`mouse.ts` 合成鼠标按键报文（rioterm 没有这个 API），输出一律经 `handle.write()` 进来才有协议 / 编码可查。**rioterm 锁定精确版本**，升级前按 ADR 核对它的 open()/canvas/keys/core。纯函数层（度量、颜色、图集分配、行构建、脏行、sprite 几何、鼠标报文）都有单测；GPU 与 DOM 只在真机验。排查用 `localStorage["falcon.rio.renderer"] = "canvas" | "webgpu"` 强制渲染器，DEV 下控制台看 `__rioHandles`（`rendererKind` / `fallbackReason` / `renderer.stats`）。WebGPU 画布 present 后回读是空的，看像素只能页面截图。
-- `lib/theme/` 是主题系统（ADR 0006）：数据模型就是 Ghostty 主题文件（`ghostty.ts` 解析 / 补默认 / 序列化，含 `theme = X` 覆盖与 cell-foreground 特殊值），浅色 / 深色各一个槽位（`pref.ts`，存的是颜色**副本**，启动不等目录），整套 shadcn 语义色、语法高亮色（shiki css-variables 主题）、终端 ITheme 都由 `derive.ts` 从一套主题推出来并写在 `<html>` 内联 style 上（`apply.ts`）。**`.dark` 按主题底色亮度切，不按明暗模式**。内置目录 = Falcon 两套 + Ghostty 全部 463 套（`assets/themes/ghostty-themes.ts`，`pnpm vendor-ghostty-themes` 从本机 Ghostty.app 或 GitHub 重新生成，懒加载）。界面色**只准用语义 token**，不许写死颜色；新增语义色去 `derive.ts` 加，不要回到 `styles.css` 写两套。
-- 文件下载 / 上传（ADR 0008）：服务端 `transfer.ts` 走**流对流**——本地是 fs 流，远端是 `SshLink.execStream` 交出来的 ssh2 通道（POSIX `cat` / `cat >`，Windows 走每行独立可解的 base64 行），没有预览那个 16MB 上限；上传先写同目录临时文件、收满 `Content-Length` 才改名到位（中途断开不留截断文件），同名文件回 409 让前端问过再带 `overwrite=1` 重发。鉴权就是登录 cookie（下载是 `<a download>` 同源导航，上传是 XHR），别再发一种令牌。进度走 sonner toast，顺序确认用 `lib/confirmAsync.ts`。
-- 文件面板（ADR 0009）：`FilesPanel.tsx` 是当前目录的平铺浏览器（路径栏 + 图标工具栏 + 多选表），不是树。mkdir / rename / remove 在 `files.ts`，命令构造是纯函数；删除只作用于 `resolveInside` 之后的工作目录内部，文件夹递归删、不能删工作目录本身。文件夹上传是 mkdir -p 再逐个走 0008 的 PUT。前端拼宿主机路径用 `lib/filePath.ts`。
-- 中转页（`RelaysPane.tsx`，ADR 0016）在设置里，不在右侧栏：按机器分块（本机只有公网发布），开着才 3s 轮询；任何写操作之后重拉整张 `/api/relays`——启用一条会顺手停掉同端口的其它规则，只替换这一行会显示错。
-- 飞书项目面板（`MeeglePanel.tsx`，ADR 0010）：不随焦点项目切换，三页（待办 / 空间 / 固定）加面板内下钻栈，粘贴飞书项目链接可直接打开视图 / 全景视图 / 工作项并固定；所有数据走 `api.meegle*`，前端不认识 CLI 原始字段；业务请求撞上 409 就重新拉 `/api/meegle/status` 让面板自己切到安装 / 登录提示。列表 / 详情走 `lib/meegleCache.ts`（与服务端共用 `TtlCache`）：卸载后再开立刻画出上次的结果，30s 内不打网络，顶栏刷新清缓存。右侧栏开着时切走不卸载（`App.tsx` 里 `hidden`），关掉右侧栏才卸。
-- 文件查看（`FileView.tsx`）：图片与 HTML 预览的字节不经 JSON，走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007）。HTML 在**没有 allow-same-origin** 的沙箱 iframe 里渲染，凭据是 URL 里只能读该项目文件的作用域令牌（`Auth.rawToken`），响应头带 CSP `sandbox` + nosniff；别为了"方便"给 iframe 加 allow-same-origin 或把登录 cookie 塞进 URL。前端拼地址一律用 `lib/rawUrl.ts`。
-- 默认字体是内嵌的 Berkeley Mono TX-02（`lib/berkeley-mono.css`，family 名 `TX-02`）：界面 `--font-sans` / `--font-mono` 和终端默认正文都用它。商业字体，zip 不进仓库，woff2 由 `pnpm vendor-berkeley-mono` 从官方发行包抽出。缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
-- 会话**默认不起名**（`name` 空串），界面显示的是自动标题：手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名，纯函数在 `lib/sessionTitle.ts`（React 里用 `lib/useSessionLabel.ts`，store 内部直接调 `sessionLabel`）。列表里四个地方（侧栏 / 总览 / 命令面板 / 移动端切换）必须叫同一个名字；窗口标题栏例外——它右边就是完整工作目录，没标题时那一格空着，别编占位名填进去。前台命令由服务端探测后经 WS 的 `{type:"title"}` 推来（`manager.scheduleTitleProbe`：只在有 Viewer 时探、2.5s 节流、后台会话的标题会陈旧），改这条链路前先读那两处注释。
-- 应用图标（ADR 0018）：选择存在服务端 settings 表（所有设备同一个），自定义图由客户端规整成 512 PNG 再传（服务端不解码图片）。标签页图标 / apple-touch 走 `/api/app-icon/*` 的跳转、PWA 清单由服务端现出，这几条取图路由不要登录（路由上的 `config.publicAsset`）。内置图标的图形在 `scripts/app-icons.mjs`，`pnpm gen-icons` 出 web 与原生的全部 PNG；增删图标要同时改 shared 与 falcon-core 的 `APP_ICON_IDS`（有测试对账）。
-- 界面上**不允许硬编码中文**，一律走 `i18n.ts` 的 key（v1 只有中文资源）。
-- 重组件（终端、命令面板、各种表单、设置）都在 `App.tsx` 里 `lazy()` 加载，新增浮层沿用这个做法。
-- `vite.config.ts` 里的 `build.target: es2022` 和 `optimizeDeps.exclude: ["rioterm"]` 都是绕具体 bug 的，注释写了症状，别顺手删。
-
-### native（原生客户端）
-
-`native/` 是独立的 Cargo workspace（不进 pnpm workspace），Rust + GPUI 写的桌面客户端，**连现有 falcon 服务端**（同一套 REST + `/ws/sessions/:id` + 登录 cookie），功能与 web 桌面端对齐。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，改动前先读。
+Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id` + 登录 cookie）。一套代码两种产物：原生桌面（`src/main.rs` → `run_desktop`）与浏览器 wasm（`falcon-web` 薄壳 → `run_web`，服务端托管）。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，浏览器版在 `docs/design/rust-unification.md`（附录 B 是浏览器端还没补齐的缺口），改动前先读。
 
 ```bash
 cd native
-cargo check -p falcon-app                       # 门禁之一（没有 clippy 要求，但保持零警告）
-cargo test --workspace                          # 单测 + 共享测试向量 + 协议 fixture（与单独 -p 跑都要绿：
-                                                # GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序）
-FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored   # 起真服务端 + zellij 的 e2e
 cargo run -p falcon-app                         # 连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
-./scripts/build-web.sh                          # 浏览器版：同一套 falcon-app 编到 wasm，产物 target-wasm/dist，FALCON_WEB_DIST 指过去即可
+./scripts/build-web.sh                          # 浏览器版，产物 target-wasm/dist
 ```
 
 - **crates.io 走 `native/.cargo/config.toml` 里的 rsproxy 镜像**：这台机器上 Clash 的 fake-ip 把 index.crates.io 解析坏了。网络正常的机器删掉那一段即可。
-- 分层：`falcon-proto`（shared 的 serde 镜像，shared 仍是真相来源；`tests/fixtures/` 是 `native/scripts/gen-fixtures.mjs` 从真服务端落盘的响应）→ `falcon-client`（REST / WS，与执行器无关的 future，内部自带 tokio 运行时）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + web 移植的鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（lib/theme 的移植，派生结果与 web 逐字节一致）→ `falcon-core`（web lib/*.ts 与 store.ts 纯函数部分的移植，`tests/vectors/` 是与 TS 共用口径的测试向量）→ `falcon-app`（唯一依赖 GPUI 的 crate）。**纯逻辑一律放下层 crate**，GPUI 升级只波及 falcon-app。
-- GPUI 走 `gpui-kit` 总包（`=` 精确锁版本）；Zed 的终端代码按文件抄（`terminal/element.rs`、`falcon-term/src/keys.rs`，文件头注明出处 commit），不按 crate 依赖——会带进第二份 gpui。`native/` 因此是 GPL-3.0-or-later。
-- 文案：`t!("key")`，key 与 web 的 `i18n.ts` 同名（`native/scripts/export-i18n.mjs` 导出到 `falcon-app/locales/`）；原生独有的放 `falcon-app/i18n-native/<区域>.json`，挂在 `native.<区域>` 下。改了 web 的 i18n.ts 要重跑导出。
-- 字体：`falcon-app/build.rs` 把 web 已 vendor 的 woff2 解成 TTF 嵌进二进制（GPUI 不认 WOFF2）。主题数据：`native/scripts/export-ghostty-themes.mjs`。
-- **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-app --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-app/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。
+- 分层：`falcon-proto`（协议类型）→ `falcon-client`（REST / WS，与执行器无关的 future，原生上自带 tokio 运行时，浏览器上走 fetch / `web_sys::WebSocket`）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + 鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（主题系统：Ghostty 主题文件即数据模型、浅深双槽位、整套界面色由一套主题派生，ADR 0006 / 0011）→ `falcon-core`（与 GPUI 无关的纯逻辑：列式工作区排布 `layout.rs`、窗口 key `pane_key.rs`、会话标题 `session_title.rs`、快捷键、文件路径 / 搜索 / 树、git 图等；`tests/vectors/` 是回归向量）→ `falcon-app`（唯一依赖 GPUI 的 crate）。**纯逻辑一律放下层 crate**，GPUI 升级只波及 falcon-app。
+- GPUI 走 `gpui-kit` 总包（`=` 精确锁版本）；Zed 的终端代码按文件抄（`terminal/element.rs`、`falcon-term/src/keys.rs`，文件头注明出处 commit），不按 crate 依赖——会带进第二份 gpui。`native/` 因此是 GPL-3.0-or-later。`native/vendor/` 下的 alacritty_terminal 与 gpui-pre-web 是带补丁的 fork，改动清单在各自 Cargo.toml 顶部，升级 gpui-kit 时重放。
+- 文案：`t!("key")`，**界面上不允许硬编码中文**。共用文案在 `falcon-app/locales/zh-CN.json`（v1 只有中文），原生 / 平台独有的放 `falcon-app/i18n-native/<区域>.json`，挂在 `native.<区域>` 下。
+- 界面色**只准用 falcon-theme 派生出的语义 token**，不许写死颜色；新增语义色去 `falcon-theme/src/derive.rs` 加。派生规则有冻结的金标准 fixture（`tests/derive_golden.rs`），有意改规则要连 fixture 一起改并写清楚。**深浅按主题底色亮度切，不按系统明暗**。内置主题 = Falcon 两套 + Ghostty 全部 463 套（`falcon-theme/data/`，`pnpm vendor-ghostty-themes` 从本机 Ghostty.app 或 GitHub 重新生成）。
+- 界面骨架是**浮动岛**（ADR 0011）：窗口底上浮着侧栏 / 主区 / 右面板几块圆角面板，之间只有一道缝，**不要加分栏边框**；岛里再嵌一块用"借窗口底色"的下沉块，也不要用边框。主区是**列式工作区**（ADR 0012）：窗口排成列、每列可叠多扇、列分在一块块画布上、不横向滚动，排布与拖拽落点的纯函数在 `falcon-core/src/layout.rs`，改之前先读 ADR 0012。
+- 会话**默认不起名**（`name` 空串），界面显示的是自动标题：手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名（`falcon-core/src/session_title.rs`）。列表里各处必须叫同一个名字；窗口标题栏例外——它右边就是完整工作目录，没标题时那一格空着，别编占位名。前台命令由服务端探测后经 WS 的 `{type:"title"}` 推来（只在有 Viewer 时探、2.5s 节流、后台会话的标题会陈旧）。
+- 字体：`falcon-app/build.rs` 把 `native/assets/fonts/` 里的 woff2（`pnpm vendor-*` 从官方发行包生成、已进仓库）解成 TTF：原生嵌进二进制，浏览器版只嵌正文字体、其余由 build-web.sh 拷进产物按需拉（GPUI 不认 WOFF2）。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
+- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `scripts/app-icons.mjs`，`pnpm gen-icons` 出浏览器版的 `native/web/icons/`（服务端 `/api/app-icon/*` 与 PWA 清单跳到这里）与原生的 `falcon-app/assets/app-icons/`；增删图标要同时改 `scripts/app-icons.mjs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-app 有测试对账）。
+- **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-app --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-app/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。浏览器版用 Chrome DevTools 驱动：canvas 上的合成指针事件在 DPR 2 时坐标要乘 2，键盘输入用真实按键（`type_text`）而不是合成 KeyboardEvent。
 - **压测用 `--features automation --release`**（不带 snapshot 的 test-support）：`frames:<ms>` 以 60Hz 手动画并打印帧耗时 p50 / p95，`frames:<ms>:refresh` 无视视图缓存。侧栏与右侧面板是 `cached` 视图（ADR 0015），新加的大块视图照此办理。
-- **浏览器版**（`docs/design/rust-unification.md`，C 线进行中）：`falcon-app` 是 lib，`run_desktop` / `run_web` 两个入口，`falcon-web` 只是 wasm 的薄壳。平台差异写 `cfg(target_family = "wasm")`，DOM 胶水放 `falcon-app/src/web.rs`。几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。`native/vendor/` 下的 alacritty_terminal 与 gpui-pre-web 是带补丁的 fork，改动清单在各自 Cargo.toml 顶部，升级 gpui-kit 时重放。测试服务端的数据目录要短（zellij socket 路径上限 104 字节），端口用 4940–4999。
-- HTML 预览的 WebView 在默认开启的 `webview` feature 上（`--no-default-features` 退成"在浏览器中打开"）。
+- **浏览器版**：平台差异写 `cfg(target_family = "wasm")`，DOM 胶水放 `falcon-app/src/web.rs`。几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable + `wasm32-unknown-unknown`，wasm-bindgen-cli 与 Cargo.lock 同版本（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。宿主页是 `native/web/index.html`（首帧主题脚本、manifest、favicon）。
+- HTML 预览：原生走默认开启的 `webview` feature（`--no-default-features` 退成"在浏览器中打开"）；字节一律走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007），沙箱不给 allow-same-origin、凭据是只能读该项目文件的作用域令牌，别为了"方便"放宽。
 - **通知一律走 `falcon-app/src/toasts.rs` 的 `ToastExt`**，不用组件库的 `push_notification`（它的通知层会被对话框盖住，见 ADR 0015）。
 - **界面尺寸写 `zoom::zpx(..)`，不写 `px(..)`**：界面缩放（⌘+ / ⌘−）= rem 与 zpx 一起乘倍数；`px` 只留给画布几何、终端画面、窗口外框这类真实像素（`zoom.rs` 顶部有清单）。`theme.font_size` 就是 rem，必须是 16 × 倍数，别再拿它当正文字号。
 
 ## 约定
 
-- TS 的相对 import 一律带 `.js` 后缀（shared 是 NodeNext 的硬要求，web 也保持同一风格；web 另有 `@/` 指向 `src/`）。
 - 术语以 [CONTEXT.md](./CONTEXT.md) 为准，包括 _Avoid_ 列表——那里写的不只是命名偏好，Detach/Terminate、源项目/附属项目、宿主机/远端主机这些区分直接对应代码里的分支。
 - 注释解释的是"为什么"和踩过的坑（多半是实测出来、文档里查不到的），密度偏高是刻意的；改动附近代码时保持同样的说明力度，注释与代码不符时先修注释。
 - 架构决策写在 `docs/adr/`：0001 是持久会话为什么选 Zellij 及一长串实现要点，0002 是附属项目与删除护栏，0003 是多仓库项目与批量派生（含回滚与包围盒断言），0005 是 rio 引擎的自持装配层与 WebGPU 渲染器（含踩坑清单），0006 是主题系统（Ghostty 主题格式、双槽位、界面色派生规则、首帧策略），0007 是原始字节路由与 HTML / 图片预览沙箱（路径形状路由、作用域令牌、响应头护栏、图片缩放模型），0008 是文件下载 / 上传（流式 exec 通道、Windows 的 base64 行协议、临时文件 + 字节数核对的落盘规则），0009 是文件面板目录浏览器（平铺当前目录、mkdir / rename / remove、文件夹上传），0010 是飞书项目面板（宿主机上的 meegle CLI 当数据源、实测的 CLI 输出约定、device-code 登录、两层 TTL 缓存），0011 是浮动岛骨架（窗口底与圆角面板、圆角阶梯、窗口底只压亮度不洗色度与色域收缩、哪些地方刻意没改），0012 是列式工作区（列 → 窗口的排布模型、为什么必须绝对定位、落点坐标的两套下标、把手与持久化、多画布与自动另起一块），0013 是 agent 会话（开场 CLI 的启动脚本、为什么不能读 $SHELL、CLI 缺失时的退路），0014 是公网发布（Cloudflare Quick Tunnel、只在后端本机跑 cloudflared、远端经 SSH 桥），0015 是原生客户端（GPUI 薄客户端、crate 分层、Zed 代码按文件抄、appearance 先于 resize、一台服务端一个窗口、测量数据与踩坑清单），0016 是中转按机器挂（端口转发与公网发布从项目 / 右侧栏搬到主机 / 设置页、同端口互斥的槽位口径、旧规则迁移与删主机级联），0017 是用 px0 审阅（宿主机上跑 px0、同源反代的代价与前提、二进制钉哈希后由后端推到远端、pty 收尸、Origin 改写），0018 是应用图标（按服务端存的选择、公开的取图路由、客户端规整自定义图、一份定义出四种形状、原生运行时换 Dock 图标及其限制），0019 是终端滚动条（CLI 为什么问不到位置、zellij 插件按需一问一答、推插件与预授权、新旧会话两套配置、升 0.45.1 的 scroll_mode_sync 坑）。做相关改动前先读对应 ADR。

@@ -60,12 +60,12 @@ D:\code\
 
 ## 快速开始
 
-服务端是 Rust（`native/crates/falcon-server`），前端是 `packages/web`。从源码跑需要 Node 24 + pnpm（前端）与 Rust 工具链（服务端）：
+服务端与客户端都是 Rust（`native/`，一个 Cargo workspace）：服务端 `falcon-server`，客户端 `falcon-app` 一套代码出原生桌面与浏览器（wasm）两种产物。从源码跑需要 Rust 工具链（浏览器版另要 `rustup target add wasm32-unknown-unknown` 与同版本的 `wasm-bindgen-cli`，见 `native/scripts/build-web.sh`）：
 
 ```bash
-pnpm install
-pnpm build                     # shared → web
-pnpm start                     # cargo run --release -p falcon-server，托管 packages/web/dist
+pnpm build:web                 # 浏览器版客户端，产物 native/target-wasm/dist
+pnpm start                     # cargo run --release -p falcon-server，托管上面那份产物
+pnpm dev:native                # 或者直接开原生客户端
 ```
 
 打开 http://localhost:4923 。注意不带参数时用的是默认数据目录 `~/.falcon`——和装好的服务同一个，试跑另起一个时带上 `--port` / `--data-dir`（`cd native && cargo run -p falcon-server -- --port 4950 --data-dir /tmp/fal`）。
@@ -85,14 +85,10 @@ pnpm start                     # cargo run --release -p falcon-server，托管 p
 ### 开发模式
 
 ```bash
-pnpm dev:server
+pnpm dev:server                # cargo run -p falcon-server
+pnpm build:web                 # 改了客户端后重编浏览器版，刷新页面即可
+pnpm dev:native                # 原生客户端连本机服务
 ```
-
-```bash
-pnpm dev:web
-```
-
-前端开发服务器在 5173 端口，`/api` 与 `/ws` 代理到 4923。
 
 ## 单文件发布
 
@@ -132,7 +128,7 @@ GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令�
 macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上；Actions 页手动触发只出构建产物、不发版。
 包里的版本号取仓库根的 `package.json`（pkg 与服务端产物）与 `native/Cargo.toml`（setup.exe），打 tag 前先改好。
 
-原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle`——web 产物
+原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle`——浏览器版客户端
 （rust-embed）、本平台的 meegle CLI、Zellij 滚动插件都编进二进制，没有首次运行的解压步骤；
 meegle 在第一次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`。
 
@@ -210,8 +206,17 @@ pnpm update-zellij 0.44.4
 ## 工程结构
 
 ```
-packages/
-├── shared/   共享类型（Project、Session、WS 协议）
-├── server/   Fastify + @lydell/node-pty + ssh2 + better-sqlite3
-└── web/      Vite + React 19 + Tailwind v4 + shadcn/ui + xterm.js + i18next（中文）
+native/
+├── crates/
+│   ├── falcon-proto/    线上协议类型（服务端与客户端共用）
+│   ├── falcon-server/   服务端：axum + portable-pty + russh + rusqlite，会话核心跑在单线程 LocalSet 上
+│   ├── falcon-client/   客户端的 REST / WS（原生 tokio、浏览器 fetch / WebSocket）
+│   ├── falcon-term/     终端：alacritty_terminal + 按键 / 鼠标 / 滚轮编码
+│   ├── falcon-theme/    主题系统（Ghostty 主题、界面色派生）
+│   ├── falcon-core/     客户端纯逻辑（列式工作区排布、会话标题、快捷键……）
+│   ├── falcon-app/      GPUI 界面（原生桌面与浏览器两种入口）
+│   └── falcon-web/      浏览器版的 wasm 薄壳
+├── web/                 浏览器版的宿主页与内置图标
+├── zellij-plugin/       滚动位置插件（wasm32-wasip1）
+└── assets/fonts/        内嵌字体（woff2）
 ```

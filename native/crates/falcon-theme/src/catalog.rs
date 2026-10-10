@@ -1,8 +1,8 @@
 //! 内置主题目录：Falcon 自己的两套默认 + Ghostty 1.3.1 内置的 463 套（`lib/theme/catalog.ts`）。
 //!
-//! Ghostty 那份数据由 `native/scripts/export-ghostty-themes.mjs` 从 web 的
-//! `assets/themes/ghostty-themes.ts` 导出到 `data/ghostty-themes.tsv`，编译期
-//! `include_str!` 嵌进来（77KB 文本），**启动时一行都不解析**：
+//! Ghostty 那份数据由 `scripts/vendor-ghostty-themes.mjs` 从 Ghostty.app（或 GitHub）
+//! 生成到 `data/ghostty-themes.tsv`，编译期 `include_str!` 嵌进来（77KB 文本），
+//! **启动时一行都不解析**：
 //!
 //! - 偏好里存的是选中主题的完整颜色副本（pref.rs），启动不需要目录就能把界面画对；
 //! - 按名字取一套（[`find_builtin`]）只扫行首的名字，命中那一行才解析；

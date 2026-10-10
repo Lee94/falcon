@@ -3,7 +3,7 @@
  * build-macos-pkg.mjs 用它现画安装包的 AppIcon。
  *
  * 每个图标 = 底色 `bg`（SVG fill，可以是渐变引用）+ 画在 1024 网格上的 `mark`（+ 可选 `defs`）。
- * id 列表与 packages/shared/src/appIcon.ts 的 APP_ICON_IDS 一一对应（web 与原生各有测试对账）。
+ * id 列表与 falcon-core 的 APP_ICON_IDS（native/crates/falcon-core/src/app_icon.rs）一一对应（falcon-app 有测试对账）。
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";

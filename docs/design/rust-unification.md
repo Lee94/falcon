@@ -1,6 +1,6 @@
 # Falcon 全面 Rust 化：Rust 服务端 + gpui-kit 统一客户端
 
-> 状态：**C0 完成**（测量结果见 §9）；**S 线完成、Node 服务端已删除**（2026-10-10，见 §11；TS 原文在提交 `fd9022a`）；C1 起未开始 · 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
+> 状态：**C0 完成**（测量结果见 §9）；**S 线完成、Node 服务端已删除**（2026-10-10，见 §11；TS 原文在提交 `fd9022a`）；**React 前端与 shared 已提前删除**（2026-10-10，用户拍板，见 §12；TS 原文在提交 `9c9d045`），C1–C3 变成在浏览器版上补回功能 · 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
 >
 > 术语一律沿用 [CONTEXT.md](../../CONTEXT.md)。"falcon 服务端"指跑着 falcon server 的那台机器，与**宿主机**、**远端主机**是三件事（同 [gpui-client.md](./gpui-client.md) §0）。
 
@@ -320,6 +320,16 @@ SSH Windows 远端没有环境，未测。
 
 1. 在真实数据目录上切换（用新 pkg 或 `falcon service install` 换掉 `~/.falcon` 上在跑的旧服务）：要用户点头。
 2. 已知风险：russh 按到达而不是按消费放大通道窗口、每条通道的队列有界，慢的下载客户端可能拖住整条 SSH 链路（终端也在上面）；Node 的 ssh2 是逐通道流控。大文件下载在弱网上要实测。
+
+---
+
+## 12. 提前删除 React 前端（2026-10-10）
+
+用户拍板：不等 C1–C3 补齐，直接删 `packages/web`、`packages/shared` 与移动端（C4 提前）。仓库里从此只剩 Rust，浏览器访问拿到的就是浏览器版 GPUI（`native/scripts/build-web.sh` 的产物，`pnpm build:bin` 编进服务端）。
+
+**跟着挪走的**：字体 → `native/assets/fonts/`（Maple 为 React 按 unicode-range 拆的拉丁 / CJK 两片与 `subset-maple-mono.mjs` 一并删掉，原生与浏览器版都用整份 Regular）；内置应用图标 → `native/web/icons/`（build-web.sh 拷进产物的 `/icons/`，服务端的 `/api/app-icon/*` 与 PWA 清单跳到这里）；Ghostty 主题 vendoring（`pnpm vendor-ghostty-themes`）直接写 `falcon-theme/data/`，产物与原来逐字节相同；`export-i18n.mjs` / `export-ghostty-themes.mjs` 退役——`falcon-app/locales/zh-CN.json` 与 `falcon-theme/tests/fixtures/` 从此是真相来源 / 冻结的回归基线；pnpm 不再是 workspace，只剩 meegle CLI 与 subset-font 两个打包用依赖。
+
+**代价（浏览器端相对 React 版的倒退，排进 C3）**：附录 B 里标 C3 的缺口现在都是线上缺口——文件上传 / 下载的选择框、拖入文件、浏览器剪贴板粘贴、HTML 预览（iframe 浮层）、外链图片代理、浏览器保留快捷键、GPU 设备丢失后自动 reload；Safari / Firefox 没测；wasm 没有预压缩（18.8 MB 原始，服务端还不发 brotli），中文字体 Maple 21 MB 要首次出现中文时才拉。原生客户端不受影响。
 
 ---
 

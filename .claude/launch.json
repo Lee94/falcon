@@ -4,14 +4,14 @@
     {
       "name": "falcon",
       "runtimeExecutable": "cargo",
-      "runtimeArgs": ["run", "--manifest-path", "native/Cargo.toml", "-p", "falcon-server"],
+      "runtimeArgs": [
+        "run",
+        "--manifest-path",
+        "native/Cargo.toml",
+        "-p",
+        "falcon-server"
+      ],
       "port": 4923
-    },
-    {
-      "name": "web",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["dev:web"],
-      "port": 5173
     }
   ]
 }

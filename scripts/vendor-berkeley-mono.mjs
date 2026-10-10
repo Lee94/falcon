@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 从本机持有的 Berkeley Mono TX-02 zip 抽出 Regular / Bold / Oblique / BoldOblique，
- * 压成 woff2 放到 packages/web/src/assets/fonts/berkeley-mono/。
+ * 压成 woff2 放到 native/assets/fonts/berkeley-mono/。
  *
  *   node scripts/vendor-berkeley-mono.mjs [zip]
  *
@@ -19,7 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = path.join(ROOT, "packages/web/src/assets/fonts/berkeley-mono");
+const OUT_DIR = path.join(ROOT, "native/assets/fonts/berkeley-mono");
 const ZIP_PREFIX = "Berkeley Mono TX-02/TX-02 2.002/";
 
 const FACES = [

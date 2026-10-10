@@ -1,7 +1,7 @@
 //! 照抄 TS 语义时要用到的几处 JavaScript 行为。
 //!
-//! 主题层的真相来源是 `packages/web/src/lib/theme/*.ts`，两边读同一份偏好 JSON、
-//! 同一段用户贴的 Ghostty 文本，结果必须一样。Rust 标准库里名字相同的东西语义
+//! 主题层移植自 React 前端的 `lib/theme/*.ts`，读已有的偏好 JSON、用户贴的 Ghostty 文本，
+//! 结果要与当年的 TS 实现一样。Rust 标准库里名字相同的东西语义
 //! 并不完全一样，差异都收在这里：
 //!
 //! - `String.prototype.trim` / 正则 `\s` 的空白集合与 `str::trim` 不同：JS 含

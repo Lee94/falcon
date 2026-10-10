@@ -1,27 +1,27 @@
-//! 构建期把 web 已经 vendor 好的 woff2 解成 TTF，嵌进二进制。
+//! 构建期把 vendor 好的 woff2 解成 TTF，嵌进二进制（浏览器版则由 build-web.sh 从 OUT_DIR
+//! 拷出去按需拉）。
 //!
 //! GPUI 的 `TextSystem::add_fonts` 不认 WOFF2（macOS 实测 parse error，Windows / Linux 源码里
-//! 也没有 WOFF2 解包），而字体资源的唯一来源是 `packages/web/src/assets/fonts/`（由
-//! `pnpm vendor-*` 从官方发行包生成、已进仓库）。在这里解压，就不必再往仓库里放一份
-//! 商业字体的 TTF，web 重新 vendor 之后原生客户端重编一次即可跟上。
+//! 也没有 WOFF2 解包），而字体资源的唯一来源是 `native/assets/fonts/`（由 `pnpm vendor-*`
+//! 从官方发行包生成、已进仓库）。在这里解压，就不必再往仓库里放一份商业字体的 TTF，
+//! 重新 vendor 之后重编一次即可跟上。
 
 use std::path::{Path, PathBuf};
 
-/// (web 资源里的相对路径, 输出文件名)
+/// (native/assets/fonts 里的相对路径, 输出文件名)
 const FONTS: &[(&str, &str)] = &[
     ("berkeley-mono/TX-02-Regular.woff2", "TX-02-Regular.ttf"),
     ("berkeley-mono/TX-02-Bold.woff2", "TX-02-Bold.ttf"),
     ("berkeley-mono/TX-02-Oblique.woff2", "TX-02-Oblique.ttf"),
     ("berkeley-mono/TX-02-BoldOblique.woff2", "TX-02-BoldOblique.ttf"),
     ("ioskeley-mono/IoskeleyMonoTermNFM-Latin.woff2", "IoskeleyMonoTerm.ttf"),
-    // web 按 unicode-range 拆成拉丁 / CJK 两片是为了浏览器按需下载；原生一次注册整份
     ("maple-mono/MapleMonoNL-NF-CN-Regular.woff2", "MapleMonoNL-NF-CN.ttf"),
     ("nerd-symbols/SymbolsNerdFontMono-Regular.woff2", "SymbolsNerdFontMono.ttf"),
 ];
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let fonts_dir = manifest.join("../../../packages/web/src/assets/fonts");
+    let fonts_dir = manifest.join("../../assets/fonts");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     for (src, dst) in FONTS {
         let src_path = fonts_dir.join(src);
@@ -40,7 +40,7 @@ fn main() {
 /// 窗口图标；资源管理器、任务栏、安装包的快捷方式也都读这一份。winresource 的 `set_icon`
 /// 恰好用 ID 1。
 ///
-/// 图形用 web 已生成的圆角方块版（`pnpm gen-icons` 的产物、已进仓库）：Windows 没有 macOS
+/// 图形用浏览器版的圆角方块版（`pnpm gen-icons` 的产物 native/web/icons、已进仓库）：Windows 没有 macOS
 /// 那种留边 + 投影的版式约定，满版圆角在任务栏里与别的 App 一样大。构建机上不必有 rsvg-convert，
 /// 缩放在这里用 image 做。运行时换图标（ADR 0018）在 Windows 上没接，跟的是这里的默认图标。
 #[cfg(windows)]
@@ -49,7 +49,7 @@ fn windows_resources(manifest: &Path, out: &Path) {
     use image::imageops::FilterType;
 
     // 与 falcon_core::app_icon::DEFAULT_APP_ICON 同一个
-    let src = manifest.join("../../../packages/web/public/icons/emberwing/icon-512.png");
+    let src = manifest.join("../../web/icons/emberwing/icon-512.png");
     println!("cargo:rerun-if-changed={}", src.display());
     let img = image::open(&src)
         .unwrap_or_else(|e| panic!("读不到 {}：{e}。先在仓库根目录 pnpm gen-icons", src.display()))

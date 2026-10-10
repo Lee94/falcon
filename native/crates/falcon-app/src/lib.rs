@@ -4,7 +4,8 @@
 //! 一套代码两种产物：原生桌面（`src/main.rs` → [`run_desktop`]）与浏览器 wasm
 //! （`falcon-web` crate → [`run_web`]）。一台 falcon 服务端一个窗口；原生上本机服务由 App
 //! 托管（local_service.rs），浏览器里服务端就是页面的源。界面文案一律走 `t!`
-//! （locales/zh-CN.json，由 native/scripts/export-i18n.mjs 从 web 的 i18n.ts 导出）。
+//! （locales/zh-CN.json——原从 React 前端的 i18n.ts 导出，React 删除后它就是文案的真相来源，
+//! 直接改它；原生独有的 key 在 i18n-native/）。
 
 mod actions;
 mod app_icon;

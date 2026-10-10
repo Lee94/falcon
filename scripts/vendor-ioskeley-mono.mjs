@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 从 IoskeleyMono 官方 Release 抽 IoskeleyMonoTerm Nerd Font Mono 的 Regular，
- * 子集化后压成 woff2 放到 packages/web/src/assets/fonts/ioskeley-mono/。
+ * 子集化后压成 woff2 放到 native/assets/fonts/ioskeley-mono/。
  *
  *   node scripts/vendor-ioskeley-mono.mjs
  *
@@ -11,7 +11,7 @@
  *
  * 上游 zip 一份 4.7MB，18037 个码位，其中 10523 个是 Nerd Font 的 PUA 图标。
  * 图标区**整个剔除**：termFontStack 里 Symbols Nerd Font Mono 排在它前面，
- * 这份内嵌图标从来不会被用到（和 subset-maple-mono.mjs 同样的理由）。
+ * 这份内嵌图标从来不会被用到（图标统一由 Symbols Nerd Font 出）。
  * 剩下按下面的范围表切，只留终端真正会画的字形。
  *
  * 只要 Regular：Bold / Italic 由浏览器合成，等宽字体的合成粗体不改变字符步进，
@@ -28,7 +28,7 @@ import { createWriteStream } from "node:fs";
 import subsetFont from "subset-font";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = path.join(ROOT, "packages/web/src/assets/fonts/ioskeley-mono");
+const OUT_DIR = path.join(ROOT, "native/assets/fonts/ioskeley-mono");
 const VERSION = "v2.1.0";
 const ZIP_URL = `https://github.com/ahatem/IoskeleyMono/releases/download/${VERSION}/IoskeleyMono-Term-NerdFont.zip`;
 const LICENSE_URL = `https://raw.githubusercontent.com/ahatem/IoskeleyMono/${VERSION}/LICENSE`;
@@ -36,7 +36,7 @@ const ENTRY = "Normal/IoskeleyMonoTermNerdFontMono-Regular.ttf";
 const OUT_FILE = "IoskeleyMonoTermNFM-Latin.woff2";
 
 /**
- * 保留范围。与 subset-maple-mono.mjs 的 LATIN_RANGES 同一套取舍——终端真会画的
+ * 保留范围。与原 Maple 拉丁子集（已随 React 前端删除）同一套取舍——终端真会画的
  * 骨架字形。PUA 不在表里就是刻意的。
  *
  * css 里**不写 unicode-range**：只有一片，没有按需分片可言；表里没覆盖到的字符

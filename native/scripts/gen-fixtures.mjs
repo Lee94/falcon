@@ -10,7 +10,7 @@
  * 测试就红——这是 shared（TS）与 falcon-proto（Rust 手写镜像）之间唯一的契约检查。
  *
  * 何时重跑：
- *   - packages/shared/src/index.ts 改了线上形状（加 / 改 / 删字段、改字面量）；
+ *   - falcon-proto 改了线上形状（加 / 改 / 删字段、改字面量）；
  *   - 服务端（native/crates/falcon-server/src/api/）改了某个端点的响应；
  *   - falcon-proto 改了类型之后，顺手重跑一次确认两边还对得上。
  * 重跑后 `git diff` 看一眼 fixture 的变化：id、时间戳、令牌每次都会变，那是正常的；

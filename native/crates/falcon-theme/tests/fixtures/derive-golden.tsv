@@ -1,4 +1,4 @@
-# 由 native/scripts/export-ghostty-themes.mjs 生成，勿手改。
+# 由 native/scripts/export-ghostty-themes.mjs 生成（已随 React 前端删除，见提交 9c9d045），勿手改。
 # web 的 deriveTheme 对每套内置主题算出的 CSS 变量：
 # `@keys` 行是变量名顺序（即 derive.ts 里 vars 的插入顺序）；其余每行
 # `名字 \t 深浅 \t 值…`，值以空格分隔，#rrggbb[aa] 去掉 #，其他（34% / currentcolor）原样。

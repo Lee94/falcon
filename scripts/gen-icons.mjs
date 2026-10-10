@@ -2,9 +2,10 @@
 /**
  * 生成全部内置应用图标（ADR 0018）。图形定义在 scripts/app-icons.mjs，这里只管出文件：
  *
- *   packages/web/public/icons/<id>/icon-{192,512}.png      圆角方块：标签页图标、设置里的预览、PWA purpose=any
- *   packages/web/public/icons/<id>/maskable-{192,512}.png  PWA purpose=maskable
- *   packages/web/public/icons/<id>/apple-touch-icon.png    iOS 主屏幕（满版方块，系统自己裁角）
+ *   native/web/icons/<id>/icon-{192,512}.png      圆角方块：标签页图标、设置里的预览、PWA purpose=any
+ *   native/web/icons/<id>/maskable-{192,512}.png  PWA purpose=maskable
+ *   native/web/icons/<id>/apple-touch-icon.png    iOS 主屏幕（满版方块，系统自己裁角）
+ *   （浏览器版的构建把 native/web/icons 拷进产物的 /icons/，服务端的 /api/app-icon/* 跳到这里）
  *   native/crates/falcon-app/assets/app-icons/<id>.png     原生客户端运行时的 Dock 图标（macOS 版式）
  *
  * 标签页图标用 PNG 不用 SVG：默认图标是栅格插画，塞进 SVG 就是一个 1MB 多的 favicon。
@@ -18,13 +19,12 @@ import { fileURLToPath } from "node:url";
 import { ICONS, macos, maskable, raster, rounded, square } from "./app-icons.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const WEB_OUT = path.join(ROOT, "packages/web/public/icons");
+const WEB_OUT = path.join(ROOT, "native/web/icons");
 const NATIVE_OUT = path.join(ROOT, "native/crates/falcon-app/assets/app-icons");
 
 // 从头出：删掉的图标不留旧文件（旧版平铺的 icons/icon-192.png 等也一并清掉）
 fs.rmSync(WEB_OUT, { recursive: true, force: true });
 fs.rmSync(NATIVE_OUT, { recursive: true, force: true });
-fs.rmSync(path.join(ROOT, "packages/web/public/favicon.svg"), { force: true });
 fs.mkdirSync(NATIVE_OUT, { recursive: true });
 
 for (const [id, icon] of Object.entries(ICONS)) {

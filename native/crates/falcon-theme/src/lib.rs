@@ -1,10 +1,11 @@
-//! falcon-theme：web 主题系统（`packages/web/src/lib/theme/*`）的 Rust 移植，不依赖 GPUI。
+//! falcon-theme：主题系统，不依赖 GPUI。原是 React 前端 `packages/web/src/lib/theme/*` 的移植，
+//! React 前端删除后（TS 原文在提交 9c9d045）这里就是真相来源。
 //!
 //! 权威决策在 `docs/adr/0006-ghostty-themes.md`（Ghostty 主题文件即数据模型、浅色 /
 //! 深色双槽位、整站颜色由一套主题派生）与 `docs/adr/0011-floating-island-shell.md`
-//! （窗口底 `app`、`tint`、只压亮度不洗色度、色域收缩）。**TS 是真相来源**：同样的输入
-//! 必须产出同样的颜色值，`tests/derive_golden.rs` 拿 web 的 deriveTheme 跑出来的
-//! 全部内置主题逐字对拍（金标准由 `native/scripts/export-ghostty-themes.mjs` 生成）。
+//! （窗口底 `app`、`tint`、只压亮度不洗色度、色域收缩）。`tests/derive_golden.rs` 拿当年
+//! web 的 deriveTheme 对全部内置主题算出的结果逐字对拍——金标准在删 React 时冻结，
+//! 是派生规则的回归基线。
 //!
 //! | 模块 | 对应的 TS | 内容 |
 //! |---|---|---|

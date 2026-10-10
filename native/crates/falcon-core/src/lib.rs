@@ -1,14 +1,13 @@
-//! falcon-core：web 前端里纯函数、零 DOM 的逻辑模块的 Rust 移植，不依赖 GPUI。
+//! falcon-core：客户端里与 GPUI 无关的纯逻辑，不依赖 GPUI。
 //!
-//! **TS 是真相来源**（`packages/web/src/lib/*.ts`、`store.ts` 的纯函数部分、shared 的
-//! `ttlCache.ts`）：同样的输入必须给出同样的结果，两个客户端才会给同一个会话起同一个
-//! 名字、把同一组窗口排成同一个样子、把同一份偏好读成同一个值。移植时保留了 TS 里
-//! 解释"为什么"的注释；与 TS 行为有出入的地方都在就近的注释里写明（多半是 JS 语义
-//! 在 Rust 里表达不了，比如 localeCompare 的 ICU 排序、Date 的本地时区）。
+//! 原是 React 前端纯函数模块（`packages/web/src/lib/*.ts`、`store.ts` 的纯函数部分、shared 的
+//! `ttlCache.ts`）的移植；React 前端删除后（TS 原文在提交 `9c9d045`）这里就是真相来源。
+//! 移植时保留了 TS 里解释"为什么"的注释；与 TS 行为有出入的地方都在就近的注释里写明
+//! （多半是 JS 语义在 Rust 里表达不了，比如 localeCompare 的 ICU 排序、Date 的本地时区）。
 //!
-//! 共享测试向量（设计文档 §6.3）：`layout`、`session_title`、`project_tree`、`file_search`、
-//! `git_graph` 的用例写成 `tests/vectors/*.json`，每条带着对应 TS 用例的名字，
-//! `tests/vectors.rs` 读它们；其余模块的单测直接写在模块里。
+//! 回归向量：`layout`、`session_title`、`project_tree`、`file_search`、`git_graph` 的用例写成
+//! `tests/vectors/*.json`（当年与 TS 共用口径，每条带着对应 TS 用例的名字），`tests/vectors.rs`
+//! 读它们；其余模块的单测直接写在模块里。
 //!
 //! 数字：几何一律 `f64`（与 TS 的 number 逐位同算，取整走 JS 的 `Math.round`），
 //! 下标 / 计数用 `usize`，时间戳 `i64` 毫秒。

@@ -3,14 +3,13 @@
   "private": true,
   "version": "0.1.1",
   "scripts": {
-    "build": "pnpm --filter @falcon/shared build && pnpm --filter @falcon/web build",
+    "build:web": "native/scripts/build-web.sh",
     "build:bin": "node scripts/build-server.mjs",
     "build:pkg": "node scripts/build-macos-pkg.mjs",
     "build:win": "node scripts/build-windows-installer.mjs",
     "build:native": "cd native && cargo build --release -p falcon-app",
     "dev:native": "cd native && cargo run -p falcon-app",
     "dev:server": "cd native && cargo run -p falcon-server",
-    "dev:web": "pnpm --filter @falcon/web dev",
     "start": "cd native && cargo run --release -p falcon-server",
     "update-zellij": "node scripts/update-zellij.mjs",
     "build:zellij-plugin": "node scripts/build-zellij-plugin.mjs",
@@ -26,7 +25,6 @@
   },
   "devDependencies": {
     "@lark-project/meegle": "1.0.23",
-    "subset-font": "^2.9.0",
-    "tsx": "^4.23.15"
+    "subset-font": "^2.9.0"
   }
 }

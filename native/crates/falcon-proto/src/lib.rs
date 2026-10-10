@@ -1,9 +1,9 @@
-//! falcon-proto：`packages/shared/src/index.ts` 的 Rust 镜像（设计文档
-//! `docs/design/gpui-client.md` 决定五）。
-//!
-//! **shared 仍是协议的唯一真相来源**，这里只是它的消费者：手写 serde，保留 TS 里
-//! 解释"为什么"的注释；服务端改字段时，由服务端产出的 JSON fixture 契约测试把这里
-//! 测红（那一步不在本 crate 里）。改这里之前先改 shared，别反过来。
+//! falcon-proto：falcon 的线上协议类型，服务端（falcon-server）与客户端（falcon-client /
+//! falcon-app）共用这一份。原是 `packages/shared/src/index.ts` 的手写镜像（设计文档
+//! `docs/design/gpui-client.md` 决定五）；TS 一侧删除后（原文在提交 `9c9d045`）这里就是
+//! **协议的唯一真相来源**。`tests/fixtures/` 是 `native/scripts/gen-fixtures.mjs` 从真服务端
+//! 落盘的响应：改了线上形状就重生 fixture，契约测试保证服务端写出的 JSON 这边读得回来。
+//! 下面的形状约定是从 TS 时代延续下来的线上格式，已经有的客户端与数据都按它来，别改。
 //!
 //! # 线上形状的约定
 //!

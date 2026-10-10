@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * 把 Ghostty 内置主题（iTerm2-Color-Schemes 的 ghostty/ 目录）压成一个 TS 模块，
- * 放到 packages/web/src/assets/themes/ghostty-themes.ts。
+ * 把 Ghostty 内置主题（iTerm2-Color-Schemes 的 ghostty/ 目录）压成 falcon-theme 的内置目录：
+ * native/crates/falcon-theme/data/ghostty-themes.tsv（数据）+ ghostty-themes.meta.rs（来源与条数）
+ * + LICENSE.txt。
  *
  *   node scripts/vendor-ghostty-themes.mjs              # 优先用本机 Ghostty.app 里的主题
  *   node scripts/vendor-ghostty-themes.mjs --from <dir> # 指定主题目录
@@ -10,7 +11,10 @@
  * 本机 Ghostty.app 的主题目录就是"用户装的那个 Ghostty 认的主题"，名字与
  * `ghostty +list-themes` 一字不差，优先用它；没装 Ghostty 才去 GitHub 拉。
  * 产物每行一个主题：`名字 \t bg fg cursor cursorText selBg selFg p0..p15`，
- * 22 个不带 # 的 rrggbb 用空格隔开——比 JSON 小一半，解析在 lib/theme/catalog.ts。
+ * 22 个不带 # 的 rrggbb 用空格隔开——比 JSON 小一半，解析在 falcon-theme 的 catalog.rs
+ * （坏行直接报错，测试按 meta 里的条数核对行数）。重新 vendor 之后跑一遍
+ * `cargo test -p falcon-theme`：派生结果的金标准 fixture 是删 React 前端时冻结的，
+ * 新增的主题不在里面，条数变了要同步更新那份 fixture 的期望。
  */
 
 import { execFileSync } from "node:child_process";
@@ -20,17 +24,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = path.join(ROOT, "packages/web/src/assets/themes");
-const OUT_TS = path.join(OUT_DIR, "ghostty-themes.ts");
-/** 条数与来源单独一个小模块：设置页要显示，但不该为此背上 77KB 的数据 */
-const OUT_META = path.join(OUT_DIR, "ghostty-themes.meta.ts");
+const OUT_DIR = path.join(ROOT, "native/crates/falcon-theme/data");
+const OUT_TSV = path.join(OUT_DIR, "ghostty-themes.tsv");
+const OUT_META = path.join(OUT_DIR, "ghostty-themes.meta.rs");
 const OUT_LICENSE = path.join(OUT_DIR, "LICENSE.txt");
 const APP_THEMES = "/Applications/Ghostty.app/Contents/Resources/ghostty/themes";
 const APP_PLIST = "/Applications/Ghostty.app/Contents/Info.plist";
 const REPO = "https://github.com/mbadolato/iTerm2-Color-Schemes";
 const LICENSE_URL = "https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/LICENSE";
 
-/** 键的顺序就是产物里 22 个颜色的顺序，lib/theme/catalog.ts 按同一顺序解析 */
+/** 键的顺序就是产物里 22 个颜色的顺序，falcon-theme 的 catalog.rs 按同一顺序解析 */
 const KEYS = [
   "background",
   "foreground",
@@ -75,7 +78,7 @@ function sparseClone() {
 
 /**
  * 只认内置主题这种规整写法（每个键都有、全是 #rrggbb）。用户手写主题的宽松解析
- * （不带 #、X11 颜色名、cell-foreground 之类特殊值）在 lib/theme/ghostty.ts。
+ * （不带 #、X11 颜色名、cell-foreground 之类特殊值）在 falcon-theme 的 ghostty.rs。
  */
 function parseTheme(name, text) {
   const values = new Map();
@@ -148,30 +151,26 @@ async function main() {
     .sort((a, b) => a.localeCompare(b, "en"));
   const lines = [];
   for (const name of names) {
-    if (/[\t\n\r`\\]|\$\{/.test(name)) throw new Error(`主题名含不能进模板字符串的字符：${name}`);
+    if (/[\t\n\r"\\]/.test(name)) throw new Error(`主题名含 TSV / Rust 字面量容不下的字符：${name}`);
     const colors = parseTheme(name, fs.readFileSync(path.join(dir, name), "utf8"));
     lines.push(`${name}\t${colors.join(" ")}`);
   }
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  const header = [
-    "/**",
-    " * 由 scripts/vendor-ghostty-themes.mjs 生成，勿手改。",
-    ` * 来源：${origin}（mbadolato/iTerm2-Color-Schemes，MIT，见同目录 LICENSE.txt）。`,
-    " *",
-    " * 每行一个主题：名字 \\t bg fg cursor cursorText selBg selFg palette0..15，",
-    " * 22 个不带 # 的 rrggbb 以空格分隔。解析见 lib/theme/catalog.ts。",
-    " */",
-    "",
-  ].join("\n");
-  fs.writeFileSync(OUT_TS, header + `export const GHOSTTY_THEMES_DATA = \`${lines.join("\n")}\`;\n`);
+  fs.writeFileSync(OUT_TSV, `${lines.join("\n")}\n`);
   fs.writeFileSync(
     OUT_META,
-    `/** 由 scripts/vendor-ghostty-themes.mjs 生成，勿手改。 */\n` +
-      `export const GHOSTTY_THEMES_ORIGIN = ${JSON.stringify(origin)};\n` +
-      `export const GHOSTTY_THEMES_COUNT = ${lines.length};\n`
+    [
+      "// 由 scripts/vendor-ghostty-themes.mjs 生成，勿手改。",
+      "",
+      "/// 内置 Ghostty 主题的来源（设置页显示用）",
+      `pub const GHOSTTY_THEMES_ORIGIN: &str = ${JSON.stringify(origin)};`,
+      "/// 内置 Ghostty 主题条数；测试按它核对 data/ghostty-themes.tsv 的行数",
+      `pub const GHOSTTY_THEMES_COUNT: usize = ${lines.length};`,
+      "",
+    ].join("\n")
   );
-  console.log(`写入 ${path.relative(ROOT, OUT_TS)}：${lines.length} 个主题，来源 ${origin}`);
+  console.log(`写入 ${path.relative(ROOT, OUT_TSV)}：${lines.length} 个主题，来源 ${origin}`);
   await fetchLicense();
 }
 

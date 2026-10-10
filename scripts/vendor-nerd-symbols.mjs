@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * 抽出 Symbols Nerd Font Mono，压成 woff2 放到
- * packages/web/src/assets/fonts/nerd-symbols/。
+ * native/assets/fonts/nerd-symbols/。
  *
  *   node scripts/vendor-nerd-symbols.mjs
  */
@@ -15,7 +15,7 @@ import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = path.join(ROOT, "packages/web/src/assets/fonts/nerd-symbols");
+const OUT_DIR = path.join(ROOT, "native/assets/fonts/nerd-symbols");
 const VERSION = "v3.5.0";
 const ZIP_URL = `https://github.com/ryanoasis/nerd-fonts/releases/download/${VERSION}/NerdFontsSymbolsOnly.zip`;
 
