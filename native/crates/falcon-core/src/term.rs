@@ -89,11 +89,11 @@ impl TermFontId {
     pub fn family(self) -> Option<&'static str> {
         match self {
             // 默认字体。Berkeley Mono TX-02（U.S. Graphics 商业字体）经
-            // scripts/vendor-berkeley-mono.mjs 内嵌，family 名跟 TTF name 表一致。
+            // `cargo xtask vendor-fonts berkeley` 内嵌，family 名跟 TTF name 表一致。
             // 覆盖比 Ioskeley 窄（几乎没有希腊 / 西里尔，盒线也不全），缺的码位顺着
             // 回退落到 Ioskeley，中文再落到 Maple。
             TermFontId::Berkeley => Some(BERKELEY_FONT_FAMILY),
-            // 内置的 OFL 回退（子集见 scripts/vendor-ioskeley-mono.mjs）
+            // 内置的 OFL 回退（子集见 xtask/src/fonts.rs 的 IOSKELEY_RANGES）
             TermFontId::Ioskeley => Some(IOSKELEY_FONT_FAMILY),
             TermFontId::Maple => Some(MAPLE_FONT_FAMILY),
             TermFontId::Jetbrains => Some("JetBrains Mono"),

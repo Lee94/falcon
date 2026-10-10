@@ -2,6 +2,6 @@ Berkeley Mono TX-02 (2.002)
 Copyright (c) 2022-2024, U.S. Graphics LLC. All Rights Reserved.
 https://usgraphics.com/products/berkeley-mono
 
-商业字体，只作为本产品内嵌默认字体分发。升级字库时用
-  node scripts/vendor-berkeley-mono.mjs <zip>
+商业字体，只作为本产品内嵌默认字体分发。升级字库时在 native/ 下用
+  cargo xtask vendor-fonts berkeley <zip>
 从官方发行包重新抽出，不要把 zip 提交进仓库。

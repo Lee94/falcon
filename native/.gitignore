@@ -1,7 +1,6 @@
 /target
 /target-*
-# 商业字体 / 从发行包抽出的 TTF 不进仓库，由 pnpm vendor-* 生成
-/assets/fonts/
 # 调试截图（FALCON_SNAPSHOT）
 /snapshots/
+# cargo xtask 的下载缓存（meegle tarball 等）
 /.cache

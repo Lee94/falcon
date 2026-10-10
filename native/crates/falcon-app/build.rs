@@ -2,7 +2,7 @@
 //! 拷出去按需拉）。
 //!
 //! GPUI 的 `TextSystem::add_fonts` 不认 WOFF2（macOS 实测 parse error，Windows / Linux 源码里
-//! 也没有 WOFF2 解包），而字体资源的唯一来源是 `native/assets/fonts/`（由 `pnpm vendor-*`
+//! 也没有 WOFF2 解包），而字体资源的唯一来源是 `native/assets/fonts/`（由 `cargo xtask vendor-fonts`
 //! 从官方发行包生成、已进仓库）。在这里解压，就不必再往仓库里放一份商业字体的 TTF，
 //! 重新 vendor 之后重编一次即可跟上。
 
@@ -76,7 +76,7 @@ fn windows_resources(manifest: &Path, out: &Path) {
 fn convert(src: &Path, dst: &Path) {
     let data = std::fs::read(src).unwrap_or_else(|e| {
         panic!(
-            "读不到 {}：{e}。字体由 `pnpm vendor-*` 生成，先在仓库根目录跑对应脚本",
+            "读不到 {}：{e}。字体由 `cargo xtask vendor-fonts <字族>` 生成，先在 native/ 下跑一遍",
             src.display()
         )
     });

@@ -15,3 +15,6 @@ sha2 = "0.11"
 hex = "0.4"
 flate2 = "1"
 tar = "0.4"
+# vendor-themes 照 JS 的 localeCompare(b, "en") 给主题名排序：同一套 ICU 排序数据
+icu_collator = "2.3.1"
+icu_locale_core = "2.3.0"
