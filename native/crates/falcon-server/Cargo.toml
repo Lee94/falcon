@@ -9,7 +9,7 @@ description = "falcon 服务端（docs/design/rust-unification.md S 线；Node �
 [lib]
 path = "src/lib.rs"
 
-# 开发构建叫 falcon-server；发布产物由 pnpm build:bin 改名为 falcon-v<版本>-<平台>，
+# 开发构建叫 falcon-server；发布产物由 cargo xtask server 改名为 falcon-v<版本>-<平台>，
 # `falcon service install` 再把它拷成 <dataDir>/bin/falcon
 [[bin]]
 name = "falcon-server"

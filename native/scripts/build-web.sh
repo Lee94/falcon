@@ -3,7 +3,7 @@
 #   cargo build（wasm32，profile web）→ wasm-bindgen → [wasm-opt] → 拼产物目录 → 报体积
 #
 # 产物在 native/target-wasm/dist/。开发构建的服务端缺省就托管这个目录；
-# `pnpm build:bin` 先跑本脚本，再把产物编进服务端二进制。
+# `cargo xtask web` 就是跑本脚本；`cargo xtask server` 先跑它，再把产物编进服务端二进制。
 #
 # 工具链：
 # - rustup 的 stable + wasm32-unknown-unknown target。这台机器 PATH 上排前面的是 Homebrew 的
@@ -68,7 +68,7 @@ if [[ "${FALCON_WASM_OPT:-}" == 1 ]]; then
 fi
 
 cp web/index.html "$out/"
-# 内置应用图标（pnpm gen-icons 的产物）：服务端的 /api/app-icon/* 与 PWA 清单都指向 /icons/<id>/…
+# 内置应用图标（cargo xtask icons 的产物）：服务端的 /api/app-icon/* 与 PWA 清单都指向 /icons/<id>/…
 cp -R web/icons "$out/icons"
 # 浏览器版只嵌了正文字体，其余按需拉（falcon-app/src/fonts.rs）
 for f in IoskeleyMonoTerm.ttf MapleMonoNL-NF-CN.ttf SymbolsNerdFontMono.ttf; do
