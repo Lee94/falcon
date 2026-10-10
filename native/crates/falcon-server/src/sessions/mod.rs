@@ -2,6 +2,7 @@
 pub mod agent;
 pub mod backend;
 pub mod forward_spec;
+pub mod local;
 pub mod login_env;
 pub mod relay_spec;
 pub mod scroll_plugin;
