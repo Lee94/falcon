@@ -26,6 +26,7 @@ use crate::db::{Db, ProjectRow};
 use crate::git::error::WorktreeError;
 use crate::git::host::{GitHost, git_host_for};
 use crate::git::remove::cleanup_worktree;
+use crate::px0::manager::Px0Manager;
 use crate::sessions::manager::SessionManager;
 
 /// 投进引擎的一件事。在引擎线程上**同步**执行；要 await 的自己 spawn_local
@@ -75,6 +76,8 @@ pub struct Engine {
     pub data_dir: PathBuf,
     pub askpass: Arc<AskpassHub>,
     pub sessions: Rc<SessionManager>,
+    /// px0 审阅实例（ADR 0017）：SSH 项目复用项目链路
+    pub px0: Rc<Px0Manager>,
 }
 
 /// 起引擎时要的东西
@@ -115,7 +118,14 @@ pub fn spawn(
 impl Engine {
     pub fn new(deps: EngineDeps) -> Rc<Self> {
         let sessions = SessionManager::new(deps.db.clone(), deps.secrets.clone(), deps.data_dir.clone(), deps.askpass.clone());
-        Rc::new(Engine { db: deps.db, secrets: deps.secrets, data_dir: deps.data_dir, askpass: deps.askpass, sessions })
+        let px0 = {
+            let sessions = Rc::downgrade(&sessions);
+            Px0Manager::new(
+                deps.data_dir.clone(),
+                Rc::new(move |row: &ProjectRow| sessions.upgrade().expect("SessionManager 还活着").get_link(row)),
+            )
+        };
+        Rc::new(Engine { db: deps.db, secrets: deps.secrets, data_dir: deps.data_dir, askpass: deps.askpass, sessions, px0 })
     }
 
     /// 项目宿主机上的 git 执行环境。SSH 侧复用项目链路（按 projectId 缓存），不另开连接
@@ -130,6 +140,14 @@ impl Engine {
         Ok(cleanup_worktree(row, &host, other_dirs).await)
     }
 
-    /// 停掉项目的 px0 实例（S6 接上 px0 之前什么也不做）
-    pub async fn stop_px0(&self, _project_id: &str) {}
+    /// 停掉项目的 px0 实例（它开的是旧目录 / 旧主机，或者目录要删了）
+    pub async fn stop_px0(&self, project_id: &str) {
+        self.px0.stop(project_id).await;
+    }
+
+    /// 进程退出前收尸：cloudflared 与本机 px0 是子进程，不杀的话 Quick Tunnel 还会在公网挂着、
+    /// px0 还占着端口；远端的 px0 随 SSH 通道关闭（pty 挂断）自己退出
+    pub async fn shutdown(&self) {
+        futures::future::join(self.sessions.shares.shutdown(), self.px0.shutdown()).await;
+    }
 }

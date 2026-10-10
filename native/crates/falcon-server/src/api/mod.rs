@@ -16,6 +16,7 @@ pub mod hosts;
 pub mod input;
 pub mod meegle;
 pub mod projects;
+pub mod px0;
 pub mod relays;
 pub mod sessions;
 pub mod static_files;
@@ -38,6 +39,7 @@ use crate::config::ServerConfig;
 use crate::crypto::SecretBox;
 use crate::db::Db;
 use crate::engine::EngineHandle;
+use crate::meegle::client::MeegleClient;
 use error::ApiError;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -56,6 +58,8 @@ pub struct Inner {
     pub askpass: Arc<AskpassHub>,
     /// 会话引擎（LocalSet 上的 SessionManager 等），见 engine.rs
     pub engine: EngineHandle,
+    /// 飞书项目 CLI（只在后端本机起进程，Send + Sync，不进引擎）
+    pub meegle: MeegleClient,
 }
 
 impl std::ops::Deref for AppState {
@@ -73,10 +77,11 @@ impl AppState {
         secrets: Arc<SecretBox>,
         askpass: Arc<AskpassHub>,
         engine: EngineHandle,
+        meegle: MeegleClient,
     ) -> Self {
         let loopback = crate::config::is_loopback(&config.host);
         let auth = Auth::new(db.clone(), loopback);
-        AppState { inner: Arc::new(Inner { config, db, auth, secrets, askpass, engine }) }
+        AppState { inner: Arc::new(Inner { config, db, auth, secrets, askpass, engine, meegle }) }
     }
 
     /// 请求带来的登录 cookie 有没有效（不需要认证的部署恒为 true）
@@ -132,6 +137,7 @@ fn protected_router() -> Router<AppState> {
         .merge(git_routes::router())
         .merge(worktrees::router())
         .merge(meegle::router())
+        .merge(px0::router())
         // 没有对应路由的 /api/*：同 Node 版的 onRequest 钩子，没登录先 401，登录了才 404
         .route("/api/{*rest}", axum::routing::any(static_files::not_found))
 }

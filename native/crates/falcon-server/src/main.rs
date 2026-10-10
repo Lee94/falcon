@@ -59,7 +59,9 @@ fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         askpass.set_on_prompt(move |p| engine.send(move |e| e.sessions.broadcast_askpass(&p)));
     }
-    let state = AppState::new(config.clone(), db, secrets, askpass, engine);
+    // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
+    let meegle = falcon_server::meegle::client::MeegleClient::from_env();
+    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -78,8 +80,8 @@ fn main() -> anyhow::Result<()> {
             res = axum::serve(listener, api::app(state)) => res?,
             () = shutdown_signal() => {}
         }
-        // cloudflared 是子进程，后端退出不会自动带走；不杀的话 Quick Tunnel 还会在公网挂着
-        let stop = engine.call(|e| async move { e.sessions.shares.shutdown().await });
+        // cloudflared / 本机 px0 是子进程，后端退出不会自动带走（见 Engine::shutdown）
+        let stop = engine.call(|e| async move { e.shutdown().await });
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
         anyhow::Ok(())
     })

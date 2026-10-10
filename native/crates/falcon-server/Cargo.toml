@@ -49,6 +49,8 @@ rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"
