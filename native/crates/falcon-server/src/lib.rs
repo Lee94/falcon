@@ -4,9 +4,14 @@
 //! 包括顶部和关键处解释"为什么"的注释——那些多半是实测出来的坑，附录 A 有清单。
 //! 协议类型一律用 falcon-proto（与原生客户端同一份），不在这里另起一套。
 
+pub mod api;
 pub mod app_icon;
 pub mod askpass;
+pub mod auth;
 pub mod cloudflared;
+pub mod config;
+pub mod crypto;
+pub mod db;
 pub mod exec;
 pub mod files;
 pub mod fs;

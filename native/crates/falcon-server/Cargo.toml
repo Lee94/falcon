@@ -21,9 +21,20 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-log.workspace = true
+log = { workspace = true, features = ["std"] }
 base64.workspace = true
 regex = "1"
+tokio = { workspace = true, features = ["process", "signal"] }
+futures.workspace = true
+bytes.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+aes-gcm = "0.11.1"
+scrypt = "0.12.0"
+rand = "0.10.3"
+hex = "0.4.3"
+subtle = "2.6.1"
+axum = { version = "0.8.9", features = ["ws"] }
+tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
 
 [dev-dependencies]
 tempfile = "3"
