@@ -284,6 +284,42 @@ Server 与 shared 现有 38 个测试文件，约 436 个用例。
 
 ---
 
+## 11. S 线进展（2026-10-10）
+
+分支 `rust-server`。`native/crates/falcon-server` 已覆盖 Node 版的全部路由（文件浏览 / 传输 / 应用图标那一组在合入中），`cargo test -p falcon-server` 六百多个用例，零警告。
+
+**执行模型（S4 定下来的）**：会话核心不改写成多线程，而是保留 Node 事件循环的语义——`engine.rs` 在一条专用线程上起 current_thread runtime + LocalSet，SessionManager、SshLink、中转、px0 全是 `Rc` / `RefCell`；axum 处理器经 `EngineHandle::call` 把闭包投进引擎、拿 oneshot 等结果，WS 的 input / resize 经 `send` 保序投递。阻塞的 PTY 读写各开线程；SQLite 照 Node 版直接同步调。好处是 manager.ts 里那些依赖"同步段不会被打断"的状态机（单飞、`attaching`、重连登记在册检查）可以逐行照搬；HTTP 处理器被丢掉（客户端断开）不会打断引擎里在跑的写操作。
+
+**实测过的**
+
+| 场景 | 结果 |
+|---|---|
+| Node 建的本地持久会话 → 停 Node → 同一数据目录起 Rust | 自动接回（unverified → active），回放里有 Node 时期的输出，之后输入正常 |
+| 浏览器版 GPUI 客户端连 Rust 服务端 | 打开会话、回放、中英文输入正常 |
+| SSH（隔离环境：测试 sshd 用 `SetEnv HOME` 把远端家目录换成 `native/target/h`） | 主机试连、Zellij 远端安装（`/ws/install` 分阶段）、建持久会话、杀掉 SSH 连接 → 数秒内自动重连接回且历史还在、重启 Rust 服务端 → 启动即接回、本地端口转发经隧道可用并随停用拆掉 |
+| 附属项目（临时 git 仓库） | 派生、目标占用 409、禁止二级派生、删除前预检看得到脏文件、存档 / 恢复、删除时 worktree 目录随之清掉 |
+| px0 | 首次打开下载钉哈希的二进制、状态页、启动后经反代可用；服务端 SIGTERM 时子进程被收掉 |
+| 发布构建 `pnpm build:server` | 40 MB 单文件（内嵌 React 产物与 meegle CLI），独立跑起来 UI、meegle、`service` 子命令都正常 |
+
+SSH Windows 远端没有环境，未测。
+
+**与 Node 版有意的出入**（其余逐字节照搬）
+
+- 数据目录在配置解析时就转成绝对路径：portable-pty 只在 PATH 里找相对路径的程序，node-pty 的 execvp 按 cwd 解析，相对的 `--data-dir` 会让 Zellij 起不来。
+- 旧链路的 channel 在新附着之后才报关闭时，不再把新 backend 置空（Node 版的竞态）。
+- WS 关闭时补完关闭握手（Node 版 1005，之前 Rust 版 1006）。
+- 陈旧的 `FALCON_MEEGLE_BIN` / `FALCON_WEB_DIST`（从旧版 falcon 终端继承来的）指向不存在的路径时忽略，不挡路。
+- 修掉的 TS 缺陷：`files.ts` 在 Windows 宿主机上反斜杠 `..` 能逃出工作目录（**线上 Node 版仍有，Windows 宿主机受影响**）；`repo.ts` 的 drop / squash / reword 在 `rev-parse HEAD` 失败时把任何提交当成 HEAD（会 `reset --hard` 掉未提交的改动）；中转的若干竞态（停用时等长连接、并发启停漏杀 cloudflared）；meegle 登录超时在设备码出现前触发会失效。
+
+**剩下的**
+
+1. 合入文件路由（fs / shells / files / raw / transfer / app-icon），React 前端整体手测一遍。
+2. 切换：macOS pkg 的 Resources 换成 `pnpm build:server` 的产物（文件名已对齐，`build-macos-pkg.mjs` 只差不再调 `build:bin`）；在真实数据目录上切换要用户点头。
+3. 删 `packages/server` 与 SEA 脚本——工作区里 `packages/server` 有未提交的改动（viewerArbiter 那一组，已移植进 Rust），删之前要用户处理。Zellij 滚动插件的产物与 meegle 依赖要先挪出 `packages/server`。
+4. fixture 改由 Rust 服务端生成。
+
+---
+
 ## 附录 A：重写时必须原样保留的运行时行为
 
 本附录从源码注释与 ADR 摘出，S 线每期动手前对照。行号是 2026-10-10 的工作区。
