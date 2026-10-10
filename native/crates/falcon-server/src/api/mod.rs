@@ -11,6 +11,7 @@
 pub mod askpass;
 pub mod auth_routes;
 pub mod error;
+pub mod git_routes;
 pub mod hosts;
 pub mod input;
 pub mod projects;
@@ -126,6 +127,7 @@ fn protected_router() -> Router<AppState> {
         .merge(hosts::router())
         .merge(projects::router())
         .merge(relays::router())
+        .merge(git_routes::router())
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
