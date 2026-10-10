@@ -1,14 +1,14 @@
 [
   {
-    "id": "199f8678-fe17-4107-a945-4965c32d5f40",
+    "id": "c27b1ad5-ef99-4d96-93b0-bf007c0ece38",
     "name": "fixture",
     "type": "local",
     "workingDir": "/private/tmp/fal-fx-repo",
     "defaultWorktreeBranch": "main",
-    "createdAt": 1791646867858
+    "createdAt": 1791650625180
   },
   {
-    "id": "e7f6ae2c-e518-4a7b-9b7b-1a9dfd35c094",
+    "id": "3fffcd6e-f360-4379-946d-71c2d7603d36",
     "name": "fixture-ssh",
     "type": "ssh",
     "workingDir": "/srv/app",
@@ -19,11 +19,11 @@
       "authMethod": "password",
       "hasSecret": true
     },
-    "hostId": "9da676c8-9ad9-4c42-859b-28df63a74f90",
-    "createdAt": 1791646867859
+    "hostId": "f363b690-6aa8-4311-8142-ce6677e2fe55",
+    "createdAt": 1791650625180
   },
   {
-    "id": "08899a09-986f-4e04-994a-59ef0ec2820b",
+    "id": "134fc8cf-0a8f-4e98-899e-a1fb0cfa6509",
     "name": "fixture-multi",
     "type": "local",
     "multi": {
@@ -33,14 +33,14 @@
         }
       ]
     },
-    "createdAt": 1791646867859
+    "createdAt": 1791650625180
   },
   {
-    "id": "666923cf-a7df-4597-8e58-25a4923c4f11",
+    "id": "b98ae674-f838-4935-bc3e-90882b761824",
     "name": "fixture-plain-renamed",
     "type": "local",
     "workingDir": "/private/tmp/fal-fx-plain",
     "shell": "/bin/sh",
-    "createdAt": 1791646867860
+    "createdAt": 1791650625180
   }
 ]

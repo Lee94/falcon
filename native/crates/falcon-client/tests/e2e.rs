@@ -17,7 +17,7 @@
 //! 后端重启 → **重启 #2**（socket 开着）：socket 撞 4401 自动重登并重连，REST 随后
 //! 不用再登 → Terminate → socket 收到 dead → 清理。
 //!
-//! 几个坑（与 gen-fixtures.mjs 同一套）：数据目录必须是短路径（zellij socket 路径 macOS
+//! 几个坑（与 `cargo xtask fixtures` 同一套）：数据目录必须是短路径（zellij socket 路径 macOS
 //! 上限 104 字节）；全新数据目录首次建会话会去下载 zellij，先从 ~/.falcon/bin 或
 //! ~/.mojito/bin 拷一份锁定版本进去；绝不碰 4923；启动子服务端前去掉环境里的
 //! FALCON_* / MOJITO_*。

@@ -1,6 +1,6 @@
 //! 协议契约测试（设计文档决定五）：真服务端产出的响应逐个反序列化成 falcon-proto 的类型。
 //!
-//! fixture 由 `native/scripts/gen-fixtures.mjs` 生成（何时重跑见脚本顶部注释）。服务端
+//! fixture 由 `cargo xtask fixtures` 生成（何时重跑见 `native/xtask/src/fixtures.rs` 顶部注释）。服务端
 //! 改字段名、删字段、加了新的字面量，重生 fixture 之后这里就红。
 //!
 //! 两道检查：
@@ -32,7 +32,7 @@ const ACCEPTED: &[&str] = &[
     "error-meegle-unavailable: .reason: 字段被丢掉",
 ];
 
-/// 本机环境决定生不生成的 fixture（见脚本注释）。
+/// 本机环境决定生不生成的 fixture（见 xtask 的 fixtures.rs）。
 const OPTIONAL: &[&str] = &["error-meegle-unavailable"];
 
 type Check = fn(&str, &str, &mut Vec<String>) -> Result<(), String>;
@@ -163,7 +163,7 @@ fn dir() -> PathBuf {
 
 fn read(name: &str) -> String {
     std::fs::read_to_string(dir().join(format!("{name}.json")))
-        .unwrap_or_else(|e| panic!("读不了 fixture {name}：{e}（先跑 native/scripts/gen-fixtures.mjs）"))
+        .unwrap_or_else(|e| panic!("读不了 fixture {name}：{e}（先在 native/ 下跑 cargo xtask fixtures）"))
 }
 
 fn check<T: DeserializeOwned + Serialize>(name: &str, raw: &str, lossy: &mut Vec<String>) -> Result<(), String> {
@@ -208,7 +208,7 @@ fn every_fixture_file_is_covered() {
     let listed: BTreeSet<&str> = table().iter().map(|(n, _)| *n).collect();
     assert_eq!(listed.len(), table().len(), "表里有重复的名字");
     let on_disk: BTreeSet<String> = std::fs::read_dir(dir())
-        .expect("fixtures 目录不存在：先跑 native/scripts/gen-fixtures.mjs")
+        .expect("fixtures 目录不存在：先在 native/ 下跑 cargo xtask fixtures")
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|n| n.strip_suffix(".json").map(str::to_owned))
         .collect();

@@ -1,10 +1,10 @@
 {
   "installed": true,
-  "bin": "/Volumes/faye/Code/mojito/node_modules/.pnpm/@lark-project+meegle@1.0.23/node_modules/@lark-project/meegle/bin/meegle-darwin-arm64",
-  "version": "1.0.23",
+  "bin": "meegle",
+  "version": "1.0.9",
   "authenticated": true,
   "host": "project.feishu.cn",
-  "expiresInMinutes": 64,
+  "expiresInMinutes": 1,
   "user": {
     "key": "user_redacted",
     "name": "已脱敏",

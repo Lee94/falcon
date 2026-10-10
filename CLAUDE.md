@@ -28,11 +28,11 @@ cargo test --workspace     # 与单独 -p 跑都要绿：GPUI 会经 feature 合
 cargo test -p falcon-server --lib sessions::manager   # 单个模块；--test-name-pattern 那套换成 cargo 的名字过滤
 ```
 
-服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。真机链路另有两道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + zellij，走设密码、自动重登、两次重启接回）；`node native/scripts/gen-fixtures.mjs` 重生协议 fixture（配 `compare-fixtures.mjs` 可在改服务端前后比形状）。SSH 远端、Windows 远端与浏览器里的真实交互（IME、剪贴板、拖放）没有自动化测试，改动那些要在真机上验。
+服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。真机链路另有两道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + zellij，走设密码、自动重登、两次重启接回）；`cargo xtask fixtures` 重生协议 fixture（配 `cargo xtask compare-fixtures` 可在改服务端前后比形状）。SSH 远端、Windows 远端与浏览器里的真实交互（IME、剪贴板、拖放）没有自动化测试，改动那些要在真机上验。
 
 ## 架构
 
-协议类型的唯一真相来源是 `native/crates/falcon-proto`，服务端与客户端用同一份；`tests/fixtures/` 是 `gen-fixtures.mjs` 从真服务端落盘的响应，改协议就重生 fixture。VT 模式跟踪 `falcon-proto::term_modes` 也是两边共用（服务端回放前缀与客户端鼠标上报）。原 TS 实现（`packages/server`、`packages/web`、`packages/shared`）已删除，ADR 与注释里提到的 `*.ts` 在提交 `9c9d045`（`packages/web`、`packages/shared`）与 `fd9022a`（`packages/server`）里。
+协议类型的唯一真相来源是 `native/crates/falcon-proto`，服务端与客户端用同一份；`tests/fixtures/` 是 `cargo xtask fixtures` 从真服务端落盘的响应，改协议就重生 fixture。VT 模式跟踪 `falcon-proto::term_modes` 也是两边共用（服务端回放前缀与客户端鼠标上报）。原 TS 实现（`packages/server`、`packages/web`、`packages/shared`）已删除，ADR 与注释里提到的 `*.ts` 在提交 `9c9d045`（`packages/web`、`packages/shared`）与 `fd9022a`（`packages/server`）里。
 
 ### 数据流
 

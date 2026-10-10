@@ -1,8 +1,8 @@
 {
   "forwards": [
     {
-      "id": "eef99f1e-59e9-4cd3-bc5a-5a4c1eee348c",
-      "hostId": "9da676c8-9ad9-4c42-859b-28df63a74f90",
+      "id": "cbeee675-23e0-4993-9d46-e797d0ea7c7f",
+      "hostId": "f363b690-6aa8-4311-8142-ce6677e2fe55",
       "name": "postgres",
       "kind": "local",
       "bindHost": "127.0.0.1",
@@ -11,28 +11,28 @@
       "destPort": 5432,
       "enabled": false,
       "state": "stopped",
-      "createdAt": 1791646868630
+      "createdAt": 1791650626022
     }
   ],
   "shares": [
     {
-      "id": "a9a3ecdb-27d3-470e-a325-66ca3d029928",
+      "id": "359d0fe5-d6dc-4a16-9169-715f4c8899aa",
       "name": "web",
       "destHost": "127.0.0.1",
       "destPort": 5173,
       "enabled": false,
       "state": "stopped",
-      "createdAt": 1791646868631
+      "createdAt": 1791650626023
     },
     {
-      "id": "c50a6153-0fc2-4312-a858-ba015ee3f2a8",
-      "hostId": "9da676c8-9ad9-4c42-859b-28df63a74f90",
+      "id": "3524ba3a-ce53-40ce-842c-a5311f797de2",
+      "hostId": "f363b690-6aa8-4311-8142-ce6677e2fe55",
       "name": "api",
       "destHost": "127.0.0.1",
       "destPort": 8000,
       "enabled": false,
       "state": "stopped",
-      "createdAt": 1791646868632
+      "createdAt": 1791650626023
     }
   ]
 }

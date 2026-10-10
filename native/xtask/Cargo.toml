@@ -15,3 +15,6 @@ sha2 = "0.11"
 hex = "0.4"
 flate2 = "1"
 tar = "0.4"
+# fixture 生成的 WS 客户端（同步版，只连 ws://127.0.0.1）。与 falcon-client 的 tokio-tungstenite
+# 同一个版本，锁文件里现成；HTTP 是 fixtures/client.rs 里手写的 HTTP/1.1，不为它拉 hyper / tokio
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
