@@ -1,0 +1,16 @@
+[package]
+name = "falcon-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Falcon 浏览器版的 wasm 入口（docs/design/rust-unification.md）"
+
+# 只为 wasm32-unknown-unknown 而存在：`native/scripts/build-web.sh` 编它、跑 wasm-bindgen、
+# 拼出 index.html。原生上 `cargo check --workspace` 也会编到它，那时只是个空 lib
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+falcon-app = { path = "../falcon-app", default-features = false }
+wasm-bindgen = "0.2"

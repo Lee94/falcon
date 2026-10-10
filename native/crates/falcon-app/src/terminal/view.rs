@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use falcon_client::{FalconClient, SessionEvent, SessionSink, SessionSocket};
 use falcon_core::term_scroll::{self, MIN_THUMB_PX, ScrollState};
@@ -28,6 +28,7 @@ use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
 };
+use web_time::Instant;
 
 use super::element::{HoveredLink, TerminalElement, TerminalGeometry};
 use crate::theme::TerminalLook;
@@ -72,7 +73,11 @@ impl SessionSink for Sink {
                 // 回调约定：别在回调里长时间占着网络 worker）。不能丢给别的线程——回放之后
                 // 紧跟的实时输出必须在它换上之后才应用，顺序由"回调顺序执行"保证
                 log::debug!("replay {} bytes", bytes.len());
+                #[cfg(not(target_family = "wasm"))]
                 let changed = tokio::task::block_in_place(|| self.core.replace_with_replay(&bytes));
+                // 浏览器里只有主线程：就地解析，与 web 现在在主线程解析回放同一个水平（设计文档决定七）
+                #[cfg(target_family = "wasm")]
+                let changed = self.core.replace_with_replay(&bytes);
                 if changed {
                     let _ = self.tx.unbounded_send(UiEvent::Dirty);
                 }

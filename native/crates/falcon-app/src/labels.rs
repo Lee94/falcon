@@ -17,8 +17,8 @@ pub fn session_title(s: &SessionWithProject) -> Option<String> {
 
 /// 相对空闲时间（web useActions 的 idleText）
 pub fn idle_text(last_active_at: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let min = (now - last_active_at).max(0) / 60_000;

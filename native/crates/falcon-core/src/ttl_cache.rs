@@ -19,10 +19,12 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use futures::future::Shared;
+
+use crate::maybe_send::{MaybeBoxFuture, MaybeSend, boxed};
 
 /// 共享给所有等待方的 load 错误
 pub type LoadError = Arc<anyhow::Error>;
@@ -57,7 +59,7 @@ struct Slot<V> {
     value: V,
 }
 
-type SharedLoad<V> = Shared<BoxFuture<'static, Result<V, LoadError>>>;
+type SharedLoad<V> = Shared<MaybeBoxFuture<'static, Result<V, LoadError>>>;
 
 struct Inner<V> {
     values: HashMap<String, Slot<V>>,
@@ -129,10 +131,10 @@ impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
         key: &str,
         load: F,
         opts: TtlCacheLoadOpts,
-    ) -> impl Future<Output = Result<V, LoadError>> + Send + 'static
+    ) -> impl Future<Output = Result<V, LoadError>> + MaybeSend + 'static
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = anyhow::Result<V>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<V>> + MaybeSend + 'static,
     {
         enum Plan<V> {
             Hit(V),
@@ -159,7 +161,7 @@ impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
             let cache = self.clone();
             let key_owned = key.to_string();
             let frozen_now = opts.now;
-            let shared: SharedLoad<V> = async move {
+            let shared: SharedLoad<V> = boxed(async move {
                 let result = fut.await;
                 let mut inner = cache.lock();
                 let outcome = match result {
@@ -177,8 +179,7 @@ impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
                     inner.inflight.remove(&key_owned);
                 }
                 outcome
-            }
-            .boxed()
+            })
             .shared();
             self.lock().inflight.insert(key.to_string(), (id, shared.clone()));
             Plan::Wait(shared)

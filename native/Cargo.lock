@@ -145,25 +145,15 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
-source = "git+https://github.com/zed-industries/alacritty?rev=4c129667ce56611becdc82de6e28218c80e2e88f#4c129667ce56611becdc82de6e28218c80e2e88f"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
- "home",
- "libc",
  "log",
- "miow",
  "parking_lot",
- "piper",
- "polling",
  "regex-automata",
- "rustix",
- "rustix-openpty",
  "serde",
- "signal-hook",
  "unicode-width",
  "vte",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2073,6 +2063,9 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
+ "wasm-bindgen",
+ "web-sys",
+ "web-time",
  "winresource",
  "woff2-patched",
 ]
@@ -2085,6 +2078,8 @@ dependencies = [
  "bytes",
  "falcon-proto",
  "futures",
+ "gloo-timers",
+ "js-sys",
  "log",
  "parking_lot",
  "percent-encoding",
@@ -2099,6 +2094,10 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -2110,6 +2109,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "web-time",
 ]
 
 [[package]]
@@ -2131,6 +2131,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "serde",
+ "web-time",
 ]
 
 [[package]]
@@ -2140,6 +2141,14 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "falcon-web"
+version = "0.1.1"
+dependencies = [
+ "falcon-app",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2825,6 +2834,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3400,7 +3421,6 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand 0.9.5",
- "wasm_thread",
  "web-time",
 ]
 
@@ -3453,8 +3473,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "184776d0763e6889dd2842dcb1204c15055945f2bdfe926b5ef57bdbd1952a65"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3474,7 +3492,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm_thread",
  "web-sys",
  "web-time",
 ]
@@ -3788,15 +3805,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
-]
-
-[[package]]
-name = "home"
-version = "0.5.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
-dependencies = [
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4964,15 +4972,6 @@ dependencies = [
  "libc",
  "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "miow"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
-dependencies = [
  "windows-sys 0.61.2",
 ]
 
@@ -7135,17 +7134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustix-openpty"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1de16c7c59892b870a6336f185dc10943517f1327447096bbb7bb32cd85e2393"
-dependencies = [
- "errno",
- "libc",
- "rustix",
-]
-
-[[package]]
 name = "rustls"
 version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7653,16 +7641,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "signal-hook"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b29ffa27d3d59a049bb328258de100f8012848d1b08d444e08bbc02ac468435e"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
 
 [[package]]
 name = "signal-hook-registry"
@@ -9536,18 +9514,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm_thread"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7516db7f32decdadb1c3b8deb1b7d78b9df7606c5cc2f6241737c2ab3a0258e"
-dependencies = [
- "futures",
- "js-sys",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "wayland-backend"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10357,15 +10323,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

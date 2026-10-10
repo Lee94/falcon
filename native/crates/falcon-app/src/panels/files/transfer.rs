@@ -118,12 +118,14 @@ impl ProgressNote {
 
 /// 传输线程报上来的进度（客户端在自己的运行时里回调，这边定时取数更新通知）
 #[derive(Default)]
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 struct Progress {
     done: AtomicU64,
     /// `u64::MAX` = 不知道总数
     total: AtomicU64,
 }
 
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 impl Progress {
     fn new() -> Arc<Self> {
         Arc::new(Self { done: AtomicU64::new(0), total: AtomicU64::new(u64::MAX) })
@@ -149,6 +151,7 @@ impl Progress {
 }
 
 /// 传输进行时每 150ms 刷一次通知文字；返回的 Task 丢掉即停
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn tick_progress(
     note: &ProgressNote,
     progress: &Arc<Progress>,
@@ -232,6 +235,7 @@ fn report(ws: &Entity<Workspace>, err: &ApiError, title: String, cx: &mut AsyncW
 pub(crate) struct UploadItem {
     pub dir: String,
     pub name: String,
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub src: PathBuf,
 }
 
@@ -386,10 +390,24 @@ async fn upload_one(
     text: &(impl Fn(u64) -> String + Clone + 'static),
     cx: &mut AsyncWindowContext,
 ) -> Result<falcon_proto::UploadResult, ApiError> {
-    let progress = Progress::new();
-    let fut = client.upload_file(project_id, &item.dir, &item.name, item.src.clone(), overwrite, progress.callback());
-    let _ticker = tick_progress(note, &progress, text.clone(), cx);
-    fut.await
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let progress = Progress::new();
+        let fut = client.upload_file(project_id, &item.dir, &item.name, item.src.clone(), overwrite, progress.callback());
+        let _ticker = tick_progress(note, &progress, text.clone(), cx);
+        fut.await
+    }
+    // 浏览器版上传（<input type=file> + XHR）在 C3 做；在那之前选不出文件，也走不到这里
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = (client, project_id, item, overwrite, note, text, cx);
+        Err(ApiError {
+            status: None,
+            message: "浏览器版暂不支持上传".into(),
+            body: None,
+            kind: falcon_client::ApiErrorKind::Internal,
+        })
+    }
 }
 
 /// 自动化验证的替身（只在 `automation` feature 下编进来）：锁屏时系统的打开 / 存储面板没法
@@ -435,6 +453,20 @@ pub(crate) fn pick_and_upload(
 
 // ---------------- 下载 ----------------
 
+/// 浏览器：逐个交给 `<a download>`，进度与存到哪儿归浏览器的下载管理器（同 web）。
+/// 在点击的同步调用栈里触发，不会被当成弹窗拦掉
+#[cfg(target_family = "wasm")]
+pub(crate) fn download(ws: Entity<Workspace>, project_id: String, paths: Vec<String>, _window: &mut Window, cx: &mut App) {
+    let client = ws.read(cx).client.clone();
+    for path in paths {
+        let url = format!("{}{}", client.base_url(), client.download_path(&project_id, &path));
+        if let Err(err) = crate::web::trigger_download(&url) {
+            log::warn!("触发下载失败（{path}）：{err}");
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn downloads_dir() -> PathBuf {
     directories::UserDirs::new()
         .and_then(|u| u.download_dir().map(Path::to_path_buf).or_else(|| Some(u.home_dir().to_path_buf())))
@@ -442,6 +474,7 @@ fn downloads_dir() -> PathBuf {
 }
 
 /// 目标文件夹里已有同名文件时，照浏览器的习惯另起 `名字 (2).扩展名`，不悄悄覆盖
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 fn unique_dest(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
@@ -462,6 +495,7 @@ fn unique_dest(dir: &Path, name: &str) -> PathBuf {
 /// 一个文件：系统"存储为"对话框（它自己会问覆盖）；多个文件：选一次文件夹，逐个存进去——
 /// 每个文件弹一次存储框太烦，而 web 的做法（交给浏览器的下载目录）在这里没有对应物。
 /// 调用方只传**文件**：文件夹要打包，那是终端里的事（ADR 0009）。
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn download(ws: Entity<Workspace>, project_id: String, paths: Vec<String>, window: &mut Window, cx: &mut App) {
     if paths.is_empty() {
         return;
@@ -504,6 +538,7 @@ pub(crate) fn download(ws: Entity<Workspace>, project_id: String, paths: Vec<Str
 }
 
 /// 逐个下载，每个一条进度通知
+#[cfg(not(target_family = "wasm"))]
 fn run_downloads(
     ws: Entity<Workspace>,
     client: FalconClient,

@@ -7,16 +7,23 @@
 //!   重登一次，不用为此改 server 去加一种长效令牌。
 //!
 //! 工作区状态（列排布、侧栏展开……）按配置分开存：id 只在一台服务端内唯一。
+//!
+//! 浏览器版只有一份配置：页面所在的源。id 就用 `local`——localStorage 天然按源分，偏好键
+//! 不加配置后缀，与 web 存的键一致；访问密码不存（浏览器里没有钥匙串，登录态在 cookie 里）。
 
+#[cfg(not(target_family = "wasm"))]
 use std::path::PathBuf;
 
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_family = "wasm"))]
 use crate::prefs::{data_dir, write_atomic};
 
 pub const LOCAL_PROFILE_ID: &str = "local";
+#[cfg(not(target_family = "wasm"))]
 pub const LOCAL_URL: &str = "http://127.0.0.1:4923";
+#[cfg(not(target_family = "wasm"))]
 const KEYCHAIN_SERVICE: &str = "com.falcon.app";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -49,10 +56,20 @@ impl ServerProfile {
     }
 
     /// 工作区状态存放目录
+    #[cfg(not(target_family = "wasm"))]
     pub fn state_dir(&self) -> PathBuf {
         data_dir().join("servers").join(&self.id)
     }
 
+    #[cfg(target_family = "wasm")]
+    pub fn password(&self) -> Option<String> {
+        None
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn store_password(&self, _password: Option<&str>) {}
+
+    #[cfg(not(target_family = "wasm"))]
     pub fn password(&self) -> Option<String> {
         keyring::Entry::new(KEYCHAIN_SERVICE, &self.id)
             .ok()?
@@ -60,6 +77,7 @@ impl ServerProfile {
             .ok()
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub fn store_password(&self, password: Option<&str>) {
         let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &self.id) else {
             return;
@@ -91,6 +109,7 @@ struct ProfilesFile {
 }
 
 pub struct Profiles {
+    #[cfg(not(target_family = "wasm"))]
     path: PathBuf,
     file: ProfilesFile,
 }
@@ -98,6 +117,17 @@ pub struct Profiles {
 impl Global for Profiles {}
 
 impl Profiles {
+    /// 浏览器：唯一的配置就是页面的源（name 放主机名，标题条上显示它）
+    #[cfg(target_family = "wasm")]
+    pub fn init(cx: &mut App) {
+        let location = web_sys::window().map(|w| w.location());
+        let origin = location.as_ref().and_then(|l| l.origin().ok()).unwrap_or_default();
+        let host = location.as_ref().and_then(|l| l.host().ok()).unwrap_or_default();
+        let profile = ServerProfile { id: LOCAL_PROFILE_ID.into(), name: host, url: origin, plaintext_ok: true };
+        cx.set_global(Profiles { file: ProfilesFile { profiles: vec![profile], last_connected: None } });
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     pub fn init(cx: &mut App) {
         let path = data_dir().join("profiles.json");
         let mut file: ProfilesFile = std::fs::read_to_string(&path)
@@ -180,6 +210,10 @@ impl Profiles {
         self.save();
     }
 
+    #[cfg(target_family = "wasm")]
+    fn save(&self) {}
+
+    #[cfg(not(target_family = "wasm"))]
     fn save(&self) {
         let bytes = serde_json::to_vec_pretty(&self.file).unwrap_or_default();
         if let Err(err) = write_atomic(&self.path, &bytes) {
@@ -189,7 +223,7 @@ impl Profiles {
 }
 
 pub fn new_profile_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use web_time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())

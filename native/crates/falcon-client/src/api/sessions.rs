@@ -16,10 +16,11 @@ use serde::Serialize;
 use super::seg;
 use crate::client::{FalconClient, Req, ReqBody, json_body};
 use crate::error::ApiResult;
+use crate::runtime::MaybeSend;
 
 impl FalconClient {
     /// `GET /api/sessions`：全部会话（含已丢失的），带所属项目名。web 每 5s 轮询一次。
-    pub fn list_sessions(&self) -> impl Future<Output = ApiResult<Vec<SessionWithProject>>> + Send + 'static {
+    pub fn list_sessions(&self) -> impl Future<Output = ApiResult<Vec<SessionWithProject>>> + MaybeSend + 'static {
         self.get("/api/sessions".to_owned())
     }
 
@@ -29,7 +30,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         request: &CreateSessionRequest,
-    ) -> impl Future<Output = ApiResult<Session>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<Session>> + MaybeSend + 'static {
         self.json(
             Method::POST,
             format!("/api/projects/{}/sessions", seg(project_id)),
@@ -38,29 +39,29 @@ impl FalconClient {
     }
 
     /// `POST /api/sessions/:id/reattach`：手动接回。确认已死时照样 200，返回 dead 的行。
-    pub fn reattach_session(&self, id: &str) -> impl Future<Output = ApiResult<Session>> + Send + 'static {
+    pub fn reattach_session(&self, id: &str) -> impl Future<Output = ApiResult<Session>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/sessions/{}/reattach", seg(id)))
     }
 
     /// `GET /api/sessions/:id/foreground`：关窗口（Terminate）前问一嘴前台有没有程序在跑。
     /// 侦测不到的场景 busy 恒为 false；会话不存在也答空闲。设计文档 §4.3 要求 app
     /// 给它套 2s 超时——它是道保险，自己卡住不能把关窗口拦下来。
-    pub fn session_foreground(&self, id: &str) -> impl Future<Output = ApiResult<SessionForeground>> + Send + 'static {
+    pub fn session_foreground(&self, id: &str) -> impl Future<Output = ApiResult<SessionForeground>> + MaybeSend + 'static {
         self.get(format!("/api/sessions/{}/foreground", seg(id)))
     }
 
     /// `POST /api/sessions/:id/terminate`：Terminate，销毁会话及其 Zellij 会话。
-    pub fn terminate_session(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + Send + 'static {
+    pub fn terminate_session(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/sessions/{}/terminate", seg(id)))
     }
 
     /// `DELETE /api/sessions/:id`：清除一条已丢失（dead）的会话记录；不是 dead 是 409。
-    pub fn clear_session(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + Send + 'static {
+    pub fn clear_session(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.bare(Method::DELETE, format!("/api/sessions/{}", seg(id)))
     }
 
     /// `PATCH /api/sessions/:id`：改名。空串是合法的——清掉名字就回到自动标题。
-    pub fn rename_session(&self, id: &str, name: &str) -> impl Future<Output = ApiResult<OkResponse>> + Send + 'static {
+    pub fn rename_session(&self, id: &str, name: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             name: &'a str,
@@ -79,7 +80,7 @@ impl FalconClient {
         session_id: &str,
         bytes: impl Into<Bytes>,
         content_type: &str,
-    ) -> impl Future<Output = ApiResult<String>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<String>> + MaybeSend + 'static {
         let path = format!("/api/sessions/{}/paste-image", seg(session_id));
         let body = ReqBody::Raw { data: bytes.into(), content_type: content_type.to_owned() };
         self.call(move |inner| async move {

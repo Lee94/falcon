@@ -207,10 +207,10 @@ impl Workspace {
     fn watch_wake(cx: &mut Context<Self>) -> Task<()> {
         const TICK: Duration = Duration::from_secs(5);
         cx.spawn(async move |this, cx| {
-            let mut last = std::time::SystemTime::now();
+            let mut last = web_time::SystemTime::now();
             loop {
                 cx.background_executor().timer(TICK).await;
-                let now = std::time::SystemTime::now();
+                let now = web_time::SystemTime::now();
                 let gap = now.duration_since(last).unwrap_or_default();
                 last = now;
                 if gap < TICK + Duration::from_secs(10) {

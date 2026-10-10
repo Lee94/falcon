@@ -15,15 +15,17 @@ use falcon_proto::{
     ClientMessage, DeadReason, ServerMessage, SessionState, TermAppearance, TermFrameKind,
     WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES, decode_term_frame,
 };
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
 
-use super::{ConnectError, WsStream, close_quietly};
+use super::{ConnectError, WsConn, WsMsg};
 use crate::api::seg;
 use crate::client::{AuthEvent, AuthEvents, FalconClient, Relogin};
-use crate::runtime::runtime;
+use crate::runtime;
+
+/// 浏览器发不了 WS ping 帧：wasm 上不做心跳，`reconnect_now` 在连着时也不探活
+/// （半开连接由 online / visibilitychange 触发的重连兜，与 web 的 TerminalView 一致）。
+const HEARTBEAT: bool = cfg!(not(target_family = "wasm"));
 
 /// 会话 socket 推给 app 的事件。
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +75,7 @@ pub enum SessionEvent {
 
 /// 接收会话事件的一方。
 ///
-/// **在网络线程上被顺序调用**：同一会话的事件严格按到达顺序、一个处理完才处理下一个
+/// **在网络线程上被顺序调用**（浏览器里是主线程）：同一会话的事件严格按到达顺序、一个处理完才处理下一个
 /// ——app 在回调里直接解析终端字节，这是设计上的零跳转路径（§3.1）。代价是回调
 /// 占着一个网络 worker：别在里面等锁等很久、别同步解析一整份 4MB 回放（那个该丢给
 /// `spawn_blocking`，§3.1）。在回调里调 [`SessionSocket`] 的方法是安全的（只是入队）。
@@ -169,7 +171,7 @@ impl SessionSocket {
             connected_before: false,
             unauthorized_streak: 0,
         };
-        runtime().spawn(driver.run());
+        runtime::spawn(driver.run());
         SessionSocket { session_id: session_id.to_owned(), cmd: tx, closed }
     }
 
@@ -392,7 +394,7 @@ impl Driver {
     async fn wait(&mut self, delay: Option<Duration>) -> Next {
         let parked = delay.is_none();
         // 停在未认证时没有定时器，只等命令或登录事件
-        let sleep = tokio::time::sleep(delay.unwrap_or(Duration::from_secs(3600)));
+        let sleep = runtime::sleep(delay.unwrap_or(Duration::from_secs(3600)));
         tokio::pin!(sleep);
         let mut auth_open = true;
         loop {
@@ -415,16 +417,16 @@ impl Driver {
         }
     }
 
-    async fn serve(&mut self, mut ws: WsStream, token_used: Option<String>) -> Next {
+    async fn serve(&mut self, mut ws: WsConn, token_used: Option<String>) -> Next {
         // 开场：先 appearance、再 resize（顺序与理由见 SessionSocket 的方法注释）
         let mut sent_size = None;
         if let Some(a) = self.appearance.clone()
-            && ws.send(Message::text(a)).await.is_err()
+            && ws.send_text(a).await.is_err()
         {
             return self.dropped("发送 appearance 失败");
         }
         if let Some((cols, rows)) = self.size {
-            if ws.send(Message::text(resize_json(cols, rows))).await.is_err() {
+            if ws.send_text(resize_json(cols, rows)).await.is_err() {
                 return self.dropped("发送 resize 失败");
             }
             sent_size = Some((cols, rows));
@@ -432,32 +434,32 @@ impl Driver {
         // 收到服务端第一条消息时才报 Connected（见 SessionEvent::Connected）
         let mut accepted = false;
 
+        // 心跳：每个间隔发一次 ping，下一次到点时还什么都没收到就当连接已死。
+        // 到点后重新起一个定时器（= interval 的 MissedTickBehavior::Delay）
         let interval = self.opts.ping_interval;
-        let mut ping = tokio::time::interval_at(Instant::now() + interval, interval);
-        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ping = Box::pin(runtime::sleep(interval));
         // 上一个 ping 发出后还什么都没收到
         let mut awaiting = false;
-        let probe = tokio::time::sleep(Duration::from_secs(3600));
-        tokio::pin!(probe);
+        let mut probe = Box::pin(runtime::sleep(Duration::from_secs(3600)));
         let mut probing = false;
 
         loop {
             tokio::select! {
-                msg = ws.next() => {
+                msg = ws.recv() => {
                     let msg = match msg {
                         Some(Ok(m)) => m,
-                        Some(Err(e)) => return self.dropped(&e.to_string()),
+                        Some(Err(e)) => return self.dropped(&e),
                         None => return self.dropped("连接已关闭"),
                     };
                     // 收到任何东西（含 pong）都说明连接活着
                     awaiting = false;
                     probing = false;
-                    if !accepted && matches!(msg, Message::Binary(_) | Message::Text(_)) {
+                    if !accepted && matches!(msg, WsMsg::Binary(_) | WsMsg::Text(_)) {
                         accepted = true;
                         self.accepted();
                     }
                     match msg {
-                        Message::Binary(frame) => {
+                        WsMsg::Binary(frame) => {
                             if let Some(f) = decode_term_frame(&frame) {
                                 let payload = frame.slice(1..);
                                 self.emit(match f.kind {
@@ -466,14 +468,13 @@ impl Driver {
                                 });
                             }
                         }
-                        Message::Text(text) => {
+                        WsMsg::Text(text) => {
                             // 坏 JSON 与看不懂的消息都安静忽略（web 的 switch 没有 default）
                             if let Ok(m) = serde_json::from_str::<ServerMessage>(&text) {
                                 self.dispatch(m);
                             }
                         }
-                        Message::Close(frame) => {
-                            let code = frame.as_ref().map(|f| u16::from(f.code));
+                        WsMsg::Close(code) => {
                             if code == Some(WS_CLOSE_UNAUTHORIZED) {
                                 // 4401 = 认证没了（后端重启丢掉了内存里的 token）。
                                 // 原样重连只会无限 4401，得先重新登录
@@ -481,23 +482,23 @@ impl Driver {
                             }
                             return self.dropped(&format!("服务端关闭连接（{code:?}）"));
                         }
-                        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                        WsMsg::Alive => {}
                     }
                 }
                 cmd = self.cmd_rx.recv() => {
                     let Some(cmd) = cmd else {
-                        close_quietly(&mut ws).await;
+                        ws.close().await;
                         return Next::Stop;
                     };
                     let sent = match cmd {
                         Cmd::Close => {
-                            close_quietly(&mut ws).await;
+                            ws.close().await;
                             return Next::Stop;
                         }
                         Cmd::Input(data) => {
                             let mut ok = true;
                             for frame in input_frames(&data, WS_MAX_PAYLOAD_BYTES) {
-                                if ws.send(Message::text(frame)).await.is_err() {
+                                if ws.send_text(frame).await.is_err() {
                                     ok = false;
                                     break;
                                 }
@@ -510,19 +511,19 @@ impl Driver {
                                 true
                             } else {
                                 sent_size = Some((cols, rows));
-                                ws.send(Message::text(resize_json(cols, rows))).await.is_ok()
+                                ws.send_text(resize_json(cols, rows)).await.is_ok()
                             }
                         }
                         Cmd::Appearance(a) => {
                             self.appearance = Some(a.clone());
-                            ws.send(Message::text(a)).await.is_ok()
+                            ws.send_text(a).await.is_ok()
                         }
-                        Cmd::Scroll(json) => ws.send(Message::text(json)).await.is_ok(),
+                        Cmd::Scroll(json) => ws.send_text(json).await.is_ok(),
                         Cmd::ReconnectNow => {
-                            if !probing {
+                            if HEARTBEAT && !probing {
                                 probing = true;
-                                probe.as_mut().reset(Instant::now() + self.opts.probe_timeout);
-                                ws.send(Message::Ping(Bytes::new())).await.is_ok()
+                                probe = Box::pin(runtime::sleep(self.opts.probe_timeout));
+                                ws.ping().await.is_ok()
                             } else {
                                 true
                             }
@@ -532,14 +533,15 @@ impl Driver {
                         return self.dropped("发送失败");
                     }
                 }
-                _ = ping.tick() => {
+                _ = &mut ping, if HEARTBEAT => {
                     if awaiting {
                         return self.dropped("心跳超时");
                     }
-                    if ws.send(Message::Ping(Bytes::new())).await.is_err() {
+                    if ws.ping().await.is_err() {
                         return self.dropped("发送心跳失败");
                     }
                     awaiting = true;
+                    ping = Box::pin(runtime::sleep(interval));
                 }
                 _ = &mut probe, if probing => return self.dropped("探活超时"),
             }

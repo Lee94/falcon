@@ -1,0 +1,66 @@
+# Vendored from https://github.com/zed-industries/alacritty @ 4c129667ce56611becdc82de6e28218c80e2e88f
+# （zed@279fe07 / gpui-pre 0.3.8 锁的那份），经 native/Cargo.toml 的 [patch] 替换 git 依赖。
+#
+# 与上游的唯一差别：新增默认开启的 `tty` feature，把 event_loop / thread / tty 三个模块
+# 和它们的平台依赖（polling、rustix、signal-hook、miow……）挂在它下面。
+# 原因：polling 在 wasm32-unknown-unknown 上直接 compile_error，tty/mod.rs 的
+# `cfg(not(windows)) mod unix` 在 wasm 上也为真。Falcon 只用 Term / grid / vte，PTY 在服务端，
+# 所以 falcon-term 关掉它（docs/design/rust-unification.md 附录 B）。
+# 升级时：拿新 rev 的 alacritty_terminal 覆盖 src/，重放本文件与 src/lib.rs 的 cfg。
+# tests/（46MB 的 ref test 数据）没拷。
+[package]
+name = "alacritty_terminal"
+version = "0.26.1-dev"
+authors = ["Christian Duerr <contact@christianduerr.com>", "Joe Wilm <joe@jwilm.com>"]
+license = "Apache-2.0"
+description = "Library for writing terminal emulators"
+homepage = "https://alacritty.org"
+repository = "https://github.com/alacritty/alacritty"
+edition = "2024"
+rust-version = "1.85.0"
+publish = false
+
+[features]
+default = ["serde", "tty"]
+serde = ["dep:serde", "bitflags/serde", "vte/serde"]
+tty = [
+    "dep:home",
+    "dep:libc",
+    "dep:polling",
+    "dep:rustix-openpty",
+    "dep:rustix",
+    "dep:signal-hook",
+    "dep:piper",
+    "dep:miow",
+    "dep:windows-sys",
+]
+
+[dependencies]
+base64 = "0.22.0"
+bitflags = "2.4.1"
+home = { version = "0.5.5", optional = true }
+libc = { version = "0.2", features = ["extra_traits"], optional = true }
+log = "0.4"
+parking_lot = "0.12.0"
+polling = { version = "3.8.0", optional = true }
+regex-automata = "0.4.3"
+unicode-width = "0.2.0"
+vte = { version = "0.15.0", default-features = false, features = ["std", "ansi"] }
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix-openpty = { version = "0.2.0", optional = true }
+rustix = { version = "1.0.0", default-features = false, features = ["std"], optional = true }
+signal-hook = { version = "0.4.3", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+piper = { version = "0.2.1", optional = true }
+miow = { version = "0.6.0", optional = true }
+windows-sys = { version = "0.59.0", optional = true, features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+]}

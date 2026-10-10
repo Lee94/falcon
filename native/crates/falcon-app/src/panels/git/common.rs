@@ -104,8 +104,8 @@ pub fn format_when(ms: i64) -> String {
     if ms == 0 {
         return String::new();
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let d = crate::local_time::civil(ms);

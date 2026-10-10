@@ -15,7 +15,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use web_time::Instant;
 
 use falcon_core::layout::{
     self, CANVAS_GAP_PX, CanvasGroup, ColumnLayout, ColumnRect, DropSpot, PaneRect, Viewport,

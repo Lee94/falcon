@@ -7,12 +7,14 @@
 //! - 响应体设上限：图片不该有几十 MB，防止一个恶意链接把内存吃光。
 //!
 //! TLS 与 FalconClient 同一套（rustls + 系统信任库）。
+//!
+//! 浏览器里这条路受 CORS 限制：第三方图片站多半不给跨源读字节，取不到就是取不到。
+//! 浏览器版要换成服务端代理（docs/design/rust-unification.md 附录 B），这里只保证编得过、
+//! 对给了 CORS 头的站点能用。
 
 use std::sync::OnceLock;
-use std::time::Duration;
 
-use crate::runtime::{run, runtime};
-use crate::tls;
+use crate::runtime::{MaybeSend, run};
 
 /// 响应体上限
 pub const EXTERNAL_MAX_BYTES: usize = 20 * 1024 * 1024;
@@ -24,7 +26,22 @@ pub struct ExternalResponse {
     pub body: Vec<u8>,
 }
 
+#[cfg(target_family = "wasm")]
 fn client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| reqwest::Client::builder().build().map_err(|e| format!("建外链 HTTP 客户端失败：{e}")))
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn client() -> Result<&'static reqwest::Client, String> {
+    use std::time::Duration;
+
+    use crate::runtime::runtime;
+    use crate::tls;
+
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -49,7 +66,7 @@ pub fn fetch_external(
     method: &str,
     url: &str,
     headers: Vec<(String, Vec<u8>)>,
-) -> impl Future<Output = Result<ExternalResponse, String>> + Send + 'static {
+) -> impl Future<Output = Result<ExternalResponse, String>> + MaybeSend + 'static {
     let method = method.to_ascii_uppercase();
     let url = url.to_string();
     async move {
@@ -68,6 +85,7 @@ pub fn fetch_external(
             for (name, value) in headers {
                 req = req.header(name, value);
             }
+            #[allow(unused_mut)]
             let mut resp = req.send().await.map_err(|e| e.to_string())?;
             if resp.content_length().is_some_and(|n| n as usize > EXTERNAL_MAX_BYTES) {
                 return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
@@ -78,13 +96,26 @@ pub fn fetch_external(
                 .iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
                 .collect();
-            let mut body = Vec::new();
-            while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-                if body.len() + chunk.len() > EXTERNAL_MAX_BYTES {
+            #[cfg(not(target_family = "wasm"))]
+            let body = {
+                let mut body = Vec::new();
+                while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+                    if body.len() + chunk.len() > EXTERNAL_MAX_BYTES {
+                        return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                body
+            };
+            // fetch 的响应体只能整份读；上限照样查（读完之后）
+            #[cfg(target_family = "wasm")]
+            let body = {
+                let body = resp.bytes().await.map_err(|e| e.to_string())?;
+                if body.len() > EXTERNAL_MAX_BYTES {
                     return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
                 }
-                body.extend_from_slice(&chunk);
-            }
+                body.to_vec()
+            };
             Ok(ExternalResponse { status, headers, body })
         };
         run(fut).await.map_err(|_| "网络运行时已关闭".to_string())?

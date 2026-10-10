@@ -25,6 +25,7 @@ macro_rules! embedded {
     };
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn register(cx: &mut App) {
     let fonts: Vec<Cow<'static, [u8]>> = vec![
         embedded!("TX-02-Regular.ttf"),
@@ -37,6 +38,56 @@ pub fn register(cx: &mut App) {
     ];
     if let Err(err) = cx.text_system().add_fonts(fonts) {
         log::error!("注册内嵌字体失败：{err:#}");
+    }
+}
+
+/// 浏览器版只嵌正文字体（TX-02 四个字重，共约 330KB）：wasm 要整个下载完才能启动，
+/// 嵌全套会多出 24MB（Maple 中文一份就 21MB）。回退字体启动后按需拉
+/// （`<页面源>/fonts/*.ttf`，构建脚本从 OUT_DIR 拷进产物），到了再注册、重画——
+/// 到之前缺的字形由 gpui-web 的 Canvas 回落顶着，与 web 按 unicode-range 懒加载同一个思路
+#[cfg(target_family = "wasm")]
+pub fn register(cx: &mut App) {
+    let fonts: Vec<Cow<'static, [u8]>> = vec![
+        embedded!("TX-02-Regular.ttf"),
+        embedded!("TX-02-Bold.ttf"),
+        embedded!("TX-02-Oblique.ttf"),
+        embedded!("TX-02-BoldOblique.ttf"),
+    ];
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        log::error!("注册内嵌字体失败：{err:#}");
+    }
+    // 字体与页面同源（这时 Profiles 还没初始化，直接看 location）
+    let origin = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
+    // 小的先到：图标与拉丁回退几百 KB，中文 21MB 放最后
+    for name in ["SymbolsNerdFontMono.ttf", "IoskeleyMonoTerm.ttf", "MapleMonoNL-NF-CN.ttf"] {
+        let url = format!("{origin}/fonts/{name}");
+        let http = cx.http_client();
+        cx.spawn(async move |cx| {
+            use futures::AsyncReadExt as _;
+            let started = web_time::Instant::now();
+            let bytes = async {
+                let mut resp = http.get(&url, Default::default(), true).await?;
+                anyhow::ensure!(resp.status().is_success(), "HTTP {}", resp.status());
+                let mut buf = Vec::new();
+                resp.body_mut().read_to_end(&mut buf).await?;
+                anyhow::Ok(buf)
+            }
+            .await;
+            match bytes {
+                Ok(bytes) => {
+                    let len = bytes.len();
+                    cx.update(|cx| {
+                        if let Err(err) = cx.text_system().add_fonts(vec![Cow::Owned(bytes)]) {
+                            log::error!("注册字体 {name} 失败：{err:#}");
+                        }
+                        cx.refresh_windows();
+                    });
+                    log::info!("字体 {name} 到位：{len} 字节，{} ms", started.elapsed().as_millis());
+                }
+                Err(err) => log::warn!("拉字体 {url} 失败：{err:#}"),
+            }
+        })
+        .detach();
     }
 }
 

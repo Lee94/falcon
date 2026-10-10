@@ -68,6 +68,7 @@ impl ApiError {
         }
     }
 
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn network_msg(message: impl Into<String>) -> Self {
         ApiError { status: None, message: message.into(), body: None, kind: ApiErrorKind::Network }
     }
@@ -81,6 +82,7 @@ impl ApiError {
         }
     }
 
+    #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub(crate) fn io(context: &str, err: &std::io::Error) -> Self {
         ApiError {
             status: None,

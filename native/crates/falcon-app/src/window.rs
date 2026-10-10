@@ -68,7 +68,10 @@ fn window_title(profile: &ServerProfile) -> String {
 }
 
 pub fn display_name(profile: &ServerProfile) -> String {
-    if profile.is_local() {
+    // 浏览器里"本机"无从谈起：页面开在哪台服务端，就叫它的主机名（profiles.rs 里放在 name 上）
+    if cfg!(target_family = "wasm") {
+        profile.name.clone()
+    } else if profile.is_local() {
         t!("native.server.local").to_string()
     } else if profile.name.trim().is_empty() {
         profile.url.clone()
@@ -116,7 +119,13 @@ impl ServerWindow {
             cx.observe_window_appearance(window, |_, window, cx| crate::theme::on_window_appearance(window, cx)),
         ];
 
-        // 本机服务先确认起来了再初始化（SEA 首次启动要解压 runtime）；远处的直接连
+        // 本机服务先确认起来了再初始化（SEA 首次启动要解压 runtime）；远处的直接连。
+        // 浏览器里没有本机服务可托管，页面能打开就说明服务端在
+        #[cfg(target_family = "wasm")]
+        let _ = (local, url);
+        #[cfg(target_family = "wasm")]
+        ws.update(cx, |w, cx| w.init(cx));
+        #[cfg(not(target_family = "wasm"))]
         if local {
             let ws2 = ws.clone();
             cx.spawn(async move |_, cx| {

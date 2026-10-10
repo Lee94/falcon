@@ -21,6 +21,7 @@ use serde::Serialize;
 use super::{Query, seg};
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
+use crate::runtime::MaybeSend;
 
 /// 要看 diff 的那个文件：从快照 / 提交详情里原样带回的仓库根相对路径。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -75,13 +76,13 @@ impl FalconClient {
         &self,
         project_id: &str,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitSnapshot>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitSnapshot>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/git{}", seg(project_id), repo_query(repo)))
     }
 
     /// `GET /api/projects/:id/git/changes`：侧栏最后一层的 +N −M。读不到时
     /// `available: false`。
-    pub fn git_changes(&self, project_id: &str) -> impl Future<Output = ApiResult<GitChangeCounts>> + Send + 'static {
+    pub fn git_changes(&self, project_id: &str) -> impl Future<Output = ApiResult<GitChangeCounts>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/git/changes", seg(project_id)))
     }
 
@@ -90,7 +91,7 @@ impl FalconClient {
     pub fn git_changes_batch(
         &self,
         project_ids: &[String],
-    ) -> impl Future<Output = ApiResult<HashMap<String, GitChangeCounts>>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<HashMap<String, GitChangeCounts>>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             ids: &'a [String],
@@ -104,7 +105,7 @@ impl FalconClient {
         project_id: &str,
         file: &GitFileRef,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitFileDiff>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitFileDiff>> + MaybeSend + 'static {
         let q = Query::new()
             .push("path", &file.path)
             .nonempty("origPath", file.orig_path.as_deref())
@@ -120,7 +121,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitWorkingChanges>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitWorkingChanges>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/git/working{}", seg(project_id), repo_query(repo)))
     }
 
@@ -129,7 +130,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         query: &GitLogQuery,
-    ) -> impl Future<Output = ApiResult<GitLogPage>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitLogPage>> + MaybeSend + 'static {
         let skip = (query.skip > 0).then(|| query.skip.to_string());
         let q = Query::new()
             .nonempty("branch", query.branch.as_deref())
@@ -146,7 +147,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitRefsInfo>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitRefsInfo>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/git/refs{}", seg(project_id), repo_query(repo)))
     }
 
@@ -157,7 +158,7 @@ impl FalconClient {
         project_id: &str,
         sha: &str,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitCommitDetail>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitCommitDetail>> + MaybeSend + 'static {
         let q = Query::new().push("sha", sha).nonempty("repo", repo).finish();
         self.get(format!("/api/projects/{}/git/commit{q}", seg(project_id)))
     }
@@ -169,7 +170,7 @@ impl FalconClient {
         sha: &str,
         file: &GitFileRef,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitFileDiff>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitFileDiff>> + MaybeSend + 'static {
         let q = Query::new()
             .push("sha", sha)
             .push("path", &file.path)
@@ -186,7 +187,7 @@ impl FalconClient {
         project_id: &str,
         input: &GitCommitInput,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitSyncResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitSyncResult>> + MaybeSend + 'static {
         self.json(
             Method::POST,
             format!("/api/projects/{}/git/commit{}", seg(project_id), repo_query(repo)),
@@ -201,7 +202,7 @@ impl FalconClient {
         project_id: &str,
         action: GitSyncAction,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitSyncResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitSyncResult>> + MaybeSend + 'static {
         self.bare(
             Method::POST,
             format!("/api/projects/{}/git/{}{}", seg(project_id), action.as_str(), repo_query(repo)),
@@ -214,7 +215,7 @@ impl FalconClient {
         project_id: &str,
         input: &GitOpInput,
         repo: Option<&str>,
-    ) -> impl Future<Output = ApiResult<GitSyncResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<GitSyncResult>> + MaybeSend + 'static {
         self.json(
             Method::POST,
             format!("/api/projects/{}/git/op{}", seg(project_id), repo_query(repo)),

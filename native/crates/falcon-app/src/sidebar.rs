@@ -309,8 +309,8 @@ impl Sidebar {
         let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
         let archived_note = archived_at.map(|at| {
             let deadline = at + falcon_proto::WORKTREE_ARCHIVE_TTL_MS;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let days_left = ((deadline - now) as f64 / 86_400_000.0).ceil() as i64;

@@ -9,14 +9,15 @@ use serde::Serialize;
 use super::seg;
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
+use crate::runtime::MaybeSend;
 
 impl FalconClient {
-    pub fn list_hosts(&self) -> impl Future<Output = ApiResult<Vec<SshHost>>> + Send + 'static {
+    pub fn list_hosts(&self) -> impl Future<Output = ApiResult<Vec<SshHost>>> + MaybeSend + 'static {
         self.get("/api/hosts".to_owned())
     }
 
     /// 同名主机是 409。
-    pub fn create_host(&self, input: &SshHostInput) -> impl Future<Output = ApiResult<SshHost>> + Send + 'static {
+    pub fn create_host(&self, input: &SshHostInput) -> impl Future<Output = ApiResult<SshHost>> + MaybeSend + 'static {
         self.json(Method::POST, "/api/hosts".to_owned(), json_body(input))
     }
 
@@ -25,17 +26,17 @@ impl FalconClient {
         &self,
         id: &str,
         input: &SshHostInput,
-    ) -> impl Future<Output = ApiResult<SshHost>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<SshHost>> + MaybeSend + 'static {
         self.json(Method::PUT, format!("/api/hosts/{}", seg(id)), json_body(input))
     }
 
     /// 还有项目在用这台主机时是 409。
-    pub fn delete_host(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + Send + 'static {
+    pub fn delete_host(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.bare(Method::DELETE, format!("/api/hosts/{}", seg(id)))
     }
 
     /// `POST /api/hosts/:id/test`：试连一台已保存主机。连不上是 200 + `ok: false`。
-    pub fn test_host(&self, id: &str) -> impl Future<Output = ApiResult<SshProbeResult>> + Send + 'static {
+    pub fn test_host(&self, id: &str) -> impl Future<Output = ApiResult<SshProbeResult>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/hosts/{}/test", seg(id)))
     }
 
@@ -45,7 +46,7 @@ impl FalconClient {
         &self,
         input: &SshHostInput,
         host_id: Option<&str>,
-    ) -> impl Future<Output = ApiResult<SshProbeResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<SshProbeResult>> + MaybeSend + 'static {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Draft<'a> {

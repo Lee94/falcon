@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::Duration;
+
+use web_time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -22,7 +24,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
-use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor, Timeout};
 use parking_lot::Mutex;
 
 use crate::mouse::MouseMode;
@@ -137,7 +139,7 @@ fn term_config(opts: &TermOptions) -> Config {
 }
 
 struct Parser {
-    processor: Processor<StdSyncHandler>,
+    processor: Processor<SyncTimeout>,
     modes: TermModeTracker,
 }
 
@@ -270,7 +272,7 @@ impl TermCore {
         parser.modes.track(bytes);
         parser.processor.advance(&mut fresh, bytes);
         // 回放末尾若停在未收尾的同步块里，别让它把之后的实时输出一起憋住
-        if parser.processor.sync_timeout().sync_timeout().is_some() {
+        if parser.processor.sync_timeout().pending_timeout() {
             parser.processor.stop_sync(&mut fresh);
         }
         muted.store(false, Ordering::Relaxed);
@@ -525,8 +527,29 @@ impl TermCore {
     }
 }
 
-fn flush_expired_sync(processor: &mut Processor<StdSyncHandler>, term: &mut Term<Listener>) -> bool {
-    match processor.sync_timeout().sync_timeout() {
+/// 同步输出（`CSI ?2026h`）的超时。等同 vte 的 `StdSyncHandler`，只是时钟换成 web-time：
+/// `std::time::Instant::now()` 在 wasm32-unknown-unknown 上直接 panic，而现代 TUI 几乎都发 2026。
+#[derive(Default)]
+struct SyncTimeout {
+    deadline: Option<Instant>,
+}
+
+impl Timeout for SyncTimeout {
+    fn set_timeout(&mut self, duration: Duration) {
+        self.deadline = Some(Instant::now() + duration);
+    }
+
+    fn clear_timeout(&mut self) {
+        self.deadline = None;
+    }
+
+    fn pending_timeout(&self) -> bool {
+        self.deadline.is_some()
+    }
+}
+
+fn flush_expired_sync(processor: &mut Processor<SyncTimeout>, term: &mut Term<Listener>) -> bool {
+    match processor.sync_timeout().deadline {
         Some(deadline) if deadline <= Instant::now() => {
             processor.stop_sync(term);
             true

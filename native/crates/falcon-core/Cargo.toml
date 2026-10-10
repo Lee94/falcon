@@ -10,5 +10,6 @@ falcon-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+web-time.workspace = true
 # TtlCache 的 in-flight 合并用 `Shared`；测试里的 block_on / oneshot 也来自它
 futures.workspace = true

@@ -20,6 +20,9 @@
 //! 会话 WebSocket 反过来：[`SessionSocket`] 在网络线程上**顺序**回调 [`SessionSink`]，
 //! app 在回调里直接把终端字节喂给 VT 解析器——这是设计上的零跳转路径（§3.1）。
 //!
+//! 浏览器版（wasm32）没有这个运行时：future 就地 await，会话 socket 的驱动循环挂在
+//! `spawn_local` 上，回调在主线程上。返回类型里的 [`MaybeSend`] 在 wasm 上不要求 `Send`。
+//!
 //! # 认证
 //!
 //! 服务端的登录 token 只存在内存里（`auth.ts`），**后端一重启就全部失效**——远处的
@@ -40,6 +43,7 @@ mod client;
 mod error;
 mod external;
 mod runtime;
+#[cfg(not(target_family = "wasm"))]
 mod tls;
 mod ws;
 
@@ -50,12 +54,14 @@ pub use api::system::ProbeTarget;
 pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
+#[cfg(not(target_family = "wasm"))]
 pub use runtime::runtime;
+pub use runtime::MaybeSend;
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 
 /// 传输进度回调：`(已完成字节数, 总字节数)`。总数未知时为 `None`。
 ///
-/// 在网络线程上调用，按时间节流（约 100ms 一次，开头与结尾各保证一次）；
+/// 在网络线程上调用（浏览器里是主线程），按时间节流（约 100ms 一次，开头与结尾各保证一次）；
 /// 回调里别做重活，要更新界面就把数字丢给 UI 线程。
 pub type ProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;

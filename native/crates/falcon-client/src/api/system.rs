@@ -9,6 +9,7 @@ use serde::Serialize;
 use super::Query;
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
+use crate::runtime::MaybeSend;
 
 /// 目录浏览 / shell 侦测在哪台机器上做。
 ///
@@ -37,13 +38,13 @@ impl ProbeTarget {
 
 impl FalconClient {
     /// `GET /api/system`：服务端平台、版本、本地会话能否持久（`null` = 还没探测过）。
-    pub fn system(&self) -> impl Future<Output = ApiResult<SystemInfo>> + Send + 'static {
+    pub fn system(&self) -> impl Future<Output = ApiResult<SystemInfo>> + MaybeSend + 'static {
         self.get("/api/system".to_owned())
     }
 
     /// `POST /api/fs/validate`：后端本机上这个路径是不是一个能进的文件夹。
     /// 不是也是 200 + `ok: false`。
-    pub fn validate_path(&self, path: &str) -> impl Future<Output = ApiResult<FsValidateResult>> + Send + 'static {
+    pub fn validate_path(&self, path: &str) -> impl Future<Output = ApiResult<FsValidateResult>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             path: &'a str,
@@ -57,14 +58,14 @@ impl FalconClient {
         &self,
         dir: Option<&str>,
         target: &ProbeTarget,
-    ) -> impl Future<Output = ApiResult<FsListing>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<FsListing>> + MaybeSend + 'static {
         let q = target.query(Query::new().opt("path", dir)).finish();
         self.get(format!("/api/fs/list{q}"))
     }
 
     /// `GET /api/shells`：侦测宿主机上可用的 shell（项目表单的 shell 选择）。
     /// 探测命令失败不算错（至少有默认项），连不上远端才是 400。
-    pub fn list_shells(&self, target: &ProbeTarget) -> impl Future<Output = ApiResult<ShellsInfo>> + Send + 'static {
+    pub fn list_shells(&self, target: &ProbeTarget) -> impl Future<Output = ApiResult<ShellsInfo>> + MaybeSend + 'static {
         let q = target.query(Query::new()).finish();
         self.get(format!("/api/shells{q}"))
     }

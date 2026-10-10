@@ -1,108 +1,78 @@
 //! 全局网络运行时，以及"把工作丢过去、外面只等结果"的那层胶水。
+//!
+//! 两个 target 的口径不同，对 crate 其余部分只露同一组函数：
+//!
+//! - **原生**：crate 自带一个 tokio 多线程运行时（[`runtime()`]），[`run`] 把工作 spawn 过去
+//!   再等 JoinHandle，[`spawn`] 把会话 socket 的驱动循环挂上去；
+//! - **浏览器（wasm32）**：只有一条线程、没有 tokio 运行时。[`run`] 就地 await（fetch 本来就
+//!   不占线程），[`spawn`] 是 `spawn_local`，[`sleep`] 是 setTimeout。返回的 future 不是
+//!   `Send`（里面攥着 JsValue），所以公开方法的返回类型用 [`MaybeSend`] 而不是 `Send`。
 
 use std::future::Future;
-use std::pin::Pin;
-use std::sync::OnceLock;
-use std::task::{Context, Poll};
+use std::time::Duration;
 
-use tokio::runtime::Runtime;
-use tokio::task::{JoinError, JoinHandle};
+/// 原生上等于 `Send`；wasm 上不要求（浏览器里只有一条线程，fetch / WebSocket 的 future
+/// 本来就不是 `Send`）。公开方法的返回类型写 `impl Future<..> + MaybeSend + 'static`。
+#[cfg(not(target_family = "wasm"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send + ?Sized> MaybeSend for T {}
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+#[cfg(target_family = "wasm")]
+pub trait MaybeSend {}
+#[cfg(target_family = "wasm")]
+impl<T: ?Sized> MaybeSend for T {}
 
-/// crate 内部的 tokio 多线程运行时，第一次用到时创建，进程内只有一个。
-///
-/// worker 数取 2–4：网络层是 I/O 密集的，线程多了只是多几个空转的 epoll；但至少
-/// 要 2 个——会话 socket 在 worker 上同步回调 sink（app 在里面解析终端字节），
-/// 一个 worker 被某个会话的大段回放占住时，别的会话和 REST 还得有人跑。
-///
-/// app 一般不需要碰它；暴露出来是给测试与少数确实要在网络线程上跑点东西的场合。
-pub fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get().clamp(2, 4))
-            .unwrap_or(2);
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .thread_name("falcon-net")
-            .enable_all()
-            .build()
-            .expect("创建 falcon-net 运行时失败")
-    })
+/// 后台跑一个驱动循环（会话 / 安装 socket），不等结果。
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn spawn(fut: impl Future<Output = ()> + Send + 'static) {
+    runtime().spawn(fut);
 }
 
-/// 把 `fut` spawn 到网络运行时上，返回一个等它结果的 future。
-///
-/// 返回的 future 只 poll 一个 `JoinHandle`，不需要 tokio 上下文——GPUI 的执行器、
-/// `futures::executor::block_on` 都能等。它被丢掉时顺手 abort 那个任务：调用方已经
-/// 不要结果了，请求没必要继续跑（尤其是上传 / 下载）。
-///
-/// 任务 panic 原样在等待方重新抛出：那是 bug，别吞成一个看似正常的网络错误。
-pub(crate) async fn run<T: Send + 'static>(
-    fut: impl Future<Output = T> + Send + 'static,
-) -> Result<T, Cancelled> {
-    match (AbortOnDrop(runtime().spawn(fut))).await {
-        Ok(v) => Ok(v),
-        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        // 只有运行时关停（进程退出）才会走到这里；我们自己 abort 时没人在等
-        Err(_) => Err(Cancelled),
+#[cfg(target_family = "wasm")]
+pub(crate) fn spawn(fut: impl Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(fut);
+}
+
+/// 与执行器无关地睡一会儿：原生走网络运行时的 tokio 定时器（调用方本来就跑在它上面），
+/// 浏览器走 setTimeout。
+#[cfg(not(target_family = "wasm"))]
+pub(crate) async fn sleep(d: Duration) {
+    tokio::time::sleep(d).await
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) async fn sleep(d: Duration) {
+    // setTimeout 的延迟是 i32 毫秒，再长就溢出成立即触发；停车用的一小时远在上限之内
+    let ms = d.as_millis().min(i32::MAX as u128) as u32;
+    gloo_timers::future::TimeoutFuture::new(ms).await
+}
+
+/// `fut` 在 `d` 之内完成就是 `Some`，否则 `None`（`fut` 被丢掉）。
+pub(crate) async fn timeout<T>(d: Duration, fut: impl Future<Output = T>) -> Option<T> {
+    use futures::future::{Either, select};
+    let fut = std::pin::pin!(fut);
+    let timer = std::pin::pin!(sleep(d));
+    match select(fut, timer).await {
+        Either::Left((v, _)) => Some(v),
+        Either::Right(_) => None,
     }
+}
+
+/// 浏览器上没有别的线程可以丢：就地 await。签名与原生那份一致。
+#[cfg(target_family = "wasm")]
+pub(crate) async fn run<T: 'static>(fut: impl Future<Output = T> + 'static) -> Result<T, Cancelled> {
+    Ok(fut.await)
 }
 
 /// 网络任务在出结果之前被取消（运行时关停）。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Cancelled;
 
-/// 被丢掉时 abort 任务的 JoinHandle。任务已经结束时 abort 是空操作。
-struct AbortOnDrop<T>(JoinHandle<T>);
+#[cfg(not(target_family = "wasm"))]
+pub use native::runtime;
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use native::run;
 
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-impl<T> Future for AbortOnDrop<T> {
-    type Output = Result<T, JoinError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    #[test]
-    fn runs_outside_tokio() {
-        // 不在任何 tokio 上下文里：block_on 只认 Waker，照样拿得到结果
-        let v = futures::executor::block_on(run(async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            std::thread::current().name().map(str::to_owned)
-        }))
-        .unwrap();
-        assert_eq!(v.as_deref(), Some("falcon-net"));
-    }
-
-    #[test]
-    fn dropping_the_future_aborts_the_task() {
-        let finished = Arc::new(AtomicBool::new(false));
-        let flag = finished.clone();
-        let fut = Box::pin(run(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            flag.store(true, Ordering::SeqCst);
-        }));
-        // poll 一次让它真的 spawn 出去，再丢掉
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let mut fut = fut;
-        assert!(fut.as_mut().poll(&mut cx).is_pending());
-        drop(fut);
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(!finished.load(Ordering::SeqCst), "被丢掉的请求不该跑完");
-    }
-}
+#[cfg(not(target_family = "wasm"))]
+mod native;

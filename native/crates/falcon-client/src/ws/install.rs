@@ -12,13 +12,12 @@ use std::time::Duration;
 
 use falcon_proto::{InstallClientMessage, InstallServerMessage, WS_CLOSE_UNAUTHORIZED};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::{SinkExt, Stream, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
+use futures::{Stream, StreamExt};
 
-use super::{ConnectError, WsStream, close_quietly};
+use super::{ConnectError, WsConn, WsMsg};
 use crate::api::seg;
 use crate::client::{FalconClient, Relogin};
-use crate::runtime::runtime;
+use crate::runtime;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -50,7 +49,7 @@ impl InstallSocket {
         let (tx, rx) = unbounded();
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel();
         let path = format!("/ws/install/{}", seg(project_id));
-        runtime().spawn(drive(client.clone(), path, tx, cancel_rx));
+        runtime::spawn(drive(client.clone(), path, tx, cancel_rx));
         InstallSocket { events: rx, cancel: cancel_tx }
     }
 
@@ -128,7 +127,7 @@ async fn drive(
 }
 
 async fn serve(
-    mut ws: WsStream,
+    mut ws: WsConn,
     emit: &impl Fn(InstallEvent),
     cancel: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> Outcome {
@@ -136,8 +135,8 @@ async fn serve(
     let mut settled = false;
     loop {
         tokio::select! {
-            msg = ws.next() => match msg {
-                Some(Ok(Message::Text(text))) => {
+            msg = ws.recv() => match msg {
+                Some(Ok(WsMsg::Text(text))) => {
                     let Ok(m) = serde_json::from_str::<InstallServerMessage>(&text) else { continue };
                     match m {
                         InstallServerMessage::Unknown => continue,
@@ -146,14 +145,14 @@ async fn serve(
                     }
                     emit(InstallEvent::Message(m));
                 }
-                Some(Ok(Message::Close(frame))) => {
-                    if !settled && frame.as_ref().map(|f| u16::from(f.code)) == Some(WS_CLOSE_UNAUTHORIZED) {
+                Some(Ok(WsMsg::Close(code))) => {
+                    if !settled && code == Some(WS_CLOSE_UNAUTHORIZED) {
                         return Outcome::Unauthorized;
                     }
                     return if settled { Outcome::Finished } else { Outcome::Broken("安装通道被关闭".to_owned()) };
                 }
                 Some(Ok(_)) => {}
-                Some(Err(e)) if !settled => return Outcome::Broken(e.to_string()),
+                Some(Err(e)) if !settled => return Outcome::Broken(e),
                 Some(Err(_)) | None => {
                     return if settled { Outcome::Finished } else { Outcome::Broken("安装通道被关闭".to_owned()) };
                 }
@@ -161,9 +160,9 @@ async fn serve(
             // 显式取消与 InstallSocket 被丢掉走同一条路：告诉服务端取消，再关连接
             _ = cancel.recv() => {
                 if let Ok(json) = serde_json::to_string(&InstallClientMessage::Cancel) {
-                    let _ = ws.send(Message::text(json)).await;
+                    let _ = ws.send_text(json).await;
                 }
-                close_quietly(&mut ws).await;
+                ws.close().await;
                 return Outcome::Finished;
             }
         }

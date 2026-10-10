@@ -28,6 +28,7 @@ mod view;
 pub(crate) mod widgets;
 
 use std::collections::HashMap;
+#[cfg(not(target_family = "wasm"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -91,6 +92,7 @@ enum Page {
 }
 
 /// 这台服务端的前端缓存。进程级、按服务端配置分：面板随右侧栏卸载，缓存得比它活得久
+#[cfg(not(target_family = "wasm"))]
 fn cache_for(profile_id: &str) -> MeegleCache {
     static CACHES: OnceLock<Mutex<HashMap<String, MeegleCache>>> = OnceLock::new();
     CACHES
@@ -100,6 +102,16 @@ fn cache_for(profile_id: &str) -> MeegleCache {
         .entry(profile_id.to_string())
         .or_default()
         .clone()
+}
+
+/// 浏览器里在飞的 load 不是 `Send`，缓存进不了 static（同 falcon_core::meegle_cache）；
+/// 一个页面只连一台服务端，线程局部存一份就够
+#[cfg(target_family = "wasm")]
+fn cache_for(profile_id: &str) -> MeegleCache {
+    thread_local! {
+        static CACHES: std::cell::RefCell<HashMap<String, MeegleCache>> = Default::default();
+    }
+    CACHES.with(|c| c.borrow_mut().entry(profile_id.to_string()).or_default().clone())
 }
 
 /// web 存在 localStorage 里的键；localStorage 天然按服务端（origin）分，这里的偏好文件是

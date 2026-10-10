@@ -26,7 +26,9 @@ falcon-core = { path = "crates/falcon-core" }
 gpui-kit = { version = "=0.7.1" }
 # zed@279fe07（gpui-pre 0.3.8 的快照点）锁的 alacritty fork。抄来的 Zed 终端
 # 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
+# 实际编的是 vendor/alacritty_terminal（见文件末尾的 [patch]）：加了 `tty` 开关，falcon-term
+# 关掉它才编得到 wasm。Falcon 只用 Term / grid / vte，PTY 在服务端。
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f", default-features = false, features = ["serde"] }
 
 anyhow = "1"
 thiserror = "2"
@@ -38,6 +40,9 @@ futures = "0.3"
 bytes = "1"
 url = "2"
 base64 = "0.23"
+# Instant / SystemTime：原生上就是 std 的重导出，wasm 上走 performance.now / Date.now
+# （std 的这两个在 wasm32-unknown-unknown 上一调就 panic）。下层 crate 一律用它
+web-time = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 
 [profile.dev]
@@ -47,3 +52,26 @@ opt-level = 1
 
 [profile.release]
 debug = "line-tables-only"
+
+# 浏览器版（falcon-web）：体积优先。wasm 要整个下载完才能启动，每 MB 都是首屏时间；
+# 调试行表在浏览器里也用不上
+[profile.web]
+inherits = "release"
+opt-level = "s"
+debug = false
+strip = true
+lto = true
+codegen-units = 1
+
+# 构建脚本是宿主机上的可执行文件，绕开 rustup 代理时 strip 用的 rust-objcopy 找不到 libLLVM
+# 而报警告；它们也不进产物，不必 strip
+[profile.web.build-override]
+strip = false
+
+# 去掉 tty 模块的 alacritty fork（vendor/alacritty_terminal/Cargo.toml 顶部注释写了改了什么、怎么升级）
+[patch."https://github.com/zed-industries/alacritty"]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
+
+# gpui-web 平台层的 fork（vendor/gpui-pre-web/Cargo.toml 顶部有改动清单）
+[patch.crates-io]
+gpui-pre-web = { path = "vendor/gpui-pre-web" }

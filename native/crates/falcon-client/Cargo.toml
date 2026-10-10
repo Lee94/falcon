@@ -16,9 +16,15 @@ futures.workspace = true
 bytes.workspace = true
 url.workspace = true
 parking_lot.workspace = true
+web-time.workspace = true
+percent-encoding = "2"
+# 两个 target 共用：mpsc / Mutex 与 select! 都不需要 tokio 运行时。定时器与 spawn 走 rt.rs
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+
+# ---------------- 原生：自带 tokio 多线程运行时、rustls、tungstenite ----------------
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }
-percent-encoding = "2"
 
 # TLS 一律 rustls（设计文档 §4.7 / §4.8）：不要 native-tls / openssl。
 # 加密后端用 ring——workspace 里别的 crate 已经带着它，不再引入 aws-lc-sys 那一套 C 构建。
@@ -36,6 +42,15 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 # WS 只要握手，TLS 自己接（tokio-rustls）：tokio-tungstenite 的 rustls 支持挂在
 # 双下划线的私有 feature 上，而且会顺带拉 webpki-roots / native-certs。
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+# ---------------- 浏览器：fetch 与 WebSocket 都是浏览器的，TLS / cookie 由它管 ----------------
+[target.'cfg(target_family = "wasm")'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["BinaryType", "CloseEvent", "Event", "MessageEvent", "WebSocket"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }

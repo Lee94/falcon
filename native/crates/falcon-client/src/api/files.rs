@@ -14,6 +14,7 @@ use serde::Serialize;
 use super::{COMPONENT, Query, seg};
 use crate::client::{FalconClient, Req, ReqBody, json_body};
 use crate::error::{ApiError, ApiResult};
+use crate::runtime::MaybeSend;
 
 /// [`FalconClient::raw_bytes`] 的结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -45,19 +46,19 @@ impl FalconClient {
         &self,
         project_id: &str,
         path: Option<&str>,
-    ) -> impl Future<Output = ApiResult<WorkspaceListing>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<WorkspaceListing>> + MaybeSend + 'static {
         let q = Query::new().nonempty("path", path).finish();
         self.get(format!("/api/projects/{}/files{q}", seg(project_id)))
     }
 
     /// `GET /api/projects/:id/files/index`：Quick Open 的文件路径清单（git 仓库走 ls-files）。
-    pub fn index_files(&self, project_id: &str) -> impl Future<Output = ApiResult<WorkspaceIndex>> + Send + 'static {
+    pub fn index_files(&self, project_id: &str) -> impl Future<Output = ApiResult<WorkspaceIndex>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/files/index", seg(project_id)))
     }
 
     /// `GET /api/projects/:id/file?path=`：读一个文件供查看。二进制与超大文件也是 200，
     /// 形状里写清是什么。响应里的 `rawBase` 配 [`raw_url`] 就是图片 / HTML 预览的地址。
-    pub fn read_file(&self, project_id: &str, path: &str) -> impl Future<Output = ApiResult<WorkspaceFile>> + Send + 'static {
+    pub fn read_file(&self, project_id: &str, path: &str) -> impl Future<Output = ApiResult<WorkspaceFile>> + MaybeSend + 'static {
         let q = Query::new().push("path", path).finish();
         self.get(format!("/api/projects/{}/file{q}", seg(project_id)))
     }
@@ -69,7 +70,7 @@ impl FalconClient {
         project_id: &str,
         path: &str,
         recursive: bool,
-    ) -> impl Future<Output = ApiResult<FileOpResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<FileOpResult>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             path: &'a str,
@@ -88,7 +89,7 @@ impl FalconClient {
         project_id: &str,
         path: &str,
         name: &str,
-    ) -> impl Future<Output = ApiResult<FileOpResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<FileOpResult>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             path: &'a str,
@@ -107,7 +108,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         paths: &[String],
-    ) -> impl Future<Output = ApiResult<FileRemoveResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<FileRemoveResult>> + MaybeSend + 'static {
         #[derive(Serialize)]
         struct Body<'a> {
             paths: &'a [String],
@@ -125,7 +126,7 @@ impl FalconClient {
     ///
     /// 也接受以本客户端基址开头的完整 URL；别的主机一律拒绝，免得把登录 cookie
     /// 送给不该拿到的地方。超过 16MB 是 413（原始字节路由的上限，ADR 0007）。
-    pub fn raw_bytes(&self, url_path: &str) -> impl Future<Output = ApiResult<RawBytes>> + Send + 'static {
+    pub fn raw_bytes(&self, url_path: &str) -> impl Future<Output = ApiResult<RawBytes>> + MaybeSend + 'static {
         let path = if url_path.starts_with('/') {
             Ok(url_path.to_owned())
         } else if let Some(rest) = url_path.strip_prefix(self.base_url()) {

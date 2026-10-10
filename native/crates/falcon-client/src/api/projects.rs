@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::seg;
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
+use crate::runtime::MaybeSend;
 
 /// 派生请求体：单仓库项目吃 [`WorktreeInput`]，多仓库容器吃 [`MultiWorktreeInput`]
 /// （服务端按项目分流，同一个端点）。TS 里是 `WorktreeInput | MultiWorktreeInput`。
@@ -48,12 +49,12 @@ pub struct HostAuthorizationPatch {
 }
 
 impl FalconClient {
-    pub fn list_projects(&self) -> impl Future<Output = ApiResult<Vec<Project>>> + Send + 'static {
+    pub fn list_projects(&self) -> impl Future<Output = ApiResult<Vec<Project>>> + MaybeSend + 'static {
         self.get("/api/projects".to_owned())
     }
 
     /// 校验失败（路径不存在、SSH 字段不全）是 400，`message` 就是服务端的原话。
-    pub fn create_project(&self, input: &ProjectInput) -> impl Future<Output = ApiResult<Project>> + Send + 'static {
+    pub fn create_project(&self, input: &ProjectInput) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         self.json(Method::POST, "/api/projects".to_owned(), json_body(input))
     }
 
@@ -61,7 +62,7 @@ impl FalconClient {
         &self,
         id: &str,
         input: &ProjectInput,
-    ) -> impl Future<Output = ApiResult<Project>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         self.json(Method::PUT, format!("/api/projects/{}", seg(id)), json_body(input))
     }
 
@@ -73,18 +74,18 @@ impl FalconClient {
         &self,
         id: &str,
         force: bool,
-    ) -> impl Future<Output = ApiResult<DeleteProjectResult>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<DeleteProjectResult>> + MaybeSend + 'static {
         self.bare(Method::DELETE, format!("/api/projects/{}?force={force}", seg(id)))
     }
 
     /// `GET /api/projects/:id/repo`：源项目的仓库信息（派生用的分支清单）。
     /// 环境事实写在 `derivable` / `reason` 里，不会是错误。
-    pub fn repo_info(&self, project_id: &str) -> impl Future<Output = ApiResult<RepoInfo>> + Send + 'static {
+    pub fn repo_info(&self, project_id: &str) -> impl Future<Output = ApiResult<RepoInfo>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/repo", seg(project_id)))
     }
 
     /// `GET /api/projects/:id/repos`：多仓库容器的派生前探测，逐成员 RepoInfo。
-    pub fn repo_info_multi(&self, project_id: &str) -> impl Future<Output = ApiResult<MultiRepoProbe>> + Send + 'static {
+    pub fn repo_info_multi(&self, project_id: &str) -> impl Future<Output = ApiResult<MultiRepoProbe>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/repos", seg(project_id)))
     }
 
@@ -96,7 +97,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         input: impl Into<DeriveInput>,
-    ) -> impl Future<Output = ApiResult<Project>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         let input = input.into();
         self.json(
             Method::POST,
@@ -107,23 +108,23 @@ impl FalconClient {
 
     /// `GET /api/projects/:id/worktree`：附属项目删除前的预检（脏文件、ignored 文件数、
     /// 未推送提交）。读不到状态时写在 `error` 里，不是错误。
-    pub fn worktree_status(&self, project_id: &str) -> impl Future<Output = ApiResult<WorktreeStatus>> + Send + 'static {
+    pub fn worktree_status(&self, project_id: &str) -> impl Future<Output = ApiResult<WorktreeStatus>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/worktree", seg(project_id)))
     }
 
     /// 存档附属项目：隐藏并终止其会话，目录保留，到期由后端自动删除。幂等。
-    pub fn archive_project(&self, id: &str) -> impl Future<Output = ApiResult<Project>> + Send + 'static {
+    pub fn archive_project(&self, id: &str) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/projects/{}/archive", seg(id)))
     }
 
     /// 恢复已存档的附属项目。幂等。
-    pub fn restore_project(&self, id: &str) -> impl Future<Output = ApiResult<Project>> + Send + 'static {
+    pub fn restore_project(&self, id: &str) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/projects/{}/restore", seg(id)))
     }
 
     /// `GET /api/projects/:id/host`：SSH 项目宿主机上的 Zellij 状态（授权按主机记）。
     /// 本地项目是 400。
-    pub fn host_status(&self, project_id: &str) -> impl Future<Output = ApiResult<HostZellijStatus>> + Send + 'static {
+    pub fn host_status(&self, project_id: &str) -> impl Future<Output = ApiResult<HostZellijStatus>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/host", seg(project_id)))
     }
 
@@ -132,7 +133,7 @@ impl FalconClient {
         &self,
         project_id: &str,
         patch: &HostAuthorizationPatch,
-    ) -> impl Future<Output = ApiResult<OkResponse>> + Send + 'static {
+    ) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.json(Method::POST, format!("/api/projects/{}/host", seg(project_id)), json_body(patch))
     }
 }

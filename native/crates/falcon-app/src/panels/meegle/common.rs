@@ -35,6 +35,7 @@ use crate::theme::{Ui, radius};
 use crate::ui::icon;
 use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
+use falcon_core::maybe_send::MaybeSend;
 
 /// 各页都要的：客户端、这台服务端的前端缓存、回到面板的弱引用（下钻、固定、409 重问状态）
 #[derive(Clone)]
@@ -80,10 +81,10 @@ impl Ctx {
 
 /// 列表 / 详情走前端缓存：命中给缓存，否则并入同 key 在飞的那次，再否则发请求（web 的
 /// `loadMeegleCache(key, () => api.xxx(…), bust)`）。
-pub(super) fn cached<T, Fut>(cache: &MeegleCache, key: &str, bust: bool, fut: Fut) -> impl Future<Output = Result<T, LoadError>> + Send + 'static
+pub(super) fn cached<T, Fut>(cache: &MeegleCache, key: &str, bust: bool, fut: Fut) -> impl Future<Output = Result<T, LoadError>> + MaybeSend + 'static
 where
     T: Clone + Send + Sync + 'static,
-    Fut: Future<Output = ApiResult<T>> + Send + 'static,
+    Fut: Future<Output = ApiResult<T>> + MaybeSend + 'static,
 {
     cache.load::<T, _, _>(key, move || async move { fut.await.map_err(anyhow::Error::from) }, bust)
 }

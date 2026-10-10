@@ -101,6 +101,7 @@ cargo test --workspace                          # 单测 + 共享测试向量 + 
                                                 # GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序）
 FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored   # 起真服务端 + zellij 的 e2e
 cargo run -p falcon-app                         # 连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
+./scripts/build-web.sh                          # 浏览器版：同一套 falcon-app 编到 wasm，产物 target-wasm/dist，FALCON_WEB_DIST 指过去即可
 ```
 
 - **crates.io 走 `native/.cargo/config.toml` 里的 rsproxy 镜像**：这台机器上 Clash 的 fake-ip 把 index.crates.io 解析坏了。网络正常的机器删掉那一段即可。
@@ -110,6 +111,7 @@ cargo run -p falcon-app                         # 连本机服务（按已装 La
 - 字体：`falcon-app/build.rs` 把 web 已 vendor 的 woff2 解成 TTF 嵌进二进制（GPUI 不认 WOFF2）。主题数据：`native/scripts/export-ghostty-themes.mjs`。
 - **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-app --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-app/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。
 - **压测用 `--features automation --release`**（不带 snapshot 的 test-support）：`frames:<ms>` 以 60Hz 手动画并打印帧耗时 p50 / p95，`frames:<ms>:refresh` 无视视图缓存。侧栏与右侧面板是 `cached` 视图（ADR 0015），新加的大块视图照此办理。
+- **浏览器版**（`docs/design/rust-unification.md`，C 线进行中）：`falcon-app` 是 lib，`run_desktop` / `run_web` 两个入口，`falcon-web` 只是 wasm 的薄壳。平台差异写 `cfg(target_family = "wasm")`，DOM 胶水放 `falcon-app/src/web.rs`。几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。`native/vendor/` 下的 alacritty_terminal 与 gpui-pre-web 是带补丁的 fork，改动清单在各自 Cargo.toml 顶部，升级 gpui-kit 时重放。测试服务端的数据目录要短（zellij socket 路径上限 104 字节），端口用 4940–4999。
 - HTML 预览的 WebView 在默认开启的 `webview` feature 上（`--no-default-features` 退成"在浏览器中打开"）。
 - **通知一律走 `falcon-app/src/toasts.rs` 的 `ToastExt`**，不用组件库的 `push_notification`（它的通知层会被对话框盖住，见 ADR 0015）。
 - **界面尺寸写 `zoom::zpx(..)`，不写 `px(..)`**：界面缩放（⌘+ / ⌘−）= rem 与 zpx 一起乘倍数；`px` 只留给画布几何、终端画面、窗口外框这类真实像素（`zoom.rs` 顶部有清单）。`theme.font_size` 就是 rem，必须是 16 × 倍数，别再拿它当正文字号。

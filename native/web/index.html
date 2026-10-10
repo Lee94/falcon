@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Falcon 浏览器版（gpui-kit 编到 wasm，docs/design/rust-unification.md）的宿主页。
+      只做三件事：首帧底色、加载中的那几秒、把 wasm 拉起来。界面全在 canvas 里，由
+      gpui-web 挂到 <body> 上（宽高 100%）。只支持桌面浏览器（设计文档决定七）。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Falcon</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/api/app-icon/favicon" />
+    <meta name="theme-color" content="#ffffff" />
+    <!--
+      首帧主题：与 packages/web/index.html 同一段逻辑（偏好 key 与结构见 falcon-theme 的 pref，
+      深浅按选中主题的底色亮度判）。wasm 下载编译要好几秒，这几秒里看得见的只有 html 的底色，
+      晚一帧就是白闪。底色算法同 --app（只减 OKLab 亮度），gpui 接手时不跳色。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      html {
+        background: color-mix(in oklab, var(--background, #ffffff) 92.5%, #000000);
+        background: oklab(from var(--background, #ffffff) calc(l - 0.05) a b);
+        color: var(--foreground, #171717);
+        color-scheme: light;
+      }
+      html.dark {
+        background: color-mix(in oklab, var(--background, #0a0a0a) 80%, #000000);
+        background: oklab(from var(--background, #0a0a0a) calc(l - 0.07) a b);
+        color-scheme: dark;
+      }
+      /* 加载中：一条细进度条贴在顶上，不写文案（这时 i18n 还没起来） */
+      #boot {
+        position: fixed;
+        inset: 0 0 auto 0;
+        height: 2px;
+        background: color-mix(in oklab, var(--foreground, #171717) 35%, transparent);
+        transform-origin: left;
+        animation: boot 2.4s ease-out infinite;
+      }
+      @keyframes boot {
+        from { transform: scaleX(0); opacity: 1; }
+        to { transform: scaleX(1); opacity: 0.2; }
+      }
+      #boot-error {
+        position: fixed;
+        inset: 0;
+        display: none;
+        place-items: center;
+        font: 13px ui-monospace, monospace;
+        white-space: pre-wrap;
+        padding: 24px;
+      }
+    </style>
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var bg = "#ffffff";
+        var fg = "#171717";
+        var dark = false;
+        try {
+          var raw = localStorage.getItem("falcon.themes");
+          var pref = raw ? JSON.parse(raw) : null;
+          var mode = pref && pref.mode;
+          var system = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var slot = mode === "light" || mode === "dark" ? mode : system ? "dark" : "light";
+          var colors = pref && pref[slot] && pref[slot].colors;
+          var hex = /^#[0-9a-f]{6}$/i;
+          if (colors && hex.test(colors.background) && hex.test(colors.foreground)) {
+            bg = colors.background;
+            fg = colors.foreground;
+            dark = luminance(bg) <= 0.5;
+          } else {
+            dark = slot === "dark";
+            bg = dark ? "#0a0a0a" : "#ffffff";
+            fg = dark ? "#fafafa" : "#171717";
+          }
+        } catch (e) {
+          // 读不到偏好就用浅色，等 gpui 起来后再由主题系统纠正
+        }
+        root.style.setProperty("--background", bg);
+        root.style.setProperty("--foreground", fg);
+        if (dark) root.classList.add("dark");
+        var theme = document.querySelector('meta[name="theme-color"]');
+        if (theme) theme.setAttribute("content", bg);
+
+        function luminance(hex) {
+          var lin = function (i) {
+            var s = parseInt(hex.slice(i, i + 2), 16) / 255;
+            return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+          };
+          return 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="boot"></div>
+    <div id="boot-error"></div>
+    <script type="module">
+      // 冷 / 热启动时间（设计文档 §9 要的测量）：开始拉 wasm → 实例化完 → gpui 开出窗口
+      const t0 = performance.now();
+      try {
+        const mod = await import("./falcon_web.js");
+        await mod.default({ module_or_path: new URL("./falcon_web_bg.wasm", import.meta.url) });
+        const t1 = performance.now();
+        mod.start();
+        const t2 = performance.now();
+        window.__falconBoot = { fetchAndInstantiateMs: Math.round(t1 - t0), startMs: Math.round(t2 - t1) };
+        console.info("[falcon] boot", window.__falconBoot);
+        document.getElementById("boot").remove();
+      } catch (err) {
+        console.error(err);
+        document.getElementById("boot").remove();
+        const box = document.getElementById("boot-error");
+        box.textContent = String(err && err.stack ? err.stack : err);
+        box.style.display = "grid";
+      }
+    </script>
+  </body>
+</html>

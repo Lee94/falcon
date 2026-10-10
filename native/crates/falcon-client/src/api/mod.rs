@@ -2,8 +2,9 @@
 //! snake_case）。路径、方法、query、请求体以服务端 `packages/server/src/routes.ts`
 //! （飞书项目在 `meegle/routes.ts`）为准，api.ts 有遗漏的地方照服务端补。
 //!
-//! 所有方法都返回 `impl Future<Output = ApiResult<T>> + Send + 'static`：参数在调用时
+//! 所有方法都返回 `impl Future<Output = ApiResult<T>> + MaybeSend + 'static`：参数在调用时
 //! 就拷成自有值、拼好路径，工作在第一次 poll 时才 spawn 到网络运行时（见 crate 文档）。
+//! 返回类型里的 [`MaybeSend`](crate::MaybeSend) 在原生上就是 `Send`，wasm 上不要求。
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 

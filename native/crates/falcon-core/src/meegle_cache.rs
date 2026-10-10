@@ -12,8 +12,11 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::OnceLock;
 
+use crate::maybe_send::MaybeSend;
 use crate::ttl_cache::{LoadError, TtlCache, TtlCacheLoadOpts, now_ms};
 
 pub const MEEGLE_CACHE_MS: i64 = 5 * 60_000;
@@ -58,11 +61,11 @@ impl MeegleCache {
 
     /// 命中给缓存值，否则并入 / 发起一次 load（`fresh` 跳过已有条目）。
     /// 缓存里同 key 存的是别的类型时当没命中，重新 load。
-    pub fn load<T, F, Fut>(&self, key: &str, load: F, fresh: bool) -> impl Future<Output = Result<T, LoadError>> + Send + 'static
+    pub fn load<T, F, Fut>(&self, key: &str, load: F, fresh: bool) -> impl Future<Output = Result<T, LoadError>> + MaybeSend + 'static
     where
         T: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = anyhow::Result<T>> + Send + 'static,
+        Fut: Future<Output = anyhow::Result<T>> + MaybeSend + 'static,
     {
         let fresh = fresh || (self.cache.peek(key, None).is_some_and(|hit| !hit.value.is::<T>()));
         let fut = self.cache.get_or_load(
@@ -88,9 +91,20 @@ impl MeegleCache {
 }
 
 /// 进程级的那一份（web 的模块单例）
+#[cfg(not(target_family = "wasm"))]
 pub fn meegle_cache() -> &'static MeegleCache {
     static CACHE: OnceLock<MeegleCache> = OnceLock::new();
     CACHE.get_or_init(MeegleCache::new)
+}
+
+/// 浏览器里只有一条线程；在飞的 load 不是 `Send`，缓存也就不是 `Sync`，放不进 static。
+/// 线程局部里存一份泄漏出来的 `'static` 引用，对外签名不变
+#[cfg(target_family = "wasm")]
+pub fn meegle_cache() -> &'static MeegleCache {
+    thread_local! {
+        static CACHE: &'static MeegleCache = Box::leak(Box::new(MeegleCache::new()));
+    }
+    CACHE.with(|c| *c)
 }
 
 #[cfg(test)]

@@ -67,6 +67,8 @@ pub mod term;
 pub mod shortcuts;
 /// 对应 packages/shared/src/ttlCache.ts：TTL + in-flight 合并缓存
 pub mod ttl_cache;
+/// 原生要 `Send`、浏览器不要的那层约束（MaybeSend / MaybeBoxFuture）
+pub mod maybe_send;
 /// 对应 web 的 lib/meegleCache.ts：飞书项目面板缓存
 pub mod meegle_cache;
 /// 对应 web 的 lib/meegleContext.ts：复制给 AI 的工作项上下文
