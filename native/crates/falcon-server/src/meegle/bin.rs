@@ -11,19 +11,18 @@
 //!    从旧版 falcon 终端里起的进程会继承一个早已清掉的 runtime 路径）；
 //! 2. 编进二进制的那份（`embed-meegle` feature，发布构建）—— 首次用时释放到
 //!    `<dataDir>/bin/meegle-<内容哈希>`；
-//! 3. 依赖包里本平台的二进制 —— pnpm 安装的源码树（开发构建）；
+//! 3. 依赖包里本平台的二进制 —— 仓库根 package.json 锁定的版本，pnpm 装过依赖的源码树
+//!    （开发构建）；
 //! 4. PATH 上的 `meegle` —— 用户自己 npm -g 装的，兜底。
 //!
 //! # 与 TS 的差别
 //!
-//! 第 2 步 Node 用 `require.resolve` 从 server 包出发找依赖。Rust 二进制没有模块解析，
-//! 这里退成**编译期的仓库位置**：`<本 crate>/../../../packages/server/node_modules/@lark-project/meegle`
-//! （`CARGO_MANIFEST_DIR` 推出来的，pnpm 装过依赖的源码树里就在那儿；worktree 里没装就落到
-//! 第 3 步）。只在从源码树跑的开发构建上有用；发布产物的内置方式在 S7 定（设计文档决定四：
-//! vendor 脚本抽出二进制、`include_bytes!`、运行时释放到 `<dataDir>/runtime/<hash>/bin/`，
-//! 再走第 1 步），届时这一步换掉。
+//! 第 3 步 Node 版用 `require.resolve` 从 server 包出发找依赖。Rust 二进制没有模块解析，
+//! 这里退成**编译期的仓库位置**：`<本 crate>/../../../node_modules/@lark-project/meegle`
+//! （`CARGO_MANIFEST_DIR` 推出来的，pnpm 装过依赖的源码树里就在那儿；没装就落到第 4 步）。
+//! 只在从源码树跑的开发构建上有用；发布产物走第 2 步（`pnpm build:bin` 开 embed-meegle）。
 //!
-//! 第 3 步不在这里查 PATH：返回裸名 `meegle`，由 spawn 时按**子进程环境**（登录环境）里的
+//! 第 4 步不在这里查 PATH：返回裸名 `meegle`，由 spawn 时按**子进程环境**（登录环境）里的
 //! PATH 找——与 Node 的 spawn 同一口径（Rust 的 `Command` 在显式给了 PATH 时也按新 PATH 找）。
 
 use std::path::{Path, PathBuf};
@@ -41,7 +40,7 @@ pub fn bundled_bin_name(platform: Option<&str>, arch: Option<&str>) -> String {
 
 /// 依赖包可能在的位置（见文件头"与 TS 的差别"）。目录不存在也照列，由调用方判断
 pub fn bundled_package_dirs() -> Vec<PathBuf> {
-    vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/server/node_modules/@lark-project/meegle")]
+    vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../node_modules/@lark-project/meegle")]
 }
 
 /// `env` 读环境变量（生产上是 `|k| std::env::var(k).ok()`）

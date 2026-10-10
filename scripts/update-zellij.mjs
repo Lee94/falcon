@@ -5,7 +5,7 @@
  *   node scripts/update-zellij.mjs 0.44.4
  *   node scripts/update-zellij.mjs --latest
  *
- * 只改 packages/server/src/zellij/version.ts 里的版本常量，并校验该 tag 下
+ * 只改 native/crates/falcon-server/src/zellij/version.rs 里的版本常量，并校验该 tag 下
  * 我们需要的五个 target 产物都存在——不校验哈希，因为二进制由宿主机自己下载、
  * 后端不经手（详见 ADR 0001 的"供应链与授权"一节）。
  *
@@ -17,10 +17,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const VERSION_FILE = path.join(
-  ROOT,
-  "packages/server/src/zellij/version.ts"
-);
+const VERSION_FILE = path.join(ROOT, "native/crates/falcon-server/src/zellij/version.rs");
 
 const TARGETS = [
   "x86_64-unknown-linux-musl",
@@ -62,8 +59,8 @@ async function main() {
 
   const src = fs.readFileSync(VERSION_FILE, "utf8");
   const next = src.replace(
-    /export const ZELLIJ_VERSION = "[^"]+";/,
-    `export const ZELLIJ_VERSION = "${version}";`
+    /pub const ZELLIJ_VERSION: &str = "[^"]+";/,
+    `pub const ZELLIJ_VERSION: &str = "${version}";`
   );
   if (next === src) {
     console.log("版本未变化，无需修改。");
@@ -77,7 +74,7 @@ async function main() {
   );
   console.log(
     `\n滚动位置插件（ADR 0019）的 zellij-tile 要同步改成 =${version}` +
-      "（packages/server/zellij-plugin/Cargo.toml），再跑 pnpm build:zellij-plugin。"
+      "（native/zellij-plugin/Cargo.toml），再跑 pnpm build:zellij-plugin。"
   );
 }
 

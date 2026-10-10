@@ -1,6 +1,6 @@
 # Falcon 全面 Rust 化：Rust 服务端 + gpui-kit 统一客户端
 
-> 状态：**C0 完成**（2026-10-10），测量结果见 §9；其余各期未开始· 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
+> 状态：**C0 完成**（测量结果见 §9）；**S 线完成、Node 服务端已删除**（2026-10-10，见 §11；TS 原文在提交 `fd9022a`）；C1 起未开始 · 范围：`packages/server` 用 Rust 重写；`native/` 的 GPUI 客户端拆成一套代码、两种产物（原生桌面 + 桌面浏览器 wasm）；删除 React 前端（`packages/web`）与移动端；`packages/shared` 随之退役 · 方向由用户拍板（§10），本文给做法、分期与风险
 >
 > 术语一律沿用 [CONTEXT.md](../../CONTEXT.md)。"falcon 服务端"指跑着 falcon server 的那台机器，与**宿主机**、**远端主机**是三件事（同 [gpui-client.md](./gpui-client.md) §0）。
 
@@ -314,12 +314,12 @@ SSH Windows 远端没有环境，未测。
 - 陈旧的 `FALCON_MEEGLE_BIN` / `FALCON_WEB_DIST`（从旧版 falcon 终端继承来的）指向不存在的路径时忽略，不挡路。
 - 修掉的 TS 缺陷：`files.ts` 在 Windows 宿主机上反斜杠 `..` 能逃出工作目录（**线上 Node 版仍有，Windows 宿主机受影响**）；`repo.ts` 的 drop / squash / reword 在 `rev-parse HEAD` 失败时把任何提交当成 HEAD（会 `reset --hard` 掉未提交的改动）；中转的若干竞态（停用时等长连接、并发启停漏杀 cloudflared）；meegle 登录超时在设备码出现前触发会失效。
 
+**删除 Node 版（2026-10-10，用户拍板）**：`packages/server`、SEA 脚本（`build-binary.mjs`）、esbuild / postject 依赖一并删掉；最后一个带 TS 原文的提交是 `fd9022a`。随之挪动的：滚动插件源码 → `native/zellij-plugin`（不进 Cargo 工作区），产物 → `native/crates/falcon-server/assets/`；`@lark-project/meegle` 与 `tsx` → 仓库根的 devDependencies；`pnpm build:bin` 改跑 `build-server.mjs`，`build:pkg` 随之打进 Rust 服务端；版本号改取仓库根 `package.json`；原生 e2e 与 `gen-fixtures.mjs` 只认 Rust 服务端，协议 fixture 已由它重新生成。工作区里 `packages/server` 那组未提交的 viewerArbiter 改动（逻辑已在 Rust 版里）删除前收进了 `git stash`。
+
 **剩下的**
 
-1. 切换：macOS pkg 的 Resources 换成 `pnpm build:server` 的产物（文件名已对齐，`build-macos-pkg.mjs` 只差不再调 `build:bin`）；在真实数据目录上切换要用户点头。
-2. 删 `packages/server` 与 SEA 脚本——工作区里 `packages/server` 有未提交的改动（viewerArbiter 那一组，已移植进 Rust），删之前要用户处理。Zellij 滚动插件的产物与 meegle 依赖要先挪出 `packages/server`。
-3. fixture 改由 Rust 服务端生成。
-4. 已知风险：russh 按到达而不是按消费放大通道窗口、每条通道的队列有界，慢的下载客户端可能拖住整条 SSH 链路（终端也在上面）；Node 的 ssh2 是逐通道流控。大文件下载在弱网上要实测。
+1. 在真实数据目录上切换（用新 pkg 或 `falcon service install` 换掉 `~/.falcon` 上在跑的旧服务）：要用户点头。
+2. 已知风险：russh 按到达而不是按消费放大通道窗口、每条通道的队列有界，慢的下载客户端可能拖住整条 SSH 链路（终端也在上面）；Node 的 ssh2 是逐通道流控。大文件下载在弱网上要实测。
 
 ---
 

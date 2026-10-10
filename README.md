@@ -20,7 +20,7 @@ SSH 项目的右侧面板可以加端口转发：本地转发把远端服务映�
 
 同一块面板还能把 HTTP 服务发布到公网：走 Cloudflare Quick Tunnel，无需 Cloudflare 账号，得到一条临时的 `*.trycloudflare.com` 地址。本地项目直接打本机端口；SSH 项目可选打本机或远端（远端先经 SSH 接到后端）。`cloudflared` 只在 falcon 后端本机跑，第一次发布时按锁定版本下载到 `~/.falcon/bin/`。地址随进程重启而变；任何拿到链接的人都能访问。
 
-右侧栏另有「飞书项目」面板：看当前用户在飞书项目（Meegle）里的待办 / 本周 / 逾期 / 已办，选空间按关键字搜视图与工作项，粘贴飞书项目链接直接打开视图、全景视图或工作项，常用的可以固定在面板里（存服务端，换浏览器还在），点开看详情、一键跳去飞书。数据来自 [meegle CLI](https://github.com/larksuite/meegle-cli)，它随服务内置（`@lark-project/meegle` 是锁定版本依赖，单文件发布时二进制一并封进去），不用另外安装；没登录时面板给出 device-code 登录链接，在浏览器里授权即可。
+右侧栏另有「飞书项目」面板：看当前用户在飞书项目（Meegle）里的待办 / 本周 / 逾期 / 已办，选空间按关键字搜视图与工作项，粘贴飞书项目链接直接打开视图、全景视图或工作项，常用的可以固定在面板里（存服务端，换浏览器还在），点开看详情、一键跳去飞书。数据来自 [meegle CLI](https://github.com/larksuite/meegle-cli)，它随服务内置（`@lark-project/meegle` 是锁定版本依赖，单文件发布时本平台的二进制编进服务端），不用另外安装；没登录时面板给出 device-code 登录链接，在浏览器里授权即可。
 
 终端里可以直接粘贴截图或拖入图片文件——包括 SSH 远端的会话。图片会写到会话宿主机的 `<falcon 根>/paste/`（远端为 `~/.falcon/paste/`），终端输入框里出现的是它的落盘路径；Claude Code 等 TUI 认输入框里的图片路径，效果等同把文件拖进原生终端。剪贴板同时有文本和位图时贴文本（Excel / 网页复制的常态），旧图 24 小时后自动清理。
 
@@ -60,13 +60,15 @@ D:\code\
 
 ## 快速开始
 
+服务端是 Rust（`native/crates/falcon-server`），前端是 `packages/web`。从源码跑需要 Node 24 + pnpm（前端）与 Rust 工具链（服务端）：
+
 ```bash
 pnpm install
-pnpm build
-node packages/server/dist/index.js
+pnpm build                     # shared → web
+pnpm start                     # cargo run --release -p falcon-server，托管 packages/web/dist
 ```
 
-打开 http://localhost:4923 。
+打开 http://localhost:4923 。注意不带参数时用的是默认数据目录 `~/.falcon`——和装好的服务同一个，试跑另起一个时带上 `--port` / `--data-dir`（`cd native && cargo run -p falcon-server -- --port 4950 --data-dir /tmp/fal`）。
 
 ### 启动参数
 
@@ -95,11 +97,12 @@ pnpm dev:web
 ## 单文件发布
 
 ```bash
-pnpm build:bin                              # 打当前平台
-pnpm build:bin --target linux-x64,linux-arm64   # 交叉打包（或 --target all）
+pnpm build:bin                        # 打当前平台
+pnpm build:bin --target linux-x64     # 交叉编译：先 rustup target add 对应三元组并配好链接器
+pnpm build:bin --skip-web             # web 产物已是最新时跳过 web 构建
 ```
 
-产物在 `release/falcon-v<版本>-<平台>`，单个可执行文件，不依赖已安装的 Node：
+产物在 `release/falcon-v<版本>-<平台>`，单个可执行文件，不依赖 Node：
 
 ```bash
 ./falcon-v0.1.0-linux-x64 --port 8080
@@ -108,7 +111,7 @@ pnpm build:bin --target linux-x64,linux-arm64   # 交叉打包（或 --target al
 macOS 还可以打一份安装包（把 `Falcon.app` 装进 `/Applications`，并注册用户级 launchd 服务，默认 http://127.0.0.1:4923）：
 
 ```bash
-pnpm build:pkg                 # 没有当前平台 SEA 就先打
+pnpm build:pkg                 # 没有当前平台的服务端产物就先 pnpm build:bin
 pnpm build:pkg --skip-bin      # 只用已有的 release/falcon-v*-darwin-*
 ```
 
@@ -127,22 +130,16 @@ pnpm build:win --skip-cargo    # 只用已有的 native/target/release/falcon-ap
 
 GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令：推 `v*` tag 时 Windows 安装包与
 macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上；Actions 页手动触发只出构建产物、不发版。
-包里的版本号仍取 `packages/server/package.json`（pkg）与 `native/Cargo.toml`（setup.exe），打 tag 前先改好。
+包里的版本号取仓库根的 `package.json`（pkg 与服务端产物）与 `native/Cargo.toml`（setup.exe），打 tag 前先改好。
 
-原理：esbuild 把 server 打成单个 bundle，与 node-pty 原生扩展、web 静态资源一起
-封进 Node SEA（Single Executable Application）blob，注入 nodejs.org 官方 Node
-二进制。首次运行把原生扩展与静态资源解压到 `<dataDir>/runtime/<内容哈希>/`，
-版本升级后旧目录自动清理。
+原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle`——web 产物
+（rust-embed）、本平台的 meegle CLI、Zellij 滚动插件都编进二进制，没有首次运行的解压步骤；
+meegle 在第一次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`。
 
 注意事项：
 
-- 体积约 150–170 MB，Node 运行时占大头，是所有 Node 单文件方案的固有成本；内置的 meegle CLI 另占约 11 MB。
-- 构建机需能访问 nodejs.org 与 registry.npmjs.org（下载缓存在 `build/cache/`）。
-- macOS 产物必须在 macOS 上构建（注入后要重新 ad-hoc 签名，`codesign` 只有 macOS 有）；
-  Linux 产物在任意平台都能构建。
+- 体积约 40 MB，其中 meegle CLI 约 11 MB。
 - 不支持 Windows 目标：服务本身依赖 Zellij 与 POSIX shell。
-- Homebrew 等发行版的 Node 编译时可能禁用了 SEA，所以生成 blob 也用下载的官方 Node，
-  本机 Node 版本不影响产物。
 
 ### 常驻运行（守护）
 

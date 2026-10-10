@@ -1,17 +1,13 @@
 //! 对真服务端的端到端测试（设计文档 §6.3）：会话链路以前没有任何自动化测试，这条补上。
 //!
-//! 跑法（默认 `#[ignore]`，还要显式打开开关——它会起 node 进程、建 zellij 会话）：
+//! 跑法（默认 `#[ignore]`，还要显式打开开关——它会起服务端进程、建 zellij 会话）：
 //!
 //! ```text
-//! pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build   # 仓库根目录
-//! cd native && FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored --nocapture
-//!
-//! # 对 Rust 服务端（docs/design/rust-unification.md S 线）：先 cargo build -p falcon-server
-//! cd native && FALCON_E2E=1 FALCON_E2E_SERVER=rust cargo test -p falcon-client --test e2e -- --ignored --nocapture
+//! cd native && cargo build -p falcon-server
+//! FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored --nocapture
 //! ```
 //!
-//! `FALCON_E2E_SERVER=rust` 起 `native/target/debug/falcon-server`（`FALCON_E2E_SERVER_BIN` 可改指），
-//! 缺省起 Node 版。两边同一套断言——协议冻结期间（决定三）它们必须对同一个客户端表现一致。
+//! 起的是 `native/target/debug/falcon-server`，`FALCON_E2E_SERVER_BIN` 可改指（比如发布产物）。
 //!
 //! 流程：拉起服务端（空数据目录、4940–4999 的空闲端口）→ 认证状态 → 建本地项目 → 建会话
 //! → 开 SessionSocket（连上前就设好外观与尺寸）→ 收到回放与 state active → 敲
@@ -26,9 +22,9 @@
 //! ~/.mojito/bin 拷一份锁定版本进去；绝不碰 4923；启动子服务端前去掉环境里的
 //! FALCON_* / MOJITO_*。
 //!
-//! 最近一次跑通：2026-09-24，macOS 27（Apple Silicon），node 24，zellij 0.44.3（从
-//! ~/.mojito/bin 拷入），本地项目（shell 用 /bin/sh，不吃本机 zsh 配置）+ 持久会话，
-//! 全程约 2s。两次重启后同一个 zellij 会话都接得回来，`$((6*7))` 的回显与
+//! 最近一次跑通：2026-10-10，macOS 27（Apple Silicon），Rust 服务端（debug 构建），zellij
+//! 0.45.1（从 ~/.falcon/bin 拷入），本地项目（shell 用 /bin/sh，不吃本机 zsh 配置）+ 持久
+//! 会话，全程约 3s。两次重启后同一个 zellij 会话都接得回来，`$((6*7))` 的回显与
 //! `stty size` 的结果都对得上；重启 #1 由 REST 的 401 触发重登，重启 #2 由 socket 的
 //! 4401 触发重登，各只登了一次；被 4401 拒掉的那条连接没有报 Connected，全程没有
 //! 冒出 Unauthorized。
@@ -319,40 +315,25 @@ fn strip_ansi(s: &str) -> String {
 
 // ---------------- 服务端进程 ----------------
 
-/// 被测的服务端：Node 版的 dist 入口，或 Rust 版的可执行文件
-#[derive(Clone)]
-enum Entry {
-    Node(PathBuf),
-    Rust(PathBuf),
-}
-
-fn server_entry(root: &Path) -> Entry {
-    if std::env::var("FALCON_E2E_SERVER").as_deref() == Ok("rust") {
-        let bin = std::env::var_os("FALCON_E2E_SERVER_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("native/target/debug/falcon-server"));
-        assert!(bin.exists(), "没有 {}：先 cargo build -p falcon-server", bin.display());
-        return Entry::Rust(bin);
-    }
-    let entry = root.join("packages/server/dist/index.js");
-    assert!(
-        entry.exists(),
-        "没有 {}：先在仓库根目录跑 pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build",
-        entry.display()
-    );
-    Entry::Node(entry)
+/// 被测的服务端可执行文件
+fn server_entry(root: &Path) -> PathBuf {
+    let bin = std::env::var_os("FALCON_E2E_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("native/target/debug/falcon-server"));
+    assert!(bin.exists(), "没有 {}：先 cargo build -p falcon-server", bin.display());
+    bin
 }
 
 struct Server {
     child: Option<Child>,
-    entry: Entry,
+    entry: PathBuf,
     data: PathBuf,
     port: u16,
 }
 
 impl Server {
-    fn start(entry: &Entry, data: &Path, port: u16) -> Server {
-        let mut s = Server { child: None, entry: entry.clone(), data: data.to_owned(), port };
+    fn start(entry: &Path, data: &Path, port: u16) -> Server {
+        let mut s = Server { child: None, entry: entry.to_owned(), data: data.to_owned(), port };
         s.start_again();
         s
     }
@@ -365,14 +346,7 @@ impl Server {
             .append(true)
             .open(self.data.join("server.log"))
             .unwrap();
-        let mut cmd = match &self.entry {
-            Entry::Node(entry) => {
-                let mut cmd = Command::new(node());
-                cmd.arg(entry);
-                cmd
-            }
-            Entry::Rust(bin) => Command::new(bin),
-        };
+        let mut cmd = Command::new(&self.entry);
         cmd.args(["--host", "127.0.0.1", "--port", &self.port.to_string(), "--data-dir"])
             .arg(&self.data)
             .stdin(Stdio::null())
@@ -458,18 +432,6 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap()
 }
 
-fn node() -> PathBuf {
-    if let Some(p) = std::env::var_os("FALCON_E2E_NODE") {
-        return p.into();
-    }
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")])
-        .map(|d| d.join("node"))
-        .find(|p| p.exists())
-        .expect("找不到 node：设 FALCON_E2E_NODE 或把它放进 PATH")
-}
-
 /// 4940–4999 里挑一个空闲端口。绝不碰 4923（日常在用、设了密码的实例）。
 fn free_port() -> u16 {
     (4940..=4999)
@@ -480,12 +442,12 @@ fn free_port() -> u16 {
 /// 把锁定版本的 zellij 拷进数据目录（服务端安装流程会先检查 binDir 里现成的），
 /// 省掉全新数据目录第一次建会话时的 14MB 下载。找不到就让服务端自己下。
 fn seed_zellij(root: &Path, data: &Path) {
-    let version_ts = std::fs::read_to_string(root.join("packages/server/src/zellij/version.ts")).unwrap();
-    let version = version_ts
-        .split("ZELLIJ_VERSION = \"")
+    let version_rs = std::fs::read_to_string(root.join("native/crates/falcon-server/src/zellij/version.rs")).unwrap();
+    let version = version_rs
+        .split("ZELLIJ_VERSION: &str = \"")
         .nth(1)
         .and_then(|s| s.split('"').next())
-        .expect("version.ts 里找不到 ZELLIJ_VERSION");
+        .expect("version.rs 里找不到 ZELLIJ_VERSION");
     let name = format!("zellij-{version}");
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let found = std::env::var_os("FALCON_E2E_ZELLIJ")

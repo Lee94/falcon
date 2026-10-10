@@ -4,12 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "falcon 服务端的 Rust 实现（docs/design/rust-unification.md S 线），替换 packages/server"
+description = "falcon 服务端（docs/design/rust-unification.md S 线；Node 版 packages/server 已删除）"
 
 [lib]
 path = "src/lib.rs"
 
-# S7 切换时改名为 falcon（与现在 SEA 产物同名，service install 认它）
+# 开发构建叫 falcon-server；发布产物由 pnpm build:bin 改名为 falcon-v<版本>-<平台>，
+# `falcon service install` 再把它拷成 <dataDir>/bin/falcon
 [[bin]]
 name = "falcon-server"
 path = "src/main.rs"

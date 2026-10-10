@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "falcon",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["packages/server/dist/index.js"],
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--manifest-path", "native/Cargo.toml", "-p", "falcon-server"],
       "port": 4923
     },
     {

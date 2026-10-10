@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * 编译滚动位置插件（packages/server/zellij-plugin，ADR 0019），产物拷到
- * packages/server/assets/falcon-scroll.wasm——这份是提交进仓库的，平时的构建、
- * build:bin 与 CI 都直接用它，只有改了插件或升了 zellij 才需要跑这个脚本。
+ * 编译滚动位置插件（native/zellij-plugin，ADR 0019），产物拷到
+ * native/crates/falcon-server/assets/falcon-scroll.wasm——这份是提交进仓库的，服务端
+ * 编译时 include_bytes! 进二进制，平时的构建、build:bin 与 CI 都直接用它，只有改了
+ * 插件或升了 zellij 才需要跑这个脚本。
  *
  *   pnpm build:zellij-plugin
  *
@@ -22,13 +23,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CRATE = path.join(ROOT, "packages/server/zellij-plugin");
-const OUT = path.join(ROOT, "packages/server/assets/falcon-scroll.wasm");
+const CRATE = path.join(ROOT, "native/zellij-plugin");
+const OUT = path.join(ROOT, "native/crates/falcon-server/assets/falcon-scroll.wasm");
 
 // 插件 API 跟着 zellij 版本走，两边必须同步升级
 const zellijVersion = fs
-  .readFileSync(path.join(ROOT, "packages/server/src/zellij/version.ts"), "utf8")
-  .match(/export const ZELLIJ_VERSION = "([^"]+)"/)[1];
+  .readFileSync(path.join(ROOT, "native/crates/falcon-server/src/zellij/version.rs"), "utf8")
+  .match(/pub const ZELLIJ_VERSION: &str = "([^"]+)"/)[1];
 const tileVersion = fs
   .readFileSync(path.join(CRATE, "Cargo.toml"), "utf8")
   .match(/zellij-tile = "=([^"]+)"/)[1];

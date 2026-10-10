@@ -1,4 +1,12 @@
 {
+  "available": true,
+  "repoDir": "/private/tmp/fal-fx-repo",
+  "workDir": "/private/tmp/fal-fx-repo",
+  "headBranch": "main",
+  "headSha": "5f939b1",
+  "detached": false,
+  "ahead": null,
+  "behind": null,
   "remotes": [],
   "files": [
     {
@@ -34,13 +42,5 @@
       "authoredAt": 1788228000000,
       "subject": "feat: 初始提交"
     }
-  ],
-  "available": true,
-  "repoDir": "/private/tmp/fal-fx-repo",
-  "workDir": "/private/tmp/fal-fx-repo",
-  "headBranch": "main",
-  "headSha": "5f939b1",
-  "detached": false,
-  "ahead": null,
-  "behind": null
+  ]
 }

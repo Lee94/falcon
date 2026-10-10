@@ -11,20 +11,20 @@
  *
  * 何时重跑：
  *   - packages/shared/src/index.ts 改了线上形状（加 / 改 / 删字段、改字面量）；
- *   - packages/server/src/routes.ts、meegle/routes.ts、ws.ts 改了某个端点的响应；
+ *   - 服务端（native/crates/falcon-server/src/api/）改了某个端点的响应；
  *   - falcon-proto 改了类型之后，顺手重跑一次确认两边还对得上。
  * 重跑后 `git diff` 看一眼 fixture 的变化：id、时间戳、令牌每次都会变，那是正常的；
  * 字段的增减才是要关心的。
  *
  * 跑法（仓库根目录）：
- *   pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build
+ *   (cd native && cargo build -p falcon-server)
  *   node native/scripts/gen-fixtures.mjs
  *   (cd native && cargo test -p falcon-proto --test fixtures)
  *
- * 对拍 Rust 服务端（S 线）：落到别的目录，再用 compare-fixtures.mjs 逐个比形状
- *   FALCON_FIXTURE_SERVER_BIN=native/target/debug/falcon-server FALCON_FIXTURE_OUT=/tmp/fx-rs \
- *     node native/scripts/gen-fixtures.mjs
- *   node native/scripts/compare-fixtures.mjs native/crates/falcon-proto/tests/fixtures /tmp/fx-rs
+ * FALCON_FIXTURE_SERVER_BIN 改起别的服务端可执行文件；FALCON_FIXTURE_OUT 落到别的目录，
+ * 再用 compare-fixtures.mjs 与仓库里的那套逐个比形状（改服务端前后对拍用）：
+ *   FALCON_FIXTURE_OUT=/tmp/fx-new node native/scripts/gen-fixtures.mjs
+ *   node native/scripts/compare-fixtures.mjs native/crates/falcon-proto/tests/fixtures /tmp/fx-new
  *
  * 几个坑：
  *   - 数据目录必须是短路径：zellij 的 IPC socket 全路径在 macOS 上限 104 字节，
@@ -46,10 +46,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const SERVER = path.join(ROOT, "packages/server/dist/index.js");
-// FALCON_FIXTURE_SERVER_BIN：改起 Rust 服务端（native/target/debug/falcon-server 之类）；
-// FALCON_FIXTURE_OUT：落到别的目录，好与 Node 版的 fixture 逐个比形状（S 线对拍用）
-const SERVER_BIN = process.env.FALCON_FIXTURE_SERVER_BIN;
+const SERVER_BIN = process.env.FALCON_FIXTURE_SERVER_BIN
+  ? path.resolve(process.env.FALCON_FIXTURE_SERVER_BIN)
+  : path.join(ROOT, "native/target/debug/falcon-server");
 const OUT = process.env.FALCON_FIXTURE_OUT
   ? path.resolve(process.env.FALCON_FIXTURE_OUT)
   : path.join(ROOT, "native/crates/falcon-proto/tests/fixtures");
@@ -79,9 +78,8 @@ main().catch((err) => {
 });
 
 async function main() {
-  if (SERVER_BIN ? !fs.existsSync(SERVER_BIN) : !fs.existsSync(SERVER)) {
-    if (SERVER_BIN) throw new Error(`没找到 ${SERVER_BIN}：先 cargo build -p falcon-server`);
-    throw new Error(`没找到 ${SERVER}：先在仓库根目录跑 pnpm --filter @falcon/shared build && pnpm --filter @falcon/server build`);
+  if (!fs.existsSync(SERVER_BIN)) {
+    throw new Error(`没找到 ${SERVER_BIN}：先 (cd native && cargo build -p falcon-server)`);
   }
   cleanupDirs();
   try {
@@ -559,8 +557,8 @@ function commitAt(date, message) {
 /** 把锁定版本的 zellij 拷进数据目录，省掉首次建会话时的下载。 */
 function prepareDataDir() {
   fs.mkdirSync(path.join(DATA, "bin"), { recursive: true });
-  const versionTs = fs.readFileSync(path.join(ROOT, "packages/server/src/zellij/version.ts"), "utf8");
-  const version = /ZELLIJ_VERSION = "([^"]+)"/.exec(versionTs)?.[1];
+  const versionRs = fs.readFileSync(path.join(ROOT, "native/crates/falcon-server/src/zellij/version.rs"), "utf8");
+  const version = /ZELLIJ_VERSION: &str = "([^"]+)"/.exec(versionRs)?.[1];
   const name = `zellij-${version}`;
   const candidates = [
     process.env.FALCON_FIXTURE_ZELLIJ,
@@ -584,9 +582,7 @@ function startServer(port) {
   env.LANG ??= "en_US.UTF-8";
   const log = fs.openSync(path.join(DATA, "server.log"), "a");
   const args = ["--host", "127.0.0.1", "--port", String(port), "--data-dir", DATA];
-  const child = SERVER_BIN
-    ? spawn(SERVER_BIN, args, { env, stdio: ["ignore", log, log] })
-    : spawn(process.execPath, [SERVER, ...args], { env, stdio: ["ignore", log, log] });
+  const child = spawn(SERVER_BIN, args, { env, stdio: ["ignore", log, log] });
   child.on("exit", (code, signal) => {
     if (server === child) console.error(`服务端提前退出：code=${code} signal=${signal}，日志在 ${DATA}/server.log`);
   });

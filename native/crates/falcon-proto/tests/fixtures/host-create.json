@@ -1,5 +1,5 @@
 {
-  "id": "2d07cfbc-9630-458b-97ef-311c145583bb",
+  "id": "9da676c8-9ad9-4c42-859b-28df63a74f90",
   "name": "fixture-host",
   "host": "127.0.0.1",
   "port": 1,
@@ -7,5 +7,5 @@
   "authMethod": "password",
   "hasSecret": true,
   "projectCount": 0,
-  "createdAt": 1790240177073
+  "createdAt": 1791646867856
 }

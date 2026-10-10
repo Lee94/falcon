@@ -14,7 +14,7 @@
  * 不用自己去抠模板字符串；derive.ts 里 `./color.js` 这种导入 node 自己的类型剥离
  * 解析不到 .ts，tsx 可以）：
  *
- *   pnpm --filter @falcon/server exec tsx ../../native/scripts/export-ghostty-themes.mjs
+ *   pnpm exec tsx native/scripts/export-ghostty-themes.mjs      # 仓库根目录
  *
  * 路径一律按本文件位置算，与 cwd 无关。derive.ts 从 @falcon/shared 取
  * appearanceFromHex，走的是 packages/shared/dist——shared 改过要先 build。
@@ -54,7 +54,7 @@ async function importTs(file) {
   } catch (err) {
     throw new Error(
       `导入 ${path.relative(ROOT, file)} 失败（${err.message}）。\n` +
-        "这个脚本要经 tsx 跑：pnpm --filter @falcon/server exec tsx ../../native/scripts/export-ghostty-themes.mjs"
+        "这个脚本要经 tsx 跑（仓库根目录）：pnpm exec tsx native/scripts/export-ghostty-themes.mjs"
     );
   }
 }

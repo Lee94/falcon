@@ -2,8 +2,8 @@
 /**
  * 打一份 Windows 安装包（Inno Setup 的 setup.exe）：只装原生客户端（native/，GPUI）。
  *
- * 与 macOS pkg 不同，这里没有捆绑服务端——SEA 不支持 Windows 目标（服务本身依赖 Zellij
- * 与 POSIX shell，见 README），装好后在客户端里连别处的 falcon 服务。
+ * 与 macOS pkg 不同，这里没有捆绑服务端——服务本身依赖 Zellij 与 POSIX shell（见 README），
+ * 装好后在客户端里连别处的 falcon 服务。
  *
  *   pnpm build:win                 # cargo build --release，再编安装包
  *   pnpm build:win --skip-cargo    # 只用已有的 native/target/release/falcon-app.exe

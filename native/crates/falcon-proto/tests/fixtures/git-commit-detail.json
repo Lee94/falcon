@@ -20,8 +20,8 @@
   "message": "docs: 补充说明\n",
   "files": [
     {
-      "status": "M",
       "path": "README.md",
+      "status": "M",
       "added": 2,
       "deleted": 0
     }

@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 /**
- * 把 Rust 服务端（native/crates/falcon-server）打成单个可执行文件，替代 Node SEA（build-binary.mjs）。
+ * 把服务端（native/crates/falcon-server）打成单个可执行文件。
  *
- *   pnpm build:server                        # 打当前平台
- *   pnpm build:server --skip-web             # web 产物已是最新时跳过 web 构建
- *   pnpm build:server --target linux-x64     # 交叉编译：需要先 rustup target add 对应三元组并配好链接器
+ *   pnpm build:bin                        # 打当前平台
+ *   pnpm build:bin --skip-web             # web 产物已是最新时跳过 web 构建
+ *   pnpm build:bin --target linux-x64     # 交叉编译：需要先 rustup target add 对应三元组并配好链接器
  *
- * 产物 release/falcon-v<版本>-<平台>，与 SEA 产物同名同位置——build-macos-pkg.mjs、
- * `falcon service install` 都不用改。和 SEA 的区别：
- *   - 没有首次运行的解压步骤：web 产物（rust-embed）与 Zellij 滚动插件直接从内存服务；
- *   - 内置的 meegle CLI 编进二进制，首次用到时释放到 <dataDir>/bin/meegle-<内容哈希>；
- *   - 不再需要 node-pty 的预编译包与官方 Node 运行时。
+ * 产物 release/falcon-v<版本>-<平台>，build-macos-pkg.mjs 把它放进 Falcon.app 的 Resources，
+ * `falcon service install` 再把它拷到 <dataDir>/bin/falcon。不需要首次运行的解压步骤：
+ *   - web 产物（rust-embed）与 Zellij 滚动插件直接从二进制里服务；
+ *   - 内置的 meegle CLI 编进二进制，首次用到时释放到 <dataDir>/bin/meegle-<内容哈希>。
  *
  * 前端仍是 React 版（packages/web/dist）；C 线收尾后换成浏览器版 GPUI 的产物
  * （native/target-wasm/dist），托管层不关心是哪一个（docs/design/rust-unification.md）。
@@ -33,7 +32,8 @@ const TRIPLES = {
   "linux-arm64": "aarch64-unknown-linux-gnu",
 };
 
-const VERSION = readJson(path.join(ROOT, "packages/server/package.json")).version;
+// 发布版本号：仓库根 package.json（与 native/Cargo.toml 的工作区版本一起改）
+const VERSION = readJson(path.join(ROOT, "package.json")).version;
 const HOST = `${process.platform}-${process.arch}`;
 
 const argv = process.argv.slice(2);
@@ -72,10 +72,10 @@ if (!fs.existsSync(path.join(webDist, "index.html"))) {
   process.exit(1);
 }
 
-// ---- 2. 本平台的 meegle CLI（npm 包自带六个平台的静态二进制）----
-const serverRequire = createRequire(path.join(ROOT, "packages/server/package.json"));
+// ---- 2. 本平台的 meegle CLI（npm 包自带六个平台的静态二进制，根 package.json 锁定版本）----
+const rootRequire = createRequire(path.join(ROOT, "package.json"));
 const meeglePkgDir = path.dirname(
-  fs.realpathSync(serverRequire.resolve("@lark-project/meegle/package.json"))
+  fs.realpathSync(rootRequire.resolve("@lark-project/meegle/package.json"))
 );
 const meegleBin = path.join(meeglePkgDir, "bin", `meegle-${target}`);
 if (!fs.existsSync(meegleBin)) {

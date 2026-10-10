@@ -1,8 +1,8 @@
 //! 滚动位置插件（ADR 0019）在宿主机上的部署：插件本体 + zellij 的预授权。
 //! 移植自 `packages/server/src/sessions/scrollPlugin.ts` 的纯函数部分。
 //!
-//! 插件是随服务打包的 .wasm（源码 packages/server/zellij-plugin，产物提交在
-//! packages/server/assets/），由后端推到宿主机——不让宿主机自己下载，内网主机常常
+//! 插件是随服务打包的 .wasm（源码 native/zellij-plugin，产物提交在
+//! native/crates/falcon-server/assets/），由后端推到宿主机——不让宿主机自己下载，内网主机常常
 //! 出不了网（与 px0 同理）。宿主机上的路径固定（`HostLayout.scroll_plugin_file`），旁边
 //! 一个 .sha256 记着内容，对得上就不再推。升级时原子替换文件即可：zellij 的插件缓存
 //! 只在会话进程内存里，新会话读到新文件，老会话继续用内存里的旧实例（所以插件协议
@@ -88,7 +88,7 @@ pub struct ScrollPluginAsset {
 
 static ASSET: std::sync::LazyLock<ScrollPluginAsset> = std::sync::LazyLock::new(|| {
     let bytes: &'static [u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../packages/server/assets/falcon-scroll.wasm"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/falcon-scroll.wasm"));
     use sha2::Digest as _;
     ScrollPluginAsset { bytes, sha256: hex::encode(sha2::Sha256::digest(bytes)) }
 });

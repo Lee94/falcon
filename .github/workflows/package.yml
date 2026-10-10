@@ -1,5 +1,5 @@
 # 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）与 macOS（.pkg，原生客户端 +
-# Resources 里的 SEA 服务）。打法与本机一样，直接跑 pnpm build:win / pnpm build:pkg，脚本是唯一真相。
+# Resources 里的 Rust 服务端）。打法与本机一样，直接跑 pnpm build:win / pnpm build:pkg，脚本是唯一真相。
 #
 # - 推 v* tag：两个包都打完后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版。
@@ -66,7 +66,7 @@ jobs:
         with:
           version: 9.12.2
 
-      # SEA 注入的就是这个 Node（build-binary.mjs 默认取 process.version）
+      # 只用来构建 web 前端（服务端已是 Rust，产物不再带 Node 运行时）
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -84,7 +84,7 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # 没有 SEA 产物时 build:pkg 会先 pnpm build:bin（含 pnpm build）
+      # 没有服务端产物时 build:pkg 会先 pnpm build:bin（构建 web、cargo 编服务端）
       - name: Build pkg
         run: pnpm build:pkg
 

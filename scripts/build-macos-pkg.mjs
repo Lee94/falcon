@@ -8,7 +8,7 @@
  * 它启动时自己做 launcher.sh 那两步（service install → 等端口），然后直接连本机服务。
  * `--launcher` 退回旧的 launcher.sh（注册服务后用浏览器打开 web 界面）。
  *
- *   pnpm build:pkg                 # 没有当前平台 SEA 就先 pnpm build:bin
+ *   pnpm build:pkg                 # 没有当前平台的服务端产物就先 pnpm build:bin
  *   pnpm build:pkg --skip-bin      # 必须已有 release/falcon-v*-darwin-*
  *   pnpm build:pkg --launcher      # App 里放 launcher.sh 而不是原生客户端
  *
@@ -28,10 +28,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RELEASE = path.join(ROOT, "release");
 const TEMPLATES = path.join(ROOT, "scripts", "macos-pkg");
 
-const serverPkg = JSON.parse(
-  fs.readFileSync(path.join(ROOT, "packages/server/package.json"), "utf8")
-);
-const VERSION = serverPkg.version;
+// 发布版本号：仓库根 package.json（与 native/Cargo.toml 的工作区版本一起改）
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
 
 const argv = process.argv.slice(2);
 let skipBin = false;
@@ -55,17 +53,17 @@ function run(cmd, args, opts = {}) {
 }
 
 const target = `${process.platform}-${process.arch}`;
-const seaBin = path.join(RELEASE, `falcon-v${VERSION}-${target}`);
-if (!fs.existsSync(seaBin)) {
+const serverBin = path.join(RELEASE, `falcon-v${VERSION}-${target}`);
+if (!fs.existsSync(serverBin)) {
   if (skipBin) {
-    console.error(`找不到 ${path.relative(ROOT, seaBin)}，先 pnpm build:bin`);
+    console.error(`找不到 ${path.relative(ROOT, serverBin)}，先 pnpm build:bin`);
     process.exit(1);
   }
-  console.log("== 没有 SEA 产物，先 pnpm build:bin ==");
+  console.log("== 没有服务端产物，先 pnpm build:bin ==");
   run("pnpm", ["build:bin"]);
 }
-if (!fs.existsSync(seaBin)) {
-  console.error(`build:bin 之后仍没有 ${path.relative(ROOT, seaBin)}`);
+if (!fs.existsSync(serverBin)) {
+  console.error(`build:bin 之后仍没有 ${path.relative(ROOT, serverBin)}`);
   process.exit(1);
 }
 
@@ -103,11 +101,11 @@ try {
   }
   run("iconutil", ["-c", "icns", "-o", path.join(resources, "AppIcon.icns"), iconset]);
 
-  // SEA 二进制进 Resources：CFBundleExecutable 不能是它本身。
-  // 双击 .app 如果直接跑 SEA，前台进程就是服务器，退出 App 会把会话全带走；
+  // 服务端二进制进 Resources：CFBundleExecutable 不能是它本身。
+  // 双击 .app 如果直接跑服务端，前台进程就是服务器，退出 App 会把会话全带走；
   // 也和 launchd KeepAlive 抢同一个端口。启动器只负责 install + 打开浏览器。
   const bundled = path.join(resources, "falcon");
-  fs.copyFileSync(seaBin, bundled);
+  fs.copyFileSync(serverBin, bundled);
   fs.chmodSync(bundled, 0o755);
 
   // 读已装服务原参数的 shell 片段：postinstall 与 launcher.sh 都从 App 里 source 它，
