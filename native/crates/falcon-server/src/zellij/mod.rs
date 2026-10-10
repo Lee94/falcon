@@ -1,4 +1,5 @@
-//! Zellij：命令构造（command）、宿主机差异（host）、版本锁定（version）。安装编排与执行在 S3。
+//! Zellij：命令构造（command）、宿主机差异（host）、安装编排（install）、版本锁定（version）。
 pub mod command;
 pub mod host;
+pub mod install;
 pub mod version;

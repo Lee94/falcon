@@ -142,6 +142,18 @@ pub fn host_layout(kind: HostKind, root: &str, target: ZellijTarget) -> HostLayo
     }
 }
 
+/// `{ ...base, ...extra }`：同名键原位替换值（保持在 base 里的位置），新键追加在末尾。
+/// 发到宿主机的命令串按 env 的顺序展开，这个顺序要与 JS 对象展开完全一致
+pub fn merge_env<K: Into<String>, V: Into<String>>(base: &mut Vec<(String, String)>, extra: impl IntoIterator<Item = (K, V)>) {
+    for (k, v) in extra {
+        let (k, v) = (k.into(), v.into());
+        match base.iter_mut().find(|(bk, _)| *bk == k) {
+            Some((_, bv)) => *bv = v,
+            None => base.push((k, v)),
+        }
+    }
+}
+
 // ---------------- 转义 ----------------
 
 /// POSIX sh 单引号转义：内部的单引号写成 '\''

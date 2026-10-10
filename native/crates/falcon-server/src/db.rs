@@ -451,17 +451,122 @@ impl Db {
     /// 落不到机器上的旧规则（项目没绑主机、也找不到连接三元组一样的已保存主机）无处
     /// 可挂，只能丢弃并打一行日志。
     ///
-    /// 依赖 sessions::relay_spec 的槽位口径，S1 合并后补上（在那之前遇到旧表就报错，
-    /// 宁可起不来也不悄悄丢规则）。
     fn migrate_relays_to_hosts(&self) -> anyhow::Result<()> {
-        let conn = self.lock();
-        let exists = |table: &str| -> rusqlite::Result<bool> {
-            conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table], |_| Ok(()))
+        use crate::sessions::relay_spec::{
+            ForwardSlotRow, HostConn, LegacyProjectConn, ShareSlotRow, excess_enabled, forward_slot,
+            legacy_forward_host, share_slot,
+        };
+        let mut conn = self.lock();
+        let exists = |c: &Connection, table: &str| -> rusqlite::Result<bool> {
+            c.query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", [table], |_| Ok(()))
                 .optional()
                 .map(|r| r.is_some())
         };
-        if exists("ssh_forwards")? || exists("public_shares")? {
-            anyhow::bail!("库里还有旧版中转表（ssh_forwards / public_shares），Rust 版的迁移尚未实现");
+        let has_forwards = exists(&conn, "ssh_forwards")?;
+        let has_shares = exists(&conn, "public_shares")?;
+        if !has_forwards && !has_shares {
+            return Ok(());
+        }
+
+        let hosts: Vec<HostConn> = conn
+            .prepare("SELECT id, host, port, username FROM ssh_hosts")?
+            .query_map([], |r| Ok(HostConn { id: r.get(0)?, host: r.get(1)?, port: r.get(2)?, username: r.get(3)? }))?
+            .collect::<Result<_, _>>()?;
+        let host_of = |c: &Connection, project_id: &str| -> rusqlite::Result<Option<String>> {
+            let conn_row = c
+                .query_row(
+                    "SELECT host_id, ssh_host, ssh_port, ssh_username FROM projects WHERE id = ?",
+                    [project_id],
+                    |r| {
+                        Ok(LegacyProjectConn {
+                            host_id: r.get(0)?,
+                            ssh_host: r.get(1)?,
+                            ssh_port: r.get(2)?,
+                            ssh_username: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(conn_row.and_then(|p| legacy_forward_host(&p, &hosts)))
+        };
+        let mut dropped: Vec<String> = Vec::new();
+
+        let tx = conn.transaction()?;
+        if has_forwards {
+            type Legacy = (String, String, Option<String>, String, String, i64, String, i64, i64, i64);
+            let rows: Vec<Legacy> = tx
+                .prepare(
+                    "SELECT id, project_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at FROM ssh_forwards",
+                )?
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+                })?
+                .collect::<Result<_, _>>()?;
+            for (id, project_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at) in rows {
+                let Some(host_id) = host_of(&tx, &project_id)? else {
+                    dropped.push(format!("转发 {kind} {bind_port}→{dest_port}"));
+                    continue;
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO host_forwards
+                       (id, host_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    params![id, host_id, name, kind, bind_host, bind_port, dest_host, dest_port, enabled, created_at],
+                )?;
+            }
+            tx.execute_batch("DROP TABLE ssh_forwards")?;
+        }
+        if has_shares {
+            type Legacy = (String, String, Option<String>, String, String, i64, i64, i64);
+            let rows: Vec<Legacy> = tx
+                .prepare("SELECT id, project_id, name, origin, dest_host, dest_port, enabled, created_at FROM public_shares")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
+                .collect::<Result<_, _>>()?;
+            for (id, project_id, name, origin, dest_host, dest_port, enabled, created_at) in rows {
+                // origin=local 本来就是后端本机，与项目是本地还是 SSH 无关
+                let host_id = if origin == "remote" { host_of(&tx, &project_id)? } else { None };
+                if origin == "remote" && host_id.is_none() {
+                    dropped.push(format!("公网发布 {dest_port}"));
+                    continue;
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO host_shares
+                       (id, host_id, name, dest_host, dest_port, enabled, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![id, host_id, name, dest_host, dest_port, enabled, created_at],
+                )?;
+            }
+            tx.execute_batch("DROP TABLE public_shares")?;
+        }
+        // 几个项目的规则并到一台机器上，可能撞出同端口的两条 enabled：留最早的那条
+        let forwards: Vec<ForwardSlotRow> = tx
+            .prepare("SELECT id, host_id, kind, bind_port, enabled, created_at FROM host_forwards")?
+            .query_map([], |r| {
+                Ok(ForwardSlotRow {
+                    id: r.get(0)?,
+                    host_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    bind_port: r.get(3)?,
+                    enabled: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        for id in excess_enabled(&forwards, forward_slot) {
+            tx.execute("UPDATE host_forwards SET enabled = 0 WHERE id = ?", [id])?;
+        }
+        let shares: Vec<ShareSlotRow> = tx
+            .prepare("SELECT id, host_id, dest_port, enabled, created_at FROM host_shares")?
+            .query_map([], |r| {
+                Ok(ShareSlotRow { id: r.get(0)?, host_id: r.get(1)?, dest_port: r.get(2)?, enabled: r.get(3)?, created_at: r.get(4)? })
+            })?
+            .collect::<Result<_, _>>()?;
+        for id in excess_enabled(&shares, share_slot) {
+            tx.execute("UPDATE host_shares SET enabled = 0 WHERE id = ?", [id])?;
+        }
+        tx.commit()?;
+        if !dropped.is_empty() {
+            log::warn!("中转迁移：{} 条旧规则找不到所属主机，已丢弃：{}", dropped.len(), dropped.join("，"));
         }
         Ok(())
     }
@@ -1367,5 +1472,81 @@ mod tests {
         assert_eq!(db_file(dir.path()), dir.path().join("mojito.db"));
         std::fs::write(dir.path().join("falcon.db"), b"").unwrap();
         assert_eq!(db_file(dir.path()), dir.path().join("falcon.db"));
+    }
+
+    /// 先让 Db 建好全套 schema，再用第二条原始连接补出旧版的两张表与数据，
+    /// 最后重新打开触发迁移——与老用户升级时的顺序一致。
+    fn legacy_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let seed = Db::open(dir.path()).unwrap();
+            seed.insert_host(&SshHostRow {
+                id: "h1".into(),
+                name: "linux".into(),
+                host: "10.0.0.1".into(),
+                port: 22,
+                username: "fay".into(),
+                auth_method: "agent".into(),
+                created_at: 1,
+                ..Default::default()
+            });
+            // p1 绑了主机；p2 没绑但连接三元组对得上；p3 哪台都对不上
+            let ssh = |id: &str, host_id: Option<&str>, user: &str| ProjectRow {
+                id: id.into(),
+                project_type: "ssh".into(),
+                host_id: host_id.map(Into::into),
+                ssh_host: Some("10.0.0.1".into()),
+                ssh_port: Some(22),
+                ssh_username: Some(user.into()),
+                ..project_row()
+            };
+            seed.insert_project(&ssh("p1", Some("h1"), "fay"));
+            seed.insert_project(&ssh("p2", None, "fay"));
+            seed.insert_project(&ssh("p3", None, "bob"));
+        }
+        let raw = Connection::open(dir.path().join("falcon.db")).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE ssh_forwards (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT, kind TEXT NOT NULL,
+               bind_host TEXT NOT NULL, bind_port INTEGER NOT NULL, dest_host TEXT NOT NULL, dest_port INTEGER NOT NULL,
+               enabled INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE public_shares (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT, origin TEXT NOT NULL,
+               dest_host TEXT NOT NULL, dest_port INTEGER NOT NULL, enabled INTEGER NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO ssh_forwards VALUES
+               ('f1', 'p1', 'db', 'local', '127.0.0.1', 5432, '127.0.0.1', 5432, 1, 10),
+               ('f2', 'p2', NULL, 'local', '127.0.0.1', 5432, '127.0.0.1', 15432, 1, 20),
+               ('f3', 'p3', NULL, 'local', '127.0.0.1', 9000, '127.0.0.1', 9000, 1, 30);
+             INSERT INTO public_shares VALUES
+               ('s1', 'p1', NULL, 'remote', '127.0.0.1', 3000, 1, 10),
+               ('s2', 'p3', NULL, 'local', '127.0.0.1', 6789, 1, 20),
+               ('s3', 'p3', NULL, 'remote', '127.0.0.1', 3000, 1, 30);",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn relays_move_onto_hosts_one_enabled_per_port() {
+        let dir = legacy_dir();
+        let db = Db::open(dir.path()).unwrap();
+        let f: Vec<_> = db.list_forwards().into_iter().map(|f| (f.id, f.host_id, f.enabled)).collect();
+        // 并到同一台机器后与 f1 抢本机 5432：留最早的 f1
+        assert_eq!(f, [("f1".to_string(), "h1".to_string(), 1), ("f2".to_string(), "h1".to_string(), 0)]);
+        let s: Vec<_> = db.list_shares().into_iter().map(|s| (s.id, s.host_id, s.enabled)).collect();
+        // origin=local 本来就是后端本机，与项目挂哪台主机无关
+        assert_eq!(s, [("s1".to_string(), Some("h1".to_string()), 1), ("s2".to_string(), None, 1)]);
+    }
+
+    #[test]
+    fn relays_migration_runs_once_and_is_harmless_fresh() {
+        let dir = legacy_dir();
+        drop(Db::open(dir.path()).unwrap());
+        let again = Db::open(dir.path()).unwrap();
+        assert_eq!(again.list_forwards().len(), 2);
+        let raw = Connection::open(dir.path().join("falcon.db")).unwrap();
+        let n: i64 = raw
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('ssh_forwards', 'public_shares')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(tmp_db().1.list_forwards().is_empty());
     }
 }

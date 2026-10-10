@@ -300,6 +300,11 @@ pub(crate) mod js {
     }
 
     /// 正则 `/\s/.test(s)`
+    /// `s.replace(/\s+$/, "")`
+    pub(crate) fn trim_end(s: &str) -> &str {
+        s.trim_end_matches(is_whitespace)
+    }
+
     pub(crate) fn has_whitespace(s: &str) -> bool {
         s.chars().any(is_whitespace)
     }

@@ -13,11 +13,8 @@
 //!
 //! 部署失败不挡开会话：返回 false，新会话退回老配置（没有滚动条）而已。
 //!
-//! 留到 S3 的函数（要读文件 / 环境变量 / 算 sha256 / 走执行器）：
-//! `resolveScrollPlugin`、`scrollPluginAsset`（及 `ScrollPluginAsset` 类型与进程级缓存）、
-//! `ensureRemoteScrollPlugin`（及 `RemoteExec` 接口）、`ensureLocalScrollPlugin`。
-//! S7 起插件随二进制 `include_bytes!`（rust-unification.md 决定四），`resolveScrollPlugin`
-//! 的两条查找路径届时要重新定。
+//! 插件本体随二进制 `include_bytes!`（rust-unification.md 决定四）：不再像 Node 版那样从
+//! `FALCON_ZELLIJ_PLUGIN` / 资产目录找文件——那个环境变量会从父实例漏进会话里，变成陈旧值。
 
 use crate::zellij::command::{HostOs, scroll_permissions_entry};
 use crate::zellij::host::quote_posix;
@@ -79,6 +76,86 @@ fn posix_dirname(p: &str) -> &str {
         None => p,
     };
     if dir.is_empty() { "/" } else { dir }
+}
+
+// ---------------- 部署 ----------------
+
+/// 插件本体与它的 sha256（宿主机上 `.sha256` 文件的内容，对得上就不再推）
+pub struct ScrollPluginAsset {
+    pub bytes: &'static [u8],
+    pub sha256: String,
+}
+
+static ASSET: std::sync::LazyLock<ScrollPluginAsset> = std::sync::LazyLock::new(|| {
+    let bytes: &'static [u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../packages/server/assets/falcon-scroll.wasm"));
+    use sha2::Digest as _;
+    ScrollPluginAsset { bytes, sha256: hex::encode(sha2::Sha256::digest(bytes)) }
+});
+
+pub fn scroll_plugin_asset() -> &'static ScrollPluginAsset {
+    &ASSET
+}
+
+/// 远端：内容不对就经 stdin 推一份，再预写授权。任何一步失败都返回 false
+pub async fn ensure_remote_scroll_plugin(
+    link: &crate::sessions::ssh::SshLink,
+    layout: &crate::zellij::host::HostLayout,
+    target: ZellijTarget,
+    home: &str,
+) -> bool {
+    use crate::exec::Exec as _;
+    let asset = scroll_plugin_asset();
+    let Some(host_os) = target_os(target) else { return false };
+    let attempt = async {
+        let digest = link.exec(&posix_plugin_digest_command(&layout.scroll_plugin_file), None).await?;
+        if digest.stdout.trim() != asset.sha256 {
+            let res = link
+                .exec_with_input(&posix_plugin_install_command(&layout.scroll_plugin_file, &asset.sha256), asset.bytes)
+                .await?;
+            if res.code != Some(0) {
+                return anyhow::Ok(false);
+            }
+        }
+        let perm_file = crate::zellij::command::scroll_permissions_file(layout, host_os, home);
+        let perm = link.exec(&posix_permissions_command(&perm_file, &layout.scroll_plugin_file), None).await?;
+        anyhow::Ok(perm.code == Some(0))
+    };
+    attempt.await.unwrap_or(false)
+}
+
+/// 本机：同上，直接读写文件
+pub fn ensure_local_scroll_plugin(layout: &crate::zellij::host::HostLayout, target: ZellijTarget, home: &str) -> bool {
+    let asset = scroll_plugin_asset();
+    let Some(host_os) = target_os(target) else { return false };
+    let attempt = || -> std::io::Result<()> {
+        let file = std::path::Path::new(&layout.scroll_plugin_file);
+        let sha_file = format!("{}.sha256", layout.scroll_plugin_file);
+        let current = std::fs::read_to_string(&sha_file).map(|s| s.trim().to_string()).unwrap_or_default();
+        if current != asset.sha256 || !file.exists() {
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let partial = format!("{}.partial", layout.scroll_plugin_file);
+            std::fs::write(&partial, asset.bytes)?;
+            std::fs::rename(&partial, file)?;
+            std::fs::write(&sha_file, &asset.sha256)?;
+        }
+        let perm_file = crate::zellij::command::scroll_permissions_file(layout, host_os, home);
+        let entry = crate::zellij::command::scroll_permissions_entry(&layout.scroll_plugin_file);
+        let key = entry.split('\n').next().unwrap_or(&entry);
+        let existing = std::fs::read_to_string(&perm_file).unwrap_or_default();
+        if !existing.contains(key) {
+            if let Some(dir) = std::path::Path::new(&perm_file).parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&perm_file)?;
+            write!(f, "\n{entry}")?;
+        }
+        Ok(())
+    };
+    attempt().is_ok()
 }
 
 #[cfg(test)]

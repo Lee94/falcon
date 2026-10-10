@@ -2448,6 +2448,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "hex",
+ "http",
  "indexmap",
  "log",
  "rand 0.10.3",
@@ -2464,6 +2465,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower-http 0.7.1",
+ "url",
 ]
 
 [[package]]
