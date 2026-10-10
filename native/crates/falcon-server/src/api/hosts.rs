@@ -7,8 +7,8 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use falcon_proto::SshHost;
-use serde_json::{Value, json};
+use falcon_proto::{HostKind as ProbeKind, SshHost, SshProbeResult};
+use serde_json::Value;
 
 use super::AppState;
 use super::auth_routes::LenientJson;
@@ -157,14 +157,14 @@ async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
 }
 
 /// 试连一台已保存主机。连不上是环境事实，200 + ok:false，不 4xx。
-async fn test_saved(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn test_saved(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<SshProbeResult>> {
     let host = state.db.get_host(&id).ok_or_else(|| ApiError::not_found("主机不存在"))?;
     probe_host(&state, host).await
 }
 
 /// 试连表单里这组还没保存（或正在改）的凭据。
 /// 编辑已有主机时带 hostId：secret / keyPath 留空则沿用已保存的。
-async fn test_draft(State(state): State<AppState>, body: LenientJson) -> ApiResult<Json<Value>> {
+async fn test_draft(State(state): State<AppState>, body: LenientJson) -> ApiResult<Json<SshProbeResult>> {
     let input = &body.0;
     let host_id = str_field(input, "hostId").filter(|s| !s.is_empty());
     let existing = host_id.and_then(|id| state.db.get_host(id));
@@ -172,7 +172,7 @@ async fn test_draft(State(state): State<AppState>, body: LenientJson) -> ApiResu
         return Err(ApiError::not_found("主机不存在"));
     }
     if let Some(err) = validate_ssh_fields(input) {
-        return Ok(Json(json!({ "ok": false, "error": err })));
+        return Ok(Json(SshProbeResult::Failed { error: err.into() }));
     }
     let method = str_field(input, "authMethod").unwrap_or_default().to_string();
     let row = SshHostRow {
@@ -198,7 +198,7 @@ async fn test_draft(State(state): State<AppState>, body: LenientJson) -> ApiResu
     probe_host(&state, row).await
 }
 
-async fn probe_host(state: &AppState, host: SshHostRow) -> ApiResult<Json<Value>> {
+async fn probe_host(state: &AppState, host: SshHostRow) -> ApiResult<Json<SshProbeResult>> {
     let res = state
         .engine
         .call(move |e| async move {
@@ -206,16 +206,18 @@ async fn probe_host(state: &AppState, host: SshHostRow) -> ApiResult<Json<Value>
         })
         .await?;
     Ok(Json(match res {
-        Ok((kind, home)) => {
-            json!({ "ok": true, "kind": if kind == HostKind::Windows { "windows" } else { "posix" }, "home": home })
-        }
-        Err(error) => json!({ "ok": false, "error": error }),
+        Ok((kind, home)) => SshProbeResult::Reachable {
+            kind: if kind == HostKind::Windows { ProbeKind::Windows } else { ProbeKind::Posix },
+            home,
+        },
+        Err(error) => SshProbeResult::Failed { error },
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn ssh_field_validation_matches_node() {
