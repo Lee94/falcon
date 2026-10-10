@@ -64,6 +64,8 @@ pub mod project;
 pub mod session;
 pub mod system;
 pub mod term_env;
+/// VT 模式跟踪：服务端拼回放前缀、客户端合成鼠标报文共用一个跟踪器（shared/termModes.ts）
+pub mod term_modes;
 pub mod worktree;
 pub mod ws;
 pub mod zellij;

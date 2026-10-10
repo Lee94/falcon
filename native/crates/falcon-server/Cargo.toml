@@ -1,0 +1,29 @@
+[package]
+name = "falcon-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "falcon 服务端的 Rust 实现（docs/design/rust-unification.md S 线），替换 packages/server"
+
+[lib]
+path = "src/lib.rs"
+
+# S7 切换时改名为 falcon（与现在 SEA 产物同名，service install 认它）
+[[bin]]
+name = "falcon-server"
+path = "src/main.rs"
+
+[dependencies]
+falcon-proto.workspace = true
+falcon-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+base64.workspace = true
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

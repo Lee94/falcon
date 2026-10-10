@@ -8,7 +8,6 @@ pub mod keyroute;
 pub mod keys;
 pub mod keystroke;
 pub mod links;
-pub mod modes;
 pub mod mouse;
 pub mod paste;
 pub mod wheel;
@@ -18,6 +17,8 @@ pub use crate::core::{
     SnapCursor, SnapSelection, Snapshot, TermCore, TermEvent, TermOptions, TermSize,
 };
 pub use keystroke::{Keystroke, Modifiers};
+// 模式跟踪在 falcon-proto 里：服务端拼回放前缀也要用它，不该为此把 alacritty 拖进服务端
+pub use falcon_proto::term_modes as modes;
 pub use modes::TermModeTracker;
 pub use mouse::{MouseAction, MouseButton, MouseMode, MouseReportEvent, MouseReporter};
 pub use wheel::{DeltaMode, WheelAccumulator};

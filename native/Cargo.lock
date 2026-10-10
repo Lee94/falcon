@@ -2122,11 +2122,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "falcon-server"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "falcon-core",
+ "falcon-proto",
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "falcon-term"
 version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "falcon-proto",
  "log",
  "parking_lot",
  "regex",
