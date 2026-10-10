@@ -101,6 +101,7 @@ pub fn app(state: AppState) -> Router {
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)));
     router = match web_dist {
         Some(dir) => router.fallback_service(static_files::service(dir)),
+        None if static_files::embedded::available() => router.fallback(static_files::embedded_service),
         None => {
             log::warn!("web 静态资源目录不存在，未托管 UI（FALCON_WEB_DIST 指了不存在的目录？）");
             router.fallback(static_files::not_found)

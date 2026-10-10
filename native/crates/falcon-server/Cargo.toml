@@ -43,6 +43,7 @@ indexmap = "2"
 getrandom = "0.4"
 http = "1"
 portable-pty = "0.9.0"
+rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -50,3 +51,8 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.190"
+
+[features]
+# 把前端产物编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_WEB_DIR 指向产物目录（绝对路径），
+# 运行时 FALCON_WEB_DIST 仍可覆盖
+embed-web = ["dep:rust-embed"]

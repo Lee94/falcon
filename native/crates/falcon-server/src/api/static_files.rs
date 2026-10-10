@@ -1,5 +1,9 @@
-//! 前端产物托管：浏览器版（native/web 的宿主页 + wasm + 字体 + 图标，`native/scripts/build-web.sh`
-//! 的产物）。S7 改成编进二进制（rust-embed），在那之前从目录读。
+//! 前端产物托管。切换（S7）时托管的还是 React 版（packages/web/dist），C 线收尾后换成浏览器版
+//! （native/web 的宿主页 + wasm + 字体 + 图标，`native/scripts/build-web.sh` 的产物）——
+//! 托管层不关心是哪一个，只认目录里有 index.html。
+//!
+//! 来源的优先级：`FALCON_WEB_DIST`（要真有 index.html）> 编进二进制的那份（`embed-web`
+//! feature，构建时 `FALCON_EMBED_WEB_DIR` 指定）> 开发构建的默认产物目录。
 //!
 //! 规则同 Node 版 index.ts：文件在就给文件；不在时，GET 且不是 `/api/`、`/ws/` 的一律回
 //! index.html（前端自己处理路径），其余 404 `{ error: "Not Found" }`。
@@ -18,10 +22,86 @@ use tower_http::services::ServeDir;
 /// 目录里没有 index.html 就当不存在——环境变量多半是从 falcon 终端里继承来的陈旧值
 pub fn web_dist() -> Option<PathBuf> {
     let from_env = std::env::var_os("FALCON_WEB_DIST").or_else(|| std::env::var_os("MOJITO_WEB_DIST"));
-    let dir = from_env
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target-wasm/dist"));
-    dir.join("index.html").is_file().then_some(dir)
+    if let Some(dir) = from_env.map(PathBuf::from) {
+        if dir.join("index.html").is_file() {
+            return Some(dir);
+        }
+        log::warn!("FALCON_WEB_DIST 指向的目录里没有 index.html，忽略：{}", dir.display());
+    }
+    if embedded::available() {
+        return None;
+    }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target-wasm/dist");
+    dev.join("index.html").is_file().then_some(dev)
+}
+
+/// 编进二进制的前端产物
+pub mod embedded {
+    #[cfg(feature = "embed-web")]
+    #[derive(rust_embed::Embed)]
+    #[folder = "$FALCON_EMBED_WEB_DIR"]
+    struct Assets;
+
+    pub fn available() -> bool {
+        #[cfg(feature = "embed-web")]
+        return Assets::get("index.html").is_some();
+        #[cfg(not(feature = "embed-web"))]
+        false
+    }
+
+    /// 按路径取一个文件：(字节, Content-Type, ETag)
+    #[cfg(feature = "embed-web")]
+    pub fn get(path: &str) -> Option<(std::borrow::Cow<'static, [u8]>, String, String)> {
+        let file = Assets::get(path)?;
+        let etag = format!("\"{}\"", hex::encode(file.metadata.sha256_hash()));
+        Some((file.data, file.metadata.mimetype().to_string(), etag))
+    }
+
+    #[cfg(not(feature = "embed-web"))]
+    pub fn get(_path: &str) -> Option<(std::borrow::Cow<'static, [u8]>, String, String)> {
+        None
+    }
+}
+
+/// 从二进制里取文件的服务（[`embedded::available`] 为真时用）
+pub async fn embedded_service(req: Request) -> Response {
+    let method = req.method().clone();
+    if method != Method::GET && method != Method::HEAD {
+        return not_found().await;
+    }
+    let path = req.uri().path().trim_start_matches('/');
+    let path = if path.is_empty() || path.ends_with('/') { format!("{path}index.html") } else { path.to_string() };
+    let hit = embedded::get(&path);
+    let is_index = hit.is_none() || path == "index.html" || path.ends_with("/index.html");
+    let found = match hit {
+        Some(f) => Some(f),
+        None => {
+            let p = req.uri().path();
+            if p.starts_with("/api/") || p.starts_with("/ws/") {
+                return not_found().await;
+            }
+            embedded::get("index.html")
+        }
+    };
+    let Some((bytes, mime, etag)) = found else { return not_found().await };
+    let fresh = req
+        .headers()
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+    let cache = if is_index { "no-cache" } else { "public, max-age=0" };
+    let headers = [
+        (CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream"))),
+        (CACHE_CONTROL, HeaderValue::from_static(cache)),
+        (axum::http::header::ETAG, HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("\"\""))),
+    ];
+    if fresh {
+        return (StatusCode::NOT_MODIFIED, headers).into_response();
+    }
+    if method == Method::HEAD {
+        return (headers, ()).into_response();
+    }
+    (headers, bytes.into_owned()).into_response()
 }
 
 pub fn service(dir: PathBuf) -> ServeDir<axum::routing::MethodRouter> {
