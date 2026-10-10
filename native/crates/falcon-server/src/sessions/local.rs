@@ -9,12 +9,12 @@ use std::cell::RefCell;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use falcon_proto::{NonDurableReason, ZellijInstallFailure};
 use futures::FutureExt as _;
-use futures::future::Shared;
+use futures::future::{BoxFuture, Shared};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
@@ -158,7 +158,8 @@ impl LocalHost {
         let fut = match pending {
             Some(f) => f,
             None => {
-                let f: LocalBoxFuture<'static, _> = Box::pin(async { Rc::new(resolve_base_env().await) });
+                // 底下是进程级的那一份（local_base_env）：meegle / px0 也用它，login shell 只跑一次
+                let f: LocalBoxFuture<'static, _> = Box::pin(async { Rc::new(local_base_env().await.as_ref().clone()) });
                 let shared = f.shared();
                 *self.base_env.borrow_mut() = Some(shared.clone());
                 shared
@@ -174,6 +175,25 @@ fn process_env() -> Vec<(String, String)> {
     std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect()
+}
+
+/// 在后端本机起进程时用的基底环境，可注入。TS 里是模块级的 `resolveLocalBaseEnv()`，PTY、
+/// cloudflared、meegle、px0 共用同一个缓存的 Promise；Rust 版做成函数值，生产上给
+/// [`local_base_env_fn`]，测试给一份固定环境，不去跑用户的 login shell。
+///
+/// 是 `Send + Sync` 的：meegle 客户端挂在 axum 的多线程状态里。
+pub type BaseEnvFn = Arc<dyn Fn() -> BoxFuture<'static, Arc<Vec<(String, String)>>> + Send + Sync>;
+
+/// 进程级缓存的本地基底环境（TS 的 `resolveLocalBaseEnv()`）：login shell 整个进程只跑一次，
+/// 任何线程都能等。[`LocalHost::base_env`] 也落到这一份上
+pub async fn local_base_env() -> Arc<Vec<(String, String)>> {
+    static CELL: tokio::sync::OnceCell<Arc<Vec<(String, String)>>> = tokio::sync::OnceCell::const_new();
+    CELL.get_or_init(|| async { Arc::new(resolve_base_env().await) }).await.clone()
+}
+
+/// [`local_base_env`] 包成 [`BaseEnvFn`]
+pub fn local_base_env_fn() -> BaseEnvFn {
+    Arc::new(|| Box::pin(local_base_env()))
 }
 
 async fn resolve_base_env() -> Vec<(String, String)> {

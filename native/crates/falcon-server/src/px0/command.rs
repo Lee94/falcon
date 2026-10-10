@@ -31,11 +31,9 @@
 //! - 正则里 JS 的 `\s` / `\d` 写成显式字符类（Rust 的是 Unicode 语义），见文件末的 `js`。
 //! - `-base-path` 的值由 [`falcon_core::px0::px0_base_path`] 给（S6 的 manager 调）。
 //!
-//! 留到 S6 的函数（下载、实例与路由）：`bin.ts` 的 `Px0BinError`、`assetPath`、
-//! `px0AssetPresent`、`ensurePx0Asset`、`ensureLocalPx0`、`ensureNow`、`ensureExecutable`、
-//! `sha256File`、`download`；`manager.ts` 的 `Px0Manager`（open / 启动 / 空闲回收 /
-//! 收尸等全部方法）、`Px0Instance`、`checkCancelled`、`waitForPort`、`connectLocal`、
-//! `connectRemote`、`killPty`、`closeChannel`；`routes.ts` 的 `registerPx0Routes`、`forward`。
+//! 不在纯函数层的：`bin.ts`（下载与校验）→ [`super::bin`]，`manager.ts`（实例、空闲回收、
+//! pty 收尸）→ [`super::manager`]；`routes.ts` 的 `registerPx0Routes`、`forward` 随 api 层的
+//! 路由一起移植。`js::trim` 开到 crate 内，manager 处理工作目录 / shell 时用。
 
 use std::sync::LazyLock;
 
@@ -290,7 +288,7 @@ mod node {
 
 /// 照抄 TS 语义要用到的几处 JavaScript 行为（与 meegle/command.rs 的 `js` 同源；
 /// falcon-server 还没有公共的落脚点，先各带一份）。
-mod js {
+pub(crate) mod js {
     /// ECMAScript 的 WhiteSpace + LineTerminator：`trim()` 与正则 `\s` 用的就是这一套
     pub(super) fn is_ws(c: char) -> bool {
         matches!(
@@ -309,7 +307,7 @@ mod js {
         )
     }
 
-    pub(super) fn trim(s: &str) -> &str {
+    pub(crate) fn trim(s: &str) -> &str {
         s.trim_matches(is_ws)
     }
 

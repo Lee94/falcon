@@ -1,0 +1,115 @@
+//! 移植自 `packages/server/src/meegle/bin.ts`（含 `command.test.ts` 里测它的那条用例）。
+//!
+//! meegle 可执行文件的定位。
+//!
+//! CLI 随服务内置：`@lark-project/meegle` 是 server 的锁定版本依赖，npm 包里带着六个
+//! 平台的静态二进制（bin/meegle-<platform>-<arch>[.exe]），我们直接 spawn 本平台那一个，
+//! 不经它的 meegle.js 包装——省一个 node 进程，也躲开包装脚本里的更新提示逻辑。
+//!
+//! 解析顺序：
+//! 1. FALCON_MEEGLE_BIN —— 显式指定。单文件发布时 SEA bootstrap 把二进制释放到
+//!    runtime 目录后也用它指入（scripts/build-binary.mjs），因为 bundle 里没有
+//!    node_modules 可供解析；
+//! 2. 依赖包里本平台的二进制 —— pnpm 安装的开发 / dist 运行方式；
+//! 3. PATH 上的 `meegle` —— 用户自己 npm -g 装的，兜底。
+//!
+//! # 与 TS 的差别
+//!
+//! 第 2 步 Node 用 `require.resolve` 从 server 包出发找依赖。Rust 二进制没有模块解析，
+//! 这里退成**编译期的仓库位置**：`<本 crate>/../../../packages/server/node_modules/@lark-project/meegle`
+//! （`CARGO_MANIFEST_DIR` 推出来的，pnpm 装过依赖的源码树里就在那儿；worktree 里没装就落到
+//! 第 3 步）。只在从源码树跑的开发构建上有用；发布产物的内置方式在 S7 定（设计文档决定四：
+//! vendor 脚本抽出二进制、`include_bytes!`、运行时释放到 `<dataDir>/runtime/<hash>/bin/`，
+//! 再走第 1 步），届时这一步换掉。
+//!
+//! 第 3 步不在这里查 PATH：返回裸名 `meegle`，由 spawn 时按**子进程环境**（登录环境）里的
+//! PATH 找——与 Node 的 spawn 同一口径（Rust 的 `Command` 在显式给了 PATH 时也按新 PATH 找）。
+
+use std::path::{Path, PathBuf};
+
+/// 显式指定 meegle 可执行文件的环境变量
+pub const MEEGLE_BIN_ENV: &str = "FALCON_MEEGLE_BIN";
+
+/// 与 @lark-project/meegle 的 bin/ 目录命名一致。`platform` / `arch` 是 Node 的叫法
+/// （`darwin` / `linux` / `win32`，`arm64` / `x64`），缺省为本进程
+pub fn bundled_bin_name(platform: Option<&str>, arch: Option<&str>) -> String {
+    let platform = platform.unwrap_or(node_platform());
+    let arch = arch.unwrap_or(node_arch());
+    format!("meegle-{platform}-{arch}{}", if platform == "win32" { ".exe" } else { "" })
+}
+
+/// 依赖包可能在的位置（见文件头"与 TS 的差别"）。目录不存在也照列，由调用方判断
+pub fn bundled_package_dirs() -> Vec<PathBuf> {
+    vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/server/node_modules/@lark-project/meegle")]
+}
+
+/// `env` 读环境变量（生产上是 `|k| std::env::var(k).ok()`）
+pub fn resolve_meegle_bin(env: impl Fn(&str) -> Option<String>) -> String {
+    resolve_with(env(MEEGLE_BIN_ENV), &bundled_package_dirs())
+}
+
+fn resolve_with(explicit: Option<String>, package_dirs: &[PathBuf]) -> String {
+    // if (env.FALCON_MEEGLE_BIN)：空串不算
+    if let Some(bin) = explicit.filter(|b| !b.is_empty()) {
+        return bin;
+    }
+    let name = bundled_bin_name(None, None);
+    for dir in package_dirs {
+        // require.resolve 给的是 realpath（pnpm 的依赖是指进 .pnpm 仓库的符号链接）；
+        // 解不开（依赖没装）就落到 PATH
+        let Ok(pkg) = dir.canonicalize() else { continue };
+        let bin = pkg.join("bin").join(&name);
+        if bin.exists() {
+            return bin.to_string_lossy().into_owned();
+        }
+    }
+    "meegle".into()
+}
+
+/// Node 的 `process.platform`
+fn node_platform() -> &'static str {
+    crate::sessions::login_env::node_platform()
+}
+
+/// Node 的 `process.arch`
+fn node_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// bundledBinName 与 npm 包的 bin/ 命名一致
+    #[test]
+    fn bundled_bin_name_matches_npm_package_layout() {
+        assert_eq!(bundled_bin_name(Some("darwin"), Some("arm64")), "meegle-darwin-arm64");
+        assert_eq!(bundled_bin_name(Some("win32"), Some("x64")), "meegle-win32-x64.exe");
+        // 显式指定优先于一切
+        let env = |k: &str| (k == MEEGLE_BIN_ENV).then(|| "/x/meegle".to_string());
+        assert_eq!(resolve_meegle_bin(env), "/x/meegle");
+    }
+
+    /// 依赖装着：解析到包里本平台的二进制（TS 断言的是真装着的依赖；这里在临时目录里
+    /// 摆一个同样布局的包，不依赖 worktree 里有没有 node_modules）
+    #[test]
+    fn resolves_the_bundled_binary_then_falls_back_to_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("node_modules/@lark-project/meegle");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        let missing = dir.path().join("nope");
+        // 包在、二进制不在：落到 PATH
+        assert_eq!(resolve_with(None, &[missing.clone(), pkg.clone()]), "meegle");
+        std::fs::write(pkg.join("bin").join(bundled_bin_name(None, None)), b"").unwrap();
+        let got = resolve_with(None, &[missing, pkg]);
+        assert!(got.contains("@lark-project/meegle/bin/meegle-"), "{got}");
+        // 空串的 FALCON_MEEGLE_BIN 不算显式指定
+        assert_eq!(resolve_with(Some(String::new()), &[]), "meegle");
+        assert_eq!(resolve_with(Some("/y/meegle".into()), &[]), "/y/meegle");
+    }
+}

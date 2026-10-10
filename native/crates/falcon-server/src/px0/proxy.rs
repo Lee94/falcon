@@ -27,7 +27,8 @@
 //! - Origin 的 host 用 `url` crate 取，与 `new URL(origin).host` 同一套 WHATWG 解析
 //!   （默认端口省略、主机名转小写、IPv6 带方括号）。
 //!
-//! 留到 S6 的函数：`routes.ts` 的 `registerPx0Routes`、`forward`（真正的反代与 SSE 透传）。
+//! 不在这里的：`routes.ts` 的 `registerPx0Routes`、`forward`（真正的反代与 SSE 透传）随 api 层
+//! 的路由一起移植；上游连接从 [`super::manager::Px0Manager::connect`] 拿。
 
 use std::collections::HashSet;
 use std::sync::LazyLock;

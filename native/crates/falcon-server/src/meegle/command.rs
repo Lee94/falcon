@@ -42,17 +42,12 @@
 //!   serde_json 的 Map 在本 workspace 里随 feature 合并可能是插入序也可能是字典序
 //!   （GPUI 会打开 preserve_order），所以 [`normalize_mql_rows`] 自己排。
 //!
-//! 留到 S6 的函数（起进程 / 缓存 / 路由，不在纯函数层）：
-//! - `client.ts`：`MeegleClient` 全部方法（env / exec / call / probeStatus / status /
-//!   loadStatus / cliVersion / me / startLogin / spawnLogin / cancelLogin / clearCache /
-//!   spaces / types / fields / resolveRows / queryHundred / spaceBySimpleName / resolveUrl /
-//!   simpleNameOf / hostOrProbe / enabledTypes / search / searchUncached / searchViews /
-//!   searchItems / recent / rowToItem / viewItems / multiViewItems / workItem / todo /
-//!   enrich）、`MeegleError`、`mapLimit`；
-//! - `bin.ts`：`bundledBinName`、`resolveMeegleBin`（`command.test.ts` 里测它们的那条
-//!   "bundledBinName 与 npm 包的 bin/ 命名一致" 随之留到 S6；S7 内嵌 meegle 后解析方式会变）；
-//! - `routes.ts`：`registerMeegleRoutes`、`queryOpts`、`pinLabel`、`optionalText`、
-//!   `parsePinInput`、`pageOf`。
+//! 不在纯函数层的（起进程 / 缓存 / 路由）：
+//! - `client.ts` → [`super::client`]（`MeegleClient` 全部方法、`MeegleError`、`mapLimit`）；
+//! - `bin.ts` → [`super::bin`]（`command.test.ts` 里测它的那条 "bundledBinName 与 npm 包的
+//!   bin/ 命名一致" 也在那边；S7 内嵌 meegle 后解析方式会变）；
+//! - `routes.ts`：`registerMeegleRoutes`、`queryOpts`（→ `MeegleQueryOpts::from_fresh_param`）、
+//!   `pinLabel`、`optionalText`、`parsePinInput`、`pageOf` 随 api 层的路由一起移植。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -1247,7 +1242,8 @@ pub fn normalize_detail(data: &Value, host: Option<&str>) -> Option<MeegleWorkIt
 
 /// 照抄 TS 语义要用到的 JavaScript 行为。falcon-core 有一份同类的 `js` 模块，但那是它的
 /// 私有模块；falcon-server 还没有公共的落脚点（lib.rs 不归本轮改），先各自带一份。
-mod js {
+/// `trim` 开到 crate 内：client.rs 的关键字也照 JS 的 `trim()` 处理。
+pub(crate) mod js {
     use serde_json::Value;
 
     /// ECMAScript 的 WhiteSpace + LineTerminator：`trim()` 与正则 `\s` 用的就是这一套
@@ -1270,7 +1266,7 @@ mod js {
     }
 
     /// `String.prototype.trim`
-    pub(super) fn trim(s: &str) -> &str {
+    pub(crate) fn trim(s: &str) -> &str {
         s.trim_matches(is_ws)
     }
 
