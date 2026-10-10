@@ -22,6 +22,7 @@ pub mod paste;
 pub mod px0;
 pub mod ringbuffer;
 pub mod service;
+pub mod service_cli;
 pub mod sessions;
 pub mod shells;
 pub mod term_env;

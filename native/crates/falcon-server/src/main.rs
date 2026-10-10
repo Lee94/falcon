@@ -17,6 +17,10 @@ use falcon_server::zellij::version::ZELLIJ_VERSION;
 fn main() -> anyhow::Result<()> {
     init_logging();
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
+    if argv.first().map(String::as_str) == Some("service") {
+        std::process::exit(falcon_server::service_cli::run_service_cli(&argv[1..]));
+    }
     let config = parse_args(&argv, |k| std::env::var(k).ok())?;
     let loopback = is_loopback(&config.host);
 

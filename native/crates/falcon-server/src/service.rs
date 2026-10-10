@@ -12,11 +12,7 @@
 //! 渲染出的 plist / unit 与 TS 逐字节一致（测试里的期望值是从 service.ts 的模板原文代入
 //! 同样的参数实跑出来的）。
 //!
-//! 留到 S7 的（执行 / 进程 / 读本机环境）：`runServiceCli`（分发与 process.exit，判定规则见
-//! [`parse_service_cli`]）、`launchd` / `systemd`（写配置、调 launchctl / systemctl、打印结果）、
-//! `relaunchJob`（bootout 后轮询 print、bootstrap 重试）、`run`、`sleepMs`、`fail`、
-//! `warnIfNonLoopback`（依赖 config.ts 的 parseArgs / isLoopback）、`programArguments` /
-//! `installProgramArguments`（读 isSea / execPath / argv，SEA 时先装二进制）。
+//! 执行部分（写配置、调 launchctl / systemctl、打印结果）在 service_cli.rs。
 
 use std::fs;
 use std::io;
