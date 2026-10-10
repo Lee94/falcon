@@ -22,7 +22,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::askpass::hub::AskpassHub;
 use crate::crypto::SecretBox;
-use crate::db::Db;
+use crate::db::{Db, ProjectRow};
+use crate::git::error::WorktreeError;
+use crate::git::host::{GitHost, git_host_for};
+use crate::git::remove::cleanup_worktree;
 use crate::sessions::manager::SessionManager;
 
 /// 投进引擎的一件事。在引擎线程上**同步**执行；要 await 的自己 spawn_local
@@ -114,4 +117,19 @@ impl Engine {
         let sessions = SessionManager::new(deps.db.clone(), deps.secrets.clone(), deps.data_dir.clone(), deps.askpass.clone());
         Rc::new(Engine { db: deps.db, secrets: deps.secrets, data_dir: deps.data_dir, askpass: deps.askpass, sessions })
     }
+
+    /// 项目宿主机上的 git 执行环境。SSH 侧复用项目链路（按 projectId 缓存），不另开连接
+    pub async fn git_host(&self, row: &ProjectRow) -> Result<GitHost, WorktreeError> {
+        git_host_for(row, || self.sessions.get_link(row)).await
+    }
+
+    /// 清理附属项目的 worktree 目录（git/remove.rs 是唯一入口）。执行环境都拿不到时报错，
+    /// 调用方把它写进 warning
+    pub async fn cleanup_worktree(&self, row: &ProjectRow, other_dirs: &[String]) -> Result<Vec<String>, WorktreeError> {
+        let host = self.git_host(row).await?;
+        Ok(cleanup_worktree(row, &host, other_dirs).await)
+    }
+
+    /// 停掉项目的 px0 实例（S6 接上 px0 之前什么也不做）
+    pub async fn stop_px0(&self, _project_id: &str) {}
 }
