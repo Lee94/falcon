@@ -132,6 +132,8 @@ fn protected_router() -> Router<AppState> {
         .merge(git_routes::router())
         .merge(worktrees::router())
         .merge(meegle::router())
+        // 没有对应路由的 /api/*：同 Node 版的 onRequest 钩子，没登录先 401，登录了才 404
+        .route("/api/{*rest}", axum::routing::any(static_files::not_found))
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
