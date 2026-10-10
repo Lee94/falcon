@@ -4,3 +4,4 @@
 /assets/fonts/
 # 调试截图（FALCON_SNAPSHOT）
 /snapshots/
+/.cache

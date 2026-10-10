@@ -1,7 +1,7 @@
-; Falcon 原生客户端的 Windows 安装包（Inno Setup 6）。由 scripts/build-windows-installer.mjs
+; Falcon 原生客户端的 Windows 安装包（Inno Setup 6）。由 cargo xtask win（native/xtask/src/win.rs）
 ; 传入下面这几个 /D 定义后编译，不要直接拿 ISCC 跑。
 ;
-; 只装原生客户端：Windows 上没有本机服务（SEA 不支持 Windows 目标，见 README），装好后
+; 只装原生客户端：Windows 上没有本机服务（服务本身依赖 Zellij 与 POSIX shell，见 README），装好后
 ; 在客户端里连别处的 falcon 服务端。所以这里也没有 macOS pkg 那种 postinstall 注册服务。
 ;
 ; 默认按当前用户装（不要管理员，装到 %LOCALAPPDATA%\Programs\Falcon），向导里可以改成

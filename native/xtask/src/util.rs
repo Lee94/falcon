@@ -6,9 +6,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-/// 仓库根（native/ 的上一层）
+/// 仓库根（native/ 的上一层）。不用 canonicalize：Windows 上它给的是 `\\?\C:\…` 形式的
+/// 路径，ISCC 之类的老工具不认
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("仓库根")
+    let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
+    xtask.parent().and_then(Path::parent).expect("仓库根").to_path_buf()
 }
 
 /// native/ 工作区

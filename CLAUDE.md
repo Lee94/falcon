@@ -4,18 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 命令
 
-整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端 `falcon-app`（原生桌面 + 浏览器 wasm 两种产物）都在里面。仓库根的 pnpm 只装打包脚本要用的两样东西（内嵌进服务端的 meegle CLI、字体子集化）。
+整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端 `falcon-app`（原生桌面 + 浏览器 wasm 两种产物）都在里面。构建 / 打包 / 资源生成任务在 `native/xtask`（`cargo xtask`，别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），仓库里没有 Node / JS 依赖。
 
 ```bash
-pnpm install
-pnpm dev:server     # cargo run -p falcon-server（4923，默认数据目录 ~/.falcon——那是日常在用的实例，开发另起要带 --port / --data-dir）
-pnpm build:web      # 浏览器版客户端（GPUI → wasm），产物 native/target-wasm/dist；开发构建的服务端缺省就托管它
-pnpm build:bin      # 服务端发布单文件（先 build:web，再把浏览器版与 meegle CLI 编进去），产物 release/falcon-v<版本>-<平台>
-pnpm build:native   # 原生客户端 release 构建
-pnpm build:pkg      # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
-pnpm build:win      # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
-pnpm build:zellij-plugin  # 重编滚动位置插件（ADR 0019），产物提交在 native/crates/falcon-server/assets/；只在改插件或升 zellij 时跑
+cd native
+cargo xtask --help          # 全部任务
+cargo run -p falcon-server  # 开发服务端（4923，默认数据目录 ~/.falcon——那是日常在用的实例，开发另起要带 --port / --data-dir）
+cargo xtask meegle          # 开发构建要用飞书项目面板时先取一次锁定版本的 meegle CLI（落在 native/.cache/meegle/，服务端自己找得到）
+cargo xtask web             # 浏览器版客户端（GPUI → wasm），产物 native/target-wasm/dist；开发构建的服务端缺省就托管它
+cargo xtask server          # 服务端发布单文件（先 web，再把浏览器版与 meegle CLI 编进去），产物 release/falcon-v<版本>-<平台>
+cargo build --release -p falcon-app   # 原生客户端 release 构建
+cargo xtask pkg             # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
+cargo xtask win             # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
+cargo xtask zellij-plugin   # 重编滚动位置插件（ADR 0019），产物提交在 native/crates/falcon-server/assets/；只在改插件或升 zellij 时跑
 ```
+
+xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、curl（meegle tarball 与 Zellij release 查询）、`native/scripts/build-web.sh`（bash，要 rustup 的 wasm32 target 与同版本 wasm-bindgen-cli）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
 
 ### 门禁：零警告编译 + 单元测试
 
@@ -57,7 +61,7 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - `sessions/agent.rs` 是 agent 会话（开场直接跑 claude / codex / grok，ADR 0013）：纯函数产启动脚本与写入命令，脚本落在宿主机 `<falcon 根>/agents/`，Zellij 的 `--default-shell` 指向它；CLI 退出后 `exec` 回登录 shell，会话不跟着结束。脚本里的登录 shell 是**生成时写死的绝对路径**，绝不读 `$SHELL`（Windows 远端那条路径上 `SHELL` 就是脚本自己，会递归）。
 - `cloudflared/` 是公网发布（ADR 0014）：`command.rs` 纯函数产 argv 与解析 Quick Tunnel URL / `/quicktunnel` JSON（**只在 falcon 后端本机 spawn `cloudflared`，不往远端装**）；`bin.rs` 按需把锁定版本下到 `<dataDir>/bin/cloudflared`（`FALCON_CLOUDFLARED_BIN` 优先，PATH 兜底）；`sessions/share.rs` 管进程生命周期，远端目标先在本机 `listen(0)` 再 `forward_out`。规则在 `host_shares` 表，公网 URL 是运行时事实不入库。v1 只做 Quick Tunnel + HTTP。
 - 中转（端口转发 `sessions/forward.rs` + 公网发布 `sessions/share.rs`，两者共用的监听 / 桥接在 `sessions/relay.rs`，ADR 0016）**按机器挂，不挂项目**：转发挂 SSH Host（`host_forwards`），发布挂本机或 SSH Host（`host_shares.host_id` 为 null = 本机）。隧道走主机链路 `SessionManager::get_host_link`（与「浏览远端目录」共用），断线由 `schedule_host_reconnect` 重连，**不走项目链路**。同端口可存多条、同时只一条生效：启用时先同步落库把同槽位的其它规则置 disabled，再异步停旧起新；槽位口径（本地转发跨主机比端口、远端转发与发布在同一台机器内比）在纯函数 `sessions/relay_spec.rs`，web 的「同端口」徽标照同一口径算。
-- `meegle/` 是右侧「飞书项目」面板的后端（ADR 0010）：`command.rs` 纯函数产 argv 与归一化 CLI 输出（**只在 falcon 后端本机 spawn `meegle`，不经 shell、不跟项目走**），`client.rs` 起进程 / TTL 缓存（待办 / 搜索 / 详情默认 5 分钟，`?fresh=1` 与 `POST /api/meegle/cache/clear` 打穿）/ 按类型扇出 / device-code 登录进程（它是 `Send + Sync` 的，挂在 AppState 上，不进引擎），`api/meegle.rs` 挂 `/api/meegle/*`（含粘贴链接解析 `resolve-url`——走 CLI 的 `url decode`，别自己拆路径——与固定列表 CRUD，固定项存 `db.rs` 的 `meegle_pins` 表），`bin.rs` 定位可执行文件：`FALCON_MEEGLE_BIN`（文件得真在）> 编进发布二进制的那份（`embed-meegle`，首次用时释放到 `<dataDir>/bin/meegle-<哈希>`）> 仓库根 `node_modules` 里 `@lark-project/meegle` 锁定版本的本平台二进制（开发构建）> PATH。CLI 的脾气（错误信封在 stderr、未登录时一切命令都是 unknown command、视图只能按关键字搜、待办没名字要 MQL 补、view search 限 5 qps）全写在 `command.rs` 顶部注释，改动前先读。
+- `meegle/` 是右侧「飞书项目」面板的后端（ADR 0010）：`command.rs` 纯函数产 argv 与归一化 CLI 输出（**只在 falcon 后端本机 spawn `meegle`，不经 shell、不跟项目走**），`client.rs` 起进程 / TTL 缓存（待办 / 搜索 / 详情默认 5 分钟，`?fresh=1` 与 `POST /api/meegle/cache/clear` 打穿）/ 按类型扇出 / device-code 登录进程（它是 `Send + Sync` 的，挂在 AppState 上，不进引擎），`api/meegle.rs` 挂 `/api/meegle/*`（含粘贴链接解析 `resolve-url`——走 CLI 的 `url decode`，别自己拆路径——与固定列表 CRUD，固定项存 `db.rs` 的 `meegle_pins` 表），`bin.rs` 定位可执行文件：`FALCON_MEEGLE_BIN`（文件得真在）> 编进发布二进制的那份（`embed-meegle`，首次用时释放到 `<dataDir>/bin/meegle-<哈希>`）> `native/.cache/meegle/bin/` 里 `cargo xtask meegle` 取下的锁定版本（开发构建；版本与 sha512 锁在 `xtask/src/meegle.rs`）> PATH。CLI 的脾气（错误信封在 stderr、未登录时一切命令都是 unknown command、视图只能按关键字搜、待办没名字要 MQL 补、view search 限 5 qps）全写在 `command.rs` 顶部注释，改动前先读。
 - `px0/` 是「用 px0 审阅」（ADR 0017）：在项目宿主机上按需拉起 px0，经 falcon **同源**反代到 `/px0/<项目 id>/`（`api/px0.rs`，hyper 逐请求开连接、流式转发；鉴权就是登录 cookie，与 `/api/` 同一口径）。`command.rs` 纯函数（资产映射、**钉死的 sha256**、argv、端口解析、远端安装 / 启动命令），`bin.rs` 在后端本机下载校验、SSH 项目再经 stdin 推到远端（不让远端自己下），`manager.rs` 管实例——**本地与远端都挂在 pty 上**，后端死了 px0 跟着挂断，别改回普通 spawn / 无 pty 的 exec；远端连接直接走 forward_out，本机不另开监听端口；反代的租约随响应体释放，空闲回收据此计数。`proxy.rs` 的头过滤有讲究：剥 falcon 的 cookie、只替同源请求改写 Origin（px0 的 localPost 要 Origin == Host）、去 set-cookie。同源意味着 px0 的前端能调 falcon 全部接口——**只在本机 / 内网可接受，公网访问前先挪到独立源**。原生客户端不嵌 px0，菜单项把地址交给系统浏览器；没登录的浏览器被送去 `/?next=<px0 地址>`，登录后由 web 的 `lib/loginNext.ts` 跳回（只认 `/px0/` 开头）。
 - `api/` 是 HTTP 面（axum）：路由路径、请求 / 响应体、状态码、错误形状（`{ error }` 与 Fastify 的 500 形状，`api/error.rs`）都照原 Node 版。请求体用 `LenientJson` 收、按 JS 口径逐字段取（`api/input.rs`），不先反序列化成强类型——那会把"某个字段类型不对"变成整条请求 400。`/api/*` 与 `/px0/*` 的登录检查在 `require_login`，各自验身份的（原始字节令牌、应用图标取图、askpass helper）挂在 `public_router`。前端产物：`FALCON_WEB_DIST`（要真有 index.html）> 编进二进制的那份（`embed-web`）> 开发默认目录。
 - `db.rs` 用 rusqlite（bundled SQLite），与 Node 版同一个 `falcon.db` / `secret.key` 格式。外键约束显式关闭，级联在应用层手写；`migrate()` 是幂等的 `CREATE TABLE IF NOT EXISTS` + 加列，没有版本号迁移表——改表结构就往这套里加。
@@ -82,7 +86,7 @@ cargo run -p falcon-app                         # 连本机服务（按已装 La
 - 界面骨架是**浮动岛**（ADR 0011）：窗口底上浮着侧栏 / 主区 / 右面板几块圆角面板，之间只有一道缝，**不要加分栏边框**；岛里再嵌一块用"借窗口底色"的下沉块，也不要用边框。主区是**列式工作区**（ADR 0012）：窗口排成列、每列可叠多扇、列分在一块块画布上、不横向滚动，排布与拖拽落点的纯函数在 `falcon-core/src/layout.rs`，改之前先读 ADR 0012。
 - 会话**默认不起名**（`name` 空串），界面显示的是自动标题：手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名（`falcon-core/src/session_title.rs`）。列表里各处必须叫同一个名字；窗口标题栏例外——它右边就是完整工作目录，没标题时那一格空着，别编占位名。前台命令由服务端探测后经 WS 的 `{type:"title"}` 推来（只在有 Viewer 时探、2.5s 节流、后台会话的标题会陈旧）。
 - 字体：`falcon-app/build.rs` 把 `native/assets/fonts/` 里的 woff2（`pnpm vendor-*` 从官方发行包生成、已进仓库）解成 TTF：原生嵌进二进制，浏览器版只嵌正文字体、其余由 build-web.sh 拷进产物按需拉（GPUI 不认 WOFF2）。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
-- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `scripts/app-icons.mjs`，`pnpm gen-icons` 出浏览器版的 `native/web/icons/`（服务端 `/api/app-icon/*` 与 PWA 清单跳到这里）与原生的 `falcon-app/assets/app-icons/`；增删图标要同时改 `scripts/app-icons.mjs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-app 有测试对账）。
+- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `native/xtask/src/icons.rs`，`cargo xtask icons` 出浏览器版的 `native/web/icons/`（服务端 `/api/app-icon/*` 与 PWA 清单跳到这里）与原生的 `falcon-app/assets/app-icons/`；增删图标要同时改 `xtask/src/icons.rs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-app 有测试对账）。
 - **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-app --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-app/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。浏览器版用 Chrome DevTools 驱动：canvas 上的合成指针事件在 DPR 2 时坐标要乘 2，键盘输入用真实按键（`type_text`）而不是合成 KeyboardEvent。
 - **压测用 `--features automation --release`**（不带 snapshot 的 test-support）：`frames:<ms>` 以 60Hz 手动画并打印帧耗时 p50 / p95，`frames:<ms>:refresh` 无视视图缓存。侧栏与右侧面板是 `cached` 视图（ADR 0015），新加的大块视图照此办理。
 - **浏览器版**：平台差异写 `cfg(target_family = "wasm")`，DOM 胶水放 `falcon-app/src/web.rs`。几条硬规矩：时间一律 `web_time::{Instant, SystemTime}`（std 的在 wasm 上一调就 panic）；future 的约束写 `MaybeSend`（falcon-client / falcon-core 各有一份），别写死 `Send`；static 里放不了在飞的 future，wasm 上用 thread_local。wasm 构建走 rustup 的 stable + `wasm32-unknown-unknown`，wasm-bindgen-cli 与 Cargo.lock 同版本（PATH 上排前面的 Homebrew rustc 没有 wasm 标准库，脚本里处理了），**不要 nightly**。宿主页是 `native/web/index.html`（首帧主题脚本、manifest、favicon）。

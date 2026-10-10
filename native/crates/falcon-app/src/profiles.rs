@@ -134,7 +134,7 @@ impl Profiles {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        // "本机"连哪儿每次启动现算，不信存下来的：开发时 FALCON_LOCAL_URL 指向 pnpm dev:server
+        // "本机"连哪儿每次启动现算，不信存下来的：开发时 FALCON_LOCAL_URL 指向 cargo run -p falcon-server
         // 或临时实例；否则按已安装服务的端口（自定义过 --port 的也能连上）；都没有才是默认 4923
         let url = std::env::var("FALCON_LOCAL_URL").ok().unwrap_or_else(|| {
             crate::local_service::installed_service_args()

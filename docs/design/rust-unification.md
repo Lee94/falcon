@@ -333,6 +333,17 @@ SSH Windows 远端没有环境，未测。
 
 ---
 
+## 13. 去掉最后的 JS：`cargo xtask`（2026-10-11）
+
+用户拍板"彻底去掉"：仓库里剩下的 Node 脚本（打包、图标、字体 / 主题 vendoring、Zellij、协议 fixture）全部移植成 `native/xtask`（`cargo xtask <命令>`，别名在 `native/.cargo/config.toml`；CI 删了那个文件，写成 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），`package.json` / `pnpm-lock.yaml` 删除，仓库里不再有 Node 依赖。
+
+- **版本号**改取 `native/Cargo.toml` 的工作区版本（原来服务端与 pkg 取仓库根 `package.json`，setup.exe 取 Cargo.toml，两处要一起改）。
+- **meegle CLI**：不再经 pnpm 装。`xtask/src/meegle.rs` 锁版本与 npm 的 `dist.integrity`（sha512），直接从 npm 仓库下 tarball、校验后解出本平台二进制到 `native/.cache/meegle/bin/`；发布构建照旧编进服务端，开发构建的服务端按这个目录兜底（原来是仓库根的 `node_modules`）。
+- **外部工具照旧是外部工具**：rsvg-convert、pkgbuild / iconutil / codesign、ISCC、curl；字体子集化从 npm 的 subset-font（HarfBuzz 的 wasm 版）换成同一个 HarfBuzz 的 `hb-subset` 命令行，WOFF2 压缩换成 Google 的 `woff2_compress`。`native/scripts/build-web.sh` 留着（bash），`native/web/index.html` 里的首帧主题脚本留着（宿主页必须的那几十行）。
+- **对拍**：图标产物逐字节相同（SVG 文本按 JS 的数字格式输出），pkg 的 AppIcon.icns 与 Node 脚本打的逐字节相同、包结构一致；滚动插件重编出来的 wasm 与提交的相同；Zellij 版本校验对 GitHub 实跑过。
+
+---
+
 ## 附录 A：重写时必须原样保留的运行时行为
 
 本附录从源码注释与 ADR 摘出，S 线每期动手前对照。行号是 2026-10-10 的工作区。

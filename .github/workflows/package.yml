@@ -1,5 +1,6 @@
 # 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）与 macOS（.pkg，原生客户端 +
-# Resources 里的 Rust 服务端）。打法与本机一样，直接跑 pnpm build:win / pnpm build:pkg，脚本是唯一真相。
+# Resources 里的 Rust 服务端）。打法与本机一样，直接跑 cargo xtask win / cargo xtask pkg，xtask 是唯一真相。
+# 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run -p xtask --。
 #
 # - 推 v* tag：两个包都打完后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版。
@@ -28,32 +29,20 @@ jobs:
         shell: bash
         run: rm -f native/.cargo/config.toml
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      # 浏览器版（native/scripts/build-web.sh）要 wasm32 target 与同版本的 wasm-bindgen-cli
+      # Windows 包里只有原生客户端，不编浏览器版，不用 wasm target
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
 
-      - name: Install wasm-bindgen-cli
-        run: |
-          ver="$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/version = |"/, ""); print; exit}' native/Cargo.lock)"
-          cargo install wasm-bindgen-cli --version "$ver" --locked
-
-      # build-windows-installer.mjs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
+      # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      # 安装包脚本只用 node 标准库，exe 的图标 / 字体取自仓库里已生成的文件，不用 pnpm install。
-      # rc.exe 来自 runner 自带的 VS 生成工具
+      # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具
       - name: Build installer
-        run: node scripts/build-windows-installer.mjs
+        run: cargo run --manifest-path native/Cargo.toml -p xtask -- win
 
       - uses: actions/upload-artifact@v4
         with:
@@ -70,16 +59,6 @@ jobs:
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.12.2
-
-      # 只跑打包脚本、装 meegle CLI 依赖（服务端与浏览器版都是 Rust）
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-
       # 浏览器版（native/scripts/build-web.sh）要 wasm32 target 与同版本的 wasm-bindgen-cli
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -94,15 +73,13 @@ jobs:
           ver="$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/version = |"/, ""); print; exit}' native/Cargo.lock)"
           cargo install wasm-bindgen-cli --version "$ver" --locked
 
-      # app-icons.mjs 用 rsvg-convert 现画 AppIcon 的各档尺寸
+      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
       - name: Install librsvg
         run: brew install librsvg
 
-      - run: pnpm install --frozen-lockfile
-
-      # 没有服务端产物时 build:pkg 会先 pnpm build:bin（构建浏览器版、cargo 编服务端）
+      # 没有服务端产物时 pkg 会先走 server（构建浏览器版、从 npm 仓库取锁定版本的 meegle CLI、cargo 编服务端）
       - name: Build pkg
-        run: pnpm build:pkg
+        run: cargo run --manifest-path native/Cargo.toml -p xtask -- pkg
 
       - uses: actions/upload-artifact@v4
         with:

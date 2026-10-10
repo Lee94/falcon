@@ -1,7 +1,7 @@
 //! 应用图标（ADR 0018）：shared 的 `appIcon.ts` 里客户端用得到的部分，加上原生独有的
 //! Dock 版式运算（像素级的纯函数；解码 / 缩放 / 编码在 falcon-app，那里有 image crate）。
 
-/// 内置图标，顺序即设置里的排列顺序。与 scripts/app-icons.mjs 一一对应
+/// 内置图标，顺序即设置里的排列顺序。与 native/xtask/src/icons.rs 一一对应
 pub const APP_ICON_IDS: [&str; 8] = [
     "emberwing",
     "voltwing",
@@ -54,7 +54,7 @@ pub fn contain_rect(w: u32, h: u32, size: u32) -> Rect {
 }
 
 /// macOS 图标网格（Big Sur 起）：1024 画布上 824 见方的圆角块，四周 100 的透明边，圆角 185。
-/// scripts/app-icons.mjs 的 `macos()` 用的是同一组数
+/// native/xtask/src/icons.rs 的 `macos()` 用的是同一组数
 pub const MAC_INSET: f64 = 100. / 1024.;
 pub const MAC_RADIUS: f64 = 185. / 1024.;
 

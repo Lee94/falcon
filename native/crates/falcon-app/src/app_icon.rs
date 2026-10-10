@@ -1,8 +1,8 @@
 //! 应用图标（ADR 0018）：内置图标嵌进二进制、运行时换 Dock 图标、自定义图标上传前的规整
 //! 与放进 Dock 前的套版式。
 //!
-//! 内置图标是 scripts/gen-icons.mjs（图形在 app-icons.mjs）按 macOS 网格出的 512 PNG（824/1024 的圆角块、四周留透明
-//! 边、带投影），直接能进 Dock。装好的 App 没启动时 Dock / 访达显示的是安装包里的
+//! 内置图标是 `cargo xtask icons`（图形在 native/xtask/src/icons.rs）按 macOS 网格出的 512 PNG
+//! （824/1024 的圆角块、四周留透明边、带投影），直接能进 Dock。装好的 App 没启动时 Dock / 访达显示的是安装包里的
 //! AppIcon.icns（默认图标）；启动、连上服务端后才换成服务端上选的——这是 macOS 的限制：
 //! 改 .app 自己的图标要写进包里，会弄坏签名。
 
@@ -157,7 +157,7 @@ fn mac_frame(src: &RgbaImage) -> RgbaImage {
     let side = (n as f64 * (1. - 2. * MAC_INSET)).round() as u32;
     let x0 = ((n - side) / 2) as f64;
     let r = n as f64 * MAC_RADIUS;
-    // 投影参数与 app-icons.mjs 的 feDropShadow 同比例：下移 10/1024、模糊 12/1024、30% 黑
+    // 投影参数与 xtask icons.rs 的 feDropShadow 同比例：下移 10/1024、模糊 12/1024、30% 黑
     let dy = n as f64 * 10. / 1024.;
     let mut shadow = GrayImage::new(n, n);
     for (x, y, p) in shadow.enumerate_pixels_mut() {
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(ids, APP_ICON_IDS.to_vec());
     }
 
-    /// app-icons.mjs 多出了图标、这里没跟上时红
+    /// xtask icons.rs 多出了图标、这里没跟上时红
     #[test]
     fn every_generated_png_is_embedded() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/app-icons");

@@ -40,7 +40,7 @@ fn main() {
 /// 窗口图标；资源管理器、任务栏、安装包的快捷方式也都读这一份。winresource 的 `set_icon`
 /// 恰好用 ID 1。
 ///
-/// 图形用浏览器版的圆角方块版（`pnpm gen-icons` 的产物 native/web/icons、已进仓库）：Windows 没有 macOS
+/// 图形用浏览器版的圆角方块版（`cargo xtask icons` 的产物 native/web/icons、已进仓库）：Windows 没有 macOS
 /// 那种留边 + 投影的版式约定，满版圆角在任务栏里与别的 App 一样大。构建机上不必有 rsvg-convert，
 /// 缩放在这里用 image 做。运行时换图标（ADR 0018）在 Windows 上没接，跟的是这里的默认图标。
 #[cfg(windows)]
@@ -52,7 +52,7 @@ fn windows_resources(manifest: &Path, out: &Path) {
     let src = manifest.join("../../web/icons/emberwing/icon-512.png");
     println!("cargo:rerun-if-changed={}", src.display());
     let img = image::open(&src)
-        .unwrap_or_else(|e| panic!("读不到 {}：{e}。先在仓库根目录 pnpm gen-icons", src.display()))
+        .unwrap_or_else(|e| panic!("读不到 {}：{e}。先在 native/ 下 cargo xtask icons", src.display()))
         .into_rgba8();
     // 资源管理器各档视图与高 DPI 任务栏要的尺寸；256 那档 Windows 只认 PNG 编码，IcoFrame::as_png 统一这么存
     let frames: Vec<IcoFrame> = [16u32, 20, 24, 32, 40, 48, 64, 128, 256]

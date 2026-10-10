@@ -2,4 +2,3 @@
 *.png binary
 *.jpg binary
 *.ico binary
-pnpm-lock.yaml -diff linguist-generated

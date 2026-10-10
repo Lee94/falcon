@@ -1,19 +1,19 @@
-//! 本机服务托管：`scripts/macos-pkg/launcher.sh` 的原生版。
+//! 本机服务托管：`native/xtask/assets/macos-pkg/launcher.sh` 的原生版。
 //!
-//! Falcon.app 的 Resources 里带着 SEA 单文件服务程序。启动时：
+//! Falcon.app 的 Resources 里带着单文件服务程序（`cargo xtask server` 的产物）。启动时：
 //! 1. `falcon service install`——幂等，兼作升级（它会把 Resources/falcon 挪进
 //!    `<dataDir>/bin/falcon` 并注册 / 重启用户级 LaunchAgent）。**带上已安装服务原来的
 //!    `--host` / `--port` / `--data-dir`**（从 LaunchAgent plist 里读）：不带参数的 install
 //!    会写默认配置，装过自定义端口 / 数据目录的人一升级，服务就换了个家，会话全看不见了
-//!    （pkg 的 postinstall 与 launcher.sh 用 `scripts/macos-pkg/service-args.sh` 做同一件事）；
-//! 2. 等端口起来：SEA 首次启动要解压 runtime，端口起来之前连会被拒；401 也算起来了
+//!    （pkg 的 postinstall 与 launcher.sh 用同目录的 `service-args.sh` 做同一件事）；
+//! 2. 等端口起来：launchd 拉起服务要时间，端口起来之前连会被拒；401 也算起来了
 //!    （设过访问密码）。"本机"配置连的端口同样取自 plist（见 [`installed_service_args`]）。
 //!
 //! 会话活在 launchd 服务里，不在 App 进程里——**退出 App = 所有窗口 Detach**，永远不会
 //! Terminate。开发时（不在 .app 里跑）找不到捆绑的服务程序，就假定服务已经在跑
-//! （`pnpm dev:server` 或已装好的服务），只做第 2 步。
+//! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。
 //!
-//! Windows 上没有本机服务（SEA 不支持 Windows 目标，见 README），这一段只有 macOS 实现。
+//! Windows 上没有本机服务（服务本身依赖 Zellij 与 POSIX shell，见 README），这一段只有 macOS 实现。
 
 use std::time::Duration;
 

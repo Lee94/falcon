@@ -1,7 +1,7 @@
 //! Zellij 版本锁定与发行产物映射。移植自 `packages/server/src/zellij/version.ts`。
 //!
 //! 锁定版本而非跟随 latest：测试矩阵封闭、可回归，升级是一次有意的发版行为。
-//! 更新版本请用 `pnpm update-zellij <version>`，不要手改这里的常量（S7 之后改成改这里）。
+//! 更新版本请用 `cargo xtask zellij-update <version>`（native/xtask/src/zellij.rs），不要手改这里的常量。
 //!
 //! 不做完整性校验（无哈希常量）——走默认 GitHub 源时 HTTPS 已保证来源与完整性；
 //! 配置了自定义 base URL 的用户会在 UI 上看到明确警告。

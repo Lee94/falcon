@@ -60,12 +60,13 @@ D:\code\
 
 ## 快速开始
 
-服务端与客户端都是 Rust（`native/`，一个 Cargo workspace）：服务端 `falcon-server`，客户端 `falcon-app` 一套代码出原生桌面与浏览器（wasm）两种产物。从源码跑需要 Rust 工具链（浏览器版另要 `rustup target add wasm32-unknown-unknown` 与同版本的 `wasm-bindgen-cli`，见 `native/scripts/build-web.sh`）：
+服务端与客户端都是 Rust（`native/`，一个 Cargo workspace）：服务端 `falcon-server`，客户端 `falcon-app` 一套代码出原生桌面与浏览器（wasm）两种产物。从源码跑只需要 Rust 工具链（浏览器版另要 `rustup target add wasm32-unknown-unknown` 与同版本的 `wasm-bindgen-cli`，见 `native/scripts/build-web.sh`）。构建 / 打包任务都是 `cargo xtask <命令>`（`native/xtask`，`cargo xtask --help` 列全部）：
 
 ```bash
-pnpm build:web                 # 浏览器版客户端，产物 native/target-wasm/dist
-pnpm start                     # cargo run --release -p falcon-server，托管上面那份产物
-pnpm dev:native                # 或者直接开原生客户端
+cd native
+cargo xtask web                       # 浏览器版客户端，产物 native/target-wasm/dist
+cargo run --release -p falcon-server  # 服务端，托管上面那份产物
+cargo run -p falcon-app               # 或者直接开原生客户端
 ```
 
 打开 http://localhost:4923 。注意不带参数时用的是默认数据目录 `~/.falcon`——和装好的服务同一个，试跑另起一个时带上 `--port` / `--data-dir`（`cd native && cargo run -p falcon-server -- --port 4950 --data-dir /tmp/fal`）。
@@ -85,20 +86,23 @@ pnpm dev:native                # 或者直接开原生客户端
 ### 开发模式
 
 ```bash
-pnpm dev:server                # cargo run -p falcon-server
-pnpm build:web                 # 改了客户端后重编浏览器版，刷新页面即可
-pnpm dev:native                # 原生客户端连本机服务
+cd native
+cargo run -p falcon-server     # 开发服务端
+cargo xtask web                # 改了客户端后重编浏览器版，刷新页面即可
+cargo run -p falcon-app        # 原生客户端连本机服务
+cargo xtask meegle             # 开发构建要用「飞书项目」面板时，先取一次锁定版本的 meegle CLI
 ```
 
 ## 单文件发布
 
 ```bash
-pnpm build:bin                        # 打当前平台
-pnpm build:bin --target linux-x64     # 交叉编译：先 rustup target add 对应三元组并配好链接器
-pnpm build:bin --skip-web             # web 产物已是最新时跳过 web 构建
+cd native
+cargo xtask server                        # 打当前平台
+cargo xtask server --target linux-x64     # 交叉编译：先 rustup target add 对应三元组并配好链接器
+cargo xtask server --skip-web             # web 产物已是最新时跳过 web 构建
 ```
 
-产物在 `release/falcon-v<版本>-<平台>`，单个可执行文件，不依赖 Node：
+产物在 `release/falcon-v<版本>-<平台>`，单个可执行文件（浏览器版客户端与锁定版本的 meegle CLI 都编在里面）：
 
 ```bash
 ./falcon-v0.1.0-linux-x64 --port 8080
@@ -107,26 +111,28 @@ pnpm build:bin --skip-web             # web 产物已是最新时跳过 web 构�
 macOS 还可以打一份安装包（把 `Falcon.app` 装进 `/Applications`，并注册用户级 launchd 服务，默认 http://127.0.0.1:4923）：
 
 ```bash
-pnpm build:pkg                 # 没有当前平台的服务端产物就先 pnpm build:bin
-pnpm build:pkg --skip-bin      # 只用已有的 release/falcon-v*-darwin-*
+cargo xtask pkg                # 没有当前平台的服务端产物就先 cargo xtask server
+cargo xtask pkg --skip-bin     # 只用已有的 release/falcon-v*-darwin-*
 ```
+
+要 macOS 自带的 pkgbuild / iconutil / codesign，外加 `brew install librsvg`（rsvg-convert 现画 AppIcon）。
 
 产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。这台已经用 `--port 6789` / `~/.mojito` 跑着的不要拿它覆盖，会把服务改回默认端口。
 
 Windows 只能打原生客户端的安装包（服务端不支持 Windows，装好后在客户端里连别处的 falcon 服务）：
 
 ```bash
-pnpm build:win                 # cargo build --release + Inno Setup
-pnpm build:win --skip-cargo    # 只用已有的 native/target/release/falcon-app.exe
+cargo xtask win                # cargo build --release + Inno Setup
+cargo xtask win --skip-cargo   # 只用已有的 native/target/release/falcon-app.exe
 ```
 
 产物 `release/Falcon-v<版本>-win32-x64-setup.exe`，默认按当前用户装、不要管理员。必须在 Windows 上打：
 需要 VS 生成工具（rc.exe 给 exe 编图标与版本信息）和 Inno Setup 6（`winget install JRSoftware.InnoSetup --scope user`，
 或用 `FALCON_ISCC` 指到 ISCC.exe）。没有代码签名，别人机器上 SmartScreen 会拦，「更多信息 → 仍要运行」即可。
 
-GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令：推 `v*` tag 时 Windows 安装包与
+GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令（经 `cargo run --manifest-path native/Cargo.toml -p xtask -- …`，CI 上删了 `native/.cargo/config.toml`，别名跟着没了）：推 `v*` tag 时 Windows 安装包与
 macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上；Actions 页手动触发只出构建产物、不发版。
-包里的版本号取仓库根的 `package.json`（pkg 与服务端产物）与 `native/Cargo.toml`（setup.exe），打 tag 前先改好。
+包里的版本号都取 `native/Cargo.toml` 的工作区版本（`[workspace.package] version`），打 tag 前先改好。
 
 原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle`——浏览器版客户端
 （rust-embed）、本平台的 meegle CLI、Zellij 滚动插件都编进二进制，没有首次运行的解压步骤；
@@ -198,10 +204,10 @@ falcon 在远端只写 `~/.falcon/`（二进制、Zellij 的 socket / config / d
 ## 升级 Zellij 版本
 
 ```bash
-pnpm update-zellij 0.44.4
+cd native && cargo xtask zellij-update 0.44.4
 ```
 
-脚本会校验该 tag 下五个 target 的 `no-web` 产物齐全，然后更新锁定版本。升级前请确认 Zellij 的 `CLIENT_SERVER_CONTRACT_VERSION` 未变——它一变，宿主机上已有的会话就接不回来了。
+它会校验该 tag 下五个 target 的 `no-web` 产物齐全，然后更新锁定版本。升级前请确认 Zellij 的 `CLIENT_SERVER_CONTRACT_VERSION` 未变——它一变，宿主机上已有的会话就接不回来了。
 
 ## 工程结构
 
@@ -218,5 +224,6 @@ native/
 │   └── falcon-web/      浏览器版的 wasm 薄壳
 ├── web/                 浏览器版的宿主页与内置图标
 ├── zellij-plugin/       滚动位置插件（wasm32-wasip1）
+├── xtask/               构建 / 打包 / 资源生成任务（cargo xtask）
 └── assets/fonts/        内嵌字体（woff2）
 ```

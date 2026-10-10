@@ -2,25 +2,26 @@
 //!
 //! meegle 可执行文件的定位。
 //!
-//! CLI 随服务内置：`@lark-project/meegle` 是 server 的锁定版本依赖，npm 包里带着六个
-//! 平台的静态二进制（bin/meegle-<platform>-<arch>[.exe]），我们直接 spawn 本平台那一个，
-//! 不经它的 meegle.js 包装——省一个 node 进程，也躲开包装脚本里的更新提示逻辑。
+//! CLI 随服务内置：锁定版本的 `@lark-project/meegle` npm 包里带着六个平台的静态二进制
+//! （bin/meegle-<platform>-<arch>[.exe]），我们直接 spawn 本平台那一个，不经它的 meegle.js
+//! 包装——省一个 node 进程，也躲开包装脚本里的更新提示逻辑。版本与 sha512 锁在
+//! `native/xtask/src/meegle.rs`，`cargo xtask meegle` 从 npm 仓库直接取 tarball 解出来（不经 Node）。
 //!
 //! 解析顺序：
 //! 1. FALCON_MEEGLE_BIN —— 显式指定（文件得真的在：Node 版 SEA 把它设进自己的环境，
 //!    从旧版 falcon 终端里起的进程会继承一个早已清掉的 runtime 路径）；
 //! 2. 编进二进制的那份（`embed-meegle` feature，发布构建）—— 首次用时释放到
 //!    `<dataDir>/bin/meegle-<内容哈希>`；
-//! 3. 依赖包里本平台的二进制 —— 仓库根 package.json 锁定的版本，pnpm 装过依赖的源码树
+//! 3. `native/.cache/meegle/bin/` 里本平台的二进制 —— `cargo xtask meegle` 取下来的锁定版本
 //!    （开发构建）；
 //! 4. PATH 上的 `meegle` —— 用户自己 npm -g 装的，兜底。
 //!
 //! # 与 TS 的差别
 //!
 //! 第 3 步 Node 版用 `require.resolve` 从 server 包出发找依赖。Rust 二进制没有模块解析，
-//! 这里退成**编译期的仓库位置**：`<本 crate>/../../../node_modules/@lark-project/meegle`
-//! （`CARGO_MANIFEST_DIR` 推出来的，pnpm 装过依赖的源码树里就在那儿；没装就落到第 4 步）。
-//! 只在从源码树跑的开发构建上有用；发布产物走第 2 步（`pnpm build:bin` 开 embed-meegle）。
+//! 这里退成**编译期的仓库位置**：`<本 crate>/../../.cache/meegle`（`CARGO_MANIFEST_DIR`
+//! 推出来的；没取过就落到第 4 步）。只在从源码树跑的开发构建上有用；发布产物走第 2 步
+//! （`cargo xtask server` 开 embed-meegle）。
 //!
 //! 第 4 步不在这里查 PATH：返回裸名 `meegle`，由 spawn 时按**子进程环境**（登录环境）里的
 //! PATH 找——与 Node 的 spawn 同一口径（Rust 的 `Command` 在显式给了 PATH 时也按新 PATH 找）。
@@ -38,9 +39,10 @@ pub fn bundled_bin_name(platform: Option<&str>, arch: Option<&str>) -> String {
     format!("meegle-{platform}-{arch}{}", if platform == "win32" { ".exe" } else { "" })
 }
 
-/// 依赖包可能在的位置（见文件头"与 TS 的差别"）。目录不存在也照列，由调用方判断
+/// 开发态的取用位置（见文件头"与 TS 的差别"），布局同 npm 包：`<目录>/bin/<bundled_bin_name>`。
+/// 目录不存在也照列，由调用方判断
 pub fn bundled_package_dirs() -> Vec<PathBuf> {
-    vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../node_modules/@lark-project/meegle")]
+    vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache/meegle")]
 }
 
 /// `env` 读环境变量（生产上是 `|k| std::env::var(k).ok()`）
@@ -117,8 +119,7 @@ fn resolve_with(explicit: Option<String>, package_dirs: &[PathBuf]) -> String {
     }
     let name = bundled_bin_name(None, None);
     for dir in package_dirs {
-        // require.resolve 给的是 realpath（pnpm 的依赖是指进 .pnpm 仓库的符号链接）；
-        // 解不开（依赖没装）就落到 PATH
+        // 规整成真实路径（日志里看得懂、`..` 不留在命令行里）；目录不在（没取过）就落到 PATH
         let Ok(pkg) = dir.canonicalize() else { continue };
         let bin = pkg.join("bin").join(&name);
         if bin.exists() {
