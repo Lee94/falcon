@@ -1,0 +1,17 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "仓库的构建 / 打包 / 资源生成任务（cargo xtask），取代原来的 Node 脚本"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2 = "0.11"
+hex = "0.4"
+flate2 = "1"
+tar = "0.4"

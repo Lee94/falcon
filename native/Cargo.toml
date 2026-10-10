@@ -1,10 +1,10 @@
 # Falcon 原生客户端（GPUI）。设计见 docs/design/gpui-client.md。
 #
-# 独立的 Cargo workspace，不进 pnpm workspace。GPUI 只出现在 falcon-app，
+# 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。GPUI 只出现在 falcon-app，
 # 其余 crate 不依赖 GPUI——GPUI 每次破坏性升级只波及一层。
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 # 滚动位置插件（ADR 0019）是独立的 wasm32-wasip1 crate，有自己的 Cargo.lock，不进工作区
 exclude = ["zellij-plugin"]
 default-members = ["crates/falcon-app"]
