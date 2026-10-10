@@ -44,6 +44,11 @@ getrandom = "0.4"
 http = "1"
 portable-pty = "0.9.0"
 rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"], optional = true }
+# 下载第三方二进制（px0，ADR 0017 决定四）。TLS 与 falcon-client 同一套：rustls + ring +
+# 系统信任库（rustls-platform-verifier），不带 aws-lc-sys / webpki-roots；只讲 HTTP/1.1
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

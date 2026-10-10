@@ -1,7 +1,7 @@
 //! 移植自 `packages/server/src/meegle/pagination.ts`（含 `pagination.test.ts` 的全部用例）。
 //!
-//! 本身不做 I/O：取哪一页由调用方的 `load` 决定（S6 的 MeegleClient 在里面起 CLI）。
-//! 留到 S6 的函数：无（调用方 viewItems / multiViewItems / todo 随 client.ts 一起在 S6）。
+//! 本身不做 I/O：取哪一页由调用方的 `load` 决定（[`super::client::MeegleClient`] 的
+//! view_items / multi_view_items / todo 在里面起 CLI）。
 
 use std::future::Future;
 
