@@ -77,12 +77,17 @@ pub fn legacy_remote_root(kind: HostKind, home: &str) -> String {
 /// 本机不能这么做：后端自己的 SQLite 开在数据目录里，进程还活着就 mv 会把库从
 /// 自己脚下抽走。远端根目录里没有后端打开的文件，Zellij 的 socket 跟着目录一起
 /// 改名，客户端按新路径 connect 仍是同一个 inode。
+///
+/// 但"远端"也可能就是跑着 falcon 后端的机器：SSH 连回本机（含经局域网地址绕回来的），
+/// 或那台远端自己也用 `~/.mojito` 当后端数据目录。实测出过事——测试连本机 sshd，
+/// 把在用服务的数据目录整个改了名，服务靠已打开的 fd 照跑，一重启就找不到程序和库。
+/// 所以旧目录里有 `secret.key`（只有后端数据目录才有，见 crypto.rs）就不搬，原地沿用。
 pub fn posix_migrate_root_script(next: &str, prev: &str) -> String {
     let n = quote_posix(next);
     let p = quote_posix(prev);
     format!(
         "n={n}; p={p}; \
-         if [ ! -e \"$n\" ] && [ -d \"$p\" ]; then mv \"$p\" \"$n\" || true; fi; \
+         if [ ! -e \"$n\" ] && [ -d \"$p\" ] && [ ! -e \"$p/secret.key\" ]; then mv \"$p\" \"$n\" || true; fi; \
          if [ -d \"$n\" ]; then printf '%s\\n' \"$n\"; \
          elif [ -d \"$p\" ]; then printf '%s\\n' \"$p\"; \
          else printf '%s\\n' \"$n\"; fi"
@@ -94,7 +99,8 @@ pub fn windows_migrate_root_script(next: &str, prev: &str) -> String {
     let p = quote_powershell(prev);
     format!(
         "$n = {n}; $p = {p}; \
-         if (-not (Test-Path -LiteralPath $n) -and (Test-Path -LiteralPath $p -PathType Container)) {{ \
+         if (-not (Test-Path -LiteralPath $n) -and (Test-Path -LiteralPath $p -PathType Container) \
+         -and -not (Test-Path -LiteralPath (Join-Path $p 'secret.key'))) {{ \
          try {{ Move-Item -LiteralPath $p -Destination $n -ErrorAction Stop }} catch {{}} }}; \
          if (Test-Path -LiteralPath $n -PathType Container) {{ $n }} \
          elseif (Test-Path -LiteralPath $p -PathType Container) {{ $p }} \
@@ -486,6 +492,7 @@ pub(crate) mod tests {
         assert!(script.contains(r"n='/home/o'\''brien/.falcon'"));
         assert!(script.contains(r"p='/home/o'\''brien/.mojito'"));
         assert!(script.contains(r#"mv "$p" "$n" || true"#));
+        assert!(script.contains(r#"[ ! -e "$p/secret.key" ]"#));
         assert!(script.contains(r#"[ -d "$n" ]"#));
         assert!(script.contains(r#"[ -d "$p" ]"#));
     }
@@ -497,6 +504,7 @@ pub(crate) mod tests {
         assert!(script.contains("Move-Item -LiteralPath $p -Destination $n -ErrorAction Stop"));
         assert!(script.contains("Test-Path -LiteralPath $p -PathType Container"));
         assert!(script.contains("catch {}"));
+        assert!(script.contains("-not (Test-Path -LiteralPath (Join-Path $p 'secret.key'))"));
     }
 
     #[test]
@@ -543,6 +551,21 @@ pub(crate) mod tests {
             assert_eq!(run_posix(next.to_str().unwrap(), prev.to_str().unwrap()).trim(), next.to_str().unwrap());
             assert!(!prev.exists());
             assert_eq!(std::fs::read_to_string(next.join("marker")).unwrap(), "ok");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_live_leaves_a_backend_data_dir_in_place() {
+        // 旧目录是某个 falcon 后端的数据目录（SSH 连回了本机）：不搬，原地沿用
+        with_home(|home| {
+            let next = home.join(".falcon");
+            let prev = home.join(".mojito");
+            std::fs::create_dir(&prev).unwrap();
+            std::fs::write(prev.join("secret.key"), [0u8; 32]).unwrap();
+            assert_eq!(run_posix(next.to_str().unwrap(), prev.to_str().unwrap()).trim(), prev.to_str().unwrap());
+            assert!(prev.join("secret.key").exists());
+            assert!(!next.exists());
         });
     }
 
