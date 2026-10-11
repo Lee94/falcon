@@ -1,12 +1,12 @@
-//! 画布上的差异窗口（web 的 `components/GitDiffView.tsx`）：split / unified 两种视图，
+//! 画布上的差异窗口（旧 React 版的 `components/GitDiffView.tsx`）：split / unified 两种视图，
 //! 内容来自工作区的 `diff_tab`（就地替换的预览语义，全工作区只有一扇）。
 //!
 //! 打开 / 切换文件 / 手动刷新时拉一次，**不轮询**——正看着的 diff 在眼皮底下变动只会让人
 //! 跟丢行号。
 //!
-//! 行一律等高交给 `uniform_list`（见 parse.rs 顶部）：web 为大 diff 手写的行窗口在这里是
-//! 白送的。分栏是左右两个 list：纵向永远同步，横向各自有内容宽度、跟着滚轮一起走（web 的
-//! 双向同步滚动），行号栏在横向滚动时钉在左边（web 的 `sticky left-0`）。
+//! 行一律等高交给 `uniform_list`（见 parse.rs 顶部）：React 版为大 diff 手写的行窗口在这里
+//! 是白送的。分栏是左右两个 list：纵向永远同步，横向各自有内容宽度、跟着滚轮一起走（React
+//! 版的双向同步滚动），行号栏在横向滚动时钉在左边（React 版的 `sticky left-0`）。
 
 mod parse;
 
@@ -33,9 +33,9 @@ use crate::ui::icon;
 use crate::workspace::{DiffTabTarget, Workspace};
 use crate::zoom::zpx;
 
-/// 正文行高（web 的 leading-5.5）
+/// 正文行高（React 版的 leading-5.5）
 const ROW_H: f32 = 22.;
-/// 行号栏宽（web 的 w-10）
+/// 行号栏宽（React 版的 w-10）
 const GUTTER_W: f32 = 40.;
 
 const VIEW_KEY: &str = "falcon.diffView";
@@ -53,7 +53,7 @@ fn view_mode(cx: &App) -> Mode {
     }
 }
 
-/// 决定"要不要重新拉"的那几项（web 的 effect 依赖数组）
+/// 决定"要不要重新拉"的那几项（React 版的 effect 依赖数组）
 #[derive(Clone, PartialEq, Eq)]
 struct DiffKey {
     project_id: String,
@@ -401,9 +401,9 @@ fn set_mode(mode: Mode, cx: &mut App) {
 }
 
 /// 纵向滚动条。GPUI 在 macOS（系统设成"自动"时）默认滚动时才出现、停 2 秒淡出，它的 Hover 模式
-/// 也只认指针落在滚动条那一窄条上——停在内容上根本看不见它，也就无从去抓。web 的约定是指针进了
-/// 窗口就浮出来（styles.css 的悬停胶囊），所以指针在差异区里时强制 Always，离开后退回系统偏好
-/// （由组件库主题同步），照常淡出。
+/// 也只认指针落在滚动条那一窄条上——停在内容上根本看不见它，也就无从去抓。沿用 React 版的约定：
+/// 指针进了窗口就浮出来（它 styles.css 里的悬停胶囊），所以指针在差异区里时强制 Always，
+/// 离开后退回系统偏好（由组件库主题同步），照常淡出。
 fn vscrollbar(handle: &UniformListScrollHandle, hovered: bool) -> impl IntoElement {
     let bar = Scrollbar::vertical(handle).viewport_from_layout();
     div().absolute().inset_0().child(if hovered { bar.mode(ScrollbarMode::Always) } else { bar })
@@ -411,7 +411,7 @@ fn vscrollbar(handle: &UniformListScrollHandle, hovered: bool) -> impl IntoEleme
 
 /// 这一下横向滚轮 list 接住了没有。list 的监听先跑（子元素后注册、冒泡时先执行），偏移已经加上
 /// 了这一下的 delta、还没夹回范围：落点仍在 [-max, 0] 里就是接住了，调用方据此 stop_propagation，
-/// 否则画布会跟着一起横滚（web 的 innerTakesWheel：窗口内部还能沿手势方向滚时让给内部）。
+/// 否则画布会跟着一起横滚（React 版的 innerTakesWheel：窗口内部还能沿手势方向滚时让给内部）。
 /// 一下滚过头的那次算没接住，最多与画布重叠一次，换来不用去猜 Lines 滚轮在 list 里的行高
 fn list_took_x(handle: &UniformListScrollHandle, e: &ScrollWheelEvent) -> bool {
     let (dx, dy) = match e.delta {
@@ -428,7 +428,7 @@ fn list_took_x(handle: &UniformListScrollHandle, e: &ScrollWheelEvent) -> bool {
 
 // ---------------- 行 ----------------
 
-/// 行底色 / 行号栏的字色（web 的 bg-success/10 等）
+/// 行底色 / 行号栏的字色（React 版的 bg-success/10 等）
 fn tones(sign: Sign, ui: &Ui) -> (Option<Hsla>, Hsla) {
     match sign {
         Sign::Add => (Some(ui.success.opacity(0.1)), ui.success),
@@ -437,7 +437,7 @@ fn tones(sign: Sign, ui: &Ui) -> (Option<Hsla>, Hsla) {
     }
 }
 
-/// 文件头 / hunk 头 / 说明行。`shift` 是横向滚动量：分栏里这几种行的文字钉在左边（web 的
+/// 文件头 / hunk 头 / 说明行。`shift` 是横向滚动量：分栏里这几种行的文字钉在左边（React 版的
 /// `sticky left-3`），只让底色跟着滚
 fn banner(kind: &DiffRow, shift: Pixels, ui: &Ui) -> AnyElement {
     let base = div()

@@ -1,8 +1,8 @@
-//! 全局动作与快捷键。全局命令的键位表在 falcon-core 的 `shortcuts`（web `lib/shortcuts.ts` 的
-//! 移植，与 VS Code 对齐：⌘⇧P 命令面板、⌘B 侧栏、⌘⇧E 文件……），按平台在运行时取：mac 习惯
-//! 还是 Ctrl+Shift 看操作系统（浏览器里看浏览器所在的那台），为绕开浏览器保留键（⌘T / ⌘W /
-//! Ctrl+Shift+T……，preventDefault 无效）而加的 Alt 别名只在浏览器里注册——原生菜单与 keymap
-//! 没有那层限制。表外的几个（设置、缩放、退出、终端剪贴板）在这里写。
+//! 全局动作与快捷键。全局命令的键位表在 falcon-core 的 `shortcuts`（旧 React 版
+//! `lib/shortcuts.ts` 的移植，与 VS Code 对齐：⌘⇧P 命令面板、⌘B 侧栏、⌘⇧E 文件……），按平台
+//! 在运行时取：mac 习惯还是 Ctrl+Shift 看操作系统（浏览器里看浏览器所在的那台），为绕开浏览器
+//! 保留键（⌘T / ⌘W / Ctrl+Shift+T……，preventDefault 无效）而加的 Alt 别名只在浏览器里注册——
+//! 原生菜单与 keymap 没有那层限制。表外的几个（设置、缩放、退出、终端剪贴板）在这里写。
 //!
 //! 约束照旧：终端聚焦时 Ctrl+字母全是 shell 语义，全局键不能用裸 Ctrl+字母；mac 上用 ⌘ 系列，
 //! 其它平台用 Ctrl+Shift 系列。Esc 永远归终端，只有浮层打开时由浮层自己接。

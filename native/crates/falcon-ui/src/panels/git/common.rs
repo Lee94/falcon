@@ -1,9 +1,9 @@
 //! 「修改」「历史」两个面板与差异窗口共用的小件：不可用原因的文案、porcelain 状态、
-//! 改动文件的列表 / 目录树（web 的 `FileChangeView.tsx`）、三态勾选框、多仓库成员切换、
+//! 改动文件的列表 / 目录树（旧 React 版的 `FileChangeView.tsx`）、三态勾选框、多仓库成员切换、
 //! 提交时间。
 //!
-//! 改动文件的列表在 web 里是一棵 React 树（目录行 + 文件行递归），这里压平成一串等高的行交给
-//! `uniform_list`：几千个改动文件也只画视口里那几十行，不用 web 那种"文件多了再说"的妥协。
+//! 改动文件的列表在 React 版里是一棵组件树（目录行 + 文件行递归），这里压平成一串等高的行交给
+//! `uniform_list`：几千个改动文件也只画视口里那几十行，不用 React 版那种"文件多了再说"的妥协。
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -30,7 +30,7 @@ use crate::zoom::zpx;
 
 // ---------------- 文案 ----------------
 
-/// 面板"不可用"原因 → i18n key（web GitPanel 的 `reasonKey`；新原因一律按"没跑起来"说）
+/// 面板"不可用"原因 → i18n key（React 版 GitPanel 的 `reasonKey`；新原因一律按"没跑起来"说）
 pub fn reason_key(reason: Option<GitUnavailableReason>) -> &'static str {
     match reason {
         Some(GitUnavailableReason::GitMissing) => "git.reason_git_missing",
@@ -40,7 +40,7 @@ pub fn reason_key(reason: Option<GitUnavailableReason>) -> &'static str {
     }
 }
 
-/// porcelain 的 XY 两列压成一个展示用字母（web `porcelainStatus`）。
+/// porcelain 的 XY 两列压成一个展示用字母（React 版 `porcelainStatus`）。
 ///
 /// 优先看暂存列（X）：`MM` 是"暂存了一版又改了一版"，主要事实是它被改过；
 /// `??` 两列都是问号，取哪个都一样。
@@ -58,7 +58,7 @@ pub fn porcelain_status(index: &str, work: &str) -> String {
     if w.is_empty() { "M".into() } else { w.to_string() }
 }
 
-/// 单字母状态 → 一句人话（web `statusText`）
+/// 单字母状态 → 一句人话（React 版 `statusText`）
 pub fn status_text(status: &str) -> String {
     let key = match status {
         "?" => "git.status_untracked",
@@ -73,7 +73,7 @@ pub fn status_text(status: &str) -> String {
     t!(key).to_string()
 }
 
-/// 状态字母的颜色（web `statusTone`）
+/// 状态字母的颜色（React 版 `statusTone`）
 pub fn status_tone(status: &str, ui: &Ui) -> Hsla {
     match status {
         "D" => ui.destructive,
@@ -82,7 +82,7 @@ pub fn status_tone(status: &str, ui: &Ui) -> Hsla {
     }
 }
 
-/// 空状态 / 说明文字（web 各面板里的 `Hint`）。detail 是 git 的原话，等宽小字另起一行
+/// 空状态 / 说明文字（React 版各面板里的 `Hint`）。detail 是 git 的原话，等宽小字另起一行
 pub fn hint(text: impl Into<SharedString>, detail: Option<String>, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let mut d = div()
@@ -99,7 +99,7 @@ pub fn hint(text: impl Into<SharedString>, detail: Option<String>, cx: &App) -> 
 }
 
 /// 详情头 / 提交行上的时间。当天只给时分（图里就是这样），跨天才补日期——一屏里绝大多数
-/// 提交都是今天的，天天重复同一个日期是噪音（web `formatWhen`）。
+/// 提交都是今天的，天天重复同一个日期是噪音（React 版 `formatWhen`）。
 pub fn format_when(ms: i64) -> String {
     if ms == 0 {
         return String::new();
@@ -121,7 +121,7 @@ pub fn format_when(ms: i64) -> String {
 
 // ---------------- 列表 / 目录树偏好 ----------------
 
-/// 列表 / 目录树。「修改」面板与 History 的提交详情共用一个键（web 的 `falcon.fileView`）：
+/// 列表 / 目录树。「修改」面板与 History 的提交详情共用一个键（`falcon.fileView`，沿用 React 版）：
 /// 同一个人对"列表还是树"的偏好不会在两个面板之间反复横跳。每次渲染现读，两处天然同步
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileViewMode {
@@ -147,7 +147,7 @@ pub fn set_file_view_mode(mode: FileViewMode, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// 头部的小号图标按钮（web 的 `variant="ghost" size="icon-xs"`）：按下态用 accent 底
+/// 头部的小号图标按钮（React 版的 `variant="ghost" size="icon-xs"`）：按下态用 accent 底
 pub fn tool_button(
     id: impl Into<ElementId>,
     name: IconName,
@@ -164,7 +164,7 @@ pub fn tool_button(
     }
 }
 
-/// 列表 / 目录树两个切换按钮（web `FileViewToggle`）
+/// 列表 / 目录树两个切换按钮（React 版 `FileViewToggle`）
 pub fn file_view_toggle(prefix: &str, cx: &App) -> Div {
     let mode = file_view_mode(cx);
     div()
@@ -196,7 +196,7 @@ pub fn file_view_toggle(prefix: &str, cx: &App) -> Div {
 
 // ---------------- 三态勾选框 ----------------
 
-/// gpui-component 的 Checkbox 没有半选态，而目录行 / 全选框要它（web 的 "indeterminate"）
+/// gpui-component 的 Checkbox 没有半选态，而目录行 / 全选框要它（React 版的 "indeterminate"）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
     Off,
@@ -246,7 +246,7 @@ pub fn checkbox(
 
 // ---------------- 多仓库成员切换 ----------------
 
-/// 多仓库项目在 Git / 修改面板头部的成员切换器（web `MultiRepoSelect`）。非多仓库项目给
+/// 多仓库项目在 Git / 修改面板头部的成员切换器（React 版 `MultiRepoSelect`）。非多仓库项目给
 /// None，两个面板可以无条件挂上它。选择存在工作区（`multi_repo`）——两个面板与差异窗口
 /// 必须看同一个成员，面板自己记必然漂移。
 pub fn multi_repo_select(id: &str, ws: &Entity<Workspace>, project: Option<&Project>, cx: &App) -> Option<AnyElement> {
@@ -290,7 +290,7 @@ pub fn multi_repo_select(id: &str, ws: &Entity<Workspace>, project: Option<&Proj
 // ---------------- 改动文件：列表 / 目录树 ----------------
 
 /// 一组改动文件里的一个。「修改」面板与提交详情各自把自己的数据翻译成这个中立形状
-/// （web `FileChangeItem`）
+/// （React 版 `FileChangeItem`）
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileItem {
     /// 仓库根相对路径
@@ -329,7 +329,7 @@ pub enum FileRow {
 }
 
 pub const FILE_ROW_H: f32 = 24.;
-/// 每层缩进多少像素（web 的 INDENT）
+/// 每层缩进多少像素（React 版的 INDENT）
 const INDENT: f32 = 12.;
 
 /// 把文件摊成行。目录树默认全展开：改动文件通常就几十个，进来还要一层层点开才看得见反而

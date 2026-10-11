@@ -1,8 +1,8 @@
-//! 历史面板的三个表单：从此新建分支、重置当前分支到此处、改提交说明（web GitPanel 的
-//! `NewBranchDialog` / `ResetDialog` / `RewordDialog`）。
+//! 历史面板的三个表单：从此新建分支、重置当前分支到此处、改提交说明（旧 React 版
+//! GitPanel 的 `NewBranchDialog` / `ResetDialog` / `RewordDialog`）。
 //!
-//! 与 web 一致：点确认后对话框**不关**，操作成功才关——失败时（分支名已存在、改写被拒）
-//! 用户要在原处改了再试，而 toast 里有 git 的原话。点遮罩不关（web 的 lockOverlay），
+//! 照 React 版的做法：点确认后对话框**不关**，操作成功才关——失败时（分支名已存在、改写被拒）
+//! 用户要在原处改了再试，而 toast 里有 git 的原话。点遮罩不关（React 版的 lockOverlay），
 //! Esc / 取消照常关。
 
 use std::cell::Cell;

@@ -4,7 +4,7 @@
 //! - 网络线程收到 OUTPUT 帧直接调 [`TermCore::advance`] 加锁解析，UI 线程不碰解析；
 //! - REPLAY 帧（最大 4MB，可能在连接中途任意时刻到达——背压重同步）走
 //!   [`TermCore::replace_with_replay`]：在一个**新 Term** 上离锁解析，完成后加锁整体换上。语义就是
-//!   web 的"reset 再 write"，但 UI 线程既不会被 4MB 解析卡住，也不会画出半截画面；
+//!   旧 React 版的"reset 再 write"，但 UI 线程既不会被 4MB 解析卡住，也不会画出半截画面；
 //! - UI 线程每帧 [`TermCore::snapshot`]：加锁把可见区拷出来立即解锁，排版绘制只用快照。
 //!
 //! 同一个会话的 advance / replace 由同一条 socket 任务顺序调用，不会并发；resize / 选区 / 滚动
@@ -63,7 +63,7 @@ impl Dimensions for TermSize {
 /// （OSC 52 查询）在这里就被丢掉了，理由见 [`Listener`]。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
-    /// OSC 52 写剪贴板（只写不读，与 web 一致）
+    /// OSC 52 写剪贴板（只写不读，`Osc52::OnlyCopy`；沿用 React 版的口径）
     ClipboardStore(String),
     /// 终端要回写给程序的应答（DA / DSR 等），app 按 `input` 发回会话
     PtyWrite(String),
@@ -75,8 +75,8 @@ pub enum TermEvent {
 /// alacritty 的事件出口。所有 Term 共享同一个队列；`muted` 只在回放解析期间为真。
 ///
 /// 回放期间一律静音：回放里带着 zellij attach 时发的查询（DA、DSR 之类），再答一次就是往
-/// zellij 里敲一串垃圾（`termEnv.ts` 的 OscColorGate 注释写过同一个坑）；历史里的 OSC 52 也
-/// 不该在重连时再写一遍剪贴板。
+/// zellij 里敲一串垃圾（服务端 `term_env.rs` 的 OscColorGate 注释写过同一个坑，原 `termEnv.ts`）；
+/// 历史里的 OSC 52 也不该在重连时再写一遍剪贴板。
 ///
 /// 颜色查询不答：服务端的 OscColorGate 在 Viewer 发过 `appearance` 之后代答 OSC 10/11/12，
 /// 客户端再答一次，多个 Viewer 就会各答一遍。CSI 14t（文本区像素尺寸）照 xterm.js 默认
@@ -106,7 +106,7 @@ impl EventListener for Listener {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermOptions {
-    /// 与 web 一致取 10000（`TerminalView.tsx` 对齐 zellij 的 scroll_buffer）。zellij 会话在
+    /// 取 10000，对齐服务端给 zellij 的 scroll_buffer（`zellij::command::SCROLL_BUFFER`）。zellij 会话在
     /// alt screen 里，本地 scrollback 实际用不上，按需增长不占内存。
     pub scrollback: usize,
     pub cursor_shape: CursorShape,
@@ -150,12 +150,6 @@ impl Parser {
             modes: TermModeTracker::new(),
         }
     }
-}
-
-/// 可见区里的一格。
-#[derive(Clone, Debug)]
-pub struct SnapCell {
-    pub cell: Cell,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,7 +342,7 @@ impl TermCore {
         *self.term.lock().mode()
     }
 
-    /// 鼠标协议与编码，来自模式跟踪器（口径与 web 的 rio 引擎一致）。
+    /// 鼠标协议与编码，来自模式跟踪器（alacritty 的 TermMode 分不出 ?9、不认 ?1016）。
     pub fn mouse_mode(&self) -> MouseMode {
         let parser = self.parser.lock();
         MouseMode {

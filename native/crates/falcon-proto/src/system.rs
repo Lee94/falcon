@@ -72,7 +72,7 @@ pub struct FsListing {
 
 /// `POST /api/fs/validate` 的响应：后端本机上这个路径是不是一个能进的文件夹。
 ///
-/// **shared 里没有这个类型**，照 `routes.ts` 的字面量与 web `api.ts` 的
+/// **shared 里没有这个类型**，照 `routes.ts` 的字面量与 React 版 `api.ts` 的
 /// `{ ok: boolean; error?: string }` 补上。不是文件夹 / 不存在同样是 200 + ok:false。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

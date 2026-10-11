@@ -2,7 +2,7 @@
 //! `packages/shared/src/termEnv.ts` 的运行时部分（类型 `TermAppearance` / `OscColorHint`
 //! 在 falcon-proto 的 `term_env`）。纯函数与纯状态，零 I/O。
 //!
-//! 主题画在浏览器的 xterm.js 上，进程只看得到 PTY。grok / vim / less 靠
+//! 主题画在客户端上，进程只看得到 PTY。grok / vim / less 靠
 //! COLORFGBG、GROK_APPEARANCE，或启动时问一声 OSC 11。这边给出统一的值。
 //!
 //! 环境变量一律是**有序**的 `(名, 值)` 列表（与 `zellij::host` 同一约定）：TS 里是
@@ -63,7 +63,7 @@ pub fn appearance_from_hex(hex: Option<&str>) -> TermAppearance {
     if hex_luminance(hex.unwrap_or("#000000")) > 0.5 { TermAppearance::Light } else { TermAppearance::Dark }
 }
 
-/// 深浅线索到了、底字没到时的兜底，与 web 的 Falcon Dark / Falcon Light（lib/theme/catalog.ts）对齐。
+/// 深浅线索到了、底字没到时的兜底，与 falcon-theme 内置的 Falcon Dark / Falcon Light（`catalog.rs`）对齐。
 /// 返回 (bg, fg)。
 fn fallback(appearance: TermAppearance) -> (&'static str, &'static str) {
     match appearance {
@@ -228,12 +228,14 @@ pub struct GateOutput {
 
 /// 从 PTY 输出里抽出 OSC 10/11/12 查询，自己答、不转给 viewer。
 ///
-/// 交给 xterm.js 答有两个坑：回放历史会再答一次（键入一串 ESC 垃圾），
-/// 多个 Viewer 会每人答一次。Zellij 0.44 实测会把 pane 里的查询实时
+/// 交给客户端答有两个坑（旧 React 版就是让 xterm.js 答的）：回放历史会再答一次（键入一串
+/// ESC 垃圾），多个 Viewer 会每人答一次。Zellij 0.44 实测会把 pane 里的查询实时
 /// 转发到外层并把答复带回，所以这里的答复就是内层程序看到的底色；
 /// zellij client 自己 attach 时也会查一次。
 ///
-/// appearance 还没到时原样放过，让 xterm.js 兜底。
+/// appearance 还没到时原样放过。当初有 xterm.js 兜底；现在的客户端不答颜色查询（falcon-term
+/// 的 `Listener`），靠的是客户端先发 appearance 再发 resize（`falcon_proto::ws` 顶部），
+/// zellij attach 时的那次查询到这里时 appearance 已经在了。
 ///
 /// 输入是已经做过 UTF-8 跨块拼接的字符串（TS 的 onData 给的也是字符串）；跨块的只有
 /// 半截查询，扣在 `pending` 里。TS 构造时传一个取深浅的闭包、每块调一次；这里改成每块把

@@ -1,13 +1,13 @@
-//! 内嵌字体：启动时一次注册完，没有 web 那套"字到了再重建图集"的等待。
+//! 字体注册：正文字体永远嵌着、启动时注册；回退字体原生也嵌着，浏览器版按需拉（见 [`register`]）。
 //!
-//! 字体栈照 web 的 `lib/term.ts` / `styles.css`：界面与终端默认都是 Berkeley Mono（TX-02），
+//! 字体栈照旧 React 版的 `lib/term.ts` / `styles.css`：界面与终端默认都是 Berkeley Mono（TX-02），
 //! 缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
 //!
-//! 与 web 的一处差别：web 的 CSS 字体栈把 Symbols Nerd Font Mono 排在**主字体前面**——Maple
+//! 与旧 React 版的一处差别：它的 CSS 字体栈把 Symbols Nerd Font Mono 排在**主字体前面**——Maple
 //! 自带的 NF 图标是宽形，xterm 把 PUA 当 1 格且拒绝缩放，图标会被裁掉。GPUI 永远先查主字体，
 //! 而且拒绝把没有 `m` 字形的字体当主字体（实测日志 "has no 'm' character and was not loaded"，
 //! Symbols 正是这种纯图标字体），所以把它放在**回退链第一位**：主字体缺的码位先查图标字体，
-//! 效果与 web 的"图标排最前"相同（Berkeley 本身不含 Nerd 图标）。
+//! 效果与 React 版的"图标排最前"相同（Berkeley 本身不含 Nerd 图标）。
 
 use std::borrow::Cow;
 
@@ -67,7 +67,7 @@ pub fn embedded_fallbacks() -> Vec<&'static [u8]> {
 }
 
 /// 回退字体从 `<base>/fonts/*.ttf` 拉（浏览器版的构建脚本从 OUT_DIR 拷进产物），到了再注册、
-/// 重画——到之前缺的字形由 gpui-web 的 Canvas 回落顶着，与 web 按 unicode-range 懒加载同一个思路
+/// 重画——到之前缺的字形由 gpui-web 的 Canvas 回落顶着，与 React 版按 unicode-range 懒加载同一个思路
 fn fetch_fallbacks(base_url: &str, cx: &mut App) {
     // 小的先到：图标与拉丁回退几百 KB，中文 21MB 放最后
     for name in ["SymbolsNerdFontMono.ttf", "IoskeleyMonoTerm.ttf", "MapleMonoNL-NF-CN.ttf"] {
@@ -103,7 +103,7 @@ fn fetch_fallbacks(base_url: &str, cx: &mut App) {
 }
 
 /// 主字体之后的回退链。系统 CJK / emoji 兜 Maple 没覆盖的生僻字、假名、谚文、emoji——与
-/// web 的 FALLBACK_STACK 同一个理由（Maple CN 不是全集）。
+/// React 版的 FALLBACK_STACK 同一个理由（Maple CN 不是全集）。
 pub fn fallbacks() -> FontFallbacks {
     FontFallbacks::from_fonts(vec![
         NERD_SYMBOLS.to_string(),

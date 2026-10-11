@@ -1,13 +1,13 @@
-//! 会话总览（web 的 `components/SessionOverview.tsx`）：主区在 ActiveView::Overview 时盖在
-//! 画布上。舰队视图——先看健康度（三张状态卡兼作筛选器），再按需下钻到某一台机器上的某一个会话。
+//! 会话总览（旧 React 版的 `components/SessionOverview.tsx`）：主区在 ActiveView::Overview 时
+//! 盖在画布上。舰队视图——先看健康度（三张状态卡兼作筛选器），再按需下钻到某一台机器上的某一个会话。
 //!
 //! 筛选 / 勾选状态在 Workspace 上（`overview_filter` / `overview_project` / `selected`）：
 //! 项目菜单的"在总览中筛选"要能从外面把总览设到某个项目上。改了这几个字段要 `cx.notify()`，
-//! 与 web 的 setFilter / setProjectFilter 一样，换筛选清空勾选。
+//! 照 React 版的 setFilter / setProjectFilter，换筛选清空勾选。
 //!
-//! 与 web 的差别：web 的行本身不可点，只能点"打开"；这里点行（不在勾选框 / 按钮上）也打开
-//! 那个会话——已丢失的除外，它只剩一条记录。空闲时间的 hover（web 用 toLocaleString 给
-//! 绝对时间）没做：app 没有带时区的日期库。
+//! 与 React 版的差别：React 版的行本身不可点，只能点"打开"；这里点行（不在勾选框 / 按钮上）
+//! 也打开那个会话——已丢失的除外，它只剩一条记录。空闲时间的 hover（React 版用 toLocaleString
+//! 给绝对时间）没做：写这里时 app 还没有带时区的日期库，现在有 local_time.rs（chrono）可用。
 
 use falcon_core::reason::durability_hint;
 use falcon_proto::{SessionState, SessionWithProject};
@@ -32,7 +32,7 @@ use crate::zoom::zpx;
 
 const CARD_STATES: [SessionState; 3] = [SessionState::Active, SessionState::Unverified, SessionState::Dead];
 
-// 表格列宽（web 的 w-9 / w-23 / w-30 / w-22 / w-33），会话与位置两列平分剩下的
+// 表格列宽（React 版的 w-9 / w-23 / w-30 / w-22 / w-33），会话与位置两列平分剩下的
 const COL_CHECK: f32 = 36.;
 const COL_STATE: f32 = 92.;
 const COL_DURABLE: f32 = 120.;
@@ -376,7 +376,7 @@ impl SessionOverview {
                             .small()
                             .icon(IconName::Ellipsis)
                             .tooltip(t!("session.moreActions").to_string())
-                            // 按钮贴着右边：菜单右对齐往左展开，别溢出窗口（web 的 align end）
+                            // 按钮贴着右边：菜单右对齐往左展开，别溢出窗口（React 版的 align end）
                             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| to_popup(menu, items.clone())),
                     ),
             )

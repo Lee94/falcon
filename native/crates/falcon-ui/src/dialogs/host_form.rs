@@ -1,4 +1,4 @@
-//! 远端主机表单（web 的 `components/HostForm.tsx` + `SshFields.tsx`）。
+//! 远端主机表单（旧 React 版的 `components/HostForm.tsx` + `SshFields.tsx`）。
 //!
 //! 名称 / 主机 / 端口 / 用户 / 认证方式（key / password / agent）/ 私钥路径 / 密码；
 //! 「检测连接」试连的是表单里**还没保存**的凭据（`POST /api/hosts/test`，编辑时带上 hostId，
@@ -115,7 +115,7 @@ impl SshFields {
         let v = |s: &Entity<InputState>| s.read(cx).value().to_string();
         SshValues {
             host: v(&self.host),
-            // web 是 Number(value)：空串 / 非数字交给服务端（主机端点按 `port || 22` 兜底）
+            // React 版是 Number(value)：空串 / 非数字交给服务端（主机端点按 `port || 22` 兜底）
             port: v(&self.port).trim().parse().unwrap_or(0),
             username: v(&self.username),
             auth_method: self.auth_method(cx),

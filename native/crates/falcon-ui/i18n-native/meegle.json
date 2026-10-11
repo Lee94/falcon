@@ -1,9 +1,0 @@
-{
-  "native": {
-    "meegle": {
-      "labelled": "%{label}：%{value}",
-      "labelPrefix": "%{label}：",
-      "listSep": "、"
-    }
-  }
-}

@@ -1,7 +1,7 @@
 //! 工作区排布：主区是从左到右的**列**，每列从上到下是若干**窗口**（pane）；列再分到
 //! 一块块**画布**上（[`ColumnLayout::canvas`]），一次只显示一块，一块就是一屏。
 //!
-//! 对应 web 的 `lib/layout.ts`，权威决策在 `docs/adr/0012-column-workspace.md`。
+//! 对应旧 React 版的 `lib/layout.ts`，权威决策在 `docs/adr/0012-column-workspace.md`。
 //!
 //! 终端 / 文件 / 差异混排在同一套结构里，谁在哪一列哪一格，只由这里的 key 顺序决定
 //! （key 约定见 [`crate::pane_key`]）。纯函数、零 GPUI：几何（列宽、窗口高、拖拽落点）
@@ -14,16 +14,16 @@
 //! 高度），`Some(px)` = 用户拖过，按像素钉住。拖一次只钉一边（列钉左边那列、
 //! 窗口钉上面那个），右边 / 下面的跟着让位。
 //!
-//! 与 web 的差别只在"没变"怎么表达：TS 的 [`apply_drop`] / [`assign_canvases`] /
+//! 与 React 版的差别只在"没变"怎么表达：TS 的 [`apply_drop`] / [`assign_canvases`] /
 //! [`move_to_canvas`] 没变时返回**同一个数组**，调用方靠引用相等跳过一次 set；Rust 这边
 //! 返回 `None`。其余函数一律返回新的 `Vec`，输入按引用借，不会被改动。
 //!
 //! 数字一律 `f64`：与 TS 的 number 逐位同算，四舍五入走 JS 的 `Math.round`（见
 //! [`crate::js`]），视图层自己转成 GPUI 的 `Pixels`。
 //!
-//! ADR 0012 的"每扇窗口绝对定位、DOM 顺序恒定"在原生这边不需要（终端状态在模型里，
-//! 元素每帧按快照重画，挂在树的哪个位置都一样），但几何仍然从这里出，两个客户端的
-//! 列宽 / 窗口高才对得上。
+//! ADR 0012 的"每扇窗口绝对定位、DOM 顺序恒定"在 GPUI 这边不需要（终端状态在模型里，
+//! 元素每帧按快照重画，挂在树的哪个位置都一样），但几何仍然从这里出，列宽 / 窗口高
+//! 沿用 React 版的同一套算法。
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,7 +88,7 @@ pub const PANE_MIN_PX: f64 = 96.0;
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 列 id 只求唯一（视图的 key 与拖拽标识），不承载任何语义。
-/// 形状照 web：`c` + 毫秒时间戳的 36 进制 + 序号的 36 进制。
+/// 形状照 React 版：`c` + 毫秒时间戳的 36 进制 + 序号的 36 进制。
 pub fn new_column_id() -> String {
     seq_id('c')
 }
@@ -595,8 +595,8 @@ pub struct CanvasFrames {
 /// 一块画布的排布 → 像素坐标（`columns` 就是这一块上的列，含接在最右的固定列）。
 /// 列的左右边取整，最后一列的右边正好落在 `viewport.width` 上。
 ///
-/// web 那边不用嵌套 flex 而是自己算坐标，是因为 xterm 的画布一旦换过父节点渲染尺寸
-/// 就错了（ADR 0012）；原生没有这个坑，但坐标仍从这里出，两个客户端才画得一样。
+/// 旧 React 版不用嵌套 flex 而是自己算坐标，是因为 xterm 的画布一旦换过父节点渲染尺寸
+/// 就错了（ADR 0012）；GPUI 没有这个坑，坐标仍从这里出，沿用同一套几何。
 ///
 /// `gap` 在 TS 里缺省是 [`CANVAS_GAP_PX`]。
 pub fn layout_frames(columns: &[ColumnLayout], viewport: Viewport, gap: f64) -> CanvasFrames {
@@ -672,7 +672,7 @@ pub struct ThumbRect {
 /// 高全糊成一块，认不出几列几扇。所以按"格子"缩——列占到下一列的左边为止、窗口占到
 /// 下一扇的顶为止，取整之后各自让出 `gap`；整张图正好铺满 `size`，四周不留边（边距归外框）。
 ///
-/// 取整走 [`js_round`]（与 JS 的 `Math.round` 一致，8.5 → 9），两个客户端的图逐像素相同。
+/// 取整走 [`js_round`]（与 JS 的 `Math.round` 一致，8.5 → 9），沿用 React 版的取整口径。
 /// `gap` 在 TS 里缺省是 1。
 pub fn canvas_thumb(columns: &[ColumnLayout], viewport: Viewport, size: Viewport, gap: f64) -> Vec<ThumbRect> {
     if !(viewport.width > 0.0 && viewport.height > 0.0) {

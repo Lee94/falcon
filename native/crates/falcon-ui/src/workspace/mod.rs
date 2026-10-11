@@ -1,9 +1,9 @@
-//! 一台 falcon 服务端的工作区：web 那个 zustand store（`packages/web/src/store.ts`）的原生版。
+//! 一台 falcon 服务端的工作区：旧 React 版那个 zustand store（`packages/web/src/store.ts`）的移植。
 //!
 //! 两层：
 //! - **排布与选择**（开着哪些窗口、列怎么排、焦点在哪、侧栏展开到哪）是纯状态，全部在
-//!   [`falcon_core::workspace::WorkspaceState`] 里——那是 store.ts 纯函数部分的移植，带着与
-//!   web 同一组测试。这里只负责"调它、落盘、通知视图"，不再自己写一遍规则；
+//!   [`falcon_core::workspace::WorkspaceState`] 里——那是 store.ts 纯函数部分的移植，带着从
+//!   React 版搬来的那组测试。这里只负责"调它、落盘、通知视图"，不再自己写一遍规则；
 //! - **服务端数据**（项目 / 主机 / 会话）、登录态、轮询、活着的终端视图，是 app 自己的事。
 //!
 //! 侧栏、画布、右侧栏、命令面板都 observe 这个 Entity。浮层（菜单 / 确认框 / 表单）不进
@@ -48,7 +48,7 @@ pub struct AskpassSpec {
     pub prompt: String,
 }
 
-/// 登录态：web 里 `auth.required && !auth.authenticated` 时整页换成 Login
+/// 登录态：React 版里 `auth.required && !auth.authenticated` 时整页换成 Login
 #[derive(Clone, Debug, PartialEq)]
 pub enum AuthPhase {
     /// 还没问过服务端
@@ -77,7 +77,7 @@ pub struct Toast {
     pub kind: ToastKind,
     pub title: String,
     pub body: Option<String>,
-    /// 要人读完的（git 失败的原话）：不自动消失。web 是停留 12s，通知组件只有"5s"与
+    /// 要人读完的（git 失败的原话）：不自动消失。React 版是停留 12s，通知组件只有"5s"与
     /// "不自动关"两档，取后者
     pub sticky: bool,
 }
@@ -119,7 +119,7 @@ pub struct Workspace {
     /// 换 / 传 / 删应用图标的请求在路上
     pub app_icon_busy: bool,
 
-    /// 活着的终端视图：在 tabs 里就常驻（web 同样不卸载——卸载 = 关 WS，再挂要重连 + 回放）
+    /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
     changes_in_flight: bool,
     _tasks: Vec<Task<()>>,
@@ -159,7 +159,7 @@ impl Workspace {
             changes_in_flight: false,
             _tasks: Vec::new(),
         };
-        // 画布的收尾挂在自己的每次通知上（web 挂在 store 订阅上的 settleCanvases）：会改排布 /
+        // 画布的收尾挂在自己的每次通知上（React 版挂在 store 订阅上的 settleCanvases）：会改排布 /
         // 焦点 / 可见性的动作有十几处，每处各调一遍迟早漏一处，新列就一直没有画布
         cx.observe_self(|this, cx| this.settle_canvases(cx)).detach();
         this.start(cx);
@@ -180,11 +180,12 @@ impl Workspace {
 
     /// 轮询在这里起；认证 / 首次加载由窗口触发 [`Self::init`]（本机服务要先确认起来了）
     fn start(&mut self, cx: &mut Context<Self>) {
-        // 会话列表 5s、askpass 1.5s、侧栏 git 计数 8s：与 web 同一套节奏
+        // 会话列表 5s、askpass 1.5s、侧栏 git 计数 8s：沿用 React 版的节奏
         self._tasks.push(Self::poll(cx, Duration::from_secs(5), |this, cx| this.refresh_sessions(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_millis(1500), |this, cx| this.pull_askpass(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
         self._tasks.push(Self::watch_wake(cx));
+        self._tasks.push(Self::watch_resume(cx));
         // 自动重登成功后，停在"需要登录"的界面自己恢复
         let mut events = self.client.subscribe_auth();
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -221,22 +222,40 @@ impl Workspace {
                 if gap < TICK + Duration::from_secs(10) {
                     continue;
                 }
-                let ok = this
-                    .update(cx, |this, cx| {
-                        for view in this.terminals.values() {
-                            view.read(cx).reconnect_now();
-                        }
-                        if this.auth_phase == AuthPhase::Ready {
-                            this.refresh_sessions(cx);
-                            this.refresh_changes(cx);
-                        }
-                    })
-                    .is_ok();
-                if !ok {
+                if this.update(cx, |this, cx| this.resume(cx)).is_err() {
                     break;
                 }
             }
         })
+    }
+
+    /// 浏览器版的网络恢复 / 标签页切回前台（`Platform::on_resume`）：与睡眠唤醒同样处理。
+    /// 原生不触发，回调随即被丢掉，这个任务读到通道关闭就结束
+    fn watch_resume(cx: &mut Context<Self>) -> Task<()> {
+        let (tx, mut resumes) = futures::channel::mpsc::unbounded::<()>();
+        falcon_platform::get(cx).on_resume(Box::new(move || {
+            let _ = tx.unbounded_send(());
+        }));
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while resumes.next().await.is_some() {
+                if this.update(cx, |this, cx| this.resume(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
+    /// 醒来 / 回到前台：每个终端 `reconnect_now`（退避中的立刻连，连着的发 ping 探活——
+    /// 睡眠或后台期间可能早被代理 / NAT 掐成半开），已登录就顺手补拉会话列表与改动计数
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        for view in self.terminals.values() {
+            view.read(cx).reconnect_now();
+        }
+        if self.auth_phase == AuthPhase::Ready {
+            self.refresh_sessions(cx);
+            self.refresh_changes(cx);
+        }
     }
 
     fn poll(cx: &mut Context<Self>, every: Duration, f: impl Fn(&mut Self, &mut Context<Self>) + 'static) -> Task<()> {
@@ -345,6 +364,10 @@ impl Workspace {
                         this.store_password(Some(&password));
                         this.client.set_relogin_password(Some(password.clone()));
                     }
+                    // 浏览器版从 px0 入口被送来登录的：直接回去，页面随即卸载
+                    if falcon_platform::get(cx).redirect_after_login() {
+                        return;
+                    }
                     this.auth_phase = AuthPhase::Checking;
                     this.init(cx);
                     // 停在 Unauthorized 的终端 socket 登录成功后会自己接着连；保险起见叫醒一次
@@ -374,7 +397,7 @@ impl Workspace {
         .detach();
     }
 
-    /// REST 失败的统一出口：401 回登录页（web 的 handleApiError）
+    /// REST 失败的统一出口：401 回登录页（React 版的 handleApiError）
     pub fn handle_error(&mut self, err: &falcon_client::ApiError, cx: &mut Context<Self>) {
         if err.is_unauthorized() && self.auth_phase == AuthPhase::Ready {
             self.auth_phase = AuthPhase::NeedLogin;
@@ -391,7 +414,7 @@ impl Workspace {
         }));
     }
 
-    /// 同 [`Self::toast`]，但不自动消失（web 的 `sticky: true`）
+    /// 同 [`Self::toast`]，但不自动消失（React 版的 `sticky: true`）
     pub fn toast_sticky(&mut self, kind: ToastKind, title: impl Into<String>, body: Option<String>, cx: &mut Context<Self>) {
         cx.emit(WorkspaceEvent::Toast(Toast {
             kind,
@@ -453,7 +476,7 @@ impl Workspace {
     }
 
     fn apply_sessions(&mut self, sessions: Vec<SessionWithProject>, cx: &mut Context<Self>) {
-        // 内容没变就整个跳过（web 的 sameFlatArray）：tabs / active 在上一轮已经收敛
+        // 内容没变就整个跳过（React 版的 sameFlatArray）：tabs / active 在上一轮已经收敛
         if self.sessions == sessions {
             return;
         }
@@ -668,6 +691,7 @@ impl Workspace {
                         cx.notify();
                     }
                 }
+                TerminalViewEvent::Toast { kind, title, body } => this.toast(*kind, title.clone(), body.clone(), cx),
             })
             .detach();
             self.terminals.insert(id, view);

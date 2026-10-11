@@ -1,4 +1,4 @@
-//! History 左侧那条提交图的泳道布局。对应 web 的 `lib/gitGraph.ts`，纯函数。
+//! History 左侧那条提交图的泳道布局。对应旧 React 版的 `lib/gitGraph.ts`，纯函数。
 //!
 //! 输入是服务端按 `--date-order` 给的一页提交（新 → 旧），输出每行画什么：圆点落在
 //! 第几条泳道、以及经过这一行的线段怎么走。渲染层只管把这些序号翻译成坐标，一行一个
@@ -162,7 +162,7 @@ pub fn layout_commit_graph<C: GraphInput>(commits: &[C]) -> Vec<GraphRow> {
 /// 同一个颜色，于是主线在整页上颜色一致，这正是扫一眼时要的信息。
 pub const GRAPH_COLOR_COUNT: usize = 6;
 
-/// 泳道用第几号图色（1..=6）。web 是 `var(--graph-N)`，这里只给 N，颜色由主题出
+/// 泳道用第几号图色（1..=6）。React 版是 `var(--graph-N)`，这里只给 N，颜色由主题出
 pub fn lane_color(lane: usize) -> usize {
     lane % GRAPH_COLOR_COUNT + 1
 }

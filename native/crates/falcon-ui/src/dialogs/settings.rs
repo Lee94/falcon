@@ -1,13 +1,13 @@
-//! 设置（web 的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、应用图标、
-//! 终端字体 / 字号 / 行高 / 光标）、账户（访问密码、钥匙串、退出登录）、远端主机、中转（端口转发
-//! 与公网发布，按机器管理，ADR 0016）、关于。
+//! 设置（旧 React 版的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、
+//! 应用图标、终端字体 / 字号 / 行高 / 光标）、账户（访问密码、钥匙串、退出登录）、远端主机、
+//! 中转（端口转发与公网发布，按机器管理，ADR 0016）、关于。
 //!
 //! 设置是覆盖层，不是一页：几乎铺满窗口的对话框，左侧按模块切（顶上一个搜索框按名字 /
 //! 分组 / 关键字筛模块），右侧是当前模块的项，各自滚动。
 //!
 //! 各模块是独立的 Entity（输入框、滑块、主题选择器都有状态），打开时一次建好，关掉对话框
 //! 一起释放——主题选择器在释放时把预览复原（theme_picker.rs）。例外是中转页：它开着就每 3s
-//! 轮询，所以只在切到它时建、切走就丢（web 同样是切 tab 即卸载）。
+//! 轮询，所以只在切到它时建、切走就丢（沿用 React 版：切 tab 即卸载）。
 
 mod account;
 mod app_icon;
@@ -95,7 +95,7 @@ pub fn open(ws: &Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App)
     let view = cx.new(|cx| SettingsView::new(ws.clone(), tab, window, cx));
     let search = view.read(cx).search.clone();
     window.open_dialog(cx, move |dialog, window, _| {
-        // web：w-[min(90rem,100vw-4rem)] h-[100vh-4rem]，上下各留 2rem
+        // React 版：w-[min(90rem,100vw-4rem)] h-[100vh-4rem]，上下各留 2rem
         let vp = window.viewport_size();
         let w = (vp.width - zpx(64.)).min(zpx(1440.));
         let h = vp.height - zpx(64.);
@@ -109,7 +109,7 @@ pub fn open(ws: &Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App)
             .on_ok(|_, _, _| false)
             .child(div().h(h - zpx(2.)).child(view.clone()))
     });
-    // 对话框打开时会把焦点收到自己身上：等它收完再交给搜索框（web 的 data-autofocus）
+    // 对话框打开时会把焦点收到自己身上：等它收完再交给搜索框（React 版的 data-autofocus）
     window.defer(cx, move |window, cx| search.update(cx, |i, cx| i.focus(window, cx)));
 }
 
@@ -228,8 +228,8 @@ impl SettingsView {
             div().font_family(crate::fonts::BERKELEY).text_sm().text_color(ui.muted_foreground).child(text)
         };
         let dash = "—".to_string();
-        // web 的"安装应用"（PWA）一行在原生里没有意义，换成客户端版本与服务端地址——
-        // 原生能连任意一台 falcon 服务端，"版本"指的是那台服务端的
+        // React 版这里是"安装应用"（PWA）一行，PWA 已删；换成客户端版本与服务端地址——
+        // 原生客户端能连任意一台 falcon 服务端，"版本"指的是连着的那台服务端的
         widgets::section(
             t!("settings.aboutTitle").to_string(),
             None,

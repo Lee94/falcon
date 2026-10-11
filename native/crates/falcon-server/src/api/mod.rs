@@ -158,7 +158,8 @@ async fn require_login(State(state): State<AppState>, req: Request, next: Next) 
     let path = req.uri().path();
     if path.starts_with("/px0/") {
         // 浏览器导航过来的（原生客户端把入口交给系统浏览器时，那边多半没登录过）：
-        // 送去首页登录，带上原地址，登录成功后回来（web 的 lib/loginNext.ts）
+        // 送去首页登录，带上原地址，登录成功后回来（浏览器版的 `Platform::redirect_after_login`，
+        // 只认 `/px0/` 开头的同源路径，规则在 falcon-core 的 `px0::login_next`）
         let html = req.headers().get(ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
         if req.method() == Method::GET && html {
             let full = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or(path);

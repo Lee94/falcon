@@ -449,6 +449,7 @@ gpui-pre-web 0.3.8 的现状出自源码（`gpui-pre-web-0.3.8/src/`）与 gpui-
 | 终端 IME 兼容 | 镜像 textarea 依赖 `selected_text_range` | Falcon 的终端 handler 恒返回 `Some(0..0)`，正好兼容，保持即可 | — |
 | 键盘 | 只认 `event.key`、布局固定 us；mac 上 Option 不能当 Meta | 终端的 Option-as-Meta 在应用层按 `event.code` 补（需要 fork 透出 code）；浏览器保留键（⌘T / ⌘W 等）走 `falcon_core::shortcuts` 的 BrowserAlias | C0 / C1 |
 | WebSocket | 无 | falcon-client 的 web 传输用 `web_sys::WebSocket`，`binaryType = arraybuffer` | C0 / C2 |
+| WS 心跳 / 半开检测 | 浏览器发不了 ping 帧；后台标签页的定时器被节流到分钟级 | 已补（2026-10-11）：协议加应用层 `{"type":"ping"}` / `{"type":"pong"}`（服务端写端直接回，不看会话在不在），wasm 上的心跳与 `reconnect_now` 探活用它；`Platform::on_resume` 接 `online` 与标签页切回可见，与睡眠唤醒同样处理 | C3 |
 | HTTP | `fetch_http_client` 没有上传流式与进度，丢弃 future 不中断请求 | 普通请求走 fetch（同源 credentials，挂 AbortController）；上传走 XHR | C2 |
 | 登录态 | cookie 是 httpOnly，脚本读不到也设不了 | cookie 罐模式；401 / close 4401 推 LoginRequired；钥匙串自动重登在浏览器里没有 | C2 |
 | 文件选择 / 下载 | `prompt_for_paths` 返回错误 | DOM `<input type=file>`（含 `webkitdirectory`）+ `<a download>` | C3 |
@@ -465,6 +466,7 @@ gpui-pre-web 0.3.8 的现状出自源码（`gpui-pre-web-0.3.8/src/`）与 gpui-
 | 弹窗拦截 | `open_url` 是 `window.open`，在 await 之后调用会被拦 | 打开外链只在同步点击回调里做（px0、飞书链接已是这样，个别异步路径要改） | C3 |
 | GPU 设备丢失 | 停止渲染 | 检测到后自动 reload（§8） | C3 |
 | favicon | 无 | 改 `<link rel=icon>`，走现有 `/api/app-icon/*` | C3 |
+| px0 登录跳回 | 无（服务端把没登录的 `/px0/*` 导航送去 `/?next=<地址>`，React 版由 `lib/loginNext.ts` 在登录后跳回） | 已补（2026-10-11）：登录成功后 `Platform::redirect_after_login` 读 `location.search` 的 `next`，`falcon_core::px0::login_next` 只认 `/px0/` 开头的同源路径，`location.replace` 过去 | C3 |
 
 ---
 

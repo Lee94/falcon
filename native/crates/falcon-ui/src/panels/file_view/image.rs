@@ -1,11 +1,11 @@
-//! 图片预览（web FileView.tsx 的 ImagePane，ADR 0007 决定四）。
+//! 图片预览（旧 React 版 FileView.tsx 的 ImagePane，ADR 0007 决定四）。
 //!
 //! 字节走原始字节路由（`rawBase + path`，URL 里带作用域令牌），不经 JSON；解码放后台线程，
-//! 解完换上。缩放模型照 web：`fit`（贴合窗口，但不放大小图——16px 的图标撑满屏幕只是一团
+//! 解完换上。缩放模型照 React 版：`fit`（贴合窗口，但不放大小图——16px 的图标撑满屏幕只是一团
 //! 马赛克）或一个具体倍率。⌘/Ctrl + 滚轮与触控板捏合缩放、双击在 fit 与 1:1 之间切换、放大后
 //! 拖拽平移；缩放以指针位置为锚点——放大时光标底下那个像素不动。
 //!
-//! web 靠浏览器的滚动容器（scrollLeft / scrollTop）；这里没有现成的，就自己记一个等价的
+//! React 版靠浏览器的滚动容器（scrollLeft / scrollTop）；这里没有现成的，就自己记一个等价的
 //! "滚动量"：内容盒 = max(视口, 图 + 两边留白)，图在内容盒里居中，滚动量夹在 [0, 内容 − 视口]。
 //! 几何全是纯函数（[`Geometry`]），带单测。
 
@@ -28,7 +28,7 @@ use crate::zoom::zpx;
 
 const ZOOM_MIN: f32 = 0.05;
 const ZOOM_MAX: f32 = 32.;
-/// 贴合时四周留的空（web 容器的 p-6）
+/// 贴合时四周留的空（React 版容器的 p-6）
 const FIT_PAD: f32 = 24.;
 
 fn clamp_zoom(z: f32) -> f32 {
@@ -199,7 +199,7 @@ impl ImagePane {
 
     fn on_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(g) = self.geometry() else { return };
-        // 鼠标滚轮一格是一"行"，按 web 那边一格约 100px 折算；触控板给的是像素
+        // 鼠标滚轮一格是一"行"，照 React 版在浏览器里一格约 100px 折算；触控板给的是像素
         let delta = e.delta.pixel_delta(px(100.));
         cx.stop_propagation();
         if e.modifiers.platform || e.modifiers.control {

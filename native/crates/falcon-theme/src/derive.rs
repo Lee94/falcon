@@ -15,14 +15,16 @@
 //! 终端同色才不会在圆角边缘露出色差）。所以唯一能拉开层次的是 `app`，它必须跟
 //! `background` 差得看得见。
 //!
-//! **界面色只准用这里派生出来的语义 token**，不许在组件里写死颜色；新增语义色先去
-//! web 的 derive.ts 加规则，再照抄到这里（`tests/derive_golden.rs` 会逼着两边一致）。
+//! **界面色只准用这里派生出来的语义 token**，不许在组件里写死颜色；新增语义色就在
+//! 这里加规则（当初是先在旧 React 版的 derive.ts 加、再照抄过来，React 版删掉后这里
+//! 就是真相来源）。`tests/derive_golden.rs` 冻结着既有规则的输出，有意改规则要连
+//! fixture 一起改；[`ResolvedTheme::css_vars`] 的键与 fixture 一一对应，往里加键也一样。
 //!
-//! apply.ts 的对应：web 把 [`ResolvedTheme::css_vars`] 那张表写到 `<html>` 的内联
+//! apply.ts 的对应：React 版把 [`ResolvedTheme::css_vars`] 那张表写到 `<html>` 的内联
 //! style 上、按 `appearance` 切 `.dark`、把 `<meta name="theme-color">` 设成底色。
-//! 原生这边没有 DOM，app 层直接读强类型字段（转 gpui 的 Hsla 在 app 层做）；
+//! GPUI 界面不经 DOM，app 层直接读强类型字段（转 gpui 的 Hsla 在 app 层做）；
 //! `systemPrefersDark` / `watchSystemTheme` 对应 GPUI 的 `window.appearance()` 与
-//! 其变化回调，也在 app 层。store 里按槽位对象缓存派生结果那一层（`WeakMap`，
+//! 其变化回调，也在 app 层。React 版 store 里按槽位对象缓存派生结果那一层（`WeakMap`，
 //! 保证同一套主题拿到同一个终端配色对象）同样归 app 层。
 
 use std::collections::BTreeMap;
@@ -43,10 +45,11 @@ const MUTED_MIN: f64 = 3.5;
 #[derive(Clone, PartialEq, Debug)]
 pub struct ResolvedTheme {
     pub colors: ThemeColors,
-    /// 按底色亮度判的深浅，决定 `.dark`、color-scheme、给 PTY 的 COLORFGBG。
+    /// 按底色亮度判的深浅，决定界面按深色还是浅色画（React 版的 `.dark`、color-scheme）、
+    /// 给 PTY 的 COLORFGBG。
     /// **不是明暗模式**：浅色槽位里放一套深底主题，这里就是 Dark。
     pub appearance: Appearance,
-    /// `appearance == Dark`，即 web 上 `<html>` 有没有 `.dark`
+    /// `appearance == Dark`，即 React 版里 `<html>` 有没有 `.dark`
     pub is_dark: bool,
     /// 界面语义 token
     pub ui: UiTokens,
@@ -58,7 +61,7 @@ pub struct ResolvedTheme {
     pub hint: TermHint,
 }
 
-/// 界面语义 token。每个字段对应 web 写在 `<html>` 上的一个 CSS 变量（注释里的名字）。
+/// 界面语义 token。每个字段对应 React 版写在 `<html>` 上的一个 CSS 变量（注释里的名字）。
 ///
 /// 不透明的是 [`Rgb`]，带 alpha 的（边框、焦点环）是 [`Rgba`]。
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -148,7 +151,7 @@ pub struct UiTokens {
     pub selection_foreground: Option<Rgb>,
 }
 
-/// 语法高亮色：shiki 的 css-variables 主题读的那组变量（web 的 `lib/highlight.ts`）。
+/// 语法高亮色：shiki 的 css-variables 主题读的那组变量（React 版的 `lib/highlight.ts`）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SyntaxColors {
     /// `--shiki-foreground`
@@ -183,7 +186,7 @@ pub struct SyntaxColors {
     pub ansi: [Rgb; 16],
 }
 
-/// 终端配色（web 交给 xterm.js 的 `ITheme`，字段注释是 ITheme 的键名）。
+/// 终端配色。字段沿用 xterm.js `ITheme` 的形状（旧 React 版直接把它交给 xterm.js），字段注释是 ITheme 的键名。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TerminalColors {
     /// `background`
@@ -412,11 +415,11 @@ pub fn extended_ansi(overrides: &BTreeMap<u8, Rgb>) -> Vec<Rgb> {
 }
 
 impl ResolvedTheme {
-    /// web 写到 `<html>` 上的整张 CSS 变量表，键与顺序都与 derive.ts 的 `vars` 相同，
+    /// React 版写到 `<html>` 上的整张 CSS 变量表，键与顺序都与 derive.ts 的 `vars` 相同，
     /// 值的文本形式也相同（`#rrggbb` / `#rrggbbaa` / `34%` / `currentcolor`）。
     ///
-    /// 原生界面不需要它——字段直接读；它存在是为了与 web 逐字对拍（金标准测试），
-    /// 以及排查时能把两边的输出摆在一起看。
+    /// 界面不需要它——字段直接读；它留着是为了与 React 版冻结下来的金标准 fixture
+    /// 逐字对拍（`tests/derive_golden.rs`），排查时也能把输出与 fixture 摆在一起看。
     pub fn css_vars(&self) -> Vec<(&'static str, String)> {
         let u = &self.ui;
         let s = &self.syntax;
@@ -732,7 +735,7 @@ palette = 15=#bbc3c4
         assert_eq!(x[239].to_hex(), "#abcdef");
     }
 
-    /// 带 extended 的主题给 xterm 整份 extendedAnsi
+    /// 带 extended 的主题给出整份 extendedAnsi
     #[test]
     fn theme_with_extended_gets_full_table() {
         let colors = ThemeColors { extended: BTreeMap::from([(16, hex("#123456"))]), ..FALCON_DARK.colors };
@@ -744,7 +747,7 @@ palette = 15=#bbc3c4
 
     // 以下不是从 TS 移植的
 
-    /// css_vars 与 web 的 vars 同样 76 个键、无重复（写 CSS 变量的那张表一个不漏）
+    /// css_vars 与 React 版的 vars 同样 76 个键、无重复（写 CSS 变量的那张表一个不漏）
     #[test]
     fn css_vars_keys_unique() {
         let vars = derive_theme(&load_catalog()[0].colors).css_vars();

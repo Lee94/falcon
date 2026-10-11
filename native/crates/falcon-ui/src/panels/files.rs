@@ -1,4 +1,4 @@
-//! 右侧「文件」面板：项目工作目录的目录浏览器（web 的 components/FilesPanel.tsx，ADR 0009），
+//! 右侧「文件」面板：项目工作目录的目录浏览器（旧 React 版的 components/FilesPanel.tsx，ADR 0009），
 //! 附带下载 / 上传（ADR 0008）。
 //!
 //! 与「修改」面板的分工：那边列的是 git 眼里"这次动了什么"，这边列的是磁盘上真正有什么——
@@ -6,7 +6,7 @@
 //!
 //! 交互按文件管理器而不是树：顶上路径栏 + 图标工具栏，当前目录平铺成表（复选框 / 名称 /
 //! 大小 / 修改时间）。点目录进去、点文件开查看窗口；多选走复选框和 Shift / ⌘ 点击，右键
-//! 复制路径 / 下载 / 重命名 / 删除。原生多一件 web 没有的：从访达把文件 / 文件夹拖进来即上传
+//! 复制路径 / 下载 / 重命名 / 删除。原生上多一件 React 版没有的：从访达把文件 / 文件夹拖进来即上传
 //! （落在目录行上就传进那个目录）。
 //!
 //! 宿主机路径一律走 falcon-core 的 file_path（`join_host_path` / `parse_nav_path`），不用
@@ -43,10 +43,10 @@ use crate::zoom::zpx;
 
 const ROW_H: f32 = 28.;
 const CHECK_COL: f32 = 24.;
-/// 3.5rem / 9.5rem：与 web 的表格列宽一致
+/// 3.5rem / 9.5rem：照 React 版的表格列宽
 const SIZE_COL: f32 = 56.;
 const MTIME_COL: f32 = 152.;
-/// 面板够宽才露出大小 / 修改时间（web 的容器查询 @[300px] / @[360px]，ADR 0009 决定二）
+/// 面板够宽才露出大小 / 修改时间（React 版的容器查询 @[300px] / @[360px]，ADR 0009 决定二）
 const SHOW_SIZE_AT: f32 = 300.;
 const SHOW_MTIME_AT: f32 = 360.;
 
@@ -736,7 +736,7 @@ impl FilesPanel {
             }),
         ));
         bar = bar.child(
-            // 加载中转的是按钮自己的图标（web 的 animate-spin），不换成别的加载图形
+            // 加载中转的是按钮自己的图标（React 版的 animate-spin），不换成别的加载图形
             tool_button("files-refresh", IconName::RefreshCw, t!("files.refresh"), !has_project, false, false, self.listing.loading && has_project, &ui)
                 .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
         );
@@ -935,7 +935,7 @@ impl FilesPanel {
                     }
                 }))
                 .child(
-                    // 复选框单独吃掉按下：点它只勾选，不触发整行的单选（web 的 data-file-check）
+                    // 复选框单独吃掉按下：点它只勾选，不触发整行的单选（React 版的 data-file-check）
                     div()
                         .id(SharedString::from(format!("files-check-{}", entry.path)))
                         .w(zpx(CHECK_COL))
@@ -1043,7 +1043,7 @@ impl Render for FilesPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let has_project = self.project_id.is_some();
-        // 断点按界面缩放折算（web 的容器查询量的是 CSS px，放大页面同样会先收起列）
+        // 断点按界面缩放折算（React 版的容器查询量的是 CSS px，放大页面同样会先收起列）
         let width = self.width.as_f32() / crate::zoom::zoom();
         let (show_size, show_mtime) = (width >= SHOW_SIZE_AT, width >= SHOW_MTIME_AT);
 
@@ -1120,7 +1120,7 @@ impl Render for FilesPanel {
             .text_color(ui.foreground)
             .child(top)
             .child(body)
-            // 面板宽度决定露出几列（web 用容器查询）；跨过断点才重画
+            // 面板宽度决定露出几列（React 版用容器查询）；跨过断点才重画
             .child(
                 canvas(
                     move |bounds, _, cx| {
@@ -1152,7 +1152,7 @@ impl Render for FilesPanel {
 
 // ---------------- 小件 ----------------
 
-/// 工具栏按钮（web 的 IconBtn：ghost、icon-xs）：不可用时变淡且不响应；按下态用 muted 底
+/// 工具栏按钮（React 版的 IconBtn：ghost、icon-xs）：不可用时变淡且不响应；按下态用 muted 底
 fn tool_button(
     id: &'static str,
     name: IconName,
@@ -1214,7 +1214,7 @@ fn sort_head(id: &'static str, label: impl Into<SharedString>, active: bool, dir
     head
 }
 
-/// 14px 的小复选框（web 的 Checkbox size-3.5）；表头"全选"要有半选态
+/// 14px 的小复选框（React 版的 Checkbox size-3.5）；表头"全选"要有半选态
 fn check_box(state: Check, disabled: bool, ui: &Ui) -> Div {
     let on = state != Check::Off;
     let mut b = div()

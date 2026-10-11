@@ -1,4 +1,4 @@
-//! Zellij 安装通道 `/ws/install/:projectId`：照 web 的 `ZellijInstallModal.tsx` 与服务端
+//! Zellij 安装通道 `/ws/install/:projectId`：照旧 React 版的 `ZellijInstallModal.tsx` 与服务端
 //! `ws.ts` 对齐。
 //!
 //! 每次连上来服务端都当作用户显式发起的安装（首次或重试），推若干 `stage` 后以
@@ -26,8 +26,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum InstallEvent {
     /// 服务端的消息：若干 `Stage`，最后 `Done` 或 `Failed`（本版本认不出的消息不推）
     Message(InstallServerMessage),
-    /// 通道本身出了问题（连不上后端、中途断开），跟远端装没装成无关。web 把它当
-    /// probe-failed 显示并给重试按钮。服务端已经报过 done / failed 之后的断开不算。
+    /// 通道本身出了问题（连不上后端、中途断开），跟远端装没装成无关。界面（falcon-ui 的
+    /// 安装对话框）把它当 probe-failed 显示并给重试按钮。服务端已经报过 done / failed
+    /// 之后的断开不算。
     ChannelError(String),
     /// 未认证，自动重登没设密码或被拒：该弹登录框了
     Unauthorized,

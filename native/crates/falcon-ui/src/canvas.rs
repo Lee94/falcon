@@ -1,15 +1,15 @@
-//! 主区工作画布（web 的 `components/WorkCanvas.tsx`，ADR 0012）：窗口排成从左到右的列，每列从上
-//! 到下若干扇，列宽与窗口高度都能拖，抓标题栏能把窗口拖到别的列或另起一列。
+//! 主区工作画布（旧 React 版的 `components/WorkCanvas.tsx`，ADR 0012）：窗口排成从左到右的列，
+//! 每列从上到下若干扇，列宽与窗口高度都能拖，抓标题栏能把窗口拖到别的列或另起一列。
 //!
 //! **不横向滚动**：列分在一块块画布上（[`ColumnLayout::canvas`]），一次只显示一块，一块正好一屏宽
 //! （列平分视口）。新开的列在当前画布排不下就自动另起一块（工作区的 settle_canvases）。有两块以上
 //! 时底下出一条画布条：点数字切过去，把窗口拖到数字上就挪到那块，拖到 ＋ 上就新开一块。两指横滑 /
 //! 快捷键也能翻。固定列在每块画布的最右都有。
 //!
-//! 与 web 的差别：web 必须"每扇窗口绝对定位、DOM 顺序恒定"，因为 xterm 的画布换过父节点渲染尺寸
-//! 就毁了；GPUI 的终端元素每帧按快照重画，挂在树的哪个位置都一样，这条约束不存在。这里仍按
-//! `layout_frames` 算出的坐标绝对定位，只是为了与 web 共用同一套几何纯函数（列宽公式、窗口平分、
-//! 拖拽落点），两边的排布行为一致。
+//! 与旧 React 版的差别：React 版必须"每扇窗口绝对定位、DOM 顺序恒定"，因为 xterm 的画布换过父节点
+//! 渲染尺寸就毁了；GPUI 的终端元素每帧按快照重画，挂在树的哪个位置都一样，这条约束不存在。这里
+//! 仍按 `layout_frames` 算出的坐标绝对定位，沿用当初两边共用的那套几何纯函数（列宽公式、窗口平分、
+//! 拖拽落点）。
 //!
 //! 不在场的窗口（别的项目的、别的画布上的）不画，但它的终端视图仍活在工作区里：解析照跑，只省渲染。
 
@@ -86,7 +86,7 @@ pub struct Canvas {
     root_origin: Point<Pixels>,
     drag: Option<Drag>,
     resize: Option<Resize>,
-    /// 横向手势翻画布（web 的 WheelAxisLock + CanvasSwipe）
+    /// 横向手势翻画布（React 版的 WheelAxisLock + CanvasSwipe）
     wheel: WheelAxisLock,
     swipe: CanvasSwipe,
     /// 滚轮事件不带时间戳，按这个起点量毫秒
@@ -279,7 +279,7 @@ impl Canvas {
 
     fn on_mouse_up(&mut self, e: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.resize.take().is_some() {
-            // 拖的途中不落盘，松手才写（web 同样的节制）
+            // 拖的途中不落盘，松手才写（沿用 React 版的节制）
             self.ws.read(cx).persist();
             return;
         }
@@ -301,9 +301,9 @@ impl Canvas {
         }
     }
 
-    /// 横向手势翻画布（web WorkCanvas 的 wheel 监听）。终端只接纵向为主的事件，横向为主的不
+    /// 横向手势翻画布（React 版 WorkCanvas 的 wheel 监听）。终端只接纵向为主的事件，横向为主的不
     /// stop_propagation，冒泡到这里；文件 / 差异是 GPUI 的滚动容器，它们的滚动监听也不拦，这里
-    /// 拿不到"内部还能不能横滚"（web 是查 DOM 的 overflow），按指针在不在文件 / 差异窗口上保守
+    /// 拿不到"内部还能不能横滚"（React 版是查 DOM 的 overflow），按指针在不在文件 / 差异窗口上保守
     /// 处理：在上面就整段手势都不翻，免得横着看长行时把画布翻走。
     fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // GPUI 的 delta 与 DOM 反号（正 = 内容往下 / 右移），换成 DOM 的口径：正 = 往右翻
@@ -588,7 +588,7 @@ struct CanvasPlace<'a> {
     alone: bool,
 }
 
-/// 画布条要画的东西（web `CanvasPager` 的 props）
+/// 画布条要画的东西（React 版 `CanvasPager` 的 props）
 struct PagerState<'a> {
     groups: &'a [CanvasGroup],
     /// 正在显示第几块
@@ -604,7 +604,7 @@ struct PagerState<'a> {
     hot: Option<&'a str>,
 }
 
-/// 缩略图里窗口块的颜色：(普通窗口, 着重的那扇)，web `THUMB_TONE` 的同一套比例
+/// 缩略图里窗口块的颜色：(普通窗口, 着重的那扇)，沿用 React 版 `THUMB_TONE` 的比例
 fn thumb_tone(ui: &Ui, hot: bool, on: bool) -> (Hsla, Hsla) {
     if hot {
         (ui.primary_foreground.opacity(0.45), ui.primary_foreground.opacity(0.85))
@@ -767,7 +767,7 @@ fn pane_label(ws: &Workspace, key: &str) -> String {
     }
 }
 
-/// 标题栏上按钮的 mouse_down 截在按钮上（web 的 `isolate`）。不截的话它冒到标题栏，标题栏把
+/// 标题栏上按钮的 mouse_down 截在按钮上（React 版的 `isolate`）。不截的话它冒到标题栏，标题栏把
 /// 这一下当成"开始拖窗口"记下来；按钮的 on_click 又 stop_propagation 了 mouse_up，画布收不到
 /// 松手，拖拽状态就一直挂着——点完最大化 / 还原，窗口跟着指针走。连点两下也会被标题栏当成
 /// 双击再切一次最大化。同一元素上冒泡阶段是后注册的先跑：on_click 记"按下"的那个监听注册
@@ -1156,7 +1156,7 @@ impl Canvas {
             .into_any_element()
     }
 
-    /// 会话还没建起来时占住窗口：立刻有反馈，而不是等 REST 返回才出现（web 的 PendingPane）
+    /// 会话还没建起来时占住窗口：立刻有反馈，而不是等 REST 返回才出现（React 版的 PendingPane）
     fn pending_body(&self, id: &str, cx: &mut Context<Self>) -> AnyElement {
         use gpui_kit::component::Sizable;
         use gpui_kit::component::button::{Button, ButtonVariants as _};

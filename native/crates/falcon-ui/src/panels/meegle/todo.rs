@@ -1,4 +1,4 @@
-//! 「待办」页（web 的 `TodoSection`）：mywork 的四个列表（待办 / 本周 / 逾期 / 已办），
+//! 「待办」页（旧 React 版的 `TodoSection`）：mywork 的四个列表（待办 / 本周 / 逾期 / 已办），
 //! 一页最多 100 条（两个 CLI 50 条页），只对当前页分组、筛选。
 //!
 //! 缓存的是**最后一次成功的那一页**，不是累加的前缀：翻页失败时可见的条目与页码都不动。
@@ -96,7 +96,7 @@ impl TodoSection {
                 self.error = None;
             }
             None => {
-                // 列表清空再重拉（刷新 / 没缓存）：web 那边分组树随之卸载，回来时全部展开
+                // 列表清空再重拉（刷新 / 没缓存）：React 版的分组树随之卸载，回来时全部展开
                 self.fold.update(cx, |f, cx| f.reset(cx));
                 self.items.clear();
                 self.page = 1;

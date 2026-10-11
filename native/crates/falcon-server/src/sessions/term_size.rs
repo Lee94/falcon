@@ -1,7 +1,8 @@
 //! 接回时的终端尺寸。移植自 `packages/server/src/sessions/termSize.ts`。纯函数，零 I/O。
 //!
-//! 客户端已经拒绝把未量好的 80×24 发给 PTY（见 web termFit），但服务端
-//! liveEntry 以前硬编码 80×24，ensureAttached 会立刻按这个尺寸 attach。
+//! 客户端只报量好的格子，不会把未量好的 80×24 发给 PTY（当初 React 版靠 termFit 拦，现在是
+//! falcon-ui 的终端元素量出格子才报 resize），但服务端 liveEntry 以前硬编码 80×24，
+//! ensureAttached 会立刻按这个尺寸 attach。
 //! Zellij 跟着 SIGWINCH，grok / vim / htop 被挤成 24 行，状态就没了。
 
 /// 终端格子数。行列用 `u16`：与 falcon-proto 的 `ClientMessage::Resize`、PTY 的 winsize 同宽
@@ -75,8 +76,9 @@ pub struct ViewerAttachInput {
 
 /// 一个 Viewer 连上来时要不要立刻 attach。
 ///
-/// 即使库里存了上次尺寸，也等这条连接自己报格子：xterm 在 fit 之前是 80×24，
-/// 先 attach 再 replay，205 列的 dump-screen 会在窄屏上折行，TUI 看起来像没恢复。
+/// 即使库里存了上次尺寸，也等这条连接自己报格子：客户端量出格子之前的尺寸不可信（旧 React 版的
+/// xterm 在 fit 之前是 80×24），先 attach 再 replay，205 列的 dump-screen 会在窄屏上折行，
+/// TUI 看起来像没恢复。
 /// 库里的尺寸只给「概览里点接回 / SSH 自动重连」这种当时没有新 Viewer 在量格子的路径。
 pub fn decide_viewer_attach(opts: ViewerAttachInput) -> ViewerAttach {
     if opts.has_backend {

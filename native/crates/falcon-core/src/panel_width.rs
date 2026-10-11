@@ -1,4 +1,4 @@
-//! 左右两栏的宽度规格。对应 web 的 `lib/panelWidth.ts`。
+//! 左右两栏的宽度规格。对应旧 React 版的 `lib/panelWidth.ts`。
 //!
 //! 设计写死了 260 / 220–420（`docs/design/ui-redesign.md` §4），右侧各面板共用同一个
 //! 槽位，所以用同一套数字——切面板不能改宽度，否则终端跟着 reflow。

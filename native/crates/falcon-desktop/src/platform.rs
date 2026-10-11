@@ -3,7 +3,7 @@
 //! 数据目录：`~/Library/Application Support/Falcon/`（`FALCON_NATIVE_DATA_DIR` 可改指临时目录，
 //! 测试 / 自动化验证时别动用户真实的偏好与工作区）：
 //!
-//! - `prefs.json`：web 存在 localStorage 里的那些键，形状逐字一致；
+//! - `prefs.json`：旧 React 版（现在是浏览器版）存在 localStorage 里的那些键，形状逐字一致；
 //! - `profiles.json`：服务端配置表与上次连上的那台；
 //! - `servers/<配置 id>/workspace.json`：按服务端配置分开存的工作区。
 //!
@@ -114,6 +114,16 @@ impl Platform for Desktop {
     fn password(&self, profile_id: &str) -> Option<String> {
         keychain_entry(profile_id)?.get_password().ok()
     }
+
+    fn has_password_store(&self) -> bool {
+        true
+    }
+
+    fn redirect_after_login(&self) -> bool {
+        false
+    }
+
+    fn on_resume(&self, _f: Box<dyn Fn()>) {}
 
     fn store_password(&self, profile_id: &str, password: Option<&str>) {
         let Some(entry) = keychain_entry(profile_id) else { return };

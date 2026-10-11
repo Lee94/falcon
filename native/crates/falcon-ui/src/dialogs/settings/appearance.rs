@@ -1,14 +1,13 @@
 //! 外观：明暗模式、浅 / 深两个主题槽位（ADR 0006）、应用图标（ADR 0018，app_icon.rs）、
-//! 终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。web 的 AppearancePane。
+//! 终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。旧 React 版的 AppearancePane。
 //!
-//! web 还有一节"实验性 · 终端渲染引擎（xterm.js / Rio）"：原生只有一套终端渲染，这一节不画；
-//! 偏好 JSON 里的 `engine` 字段原样保留（falcon-core 的 TermPref 读写不丢值），换回浏览器
-//! 用的还是用户选过的那个引擎。
+//! 旧 React 版还有一节"实验性 · 终端渲染引擎（xterm.js / Rio）"，随 React 前端删了：两种产物
+//! 现在只有一套终端渲染（alacritty_terminal + GPUI）。偏好 JSON 里遗留的 `engine` 键读入时丢掉。
 
 use falcon_core::term::{
     TERM_FONT_SIZE_MAX, TERM_FONT_SIZE_MIN, TERM_LINE_HEIGHT_MAX, TERM_LINE_HEIGHT_MIN, TERM_PREF_KEY,
-    TERM_PREF_KEY_LEGACY, TermCursorStyle, TermFontId, TermPref, clamp_font_size, clamp_line_height,
-    load_term_pref, sanitize_term_pref, serialize_term_pref,
+    TermCursorStyle, TermFontId, TermPref, clamp_font_size, clamp_line_height, load_term_pref,
+    sanitize_term_pref, serialize_term_pref,
 };
 use falcon_theme::{
     FALCON_DARK, FALCON_LIGHT, GHOSTTY_THEMES_COUNT, GHOSTTY_THEMES_ORIGIN, ThemeMode, ThemePref, choice_of,
@@ -38,13 +37,12 @@ use crate::ui::icon;
 use crate::workspace::Workspace;
 use crate::zoom::zpx;
 
-/// 读偏好文件里的 `falcon.term`（没有再看旧名 `mojito.term`），过一遍 falcon-core 的清洗
+/// 读偏好里的 `falcon.term`，过一遍 falcon-core 的清洗
 fn load_term(cx: &App) -> TermPref {
-    let prefs = Prefs::global(cx);
-    load_term_pref(prefs.get(TERM_PREF_KEY).or_else(|| prefs.get(TERM_PREF_KEY_LEGACY)))
+    load_term_pref(Prefs::global(cx).get(TERM_PREF_KEY))
 }
 
-/// TermPref（与 web 同形的偏好）→ 终端渲染用的 TermPrefs（映射在 theme.rs，启动时读偏好也走它）
+/// TermPref（形状沿用 React 版）→ 终端渲染用的 TermPrefs（映射在 theme.rs，启动时读偏好也走它）
 fn term_look(pref: &TermPref) -> TermPrefs {
     TermPrefs::from_pref(pref)
 }
@@ -112,7 +110,7 @@ impl AppearancePane {
         Self { app_icon, light, dark, term, custom_font, font_size, line_height }
     }
 
-    /// web 的 `setTerm(patch)`：合并 → 清洗 → 落盘，终端立即换上
+    /// React 版的 `setTerm(patch)`：合并 → 清洗 → 落盘，终端立即换上
     fn set_term(&mut self, patch: impl FnOnce(&mut TermPref), cx: &mut Context<Self>) {
         let mut next = self.term.clone();
         patch(&mut next);
@@ -193,7 +191,7 @@ impl AppearancePane {
                         .xsmall()
                         .disabled(is_default_theme_settings(&settings))
                         .label(t!("theme.resetThemes").to_string())
-                        // web 的 resetThemes：两个槽位回 Falcon 默认，明暗模式不动
+                        // React 版的 resetThemes：两个槽位回 Falcon 默认，明暗模式不动
                         .on_click(|_, _, cx| {
                             crate::theme::update_settings(cx, |s| {
                                 s.light = choice_of(&FALCON_LIGHT);
@@ -375,7 +373,7 @@ fn zoom_control(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// 终端预览：当前主题的终端配色 + 当前字体 / 字号 / 行高画几行典型输出（web 的 TermPreview），
+/// 终端预览：当前主题的终端配色 + 当前字体 / 字号 / 行高画几行典型输出（React 版的 TermPreview），
 /// 含一个 CJK 字与三个 Nerd 图标，换字体时一眼看出回退链是否接得上。
 fn term_preview(cx: &App) -> AnyElement {
     let look = TerminalLook::global(cx);

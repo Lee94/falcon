@@ -54,7 +54,7 @@ fn encode_png(img: &RgbaImage) -> Result<Vec<u8>> {
 }
 
 /// 用户挑的图（GPUI 能解码的格式，含 SVG）→ 512 见方的 PNG：等比缩放、居中、不裁切。
-/// web `normalizeIconImage` 的原生版，服务端只收这个。
+/// 旧 React 版 `normalizeIconImage` 的移植，服务端只收这个。
 pub fn normalize_upload(bytes: Vec<u8>, format: ImageFormat, svg: SvgRenderer) -> Result<Vec<u8>> {
     let size = APP_ICON_CUSTOM_SIZE;
     let render = if format == ImageFormat::Svg {

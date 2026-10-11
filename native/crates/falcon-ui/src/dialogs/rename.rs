@@ -1,4 +1,4 @@
-//! 就地重命名会话（web 的 RenameDialog）。清空 = 回到自动标题。
+//! 就地重命名会话（旧 React 版的 RenameDialog）。清空 = 回到自动标题。
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};

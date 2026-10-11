@@ -25,7 +25,7 @@ pub struct RawBytes {
 }
 
 /// 原始字节地址：`raw_base`（`GET …/file` 响应里的 `rawBase`，形如
-/// `/api/projects/<id>/raw/<token>/`）后面接工作目录相对路径。移植自 web 的
+/// `/api/projects/<id>/raw/<token>/`）后面接工作目录相对路径。移植自 React 版的
 /// `lib/rawUrl.ts`。
 ///
 /// 逐段 `encodeURIComponent` 而不是整串：`/` 是路径分隔符得留着，而 `#` / `?` / `%`

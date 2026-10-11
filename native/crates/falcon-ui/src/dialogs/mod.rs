@@ -1,6 +1,6 @@
 //! 浮层：确认框、重命名、askpass、Zellij 安装、各种表单与设置。
 //!
-//! 一律由 gpui-component 的 `window.open_dialog` 打开，Esc 只关最上面那一层（web 的全局 Esc
+//! 一律由 gpui-component 的 `window.open_dialog` 打开，Esc 只关最上面那一层（旧 React 版的全局 Esc
 //! 分发在这里由 Root 的对话框栈负责）。
 
 pub mod askpass;
@@ -49,7 +49,7 @@ pub struct ConfirmOpts {
     pub danger: bool,
 }
 
-/// 通用确认框（web 的 ConfirmDialog）：标题、正文、被波及的清单、脚注、确认 / 取消。
+/// 通用确认框（React 版的 ConfirmDialog）：标题、正文、被波及的清单、脚注、确认 / 取消。
 pub fn confirm(
     opts: ConfirmOpts,
     on_confirm: impl Fn(&mut Window, &mut App) + 'static,

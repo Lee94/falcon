@@ -27,7 +27,7 @@
 //!
 //! # 移植约定
 //!
-//! - CLI 的原始输出用 `serde_json::Value` 读入，产出 falcon-proto 里的类型（与原生客户端
+//! - CLI 的原始输出用 `serde_json::Value` 读入，产出 falcon-proto 里的类型（与客户端
 //!   同一份）。TS 里 `data: unknown` 的参数一律收 `&Value`：这些函数对 `undefined` 与
 //!   `null` 走同一条分支，调用方拿不到值时传 `&Value::Null` 即可。
 //! - TS 的默认参数（`page = 1`、`limit = MEEGLE_PAGE_SIZE`）在 Rust 里是 `Option`，`None`

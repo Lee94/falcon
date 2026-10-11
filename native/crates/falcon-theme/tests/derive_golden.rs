@@ -1,6 +1,7 @@
-//! 派生规则的回归基线：`tests/fixtures/*` 是当年直接跑 web 的 TS 源码（deriveTheme /
+//! 派生规则的回归基线：`tests/fixtures/*` 是当年直接跑旧 React 版的 TS 源码（deriveTheme /
 //! JSON.stringify）生成的（导出脚本随 React 前端一起删了：
 //! `git show 9c9d045:native/scripts/export-ghostty-themes.mjs`），这里要求 Rust 的输出逐字相同。
+//! 测试名与断言信息里的 `web` 指的就是这份冻结下来的 React 版输出。
 //!
 //! 红了的意思是派生规则变了。是有意改规则，就连同这份 fixture 一起改并在提交里写清楚；
 //! 不是，就是改错了。别为了变绿去改 fixture。
@@ -10,7 +11,7 @@ use falcon_theme::{FALCON_THEMES, ThemeSettings, derive_theme, load_catalog};
 const GOLDEN: &str = include_str!("fixtures/derive-golden.tsv");
 const PREF_DEFAULT: &str = include_str!("fixtures/pref-default.json");
 
-/// Falcon 两套 + 全部 Ghostty 主题：每个 CSS 变量的值、深浅都与 web 的 deriveTheme 相同
+/// Falcon 两套 + 全部 Ghostty 主题：每个 CSS 变量的值、深浅都与 React 版的 deriveTheme 相同
 #[test]
 fn every_builtin_theme_derives_exactly_like_web() {
     let mut lines = GOLDEN.lines().filter(|l| !l.starts_with('#'));
@@ -50,12 +51,12 @@ fn every_builtin_theme_derives_exactly_like_web() {
     assert!(mismatches.is_empty(), "{} 处与 web 不同：\n{}", mismatches.len(), mismatches.join("\n"));
 }
 
-/// 偏好的 JSON 形状：默认设置序列化出来与 web 的 `JSON.stringify(DEFAULT_THEME_SETTINGS)` 逐字节相同
+/// 偏好的 JSON 形状：默认设置序列化出来与 React 版的 `JSON.stringify(DEFAULT_THEME_SETTINGS)` 逐字节相同
 #[test]
 fn default_settings_json_matches_web() {
     let json = serde_json::to_string(&ThemeSettings::default()).unwrap();
     assert_eq!(json, PREF_DEFAULT.trim_end());
-    // web 写的偏好读进来就是默认值
+    // React 版写下的默认偏好读进来就是默认值
     let back: ThemeSettings = serde_json::from_str(PREF_DEFAULT).unwrap();
     assert_eq!(back, ThemeSettings::default());
     assert_eq!(FALCON_THEMES.len(), 2);

@@ -1,8 +1,8 @@
-//! 右侧「修改」面板（web 的 `components/ChangesPanel.tsx`）：工作区里全部未提交的改动，
+//! 右侧「修改」面板（旧 React 版的 `components/ChangesPanel.tsx`）：工作区里全部未提交的改动，
 //! 勾选后提交；修订上次提交、提交并推送、丢弃所选、冲突时继续 / 中止 / 取 ours / theirs。
 //!
 //! 勾选状态**不写 index**，只是"这次要提交哪些"的前端选择。服务端按 pathspec 提交那些路径，
-//! 用户在终端里 `git add` 的暂存内容不受影响（见服务端 git/command.ts 的 commitArgs 注释）。
+//! 用户在终端里 `git add` 的暂存内容不受影响（见服务端 git/command.rs 的 commit_args 注释）。
 //!
 //! 轮询 4s（比侧栏那条 8s 快：这个面板是用户正盯着看的，改完文件切回来还显示旧列表会让人
 //! 以为坏了），只在面板真的显示着时轮询——右侧栏切走时视图不卸载，但不该还在后台打 git。
@@ -216,7 +216,7 @@ impl ChangesPanel {
         // 失败时 detail 是 git 的原话——"为什么被拒"只有它说得清
         let kind = if ok { ToastKind::Success } else { ToastKind::Danger };
         let body = (!detail.trim().is_empty()).then_some(detail);
-        // 失败的原话要读完（往往还得照着敲命令），不自动消失（web 的 sticky: !res.ok）
+        // 失败的原话要读完（往往还得照着敲命令），不自动消失（React 版的 sticky: !res.ok）
         self.ws.update(cx, |w, cx| if ok { w.toast(kind, title, body, cx) } else { w.toast_sticky(kind, title, body, cx) });
     }
 
@@ -695,7 +695,7 @@ impl Render for ChangesPanel {
                         }
                     }))
                     .child(
-                        // 高度写死三行（web 的 rows=3）：TextareaState 的 rows 只在 auto_grow 下才影响布局
+                        // 高度写死三行（React 版的 rows=3）：TextareaState 的 rows 只在 auto_grow 下才影响布局
                         Textarea::new(&self.message).h(zpx(62.)).text_xs(),
                     )
                     .child(amend_row)

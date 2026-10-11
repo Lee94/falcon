@@ -106,7 +106,7 @@ pub struct PortForwardPatch {
 ///
 /// 本机（`host_id` 缺省）：直接打后端本机端口。SSH Host：目标在远端，先经 SSH 接到后端，
 /// 再由本机 cloudflared 发出去。cloudflared 永远只在 falcon 后端本机跑。
-/// 界面文案照 web 写明"任何拿到链接的人都能访问"。
+/// 界面文案（设置页里发布的说明）写明"任何拿到链接的人都能访问"。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicShare {

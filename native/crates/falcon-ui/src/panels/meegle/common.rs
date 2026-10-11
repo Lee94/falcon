@@ -1,5 +1,5 @@
 //! 飞书项目面板各页共用的东西：面板上下文（客户端、缓存、回到面板的弱引用）、工作项行、
-//! 三级分组、翻页、下钻页顶栏、复制菜单与拖拽载荷。对应 web `MeeglePanel.tsx` 底部的
+//! 三级分组、翻页、下钻页顶栏、复制菜单与拖拽载荷。对应旧 React 版 `MeeglePanel.tsx` 底部的
 //! "小件" 与 `useMeegleCopyMenu.ts`。
 
 use std::collections::HashSet;
@@ -47,7 +47,7 @@ pub(super) struct Ctx {
 }
 
 impl Ctx {
-    /// 业务请求失败的统一出口（web 的 `handleApiError` + `onUnavailable`）：401 回登录页；
+    /// 业务请求失败的统一出口（React 版的 `handleApiError` + `onUnavailable`）：401 回登录页；
     /// 409 说明 CLI 没装 / 登录态中途没了，让面板重新问一次状态、自己切到对应提示。
     pub fn failed(&self, err: &ApiError, cx: &mut App) {
         self.ws.update(cx, |w, cx| w.handle_error(err, cx));
@@ -79,7 +79,7 @@ impl Ctx {
     }
 }
 
-/// 列表 / 详情走前端缓存：命中给缓存，否则并入同 key 在飞的那次，再否则发请求（web 的
+/// 列表 / 详情走前端缓存：命中给缓存，否则并入同 key 在飞的那次，再否则发请求（React 版的
 /// `loadMeegleCache(key, () => api.xxx(…), bust)`）。
 pub(super) fn cached<T, Fut>(cache: &MeegleCache, key: &str, bust: bool, fut: Fut) -> impl Future<Output = Result<T, LoadError>> + MaybeSend + 'static
 where
@@ -110,7 +110,7 @@ pub(super) fn untitled(item: &MeegleWorkItem) -> String {
     if item.name.is_empty() { t!("meegle.untitled", id = item.id).to_string() } else { item.name.clone() }
 }
 
-// ---------------- 复制菜单（web 的 useMeegleCopyMenu） ----------------
+// ---------------- 复制菜单（React 版的 useMeegleCopyMenu） ----------------
 
 /// 工作项行 / 工作项固定项 / 详情里编号上的右键菜单
 pub(super) fn copy_menu(ctx: &Ctx, space_key: &str, id: &str) -> Vec<MenuItemSpec> {
@@ -164,7 +164,8 @@ fn copy_context(ctx: &Ctx, space_key: &str, id: &str, cx: &mut App) {
     .detach();
 }
 
-// ---------------- 拖拽（web 的 meegleDrag：私有 MIME；原生是类型化载荷） ----------------
+// ---------------- 拖拽 ----------------
+// React 版的 meegleDrag 走私有 MIME；这里是 GPUI 的类型化载荷
 
 /// 拖动时跟着指针的小标签。落点只认 [`MeegleWorkItemDragPayload`] 这个类型，标签只是给人看的
 pub(super) struct DragPreview {
@@ -206,7 +207,7 @@ pub(super) fn draggable<E: StatefulInteractiveElement>(el: E, space_key: &str, i
 
 // ---------------- 行 ----------------
 
-/// 工作项行（web 的 `ItemRow`）：两行标题 + 一行 meta；整行可点下钻、可拖、右键复制；
+/// 工作项行（React 版的 `ItemRow`）：两行标题 + 一行 meta；整行可点下钻、可拖、右键复制；
 /// hover 时右上角冒出外链
 pub(super) fn item_row(ctx: &Ctx, item: &MeegleWorkItem, meta: String, cx: &App) -> AnyElement {
     let ui = Ui::global(cx).clone();
@@ -253,7 +254,7 @@ pub(super) fn item_row(ctx: &Ctx, item: &MeegleWorkItem, meta: String, cx: &App)
 
 // ---------------- 三级分组 ----------------
 
-/// 分组的折叠状态（web 用 `<details open>`，翻页时整棵树重挂、全部重新展开）
+/// 分组的折叠状态（React 版用 `<details open>`，翻页时整棵树重挂、全部重新展开）
 #[derive(Default)]
 pub(super) struct Fold {
     closed: HashSet<String>,
@@ -351,7 +352,7 @@ fn render_nodes<T: MeegleRow>(
 
 pub(super) type OnPage = Rc<dyn Fn(u32, &mut Window, &mut App)>;
 
-/// 翻页（web 的 `PageControls`）
+/// 翻页（React 版的 `PageControls`）
 pub(super) fn page_controls(id: &str, page: u32, count: usize, total: Option<u64>, has_more: bool, loading: bool, on_page: OnPage, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let mut summary = t!("meegle.pageSummary", page = page, count = count).to_string();
@@ -395,7 +396,7 @@ pub(super) fn page_controls(id: &str, page: u32, count: usize, total: Option<u64
         )
 }
 
-/// 待办 / 视图两种列表共用的正文：空态、错误、筛不到、翻页（web 的 `ItemList`）
+/// 待办 / 视图两种列表共用的正文：空态、错误、筛不到、翻页（React 版的 `ItemList`）
 #[allow(clippy::too_many_arguments)]
 pub(super) fn item_list<T: MeegleRow>(
     id: &str,
@@ -459,7 +460,8 @@ pub(super) fn item_list<T: MeegleRow>(
     list.child(page_controls(id, page, shown.len(), total, has_more, loading, on_page, cx))
 }
 
-/// 只对已返回结果做本地分页（每页 100 条）再分组：最近列表与搜索结果（web 的 `LocalGroupedItems`）
+/// 只对已返回结果做本地分页（每页 100 条）再分组：最近列表与搜索结果
+/// （React 版的 `LocalGroupedItems`）
 pub(super) fn local_grouped<T: MeegleRow>(id: &str, items: &[T], requested: u32, fold: &Entity<Fold>, row: &dyn Fn(&T) -> AnyElement, on_page: OnPage, cx: &App) -> Vec<AnyElement> {
     let ui = Ui::global(cx);
     let current = meegle_page(items, requested as f64);
@@ -476,12 +478,12 @@ pub(super) fn local_grouped<T: MeegleRow>(id: &str, items: &[T], requested: u32,
 
 // ---------------- 顶栏小件 ----------------
 
-/// 带放大镜与清空键的搜索框（web 的 `SearchBox`）
+/// 带放大镜与清空键的搜索框（React 版的 `SearchBox`）
 pub(super) fn search_box(state: &Entity<InputState>, disabled: bool) -> Input {
     Input::new(state).prefix(icon(IconName::Search).size(zpx(14.))).cleanable(true).disabled(disabled)
 }
 
-/// 下钻页顶栏（web 的 `SubHeader`）：返回、标题、meta、右侧动作
+/// 下钻页顶栏（React 版的 `SubHeader`）：返回、标题、meta、右侧动作
 pub(super) fn sub_header(ctx: &Ctx, title: String, meta: Option<String>, actions: Vec<AnyElement>, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let back = ctx.clone();
@@ -502,7 +504,7 @@ pub(super) fn sub_header(ctx: &Ctx, title: String, meta: Option<String>, actions
         .children(actions)
 }
 
-/// 下钻页顶栏的图钉：已固定就取消，没固定就固定（web 的 `PinButton`）
+/// 下钻页顶栏的图钉：已固定就取消，没固定就固定（React 版的 `PinButton`）
 pub(super) fn pin_button(ctx: &Ctx, input: MeeglePinInput, cx: &App) -> AnyElement {
     let ui = Ui::global(cx);
     let panel = ctx.panel.upgrade();
@@ -523,7 +525,7 @@ pub(super) fn pin_button(ctx: &Ctx, input: MeeglePinInput, cx: &App) -> AnyEleme
     .into_any_element()
 }
 
-/// 顶栏的外链（web 的 `ExternalIconLink`）
+/// 顶栏的外链（React 版的 `ExternalIconLink`）
 pub(super) fn external_link(id: &str, url: String, cx: &App) -> AnyElement {
     tiny_button(ElementId::Name(id.to_string().into()), IconName::ExternalLink, t!("meegle.openExternal").to_string(), 24., cx, move |_, _, cx| {
         cx.open_url(&url)
@@ -531,7 +533,7 @@ pub(super) fn external_link(id: &str, url: String, cx: &App) -> AnyElement {
     .into_any_element()
 }
 
-/// 页头下面那条放分段 / 筛选框的带子（web 的 `shrink-0 border-b px-2 py-1.5`）
+/// 页头下面那条放分段 / 筛选框的带子（React 版的 `shrink-0 border-b px-2 py-1.5`）
 pub(super) fn toolbar(cx: &App) -> Div {
     let ui = Ui::global(cx);
     div().flex_none().flex().flex_col().gap(zpx(6.)).px_2().py(zpx(6.)).border_b_1().border_color(ui.border)

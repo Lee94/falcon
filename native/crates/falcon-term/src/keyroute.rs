@@ -1,7 +1,8 @@
 //! 终端里一次按键归谁。`packages/web/src/lib/rio/keyRoute.ts` 的移植，去掉了 IME 分支——
 //! GPUI 的组字走 `InputHandler`，组字期间的按键根本不会作为普通 keydown 到终端视图。
 //!
-//! - 命中全局快捷键的按键放过，让 app 的 keymap 处理；
+//! - 命中全局快捷键的按键放过，让 app 的 keymap 处理（照 React 版移植的一支：GPUI 里全局键
+//!   先被 keymap 吃掉，终端视图调用时恒传 `false`）；
 //! - ⌘C（mac）/ Ctrl+Shift+C 只在有选区时复制，否则照常交给终端（⌘ 组合本来就不编码，
 //!   Ctrl+Shift+C 在 legacy 编码下也没有对应字节）；
 //! - Ctrl+Shift+V 粘贴（⌘V 走 app 的粘贴动作，不经过这里）。

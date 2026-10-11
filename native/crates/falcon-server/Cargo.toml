@@ -58,6 +58,8 @@ tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 # 路由测试：tower::ServiceExt::oneshot 直接把请求喂给 axum 的 Router，不开端口
 tower = { version = "0.5.3", features = ["util"] }
+# WS 路由测试的客户端（oneshot 做不了升级）：与 falcon-client 同版本同特性，不多拉依赖
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.190"

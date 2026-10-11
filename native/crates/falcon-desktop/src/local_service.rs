@@ -28,7 +28,7 @@ fn bundled_server() -> Option<std::path::PathBuf> {
     bin.is_file().then_some(bin)
 }
 
-/// 已经注册过的用户级 LaunchAgent（服务端 `service.ts` 的 `com.falcon.server`）的启动参数。
+/// 已经注册过的用户级 LaunchAgent（服务端 `service.rs` 的 `com.falcon.server`）的启动参数。
 /// 没装过、读不出来都是 None。用系统自带的 plutil 转 JSON，不为读一个 plist 加依赖
 pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs> {
     #[cfg(target_os = "macos")]

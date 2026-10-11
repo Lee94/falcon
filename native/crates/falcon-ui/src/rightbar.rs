@@ -1,8 +1,8 @@
-//! 右侧活动栏（web 的 `components/RightBar.tsx`）与右面板宿主。
+//! 右侧活动栏（旧 React 版的 `components/RightBar.tsx`）与右面板宿主。
 //!
 //! 活动栏不成岛：图标直接落在窗口底上。点同一格关面板，点另一格切过去。
 //! 面板视图在右侧栏开着时切走不卸载（飞书项目的 CLI 往返 2–6s，切回来要立刻有东西），
-//! 关掉右侧栏才卸——与 web 同一条规则。
+//! 关掉右侧栏才卸——沿用 React 版的规则。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
@@ -26,7 +26,7 @@ const ITEMS: [(RightPanelId, IconName, &str, &str); 4] = [
     (RightPanelId::Meegle, IconName::ListTodo, "meegle.panel", "toggleMeeglePanel"),
 ];
 
-/// 面板在持久化与元素 id 里的名字（与 web 的 RightPanelId 字面量一致）
+/// 面板在持久化与元素 id 里的名字（沿用 React 版 RightPanelId 的字面量）
 pub fn panel_id(p: RightPanelId) -> &'static str {
     match p {
         RightPanelId::Files => "files",

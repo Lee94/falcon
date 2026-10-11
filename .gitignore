@@ -1,7 +1,5 @@
-dist/
 .DS_Store
 *.bin
-build/
 release/
 Berkeley-Mono-*.zip
 .cube

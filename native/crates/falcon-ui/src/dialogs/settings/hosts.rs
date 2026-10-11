@@ -1,5 +1,6 @@
-//! 远端主机：已保存的 SSH 连接配置列表 + 检测连接 / 编辑 / 删除 / 添加。web 的 HostsPane +
-//! HostList。表单本身在 `dialogs::host_form`，删除（含"被项目引用时拒绝"）在 `menus::delete_host`。
+//! 远端主机：已保存的 SSH 连接配置列表 + 检测连接 / 编辑 / 删除 / 添加。旧 React 版的
+//! HostsPane + HostList。表单本身在 `dialogs::host_form`，删除（含"被项目引用时拒绝"）在
+//! `menus::delete_host`。
 
 use falcon_core::host_color::ssh_conn;
 use falcon_proto::{HostKind, SshAuthMethod, SshHost, SshProbeResult};
@@ -32,7 +33,7 @@ pub struct HostsPane {
 impl HostsPane {
     pub fn new(ws: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
-        // 打开设置时顺手刷一遍：别的窗口 / web 端刚加的主机、引用计数都要是新的
+        // 打开设置时顺手刷一遍：别的窗口 / 浏览器版刚加的主机、引用计数都要是新的
         ws.update(cx, |w, cx| w.refresh_hosts(cx));
         Self { ws, testing: None }
     }

@@ -59,11 +59,6 @@ wire_enum! {
 /// TS 的 `SESSION_AGENTS`：＋ 菜单里按这个顺序列各家 CLI。
 pub const SESSION_AGENTS: &[SessionAgent] = SessionAgent::ALL;
 
-/// TS 的 `isSessionAgent`：只认已知的 CLI 名。
-pub fn is_session_agent(v: &str) -> bool {
-    SessionAgent::from_wire(v).is_some()
-}
-
 /// `POST /api/projects/:id/sessions`、`POST /api/sessions/:id/reattach` 的响应。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -132,7 +127,8 @@ pub struct SessionForeground {
 }
 
 /// 粘贴图片的大小上限。Retina 全屏截图的 PNG 能到 10 MB 上下，取 20 MB；
-/// 前端超限时不发请求直接提示，后端的 bodyLimit 用同一个数兜底。
+/// 前端超限时不发请求（React 版当初还直接提示，falcon-ui 眼下只记一条日志），
+/// 后端的 bodyLimit 用同一个数兜底。
 pub const PASTE_IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// `POST /api/sessions/:id/paste-image` 的返回：图片在会话宿主机上的绝对路径
@@ -173,9 +169,9 @@ mod tests {
     fn agents_match_ts() {
         let names: Vec<_> = SESSION_AGENTS.iter().map(|a| a.as_str()).collect();
         assert_eq!(names, ["claude", "codex", "grok"]);
-        assert!(is_session_agent("codex"));
-        assert!(!is_session_agent("unknown"));
-        assert!(!is_session_agent("gemini"));
+        assert_eq!(SessionAgent::from_wire("codex"), Some(SessionAgent::Codex));
+        assert_eq!(SessionAgent::from_wire("unknown"), None);
+        assert_eq!(SessionAgent::from_wire("gemini"), None);
     }
 
     #[test]

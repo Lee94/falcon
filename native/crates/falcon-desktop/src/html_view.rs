@@ -1,7 +1,7 @@
 //! HTML 预览的原生网页视图：wry（macOS 上是 WKWebView）加载原始字节地址（ADR 0007，设计文档 §4.4）。
 //! 摆位置与显隐在 falcon-ui 的 `panels/file_view/html.rs`，这里只建视图、守安全边界。
 //!
-//! 安全边界与 web 的沙箱 iframe 等价，逐条对应：
+//! 安全边界与沙箱 iframe（旧 React 版的做法，浏览器版的叠层在 C3 补）等价，逐条对应：
 //! - **不带登录 cookie**：无痕（非持久）数据存储，WebView 与 falcon-client 的 cookie 罐本来就
 //!   不相通；凭据只有 URL 里那枚**只能读这个项目文件**的作用域令牌。页面里的脚本拿到它，能做的
 //!   也只是读同项目的其它文件（ADR 0007 决定二）；

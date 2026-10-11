@@ -9,9 +9,9 @@
 //! 亮度判深浅（derive.rs），不按槽位。代码里 `ThemeMode` 是槽位、
 //! `ResolvedTheme::appearance` 是深浅，别混用（CONTEXT.md）。
 //!
-//! 持久化形状与 web 存在 localStorage `falcon.themes` 里的 JSON 逐键相同
-//! （`{"mode":…,"light":{"name","kind","colors":{…}},"dark":{…}}`），两边的偏好可以
-//! 直接对照；`tests/fixtures/pref-default.json` 是 web `JSON.stringify` 出来的默认值，
+//! 持久化形状沿用旧 React 版存在 localStorage `falcon.themes` 里的 JSON，逐键相同
+//! （`{"mode":…,"light":{"name","kind","colors":{…}},"dark":{…}}`），它留下的偏好
+//! 直接能读；`tests/fixtures/pref-default.json` 是 React 版 `JSON.stringify` 出来的默认值，
 //! 测试钉住 serde 输出与它逐字节相同。读入一律走 `sanitize_*`：坏一项回退一项，
 //! 永远不因为偏好文件坏了起不来。
 //!
@@ -98,57 +98,17 @@ impl<'de> Deserialize<'de> for ThemeSettings {
 }
 
 pub const THEMES_KEY: &str = "falcon.themes";
-/// 旧版只存明暗模式的字符串
-const LEGACY_MODE_KEYS: [&str; 2] = ["falcon.theme", "mojito.theme"];
-/// 旧版终端偏好，themeId 字段是旧的终端配色 id
-const LEGACY_TERM_KEYS: [&str; 2] = ["falcon.term", "mojito.term"];
+/// 旧版（2026-09-02 之前的 React 版）只存明暗模式的字符串。`mojito.theme` 不再认：浏览器版
+/// 只把 `falcon.` 开头的键读进偏好，原生的偏好文件出现在改名之后，都不会有它。
+const LEGACY_MODE_KEY: &str = "falcon.theme";
 
 pub fn choice_of(entry: &CatalogEntry) -> ThemeChoice {
     ThemeChoice { name: entry.name.to_string(), kind: ThemeKind::Builtin, colors: entry.colors.clone() }
 }
 
-/// 旧版终端配色能对上的 Ghostty 主题：给哪个槽位、叫什么名字
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct LegacyTermTheme {
-    pub slot: ThemeMode,
-    pub name: &'static str,
-}
-
-/// 旧版终端配色 id → Ghostty 内置主题名。Campbell 与 Light+ 在 Ghostty 里没有
-/// 对应，落回 Falcon 默认（Light+ 本来就是 Falcon Light 的 ANSI）。
-pub const LEGACY_TERM_THEME_NAMES: [(&str, LegacyTermTheme); 14] = {
-    const fn t(slot: ThemeMode, name: &'static str) -> LegacyTermTheme {
-        LegacyTermTheme { slot, name }
-    }
-    use ThemeMode::{Dark, Light};
-    [
-        ("one-dark", t(Dark, "Atom One Dark")),
-        ("dracula", t(Dark, "Dracula")),
-        ("nord", t(Dark, "Nord")),
-        ("tokyo-night", t(Dark, "TokyoNight")),
-        ("catppuccin-mocha", t(Dark, "Catppuccin Mocha")),
-        ("gruvbox-dark", t(Dark, "Gruvbox Dark")),
-        ("solarized-dark", t(Dark, "iTerm2 Solarized Dark")),
-        ("github-dark", t(Dark, "GitHub Dark Default")),
-        ("monokai", t(Dark, "Monokai Classic")),
-        ("solarized-light", t(Light, "iTerm2 Solarized Light")),
-        ("catppuccin-latte", t(Light, "Catppuccin Latte")),
-        ("github-light", t(Light, "GitHub Light Default")),
-        ("gruvbox-light", t(Light, "Gruvbox Light")),
-        ("one-light", t(Light, "Atom One Light")),
-    ]
-};
-
-/// 查旧版终端配色 id。
-///
-/// TS 用普通对象查表，`"constructor"` 这类 id 会查到继承属性、被当成命中——那是
-/// TS 的偶然行为（结果也没法用），这边只认表里的 14 个。
-pub fn legacy_term_theme(id: &str) -> Option<LegacyTermTheme> {
-    LEGACY_TERM_THEME_NAMES.iter().find(|(k, _)| *k == id).map(|(_, v)| *v)
-}
-
-/// localStorage 的抽象（原生这边是偏好文件）。读写都可能失败——web 的隐私模式 /
-/// 沙箱 iframe 连读 localStorage 都会抛 SecurityError，原生这边是 IO 错误。
+/// localStorage 的抽象（GPUI 客户端里由 falcon-ui 的 `Prefs` 实现，背后存哪儿归平台）。
+/// 读写都可能失败——React 版在隐私模式 / 沙箱 iframe 里连读 localStorage 都会抛
+/// SecurityError，存文件则是 IO 错误。
 pub trait StorageLike {
     fn get_item(&self, key: &str) -> anyhow::Result<Option<String>>;
     fn set_item(&mut self, key: &str, value: &str) -> anyhow::Result<()>;
@@ -238,14 +198,6 @@ pub fn sanitize_theme_settings(raw: &Value) -> ThemeSettings {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct LoadedThemeSettings {
-    pub settings: ThemeSettings,
-    /// 旧版终端配色能对上 Ghostty 主题时给出，由调用方从目录取颜色后补进槽位
-    /// （`catalog::find_builtin` + `choice_of`）
-    pub legacy_term: Option<LegacyTermTheme>,
-}
-
 /// 读一个 JSON 值：没有 / 空串 / 解析失败都是 `None`；读本身失败才是 `Err`
 fn read_json(storage: &dyn StorageLike, key: &str) -> anyhow::Result<Option<Value>> {
     Ok(match storage.get_item(key)? {
@@ -254,44 +206,33 @@ fn read_json(storage: &dyn StorageLike, key: &str) -> anyhow::Result<Option<Valu
     })
 }
 
-/// 读偏好；没有新格式时从旧的两个 key 迁移（明暗模式直接带过来，终端配色
-/// 需要目录里的颜色，只返回线索）。存储读失败就整份用默认。
-pub fn load_theme_settings(storage: Option<&dyn StorageLike>) -> LoadedThemeSettings {
-    let defaults = || LoadedThemeSettings { settings: ThemeSettings::default(), legacy_term: None };
-    let Some(storage) = storage else { return defaults() };
-    try_load(storage).unwrap_or_else(|_| defaults())
+/// 读偏好；没有新格式时把旧版的明暗模式带过来。存储读失败就整份用默认。
+///
+/// 旧版终端偏好里的 `themeId`（终端单独配色）当初也会折成一条"对应哪套 Ghostty 主题"的
+/// 线索交给调用方，但 GPUI 客户端从没消费过它，那段迁移已删；`themeId` 读入时由
+/// falcon-core 的 `sanitize_term_pref` 丢掉。
+pub fn load_theme_settings(storage: Option<&dyn StorageLike>) -> ThemeSettings {
+    let Some(storage) = storage else { return ThemeSettings::default() };
+    try_load(storage).unwrap_or_default()
 }
 
-fn try_load(storage: &dyn StorageLike) -> anyhow::Result<LoadedThemeSettings> {
+fn try_load(storage: &dyn StorageLike) -> anyhow::Result<ThemeSettings> {
     // `if (current)`：JSON 里的 0 / "" / false / null 算没有，走旧格式迁移
     if let Some(current) = read_json(storage, THEMES_KEY)?.filter(js_truthy) {
-        return Ok(LoadedThemeSettings { settings: sanitize_theme_settings(&current), legacy_term: None });
+        return Ok(sanitize_theme_settings(&current));
     }
     let mut settings = ThemeSettings::default();
-    for key in LEGACY_MODE_KEYS {
-        // 旧版存的是裸字符串，不是 JSON
-        let mode = match storage.get_item(key)?.as_deref() {
-            Some("light") => ThemePref::Light,
-            Some("dark") => ThemePref::Dark,
-            Some("system") => ThemePref::System,
-            _ => continue,
-        };
-        settings.mode = mode;
-        break;
+    // 旧版存的是裸字符串，不是 JSON
+    match storage.get_item(LEGACY_MODE_KEY)?.as_deref() {
+        Some("light") => settings.mode = ThemePref::Light,
+        Some("dark") => settings.mode = ThemePref::Dark,
+        Some("system") => settings.mode = ThemePref::System,
+        _ => {}
     }
-    let mut legacy_term = None;
-    for key in LEGACY_TERM_KEYS {
-        let term = read_json(storage, key)?;
-        let id = term.as_ref().and_then(Value::as_object).and_then(|o| o.get("themeId")).and_then(Value::as_str);
-        if let Some(hit) = id.and_then(legacy_term_theme) {
-            legacy_term = Some(hit);
-            break;
-        }
-    }
-    Ok(LoadedThemeSettings { settings, legacy_term })
+    Ok(settings)
 }
 
-/// 写偏好。写不进去就只在本次运行生效（与 web 一致：不报错、不重试）
+/// 写偏好。写不进去就只在本次运行生效（沿用 React 版的做法：不报错、不重试）
 pub fn save_theme_settings(storage: Option<&mut dyn StorageLike>, settings: &ThemeSettings) {
     let Some(storage) = storage else { return };
     if let Ok(json) = serde_json::to_string(settings) {
@@ -434,7 +375,7 @@ mod tests {
     /// 没有 storage 用默认
     #[test]
     fn load_without_storage() {
-        assert_eq!(load_theme_settings(None).settings, ThemeSettings::default());
+        assert_eq!(load_theme_settings(None), ThemeSettings::default());
     }
 
     /// 新格式直接读
@@ -447,41 +388,29 @@ mod tests {
             dark: ThemeChoice { name: "X".into(), kind: ThemeKind::Custom, ..choice_of(&FALCON_DARK) },
         };
         save_theme_settings(Some(&mut st), &settings);
-        let LoadedThemeSettings { settings, legacy_term } = load_theme_settings(Some(&st));
+        let settings = load_theme_settings(Some(&st));
         assert_eq!(settings.mode, ThemePref::Light);
         assert_eq!(settings.dark.name, "X");
         assert_eq!(settings.dark.kind, ThemeKind::Custom);
-        assert_eq!(legacy_term, None);
     }
 
-    /// 旧格式：明暗模式带过来，终端配色给出目录线索
+    /// 旧格式：明暗模式带过来，终端偏好里的旧配色 id 不再折成主题
     #[test]
     fn load_legacy_format() {
         let term = json!({"fontId": "maple", "themeId": "catppuccin-mocha"}).to_string();
         let st = MemStorage::with(&[("falcon.theme", "dark"), ("falcon.term", &term)]);
-        let LoadedThemeSettings { settings, legacy_term } = load_theme_settings(Some(&st));
+        let settings = load_theme_settings(Some(&st));
         assert_eq!(settings.mode, ThemePref::Dark);
-        assert_eq!(settings.dark.name, ThemeSettings::default().dark.name);
-        assert_eq!(legacy_term, Some(LegacyTermTheme { slot: ThemeMode::Dark, name: "Catppuccin Mocha" }));
-    }
-
-    /// 旧格式 mojito.* 也认；跟随界面 / 没对应的 id 没有线索
-    #[test]
-    fn load_legacy_mojito_and_unmapped_ids() {
-        let term = json!({"themeId": "match"}).to_string();
-        let st = MemStorage::with(&[("mojito.theme", "light"), ("mojito.term", &term)]);
-        let LoadedThemeSettings { settings, legacy_term } = load_theme_settings(Some(&st));
-        assert_eq!(settings.mode, ThemePref::Light);
-        assert_eq!(legacy_term, None);
-        let campbell = json!({"themeId": "campbell"}).to_string();
-        assert_eq!(load_theme_settings(Some(&MemStorage::with(&[("falcon.term", &campbell)]))).legacy_term, None);
+        assert_eq!(settings, ThemeSettings { mode: ThemePref::Dark, ..ThemeSettings::default() });
+        // 改名前的 mojito.* 不认
+        assert_eq!(load_theme_settings(Some(&MemStorage::with(&[("mojito.theme", "light")]))).mode, ThemePref::System);
     }
 
     /// 坏 JSON 用默认
     #[test]
     fn load_bad_json() {
         let st = MemStorage::with(&[(THEMES_KEY, "{oops")]);
-        assert_eq!(load_theme_settings(Some(&st)).settings.mode, ThemePref::System);
+        assert_eq!(load_theme_settings(Some(&st)).mode, ThemePref::System);
     }
 
     /// storage 抛异常也不炸
@@ -496,7 +425,7 @@ mod tests {
                 anyhow::bail!("SecurityError")
             }
         }
-        assert_eq!(load_theme_settings(Some(&Broken)).settings.mode, ThemePref::System);
+        assert_eq!(load_theme_settings(Some(&Broken)).mode, ThemePref::System);
         save_theme_settings(Some(&mut Broken), &ThemeSettings::default());
     }
 
@@ -528,11 +457,11 @@ mod tests {
     fn falsy_current_falls_back_to_legacy() {
         for falsy in ["0", "false", "null", "\"\""] {
             let st = MemStorage::with(&[(THEMES_KEY, falsy), ("falcon.theme", "dark")]);
-            assert_eq!(load_theme_settings(Some(&st)).settings.mode, ThemePref::Dark, "{falsy}");
+            assert_eq!(load_theme_settings(Some(&st)).mode, ThemePref::Dark, "{falsy}");
         }
         // 真值但不是对象：不迁移，整份默认
         let st = MemStorage::with(&[(THEMES_KEY, "1"), ("falcon.theme", "dark")]);
-        assert_eq!(load_theme_settings(Some(&st)).settings.mode, ThemePref::System);
+        assert_eq!(load_theme_settings(Some(&st)).mode, ThemePref::System);
     }
 
     /// selectionForeground 缺失 / 非法不作废整套，当 null

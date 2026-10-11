@@ -1,7 +1,7 @@
-//! 外观 › 应用图标（ADR 0018）：web 的 AppIconPicker。内置几套 + 一格自定义；选择存在服务端，
+//! 外观 › 应用图标（ADR 0018）：旧 React 版的 AppIconPicker。内置几套 + 一格自定义；选择存在服务端，
 //! 这里改了 Dock 立刻换，别的设备下次加载换。
 //!
-//! 预览用的是嵌进二进制的 macOS 版式 PNG（与 Dock 里看到的一模一样），web 那边用的是圆角方块。
+//! 预览用的是嵌进二进制的 macOS 版式 PNG（与 Dock 里看到的一模一样），React 版用的是圆角方块。
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ impl AppIconPicker {
     }
 }
 
-/// 一格：图标 + 名字；选中用 tint，hover 用灰（web 的 Tile）
+/// 一格：图标 + 名字；选中用 tint，hover 用灰（React 版的 Tile）
 fn tile(
     id: impl Into<SharedString>,
     picture: AnyElement,
@@ -71,7 +71,7 @@ fn tile(
         .child(div().max_w_full().truncate().child(label))
 }
 
-/// macOS 版式的图四周本来就留了 10% 的透明边，比 web 的圆角方块（56）画大一号才一样大
+/// macOS 版式的图四周本来就留了 10% 的透明边，比 React 版的圆角方块（56）画大一号才一样大
 fn picture(image: Arc<Image>) -> AnyElement {
     img(image).size(zpx(64.)).into_any_element()
 }
@@ -168,6 +168,8 @@ impl Render for AppIconPicker {
                     ws.update(cx, |w, cx| w.upload_app_icon(cx)).ok();
                 }),
         );
+        let info = falcon_platform::get(cx).info();
+        let dock_note = info.mac && !info.browser;
         let footer = div()
             .mt_3()
             .flex()
@@ -183,7 +185,9 @@ impl Render for AppIconPicker {
                     .line_height(zpx(18.))
                     .text_color(ui.muted_foreground)
                     .child(t!("appIcon.customHint").to_string())
-                    .child(t!("native.settings.appIconDockNote").to_string()),
+                    // Dock / 访达那句只对 macOS 原生客户端成立（ADR 0018 决定五），浏览器版与
+                    // Windows 不画
+                    .when(dock_note, |d| d.child(t!("native.settings.appIconDockNote").to_string())),
             )
             .child(buttons);
 

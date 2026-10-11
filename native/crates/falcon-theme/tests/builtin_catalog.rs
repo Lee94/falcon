@@ -2,7 +2,7 @@
 
 use falcon_theme::catalog::{GHOSTTY_THEMES_DATA, parse_catalog_data};
 use falcon_theme::{
-    Appearance, GHOSTTY_THEMES_COUNT, derive_theme, find_builtin, find_theme, load_catalog, parse_ghostty_theme,
+    Appearance, GHOSTTY_THEMES_COUNT, derive_theme, find_theme, load_catalog, parse_ghostty_theme,
     resolve_theme_colors, serialize_ghostty_theme,
 };
 
@@ -33,15 +33,11 @@ fn all_builtin_themes_parse_and_derive() {
 /// 按名字取：精确、忽略大小写、Falcon 自己的、取不到
 #[test]
 fn builtin_lookup_by_name() {
-    let mocha = find_builtin("Catppuccin Mocha").expect("Catppuccin Mocha");
+    let all = load_catalog();
+    let mocha = find_theme(all, "Catppuccin Mocha").expect("Catppuccin Mocha");
     assert_eq!(mocha.colors.background.to_hex(), "#1e1e2e");
     assert_eq!(mocha.appearance, Appearance::Dark);
-    assert_eq!(find_builtin("catppuccin latte").map(|e| e.name.into_owned()).as_deref(), Some("Catppuccin Latte"));
-    assert_eq!(find_builtin("Falcon Dark").map(|e| e.colors.background.to_hex()).as_deref(), Some("#0a0a0a"));
-    assert!(find_builtin("No Such Theme").is_none());
-    // 旧版终端配色迁移会用到的名字全都在
-    for (_, legacy) in falcon_theme::pref::LEGACY_TERM_THEME_NAMES {
-        let e = find_theme(load_catalog(), legacy.name).unwrap_or_else(|| panic!("{}", legacy.name));
-        assert_eq!(e.name, legacy.name);
-    }
+    assert_eq!(find_theme(all, "catppuccin latte").map(|e| e.name.to_string()).as_deref(), Some("Catppuccin Latte"));
+    assert_eq!(find_theme(all, "Falcon Dark").map(|e| e.colors.background.to_hex()).as_deref(), Some("#0a0a0a"));
+    assert!(find_theme(all, "No Such Theme").is_none());
 }

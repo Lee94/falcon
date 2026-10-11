@@ -68,3 +68,9 @@ rio 引擎（rioterm，Rio 的 Rust VT 核心编译成 WASM）解析吞吐是 xt
 - `open.ts` 与上游 rioterm 的 `open()` 会漂移，由我们维护；上游修的 bug 不会自动带过来。
 - 引擎仍是两值（xterm / rio），WebGPU 与 canvas 的切换对用户不可见，只靠 toast 与设置页提示；花屏但不抛异常时靠 localStorage 逃生口。
 - 明确不做（可后补）：触屏滚动、软键盘退格连删（rio 的 textarea 现在归我们，xterm 那套哨兵可以搬）、跨终端共享图集、DOMRenderer。
+
+## 后记（2026-10-11）：rio 引擎随 React 前端删除
+
+浏览器版换成 GPUI（wasm）后，`packages/web` 整个删掉（提交 `54c4bef`），本文的 `lib/rio/`、自研 WebGPU 渲染器与 xterm.js 一起没了；原文件在提交 `9c9d045` 里。现在原生与浏览器版是同一套终端：`falcon-term`（alacritty_terminal）解析，`falcon-ui/src/terminal/element.rs` 画，浏览器上由 gpui-pre-web 底下的 wgpu 渲染（WebGPU 优先，退 WebGL2）。偏好 JSON 的 `engine` 键随之不再读写，旧值读入时丢掉。
+
+留下来的是从 `lib/rio/` 移植进 `falcon-term` 的输入口径：`mouse.rs`（鼠标上报）、`wheel.rs`（滚轮）、`keyroute.rs`（按键归属），以及 `falcon-proto::term_modes` 那条"客户端读模式跟踪器合成鼠标报文"的用法。上文的基准表与踩坑清单只剩历史参考价值。

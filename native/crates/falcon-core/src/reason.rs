@@ -1,6 +1,6 @@
-//! 失败 / 非持久原因 → 给人看的一句话。对应 web 的 `lib/reason.ts`。
+//! 失败 / 非持久原因 → 给人看的一句话。对应旧 React 版的 `lib/reason.ts`。
 //!
-//! 文案本身在 i18n 资源里（key 与 web 的 `i18n.ts` 同名，设计文档 §4.6），这里只管
+//! 文案本身在 i18n 资源里（key 沿用 React 版 `i18n.ts` 里的名字，设计文档 §4.6），这里只管
 //! "哪个原因用哪个 key、带什么参数"。翻译函数由调用方给：`t(key, params)`。
 
 use falcon_proto::{NonDurableReason, WorktreeFailure};

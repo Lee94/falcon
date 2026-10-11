@@ -1,8 +1,8 @@
-//! 本地时区。web 用 `new Date()` 自带本地时区，Rust 标准库没有时区数据库，交给 chrono
+//! 本地时区。旧 React 版用 `new Date()` 自带本地时区，Rust 标准库没有时区数据库，交给 chrono
 //! （macOS / Linux 读 TZ 数据库，Windows 走系统 API）。
 //!
 //! 按**每个时间戳**取一次偏移，而不是启动时取一个固定值：有夏令时的地区，冬天与夏天的
-//! 时间戳偏移差一小时，固定偏移会让一半的时间错一小时（web 的 Date 没有这个错）。
+//! 时间戳偏移差一小时，固定偏移会让一半的时间错一小时（React 版的 Date 没有这个错）。
 
 use chrono::{Datelike, Local, TimeZone, Timelike};
 

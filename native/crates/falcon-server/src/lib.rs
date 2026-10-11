@@ -4,7 +4,7 @@
 //! 包括顶部和关键处解释"为什么"的注释——那些多半是实测出来的坑，附录 A 有清单。
 //! Node 版已删除；各文件头"移植自 …"指的 TS 原文在提交 fd9022a（删除前的最后一个提交）里：
 //! `git show fd9022a:packages/server/src/<路径>`。
-//! 协议类型一律用 falcon-proto（与原生客户端同一份），不在这里另起一套。
+//! 协议类型一律用 falcon-proto（与客户端同一份），不在这里另起一套。
 
 pub mod api;
 pub mod app_icon;

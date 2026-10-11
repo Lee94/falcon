@@ -1,10 +1,10 @@
-//! Zellij 授权 / 安装（web 的 `components/ZellijInstallModal.tsx`，ADR 0001）。
+//! Zellij 授权 / 安装（旧 React 版的 `components/ZellijInstallModal.tsx`，ADR 0001）。
 //!
 //! SSH 项目第一次在某台远端主机上建会话前：先问一次授权（会往用户的服务器写可执行文件，
 //! 授权按 host + port + username 记），同意后经 `/ws/install/:projectId` 看宿主机自己下载、解压、
 //! 验证的进度；瞬时故障后端自动重试 3 次，稳定的环境事实（noexec、缺 curl）直接给重试按钮。
 //! 拒绝则直接建非持久会话。`then_create` 带着开场 agent：装完（或拒绝 / 跳过）后接着把会话建出来
-//! （web 的 `finish(create)`）；为 None 时（命令面板「为某主机启用持久会话」）只装不建。
+//! （React 版的 `finish(create)`）；为 None 时（命令面板「为某主机启用持久会话」）只装不建。
 //!
 //! 授权是"允许 falcon 往这台服务器写可执行文件"的决定，该问；安装是随后的执行过程，只报进度。
 //! 失败态里能直接改下载地址再重试——后端刚刚已经用旧地址自动试过 3 次了，不给改地址的话
@@ -35,7 +35,7 @@ use crate::toasts::ToastExt;
 use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
 
-/// Zellij 官方发行的 target 三元组，与后端 version.ts 保持一致
+/// Zellij 官方发行的 target 三元组，与后端 zellij/version.rs 保持一致
 const TARGETS: [&str; 5] = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
@@ -62,7 +62,7 @@ pub struct InstallView {
     then_create: Option<Option<SessionAgent>>,
     phase: Phase,
     status: HostZellijStatus,
-    /// 下载地址：授权页与失败页共用同一个值（web 同一个 state）
+    /// 下载地址：授权页与失败页共用同一个值（React 版里也是同一个 state）
     base_url: Entity<InputState>,
     saved_url: String,
     stage: ZellijInstallStage,
@@ -80,7 +80,7 @@ pub struct InstallView {
     log_scroll: ScrollHandle,
     /// 读安装通道的任务。丢掉 = 关掉 socket = 服务端取消这次安装
     install: Option<Task<()>>,
-    /// 授权 / 改下载源的请求失败（web 没接这个错，这里就地显示）
+    /// 授权 / 改下载源的请求失败（React 版没接这个错，这里就地显示）
     error: Option<String>,
     finished: bool,
 }
@@ -99,7 +99,7 @@ pub fn open(
             let status = request.await;
             cx.update(|window, cx| match status {
                 Ok(status) => open_view(ws, pid, then_create, status, window, cx),
-                // 查不到主机状态：照常建会话，由后端判定持久性（web 的 skip("verify-failed")）
+                // 查不到主机状态：照常建会话，由后端判定持久性（React 版的 skip("verify-failed")）
                 Err(err) => ws.update(cx, |w, cx| {
                     w.handle_error(&err, cx);
                     if let Some(agent) = then_create {
@@ -138,7 +138,7 @@ fn open_view(
         dialog
             .title(title)
             .w(zpx(576.))
-            // 安装进行中锁住遮罩（web 的 lockOverlay 只在 installing 时开）
+            // 安装进行中锁住遮罩（React 版的 lockOverlay 只在 installing 时开）
             .overlay_closable(!installing)
             .close_button(!installing)
             .child(v.clone())
@@ -408,7 +408,7 @@ impl InstallView {
         .detach();
     }
 
-    /// 回车：当前阶段的主按钮（web 里它带 data-autofocus）
+    /// 回车：当前阶段的主按钮（React 版里它带 data-autofocus）
     fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.phase {
             Phase::Ask => self.allow(window, cx),

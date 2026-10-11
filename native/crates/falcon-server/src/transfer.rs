@@ -435,9 +435,10 @@ pub struct UploadTarget {
     pub tmp: String,
 }
 
-/// 上传文件名的护栏。浏览器给的 File.name 不会含分隔符，会含的只能是构造出来的
-/// 请求；控制字符与 `..` 同 relSegments 的理由。Windows 的保留字符在远端也会
-/// 失败，但那边的报错是一段 .NET 异常文本，不如在这里直接说清楚。
+/// 上传文件名的护栏。客户端给的是本机文件名的末段（React 版是浏览器的 File.name），
+/// 不会含分隔符，会含的只能是构造出来的请求；控制字符与 `..` 同 relSegments 的理由。
+/// Windows 的保留字符在远端也会失败，但那边的报错是一段 .NET 异常文本，不如在这里
+/// 直接说清楚。
 pub fn validate_upload_name(kind: HostKind, name: &str) -> Result<(), String> {
     validate_entry_name(kind, name)
 }

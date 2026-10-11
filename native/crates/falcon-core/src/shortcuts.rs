@@ -1,22 +1,23 @@
-//! 全局快捷键的定义表。对应 web 的 `lib/shortcuts.ts`（设计文档 §4.3）。
+//! 全局快捷键的定义表。对应旧 React 版的 `lib/shortcuts.ts`（设计文档 §4.3）。
 //!
 //! 键位跟 VS Code 对齐——命令面板是 ⌘⇧P / Ctrl+Shift+P / F1，其余能对上的也用同一套
 //! （⌘B 侧栏、⌘⇧E 文件、⌘⇧] / ⌘⇧[ 切窗口）。
 //!
-//! 硬约束（两个客户端都一样）：终端聚焦时几乎吞掉所有 Ctrl+* 组合（Ctrl+C/D/R/W 全是
+//! 硬约束（原生与浏览器版都一样）：终端聚焦时几乎吞掉所有 Ctrl+* 组合（Ctrl+C/D/R/W 全是
 //! shell 语义），所以全局键**不能**用裸 Ctrl+字母。安全区是 ⌘ 系列（mac）、Ctrl+Shift+*
 //! （Win/Linux 惯例上留给应用层）和 Alt+*。Esc 永远归终端，只有对话框 / 命令面板 /
 //! 菜单打开时被上层拦截——那时终端必定已失焦。
 //!
 //! 浏览器会吞掉 ⌘T / ⌘W / Ctrl+Shift+T / Ctrl+Shift+W / Ctrl+Tab（保留快捷键，页面
-//! preventDefault 无效），所以 web 给每个命令额外注册了一个 Alt 别名。**原生不需要
+//! preventDefault 无效），所以 React 版给每个命令额外注册了一个 Alt 别名。**原生不需要
 //! 这些别名**（设计文档 §4.3），但表里照样列出来并标成 [`BindingRole::BrowserAlias`]：
-//! 注册与否由 app 决定，两边的键位表仍能逐条对照。
+//! 注册与否由 app 按平台决定——浏览器版同样躲不开保留键，照注册；原生不注册。
 //!
 //! 这里是数据：动作 id、各平台的键位（主键位 / 额外入口 / 浏览器别名）、说明文案的
 //! i18n key、分组。GPUI 的 keybinding 字符串由 [`Keystroke::gpui`] 给出。另有
-//! [`match_command`]：web `matchCommand` 的逐行移植，按物理键码判命令，给不经过
-//! GPUI keymap 的场合（终端里判"这是不是全局键"）用。
+//! [`match_command`]：React 版 `matchCommand` 的逐行移植，按物理键码判命令，原本留给
+//! 不经过 GPUI keymap 的场合（终端里判"这是不是全局键"）；现在全局键由 keymap 先吃掉，
+//! 终端那边用不上它。
 
 /// 全局命令
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,7 +29,7 @@ pub enum Command {
     ToggleSidebar,
     ToggleGitPanel,
     ToggleChangesPanel,
-    /// 打开设置并停在「中转」页（web 的 `openRelays`）。中转挂机器、在设置里管（ADR 0016），
+    /// 打开设置并停在「中转」页（React 版的 `openRelays`）。中转挂机器、在设置里管（ADR 0016），
     /// 沿用原来转发面板的 ⌘⇧F
     OpenRelays,
     ToggleFilesPanel,
@@ -45,7 +46,7 @@ pub enum Command {
 }
 
 impl Command {
-    /// 固定的那些（不含 `Tab(n)`），web 的书写顺序
+    /// 固定的那些（不含 `Tab(n)`），React 版的书写顺序
     pub const FIXED: [Command; 16] = [
         Command::Palette,
         Command::QuickOpen,
@@ -70,7 +71,7 @@ impl Command {
         Self::FIXED.into_iter().chain((1..=9).map(Command::Tab)).collect()
     }
 
-    /// web 里的动作 id（`palette`、`quickOpen`、`tab3`……）
+    /// 动作 id（沿用 React 版的 `palette`、`quickOpen`、`tab3`……）
     pub fn id(self) -> String {
         match self {
             Command::Palette => "palette".into(),
@@ -118,13 +119,13 @@ pub enum ShortcutGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutDef {
     pub command: Command,
-    /// 说明文案的 i18n key，与 web 在菜单 / tooltip / 命令面板里配这条快捷键用的那句同名。
-    /// web 没有现成文案的（切窗口）是 `None`，需要时由 app 补 key。
+    /// 说明文案的 i18n key，沿用 React 版在菜单 / tooltip / 命令面板里配这条快捷键用的那句。
+    /// React 版没有现成文案的（切窗口）是 `None`，需要时由 app 补 key。
     pub label_key: Option<&'static str>,
     pub group: ShortcutGroup,
 }
 
-/// 按 web 的书写顺序列出全部命令的说明
+/// 按 React 版的书写顺序列出全部命令的说明
 pub fn shortcut_defs() -> Vec<ShortcutDef> {
     use Command::*;
     use ShortcutGroup::*;
@@ -154,7 +155,7 @@ pub fn shortcut_defs() -> Vec<ShortcutDef> {
 /// 一次按键组合。`key` 用 GPUI 的键名：小写字母、数字、`[` `]` `` ` ``、`tab`、`f1`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Keystroke {
-    /// mac 的 ⌘（GPUI 的 `cmd`，web 的 metaKey）
+    /// mac 的 ⌘（GPUI 的 `cmd`，DOM 的 metaKey）
     pub cmd: bool,
     pub ctrl: bool,
     pub alt: bool,
@@ -191,7 +192,7 @@ impl Keystroke {
         s
     }
 
-    /// 对应的 web 物理键码（`KeyP`、`Digit0`、`BracketLeft`……），给 [`match_command`] 用
+    /// 对应的 DOM 物理键码（`KeyP`、`Digit0`、`BracketLeft`……），给 [`match_command`] 用
     pub fn web_code(&self) -> String {
         match self.key {
             "[" => "BracketLeft".into(),
@@ -205,15 +206,15 @@ impl Keystroke {
     }
 }
 
-/// 这条键位在 web 里是什么身份
+/// 这条键位是什么身份（照 React 版 `chord()` / `altChord()` 的划分）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingRole {
-    /// 菜单、tooltip 里显示的那个（web 的 `chord()`）
+    /// 菜单、tooltip 里显示的那个（React 版的 `chord()`）
     Primary,
-    /// VS Code 主键位之外的额外入口（旧的 ⌘K / Ctrl+K、F1、Ctrl+Shift+`），原生照样要
+    /// VS Code 主键位之外的额外入口（旧的 ⌘K / Ctrl+K、F1、Ctrl+Shift+`），原生与浏览器版都注册
     Secondary,
-    /// 为绕开浏览器保留键才加的 Alt 别名（web 的 `altChord()` 里除 ⌘K 以外那些）。
-    /// 原生不需要
+    /// 为绕开浏览器保留键才加的 Alt 别名（React 版 `altChord()` 里除 ⌘K 以外那些）。
+    /// 只有浏览器版注册，原生不需要
     BrowserAlias,
 }
 
@@ -288,7 +289,7 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
             b(Keystroke::new("[").alt(), BrowserAlias),
         ],
         // 与切窗口的 ⌘⇧] / ⌘⇧[ 同一对键，换成 ⌥。Win/Linux 不能用 Ctrl+Alt：那是 AltGr，
-        // 德语键盘上 AltGr + 这颗键打的是 ~。Alt+Shift 在 Win/Linux 是主键位，在 mac 是 web 的别名
+        // 德语键盘上 AltGr + 这颗键打的是 ~。Alt+Shift 在 Win/Linux 是主键位，在 mac 是浏览器版的别名
         Command::NextCanvas | Command::PrevCanvas => {
             let key = if cmd == Command::NextCanvas { "]" } else { "[" };
             if mac {
@@ -302,7 +303,7 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
 
 const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
-/// 菜单、tooltip 里显示的主键位（web 的 `chord()`，字面逐字一致）
+/// 菜单、tooltip 里显示的主键位（照 React 版的 `chord()` 逐字移植）
 pub fn chord(cmd: Command, mac: bool) -> String {
     let pick = |m: &str, o: &str| if mac { m.to_string() } else { o.to_string() };
     match cmd {
@@ -327,7 +328,7 @@ pub fn chord(cmd: Command, mac: bool) -> String {
     }
 }
 
-/// web 的 `altChord()`：浏览器保留了主键位时能用的别名（外加命令面板的旧入口 ⌘K / Ctrl+K）
+/// React 版的 `altChord()`：浏览器保留了主键位时能用的别名（外加命令面板的旧入口 ⌘K / Ctrl+K）
 pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
     Some(match cmd {
         Command::NewTerminal => "Alt+T",
@@ -356,7 +357,7 @@ pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
     })
 }
 
-/// 一次按键事件（web KeyboardEvent 的那几个字段）
+/// 一次按键事件（DOM KeyboardEvent 的那几个字段）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyEventLike {
     /// 物理键码（`KeyP`、`Digit1`、`BracketLeft`、`Tab`、`F1`、`Backquote`）；拿不到给空串
@@ -462,7 +463,7 @@ fn event_code(e: &KeyEventLike) -> String {
     }
 }
 
-/// 命中则返回命令。web `matchCommand` 的逐行移植（含它的优先级：F1 → Ctrl+Shift+` →
+/// 命中则返回命令。React 版 `matchCommand` 的逐行移植（含它的优先级：F1 → Ctrl+Shift+` →
 /// Alt 别名 → 平台修饰键）。注意平台修饰键那一支不看 Alt：mac 上 ⌘⌥P 也是 quickOpen。
 pub fn match_command(e: &KeyEventLike, mac: bool) -> Option<Command> {
     let modifier = if mac { e.meta && !e.ctrl } else { e.ctrl && !e.meta };

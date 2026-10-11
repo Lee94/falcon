@@ -1,4 +1,4 @@
-//! 画布上的文件查看窗口（web 的 components/FileView.tsx，ADR 0007）。
+//! 画布上的文件查看窗口（旧 React 版的 components/FileView.tsx，ADR 0007）。
 //!
 //! 目标由排布给（canvas 调 [`FileView::set_target`]）而不是跟着焦点走：文件窗口是列里的一扇，
 //! 焦点在别处时它照样要显示自己的内容。打开 / 换文件 / 手动刷新时拉一次，不轮询——正看着的
@@ -7,7 +7,7 @@
 //!
 //! 内容按预览类型分四种：源码（tree-sitter 高亮，[`code`]）、图片（缩放 / 平移，[`image`]）、
 //! Markdown（渲染，[`markdown`]）、HTML（WebView，[`html`]）。后两种有"预览 / 源码"切换，
-//! 选择记在偏好里（web 的 `falcon.fileViewMode`）。图片与 HTML 的字节走原始字节路由
+//! 选择记在偏好里（`falcon.fileViewMode`，沿用 React 版的键）。图片与 HTML 的字节走原始字节路由
 //! （`rawBase + path`，URL 里带只能读这个项目文件的作用域令牌），不经 JSON。
 
 mod code;
@@ -343,7 +343,7 @@ impl Render for FileView {
     }
 }
 
-/// 工具栏上的小图标按钮（web 的 ghost icon-xs）；按下态用 muted 底，`spinning` 时图标自己转
+/// 工具栏上的小图标按钮（React 版的 ghost icon-xs）；按下态用 muted 底，`spinning` 时图标自己转
 fn bar_button(id: &'static str, name: IconName, label: impl Into<SharedString>, pressed: bool, spinning: bool, ui: &Ui) -> Stateful<Div> {
     let label: SharedString = label.into();
     let fg = ui.foreground;
@@ -383,7 +383,7 @@ fn dir_of(path: &str) -> &str {
     path.rfind('/').map_or("", |i| &path[..i])
 }
 
-/// web FileView 的 formatBytes（与文件面板的 format_size 不同：只到 MB，一位小数）
+/// React 版 FileView 的 formatBytes（与文件面板的 format_size 不同：只到 MB，一位小数）
 fn format_bytes(n: u64) -> String {
     if n < 1024 {
         format!("{n} B")

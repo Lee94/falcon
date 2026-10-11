@@ -1,12 +1,12 @@
-//! 主题选择器（web 的 `components/ThemePicker.tsx`，ADR 0006）：Falcon 两套 + Ghostty 全部内置
-//! 主题，搜索、按深浅筛选，高亮到哪项就实时预览哪项（`crate::theme::preview`），也可以贴一段
+//! 主题选择器（旧 React 版的 `components/ThemePicker.tsx`，ADR 0006）：Falcon 两套 + Ghostty
+//! 全部内置主题，搜索、按深浅筛选，高亮到哪项就实时预览哪项（`crate::theme::preview`），也可以贴一段
 //! Ghostty 主题文本当自定义主题（`falcon_theme::resolve_custom_theme`）。
 //!
-//! 结构与 web 一致：设置页里每个槽位一个触发按钮（色块 + 主题名），点开是弹层——搜索框、
+//! 结构照 React 版：设置页里每个槽位一个触发按钮（色块 + 主题名），点开是弹层——搜索框、
 //! 分组列表（当前自定义 / Falcon / 同明暗的 Ghostty 主题）、底部"自定义…"与"复制为 Ghostty
 //! 主题"。选定才落盘；弹层关掉（选定、Esc、点外面、整个设置被关掉）一律复原到真正的槽位主题。
 //!
-//! 与 web 的差别只在实现层：
+//! 与 React 版的差别只在实现层：
 //! - 目录是编译期嵌进来的（falcon-theme 的 `load_catalog`），第一次打开时同步解析，没有
 //!   "正在加载 / 加载失败"两种状态；
 //! - 463 套进一个 `uniform_list`，只排可见的那几十行——整份列表每帧重排在 debug 构建里
@@ -41,14 +41,14 @@ use crate::toasts::ToastExt;
 use crate::ui::icon;
 use crate::zoom::zpx;
 
-/// 高亮 / 编辑到应用整套主题之间的延迟：键盘连按时别每一下都重排整个窗口（web 同值）
+/// 高亮 / 编辑到应用整套主题之间的延迟：键盘连按时别每一下都重排整个窗口（沿用 React 版的值）
 const PREVIEW_DELAY: Duration = Duration::from_millis(120);
 /// 列表行高：标题行与主题行同高，`uniform_list` 要求每行一样高
 const ROW_H: f32 = 30.;
-/// 列表最高（web 的 max-h-80）
+/// 列表最高（React 版的 max-h-80）
 const LIST_MAX_H: f32 = 320.;
 
-/// 主题缩略：底色、字色、红、蓝四格，一眼能分出深浅与调性（web 的 ThemeSwatch）
+/// 主题缩略：底色、字色、红、蓝四格，一眼能分出深浅与调性（React 版的 ThemeSwatch）
 pub fn swatch(colors: &ThemeColors, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let cell = |c| div().flex_1().bg(hsla(c));
@@ -254,7 +254,7 @@ impl ThemeList {
                 i.set_placeholder(t!("theme.search", n = count).to_string(), window, cx);
             });
             self.rebuild(cx);
-            // 打开时高亮停在槽位现在那一项（web：setHighlighted(currentValue)）
+            // 打开时高亮停在槽位现在那一项（React 版：setHighlighted(currentValue)）
             let current = slot_choice(self.slot, cx);
             let at = self.items.iter().position(|&ix| match &self.rows[ix] {
                 Row::Item(item) => match (&item.target, current.kind) {
@@ -523,7 +523,7 @@ impl Render for ThemeList {
                     .border_t_1()
                     .border_color(ui.border)
                     .child(
-                        // 左对齐的幽灵按钮（web：flex-1 justify-start）；组件库的 Button 内容恒居中
+                        // 左对齐的幽灵按钮（React 版：flex-1 justify-start）；组件库的 Button 内容恒居中
                         div()
                             .id("theme-custom-entry")
                             .flex_1()
@@ -569,13 +569,13 @@ pub fn open_editor(slot: ThemeMode, initial: ThemeChoice, window: &mut Window, c
         dialog
             .title(t!("theme.editorTitle").to_string())
             .w(zpx(672.))
-            // 编辑到一半点到外面就丢了——只认取消 / Esc / 应用（web 的 lockOverlay）
+            // 编辑到一半点到外面就丢了——只认取消 / Esc / 应用（React 版的 lockOverlay）
             .overlay_closable(false)
             .child(editor.clone())
             .footer(footer)
             .on_ok(move |_, _, cx| editor_ok.update(cx, |e, cx| e.apply(cx)))
     });
-    // 对话框打开时会把焦点收到自己身上：等它收完再交给文本框（web 的 data-autofocus）
+    // 对话框打开时会把焦点收到自己身上：等它收完再交给文本框（React 版的 data-autofocus）
     window.defer(cx, move |window, cx| text.update(cx, |t, cx| t.focus(window, cx)));
 }
 
@@ -679,7 +679,7 @@ impl Render for ThemeEditor {
                     .flex_col()
                     .gap(zpx(6.))
                     .child(label(t!("theme.editorText").to_string()))
-                    // web：rows=14、leading-5（20px）+ 上下各 8px
+                    // React 版：rows=14、leading-5（20px）+ 上下各 8px
                     .child(div().font_family(crate::fonts::BERKELEY).text_xs().child(Textarea::new(&self.text).h(zpx(296.))))
                     .child(div().text_xs().text_color(tone).child(hint)),
             );

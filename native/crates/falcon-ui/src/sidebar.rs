@@ -1,4 +1,4 @@
-//! 侧栏：服务器 → 文件夹 → 检出 → 会话（web 的 `components/Sidebar.tsx`）。
+//! 侧栏：服务器 → 文件夹 → 检出 → 会话（旧 React 版的 `components/Sidebar.tsx`）。
 //!
 //! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
@@ -649,7 +649,7 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
         );
     }
     if let Some((ws, source_id)) = o.meegle_drop {
-        // 落点只认类型化的载荷（web 是自定义 dataTransfer 类型）；拖到上面时整行换底色
+        // 落点只认类型化的载荷（React 版是自定义 dataTransfer 类型）；拖到上面时整行换底色
         let over = ui.accent;
         row = row
             .drag_over::<MeegleWorkItemDragPayload>(move |s, _, _, _| s.bg(over))
@@ -663,8 +663,8 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
     }
 }
 
-/// 飞书项目工作项拖到源项目上（web `Sidebar.tsx` 的 `openWorktreeFromMeegle`）：取详情拿到带
-/// 前缀的 Key，预填派生表单的名字与分支（new-branch 模式，基点是源项目的默认基点或 HEAD）。
+/// 飞书项目工作项拖到源项目上（React 版 `Sidebar.tsx` 的 `openWorktreeFromMeegle`）：取详情
+/// 拿到带前缀的 Key，预填派生表单的名字与分支（new-branch 模式，基点是源项目的默认基点或 HEAD）。
 /// 什么都不直接建——表单等用户确认
 fn open_worktree_from_meegle(
     ws: Entity<Workspace>,

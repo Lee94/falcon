@@ -1,5 +1,5 @@
-//! 设置页的排版件（web SettingsModal 里的 SettingSection / SettingRow，common/Field 的
-//! Field / Segmented）。颜色一律取语义 token。
+//! 设置页的排版件（旧 React 版 SettingsModal 里的 SettingSection / SettingRow，common/Field
+//! 的 Field / Segmented）。颜色一律取语义 token。
 
 use std::rc::Rc;
 
@@ -11,7 +11,7 @@ use crate::theme::{Ui, radius};
 use crate::ui::icon;
 use crate::zoom::zpx;
 
-/// 一节：标题 + 可选说明 + 内容（web：mb-8，h2 text-base semibold，说明 text-xs）
+/// 一节：标题 + 可选说明 + 内容（React 版：mb-8，h2 text-base semibold，说明 text-xs）
 pub fn section(title: impl Into<SharedString>, description: Option<String>, children: Vec<AnyElement>, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let head = div()
@@ -49,7 +49,7 @@ pub fn row(label: impl Into<SharedString>, hint: Option<String>, control: impl I
 }
 
 /// 把若干行排成一列，行间自动加分隔线。`more` = 后面还跟着别的内容（脚注、预览、表单），
-/// 最后一行也要画线——web 的 `last:border-b-0` 只对整节的最后一个子元素生效
+/// 最后一行也要画线——React 版的 `last:border-b-0` 只对整节的最后一个子元素生效
 pub fn rows(items: Vec<(String, Option<String>, AnyElement)>, more: bool, cx: &App) -> Vec<AnyElement> {
     let n = items.len();
     items
@@ -59,7 +59,7 @@ pub fn rows(items: Vec<(String, Option<String>, AnyElement)>, more: bool, cx: &A
         .collect()
 }
 
-/// 表单字段：小号标签 + 控件 + 提示（web 的 Field）
+/// 表单字段：小号标签 + 控件 + 提示（React 版的 Field）
 pub fn field(label: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> Div {
     let ui = Ui::global(cx);
     div()
@@ -76,7 +76,7 @@ pub struct SegOption<T> {
     pub icon: Option<IconName>,
 }
 
-/// 分段选择（web 的 Segmented / ThemeChoice）：凹槽里浮起一块——槽用 sunken，选中项用岛的
+/// 分段选择（React 版的 Segmented / ThemeChoice）：凹槽里浮起一块——槽用 sunken，选中项用岛的
 /// 材质，同一套曲率只是小一号。`dense` 是明暗模式那种带图标的小号。
 pub fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,

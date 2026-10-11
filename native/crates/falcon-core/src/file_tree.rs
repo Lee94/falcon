@@ -1,4 +1,4 @@
-//! 把一串文件路径拼成目录树。对应 web 的 `lib/fileTree.ts`，纯函数。
+//! 把一串文件路径拼成目录树。对应旧 React 版的 `lib/fileTree.ts`，纯函数。
 //!
 //! 「修改」面板与 History 的提交详情共用它——两处列的都是"一组改动文件"，
 //! 只是来源不同。
@@ -79,7 +79,7 @@ impl<T> Draft<T> {
 /// `packages` → `server/src` → `git`，而不是每层一格缩进。一个只有几个
 /// 改动文件的仓库，不压缩的话大半个面板都在画空目录的缩进。
 ///
-/// 顺序：目录在前、文件在后，各自按名字排（web 用 localeCompare，中文路径才不会
+/// 顺序：目录在前、文件在后，各自按名字排（React 版用 localeCompare，中文路径才不会
 /// 按码位乱序；这里的近似见 [`crate::js`]）。git 给的顺序本身是按路径排的，但树化
 /// 之后必须重排。
 pub fn build_file_tree<T>(items: Vec<T>, path_of: impl Fn(&T) -> String) -> Vec<TreeNode<T>> {

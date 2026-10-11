@@ -45,8 +45,10 @@
 //!
 //! index.ts 从 termEnv / termModes / ttlCache 转出的运行时逻辑（`OscColorGate`、
 //! `termPtyEnv` 等 PTY 环境函数、`TermModeTracker`、`TtlCache` 及其
-//! `TtlCacheEntry` / `TtlCacheLoadOpts`）不是线上形状：前者只在服务端跑，后两者
-//! 需要时由 falcon-term / falcon-core 按各自的 TS 模块移植。
+//! `TtlCacheEntry` / `TtlCacheLoadOpts`）不是线上形状，不当协议类型镜像：前者只在服务端跑
+//! （`falcon-server` 的 `term_env.rs`），`TtlCache` 在 falcon-core 的 `ttl_cache.rs`。
+//! 例外是 `TermModeTracker`：服务端回放前缀与客户端鼠标上报都要它，就放在本 crate 的
+//! [`term_modes`] 里两边共用。
 //!
 //! # shared 里没有、但线上确实存在的
 //!

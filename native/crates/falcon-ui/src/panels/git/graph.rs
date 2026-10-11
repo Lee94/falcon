@@ -1,7 +1,7 @@
-//! 提交图的一格（web GitPanel 的 `GraphCell`）：每行一张独立的小图，泳道与线段来自
+//! 提交图的一格（旧 React 版 GitPanel 的 `GraphCell`）：每行一张独立的小图，泳道与线段来自
 //! `falcon_core::git_graph`，这里只把泳道号翻译成坐标、用 GPUI 的 path 画出来。
 //!
-//! 行高固定（ROW_H），图与行 1:1——web 为此放弃了可变行高（拉伸 SVG 会把圆点压扁），
+//! 行高固定（ROW_H），图与行 1:1——React 版为此放弃了可变行高（拉伸 SVG 会把圆点压扁），
 //! 这里同理。
 
 use falcon_core::git_graph::{GraphRow, lane_color};
@@ -18,7 +18,7 @@ fn color(colors: &[Hsla; 6], lane: usize) -> Hsla {
     colors[lane_color(lane) - 1]
 }
 
-/// `panel_bg` 给合并提交的空心点填底（web 的 `var(--sidebar)`：与面板同色才像"空心"）
+/// `panel_bg` 给合并提交的空心点填底（React 版的 `var(--sidebar)`：与面板同色才像"空心"）
 pub fn graph_cell(row: &GraphRow, colors: [Hsla; 6], panel_bg: Hsla) -> impl IntoElement {
     let row = row.clone();
     let width = row.width.max(1) as f32 * LANE_W;

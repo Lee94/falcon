@@ -1,5 +1,5 @@
 //! 文件面板的路径运算：把工作目录相对路径和宿主机绝对路径互相翻译，
-//! 以及从文件夹上传的相对路径里抽出要 mkdir 的中间层。对应 web 的 `lib/filePath.ts`。
+//! 以及从文件夹上传的相对路径里抽出要 mkdir 的中间层。对应旧 React 版的 `lib/filePath.ts`。
 //!
 //! **不能用 `std::path`**：宿主机可能是 Linux，客户端将来在 Windows 上（同 server 的
 //! `git/path.ts` 不用 `node:path` 的理由）。客户端不知道宿主机是 POSIX 还是 Windows，
@@ -106,8 +106,9 @@ pub fn deepest_upload_dirs<S: AsRef<str>>(cwd: &str, relative_paths: &[S]) -> Ve
 
 /// 修改时间（Unix 秒）→ `YYYY-MM-DD HH:MM:SS`。
 ///
-/// web 用 `new Date()` 的**本地时区**；Rust 标准库没有时区数据库，这里由调用方传
-/// 这一时刻的本地 UTC 偏移（秒，东正西负）。偏移对得上时输出与 web 逐字一致。
+/// React 版用 `new Date()` 的**本地时区**；Rust 标准库没有时区数据库，这里由调用方传
+/// 这一时刻的本地 UTC 偏移（秒，东正西负）。偏移对得上时与 React 版的输出逐字相同（单测
+/// 的期望值就取自它）。
 pub fn format_mtime(sec: Option<f64>, utc_offset_secs: i64) -> String {
     let Some(sec) = sec.filter(|s| s.is_finite()) else { return "—".into() };
     // Date 的时间值要落在 ±8.64e15 ms 内，否则是 Invalid Date；小数毫秒截掉
@@ -287,7 +288,7 @@ mod tests {
     fn format_mtime_with_explicit_offset() {
         assert_eq!(format_mtime(None, 0), "—");
         assert_eq!(format_mtime(Some(f64::INFINITY), 0), "—");
-        // 期望值取自 web 的 formatMtime 在 TZ=UTC / Asia/Shanghai / America/New_York 下的输出，
+        // 期望值取自 React 版的 formatMtime 在 TZ=UTC / Asia/Shanghai / America/New_York 下的输出，
         // 偏移是那一时刻的真实 UTC 偏移（1900 年前是 LMT，带秒：上海 +8:05:43、纽约 −4:56:02；
         // getTimezoneOffset() 只给到分钟，调用方要按秒算）
         for (sec, offset, want) in [

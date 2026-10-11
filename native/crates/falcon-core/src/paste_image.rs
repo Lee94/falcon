@@ -1,12 +1,16 @@
-//! 终端里粘贴 / 拖入图片的判定。对应 web 的 `lib/pasteImage.ts` 的纯判定部分。
+//! 终端里粘贴 / 拖入图片的判定。对应旧 React 版的 `lib/pasteImage.ts` 的纯判定部分。
 //!
 //! 图片走上传 → 宿主机落盘 → 把路径粘进输入框（Claude Code 认输入框里的图片路径，
 //! CONTEXT.md「Image Paste」）。判定规则：剪贴板里**有文本就贴文本**——Excel / 网页
 //! 复制经常同时带 text 与渲染好的位图，用户要的是文本；截图与复制的图片文件没有
 //! 纯文本，才当图片处理。
 //!
-//! web 那边的输入是 DataTransfer；这里把它拆成最小面：剪贴板的纯文本 + 条目的
+//! React 版的输入是 DataTransfer；这里把它拆成最小面：剪贴板的纯文本 + 条目的
 //! (kind, MIME) 列表，拖放的文件 MIME。读剪贴板 / 读文件是 app 层的事。
+//!
+//! GPUI 客户端眼下只用到 [`quote_for_prompt`]：剪贴板与拖放拿到的是 GPUI 的
+//! `ClipboardEntry` / 本机路径，判定在 falcon-ui 的 `terminal/view.rs` 里按同样的规则写了。
+//! DataTransfer 那一套留给浏览器版接 DOM 的 paste / drop 事件（rust-unification.md 附录 B）。
 
 use crate::js::has_js_whitespace;
 
@@ -30,7 +34,7 @@ pub fn is_image_type(mime: &str) -> bool {
 /// 粘贴里应当按图片处理的那一项（下标）；应走原有文本粘贴时返回 `None`。
 ///
 /// - `text_plain`：剪贴板的 `text/plain`，没有或读不到给 `None` / 空串；
-/// - `items`：剪贴板条目，`None` = 拿不到条目列表（web 的 `!dt?.items`）。
+/// - `items`：剪贴板条目，`None` = 拿不到条目列表（React 版的 `!dt?.items`）。
 pub fn image_from_clipboard<I: TransferItem>(text_plain: Option<&str>, items: Option<&[I]>) -> Option<usize> {
     let items = items?;
     if text_plain.is_some_and(|t| !t.is_empty()) {

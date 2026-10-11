@@ -13,7 +13,7 @@ use bytes::Bytes;
 use falcon_proto::ServerMessage;
 use tokio::sync::mpsc;
 
-/// 背压阈值：ws 的发送队列没有上限，慢客户端（手机弱网开着 `cat 大文件`）会让
+/// 背压阈值：ws 的发送队列没有上限，慢客户端（弱网下开着 `cat 大文件`）会让
 /// bufferedAmount 无限堆积直至进程 OOM。超过高水位就丢输出帧——数据都在服务端
 /// Scrollback 里，manager 会在低水位后用 replay 重新同步。
 pub const BACKPRESSURE_HIGH: usize = 4 * 1024 * 1024;

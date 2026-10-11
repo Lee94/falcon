@@ -5,7 +5,7 @@
 //! 明暗模式。界面色只准用这里的语义 token，不许在组件里写死颜色。
 //!
 //! 三个出口：
-//! - [`Ui`]：我们自己的组件用的语义 token（对应 web 的 CSS 变量）；
+//! - [`Ui`]：我们自己的组件用的语义 token（对应旧 React 版的 CSS 变量）；
 //! - gpui-component 的 `Theme`：把同一套 token 映射到它的 134 个颜色字段上，组件库画出来的
 //!   按钮 / 菜单 / 输入框与我们的界面同色；
 //! - [`TerminalLook`]：终端配色 + 字体 + 光标 + 告诉服务端的外观（OscColorGate 代答用）。
@@ -44,7 +44,7 @@ pub fn hsla_a(c: ThemeRgba) -> Hsla {
     .into()
 }
 
-/// 界面语义 token（字段名对应 web 的 CSS 变量，去掉 `--`、连字符换下划线）。
+/// 界面语义 token（字段名沿用 React 版的 CSS 变量，去掉 `--`、连字符换下划线）。
 #[derive(Clone, Debug)]
 pub struct Ui {
     pub is_dark: bool,
@@ -58,7 +58,7 @@ pub struct Ui {
     pub tint_foreground: Hsla,
     /// 语义蓝本身（活动窗口的描边）
     pub tint_strong: Hsla,
-    // 与 web 的语义 token 一一对应，原生界面暂时没有用到的组件，保留着便于对照
+    // 与 falcon-theme 的 UiTokens 一一对应，界面暂时没有用到的组件，保留着便于对照
     #[allow(dead_code)]
     pub card: Hsla,
     pub popover: Hsla,
@@ -89,7 +89,7 @@ pub struct Ui {
 #[derive(Clone, Debug)]
 pub struct Syntax {
     pub foreground: Hsla,
-    #[allow(dead_code)] // web 的 shiki 变量里有，原生的高亮映射暂不区分
+    #[allow(dead_code)] // React 版的 shiki 变量里有，这里的高亮映射暂不区分
     pub background: Hsla,
     pub comment: Hsla,
     pub keyword: Hsla,
@@ -97,15 +97,15 @@ pub struct Syntax {
     pub string_expression: Hsla,
     pub constant: Hsla,
     pub function: Hsla,
-    #[allow(dead_code)] // web 的 shiki 变量里有，原生的高亮映射暂不区分
+    #[allow(dead_code)] // React 版的 shiki 变量里有，这里的高亮映射暂不区分
     pub parameter: Hsla,
     pub punctuation: Hsla,
     pub link: Hsla,
-    #[allow(dead_code)] // web 的 shiki 变量里有，原生的高亮映射暂不区分
+    #[allow(dead_code)] // React 版的 shiki 变量里有，这里的高亮映射暂不区分
     pub inserted: Hsla,
-    #[allow(dead_code)] // web 的 shiki 变量里有，原生的高亮映射暂不区分
+    #[allow(dead_code)] // React 版的 shiki 变量里有，这里的高亮映射暂不区分
     pub deleted: Hsla,
-    #[allow(dead_code)] // web 的 shiki 变量里有，原生的高亮映射暂不区分
+    #[allow(dead_code)] // React 版的 shiki 变量里有，这里的高亮映射暂不区分
     pub changed: Hsla,
 }
 
@@ -129,7 +129,7 @@ pub mod radius {
 /// 岛之间的缝（ADR 0011）
 pub const GAP: gpui_kit::Pixels = px(6.);
 
-/// 终端偏好（web 的 `falcon.term`）。
+/// 终端偏好（偏好键 `falcon.term`，沿用 React 版）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermPrefs {
     pub family: String,
@@ -152,14 +152,14 @@ impl Default for TermPrefs {
 }
 
 impl TermPrefs {
-    /// 读 `falcon.term`（没有再看旧名 `mojito.term`），清洗规则在 falcon-core，与 web 同一口径
+    /// 读 `falcon.term`，清洗规则在 falcon-core（照 React 版的口径）
     pub fn load(prefs: &Prefs) -> Self {
-        use falcon_core::term::{TERM_PREF_KEY, TERM_PREF_KEY_LEGACY, load_term_pref};
-        Self::from_pref(&load_term_pref(prefs.get(TERM_PREF_KEY).or_else(|| prefs.get(TERM_PREF_KEY_LEGACY))))
+        use falcon_core::term::{TERM_PREF_KEY, load_term_pref};
+        Self::from_pref(&load_term_pref(prefs.get(TERM_PREF_KEY)))
     }
 
-    /// 与 web 同形的偏好 → 终端渲染用的这份。`system` 交给 Menlo（web 是整条交给系统
-    /// 回退栈，GPUI 没有"系统等宽"这个名字）；`custom` 空着回落默认字体
+    /// 偏好（形状沿用 React 版）→ 终端渲染用的这份。`system` 交给 Menlo（React 版是整条交给
+    /// 系统回退栈，GPUI 没有"系统等宽"这个名字）；`custom` 空着回落默认字体
     pub fn from_pref(pref: &falcon_core::term::TermPref) -> Self {
         use falcon_core::term::{TermCursorStyle, TermFontId, primary_family};
         let family = match pref.font_id {
@@ -216,13 +216,13 @@ impl ThemeState {
 }
 
 pub fn init(cx: &mut App) {
-    let loaded = load_theme_settings(Some(Prefs::global(cx) as &dyn falcon_theme::StorageLike));
+    let settings = load_theme_settings(Some(Prefs::global(cx) as &dyn falcon_theme::StorageLike));
     let term = TermPrefs::load(Prefs::global(cx));
     let system_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
-    let mode = resolve_theme_mode(loaded.settings.mode, system_dark);
-    let resolved = derive_theme(&loaded.settings.slot(mode).colors);
+    let mode = resolve_theme_mode(settings.mode, system_dark);
+    let resolved = derive_theme(&settings.slot(mode).colors);
     cx.set_global(ThemeState {
-        settings: loaded.settings,
+        settings,
         resolved,
         term,
         system_dark,
@@ -348,6 +348,7 @@ fn apply(cx: &mut App) {
             selection_background: hsla(t.selection_background),
             selection_foreground: t.selection_foreground.map(hsla),
             ansi: t.ansi.map(hsla),
+            extended: t.extended_ansi.as_ref().map(|ext| ext.iter().copied().map(hsla).collect()),
         },
         text: TermTextStyle {
             font: {
@@ -472,8 +473,8 @@ fn apply_kit_theme(ui: &Ui, cx: &mut App) {
 }
 
 /// tree-sitter 的高亮名 → 主题语法色。对照的是 shiki css-variables 主题把 TextMate 作用域
-/// 分到哪个 `--shiki-token-*`（web 的高亮就是它），尽量让同一段代码两边颜色一样：
-/// 带引号的字符串在那边落 `string-expression`、类型名与属性名落 `function`、`this` / 数字 /
+/// 分到哪个 `--shiki-token-*`（React 版的高亮就是它），沿用它给代码上色的口径：
+/// 带引号的字符串在 shiki 里落 `string-expression`、类型名与属性名落 `function`、`this` / 数字 /
 /// 布尔落 `constant`、运算符算 `keyword`。认不出的名字不上色（用前景色）。
 fn highlight_theme(ui: &Ui) -> gpui_kit::component::highlighter::HighlightTheme {
     use gpui_kit::component::highlighter::HighlightTheme;

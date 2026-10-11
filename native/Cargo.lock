@@ -2473,6 +2473,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -2532,6 +2533,7 @@ dependencies = [
 name = "falcon-web"
 version = "0.1.1"
 dependencies = [
+ "falcon-core",
  "falcon-platform",
  "falcon-ui",
  "gpui-kit",

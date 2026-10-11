@@ -68,7 +68,7 @@ if [[ "${FALCON_WASM_OPT:-}" == 1 ]]; then
 fi
 
 cp web/index.html "$out/"
-# 内置应用图标（cargo xtask icons 的产物）：服务端的 /api/app-icon/* 与 PWA 清单都指向 /icons/<id>/…
+# 内置应用图标（cargo xtask icons 的产物）：服务端的 /api/app-icon/favicon 跳到 /icons/<id>/…
 cp -R web/icons "$out/icons"
 # 浏览器版只嵌了正文字体，其余按需拉（falcon-ui/src/fonts.rs）
 for f in IoskeleyMonoTerm.ttf MapleMonoNL-NF-CN.ttf SymbolsNerdFontMono.ttf; do

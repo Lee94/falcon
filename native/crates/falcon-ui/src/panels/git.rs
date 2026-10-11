@@ -1,13 +1,13 @@
-//! 右侧「历史」面板（web 的 `components/GitPanel.tsx`）：分支 / 同步状态头、提交图泳道、
+//! 右侧「历史」面板（旧 React 版的 `components/GitPanel.tsx`）：分支 / 同步状态头、提交图泳道、
 //! 按分支 / 作者 / 关键字筛选、分页加载、提交详情与文件列表、17 种 git op 的菜单与确认框。
 //!
-//! 三份数据各有各的节奏，刻意不合并成一个轮询（与 web 同）：
+//! 三份数据各有各的节奏，刻意不合并成一个轮询（沿用 React 版）：
 //! - 头部的 ahead/behind 走 5s 轮询（Pull / Push 上的数字要跟得上远端），只在面板显示着时；
 //! - 列表只在筛选变化 / 手动刷新 / 写操作之后重取——正读着的历史在眼皮底下重排会让人跟丢
 //!   位置，而历史本来就不怎么变；
 //! - 详情随选中项走。
 //!
-//! 提交列表是 `uniform_list`：web 为了"方向键连按不掉帧"给每行加 memo，这里只画视口里那
+//! 提交列表是 `uniform_list`：React 版为了"方向键连按不掉帧"给每行加 memo，这里只画视口里那
 //! 几十行，没有这层讲究。
 //!
 //! 右键菜单：整个面板只挂一个 ContextMenu，行 / 分支徽标 / 分支树 / Push 按钮在右键按下时
@@ -57,9 +57,9 @@ use crate::zoom::zpx;
 
 /// 头部 Pull / Push 计数的轮询间隔。列表本身不轮询
 const POLL: Duration = Duration::from_millis(5000);
-/// 搜索框每敲一个字都发一次 git log 太重：停手这么久才查（web 用 useDeferredValue 降频）
+/// 搜索框每敲一个字都发一次 git log 太重：停手这么久才查（React 版用 useDeferredValue 降频）
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
-/// 分支树一行的高度与最大高度（web 的 h-6 / max-h-36）
+/// 分支树一行的高度与最大高度（React 版的 h-6 / max-h-36）
 const TREE_ROW_H: f32 = 24.;
 const TREE_MAX_H: f32 = 144.;
 
@@ -235,7 +235,7 @@ impl GitPanel {
         self.target.as_ref().and_then(|t| t.1.clone())
     }
 
-    /// 跟着工作区走：换项目 / 换成员就清空重来；面板重新露出来时整份重取（web 那边是重新挂载）
+    /// 跟着工作区走：换项目 / 换成员就清空重来；面板重新露出来时整份重取（React 版是重新挂载）
     fn sync(&mut self, cx: &mut Context<Self>) {
         let ws = self.ws.read(cx);
         let visible = ws.ready() && ws.state.right_open && ws.state.right_panel == RightPanelId::Git;
@@ -268,7 +268,7 @@ impl GitPanel {
         }
     }
 
-    /// web 的 tick：头部、筛选候选、列表一起重取
+    /// React 版的 tick：头部、筛选候选、列表一起重取
     fn refresh_all(&mut self, cx: &mut Context<Self>) {
         self.snap_in_flight = None;
         self.load_snapshot(cx);
@@ -526,7 +526,7 @@ impl GitPanel {
         // 而且往往直接把该敲的命令印在里面（比如没有 upstream 时的 --set-upstream）
         let kind = if ok { ToastKind::Success } else { ToastKind::Danger };
         let body = (!detail.trim().is_empty()).then_some(detail);
-        // 失败的原话要读完（往往还得照着敲命令），不自动消失（web 的 sticky: !res.ok）
+        // 失败的原话要读完（往往还得照着敲命令），不自动消失（React 版的 sticky: !res.ok）
         self.ws.update(cx, |w, cx| if ok { w.toast(kind, title, body, cx) } else { w.toast_sticky(kind, title, body, cx) });
     }
 
@@ -609,7 +609,7 @@ impl GitPanel {
         self.run_request(kind, title, fut, cx).detach();
     }
 
-    /// 先确认再动手（web 的 confirmOp）
+    /// 先确认再动手（React 版的 confirmOp）
     fn confirm_op(
         this: &Entity<Self>,
         title: String,
@@ -1063,7 +1063,7 @@ impl GitPanel {
 
     // ---------------- 作者筛选 ----------------
 
-    /// 作者下拉（web `FilterMenu`）。用 Popover 而不是菜单：顶上要放一个搜索框。搜索在本地做：
+    /// 作者下拉（React 版 `FilterMenu`）。用 Popover 而不是菜单：顶上要放一个搜索框。搜索在本地做：
     /// 候选就是作者名，几十上百条，本地过滤比一次往返快得多
     fn author_filter(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
@@ -1088,7 +1088,7 @@ impl GitPanel {
             );
         // 开关交给 Popover 自己管（不受控），选中一项后用它的 state 收起——少一份要与弹层同步的状态
         Popover::new("git-author-filter")
-            // 内容自己排版（搜索框贴边、列表自带内边距），与 web 的 PopoverContent p-0 一致
+            // 内容自己排版（搜索框贴边、列表自带内边距），照 React 版的 PopoverContent p-0
             .p_0()
             .track_focus(&self.author_search.focus_handle(cx))
             .on_open_change(cx.listener(|this, open: &bool, window, cx| {

@@ -1,4 +1,4 @@
-//! 视图下钻页（web 的 `ViewItems`）：普通视图与全景视图共用一页，只是取数接口不同。
+//! 视图下钻页（旧 React 版的 `ViewItems`）：普通视图与全景视图共用一页，只是取数接口不同。
 //!
 //! 顶上是筛选框，底下是分组树。飞书那边视图左侧的分类树与分组 CLI 一条都不给，所以这里的
 //! 层级是就手上的条目自己推的（ADR 0010）；全景视图跨空间，行上多带空间与类型。
@@ -105,7 +105,7 @@ impl ViewItems {
         match hit.clone() {
             Some(h) => self.apply(h, cx),
             None => {
-                // 列表清空再重拉（刷新 / 没缓存）：web 那边分组树随之卸载，回来时全部展开
+                // 列表清空再重拉（刷新 / 没缓存）：React 版的分组树随之卸载，回来时全部展开
                 self.fold.update(cx, |f, cx| f.reset(cx));
                 self.items.clear();
                 self.page = 1;

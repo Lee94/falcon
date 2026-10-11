@@ -1,8 +1,9 @@
-//! 浏览器的 WebSocket：`web_sys::WebSocket`，与 web 的 `TerminalView.tsx` 同一套用法。
+//! 浏览器的 WebSocket：`web_sys::WebSocket`，与旧 React 版的 `TerminalView.tsx` 同一套用法。
 //!
 //! - 登录 cookie 由浏览器自己带（同源，httpOnly），这里设不了也不该设；
 //! - `binaryType = arraybuffer`：终端字节走二进制帧，拿到的是 ArrayBuffer，拷进 `Bytes`；
-//! - 浏览器发不了 ping 帧，[`WsConn::ping`] 是空操作；
+//! - 浏览器发不了 ping 帧，[`WsConn::ping`] 发的是应用层的 `{"type":"ping"}`，服务端回
+//!   `{"type":"pong"}`（`ClientMessage::Ping`）——心跳与唤醒后的探活照常有效；
 //! - 升级被 HTTP 401 挡回来时浏览器只报 1006，分不出来，一律当普通连接失败。falcon 服务端
 //!   自己是先接受升级再用 4401 关，那条路照常看得到。
 //!
@@ -88,7 +89,8 @@ impl WsConn {
     }
 
     pub(crate) async fn ping(&mut self) -> Result<(), String> {
-        Ok(())
+        let ping = serde_json::to_string(&falcon_proto::ClientMessage::Ping).map_err(|e| e.to_string())?;
+        self.send_text(ping).await
     }
 
     pub(crate) async fn close(&mut self) {

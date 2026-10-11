@@ -6,8 +6,8 @@
 //! - [`WheelAccumulator::click`]：程序接管了滚轮（鼠标上报 / alt screen，也就是 zellij 会话的
 //!   常态）时用，一个事件最多折成一次点击。zellij 收到每条上报自己再滚 3 行，按行数发 n 条会让
 //!   鼠标一格冲出十几行。xterm.js 的口径（MouseService._consumeWheelEvent）是行数只当门槛、每个
-//!   事件最多发一条，多出的整行丢掉，且 |delta| < 50 的像素事件当作触控板再乘 0.3。照抄，与 web
-//!   两个引擎手感一致。
+//!   事件最多发一条，多出的整行丢掉，且 |delta| < 50 的像素事件当作触控板再乘 0.3。照抄——
+//!   旧 React 版的两个引擎（xterm / rio）当初就按这套对齐手感。
 //!
 //! GPUI 的 `ScrollDelta::Lines` 对应 DOM 的 deltaMode = 1，`ScrollDelta::Pixels` 对应 0。
 

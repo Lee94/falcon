@@ -26,8 +26,8 @@ use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powers
 
 /// CLI 的可执行名。三个都是 npm 全局包，装完就在 PATH 上。
 ///
-/// `Unknown` 是 falcon-proto 给反序列化留的兜底，服务端收请求时已用 `is_session_agent`
-/// 挡掉，到不了这里；真到了也只是生成一个"找不到 unknown、落回 shell"的脚本，无害。
+/// `Unknown` 是 falcon-proto 给反序列化留的兜底，服务端收请求时已用 `SessionAgent::from_wire`
+/// 挡掉（`api/sessions.rs`），到不了这里；真到了也只是生成一个"找不到 unknown、落回 shell"的脚本，无害。
 pub fn agent_bin(agent: SessionAgent) -> &'static str {
     match agent {
         SessionAgent::Claude => "claude",

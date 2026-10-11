@@ -19,13 +19,13 @@ use crate::error::ApiResult;
 use crate::runtime::MaybeSend;
 
 impl FalconClient {
-    /// `GET /api/sessions`：全部会话（含已丢失的），带所属项目名。web 每 5s 轮询一次。
+    /// `GET /api/sessions`：全部会话（含已丢失的），带所属项目名。界面每 5s 轮询一次。
     pub fn list_sessions(&self) -> impl Future<Output = ApiResult<Vec<SessionWithProject>>> + MaybeSend + 'static {
         self.get("/api/sessions".to_owned())
     }
 
     /// `POST /api/projects/:id/sessions`。项目已存档是 409，建不起来是 502。
-    /// 请求体缺省就是 `CreateSessionRequest::default()`（web 发 `{}`）。
+    /// 请求体缺省就是 `CreateSessionRequest::default()`（React 版当初发的就是 `{}`）。
     pub fn create_session(
         &self,
         project_id: &str,
@@ -73,7 +73,7 @@ impl FalconClient {
     /// 类型，不走 JSON），写到会话宿主机的 `<falcon 根>/paste/`，返回落盘的绝对路径——
     /// app 把它粘进终端输入（CONTEXT.md「Image Paste」）。
     ///
-    /// 大小上限是 [`falcon_proto::PASTE_IMAGE_MAX_BYTES`]：app 应当像 web 一样先检查、
+    /// 大小上限是 [`falcon_proto::PASTE_IMAGE_MAX_BYTES`]：app 应当像当初 React 版那样先检查、
     /// 超限直接提示，不发请求；服务端的 bodyLimit 只是兜底。不支持的类型是 415。
     pub fn paste_image(
         &self,

@@ -12,7 +12,7 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::get;
-use falcon_proto::{InstallServerMessage, NonDurableReason, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES};
+use falcon_proto::{InstallServerMessage, NonDurableReason, ServerMessage, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES};
 use futures::{SinkExt as _, StreamExt as _};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -161,18 +161,42 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (viewer, mut out) = Viewer::new();
     let viewer_id = viewer.id;
+    // 应用层心跳（`{"type":"ping"}`，浏览器版发不了 ping 帧）的回话直接交给写端，不经引擎：
+    // 与 ping 帧由协议层自动回 pong 一样，不看会话在不在、Viewer 还挂没挂着
+    let (pong_tx, mut pong_rx) = mpsc::unbounded_channel::<()>();
 
     // 写端：引擎投来的帧依次写进 socket，写完一帧减一次计数（= bufferedAmount 的等价物）。
-    // Viewer 被引擎丢掉（会话不存在 / 连接已断）时 channel 关闭，写端随之结束
     //
     // 连着到的几帧攒成一次 flush（Node 的 ws 也是同一轮事件循环里的 send 合成一次写）：
     // 少几次 syscall，也让"state dead + title null"这种成对的控制消息落在同一段 TCP 里
+    //
+    // Viewer 被丢掉之后写端还留着回 pong，直到读端结束（`pong_tx` 随之落下）才把 sink 还回来
     let writer = tokio::spawn(async move {
         let to_msg = |frame: &ViewerFrame| match frame {
             ViewerFrame::Text(t) => Message::Text(t.clone().into()),
             ViewerFrame::Binary(b) => Message::Binary(b.clone()),
         };
-        'outer: while let Some(first) = out.rx.recv().await {
+        let pong = serde_json::to_string(&ServerMessage::Pong).unwrap_or_default();
+        let mut viewer_open = true;
+        'outer: loop {
+            let first = tokio::select! {
+                frame = out.rx.recv(), if viewer_open => match frame {
+                    Some(frame) => frame,
+                    None => {
+                        viewer_open = false;
+                        continue 'outer;
+                    }
+                },
+                asked = pong_rx.recv() => match asked {
+                    Some(()) => {
+                        if sink.send(Message::Text(pong.clone().into())).await.is_err() {
+                            break 'outer;
+                        }
+                        continue 'outer;
+                    }
+                    None => break 'outer,
+                },
+            };
             let mut batch = vec![first];
             while batch.len() < WRITE_BATCH {
                 match out.rx.try_recv() {
@@ -235,15 +259,19 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
                 let seek = msg["seek"].as_f64().filter(|s| s.is_finite() && *s >= 0.0);
                 state.engine.send(move |engine| engine.sessions.scroll(&id, seek));
             }
+            Some("ping") => {
+                let _ = pong_tx.send(());
+            }
             _ => {}
         }
     }
+    drop(pong_tx);
 
     // Detach：仅断开视图，会话继续运行
     state.engine.send(move |engine| engine.sessions.remove_viewer(&id, viewer_id));
-    // 写端在引擎丢掉 Viewer 后自己结束，把 sink 还回来，这里补上关闭握手（不补的话对端
-    // 看到的是 1006 异常断开）。会话不存在时 Viewer 早就被丢了，socket 照 Node 版一直开着，
-    // 等对端自己关
+    // 读端结束、`pong_tx` 落下后写端就收工，把 sink 还回来，这里补上关闭握手（不补的话对端
+    // 看到的是 1006 异常断开）。会话不存在时 Viewer 早就被丢了，socket 照 Node 版一直开着
+    // （写端还在回 pong），等对端自己关
     if let Ok(Ok(mut sink)) = tokio::time::timeout(std::time::Duration::from_secs(5), writer).await {
         let _ = sink.close().await;
     }
@@ -259,6 +287,33 @@ fn positive_int(v: &Value) -> Option<u16> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 应用层心跳（浏览器版拿它代替 ping 帧）：会话不存在、Viewer 已被引擎丢掉时照样回 pong，
+    /// 与协议层的 ping 帧一样——否则浏览器版在"会话不存在"的页面上会每个心跳周期重连一次
+    #[tokio::test]
+    async fn app_level_ping_gets_a_pong_even_without_a_session() {
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        let app = crate::api::test_support::TestApp::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = app.router.clone();
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://{addr}/ws/sessions/no-such-session"), tcp).await.unwrap();
+        ws.send(WsMessage::Text(r#"{"type":"ping"}"#.into())).await.unwrap();
+        let got_pong = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(Ok(msg)) = ws.next().await {
+                if let WsMessage::Text(text) = msg
+                    && serde_json::from_str::<ServerMessage>(text.as_str()).ok() == Some(ServerMessage::Pong)
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(got_pong, Ok(true));
+    }
 
     #[test]
     fn resize_wants_positive_integers() {

@@ -1,4 +1,4 @@
-//! 中转的同端口槽位：与 server 的 `sessions/relaySpec.ts`（`forwardSlot` / `shareSlot`）同一口径，
+//! 中转的同端口槽位：与服务端的 `sessions/relay_spec.rs`（`forward_slot` / `share_slot`）同一口径，
 //! 设置「中转」页用它给同端口的规则挂徽标（ADR 0016）。
 //!
 //! 同端口可以存多条通道，同时只能一条生效。「同端口」按监听真正落在哪台机器上算：

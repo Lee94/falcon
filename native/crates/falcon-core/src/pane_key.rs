@@ -1,24 +1,10 @@
 //! 窗口（pane）的 key 约定：`t:<sessionId>` / `f:<projectId>:<path>` / `d`。
 //!
-//! 对应 web 的 `lib/paneKey.ts`。工作区的排布（[`crate::layout`]）只搬运这一个字符串，
+//! 对应旧 React 版的 `lib/paneKey.ts`。工作区的排布（[`crate::layout`]）只搬运这一个字符串，
 //! 具体是终端、文件还是差异，靠解析 key 得到——列里混排三种视图，再给每种各存一份
 //! 顺序必然漂移。
 //!
 //! path 里可以有冒号（相对路径里极少见但合法），所以 file key 只在 projectId 后切一次。
-
-/// 文件窗口指向的文件
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneFile {
-    pub project_id: String,
-    pub path: String,
-}
-
-impl PaneFile {
-    /// TS 的 `fileKey(file)`
-    pub fn key(&self) -> String {
-        file_key(&self.project_id, &self.path)
-    }
-}
 
 /// 解析出来的窗口
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,14 +57,6 @@ pub fn parse_pane_key(key: &str) -> Option<PaneItem> {
     None
 }
 
-/// 终端 key 里的会话 id；不是终端就给 `None`
-pub fn pane_session_id(key: &str) -> Option<String> {
-    match parse_pane_key(key)? {
-        PaneItem::Terminal { id, .. } => Some(id),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,12 +79,5 @@ mod tests {
         for key in ["t:", "f:", "f:p1", "f::a", "f:p1:", "x:1", "", "dd"] {
             assert_eq!(parse_pane_key(key), None, "{key:?}");
         }
-    }
-
-    #[test]
-    fn session_id_only_for_terminals() {
-        assert_eq!(pane_session_id("t:pending:3").as_deref(), Some("pending:3"));
-        assert_eq!(pane_session_id("d"), None);
-        assert_eq!(pane_session_id("f:p:a"), None);
     }
 }

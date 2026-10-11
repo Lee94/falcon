@@ -1,4 +1,4 @@
-//! 「复制给 AI」的工作项上下文（Markdown）。对应 web 的 `lib/meegleContext.ts`。
+//! 「复制给 AI」的工作项上下文（Markdown）。对应旧 React 版的 `lib/meegleContext.ts`。
 //!
 //! 只带能帮 AI 干活的东西：带前缀的编号 + 标题、正文、附件、评论。路由元数据（空间、
 //! 类型、节点）与人员标识一律不进——前者对 AI 没用，后者不该外流。
@@ -45,7 +45,7 @@ fn section(heading: &str, body: &str, incomplete: Option<&str>) -> Option<String
 }
 
 /// 生成上下文。`t` 是翻译函数（key 形如 `meegle.contextDescription`）；
-/// `_fetched_at` 与 web 签名对齐，目前不进正文。
+/// `_fetched_at` 是照 React 版的签名留下的，目前不进正文。
 pub fn format_meegle_context(detail: &MeegleWorkItemDetail, _fetched_at: &str, t: impl Fn(&str) -> String) -> String {
     let label = |key: &str| t(&format!("meegle.{key}"));
     // `descriptionMarkdown ?? description ?? ""`：空串的 Markdown 也算有，不往下落

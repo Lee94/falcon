@@ -1,6 +1,7 @@
 //! 错误形状，照 Node 版：
 //! - 路由自己回的错是 `{ "error": "<给人看的话>" }`，有的带 `reason` / `code` 等字段
-//!   （客户端读 `.error`，按需收窄额外字段——web 的 ApiRequestError、原生的 ApiError）；
+//!   （客户端读 `.error`，按需收窄额外字段——falcon-client 的 ApiError，React 版是
+//!   ApiRequestError）；
 //! - 没被路由接住的异常，Fastify 回 `{ statusCode, error: "Internal Server Error", message }`，
 //!   这里的 [`ApiError::internal`] 产出同一形状。
 

@@ -6,9 +6,9 @@
 //! 自己画成矩形（`▀▄█░▒▓`、象限、六分块）、`TerminalInputHandler` 都来自那里。剥掉的：
 //! workspace / settings / 搜索高亮 / 块下插件 / 路径跳转。
 //!
-//! 与 Zed 不同的口径（为了与 web 的 xterm.js 引擎画出同样的东西）：
+//! 与 Zed 不同的口径（当初为了与旧 React 版的 xterm.js 画出同样的东西，浏览器版换成 GPUI 后沿用）：
 //! - 行高 = 字体自然高度（ascent + descent）× 行高倍数，与 xterm 的 lineHeight 语义一致——
-//!   web 默认倍数 1，不是 13px；
+//!   React 版默认倍数 1，不是 13px；
 //! - 粗体 + ANSI 0–7 前景画成亮色（xterm 的 drawBoldTextInBrightColors 默认开）；
 //! - 不做最小对比度调整（xterm 的 minimumContrastRatio 默认 1）；
 //! - dim 用 0.5 透明度（xterm 的 DIM_OPACITY）；
@@ -30,7 +30,8 @@ use gpui_kit::{
 
 use super::view::TerminalView;
 
-/// 终端配色：主题派生的 16 色 + 前景 / 背景 / 光标 / 选区。
+/// 终端配色：主题派生的 16 色（主题写了 16–255 的覆盖时还有整份扩展色）+ 前景 / 背景 /
+/// 光标 / 选区。
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermPalette {
     pub foreground: Hsla,
@@ -41,6 +42,9 @@ pub struct TermPalette {
     /// 主题给了 selection-foreground 才有；否则选区里的字保持原色
     pub selection_foreground: Option<Hsla>,
     pub ansi: [Hsla; 16],
+    /// 16–255 的整份 240 色，只有主题写了 `palette = N=…`（N ≥ 16）才有（falcon-theme 的
+    /// `extended_ansi`）；没有就按 xterm 标准色立方 + 灰阶现算（[`indexed_rgb`]）
+    pub extended: Option<Vec<Hsla>>,
 }
 
 /// 排版参数：字体、字号、行高倍数。
@@ -104,7 +108,7 @@ pub struct TerminalElement {
     cursor_visible: bool,
     marked_text: Option<String>,
     hovered_link: Option<HoveredLink>,
-    /// 左 / 上的内边距（web 是 pl-2 py-1.5）
+    /// 左 / 上的内边距（React 版是 pl-2 py-1.5）
     padding: Point<Pixels>,
 }
 
@@ -511,6 +515,9 @@ impl Colorizer<'_> {
         }
         if i < 16 {
             return self.palette.ansi[i as usize];
+        }
+        if let Some(c) = self.palette.extended.as_ref().and_then(|ext| ext.get(i as usize - 16)) {
+            return *c;
         }
         let (r, g, b) = indexed_rgb(i);
         rgb_to_hsla(r, g, b)
@@ -951,7 +958,7 @@ impl Element for TerminalElement {
 
             let marked = self.marked_text.as_ref().filter(|t| !t.is_empty());
             if let (Some(text), Some(ime_bounds)) = (marked, layout.ime_cursor_bounds) {
-                // 组字串画在光标处、盖在格子上，不进 PTY（web 的 rio 引擎是 DOM 预编辑覆盖层）
+                // 组字串画在光标处、盖在格子上，不进 PTY
                 let pos = (ime_bounds + origin).origin;
                 let run = TextRun {
                     len: text.len(),
@@ -1105,6 +1112,33 @@ mod tests {
         assert_eq!(indexed_rgb(196), (255, 0, 0));
         assert_eq!(indexed_rgb(232), (8, 8, 8));
         assert_eq!(indexed_rgb(255), (238, 238, 238));
+    }
+
+    /// 主题写了 16–255 的覆盖就用主题的整份扩展色，没写才现算 xterm 标准色
+    #[test]
+    fn extended_palette_overrides_the_xterm_cube() {
+        let snapshot = falcon_term::TermCore::new(falcon_term::TermSize::new(4, 2), falcon_term::TermOptions::default()).snapshot();
+        let mut palette = TermPalette {
+            foreground: Hsla::white(),
+            background: Hsla::black(),
+            cursor: Hsla::white(),
+            cursor_text: Hsla::black(),
+            selection_background: Hsla::blue(),
+            selection_foreground: None,
+            ansi: [Hsla::black(); 16],
+            extended: None,
+        };
+        let cube_16 = rgb_to_hsla(0, 0, 0);
+        assert_eq!(Colorizer { palette: &palette, snapshot: &snapshot }.indexed(16), cube_16);
+        let mut ext = vec![Hsla::black(); 240];
+        ext[0] = Hsla::red();
+        ext[239] = Hsla::green();
+        palette.extended = Some(ext);
+        let colors = Colorizer { palette: &palette, snapshot: &snapshot };
+        assert_eq!(colors.indexed(16), Hsla::red());
+        assert_eq!(colors.indexed(255), Hsla::green());
+        // 16 以下仍是 16 色
+        assert_eq!(colors.indexed(1), Hsla::black());
     }
 
     #[test]

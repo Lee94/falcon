@@ -1,15 +1,15 @@
-//! 设置 →「中转」（web SettingsModal 的 RelaysPane，ADR 0016）：端口转发与公网发布按**机器**
-//! 管理，不跟项目走。
+//! 设置 →「中转」（旧 React 版 SettingsModal 的 RelaysPane，ADR 0016）：端口转发与公网
+//! 发布按**机器**管理，不跟项目走。
 //!
 //! 按机器分块：「本机」只有公网发布（端口转发两头都要落在一条 SSH 链路上）；每台已保存的
 //! SSH Host 有端口转发 + 公网发布。隧道走该主机自己的那条 SshLink，与项目终端的链路无关。
 //!
 //! 同端口可以存多条通道，同时只有一条生效：启用一条时服务端顺手停掉同端口的其它通道，
 //! 所以任何写操作之后都重拉整张列表（`GET /api/relays`），不只替换这一行。同端口的规则
-//! 挂一枚徽标（槽位口径在 falcon_core::relay，与服务端 relaySpec.ts 一致）。
+//! 挂一枚徽标（槽位口径在 falcon_core::relay，与服务端 sessions/relay_spec.rs 一致）。
 //!
 //! 规则的 `state` / `error` / 公网 URL 是此刻的事实：页面开着时每 3s 轮询。设置对话框里
-//! 切到别的页就把这一页整个丢掉（settings.rs），轮询随之停——与 web 切 tab 即卸载同理。
+//! 切到别的页就把这一页整个丢掉（settings.rs），轮询随之停——沿用 React 版切 tab 即卸载的做法。
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -476,7 +476,7 @@ impl RelaysPane {
             .bg(color)
             .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx));
         if state == ForwardState::Starting {
-            // web 的 animate-breathe：正在建立的那颗点慢慢呼吸
+            // React 版的 animate-breathe：正在建立的那颗点慢慢呼吸
             dot.with_animation(
                 ElementId::Name(format!("relay-breathe-{id}").into()),
                 Animation::new(Duration::from_millis(1600)).repeat().with_easing(pulsating_between(0.35, 1.0)),

@@ -1,4 +1,4 @@
-//! ⌘P 转到文件（web 的 `components/FileQuickOpen.tsx`）：搜当前项目工作目录里的文件，回车在
+//! ⌘P 转到文件（旧 React 版的 `components/FileQuickOpen.tsx`）：搜当前项目工作目录里的文件，回车在
 //! 画布上打开文件窗口。
 //!
 //! 清单一次拉全（`/api/projects/:id/files/index`，git 仓库走 ls-files，有上限），过滤在客户端，
@@ -70,7 +70,7 @@ impl QuickOpen {
                 this.refilter(cx);
             }
         });
-        // 焦点项目优先，没有就第一个项目（与 web 一致）
+        // 焦点项目优先，没有就第一个项目（沿用 React 版）
         let project_id = {
             let w = ws.read(cx);
             w.focus_project_id().or_else(|| w.projects.first().map(|p| p.id.clone()))

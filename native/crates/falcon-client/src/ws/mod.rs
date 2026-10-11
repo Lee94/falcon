@@ -3,8 +3,8 @@
 //! 两个 target 各一份实现，对上只露同一组方法：
 //! - 原生（`native.rs`）：自己接 TCP / TLS，tungstenite 升级，升级请求带登录 cookie；
 //! - 浏览器（`web.rs`）：`web_sys::WebSocket`，cookie 由浏览器带，`binaryType = arraybuffer`。
-//!   浏览器发不了 ping 帧，[`WsConn::ping`] 是空操作——会话 socket 在 wasm 上不做心跳，
-//!   半开连接靠 online / visibilitychange 触发的 `reconnect_now` 兜（与 web 的 TerminalView 一致）。
+//!   浏览器发不了 ping 帧，[`WsConn::ping`] 改发应用层的 `{"type":"ping"}`（服务端回 pong），
+//!   所以心跳与唤醒后的探活两边是同一套逻辑（`session.rs`）。
 
 pub(crate) mod install;
 pub(crate) mod session;

@@ -79,7 +79,7 @@ _Avoid_: Tab、面板（面板是右侧栏那几格）
 _Avoid_: AI 会话、机器人（"agent" 就是这些 CLI 的自称）
 
 **自动标题**:
-会话在界面上显示的那行字，按 手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名 取第一个有值的（`web/lib/sessionTitle.ts`）。会话**默认没有名字**（`name` 空串）：编号名（"Terminal 3"）没有信息量，序号还会随删除重号，而"这个终端在干什么"由前台命令回答得更好。前台命令由后端探测（`manager.foreground`），只在有 Viewer 时刷新，所以后台会话上可能是陈旧值。
+会话在界面上显示的那行字，按 手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名 取第一个有值的（`falcon-core/src/session_title.rs`）。会话**默认没有名字**（`name` 空串）：编号名（"Terminal 3"）没有信息量，序号还会随删除重号，而"这个终端在干什么"由前台命令回答得更好。前台命令由后端探测（`manager.foreground`），只在有 Viewer 时刷新，所以后台会话上可能是陈旧值。
 _Avoid_: 会话名（那专指用户手起的那个）、tab 标题（没有 tab 栏）
 
 **Scrollback（历史输出）**:

@@ -1,10 +1,10 @@
 //! 终端 VT 模式跟踪：`packages/shared/src/termModes.ts` 的 Rust 移植，语义逐条对齐。
 //!
-//! 服务端用同一个跟踪器生成回放前缀；web 的 rio 引擎用它读鼠标协议 / 编码来合成按键报文。
-//! 原生客户端的用途与 rio 一样：alacritty 的 `TermMode` 只有 MOUSE_REPORT_CLICK / DRAG /
-//! MOTION 与 SGR_MOUSE 几个位，分不出 `?9`（X10）也不认 `?1016`（SGR 像素坐标），而
-//! [`crate::mouse::MouseReporter`] 要的正是这两个维度。客户端喂的是同一条输出流（回放前缀也在
-//! 其中），跟踪结果与服务端一致。
+//! 服务端用同一个跟踪器生成回放前缀；客户端用它读鼠标协议 / 编码来合成按键报文（这个用法来自
+//! 旧 React 版的 rio 引擎，rio 已随它一起删除）。客户端不直接用 alacritty 的 `TermMode`：它只有
+//! MOUSE_REPORT_CLICK / DRAG / MOTION 与 SGR_MOUSE 几个位，分不出 `?9`（X10）也不认
+//! `?1016`（SGR 像素坐标），而 falcon-term 的 `mouse::MouseReporter` 要的正是这两个维度。
+//! 客户端喂的是同一条输出流（回放前缀也在其中），跟踪结果与服务端一致。
 //!
 //! 按字节而不是按字符扫描：它关心的字符全是 ASCII，而 UTF-8 多字节序列的每个字节都 ≥ 0x80，
 //! 不会被误认成 ESC / BEL / 参数字节，结果与 TS 按 UTF-16 码元扫描一致。
@@ -88,14 +88,6 @@ impl TermModeTracker {
     /// 当前鼠标编码：0 = 默认单字节；否则 1006（SGR）/ 1016（SGR 像素坐标）。
     pub fn mouse_encoding(&self) -> u16 {
         self.mouse_enc
-    }
-
-    /// 布尔模式的当前值（只认跟踪列表里的号）。
-    pub fn bool_mode(&self, mode: u16) -> Option<bool> {
-        BOOL_MODE_DEFAULTS
-            .iter()
-            .position(|(m, _)| *m == mode)
-            .map(|i| self.bools[i])
     }
 
     /// 喂入一段 PTY 输出。序列可以在任意字节处被 chunk 边界切开，状态机跨调用续接。

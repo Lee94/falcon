@@ -1,15 +1,15 @@
-//! Markdown 预览（web 的 components/Markdown.tsx）。README / CHANGELOG / ADR 这类文件在这里
-//! 是主要内容，给一坨等宽源码不如直接渲染出来。
+//! Markdown 预览（旧 React 版的 components/Markdown.tsx）。README / CHANGELOG / ADR 这类文件
+//! 在这里是主要内容，给一坨等宽源码不如直接渲染出来。
 //!
-//! 渲染交给 gpui-component 的 TextView（它不执行任何脚本，内联 HTML 也只是排版，没有 web 那边
-//! "塞进 innerHTML 等于打开 XSS"的问题）。这里补三件事：
-//! - **链接**：`http(s)` / `mailto` 交给系统浏览器（白名单，同 `lib/mdLink.ts`：`javascript:`、
-//!   `data:` 一律不认）；指向仓库里另一个文件的相对链接在画布上打开；`#锚点` 不动；
+//! 渲染交给 gpui-component 的 TextView（它不执行任何脚本，内联 HTML 也只是排版，没有 React 版
+//! 那种"塞进 innerHTML 等于打开 XSS"的问题）。这里补三件事：
+//! - **链接**：`http(s)` / `mailto` 交给系统浏览器（白名单，照 React 版 `lib/mdLink.ts`：
+//!   `javascript:`、`data:` 一律不认）；指向仓库里另一个文件的相对链接在画布上打开；`#锚点` 不动；
 //! - **相对图片**：TextView 自己只会把相对地址当成**这台 Mac 上的本地路径**去读——既读不到宿主机
-//!   上的图，还会去碰本机同名文件。所以先把它们改写成链接（点开在查看窗口里看原图，web 的
-//!   虚线占位也是这个作用），再逐张经原始字节路由取回，内联成 `data:` 地址；
+//!   上的图，还会去碰本机同名文件。所以先把它们改写成链接（点开在查看窗口里看原图，React 版
+//!   的虚线占位也是这个作用），再逐张经原始字节路由取回，内联成 `data:` 地址；
 //! - **外链图片**：http(s) 的原样留给 TextView，由 `http.rs` 装给 GPUI 的外链客户端去取（不带
-//!   falcon 的 cookie，与 web 的 `<img src>` 一样直接从对方站点拿）。
+//!   falcon 的 cookie，与 React 版的 `<img src>` 一样直接从对方站点拿）。
 //!
 //! 代码块的高亮颜色与源码视图同一套映射（theme.rs 随主题装进组件库的那份）。
 
@@ -108,7 +108,7 @@ pub fn link_handler(ws: &Entity<Workspace>, project_id: String, dir: String) -> 
             cx.open_url(&url);
             return;
         }
-        // 文档内锚点：这里没有目录也没做 id 映射，点了跳到别处反而更奇怪（同 web）
+        // 文档内锚点：这里没有目录也没做 id 映射，点了跳到别处反而更奇怪
         if href.starts_with('#') || href.starts_with("data:") {
             return;
         }
@@ -128,7 +128,7 @@ impl Render for MarkdownPane {
             ..Default::default()
         };
         div().id(SharedString::from(format!("{}-scroll", self.id))).size_full().overflow_y_scroll().child(
-            // web：max-w-3xl 居中、px-6 py-5、text-sm
+            // React 版：max-w-3xl 居中、px-6 py-5、text-sm
             div().mx_auto().max_w(zpx(768.)).px_6().py_5().text_size(zpx(14.)).text_color(ui.foreground).child(
                 TextView::markdown(self.id.clone(), self.source.clone())
                     .style(style)

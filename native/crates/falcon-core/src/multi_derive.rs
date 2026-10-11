@@ -1,5 +1,5 @@
 //! 批量派生表单的纯逻辑：按模式与分支名推演每个成员会发生什么。
-//! 对应 web 的 `lib/multiDerive.ts`。
+//! 对应旧 React 版的 `lib/multiDerive.ts`。
 //!
 //! 只是**预演**——权威判定在服务端（预检 + add 时的 TOCTOU 兜底），这里的结论用于
 //! 提交前把可预见的失败摆在成员行上，别让用户白交一张表。
@@ -24,7 +24,7 @@ pub enum MemberAction {
 }
 
 impl MemberAction {
-    /// web 里的 `kind` 字面量
+    /// React 版里的 `kind` 字面量
     pub fn kind(&self) -> &'static str {
         match self {
             MemberAction::Blocked { .. } => "blocked",

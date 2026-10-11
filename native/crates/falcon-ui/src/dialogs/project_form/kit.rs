@@ -1,10 +1,10 @@
-//! 表单小件：项目 / 附属项目 / 主机表单与 Zellij 安装框共用（web 的 `common/Field.tsx` 与
-//! shadcn Select 的原生版）。只有这几个表单用，所以放在这里而不是 `ui.rs`。
+//! 表单小件：项目 / 附属项目 / 主机表单与 Zellij 安装框共用（旧 React 版 `common/Field.tsx` 与
+//! shadcn Select 的移植）。只有这几个表单用，所以放在这里而不是 `ui.rs`。
 //!
-//! - [`field`]：标签 + 控件 + 提示，提示带 ok / err 语气（web 的 `Field`）；
-//! - [`segmented`]：二选一 / 三选一切换，槽用 sunken、选中项用 island（web 的 `Segmented`）；
-//! - [`Opt`] / [`Options`]：Select 的选项与分组数据源。值一律是字符串——web 那边 Radix Select
-//!   也只认字符串 value，哨兵值（"__auto__" 之类）的写法可以原样照搬。
+//! - [`field`]：标签 + 控件 + 提示，提示带 ok / err 语气（React 版的 `Field`）；
+//! - [`segmented`]：二选一 / 三选一切换，槽用 sunken、选中项用 island（React 版的 `Segmented`）；
+//! - [`Opt`] / [`Options`]：Select 的选项与分组数据源。值一律是字符串——React 版的 Radix
+//!   Select 也只认字符串 value，哨兵值（"__auto__" 之类）的写法原样照搬了过来。
 
 use falcon_core::reason::Translate;
 use gpui_kit::component::IndexPath;
@@ -24,7 +24,7 @@ pub enum Tone {
     Warn,
 }
 
-/// 表单一行：标签 + 控件 + 提示（web 的 `Field`）
+/// 表单一行：标签 + 控件 + 提示（React 版的 `Field`）
 pub fn field(label: Option<String>, control: impl IntoElement, hint: Option<(String, Tone)>, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let mut d = div().flex().flex_col().gap(zpx(6.)).min_w_0();
@@ -44,12 +44,12 @@ pub fn field(label: Option<String>, control: impl IntoElement, hint: Option<(Str
     d
 }
 
-/// 服务端错误 / 校验错误：就地一行红字（web 的 `text-[13px] text-destructive`）
+/// 服务端错误 / 校验错误：就地一行红字（React 版的 `text-[13px] text-destructive`）
 pub fn error_line(text: impl Into<SharedString>, cx: &App) -> Div {
     div().text_size(zpx(13.)).text_color(Ui::global(cx).destructive).child(text.into())
 }
 
-/// 一行说明文字（web 的 `text-xs text-muted-foreground`）
+/// 一行说明文字（React 版的 `text-xs text-muted-foreground`）
 pub fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div().text_xs().line_height(zpx(18.)).text_color(Ui::global(cx).muted_foreground).child(text.into())
 }
@@ -89,7 +89,7 @@ pub fn segmented(id: &str, items: Vec<SegItem>, cx: &App) -> Div {
     d
 }
 
-/// 可展开的一段（web 的 `Disclosure`）：箭头 + 标签，展开后显示内容
+/// 可展开的一段（React 版的 `Disclosure`）：箭头 + 标签，展开后显示内容
 pub fn disclosure(
     id: &str,
     open: bool,
@@ -164,7 +164,7 @@ impl SelectItem for Opt {
         self.label.clone()
     }
 
-    // 触发器里只显示标题：detail（user@host:port）由 Field 的提示行给出，与 web 一致
+    // 触发器里只显示标题：detail（user@host:port）由 Field 的提示行给出（照 React 版）
 
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let muted = Ui::global(cx).muted_foreground;
@@ -190,7 +190,7 @@ pub struct Section {
     pub items: Vec<Opt>,
 }
 
-/// 分组的选项表（web 的 SelectGroup + SelectLabel）
+/// 分组的选项表（React 版的 SelectGroup + SelectLabel）
 #[derive(Clone, Debug, Default)]
 pub struct Options(pub Vec<Section>);
 
@@ -200,7 +200,7 @@ impl Options {
         Options(vec![Section { title: None, items }])
     }
 
-    /// 顶上几项不归组、下面分组（web 的「当前 HEAD」+ 本地分支 / 远程分支）。
+    /// 顶上几项不归组、下面分组（React 版的「当前 HEAD」+ 本地分支 / 远程分支）。
     ///
     /// gpui-component 的 List 只量第 0 组的组头高度、套给所有组：第 0 组没有组头而后面的有，
     /// 组头就会压在选项上。所以有不归组的顶项时整张表摊平成一组，组头改成不可选的标签行。

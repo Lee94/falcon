@@ -1,7 +1,8 @@
-//! 账户：访问密码（设置 / 修改）、钥匙串里记着的密码、退出登录。web 的 AccountPane。
+//! 账户：访问密码（设置 / 修改）、钥匙串里记着的密码、退出登录。旧 React 版的 AccountPane。
 //!
-//! "记住的密码"一行是原生独有的：web 靠浏览器 cookie，原生把密码存进系统钥匙串，服务端重启
+//! "记住的密码"一行是原生独有的：浏览器里靠 cookie，原生把密码存进系统钥匙串，服务端重启
 //! （token 只在它内存里）后客户端用它自动重登（profiles.rs）。所以这里要能看见、能忘掉；
+//! 没有钥匙串的平台（`Platform::has_password_store`，即浏览器版）不画这一行——画了也恒为"未记住"。
 //! 改了访问密码时钥匙串里若记着旧的，一并换成新的——否则下次自动重登拿旧密码必然失败。
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -70,7 +71,7 @@ impl AccountPane {
                             this.next.update(cx, |i, cx| i.set_value("", window, cx));
                             let ws = this.ws.clone();
                             let keychain = this.keychain;
-                            // web 的 refreshAuth：第一次设密码后服务端开始要求登录，这个客户端还没有
+                            // React 版的 refreshAuth：第一次设密码后服务端开始要求登录，这个客户端还没有
                             // token——整页换成登录（设置对话框一起收起，否则盖在登录框上面）
                             let need_login = ws.update(cx, |w, cx| {
                                 if keychain {
@@ -120,39 +121,36 @@ impl Render for AccountPane {
         let can_submit = !self.busy && self.next.read(cx).value().chars().count() >= 6;
 
         let status = |text: String| div().text_sm().text_color(ui.muted_foreground).child(text);
-        let mut children = rows(
-            vec![
-                (
-                    t!("settings.passwordStatus").to_string(),
-                    None,
-                    status(if password_set { t!("settings.passwordSet") } else { t!("settings.passwordUnset") }.to_string())
-                        .into_any_element(),
-                ),
-                (
-                    t!("native.settings.keychain").to_string(),
-                    Some(t!("native.settings.keychainHint").to_string()),
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(status(
-                            if self.keychain { t!("native.settings.keychainStored") } else { t!("native.settings.keychainEmpty") }
-                                .to_string(),
-                        ))
-                        .child(
-                            Button::new("keychain-forget")
-                                .outline()
-                                .small()
-                                .disabled(!self.keychain)
-                                .label(t!("native.settings.keychainForget").to_string())
-                                .on_click(cx.listener(|this, _, _, cx| this.forget(cx))),
-                        )
-                        .into_any_element(),
-                ),
-            ],
-            true,
-            cx,
-        );
+        let mut items = vec![(
+            t!("settings.passwordStatus").to_string(),
+            None,
+            status(if password_set { t!("settings.passwordSet") } else { t!("settings.passwordUnset") }.to_string())
+                .into_any_element(),
+        )];
+        if falcon_platform::get(cx).has_password_store() {
+            items.push((
+                t!("native.settings.keychain").to_string(),
+                Some(t!("native.settings.keychainHint").to_string()),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(status(
+                        if self.keychain { t!("native.settings.keychainStored") } else { t!("native.settings.keychainEmpty") }
+                            .to_string(),
+                    ))
+                    .child(
+                        Button::new("keychain-forget")
+                            .outline()
+                            .small()
+                            .disabled(!self.keychain)
+                            .label(t!("native.settings.keychainForget").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.forget(cx))),
+                    )
+                    .into_any_element(),
+            ));
+        }
+        let mut children = rows(items, true, cx);
         let mut form = div().flex().flex_col().gap_3().pt_4().max_w(zpx(448.));
         if password_set {
             form = form.child(field(t!("password.current").to_string(), Input::new(&self.current), cx));

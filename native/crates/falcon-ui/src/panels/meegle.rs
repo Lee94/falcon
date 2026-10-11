@@ -1,5 +1,5 @@
-//! web 的 components/MeeglePanel.tsx（ADR 0010）：右侧「飞书项目」面板，falcon 后端本机上
-//! meegle CLI 的一扇窗口。
+//! 右侧「飞书项目」面板（旧 React 版的 components/MeeglePanel.tsx，ADR 0010）：falcon 后端
+//! 本机上 meegle CLI 的一扇窗口。
 //!
 //! 和 Git / 文件面板不同，它**不跟着焦点项目走**——飞书项目的登录态是整台机器（跑 falcon
 //! 的那台）一份，待办也是跨空间的。三页：「待办」是 mywork 的四个列表；「空间」是选一个
@@ -15,8 +15,8 @@
 //! 上次的结果，30s 内不打网络，之后后台静默再拉；顶栏刷新清两边。缓存按服务端配置分开——
 //! 一个 App 可以同时连好几台 falcon 服务端，每台背后是不同机器上的 CLI 登录态。
 //!
-//! 与 web 的差别：web 里切页 / 下钻会卸载下面那页（回来时从缓存重画、筛选与滚动丢了）；这里
-//! 各页是常驻的 Entity，返回时停在原来的位置。
+//! 与 React 版的差别：React 版里切页 / 下钻会卸载下面那页（回来时从缓存重画、筛选与滚动
+//! 丢了）；这里各页是常驻的 Entity，返回时停在原来的位置。
 
 mod common;
 mod detail;
@@ -99,8 +99,8 @@ fn cache_for(profile_id: &str) -> MeegleCache {
     CACHES.with(|c| c.borrow_mut().entry(profile_id.to_string()).or_default().clone())
 }
 
-/// web 存在 localStorage 里的键；localStorage 天然按服务端（origin）分，这里的偏好文件是
-/// 全局一份，远处的服务端加上配置 id 后缀
+/// 沿用 React 版存在 localStorage 里的键；localStorage 天然按服务端（origin）分（浏览器版
+/// 只有 `local` 一份配置，不加后缀），原生的偏好文件是全局一份，远处的服务端加上配置 id 后缀
 pub(super) fn pref_key(ws: &Entity<Workspace>, base: &str, cx: &App) -> String {
     let profile = &ws.read(cx).profile;
     if profile.is_local() { base.to_string() } else { format!("{base}@{}", profile.id) }
@@ -293,7 +293,7 @@ impl MeeglePanel {
         }
     }
 
-    /// web 的 `epoch + 1`：还活着的各页带 `fresh` 重拉
+    /// React 版的 `epoch + 1`：还活着的各页带 `fresh` 重拉
     fn reload_children(&mut self, cx: &mut Context<Self>) {
         if let Some(t) = &self.todo {
             t.update(cx, |t, cx| t.refresh(cx));
@@ -570,7 +570,7 @@ impl MeeglePanel {
             .child(icon(IconName::ListTodo).size(zpx(14.)).text_color(ui.muted_foreground))
             .child(div().flex_1().min_w_0().truncate().text_size(zpx(12.)).font_weight(FontWeight::MEDIUM).child(t!("meegle.title").to_string()))
             .when_some(user, |d, user| {
-                // 头像走飞书 CDN（经 http.rs 装给 GPUI 的外链客户端取），没有或取不到时用 web 的
+                // 头像走飞书 CDN（经 http.rs 装给 GPUI 的外链客户端取），没有或取不到时用 React 版的
                 // "图裂了"兜底：首字圆点
                 let title: SharedString =
                     user.email.as_ref().map(|e| format!("{} · {e}", user.name)).unwrap_or_else(|| user.name.clone()).into();

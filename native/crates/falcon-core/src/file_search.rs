@@ -1,8 +1,8 @@
-//! Quick Open（⌘P）的客户端过滤。对应 web 的 `lib/fileSearch.ts`。
+//! Quick Open（⌘P）的客户端过滤。对应旧 React 版的 `lib/fileSearch.ts`。
 //!
 //! 后端给整份路径清单，这里按 VS Code 的直觉打分：文件名命中优于路径命中，前缀优于
-//! 包含，子序列垫底。两个客户端对同一个查询必须排出同一个顺序
-//! （`tests/vectors/fileSearch.json`）。
+//! 包含，子序列垫底。打分口径沿用 React 版，同一个查询排出的顺序由
+//! `tests/vectors/fileSearch.json` 兜住。
 
 use crate::js::{js_trim, locale_compare, utf16_len};
 

@@ -71,7 +71,7 @@ impl SessionSink for Sink {
             SessionEvent::Replay(bytes) => {
                 // 回放最大 4MB：原生上解析期间让 tokio 把这个 worker 上的其他任务挪走（client 的
                 // 回调约定：别在回调里长时间占着网络 worker）；浏览器里只有主线程，就地解析，与
-                // web 在主线程解析回放同一个水平（设计文档决定七）。不能丢给别的线程——回放之后
+                // 旧 React 版在主线程解析回放同一个水平（设计文档决定七）。不能丢给别的线程——回放之后
                 // 紧跟的实时输出必须在它换上之后才应用，顺序由"回调顺序执行"保证
                 log::debug!("replay {} bytes", bytes.len());
                 let changed = falcon_client::block_in_place(|| self.core.replace_with_replay(&bytes));
@@ -104,7 +104,7 @@ fn button_bit(b: MouseButton) -> u8 {
 /// xterm.js 的光标闪烁间隔
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
-/// 滚过之后滚动条亮多久（web 的 LINGER_MS）
+/// 滚过之后滚动条亮多久（React 版的 LINGER_MS）
 const SCROLL_LINGER: Duration = Duration::from_millis(1200);
 /// 滚动条亮着时隔多久再问一次位置：期间输出还在涨，历史长度会变
 const SCROLL_REFRESH: Duration = Duration::from_millis(1000);
@@ -121,7 +121,7 @@ struct ScrollDrag {
     top: f32,
 }
 
-/// 滚动条（ADR 0019，web 的 TerminalScrollbar.tsx）。滚动发生在宿主机的 zellij 里，
+/// 滚动条（ADR 0019，React 版的 TerminalScrollbar.tsx）。滚动发生在宿主机的 zellij 里，
 /// 位置是问服务端才知道的：滚轮、悬停、拖动时问，平时不问。
 #[derive(Default)]
 struct Scrollbar {
@@ -205,6 +205,8 @@ pub enum TerminalViewEvent {
     ClearRecord,
     Askpass { id: String, prompt: String },
     Unauthorized,
+    /// 要用户看见的提示（图片粘贴超限 / 上传失败），由工作区转成通知
+    Toast { kind: crate::workspace::ToastKind, title: String, body: Option<String> },
 }
 
 impl gpui_kit::EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -543,7 +545,7 @@ impl TerminalView {
         }
         if let Some(img) = image {
             let mime = img.format.mime_type().to_string();
-            self.upload_image(img.bytes.clone(), mime, cx);
+            self.upload_images(vec![(img.bytes.clone(), mime)], cx);
         }
     }
 
@@ -555,30 +557,57 @@ impl TerminalView {
         self.bump_blink(cx);
     }
 
-    fn upload_image(&mut self, bytes: Vec<u8>, mime: String, cx: &mut Context<Self>) {
-        if bytes.len() as u64 > falcon_proto::PASTE_IMAGE_MAX_BYTES as u64 {
-            log::warn!("图片超过上限，不上传");
+    /// 图片逐张传到会话宿主机，落盘路径按原顺序用空格连起来**一次**粘进终端（旧 React 版
+    /// `uploadImages` 的口径；逐张各贴一次的话，拖进两张图两个路径会首尾相接）。含空白的
+    /// 路径包上双引号（Windows 用户名带空格很常见，Claude Code 按这个约定剥引号）。超过上限的、
+    /// 传失败的各弹一条提示后跳过，其余照贴。
+    fn upload_images(&mut self, images: Vec<(Vec<u8>, String)>, cx: &mut Context<Self>) {
+        use crate::workspace::ToastKind;
+        use rust_i18n::t;
+        let max = falcon_proto::PASTE_IMAGE_MAX_BYTES;
+        let mut uploads = Vec::new();
+        for (bytes, mime) in images {
+            if bytes.len() as u64 > max {
+                let title = t!("term.pasteImageTooLarge", max = max / 1024 / 1024).to_string();
+                cx.emit(TerminalViewEvent::Toast { kind: ToastKind::Warning, title, body: None });
+                continue;
+            }
+            uploads.push(self.client.paste_image(&self.session_id, bytes, &mime));
+        }
+        if uploads.is_empty() {
             return;
         }
-        let fut = self.client.paste_image(&self.session_id, bytes, &mime);
         cx.spawn(async move |this, cx| {
-            let result = fut.await;
-            this.update(cx, |this, cx| match result {
-                Ok(path) => this.paste_text(&path, cx),
-                Err(err) => log::warn!("图片粘贴失败：{err}"),
-            })
-            .ok();
+            let mut paths = Vec::new();
+            for upload in uploads {
+                match upload.await {
+                    Ok(path) => paths.push(falcon_core::paste_image::quote_for_prompt(&path)),
+                    Err(err) => {
+                        let title = t!("term.pasteImageFailed").to_string();
+                        let ev = TerminalViewEvent::Toast { kind: ToastKind::Warning, title, body: Some(err.to_string()) };
+                        this.update(cx, |_, cx| cx.emit(ev)).ok();
+                    }
+                }
+            }
+            if !paths.is_empty() {
+                this.update(cx, |this, cx| this.paste_text(&paths.join(" "), cx)).ok();
+            }
         })
         .detach();
     }
 
     fn on_drop_paths(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         let mut plain = Vec::new();
+        let mut images = Vec::new();
         for path in paths.paths() {
             if let Some(mime) = image_mime(path) {
                 match std::fs::read(path) {
-                    Ok(bytes) => self.upload_image(bytes, mime.to_string(), cx),
-                    Err(err) => log::warn!("读不了拖入的图片 {}：{err}", path.display()),
+                    Ok(bytes) => images.push((bytes, mime.to_string())),
+                    Err(err) => cx.emit(TerminalViewEvent::Toast {
+                        kind: crate::workspace::ToastKind::Warning,
+                        title: rust_i18n::t!("term.pasteImageFailed").to_string(),
+                        body: Some(format!("{}：{err}", path.display())),
+                    }),
                 }
             } else if self.local_server {
                 plain.push(shell_quote(path));
@@ -587,6 +616,9 @@ impl TerminalView {
         if !plain.is_empty() {
             let text = plain.join(" ") + " ";
             self.paste_text(&text, cx);
+        }
+        if !images.is_empty() {
+            self.upload_images(images, cx);
         }
     }
 
@@ -735,7 +767,7 @@ impl TerminalView {
             return;
         }
         if self.dragging.take().is_some() {
-            // 松开即复制（与 web 一致）；单击没拖出选区时清掉空选区
+            // 松开即复制（沿用 React 版）；单击没拖出选区时清掉空选区
             if self.core.has_selection() {
                 self.copy(cx);
             } else {
@@ -749,7 +781,7 @@ impl TerminalView {
         let Some(geo) = self.geometry else {
             return;
         };
-        // 横向为主的手势留给画布横滚（web 的 WheelAxisLock：终端只接纵向）
+        // 横向为主的手势留给画布横滚（React 版的 WheelAxisLock：终端只接纵向）
         let (dx, dy) = match e.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             ScrollDelta::Lines(l) => (l.x, l.y),
@@ -1044,7 +1076,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 窗口顶上的持续性提示：只用于**需要用户动作**的会话级异常（web 的 Banner）
+    /// 窗口顶上的持续性提示：只用于**需要用户动作**的会话级异常（React 版的 Banner）
     fn banner(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         use gpui_kit::component::button::{Button, ButtonVariants};
         use gpui_kit::component::Sizable;
@@ -1158,7 +1190,7 @@ impl TerminalView {
         Some(bar.child(div().flex_none().flex().gap_2().children(actions)).into_any_element())
     }
 
-    /// 终端里的右键菜单：复制 / 粘贴 / 清屏（web 的 termMenuItems）
+    /// 终端里的右键菜单：复制 / 粘贴 / 清屏（React 版的 termMenuItems）
     fn context_items(&self, cx: &mut Context<Self>) -> Vec<crate::menus::MenuItemSpec> {
         use rust_i18n::t;
         let view = cx.entity();
@@ -1235,7 +1267,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &crate::actions::term::Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &crate::actions::term::SelectAll, _, cx| this.select_all(cx)))
             .on_action(cx.listener(|this, _: &crate::actions::term::Clear, _, cx| this.clear(cx)))
-            // 输入被禁用这件事要看得见（web 同样压到 0.55）
+            // 输入被禁用这件事要看得见（照 React 版压到 0.55）
             .when(dim, |d| d.opacity(0.55))
             .child(element)
             .children(scrollbar)

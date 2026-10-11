@@ -1,8 +1,8 @@
-//! unified diff → 表格行（web `GitDiffView.tsx` 的 `parseDiff` / `toSplitRows`），纯函数。
+//! unified diff → 表格行（旧 React 版 `GitDiffView.tsx` 的 `parseDiff` / `toSplitRows`），纯函数。
 //!
-//! 与 web 的一处差别：行一律等高。web 的文件头 / hunk 头 / 说明行各有各的 padding（36 / 30 /
-//! 26px），所以大 diff 要自己算前缀偏移做行窗口；这里全部压成正文行高交给 `uniform_list`，
-//! 虚拟化是白送的，不再有"500 行以上才启用"的分支。
+//! 与 React 版的一处差别：行一律等高。React 版的文件头 / hunk 头 / 说明行各有各的 padding
+//! （36 / 30 / 26px），所以大 diff 要自己算前缀偏移做行窗口；这里全部压成正文行高交给
+//! `uniform_list`，虚拟化是白送的，不再有"500 行以上才启用"的分支。
 
 /// 正文行
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +50,7 @@ pub enum SplitRow {
     },
 }
 
-/// 制表符按 8 列的制表位展开（web 表格是 `white-space: pre`，浏览器默认 tab-size 8）。
+/// 制表符按 8 列的制表位展开（React 版表格是 `white-space: pre`，浏览器默认 tab-size 8）。
 /// GPUI 的文本不认制表位，不展开的话缩进全乱
 pub fn expand_tabs(s: &str) -> String {
     if !s.contains('\t') {

@@ -1,16 +1,16 @@
-//! 终端画面偏好：字体、字号、行高、光标、引擎。对应 web 的 `lib/term.ts`。
+//! 终端画面偏好：字体、字号、行高、光标。对应旧 React 版的 `lib/term.ts`。
 //!
 //! 只影响终端，不改界面字体。配色不在这里——终端与整个界面共用一套主题
 //! （falcon-theme），按明暗各选一套。
 //!
-//! 持久化：web 存在 localStorage 的 `falcon.term`（旧名 `mojito.term`），原生存在偏好
-//! 文件的同名键下，JSON 形状逐字一致（[`TermPref`] 的 serde）。读入一律过
-//! [`sanitize_term_pref`]：换机器不跟着走、文件被手改坏、旧版存过 `themeId`（终端单独
-//! 配色，迁移见 falcon-theme 的 pref）都只是回到默认 / 丢掉那一项。
+//! 持久化：键沿用 React 版的 `falcon.term`（改名前的 `mojito.term` 不再认），浏览器版存在 localStorage，
+//! 原生存在偏好文件的同名键下；JSON 形状也沿用（[`TermPref`] 的 serde，只去掉了 `engine`）。
+//! 读入一律过 [`sanitize_term_pref`]：换机器不跟着走、文件被手改坏、旧版存过 `themeId`
+//! （终端单独配色，迁移见 falcon-theme 的 pref）都只是回到默认 / 丢掉那一项。
 //!
-//! 不在这里的：web 的 `termFontStack`（拼 CSS font-family 字符串，含一长串系统回退）。
-//! 原生字体回退由平台做，这里只留"字体 id → family 名"的映射与内置字体的先后
-//! （[`term_font_families`]）。
+//! 不在这里的：React 版的 `termFontStack`（拼 CSS font-family 字符串：图标字体打头、内置字体
+//! 垫底、再接一长串系统回退）。GPUI 客户端的字体回退链在 falcon-ui 的 `fonts.rs`，顺序与它
+//! 刻意不同（见那里的注释），这里只留"字体 id → family 名"的映射。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,7 +18,6 @@ use serde_json::Value;
 use crate::js::{js_max, js_min, js_num, js_number, js_round, js_slice_utf16, js_trim};
 
 pub const TERM_PREF_KEY: &str = "falcon.term";
-pub const TERM_PREF_KEY_LEGACY: &str = "mojito.term";
 
 pub const TERM_FONT_SIZE_MIN: f64 = 10.0;
 pub const TERM_FONT_SIZE_MAX: f64 = 24.0;
@@ -114,15 +113,6 @@ pub enum TermCursorStyle {
     Underline,
 }
 
-/// 终端渲染引擎。web 专属（rio = 实验性的 rioterm），原生只有一套；保留这个字段是为了
-/// 与 web 的偏好 JSON 形状一致、读写时不丢值。
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TermEngine {
-    Xterm,
-    Rio,
-}
-
 /// `falcon.term` 的形状
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -135,7 +125,6 @@ pub struct TermPref {
     pub line_height: f64,
     pub cursor_style: TermCursorStyle,
     pub cursor_blink: bool,
-    pub engine: TermEngine,
 }
 
 impl Default for TermPref {
@@ -148,19 +137,16 @@ impl Default for TermPref {
             line_height: 1.0,
             cursor_style: TermCursorStyle::Block,
             cursor_blink: true,
-            engine: TermEngine::Xterm,
         }
     }
 }
 
-/// 内置默认正文字体的 family 名，必须与内嵌字体的 name 表一致（web 的 berkeley-mono.css）
+/// 内置默认正文字体的 family 名，必须与内嵌字体的 name 表一致（React 版的 berkeley-mono.css）
 pub const BERKELEY_FONT_FAMILY: &str = "TX-02";
-/// 内置的 OFL 回退（web 的 ioskeley-mono.css）
+/// 内置的 OFL 回退（React 版的 ioskeley-mono.css）
 pub const IOSKELEY_FONT_FAMILY: &str = "IoskeleyMonoTerm Nerd Font Mono";
-/// 内置 Maple 的 family 名（web 的 maple-mono.css）
+/// 内置 Maple 的 family 名（React 版的 maple-mono.css）
 pub const MAPLE_FONT_FAMILY: &str = "Maple Mono NL NF CN";
-/// 内置图标字体（web 的 nerd-symbols.css）
-pub const NERD_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
 
 /// 这份偏好的正文字体 family：命名字体给它的 family，`custom` 给去掉首尾空白的
 /// `customFamily`（空的算没有），`system` 没有。
@@ -168,36 +154,6 @@ pub fn primary_family(pref: &TermPref) -> Option<String> {
     match pref.font_id {
         TermFontId::Custom => Some(js_trim(&pref.custom_family).to_string()).filter(|s| !s.is_empty()),
         id => id.family().map(str::to_string),
-    }
-}
-
-/// 内置字体的先后（web `termFontStack` 里系统回退之前的那一段，去掉 CSS 引号）。
-///
-/// - 图标字体永远打头：换正文字体不该把 Powerline / Nerd 图标弄丢。web 那边的理由是
-///   Maple 自带的 NF 是宽形，xterm 把 U+E000–F8FF 当成 1 格且拒绝 rescale；原生渲染
-///   同样按 1 格排私用区，保持同一个顺序。
-/// - 命名字体后面垫内置的 Ioskeley 再垫 Maple：选了本机没装的字体、或 Berkeley 缺字形
-///   时，回退的是同为等宽骨架的内置字体而不是系统字体。fontId 本身就是 Ioskeley 时不重复列。
-/// - `maple`：图标字体 + Maple；`custom`：图标字体 + 自定义（空则省略）+ Maple；
-///   `system`：一个内置字体都不列（web 那边整条交给系统回退栈）。
-pub fn term_font_families(pref: &TermPref) -> Vec<String> {
-    let s = |x: &str| x.to_string();
-    match pref.font_id {
-        TermFontId::System => Vec::new(),
-        TermFontId::Maple => vec![s(NERD_FONT_FAMILY), s(MAPLE_FONT_FAMILY)],
-        TermFontId::Custom => {
-            let mut out = vec![s(NERD_FONT_FAMILY)];
-            if let Some(custom) = primary_family(pref) {
-                out.push(custom);
-            }
-            out.push(s(MAPLE_FONT_FAMILY));
-            out
-        }
-        TermFontId::Ioskeley => vec![s(NERD_FONT_FAMILY), s(IOSKELEY_FONT_FAMILY), s(MAPLE_FONT_FAMILY)],
-        id => {
-            let named = id.family().unwrap_or(BERKELEY_FONT_FAMILY);
-            vec![s(NERD_FONT_FAMILY), s(named), s(IOSKELEY_FONT_FAMILY), s(MAPLE_FONT_FAMILY)]
-        }
     }
 }
 
@@ -219,7 +175,8 @@ pub fn clamp_line_height(n: f64) -> f64 {
 }
 
 /// 读入清洗：任意 JSON（旧版、手改过、别的类型）→ 合法偏好。认不出的字段回默认，
-/// 多余字段（旧版的 `themeId`）直接丢。数字照 JS 的 `Number(x)` 转（`"16"` 也算 16）。
+/// 多余字段（旧版的 `themeId`、旧 React 版选终端引擎 xterm.js / rio 的 `engine`）直接丢。
+/// 数字照 JS 的 `Number(x)` 转（`"16"` 也算 16）。
 pub fn sanitize_term_pref(raw: &Value) -> TermPref {
     let d = TermPref::default();
     let get = |k: &str| raw.as_object().and_then(|o| o.get(k));
@@ -237,7 +194,6 @@ pub fn sanitize_term_pref(raw: &Value) -> TermPref {
         line_height: clamp_line_height(js_number(get("lineHeight"))),
         cursor_style,
         cursor_blink: get("cursorBlink") != Some(&Value::Bool(false)),
-        engine: if get("engine").and_then(Value::as_str) == Some("rio") { TermEngine::Rio } else { TermEngine::Xterm },
     }
 }
 
@@ -250,7 +206,7 @@ pub fn load_term_pref(raw: Option<&str>) -> TermPref {
     }
 }
 
-/// 写回存储的 JSON（与 web 的 `JSON.stringify(pref)` 同形）
+/// 写回存储的 JSON（沿用 React 版 `JSON.stringify(pref)` 的形状，去掉了 `engine`）
 pub fn serialize_term_pref(pref: &TermPref) -> String {
     serde_json::to_string(pref).unwrap_or_default()
 }
@@ -266,11 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_theme_id_is_dropped_other_fields_kept() {
+    fn legacy_fields_are_dropped_other_fields_kept() {
         let pref = sanitize_term_pref(&json!({ "fontSize": 16, "themeId": "dracula", "engine": "rio" }));
         assert_eq!(pref.font_size, 16.0);
-        assert_eq!(pref.engine, TermEngine::Rio);
-        assert!(!serialize_term_pref(&pref).contains("themeId"));
+        let out = serialize_term_pref(&pref);
+        assert!(!out.contains("themeId") && !out.contains("engine"), "{out}");
     }
 
     #[test]
@@ -283,38 +239,11 @@ mod tests {
     }
 
     #[test]
-    fn icon_font_leads_then_the_default_body_font_then_builtin_fallbacks() {
-        assert_eq!(
-            term_font_families(&TermPref::default()),
-            [NERD_FONT_FAMILY, BERKELEY_FONT_FAMILY, IOSKELEY_FONT_FAMILY, MAPLE_FONT_FAMILY]
-        );
-    }
-
-    #[test]
-    fn ioskeley_is_not_listed_twice() {
-        let f = term_font_families(&TermPref { font_id: TermFontId::Ioskeley, ..TermPref::default() });
-        assert_eq!(f, [NERD_FONT_FAMILY, IOSKELEY_FONT_FAMILY, MAPLE_FONT_FAMILY]);
-    }
-
-    #[test]
-    fn maple_follows_the_icon_font() {
-        let f = term_font_families(&TermPref { font_id: TermFontId::Maple, ..TermPref::default() });
-        assert_eq!(f, [NERD_FONT_FAMILY, MAPLE_FONT_FAMILY]);
-    }
-
-    #[test]
-    fn custom_sits_between_the_icon_font_and_maple_empty_falls_back_to_maple() {
-        let custom = |s: &str| TermPref { font_id: TermFontId::Custom, custom_family: s.into(), ..TermPref::default() };
-        assert_eq!(term_font_families(&custom("Sarasa Term SC")), [NERD_FONT_FAMILY, "Sarasa Term SC", MAPLE_FONT_FAMILY]);
-        assert_eq!(term_font_families(&custom("  ")), [NERD_FONT_FAMILY, MAPLE_FONT_FAMILY]);
-    }
-
-    #[test]
     fn json_shape_matches_web() {
         // 以下是 Rust 侧补的：落盘形状、JS 的 Number() 转换、load 的兜底
         assert_eq!(
             serialize_term_pref(&TermPref::default()),
-            r#"{"fontId":"berkeley","customFamily":"","fontSize":13,"lineHeight":1,"cursorStyle":"block","cursorBlink":true,"engine":"xterm"}"#
+            r#"{"fontId":"berkeley","customFamily":"","fontSize":13,"lineHeight":1,"cursorStyle":"block","cursorBlink":true}"#
         );
         let p = sanitize_term_pref(&json!({ "fontSize": "15", "lineHeight": 1.23, "cursorBlink": 0, "fontId": "fira-code" }));
         assert_eq!((p.font_size, p.line_height, p.cursor_blink, p.font_id), (15.0, 1.25, true, TermFontId::FiraCode));

@@ -1,4 +1,4 @@
-//! sudo askpass（web 的 AskpassDialog）：宿主机上的 helper 向服务端要密码，服务端经会话 WS
+//! sudo askpass（旧 React 版的 AskpassDialog）：宿主机上的 helper 向服务端要密码，服务端经会话 WS
 //! 推 `askpass`（目标会话没人看时广播给所有 Viewer），另有 1.5s 的 `/api/askpass/pending`
 //! 轮询兜底。对话框只展示队头；答完或取消就出队。
 

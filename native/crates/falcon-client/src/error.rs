@@ -1,6 +1,6 @@
-//! 错误形状：对齐 web 的 `ApiRequestError`（`packages/web/src/api.ts`）。
+//! 错误形状：对齐旧 React 版的 `ApiRequestError`（`packages/web/src/api.ts`）。
 //!
-//! web 那边：非 2xx 时取响应体里的 `error` 字段当消息（没有就是 `HTTP <status>`），
+//! React 版那边：非 2xx 时取响应体里的 `error` 字段当消息（没有就是 `HTTP <status>`），
 //! 整个响应体原样挂在 `body` 上给调用方按需收窄（批量派生的 `MultiDeriveError`、
 //! 飞书项目 409 的 `reason`）；网络层失败 status 为 0。Rust 侧 status 用 `Option`，
 //! 网络层失败是 `None`。

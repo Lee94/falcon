@@ -63,7 +63,7 @@ pub fn icon_button(
         .on_click(on_click)
 }
 
-/// 会话状态记号：形状 + 颜色双编码（web 的 StatusMark）。creating 是纯前端状态
+/// 会话状态记号：形状 + 颜色双编码（旧 React 版的 StatusMark）。creating 是纯前端状态
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Active,
@@ -106,7 +106,7 @@ pub fn status_mark(mark: Mark, size: Pixels, cx: &App) -> AnyElement {
     icon(name).size(size).text_color(color).into_any_element()
 }
 
-/// 主机身份色：色相由连接串散列而来，饱和度 / 亮度随主题（hostColor.ts 的 hsl(h, s%, l%)）
+/// 主机身份色：色相由连接串散列而来，饱和度 / 亮度随主题（React 版 hostColor.ts 的 hsl(h, s%, l%)）
 pub fn host_color(hue: u32, cx: &App) -> Hsla {
     let ui = Ui::global(cx);
     hsla(hue as f32 / 360.0, ui.host_s as f32 / 100.0, ui.host_l as f32 / 100.0, 1.0)
@@ -137,7 +137,7 @@ pub(crate) fn set_mac_keys(mac: bool) {
     MAC_KEYS.store(mac, Ordering::Relaxed);
 }
 
-/// 键位提示（菜单 / tooltip 里显示的主键位），字面与 web 的 `chord()` 逐字一致
+/// 键位提示（菜单 / tooltip 里显示的主键位），字面沿用 React 版 `chord()` 的写法
 /// （falcon-core 的快捷键表）。不认识的动作 id 给空串
 pub fn chord(action: &str) -> String {
     Command::from_id(action).map(|c| shortcuts::chord(c, MAC_KEYS.load(Ordering::Relaxed))).unwrap_or_default()

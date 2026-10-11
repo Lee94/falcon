@@ -305,7 +305,8 @@ async fn download(State(state): State<AppState>, Path(id): Path<String>, uri: Ur
 /// （application/octet-stream），按流写到宿主机。
 ///
 /// Content-Length 是必需的：宿主机那头收满这个数才把文件改名到位，中途断开的
-/// 上传不会留下截断的文件。浏览器给 File 请求体一定带这个头。
+/// 上传不会留下截断的文件。原生客户端（falcon-client）流式上传时显式带准确的值；
+/// 浏览器给 File 请求体也一定带这个头。
 ///
 /// 同名文件已存在且没带 overwrite=1 时回 409，前端问过用户再重发；此时请求体
 /// 可能还没收完，剩下的读掉丢弃（drain_in_background），连接不会被掐断。

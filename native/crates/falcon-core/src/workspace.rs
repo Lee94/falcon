@@ -1,13 +1,13 @@
-//! 工作区状态：持久化的 `falcon.workspace` 形状与读入清洗，以及 web `store.ts` 里与
-//! 工作区相关的纯函数 selector 和 reducer 式的状态迁移。
+//! 工作区状态：持久化的 `falcon.workspace` 形状与读入清洗，以及旧 React 版 `store.ts`
+//! 里与工作区相关的纯函数 selector 和 reducer 式的状态迁移。
 //!
-//! web 的 store 是一个 zustand store，工作区的状态迁移写在各个 action 的 `set(...)` 里，
-//! 与 API 调用、toast、i18n 混在一起。这里只取纯的那一半：[`WorkspaceState`] 上的方法
-//! 与 web 对应 action 里的 `set` 逐字段一致；发请求、弹提示、问"要不要关"这些仍归
-//! app 层（对应的 web action 名写在每个方法的注释里）。会话 / 项目列表是服务端数据，
-//! 由调用方按参数传进来。
+//! React 版的 store 是一个 zustand store，工作区的状态迁移写在各个 action 的 `set(...)`
+//! 里，与 API 调用、toast、i18n 混在一起。这里只取纯的那一半：[`WorkspaceState`] 上的
+//! 方法照 React 版对应 action 里的 `set` 逐字段移植；发请求、弹提示、问"要不要关"这些
+//! 仍归 app 层（对应的 React 版 action 名写在每个方法的注释里）。会话 / 项目列表是服务端
+//! 数据，由调用方按参数传进来。
 //!
-//! 落盘：web 在部分 action 之后调 `persist()`；这里的方法注释里标了「web 此后落盘」，
+//! 落盘：React 版在部分 action 之后调 `persist()`，这里的方法注释里标了「此后落盘」，
 //! app 照做即可（只在松手 / 关窗时写、内容相同跳过，设计文档 §4.9）。
 
 use std::collections::{BTreeMap, HashSet};
@@ -26,11 +26,6 @@ use crate::layout::{
 use crate::pane_key::{DIFF_KEY, PaneItem, file_key, parse_pane_key, term_key};
 use crate::panel_width::{PANEL_WIDTH_DEFAULT, clamp_panel_width_default, parse_panel_width};
 
-pub const WORKSPACE_KEY: &str = "falcon.workspace";
-pub const WORKSPACE_KEY_LEGACY: &str = "mojito.workspace";
-/// "关窗口会结束会话"的一次性说明看过没有（值是 `"1"`）
-pub const CLOSE_KILLS_KEY: &str = "falcon.closeKillsEducated";
-pub const CLOSE_KILLS_KEY_LEGACY: &str = "mojito.closeKillsEducated";
 pub const PENDING_PREFIX: &str = "pending:";
 
 /// 还没拿到后端 id 的会话 id（`pending:<序号>`）
@@ -136,7 +131,7 @@ pub struct PersistedColumn {
     #[serde(with = "js_num::opt")]
     pub basis: Option<f64>,
     pub panes: Vec<PaneLayout>,
-    /// 固定在最右（见 [`ColumnLayout::pinned`]）。只可能是最后一列。web 落盘时恒写这个字段
+    /// 固定在最右（见 [`ColumnLayout::pinned`]）。只可能是最后一列。落盘时恒写这个字段（照 React 版）
     #[serde(default)]
     pub pinned: bool,
     /// 所在画布（见 [`ColumnLayout::canvas`]）。旧版本没有，读回来按还没分处理；固定列不记
@@ -144,7 +139,8 @@ pub struct PersistedColumn {
     pub canvas: Option<String>,
 }
 
-/// `falcon.workspace` 的形状（字段名、嵌套、顺序与 web 的 `JSON.stringify` 一致）
+/// `falcon.workspace` 的形状（字段名、嵌套、顺序照 React 版 `JSON.stringify` 的输出：浏览器版沿用
+/// 同一个 localStorage 键，老用户的排布原样读回）
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedWorkspace {
@@ -228,7 +224,7 @@ pub fn parse_persisted_columns(raw: Option<&Value>) -> Vec<PersistedColumn> {
     out
 }
 
-/// `Record<string, boolean>`：web 不校验值的类型、用时按真假读，这里读入时就按 JS 真值转
+/// `Record<string, boolean>`：React 版不校验值的类型、用时按真假读，这里读入时就按 JS 真值转
 fn bool_record(v: Option<&Value>) -> BTreeMap<String, bool> {
     match v {
         Some(Value::Object(m)) => m.iter().map(|(k, v)| (k.clone(), js_truthy(v))).collect(),
@@ -236,8 +232,9 @@ fn bool_record(v: Option<&Value>) -> BTreeMap<String, bool> {
     }
 }
 
-/// 读工作区：`raw` 是存储里的原文（先 `falcon.workspace`，没有再 `mojito.workspace`，由调用方取）。
-/// 没有、坏 JSON、形状离谱到 web 那边会抛异常（`tabs` 不是数组、整个是 `null`）都退回默认。
+/// 读工作区：`raw` 是存储里的原文（键 `falcon.workspace`，由平台取：浏览器版在 falcon-web 的
+/// localStorage，原生在 falcon-desktop 的数据目录；改名前的 `mojito.workspace` 不再认）。
+/// 没有、坏 JSON、形状离谱到 React 版会抛异常（`tabs` 不是数组、整个是 `null`）都退回默认。
 pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
     let fallback = PersistedWorkspace::default();
     let Some(raw) = raw.filter(|s| !s.is_empty()) else { return fallback };
@@ -247,7 +244,7 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
     }
     let get = |k: &str| parsed.as_object().and_then(|o| o.get(k));
     // 持久化的 tab 里绝不该混进上一次的 pending id。`(parsed.tabs ?? []).filter(...)`：
-    // tabs 是别的类型时 web 那边 `.filter` 直接抛，整份退回默认
+    // tabs 是别的类型时 React 版的 `.filter` 直接抛，整份退回默认
     let tabs = match get("tabs") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(items)) => {
@@ -344,39 +341,7 @@ pub fn select_multi_repo_dir(multi_repo: &BTreeMap<String, String>, project: Opt
     multi.repos.first().map(|m| m.dir.clone())
 }
 
-/// 关掉一组窗口时各归哪条路（web `closePaneKeys` 里请求之前的那段分拣）
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ClosePlan {
-    /// 文件窗口：直接收起
-    pub files: Vec<FileTabTarget>,
-    /// 差异窗口：直接收起
-    pub close_diff: bool,
-    /// pending、已丢失、列表里找不到的会话：只摘窗口，没什么可杀的
-    pub drop_only: Vec<String>,
-    /// 活着的会话：先问前台忙不忙（2s 超时），再 Terminate
-    pub live: Vec<String>,
-}
-
-pub fn plan_close(keys: &[String], sessions: &[SessionWithProject]) -> ClosePlan {
-    let mut plan = ClosePlan::default();
-    for key in keys {
-        match parse_pane_key(key) {
-            Some(PaneItem::File { project_id, path, .. }) => plan.files.push(FileTabTarget { project_id, path }),
-            Some(PaneItem::Diff { .. }) => plan.close_diff = true,
-            Some(PaneItem::Terminal { id, .. }) => {
-                let session = (!is_pending_id(&id)).then(|| sessions.iter().find(|s| s.id == id)).flatten();
-                match session {
-                    Some(s) if s.state != SessionState::Dead => plan.live.push(id),
-                    _ => plan.drop_only.push(id),
-                }
-            }
-            None => {}
-        }
-    }
-    plan
-}
-
-/// WS 推过来的状态立刻写进列表（web `applySessionState`），不等 5s 轮询——否则接回后
+/// WS 推过来的状态立刻写进列表（React 版 `applySessionState`），不等 5s 轮询——否则接回后
 /// 仍显示「待接回」。不是 dead 就清掉 deadReason。
 pub fn apply_session_state(sessions: &mut [SessionWithProject], id: &str, state: SessionState, dead_reason: Option<DeadReason>) {
     for s in sessions.iter_mut().filter(|s| s.id == id) {
@@ -385,7 +350,7 @@ pub fn apply_session_state(sessions: &mut [SessionWithProject], id: &str, state:
     }
 }
 
-/// 自动标题（前台命令）变了就地更新（web `applySessionTitle`）
+/// 自动标题（前台命令）变了就地更新（React 版 `applySessionTitle`）
 pub fn apply_session_title(sessions: &mut [SessionWithProject], id: &str, title: Option<&str>) {
     for s in sessions.iter_mut().filter(|s| s.id == id) {
         s.session.title = title.map(str::to_string);
@@ -394,7 +359,7 @@ pub fn apply_session_title(sessions: &mut [SessionWithProject], id: &str, title:
 
 // ---------------- 状态 ----------------
 
-/// web store 里工作区那一部分的状态（不含服务端数据与弹层开关）
+/// React 版 store 里工作区那一部分的状态（不含服务端数据与弹层开关）
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceState {
     /// 打开的终端窗口（手动关掉 = 结束会话），可能含 pending id
@@ -454,7 +419,7 @@ impl Default for WorkspaceState {
 }
 
 impl WorkspaceState {
-    /// 从读回来的工作区起一份状态（web 的 store 初值）
+    /// 从读回来的工作区起一份状态（React 版 store 的初值）
     pub fn from_persisted(ws: &PersistedWorkspace) -> Self {
         WorkspaceState {
             tabs: ws.tabs.clone(),
@@ -482,7 +447,7 @@ impl WorkspaceState {
         }
     }
 
-    /// 要落盘的那份（web 的 `persist()`）：只落终端，pending 与两个查看窗口都活不过重启
+    /// 要落盘的那份（React 版的 `persist()`）：只落终端，pending 与两个查看窗口都活不过重启
     pub fn persisted(&self) -> PersistedWorkspace {
         let columns = self
             .columns
@@ -686,9 +651,9 @@ impl WorkspaceState {
 
     // ---- reducer：会话 ----
 
-    /// 服务端的会话列表变了之后的收敛（web `refreshSessions` 里的 `set`）。
+    /// 服务端的会话列表变了之后的收敛（React 版 `refreshSessions` 里的 `set`）。
     /// dead 会话仍在列表里，因此恢复出来的窗口不会被静默丢弃，只是显示为已丢失。
-    /// web 此后落盘。
+    /// 此后落盘。
     pub fn apply_sessions(&mut self, sessions: &[SessionWithProject]) {
         let alive: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         let keep = |id: &str| is_pending_id(id) || alive.contains(id);
@@ -700,7 +665,7 @@ impl WorkspaceState {
             }
     }
 
-    /// 服务端的项目列表变了之后的收敛（web `refreshProjects` 里的 `set`）：被存档的项目
+    /// 服务端的项目列表变了之后的收敛（React 版 `refreshProjects` 里的 `set`）：被存档的项目
     /// 不能保持选中——它已从侧栏消失，主区不能停在一个看不见的项目上。
     pub fn apply_projects(&mut self, projects: &[Project]) {
         let still = self.selected_project_id.as_ref().is_some_and(|sel| {
@@ -714,8 +679,8 @@ impl WorkspaceState {
         }
     }
 
-    /// 打开一个已有会话（web `openSession`）：还没排布过就自己接一列在最右；刚打开的
-    /// 会话要在侧栏里看得见，会话行默认收着，这里替用户摊开它那个检出。web 此后落盘。
+    /// 打开一个已有会话（React 版 `openSession`）：还没排布过就自己接一列在最右；刚打开的
+    /// 会话要在侧栏里看得见，会话行默认收着，这里替用户摊开它那个检出。此后落盘。
     pub fn open_session(&mut self, session_id: &str, sessions: &[SessionWithProject]) {
         let project_id = tab_project_id(session_id, sessions, &self.pending)
             .map(str::to_string)
@@ -731,7 +696,7 @@ impl WorkspaceState {
         }
     }
 
-    /// 新建会话的第一步（web `createSessionNow` 发请求之前的 `set`）：先摆一扇 pending
+    /// 新建会话的第一步（React 版 `createSessionNow` 发请求之前的 `set`）：先摆一扇 pending
     /// 窗口。默认独占一列接在当前画布的最右（排不下另起一块，见 [`assign_canvases`]）；
     /// `after` 给了就插在那扇窗口所在列的右边。开在别的项目里就接到最右——当前画布是
     /// 这个项目的，与它无关。新开的终端不能建在一个收着的检出里，顺手摊开。返回 pending id。
@@ -742,7 +707,7 @@ impl WorkspaceState {
         after: Option<&str>,
         sessions: &[SessionWithProject],
     ) -> String {
-        // 位置按加 pending 之前的状态算（web 在同一个 set 里用的也是旧状态）
+        // 位置按加 pending 之前的状态算（React 版在同一个 set 里用的也是旧状态）
         let at = if self.selected_project_id.as_deref() == Some(project_id) || after.is_some() {
             self.new_column_at(after, sessions)
         } else {
@@ -759,8 +724,8 @@ impl WorkspaceState {
         pending_id
     }
 
-    /// 会话建好了：pending 换成真 id，窗口原地不动（web `createSessionNow` / `retryPending`
-    /// 成功后的 `set`）。web 此后落盘。
+    /// 会话建好了：pending 换成真 id，窗口原地不动（React 版 `createSessionNow` / `retryPending`
+    /// 成功后的 `set`）。此后落盘。
     pub fn resolve_pending(&mut self, pending_id: &str, session_id: &str) {
         self.pending.retain(|p| p.id != pending_id);
         for t in &mut self.tabs {
@@ -781,15 +746,15 @@ impl WorkspaceState {
         }
     }
 
-    /// 重试前清掉错误（web `retryPending` 的第一个 `set`）；返回要重建的那条，没有就是 `None`
+    /// 重试前清掉错误（React 版 `retryPending` 的第一个 `set`）；返回要重建的那条，没有就是 `None`
     pub fn retry_pending(&mut self, pending_id: &str) -> Option<PendingSession> {
         let entry = self.pending.iter_mut().find(|p| p.id == pending_id)?;
         entry.error = None;
         Some(entry.clone())
     }
 
-    /// 只把窗口摘掉，不碰会话（web `dropTab`）：Terminate / Detach / 清除已丢失记录之后
-    /// 都走这里。web 此后落盘。
+    /// 只把窗口摘掉，不碰会话（React 版 `dropTab`）：Terminate / Detach / 清除已丢失记录之后
+    /// 都走这里。此后落盘。
     pub fn drop_tab(&mut self, id: &str, sessions: &[SessionWithProject]) {
         self.tabs.retain(|t| t != id);
         self.pending.retain(|p| p.id != id);
@@ -801,21 +766,14 @@ impl WorkspaceState {
 
     // ---- reducer：查看窗口 ----
 
-    /// 在差异窗口里打开一个文件，就地替换上一个（web `openDiff`）
+    /// 在差异窗口里打开一个文件，就地替换上一个（React 版 `openDiff`）
     pub fn open_diff(&mut self, target: DiffTabTarget, sessions: &[SessionWithProject]) {
         self.columns = self.place_view_pane(DIFF_KEY, sessions);
         self.diff_tab = Some(target);
         self.active = ActiveView::Diff;
     }
 
-    /// 切回已开的差异窗口（web `showDiff`）
-    pub fn show_diff(&mut self) {
-        if self.diff_tab.is_some() {
-            self.active = ActiveView::Diff;
-        }
-    }
-
-    /// web `closeDiff`
+    /// React 版 `closeDiff`
     pub fn close_diff(&mut self, sessions: &[SessionWithProject]) {
         self.diff_tab = None;
         self.columns = remove_pane(&self.columns, DIFF_KEY);
@@ -824,7 +782,7 @@ impl WorkspaceState {
         }
     }
 
-    /// 打开工作目录里的一个文件（web `openFile`）：已经开着一个文件时是同一扇窗口换内容，
+    /// 打开工作目录里的一个文件（React 版 `openFile`）：已经开着一个文件时是同一扇窗口换内容，
     /// 位置与高度都不动
     pub fn open_file(&mut self, project_id: &str, path: &str, sessions: &[SessionWithProject]) {
         let next = FileTabTarget { project_id: project_id.to_string(), path: path.to_string() };
@@ -839,7 +797,7 @@ impl WorkspaceState {
         self.active = ActiveView::File { project_id: project_id.to_string(), path: path.to_string() };
     }
 
-    /// 关掉文件窗口（web `closeFile`）；`target` 缺省是正开着的那个。指名要关的不是正开着
+    /// 关掉文件窗口（React 版 `closeFile`）；`target` 缺省是正开着的那个。指名要关的不是正开着
     /// 的那个文件（比如改名后回收旧路径）时什么也不做。
     pub fn close_file(&mut self, target: Option<&FileTabTarget>, sessions: &[SessionWithProject]) {
         let Some(current) = self.file_tab.clone() else { return };
@@ -857,7 +815,7 @@ impl WorkspaceState {
 
     // ---- reducer：焦点与导航 ----
 
-    /// 把焦点交给某扇窗口（点标题栏 / 点进画布，web `focusPane`）。返回有没有变；变了 web 落盘。
+    /// 把焦点交给某扇窗口（点标题栏 / 点进画布，React 版 `focusPane`）。返回有没有变；变了要落盘。
     pub fn focus_pane(&mut self, key: &str) -> bool {
         match pane_view(key) {
             Some(view) if view != self.active => {
@@ -868,9 +826,9 @@ impl WorkspaceState {
         }
     }
 
-    /// 侧栏点一个项目（web `selectProject`）：它名下还没开窗口的会话按最近活跃从旧到新
+    /// 侧栏点一个项目（React 版 `selectProject`）：它名下还没开窗口的会话按最近活跃从旧到新
     /// 补进来；焦点留在它名下的当前终端，否则最新的 pending，否则最近活跃的会话，
-    /// 都没有就是项目空页。项目不存在时什么也不做。web 此后落盘。
+    /// 都没有就是项目空页。项目不存在时什么也不做。此后落盘。
     pub fn select_project(&mut self, project_id: &str, projects: &[Project], sessions: &[SessionWithProject]) {
         if !projects.iter().any(|p| p.id == project_id) {
             return;
@@ -900,13 +858,13 @@ impl WorkspaceState {
         self.resync();
     }
 
-    /// 回到总览（web `showOverview`）。web 此后落盘。
+    /// 回到总览（React 版 `showOverview`）。此后落盘。
     pub fn show_overview(&mut self) {
         self.active = ActiveView::Overview;
         self.selected_project_id = None;
     }
 
-    /// 切到第 index 扇（从 0 起，按排布顺序；web `focusTabAt`）。返回有没有切；切了 web 落盘。
+    /// 切到第 index 扇（从 0 起，按排布顺序；React 版 `focusTabAt`）。返回有没有切；切了要落盘。
     pub fn focus_tab_at(&mut self, index: usize, sessions: &[SessionWithProject]) -> bool {
         match self.view_tabs(sessions).into_iter().nth(index) {
             Some(view) => {
@@ -917,8 +875,8 @@ impl WorkspaceState {
         }
     }
 
-    /// 前后切窗口（web `cycleTab`）。当前焦点不在排布里时，往后切落到第一扇、往前切落到
-    /// 最后一扇。返回有没有切；切了 web 落盘。
+    /// 前后切窗口（React 版 `cycleTab`）。当前焦点不在排布里时，往后切落到第一扇、往前切落到
+    /// 最后一扇。返回有没有切；切了要落盘。
     ///
     /// 已知出入：|delta| 大于窗口数时 JS 的 `%` 会得出负下标（什么都不切、active 变成
     /// undefined），这里按欧几里得取模照样落到一扇上。实际只传 ±1。
@@ -940,9 +898,9 @@ impl WorkspaceState {
 
     // ---- reducer：排布 ----
 
-    /// 拖拽松手：把一扇窗口挪到落点（web `movePane`）。落点是在**可见**列上量出来的，
+    /// 拖拽松手：把一扇窗口挪到落点（React 版 `movePane`）。落点是在**可见**列上量出来的，
     /// 先翻成全量坐标再落。返回有没有动——拖了等于没拖就不改状态，省掉一轮终端重新量
-    /// 尺寸；动了 web 落盘。
+    /// 尺寸；动了要落盘。
     pub fn move_pane(&mut self, key: &str, spot: DropSpot, sessions: &[SessionWithProject]) -> bool {
         let visible = self.layout_columns(sessions);
         match apply_drop(&self.columns, key, resolve_spot(&self.columns, &visible, spot)) {
@@ -954,14 +912,14 @@ impl WorkspaceState {
         }
     }
 
-    /// 固定 / 取消固定「这扇窗口所在的那一列」在最右（web `togglePinPane`）。web 此后落盘。
+    /// 固定 / 取消固定「这扇窗口所在的那一列」在最右（React 版 `togglePinPane`）。此后落盘。
     pub fn toggle_pin_pane(&mut self, key: &str) {
         self.columns = if is_pinned(&self.columns, key) { unpin_all(&self.columns) } else { pin_pane(&self.columns, key) };
     }
 
-    /// 把一扇窗口挪到另一块画布（web `movePaneToCanvas`）：独占一列接在那块最右；`None` =
+    /// 把一扇窗口挪到另一块画布（React 版 `movePaneToCanvas`）：独占一列接在那块最右；`None` =
     /// 新开一块，紧跟在当前画布后面。焦点跟着它走，画布也就切过去了。返回有没有动；动了
-    /// web 落盘。
+    /// 要落盘。
     pub fn move_pane_to_canvas(&mut self, key: &str, canvas: Option<&str>, sessions: &[SessionWithProject]) -> bool {
         let current = self.current_canvas(sessions);
         let Some(columns) = move_to_canvas(&self.columns, key, canvas, current.as_deref()) else { return false };
@@ -972,8 +930,8 @@ impl WorkspaceState {
         true
     }
 
-    /// 切到某块画布（web `showCanvas`）：焦点交给它上次停的那扇窗口；活动窗口在固定列里
-    /// 就只换画布、焦点不动。返回有没有变；焦点变了 web 落盘（focusPane 里）。
+    /// 切到某块画布（React 版 `showCanvas`）：焦点交给它上次停的那扇窗口；活动窗口在固定列里
+    /// 就只换画布、焦点不动。返回有没有变；焦点变了要落盘（focusPane 里）。
     pub fn show_canvas(&mut self, id: &str, sessions: &[SessionWithProject]) -> bool {
         let groups = self.view_canvases(sessions);
         let Some(group) = groups.iter().find(|g| g.id == id) else { return false };
@@ -1000,7 +958,7 @@ impl WorkspaceState {
         target.is_some_and(|k| self.focus_pane(&k))
     }
 
-    /// 切到左 / 右一块画布，不回绕（web `stepCanvas`）。画布条、横向手势、快捷键都走它
+    /// 切到左 / 右一块画布，不回绕（React 版 `stepCanvas`）。画布条、横向手势、快捷键都走它
     pub fn step_canvas(&mut self, delta: i64, sessions: &[SessionWithProject]) -> bool {
         let groups = self.view_canvases(sessions);
         let key = active_key(&self.active);
@@ -1023,7 +981,7 @@ impl WorkspaceState {
         true
     }
 
-    /// 画布的收尾（web 挂在 store 订阅上的 `settleCanvases`）——每次会改 columns / active /
+    /// 画布的收尾（React 版挂在 store 订阅上的 `settleCanvases`）——每次会改 columns / active /
     /// 可见性的变更之后都要过一遍，跟 [`sync_columns`] 一样不能漏：
     ///
     /// 1. 还没分画布的可见列分好（[`assign_canvases`]）：新开的终端、对账补进来的会话、取消
@@ -1071,7 +1029,7 @@ impl WorkspaceState {
 
     // ---- reducer：侧栏与面板 ----
 
-    /// 显式开合永远以"现在看到的样子"为准，并解除窄窗口的临时隐藏。web 此后落盘。
+    /// 显式开合永远以"现在看到的样子"为准，并解除窄窗口的临时隐藏。此后落盘。
     pub fn toggle_sidebar(&mut self) {
         let visible = self.sidebar_visible();
         self.sidebar_open = !visible;
@@ -1097,12 +1055,12 @@ impl WorkspaceState {
         changed
     }
 
-    /// 终端画布：只看当前一列 ⇄ 多列并排。web 此后落盘。
+    /// 终端画布：只看当前一列 ⇄ 多列并排。此后落盘。
     pub fn toggle_term_zoom(&mut self) {
         self.term_zoomed = !self.term_zoomed;
     }
 
-    /// 点同一格再关；点另一格则切过去（web `toggleRightPanel`，缺省面板是 git）。web 此后落盘。
+    /// 点同一格再关；点另一格则切过去（React 版 `toggleRightPanel`，缺省面板是 git）。此后落盘。
     pub fn toggle_right_panel(&mut self, id: RightPanelId) {
         if self.right_open && self.right_panel == id {
             self.right_open = false;
@@ -1112,19 +1070,19 @@ impl WorkspaceState {
         }
     }
 
-    /// 摊开 / 收起某个检出下的会话行。web 此后落盘。
+    /// 摊开 / 收起某个检出下的会话行。此后落盘。
     pub fn toggle_sessions(&mut self, project_id: &str) {
         let now = self.sessions_open.get(project_id).copied().unwrap_or(false);
         self.sessions_open.insert(project_id.to_string(), !now);
     }
 
-    /// 折叠 / 展开侧栏树的某一层（服务器 / 文件夹 / worktree）。web 此后落盘。
+    /// 折叠 / 展开侧栏树的某一层（服务器 / 文件夹 / worktree）。此后落盘。
     pub fn toggle_collapsed(&mut self, key: &str) {
         let now = self.collapsed.get(key).copied().unwrap_or(false);
         self.collapsed.insert(key.to_string(), !now);
     }
 
-    /// web 此后落盘。
+    /// 此后落盘。
     pub fn toggle_show_archived(&mut self) {
         self.show_archived = !self.show_archived;
     }
@@ -1164,7 +1122,7 @@ mod tests {
         assert_eq!(load_workspace(Some("")), d);
         assert_eq!(load_workspace(Some("{oops")), d);
         assert_eq!(load_workspace(Some("null")), d);
-        // tabs 不是数组：web 那边 `.filter` 抛异常，整份退回默认（连 sidebarOpen 也不认）
+        // tabs 不是数组：React 版的 `.filter` 抛异常，整份退回默认（连 sidebarOpen 也不认）
         assert_eq!(load_workspace(Some(r#"{"tabs":"s1","sidebarOpen":false}"#)), d);
         assert_eq!(load_workspace(Some("5")), d);
     }
@@ -1295,7 +1253,7 @@ mod tests {
         ws.open_file("p", "b.ts", &sessions);
         assert_eq!(shape(&ws.columns)[1], ["f:p:b.ts", "d"]);
         // 关掉正看着的差异：先落到最近的可见终端，不是旁边的文件
-        ws.show_diff();
+        ws.focus_pane("d");
         assert_eq!(ws.active, ActiveView::Diff);
         ws.close_diff(&sessions);
         assert_eq!(ws.active, ActiveView::Terminal { session_id: "s2".into() });
@@ -1562,19 +1520,6 @@ mod tests {
         picks.insert("m".into(), "/gone".into());
         assert_eq!(select_multi_repo_dir(&picks, Some(&multi)).as_deref(), Some("/a"));
         assert_eq!(select_multi_repo_dir(&picks, Some(&project("p"))), None);
-    }
-
-    #[test]
-    fn close_plan_sorts_keys_by_what_closing_them_means() {
-        let mut dead = session("z", "p", 0);
-        dead.session.state = SessionState::Dead;
-        let sessions = vec![session("a", "p", 0), dead];
-        let keys: Vec<String> = ["t:a", "t:z", "t:pending:2", "t:gone", "f:p:x", "d", "junk"].map(String::from).to_vec();
-        let plan = plan_close(&keys, &sessions);
-        assert_eq!(plan.live, ["a"]);
-        assert_eq!(plan.drop_only, ["z", "pending:2", "gone"]);
-        assert_eq!(plan.files, [FileTabTarget { project_id: "p".into(), path: "x".into() }]);
-        assert!(plan.close_diff);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! 飞书项目面板内的下钻栈，及其持久化。对应 web 的 `lib/meegleDrill.ts`。
+//! 飞书项目面板内的下钻栈，及其持久化。对应旧 React 版的 `lib/meegleDrill.ts`。
 //!
 //! 视图与全景视图共用一页，只是取数接口不同。面板重开时恢复上次停的位置；存储被改坏
 //! 或换了版本都只是回到根页，不弹错。
@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 下钻栈的一层。字段顺序照 web 读回来之后的样子（`kind` 打头、公共字段在前）。
+/// 下钻栈的一层。字段顺序照 React 版读回来之后的样子（`kind` 打头、公共字段在前）。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase", rename_all_fields = "camelCase")]
 pub enum Drill {

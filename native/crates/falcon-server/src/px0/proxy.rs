@@ -182,7 +182,7 @@ fn escape_html(s: &str) -> String {
 /// px0 还没起来时入口页回的 HTML。没有脚本：起着就 meta refresh 每秒刷一次，
 /// 起好了刷新落到 px0 本体；起不来就停在这里显示原因，重试链接带 `?retry=1`。
 ///
-/// 文案写死中文：这一页由服务端直接吐出、不经 web 的 i18n，与服务端的错误文案同一口径。
+/// 文案写死中文：这一页由服务端直接吐出、不经客户端的 i18n，与服务端的错误文案同一口径。
 /// 颜色只用系统色（Canvas / CanvasText），跟着系统明暗走——这里拿不到 falcon 的主题。
 pub fn px0_status_page(state: &Px0PageState, base_path: &str, project_name: &str) -> String {
     let title = escape_html(&format!("px0 · {project_name}"));

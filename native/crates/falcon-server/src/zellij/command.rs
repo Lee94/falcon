@@ -16,9 +16,9 @@ use super::version::ZELLIJ_VERSION;
 /// 远端 scrollback 深度。dump-screen 没有 `-S -2000` 这类行数参数，
 /// 只能全量或仅当前屏；把 buffer 本身设小，`--full` 就天然限行了。
 ///
-/// 注意这是断线重连后用户能上翻行数的**硬上限**：replay 会 term.reset()
-/// 整体替换前端缓冲，前端积累的历史保不住，能翻多少全看 dump 有多少。
-/// 取 zellij 默认值 10000，并与前端 xterm scrollback、服务端 RingBuffer
+/// 注意这是断线重连后用户能上翻行数的**硬上限**：replay 会整体替换前端缓冲
+/// （等同 reset 再写），前端积累的历史保不住，能翻多少全看 dump 有多少。
+/// 取 zellij 默认值 10000，并与客户端 scrollback（falcon-term 的 `TermOptions`）、服务端 RingBuffer
 /// 容量保持匹配（三者取最小生效）。
 const SCROLL_BUFFER: u32 = 10000;
 
@@ -221,9 +221,10 @@ fn session_options(paths: &ZellijPaths, opts: &SessionProfile) -> Vec<String> {
         // --mouse-mode。实测（0.44.3）：CLI 传 --mouse-mode true 时客户端反而
         // 永远不发 ?1000h（与传 false 同效，疑似上游 bug）；不传时每次 attach
         // 都按 config 开启。开鼠标的动机：Zellij 常驻备用屏（无 scrollback），
-        // xterm.js 对"备用屏 + 无鼠标上报"的滚轮会降级成 ↑/↓ 方向键——在 shell
-        // 提示符下滚轮变成翻命令历史。开启后滚轮交给 Zellij 滚它自己的 scroll
-        // buffer（上限 SCROLL_BUFFER 行）。代价：前端本地选区需按住 Shift 拖拽。
+        // 客户端照 xterm 的 alternateScroll，把"备用屏 + 无鼠标上报"的滚轮降级成
+        // ↑/↓ 方向键——在 shell 提示符下滚轮变成翻命令历史。开启后滚轮交给 Zellij
+        // 滚它自己的 scroll buffer（上限 SCROLL_BUFFER 行）。代价：前端本地选区需按住
+        // Shift 拖拽。
         // 这两条是实测踩出来的：Zellij 默认会先显示一屏 "Zellij Tip #N" 启动提示，
         // 挡在 shell 前面等用户按键关闭。表现为会话建成了、hasSession 为真、
         // 但屏幕空白且输入毫无反应——不关掉整个终端就是废的。

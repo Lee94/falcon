@@ -61,7 +61,7 @@ mod native;
 mod web;
 
 impl FalconClient {
-    /// web 的 `downloadUrl`：`/api/projects/:id/download?path=` 这个路径（不含基址）。
+    /// React 版的 `downloadUrl`：`/api/projects/:id/download?path=` 这个路径（不含基址）。
     /// 原生客户端自己下载走 `download_to_file`；浏览器版把它交给 `<a download>`。
     pub fn download_path(&self, project_id: &str, path: &str) -> String {
         let q = Query::new().push("path", path).finish();

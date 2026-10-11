@@ -7,9 +7,9 @@
 //! 连接时序（设计文档 §3.2）：每条新 socket 都**强制**发一次 `resize`（服务端拿它当持久会话
 //! 懒惰接回的信号），以及 `appearance`（服务端的 OscColorGate 拿到它才代答 OSC 10/11/12）。
 //!
-//! 原生客户端先发 `appearance` 再发 `resize`，与 web（`TerminalView.tsx` 先 resize）相反，
-//! 是有意的：resize 触发懒惰接回，zellij 一 attach 就查 OSC 11；web 的 xterm 会自己兜底回答，
-//! 原生客户端不答颜色查询（多个 Viewer 会各答一遍），所以外观必须赶在接回之前到服务端。
+//! 客户端先发 `appearance` 再发 `resize`，与旧 React 版（`TerminalView.tsx` 先 resize）相反，
+//! 是有意的：resize 触发懒惰接回，zellij 一 attach 就查 OSC 11；React 版的 xterm.js 会自己兜底
+//! 回答，现在的客户端不答颜色查询（多个 Viewer 会各答一遍），所以外观必须赶在接回之前到服务端。
 
 use serde::{Deserialize, Serialize};
 
@@ -21,14 +21,14 @@ use crate::zellij::{NonDurableReason, ZellijInstallStage};
 
 /// 终端数据走二进制帧，不走 JSON：1 字节类型头 + UTF-8 载荷。
 /// JSON 文本帧对 ANSI 密集数据的转义（`\x1b` → `\u001b`）会把线上字节膨胀
-/// 1.3~1.7 倍，且每帧多一次全量转义扫描；二进制帧还让前端能把字节直接喂给
-/// VT 解析器，省一轮 UTF-8 → UTF-16 → UTF-8。
+/// 1.3~1.7 倍，且每帧多一次全量转义扫描；二进制帧还让客户端能把字节直接喂给
+/// VT 解析器，不必先解成 JSON 字符串（当初 React 版省的是一轮 UTF-8 → UTF-16 → UTF-8）。
 ///
 /// 输出帧：服务端已按 16ms 合并，单帧很小。
 pub const TERM_FRAME_OUTPUT: u8 = 0x01;
-/// 回放帧：前端先 reset 再写入。整份 Scrollback 快照（最大 4MB 的 RingBuffer），
-/// 可能在连接中途任意时刻到达——服务端背压重同步（慢 Viewer 排空后整体重放）
-/// 也走这条。
+/// 回放帧：整份 Scrollback 快照（最大 4MB 的 RingBuffer），客户端整体替换终端状态
+/// （falcon-term 在新 Term 上解析完再换上，等同先 reset 再写入）。可能在连接中途任意
+/// 时刻到达——服务端背压重同步（慢 Viewer 排空后整体重放）也走这条。
 pub const TERM_FRAME_REPLAY: u8 = 0x02;
 
 /// 未认证时服务端关闭 WS 用的关闭码（`ws.ts` 的 `socket.close(4401, …)`）。
@@ -81,7 +81,7 @@ pub struct TermFrame<'a> {
     pub payload: &'a [u8],
 }
 
-/// 解一帧二进制消息。空帧与认不出的类型头返回 `None`——与 web 一致，直接丢掉，
+/// 解一帧二进制消息。空帧与认不出的类型头返回 `None`——照 React 版的做法，直接丢掉，
 /// 不当成错误（新服务端加的帧类型，老客户端看不懂就不看）。
 pub fn decode_term_frame(frame: &[u8]) -> Option<TermFrame<'_>> {
     let (&head, payload) = frame.split_first()?;
@@ -129,12 +129,17 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seek: Option<u32>,
     },
+    /// 应用层心跳：服务端回一条 [`ServerMessage::Pong`]。浏览器的 WebSocket 发不了 ping 帧，
+    /// 浏览器版拿它代替（心跳与唤醒后的探活，falcon-client 的 `ws/web.rs`）；原生仍发 ping 帧。
+    /// 浏览器版总由同一个服务端二进制托管，不会遇上不认它的旧服务端
+    #[serde(rename = "ping")]
+    Ping,
 }
 
 /// 服务端 → 客户端（会话通道）的控制消息。output / replay 见 `TERM_FRAME_*` 二进制帧。
 ///
 /// Rust 侧加了 `Unknown` 兜底：新服务端加一种控制消息时，客户端能把"看不懂的消息"
-/// 与"坏掉的 JSON"分开——前者照 web 的 `switch` 无 default 分支那样安静忽略。
+/// 与"坏掉的 JSON"分开——前者照 React 版 `switch` 无 default 分支那样安静忽略。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum ServerMessage {
@@ -166,6 +171,10 @@ pub enum ServerMessage {
     /// （0 = 在底部）；length = 视口上方 + 下方，0 = 没有可滚的历史；rows = 视口高度。
     #[serde(rename = "scroll")]
     Scroll { position: u32, length: u32, rows: u32 },
+    /// [`ClientMessage::Ping`] 的回话，只发给问的那个 Viewer；客户端收到任何消息都算连接活着，
+    /// 这条本身没有内容
+    #[serde(rename = "pong")]
+    Pong,
     /// 本版本不认识的控制消息（服务端比客户端新）。只在反序列化时出现，忽略即可。
     #[serde(rename = "unknown", other)]
     Unknown,
@@ -191,7 +200,7 @@ pub enum InstallClientMessage {
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum InstallServerMessage {
     /// attempt 从 1 起；>1 表示后端在自动重试瞬时故障，UI 据此说明"为什么还在转"。
-    /// command 是宿主机上正在跑的命令，web 把它们去重后列在进度下面。
+    /// command 是宿主机上正在跑的命令，界面把相邻重复的去掉后列在进度下面。
     #[serde(rename = "stage")]
     Stage {
         stage: ZellijInstallStage,
@@ -272,6 +281,7 @@ mod tests {
         assert_eq!(q, ClientMessage::Scroll { seek: None });
         let k = roundtrip::<ClientMessage>(r#"{"type":"scroll","seek":250}"#);
         assert_eq!(k, ClientMessage::Scroll { seek: Some(250) });
+        assert_eq!(roundtrip::<ClientMessage>(r#"{"type":"ping"}"#), ClientMessage::Ping);
     }
 
     #[test]
@@ -304,6 +314,7 @@ mod tests {
         );
         let sc = roundtrip::<ServerMessage>(r#"{"type":"scroll","position":97,"length":473,"rows":30}"#);
         assert_eq!(sc, ServerMessage::Scroll { position: 97, length: 473, rows: 30 });
+        assert_eq!(roundtrip::<ServerMessage>(r#"{"type":"pong"}"#), ServerMessage::Pong);
     }
 
     #[test]

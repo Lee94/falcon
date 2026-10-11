@@ -1,7 +1,7 @@
 //! falcon-platform 的浏览器实现。
 //!
-//! 偏好与工作区直接读写 localStorage，键就是 web 用的那些（`falcon.themes` / `falcon.workspace` …）——
-//! 现有 web 用户的主题、终端设置与排布原样继承。localStorage 天然按源分，一个页面只连一台服务端，
+//! 偏好与工作区直接读写 localStorage，键沿用旧 React 版的那些（`falcon.themes` / `falcon.workspace` …）——
+//! React 版老用户的主题、终端设置与排布原样继承。localStorage 天然按源分，一个页面只连一台服务端，
 //! 所以不分配置 id。
 
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use gpui_kit::Window;
 
 use crate::dom::{self, local_storage};
 
-/// web 的 localStorage 键都以它开头；启动时把这些键一次读进来
+/// Falcon 的 localStorage 键都以它开头（沿用 React 版）；启动时把这些键一次读进来
 const KEY_PREFIX: &str = "falcon.";
 const WORKSPACE_KEY: &str = "falcon.workspace";
 
@@ -77,6 +77,21 @@ impl Platform for Browser {
     }
 
     fn store_password(&self, _profile_id: &str, _password: Option<&str>) {}
+
+    fn has_password_store(&self) -> bool {
+        false
+    }
+
+    fn on_resume(&self, f: Box<dyn Fn()>) {
+        dom::on_resume(f);
+    }
+
+    fn redirect_after_login(&self) -> bool {
+        match falcon_core::px0::login_next(&dom::location_search()) {
+            Some(next) => dom::location_replace(&next),
+            None => false,
+        }
+    }
 
     fn local_service(&self) -> Option<Arc<dyn LocalService>> {
         None

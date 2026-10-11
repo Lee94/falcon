@@ -586,7 +586,7 @@ pub fn image_mime_of(name: &str) -> Option<&'static str> {
 
 /// 字节 → 前端能直接渲染的形状。
 ///
-/// 图片不看字节只看扩展名与大小：字节由浏览器自己经原始字节路由取，这里
+/// 图片不看字节只看扩展名与大小：字节由客户端自己经原始字节路由取，这里
 /// 收到的 bytes 通常是空的（readWorkspaceFile 对图片按 cap 0 读）。
 ///
 /// 二进制判定跟 git 一样看 NUL：前 8KB 里出现 NUL 就当二进制。这条规则会把
@@ -616,9 +616,9 @@ pub fn classify(name: &str, size: u64, bytes: &[u8]) -> FilePreview {
 
 /// 单段文件名的护栏。mkdir / rename / 上传共用。
 ///
-/// 浏览器给的 File.name 不会含分隔符，会含的只能是构造出来的请求；控制字符与
-/// `..` 同 rel_segments 的理由。Windows 的保留字符在远端也会失败，但那边的报错
-/// 是一段 .NET 异常文本，不如在这里直接说清楚。
+/// 上传时客户端给的是本机文件名的末段（React 版是浏览器的 File.name），不会含分隔符，
+/// 会含的只能是构造出来的请求；控制字符与 `..` 同 rel_segments 的理由。Windows 的保留
+/// 字符在远端也会失败，但那边的报错是一段 .NET 异常文本，不如在这里直接说清楚。
 pub fn validate_entry_name(kind: HostKind, name: &str) -> Result<(), FileError> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(FileError::InvalidName);
@@ -1051,7 +1051,7 @@ pub async fn read_workspace_bytes(
 pub async fn read_workspace_file(host: &FileHost<'_>, root: &str, rel: &str) -> Result<FilePreview, FileError> {
     let segs = rel_segments(Some(rel))?;
     let name = segs.last().map(String::as_str).unwrap_or("");
-    // 图片的字节浏览器会自己去原始字节路由取，这里只要大小；`head -c 0` 与
+    // 图片的字节客户端会自己去原始字节路由取，这里只要大小；`head -c 0` 与
     // PowerShell 那个 0 字节循环都是合法的空读
     let cap = if image_mime_of(name).is_some() { 0 } else { WORKSPACE_FILE_CAP };
     let (name, read) = read_workspace_bytes(host, root, rel, cap).await?;
@@ -1526,7 +1526,7 @@ mod tests {
         let cut = classify("big.log", 999_999, b"head");
         assert!(matches!(cut, FilePreview::Text { truncated: true, .. }));
 
-        // 超过原始字节上限的图片浏览器取不到，只报大小
+        // 超过原始字节上限的图片客户端取不到，只报大小
         let huge = classify("big.png", 99_000_000, &[]);
         assert!(matches!(huge, FilePreview::TooLarge { .. }));
         // 上限内的大图（超过文本上限也无妨）照常是图片

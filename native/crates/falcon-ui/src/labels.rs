@@ -1,6 +1,6 @@
-//! 列表里显示的名字。会话的自动标题规则在 falcon-core 的 session_title（与 web 的
-//! `lib/sessionTitle.ts` 同一份逻辑、同一组测试向量）：侧栏、总览、命令面板必须叫同一个名字，
-//! 而且要与 web 叫同一个名字。窗口标题栏例外——没标题时那一格空着，不编占位名。
+//! 列表里显示的名字。会话的自动标题规则在 falcon-core 的 session_title（移植自旧 React
+//! 版的 `lib/sessionTitle.ts`，沿用同一组测试向量）：侧栏、总览、命令面板必须叫同一个名字。
+//! 窗口标题栏例外——没标题时那一格空着，不编占位名。
 
 use falcon_proto::{Project, SessionWithProject};
 use rust_i18n::t;
@@ -15,7 +15,7 @@ pub fn session_title(s: &SessionWithProject) -> Option<String> {
     falcon_core::session_title::session_title(&s.session)
 }
 
-/// 相对空闲时间（web useActions 的 idleText）
+/// 相对空闲时间（React 版 useActions 的 idleText）
 pub fn idle_text(last_active_at: i64) -> String {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)

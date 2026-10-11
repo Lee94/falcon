@@ -225,12 +225,6 @@ impl FalconClient {
         self.inner.auth.token()
     }
 
-    /// 直接设置登录 token，比如同一台服务端开第二个窗口时沿用第一个窗口的。
-    /// 设 `None` 等于忘掉登录态（不通知服务端，也不推事件）。
-    pub fn set_token(&self, token: Option<String>) {
-        *self.inner.auth.token.write() = token;
-    }
-
     /// 设置自动重登用的访问密码（app 从钥匙串取出来）。设了之后：REST 收到 401
     /// 时自动登录一次并重放原请求一次，WS 收到 4401 时自动登录再重连；再失败才
     /// 返回未认证 / 推 [`AuthEvent::LoginRequired`]。
@@ -302,7 +296,7 @@ impl FalconClient {
         self.json(Method::GET, path, Ok(ReqBody::Empty))
     }
 
-    /// 不带请求体的 POST / DELETE（web 里 `request("POST", url)` 那种）。
+    /// 不带请求体的 POST / DELETE（React 版里 `request("POST", url)` 那种）。
     pub(crate) fn bare<T>(&self, method: Method, path: String) -> impl Future<Output = ApiResult<T>> + MaybeSend + 'static
     where
         T: DeserializeOwned + MaybeSend + 'static,

@@ -1,5 +1,7 @@
-//! 工作画布的滚轮层纯函数：滚轮手势的轴向锁定、内部滚动容器是否还能接这次滚轮、
-//! 横向手势翻画布。对应 web 的 `lib/termCanvas.ts`。
+//! 工作画布的滚轮层纯函数：滚轮手势的轴向锁定、横向手势翻画布。对应旧 React 版的
+//! `lib/termCanvas.ts`。React 版还在这里按 DOM 的 deltaMode 与 overflow 度量判"内部滚动
+//! 容器还能不能接这次滚轮"；GPUI 拿不到那些度量，改由视图层按指针落在哪扇窗口上判
+//! （`falcon-ui/src/canvas.rs` 的 `on_scroll_wheel`），那几个函数随之删掉。
 //!
 //! 画布本身不再滚动（一块画布一屏，见 [`crate::layout::canvas_groups`]），横向手势
 //! 的用处从"滚画布"变成"翻到左 / 右一块画布"。
@@ -38,7 +40,7 @@ pub struct WheelSample {
 /// - 静默超过 [`WHEEL_GESTURE_GAP_MS`] 视为新手势重新定轴。
 ///
 /// GPUI 的 ScrollWheelEvent 带 TouchPhase，能直接知道手势起止；但鼠标滚轮没有 phase，
-/// 这里的时间间隔判据两种输入都能用，与 web 保持同一手感。
+/// 这里的时间间隔判据两种输入都能用，手感也沿用 React 版。
 #[derive(Debug, Clone)]
 pub struct WheelAxisLock {
     axis: Option<WheelAxis>,
@@ -85,70 +87,6 @@ impl WheelAxisLock {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
-}
-
-/// WheelEvent 的 deltaMode
-pub const DOM_DELTA_PIXEL: u32 = 0;
-pub const DOM_DELTA_LINE: u32 = 1;
-pub const DOM_DELTA_PAGE: u32 = 2;
-
-/// 把滚轮 delta 折成像素：按行 / 页给的（Firefox 的鼠标滚轮；原生这边是 GPUI 的
-/// `ScrollDelta::Lines`）乘上行高 / 页高。`line_size` / `page_size` 在 TS 里缺省 16 / 800。
-pub fn wheel_delta_px(delta: f64, delta_mode: u32, line_size: f64, page_size: f64) -> f64 {
-    match delta_mode {
-        DOM_DELTA_LINE => delta * line_size,
-        DOM_DELTA_PAGE => delta * page_size,
-        _ => delta,
-    }
-}
-
-/// 窗口内部滚动容器的溢出度量。画布自己接管横向滚轮，但文件 / 差异的内容区、终端的
-/// 回滚区也会滚——这些还能沿手势方向滚时，事件必须留给内部，画布不抢。
-///
-/// overflow 用 web 的计算值字面量（`auto` / `scroll` / `overlay` 可滚，其余不行），
-/// 原生视图层按自己的滚动容器填 `"auto"` 或 `"hidden"` 即可。
-#[derive(Debug, Clone, PartialEq)]
-pub struct OverflowBox {
-    pub overflow_x: String,
-    pub overflow_y: String,
-    pub scroll_left: f64,
-    pub scroll_top: f64,
-    pub client_width: f64,
-    pub client_height: f64,
-    pub scroll_width: f64,
-    pub scroll_height: f64,
-}
-
-/// 贴边容差：亚像素 / 缩放会让 max - scrollLeft 剩 0.5px，不能当成还能滚
-const OVERFLOW_EDGE_PX: f64 = 1.0;
-
-/// `overlay` 是 Chrome 旧值，按可滚处理
-pub fn overflow_scrollable(value: &str) -> bool {
-    matches!(value, "auto" | "scroll" | "overlay")
-}
-
-/// 这个容器还能沿 axis 消化这次滚轮吗。正 delta = 增加 scroll 偏移（右 / 下）。
-pub fn overflow_can_consume(bx: &OverflowBox, axis: WheelAxis, delta_px: f64) -> bool {
-    if !delta_px.is_finite() || delta_px == 0.0 {
-        return false;
-    }
-    let (overflow, pos, client, scroll) = match axis {
-        WheelAxis::X => (&bx.overflow_x, bx.scroll_left, bx.client_width, bx.scroll_width),
-        WheelAxis::Y => (&bx.overflow_y, bx.scroll_top, bx.client_height, bx.scroll_height),
-    };
-    if !overflow_scrollable(overflow) {
-        return false;
-    }
-    let max = scroll - client;
-    if max <= OVERFLOW_EDGE_PX {
-        return false;
-    }
-    if delta_px < 0.0 { pos > OVERFLOW_EDGE_PX } else { pos < max - OVERFLOW_EDGE_PX }
-}
-
-/// 从内到外，任一容器还能沿该轴滚就归内部
-pub fn inner_takes_wheel(boxes: &[OverflowBox], axis: WheelAxis, delta_px: f64) -> bool {
-    boxes.iter().any(|b| overflow_can_consume(b, axis, delta_px))
 }
 
 /// 一段横向手势累计横移超过这么多才翻画布：比随手的横漂大，又不用滑满一屏
@@ -268,92 +206,6 @@ mod tests {
         assert_eq!(lock.classify(s(12.0, 0.0, 0.0)), Some(X));
         lock.reset();
         assert_eq!(lock.classify(s(0.0, 5.0, 1.0)), Some(Y));
-    }
-
-    #[test]
-    fn wheel_delta_px_scales_lines_and_pages() {
-        assert_eq!(wheel_delta_px(7.0, 0, 16.0, 800.0), 7.0);
-        assert_eq!(wheel_delta_px(3.0, 1, 16.0, 800.0), 48.0);
-        assert_eq!(wheel_delta_px(-1.0, 2, 16.0, 640.0), -640.0);
-    }
-
-    fn bx() -> OverflowBox {
-        OverflowBox {
-            overflow_x: "hidden".into(),
-            overflow_y: "hidden".into(),
-            scroll_left: 0.0,
-            scroll_top: 0.0,
-            client_width: 100.0,
-            client_height: 100.0,
-            scroll_width: 100.0,
-            scroll_height: 100.0,
-        }
-    }
-
-    #[test]
-    fn overflow_scrollable_values() {
-        for v in ["auto", "scroll", "overlay"] {
-            assert!(overflow_scrollable(v), "{v}");
-        }
-        for v in ["hidden", "visible", "clip"] {
-            assert!(!overflow_scrollable(v), "{v}");
-        }
-    }
-
-    #[test]
-    fn hidden_or_non_overflowing_boxes_do_not_consume() {
-        assert!(!overflow_can_consume(&OverflowBox { scroll_height: 400.0, ..bx() }, Y, 10.0));
-        assert!(!overflow_can_consume(&OverflowBox { overflow_y: "auto".into(), ..bx() }, Y, 10.0));
-        assert!(!overflow_can_consume(
-            &OverflowBox { overflow_x: "auto".into(), scroll_width: 400.0, ..bx() },
-            Y,
-            10.0
-        ));
-    }
-
-    #[test]
-    fn zero_delta_does_not_consume() {
-        assert!(!overflow_can_consume(&OverflowBox { overflow_y: "auto".into(), scroll_height: 400.0, ..bx() }, Y, 0.0));
-    }
-
-    #[test]
-    fn vertical_consumes_only_while_it_can_still_move() {
-        let y = OverflowBox { overflow_y: "auto".into(), scroll_height: 400.0, ..bx() };
-        assert!(overflow_can_consume(&y, Y, 10.0));
-        assert!(!overflow_can_consume(&y, Y, -10.0));
-        assert!(overflow_can_consume(&OverflowBox { scroll_top: 50.0, ..y.clone() }, Y, -10.0));
-        assert!(!overflow_can_consume(&OverflowBox { scroll_top: 300.0, ..y.clone() }, Y, 10.0));
-        assert!(overflow_can_consume(&OverflowBox { scroll_top: 300.0, ..y }, Y, -10.0));
-    }
-
-    #[test]
-    fn horizontal_likewise() {
-        let x = OverflowBox { overflow_x: "scroll".into(), scroll_width: 400.0, ..bx() };
-        assert!(overflow_can_consume(&x, X, 10.0));
-        assert!(!overflow_can_consume(&x, X, -10.0));
-        assert!(overflow_can_consume(&OverflowBox { scroll_left: 20.0, ..x.clone() }, X, -10.0));
-        assert!(!overflow_can_consume(&OverflowBox { scroll_left: 300.0, ..x }, X, 10.0));
-    }
-
-    #[test]
-    fn subpixel_edges_count_as_unscrollable() {
-        assert!(!overflow_can_consume(&OverflowBox { overflow_y: "auto".into(), scroll_height: 100.4, ..bx() }, Y, 10.0));
-        assert!(!overflow_can_consume(
-            &OverflowBox { overflow_x: "auto".into(), scroll_width: 400.0, client_width: 100.0, scroll_left: 0.4, ..bx() },
-            X,
-            -10.0
-        ));
-    }
-
-    #[test]
-    fn inner_takes_wheel_if_any_box_inside_out_can_move() {
-        let inner = bx();
-        let scroller = OverflowBox { overflow_y: "auto".into(), scroll_height: 400.0, ..bx() };
-        assert!(inner_takes_wheel(&[inner.clone(), scroller.clone()], Y, 10.0));
-        assert!(!inner_takes_wheel(&[inner], Y, 10.0));
-        // 只认被问的那根轴
-        assert!(!inner_takes_wheel(std::slice::from_ref(&scroller), X, 10.0));
-        assert!(inner_takes_wheel(&[scroller], Y, 10.0));
     }
 
     #[test]

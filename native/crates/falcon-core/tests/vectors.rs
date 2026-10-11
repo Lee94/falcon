@@ -1,7 +1,9 @@
-//! 共享测试向量（设计文档 §6.3）：`tests/vectors/*.json` 里的每条用例都对应 web 的一句
-//! TS 断言（`ts` 字段是 describe > it）。两边实现一旦分叉，至少有一边会红。
+//! 回归向量（设计文档 §6.3 的"共享测试向量"）：`tests/vectors/*.json` 里的每条用例都对应
+//! 旧 React 版的一句 TS 断言（`ts` 字段是 describe > it）。当年 TS 与 Rust 共用这份向量，
+//! 两边实现一旦分叉至少有一边会红；TS 删除后它们照旧兜住 Rust 这边的行为不漂。
 //!
-//! 每个测试把整份向量跑完再报错，失败信息带 TS 用例名，方便回到 TS 测试对照。
+//! 每个测试把整份向量跑完再报错，失败信息带 TS 用例名，方便回到 TS 测试对照（原文在
+//! 提交 `9c9d045`）。
 
 use falcon_core::file_search::{FILE_SEARCH_LIMIT, basename, dirname, filter_files, score_path};
 use falcon_core::git_graph::{GraphCommit, GraphRow, layout_commit_graph};

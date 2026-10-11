@@ -1,13 +1,13 @@
-//! 主机身份色。对应 web 的 `lib/hostColor.ts`。
+//! 主机身份色。对应旧 React 版的 `lib/hostColor.ts`。
 //!
 //! 由 user@host:port 稳定哈希到一个 hue，同一台机器在侧栏、标题栏、抽屉里永远是
 //! 同一条色带。本地项目**不给**色条——"有颜色 = 在别人的机器上"这个信号必须
 //! 独占，才有警示价值。
 //!
-//! 只哈希色相；深浅交给主题（web 是 CSS 变量 `--host-s` / `--host-l`，明暗各一套），
+//! 只哈希色相；深浅交给主题（React 版是 CSS 变量 `--host-s` / `--host-l`，明暗各一套），
 //! 于是同一台机器在浅色下是深色条、在深色下是浅色条，色相不变、认得出来。
 //!
-//! 与 web 的差别：web 直接吐 CSS 字符串（`hsl(210 var(--host-s) var(--host-l))`、
+//! 与 React 版的差别：它直接吐 CSS 字符串（`hsl(210 var(--host-s) var(--host-l))`、
 //! `var(--border)`、`transparent`），这里只给结构化的 [`HostBar`]，饱和度 / 亮度与
 //! 半透明底色由 app 层按主题补上。
 
@@ -17,7 +17,7 @@ use falcon_proto::{Project, ProjectType, SshConfig, SshConfigInput, SshHost, Ssh
 const BANDS: [u32; 11] = [30, 50, 170, 190, 210, 230, 250, 270, 290, 310, 330];
 
 /// FNV-1a 按 UTF-16 码元哈希（照 `charCodeAt` + `Math.imul` 的 32 位有符号算术），
-/// 取 |h| 落到色带上。同一台机器在 web 与原生里必须是同一个颜色。
+/// 取 |h| 落到色带上。算法照 React 版逐位不变：同一台机器不该因为换了客户端就换了颜色。
 pub fn host_hue(key: &str) -> u32 {
     let mut h: i32 = 2_166_136_261_u32 as i32;
     for unit in key.encode_utf16() {
@@ -61,7 +61,7 @@ pub fn host_key(project: Option<&Project>) -> String {
 /// 身份色条
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostBar {
-    /// 中性：web 的 `var(--border)`（要底色时是 `transparent`）
+    /// 中性：React 版的 `var(--border)`（要底色时是 `transparent`）
     Neutral,
     /// 这个色相 + 主题给的饱和度 / 亮度
     Hue(u32),
@@ -76,7 +76,7 @@ pub fn host_bar(project: Option<&Project>) -> HostBar {
 }
 
 /// SSH 项目才有色条；本地项目返回 `None`，调用方据此不渲染色条。
-/// 注意 SSH 项目缺连接配置时是 `Some(Neutral)`——与 web 的 `sshBar` 一致。
+/// 注意 SSH 项目缺连接配置时是 `Some(Neutral)`——照 React 版 `sshBar` 的口径。
 pub fn ssh_bar(project: Option<&Project>) -> Option<HostBar> {
     match project {
         Some(p) if p.project_type == ProjectType::Ssh => Some(host_bar(Some(p))),
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn hue_matches_web_for_known_keys() {
-        // 期望值取自 web 的 hostHue（node 里跑出来的）
+        // 期望值取自 React 版的 hostHue（node 里跑出来的）
         assert_eq!(host_hue(""), 190);
         assert_eq!(host_hue("fay@172.16.25.134:22"), 50);
         assert_eq!(host_hue("root@10.0.0.2:22"), 30);

@@ -1,8 +1,8 @@
 //! 源码视图：gpui-component 的代码编辑器，只读（能选、能复制、⌘F 能搜，不能改——改文件是
-//! 终端里的事）。语法高亮是 tree-sitter，颜色映射到主题派生出的语法色（`Ui::syntax`，与 web
-//! 的 shiki css-variables 主题同一组变量），换主题不用重新解析。
+//! 终端里的事）。语法高亮是 tree-sitter，颜色映射到主题派生出的语法色（`Ui::syntax`，沿用旧 React 版
+//! shiki css-variables 主题的那组变量），换主题不用重新解析。
 //!
-//! 与 web `lib/highlight.ts` 对齐的几条规则：
+//! 沿用 React 版 `lib/highlight.ts` 的几条规则：
 //! - 语言按路径认（扩展名 / 特殊文件名），认不出保持纯文本，不瞎猜；
 //! - 超过 [`HIGHLIGHT_CAP`] 字符不高亮：再大的多半是生成物或日志，上色撑不起那个开销；
 //! - 末尾一个换行吞掉（POSIX 文本以 `\n` 结尾，不吞就多一个幽灵空行）。
@@ -14,7 +14,7 @@ use gpui_kit::{Context, Entity, IntoElement, Render, Subscription, Window};
 use crate::theme::Ui;
 use crate::zoom::zpx;
 
-/// 超过这个字符数不高亮（web 的 HIGHLIGHT_CAP）
+/// 超过这个字符数不高亮（React 版的 HIGHLIGHT_CAP）
 pub const HIGHLIGHT_CAP: usize = 512_000;
 
 pub struct CodePane {
@@ -42,7 +42,7 @@ impl CodePane {
 
 impl Render for CodePane {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // web 的源码视图是 text-xs（12px）等宽；只读 = 能选能复制，拒绝一切修改
+        // React 版的源码视图是 text-xs（12px）等宽；只读 = 能选能复制，拒绝一切修改
         Editor::new(&self.editor).readonly(true).bordered(false).h_full().text_size(zpx(12.))
     }
 }
@@ -50,7 +50,7 @@ impl Render for CodePane {
 
 /// 文件路径 → tree-sitter 语言名；认不出返回 None（保持纯文本）。
 ///
-/// 规则照 web `langForPath`：先认特殊文件名，再按扩展名；`.env.*` 这类带后缀的变体算 dotenv
+/// 规则照 React 版 `langForPath`：先认特殊文件名，再按扩展名；`.env.*` 这类带后缀的变体算 dotenv
 /// （这边没有 dotenv 语法，按纯文本）。这里只列 gpui-component 真带着语法的语言。
 pub fn lang_for_path(path: &str) -> Option<&'static str> {
     let base = path.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
@@ -68,7 +68,7 @@ pub fn lang_for_path(path: &str) -> Option<&'static str> {
     lang_for_word(&base[dot + 1..])
 }
 
-/// 扩展名 / Markdown fence 的语言词 → 语言名（web 的 ALIASES + LANGS 的交集）
+/// 扩展名 / Markdown fence 的语言词 → 语言名（React 版的 ALIASES + LANGS 的交集）
 pub fn lang_for_word(word: &str) -> Option<&'static str> {
     Some(match word.to_lowercase().as_str() {
         "ts" | "mts" | "cts" | "typescript" => "typescript",

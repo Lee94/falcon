@@ -1,5 +1,6 @@
 //! 飞书项目面板与设置「中转」页共用的小件：提示文字、分段控件、分组标题、药丸、小号图标按钮。
-//! 形状照 web 的 `Hint` / `common/Field.tsx` 的 `Segmented` / `GroupTitle` / `Pill`，颜色一律取语义 token。
+//! 形状照旧 React 版的 `Hint` / `common/Field.tsx` 的 `Segmented` / `GroupTitle` / `Pill`，
+//! 颜色一律取语义 token。
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use crate::theme::{Ui, radius};
 use crate::ui::icon;
 use crate::zoom::zpx;
 
-/// 空态 / 加载中 / 失败的提示段落（web 的 `Hint`：px-3 py-4 text-xs leading-relaxed）
+/// 空态 / 加载中 / 失败的提示段落（React 版的 `Hint`：px-3 py-4 text-xs leading-relaxed）
 pub(crate) fn hint(text: impl Into<SharedString>, cx: &App) -> Div {
     let ui = Ui::global(cx);
     div()
@@ -33,7 +34,7 @@ pub(crate) fn hint_detail(text: impl Into<SharedString>, detail: impl Into<Share
     hint(text, cx).child(div().mt_1().text_size(zpx(11.)).child(detail.into()))
 }
 
-/// 分组标题（web 的 `GroupTitle`：11px、muted、下边一道细线）
+/// 分组标题（React 版的 `GroupTitle`：11px、muted、下边一道细线）
 pub(crate) fn group_title(cx: &App) -> Div {
     let ui = Ui::global(cx);
     div()
@@ -49,7 +50,7 @@ pub(crate) fn group_title(cx: &App) -> Div {
         .border_color(ui.border)
 }
 
-/// 分段控件（web 的 `Segmented dense`）：sunken 槽里一排等宽按钮，选中的那格浮起来（面板底色）。
+/// 分段控件（React 版的 `Segmented dense`）：sunken 槽里一排等宽按钮，选中的那格浮起来（面板底色）。
 /// 窄栏里与 h-7 的输入框对齐，所以按钮是 24px 高。
 pub(crate) fn segmented<T: Copy + PartialEq + 'static>(
     id: &str,
@@ -88,7 +89,7 @@ pub(crate) fn segmented<T: Copy + PartialEq + 'static>(
     bar
 }
 
-/// 圆角小药丸（web 的 `Pill`）：状态 / 优先级用弱着色底，编号用等宽 muted
+/// 圆角小药丸（React 版的 `Pill`）：状态 / 优先级用弱着色底，编号用等宽 muted
 pub(crate) fn pill(text: impl Into<SharedString>, muted: bool, cx: &App) -> Div {
     let ui = Ui::global(cx);
     let d = div()
@@ -106,7 +107,7 @@ pub(crate) fn pill(text: impl Into<SharedString>, muted: bool, cx: &App) -> Div 
     if muted { d.text_color(ui.muted_foreground) } else { d.bg(ui.accent.opacity(0.6)) }
 }
 
-/// 行内的小号图标按钮（web 的 `size-5` / `size-6` ghost 按钮）。`occlude`：它常叠在一整行可点的
+/// 行内的小号图标按钮（React 版的 `size-5` / `size-6` ghost 按钮）。`occlude`：它常叠在一整行可点的
 /// 行上面（外链、重命名），点它不能再把下面那行也点了。
 pub(crate) fn tiny_button(
     id: impl Into<ElementId>,
@@ -151,7 +152,7 @@ pub(crate) fn icon_button(
     }
 }
 
-/// 转圈的图标（刷新中）：web 的 `animate-spin`
+/// 转圈的图标（刷新中）：React 版的 `animate-spin`
 pub(crate) fn spinning(name: IconName, size: f32) -> impl IntoElement {
     icon(name).size(zpx(size)).with_animation(
         "spin",

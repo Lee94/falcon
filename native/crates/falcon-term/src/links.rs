@@ -1,5 +1,5 @@
-//! 终端文本里的 URL 识别。正则照 web 用的 `@xterm/addon-web-links` 默认正则，两个客户端认出的
-//! 链接范围一致（OSC 8 超链接另走 cell 上的 hyperlink，不经过这里）。
+//! 终端文本里的 URL 识别。正则照 `@xterm/addon-web-links` 的默认正则（旧 React 版用的那个），认出的
+//! 链接范围与那时一致（OSC 8 超链接另走 cell 上的 hyperlink，不经过这里）。
 
 use std::sync::OnceLock;
 

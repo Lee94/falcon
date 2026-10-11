@@ -1,4 +1,5 @@
-//! 没装 CLI 的提示与 device-code 登录卡片（web `MeeglePanel.tsx` 的 `InstallHint` / `LoginCard`）。
+//! 没装 CLI 的提示与 device-code 登录卡片（旧 React 版 `MeeglePanel.tsx` 的
+//! `InstallHint` / `LoginCard`）。
 //!
 //! 登录：点「登录」让后端起 `meegle auth login --device-code`，拿到授权链接后这里给一个按钮，
 //! 用系统浏览器打开；用户授权完成，面板每 2s 的状态轮询会把卡片切成正文（ADR 0010 决定三：
@@ -73,7 +74,7 @@ impl SearchableListItem for HostOption {
         self.label.clone()
     }
 
-    /// 触发器上也带域名（web 的 SelectValue 就是选中项的整行内容）
+    /// 触发器上也带域名（React 版的 SelectValue 就是选中项的整行内容）
     fn display_title(&self) -> Option<gpui_kit::AnyElement> {
         let host = self.host.clone()?;
         Some(

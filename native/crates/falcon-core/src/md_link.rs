@@ -1,4 +1,4 @@
-//! Markdown 文档里链接目标的解析。对应 web 的 `lib/mdLink.ts`，供 Markdown 预览用。
+//! Markdown 文档里链接目标的解析。对应旧 React 版的 `lib/mdLink.ts`，供 Markdown 预览用。
 
 use crate::js::{decode_uri_component, js_trim};
 
@@ -22,7 +22,7 @@ pub fn external_href(href: &str) -> Option<String> {
 ///
 /// href 是 URL 而不是路径：Markdown 里带空格的文件名只能写成 `img%20dir/a.png`
 /// （或用 <> 包起来），解析器原样给出。每段 decodeURIComponent 还原成真实文件名，
-/// 之后再交给 [`crate::raw_url::raw_url`] 编码或喂给查看窗口才不会二次编码成 `%2520`。
+/// 之后再交给 falcon-client 的 `raw_url` 编码或喂给查看窗口才不会二次编码成 `%2520`。
 /// 解不动的（孤零零的 `%`）按原文保留——那多半本来就是文件名的一部分。
 pub fn resolve_rel(dir: &str, href: &str) -> Option<String> {
     let no_hash = href.split('#').next().unwrap_or("");

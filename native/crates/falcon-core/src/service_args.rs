@@ -5,9 +5,10 @@
 //!   目录），装过自定义端口 / 数据目录的人一升级，服务就换了个家，原来的会话全看不见了；
 //! - **"本机"配置按它连**：服务跑在哪个端口，客户端就连哪个。
 //!
-//! 解析口径与服务端 `config.ts` 的 `parseArgs` 一致：只认空格分隔的 `--host` / `--port` /
-//! `--data-dir`，后出现的覆盖先出现的；`ProgramArguments` 里的程序路径（SEA 是
-//! `<dataDir>/bin/falcon`，源码运行是 node + 入口脚本）不是这三个开关，自然被跳过。
+//! 解析口径与服务端 `config.rs` 的 `parse_args` 一致：只认空格分隔的 `--host` / `--port` /
+//! `--data-dir`，后出现的覆盖先出现的；`ProgramArguments` 里的程序路径（现在是
+//! `<dataDir>/bin/falcon`；Node 时代装的服务可能是 SEA 或 node + 入口脚本）不是这三个开关，
+//! 自然被跳过。
 
 /// 服务端 `parseArgs` 的默认端口
 pub const DEFAULT_PORT: u16 = 4923;

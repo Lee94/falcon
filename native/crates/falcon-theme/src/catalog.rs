@@ -5,8 +5,9 @@
 //! **启动时一行都不解析**：
 //!
 //! - 偏好里存的是选中主题的完整颜色副本（pref.rs），启动不需要目录就能把界面画对；
-//! - 按名字取一套（[`find_builtin`]）只扫行首的名字，命中那一行才解析；
 //! - 整份目录（[`load_catalog`]）在第一次要列表时（打开主题选择器）才解析，之后缓存。
+//!   以前还有一个只扫行首名字、命中才解析的按名查找（`find_builtin`），专给启动时的旧偏好
+//!   迁移用；那段迁移删掉后它没了消费者，一并删了，按名字查一律 [`find_theme`]。
 //!
 //! 名字与 `ghostty +list-themes` 一字不差，Ghostty 配置里 `theme = Catppuccin Mocha`
 //! 在这里查同一个名字就能命中。
@@ -27,7 +28,7 @@ include!("../data/ghostty-themes.meta.rs");
 
 /// 内置 Ghostty 主题数据：每行 `名字 \t 22 个不带 # 的 rrggbb`，顺序是
 /// bg fg cursor cursorText selBg selFg palette0..15（与 xtask/src/themes.rs
-/// 的 KEYS 一致）。与 web 的 `GHOSTTY_THEMES_DATA` 逐字节相同。
+/// 的 KEYS 一致）。格式沿用旧 React 版的 `GHOSTTY_THEMES_DATA`，当初两份逐字节相同。
 pub const GHOSTTY_THEMES_DATA: &str = include_str!("../data/ghostty-themes.tsv");
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -142,11 +143,6 @@ fn data_lines(data: &str) -> impl Iterator<Item = &str> {
     data.split('\n').filter(|l| !l.is_empty())
 }
 
-/// 行首的名字，不解析颜色（按名字查找时用）
-fn line_name(line: &str) -> &str {
-    line.find('\t').map_or(line, |tab| &line[..tab])
-}
-
 /// 解析 vendor 脚本的产物（任意来源的文本）。
 pub fn parse_catalog_data(data: &str) -> anyhow::Result<Vec<CatalogEntry>> {
     data_lines(data)
@@ -183,39 +179,6 @@ pub fn load_catalog() -> &'static [CatalogEntry] {
     })
 }
 
-/// 已经加载过就给，没有就 `None`（选择器首次打开前）
-pub fn cached_catalog() -> Option<&'static [CatalogEntry]> {
-    CATALOG.get().map(Vec::as_slice)
-}
-
-/// 按名字取一套内置主题，语义同 `find_theme(load_catalog(), name)`，但目录还没加载时
-/// 不解析整份：只比对每行行首的名字，命中那一行才解析颜色。
-///
-/// 启动路径上用它（例如旧偏好迁移、`theme = X` 找底），不把 463 套全解析一遍。
-pub fn find_builtin(name: &str) -> Option<CatalogEntry> {
-    match cached_catalog() {
-        Some(all) => find_theme(all, name).cloned(),
-        None => find_builtin_by_line(name),
-    }
-}
-
-fn find_builtin_by_line(name: &str) -> Option<CatalogEntry> {
-    // 两轮的顺序与 find_theme 在 [Falcon…, Ghostty…] 上一致：先全体精确，再全体忽略大小写
-    if let Some(e) = FALCON_THEMES.iter().find(|e| e.name == name) {
-        return Some(e.clone());
-    }
-    if let Some(line) = data_lines(GHOSTTY_THEMES_DATA).find(|l| line_name(l) == name) {
-        return Some(parse_builtin_line(line));
-    }
-    let lower = js_trim(name).to_lowercase();
-    if let Some(e) = FALCON_THEMES.iter().find(|e| e.name.to_lowercase() == lower) {
-        return Some(e.clone());
-    }
-    data_lines(GHOSTTY_THEMES_DATA)
-        .find(|l| line_name(l).to_lowercase() == lower)
-        .map(parse_builtin_line)
-}
-
 /// 自定义主题编辑器的解析结果
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CustomThemeParse {
@@ -232,9 +195,9 @@ pub struct CustomThemeParse {
 /// 用户贴的一段 Ghostty 文本 → 颜色：`theme = X` 以内置主题为底再覆盖（与 Ghostty 读
 /// 配置的顺序一致），`light:X,dark:Y` 取当前槽位那一半，只写一边就用那一边。
 ///
-/// 这段逻辑在 web 里写在 `components/ThemePicker.tsx`（编辑器的 `parsed`），不在
-/// lib/theme 下；原生的编辑器也要同样的行为，所以挪进主题层。web 那边目录还没加载完时
-/// 不找底；这边目录是嵌入的，调用方把 [`load_catalog`] 传进来。
+/// 这段逻辑在 React 版里写在 `components/ThemePicker.tsx`（编辑器的 `parsed`），不在
+/// lib/theme 下；GPUI 客户端的编辑器也要同样的行为，所以挪进主题层。React 版目录还没
+/// 加载完时不找底；这边目录是嵌入的，调用方把 [`load_catalog`] 传进来。
 pub fn resolve_custom_theme(text: &str, slot: ThemeMode, catalog: &[CatalogEntry]) -> CustomThemeParse {
     let src = parse_ghostty_theme(text);
     let base_name = src.theme.as_deref().and_then(|t| {
@@ -346,22 +309,12 @@ mod tests {
         }
     }
 
-    // 以下不是从 TS 移植的：懒加载与按名字取
+    // 以下不是从 TS 移植的：懒加载
 
-    /// 目录还没加载时 find_builtin 按行查，结果与整份目录上的 find_theme 一致。
-    /// 直接测按行查的那条路：测试并行跑，别的用例可能已经把目录加载了
+    /// 内置主题名借用嵌入数据，不分配
     #[test]
-    fn find_builtin_matches_full_catalog() {
-        let all = {
-            let mut v = FALCON_THEMES.to_vec();
-            v.extend(entries());
-            v
-        };
-        for name in ["Catppuccin Mocha", "catppuccin mocha", " NORD ", "Falcon Dark", "falcon light", "nope", "0x96f", "Zenwritten Light"] {
-            assert_eq!(find_builtin_by_line(name), find_theme(&all, name).cloned(), "{name:?}");
-            assert_eq!(find_builtin(name), find_theme(&all, name).cloned(), "{name:?}");
-        }
-        let dracula = find_builtin_by_line("Dracula").unwrap();
+    fn builtin_names_borrow_the_embedded_data() {
+        let dracula = find_theme(load_catalog(), "Dracula").unwrap();
         assert!(matches!(dracula.name, Cow::Borrowed(_)), "内置主题名应借用嵌入数据");
     }
 
@@ -371,7 +324,7 @@ mod tests {
         assert_eq!(all.len(), 2 + GHOSTTY_THEMES_COUNT);
         assert_eq!(all[0].name, FALCON_LIGHT_NAME);
         assert_eq!(all[1].name, FALCON_DARK_NAME);
-        assert!(std::ptr::eq(all, cached_catalog().unwrap()));
+        assert!(std::ptr::eq(all, load_catalog()), "第二次取的是缓存");
         assert!(!GHOSTTY_THEMES_ORIGIN.is_empty());
     }
 

@@ -1,4 +1,4 @@
-//! 会话 / 项目 / 主机上的动作，以及溢出菜单的内容：web `lib/useActions.ts` 的原生版。
+//! 会话 / 项目 / 主机上的动作，以及溢出菜单的内容：旧 React 版 `lib/useActions.ts` 的移植。
 //! 侧栏的 ＋ / ⋯ / 右键、总览、命令面板、窗口标题栏共用同一份，避免同一个操作各写一遍。
 //!
 //! 菜单项是数据（[`MenuItemSpec`]），由 [`to_popup`] 画成 gpui-component 的 PopupMenu，
@@ -71,7 +71,7 @@ pub fn to_popup(mut menu: PopupMenu, items: Vec<MenuItemSpec>) -> PopupMenu {
         }
         let handler = item.on_select.clone();
         // PopupMenuItem 的纯文字项既没有危险色也不会把快捷键右对齐，自己画：
-        // 危险项（终止、删除）用 destructive 色，与 web 的 Menu 一致
+        // 危险项（终止、删除）用 destructive 色（照 React 版的 Menu）
         let (label, kbd, danger) = (item.label.clone(), item.kbd.clone(), item.danger);
         let mut entry = PopupMenuItem::element(move |_, cx| {
             let ui = crate::theme::Ui::global(cx);
@@ -186,7 +186,7 @@ pub fn terminate_many(ws: &Entity<Workspace>, ids: Vec<String>, window: &mut Win
                 }
                 cx.update(|cx| {
                     toast(&ws3, ToastKind::Danger, t!("toast.terminatedMany", n = n).to_string(), None, cx);
-                    // 总览里的勾选跟着清掉（web 的 setSelected([])），否则剩下的行还勾着
+                    // 总览里的勾选跟着清掉（React 版的 setSelected([])），否则剩下的行还勾着
                     ws3.update(cx, |w, cx| {
                         w.selected.clear();
                         w.refresh_sessions(cx);

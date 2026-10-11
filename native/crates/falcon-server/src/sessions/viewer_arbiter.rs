@@ -142,8 +142,9 @@ impl<V: PartialEq + Clone> ViewerArbiter<V> {
 ///   DECRPM（`$y`）、kitty 键盘协议的查询答复（`?…u`，按键事件不带 `?`）、焦点进出（`I` / `O`）；
 /// - OSC / DCS 答复（颜色查询、XTVERSION、DECRQSS…）。
 ///
-/// 原生客户端（alacritty_terminal）会替 Zellij 的 `CSI 14t` 这类查询自动答复，每次 resize
-/// 都有——被动看着的那端也在"输入"，不滤掉的话谁答得晚谁抢走深浅。
+/// 客户端的终端（falcon-term 里的 alacritty_terminal）会替 Zellij 的查询自动答复——当初实测
+/// 是 `CSI 14t`，每次 resize 都有（falcon-term 现在不答 14t，DA / DSR / `CSI 18t` 照答）。
+/// 被动看着的那端也在"输入"，不滤掉的话谁答得晚谁抢走深浅。
 /// 误伤可以接受：老式 Shift+F3（`CSI 1;2R`）与 CPR 同形，只是不算一次操作。
 ///
 /// （JS 的 `\d` 只认 ASCII 数字，Rust regex 的 `\d` 是 Unicode，这里一律写 `[0-9]`）

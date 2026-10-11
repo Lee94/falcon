@@ -1,6 +1,7 @@
-//! falcon-client：原生客户端的网络层（设计文档 `docs/design/gpui-client.md` 决定四、§3.2、§4.7）。
+//! falcon-client：GPUI 客户端的网络层，原生（falcon-desktop）与浏览器版（falcon-web）共用
+//! （设计文档 `docs/design/gpui-client.md` 决定四、§3.2、§4.7）。
 //!
-//! 对 falcon 服务端来说，原生客户端只是又一个会用 cookie 的 Viewer：同一套 REST
+//! 对 falcon 服务端来说，这个客户端就是一个会用 cookie 的 Viewer：同一套 REST
 //! （`/api/*`）、同一条 `/ws/sessions/:id`、同一个登录 cookie（`falcon_token`）。
 //! 这个 crate 不认识任何 GPUI 类型，可以脱离窗口单测，也能对真服务端跑 e2e
 //! （`tests/e2e.rs`）。
@@ -34,9 +35,9 @@
 //! # 模块
 //!
 //! - [`FalconClient`]：REST 客户端本体，方法按功能域分在 `api/` 下的各文件里，
-//!   与 web 的 `packages/web/src/api.ts` 逐条对应（名字是它的 snake_case）。
+//!   与旧 React 版的 `packages/web/src/api.ts` 逐条对应（名字是它的 snake_case）。
 //! - [`SessionSocket`] / [`InstallSocket`]：`/ws/sessions/:id` 与 `/ws/install/:projectId`。
-//! - [`ApiError`]：对齐 web 的 `ApiRequestError`。
+//! - [`ApiError`]：对齐 React 版的 `ApiRequestError`。
 
 mod api;
 mod client;

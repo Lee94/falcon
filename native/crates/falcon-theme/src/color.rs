@@ -11,7 +11,8 @@
 //! 的取整点与 TS 完全相同**（`mix` 的结果是 `Rgb`，二分里每次试探都先取整再算对比度）。
 //! 浮点运算顺序照抄（`a + k1 * x + k2 * y` 这类式子左结合，与 JS 一致），`**` 一律用
 //! `powf`（不用 `powi`：`x ** 3` 在 JS 里走的是 pow，不是连乘，舍入不同）。
-//! `tests/derive_golden.rs` 拿 web 的 deriveTheme 跑全部内置主题的结果逐字对拍。
+//! `tests/derive_golden.rs` 拿旧 React 版 deriveTheme 跑全部内置主题的结果（冻结的 fixture）
+//! 逐字对拍。
 //!
 //! TS 里"非法输入原样返回"（`mix("nope", …)`）在这边由类型挡掉：拿不到非法的
 //! [`Rgb`]。只有 [`normalize_hex`] 保留了字符串进、字符串出的原语义。

@@ -1,9 +1,9 @@
-//! 派生目录的**预览**计算。对应 web 的 `lib/worktreePath.ts`。
+//! 派生目录的**预览**计算。对应旧 React 版的 `lib/worktreePath.ts`。
 //!
-//! 权威实现在服务端 `git/path.ts`（branchSlug / nameSlug / siblingWorktreePath /
-//! multiCentralPath），这里只是让用户敲分支名时看得见结果。提交时预览值不上送
-//! （单派生仅在用户手动改过目录时才发 dir），预览与真实值万一漂移也绝不会建到
-//! 别处去。改动 slug 规则时请三边（server / web / 这里）对照。
+//! 权威实现在服务端 `git/path.rs`（branch_slug / name_slug / sibling_worktree_path /
+//! multi_central_path，移植自 `git/path.ts`），这里只是让用户敲分支名时看得见结果。
+//! 提交时预览值不上送（单派生仅在用户手动改过目录时才发 dir），预览与真实值万一漂移
+//! 也绝不会建到别处去。改动 slug 规则时请两边（服务端 / 这里）对照。
 
 use crate::js::is_js_whitespace;
 

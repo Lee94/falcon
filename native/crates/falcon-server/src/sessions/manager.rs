@@ -1526,7 +1526,7 @@ impl SessionManager {
     }
 
     fn send_replay(&self, entry: &LiveEntry, viewer: &Viewer) {
-        // 前端对 replay 帧先 reset 再写入，reset 会清掉全部 VT 模式；
+        // 前端拿 replay 帧整体换掉终端状态（等同先 reset 再写入），会清掉全部 VT 模式；
         // 快照里往往已没有当初的模式序列（4MB 环挤掉了），这里用跟踪到的
         // 当前模式作前缀重建，否则重连后的 Viewer 永久丢失 mouse tracking
         // （滚轮失效）和 bracketed paste（多行粘贴被逐行执行）。

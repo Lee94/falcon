@@ -1,4 +1,4 @@
-//! 工作项的显示编号。对应 web 的 `lib/meegleKey.ts`。
+//! 工作项的显示编号。对应旧 React 版的 `lib/meegleKey.ts`。
 
 use falcon_proto::MeegleWorkItemDetail;
 

@@ -1,9 +1,11 @@
 //! 主题的深浅：`@falcon/shared` 的 `appearanceFromHex`（`packages/shared/src/termEnv.ts`）。
 //!
 //! **按底色亮度判，不按明暗模式**（ADR 0006）：给浅色槽位选一套深底主题，界面就按
-//! 深色算。这个判定在 web 有三处必须一致——shared 的 `appearanceFromHex`、web
-//! `index.html` 的内联首帧脚本、catalog 给选择器分深浅——原生这边是第四处，公式
-//! 照抄 shared（WCAG 相对亮度 > 0.5 为浅）。
+//! 深色算。这个判定当初在旧 React 版有三处必须一致——shared 的 `appearanceFromHex`、
+//! `index.html` 的内联首帧脚本、catalog 给选择器分深浅——这里是照抄出来的第四处，
+//! 公式照抄 shared（WCAG 相对亮度 > 0.5 为浅）。现在仍要与这里一致的：服务端
+//! `term_env.rs` 的 `appearance_from_hex`（shared 那份的移植）与浏览器版宿主页
+//! `native/web/index.html` 的首帧脚本。
 //!
 //! 和 falcon-proto 的 `TermAppearance` 是同一个概念（线上字面量都是 `"light"` /
 //! `"dark"`）。这里不依赖 falcon-proto，免得主题层被协议层的改动牵着走，app 层

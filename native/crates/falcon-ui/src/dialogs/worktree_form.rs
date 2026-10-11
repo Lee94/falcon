@@ -1,6 +1,6 @@
-//! 派生附属项目表单（web 的 `components/WorktreeForm.tsx`，ADR 0002 / 0003）。
+//! 派生附属项目表单（旧 React 版的 `components/WorktreeForm.tsx`，ADR 0002 / 0003）。
 //!
-//! 两张表刻意分开（与 web 一致）：
+//! 两张表刻意分开（沿用 React 版）：
 //! - **单仓库**：先 `GET /repo` 预检（环境事实写在 derivable / reason 里，不是错误），新建分支
 //!   （可选基点）或检出已有分支；目录默认是仓库同级的平铺路径，这里只做**预览**
 //!   （`falcon_core::worktree_path`），用户没手改过目录就不上送 dir——预览与服务端万一漂移
@@ -33,7 +33,7 @@ use crate::zoom::zpx;
 
 #[derive(Clone, Debug, Default)]
 pub struct Preset {
-    /// 飞书项目工作项拖进来时预填的分支名（带了它就是 new-branch 模式，与 web 的 preset 一致）
+    /// 飞书项目工作项拖进来时预填的分支名（带了它就是 new-branch 模式，照 React 版的 preset）
     pub branch: Option<String>,
     /// 预填的项目名
     pub name: Option<String>,
@@ -45,7 +45,7 @@ pub fn open(ws: &Entity<Workspace>, source_project_id: &str, preset: Preset, win
     let Some(project) = ws.read(cx).project(source_project_id).cloned() else {
         return;
     };
-    // 多仓库容器走批量派生表单；单仓库路径与 web 的 SingleWorktreeForm 一一对应
+    // 多仓库容器走批量派生表单；单仓库路径对应 React 版的 SingleWorktreeForm
     if project.multi.is_some() {
         let form = cx.new(|cx| MultiForm::new(ws.clone(), project, preset, window, cx));
         let title = t!("multi.deriveTitle", name = form.read(cx).project.name.clone()).to_string();
@@ -519,7 +519,7 @@ impl MultiForm {
             project,
             probe: None,
             load_error: None,
-            // 带着预填分支进来（飞书项目拖拽）是 new-branch，与 web 的 preset.mode 一致
+            // 带着预填分支进来（飞书项目拖拽）是 new-branch（照 React 版的 preset.mode）
             mode: if preset.branch.is_some() { MultiWorktreeMode::NewBranch } else { MultiWorktreeMode::Auto },
             branch_text,
             picked_ref: String::new(),

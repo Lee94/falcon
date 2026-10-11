@@ -18,11 +18,12 @@ use serde_json::json;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeader;
 
-/// `FALCON_WEB_DIST`（旧名 `MOJITO_WEB_DIST`）优先，否则开发构建的默认产物目录。
-/// 目录里没有 index.html 就当不存在——环境变量多半是从 falcon 终端里继承来的陈旧值
+/// `FALCON_WEB_DIST` 优先，否则开发构建的默认产物目录。
+/// 目录里没有 index.html 就当不存在——环境变量多半是从 falcon 终端里继承来的陈旧值。
+/// 旧名 `MOJITO_WEB_DIST` 不再认：它只可能指向已删的 React 产物，认了反而会盖过编进去的
+/// 浏览器版
 pub fn web_dist() -> Option<PathBuf> {
-    let from_env = std::env::var_os("FALCON_WEB_DIST").or_else(|| std::env::var_os("MOJITO_WEB_DIST"));
-    if let Some(dir) = from_env.map(PathBuf::from) {
+    if let Some(dir) = std::env::var_os("FALCON_WEB_DIST").map(PathBuf::from) {
         if dir.join("index.html").is_file() {
             return Some(dir);
         }

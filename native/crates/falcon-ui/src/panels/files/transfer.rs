@@ -1,9 +1,9 @@
-//! 下载 / 上传在原生这一侧的流程（ADR 0008 / 0009），文件面板与文件窗口共用。
+//! 下载 / 上传在 GPUI 客户端这一侧的流程（ADR 0008 / 0009），文件面板与文件窗口共用。
 //! 与服务端的往返在 falcon-client（`download_to_file` / `upload_file`，流对流、带
 //! `Content-Length` 核对）；这里只管"问用户、排队、报进度"。
 //!
 //! - **顺序而不是并发**：每个文件都可能要弹一次"覆盖吗"，并发的确认框会互相盖住；SSH
-//!   链路上并发也不会更快（web `uploadItems` 同一个理由）。
+//!   链路上并发也不会更快（旧 React 版 `uploadItems` 同一个理由）。
 //! - **进度走通知**：面板本身不摆进度条——上传是偶发动作，常驻的进度区大多数时候是空的。
 //!   通知就地更新文字，不重推：同 id 重推会重播入场动画、还会挪到队尾，进度一跳一闪。
 //! - **本机路径用 `std::path` 没问题**：这里的 `PathBuf` 都是**这台电脑**上用户选的文件；
@@ -138,7 +138,7 @@ impl Progress {
         }
     }
 
-    /// web 的算法：没有总数算 0；到 100 之前封顶 99——请求体发完 ≠ 服务端落盘，满格要等响应
+    /// React 版的算法：没有总数算 0；到 100 之前封顶 99——请求体发完 ≠ 服务端落盘，满格要等响应
     fn pct(&self) -> u64 {
         let total = self.total.load(Ordering::Relaxed);
         if total == 0 || total == u64::MAX {
@@ -179,7 +179,7 @@ fn tick_progress(
     })
 }
 
-/// web 的 `confirmAsync`：确认 → true；取消 / Esc / 点外面关掉 → false。
+/// React 版的 `confirmAsync`：确认 → true；取消 / Esc / 点外面关掉 → false。
 ///
 /// 借 `dialogs::confirm` 的样子（与别处的确认框一模一样），只是把"确认"接到一个 oneshot 上：
 /// 对话框无论怎么关，Root 都会丢掉它的构造闭包，连带丢掉发送端，接收端于是收到 Canceled。
@@ -240,7 +240,7 @@ pub(crate) struct UploadItem {
 /// （同 `webkitRelativePath`），上传时按这段路径在工作目录里重建树。
 ///
 /// 指向目录的符号链接不跟进去：成环时会无限递归，而把链接那头整棵树搬过去多半也不是用户
-/// 想要的；指向文件的链接按文件内容传。空文件夹给不出文件，跟 web 一样不建（ADR 0009）。
+/// 想要的；指向文件的链接按文件内容传。空文件夹给不出文件，照 React 版不建（ADR 0009）。
 fn collect_local(paths: &[PathBuf]) -> Vec<(String, PathBuf)> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
         let Ok(read) = std::fs::read_dir(dir) else { return };
@@ -457,8 +457,8 @@ fn unique_dest(dir: &Path, name: &str) -> PathBuf {
 /// 把工作目录里的文件下载到本机。调用方只传**文件**：文件夹要打包，那是终端里的事（ADR 0009）。
 ///
 /// - 原生：一个文件弹系统"存储为"对话框（它自己会问覆盖）；多个文件选一次文件夹，逐个存
-///   进去——每个文件弹一次存储框太烦，而 web 的做法（交给浏览器的下载目录）在这里没有对应物；
-/// - 浏览器：逐个交给 `<a download>`，进度与存到哪儿归浏览器的下载管理器（同 web）。
+///   进去——每个文件弹一次存储框太烦，而浏览器那种做法（交给浏览器的下载目录）在原生上没有对应物；
+/// - 浏览器：逐个交给 `<a download>`，进度与存到哪儿归浏览器的下载管理器（沿用 React 版）。
 ///   在点击的同步调用栈里触发，不会被当成弹窗拦掉。
 pub(crate) fn download(ws: Entity<Workspace>, project_id: String, paths: Vec<String>, window: &mut Window, cx: &mut App) {
     if paths.is_empty() {

@@ -1,8 +1,9 @@
 //! 一台 falcon 服务端的窗口：浮动岛骨架（ADR 0011）——窗口底铺 `app`，侧栏 / 主区 / 右面板
 //! 是浮在上面的圆角岛，之间只有一道 6px 的缝；右侧活动栏不成岛，图标直接落在窗口底上。
 //!
-//! 顶上一条 36px 的标题条是原生独有的：放 macOS 的红绿灯（Windows 上是自绘的三颗窗口按钮）、写明这是哪台 falcon 服务端
-//! （"身份先于内容"——远处的服务端要让人一眼认出来，别把命令敲错机器），也是拖窗口的地方。
+//! 顶上一条 36px 的标题条（旧 React 版没有）：放 macOS 的红绿灯（Windows 上是自绘的三颗窗口
+//! 按钮）、写明这是哪台 falcon 服务端（"身份先于内容"——远处的服务端要让人一眼认出来，别把
+//! 命令敲错机器），也是拖窗口的地方。
 
 use gpui_kit::component::Root;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -89,7 +90,7 @@ pub struct ServerWindow {
     panels: Entity<PanelHost>,
     login: Entity<LoginView>,
     focus: FocusHandle,
-    /// 拖侧栏 / 右面板宽度中（web 的 ResizableSlot）
+    /// 拖侧栏 / 右面板宽度中（旧 React 版的 ResizableSlot）
     panel_resize: Option<PanelDrag>,
     _subs: Vec<Subscription>,
 }
@@ -226,7 +227,7 @@ impl ServerWindow {
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use falcon_core::panel_width::ResizeEdge;
-        // 窄窗口临时收起侧栏，不写回偏好（web 同一条规则：只影响显示，显式开合会解除它）
+        // 窄窗口临时收起侧栏，不写回偏好（沿用 React 版的规则：只影响显示，显式开合会解除它）
         let narrow = window.viewport_size().width < zpx(1024.);
         if self.ws.read(cx).state.sidebar_auto_hidden != narrow {
             self.ws.update(cx, |w, _| w.state.set_sidebar_auto_hidden(narrow));

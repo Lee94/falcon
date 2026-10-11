@@ -1,4 +1,4 @@
-//! 飞书项目面板的客户端内存缓存。对应 web 的 `lib/meegleCache.ts`（ADR 0010）。
+//! 飞书项目面板的客户端内存缓存。对应旧 React 版的 `lib/meegleCache.ts`（ADR 0010）。
 //!
 //! 面板卸载（切到别的面板、收起右侧栏）后数据还在，再打开立刻画出上次的列表；
 //! [`MEEGLE_REVALIDATE_MS`] 内不打网络。刷新按钮 / 换人登录会清空。
@@ -6,7 +6,7 @@
 //! 不落盘：工作项是内部数据，不该跟着偏好文件走。后端另有一份同样 TTL 的 CLI 缓存，
 //! 重开 App 后 HTTP 也是毫秒级。
 //!
-//! web 是模块级单例；这里是可实例化的 [`MeegleCache`]，另给一个进程级的
+//! React 版是模块级单例；这里是可实例化的 [`MeegleCache`]，另给一个进程级的
 //! [`meegle_cache()`]。值是异构的（待办列表、视图条目、详情各是各的类型），存成
 //! `Arc<dyn Any>`，取的时候按类型认——类型对不上当没命中。
 
@@ -90,7 +90,7 @@ impl MeegleCache {
     }
 }
 
-/// 进程级的那一份（web 的模块单例）
+/// 进程级的那一份（React 版的模块单例）
 #[cfg(not(target_family = "wasm"))]
 pub fn meegle_cache() -> &'static MeegleCache {
     static CACHE: OnceLock<MeegleCache> = OnceLock::new();

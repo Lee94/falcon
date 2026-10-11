@@ -191,7 +191,7 @@ pub fn rounded(icon: &Icon) -> String {
 }
 
 /// macOS 版式（Big Sur 起的图标网格）：824 见方的圆角块居中、四周留透明边、带一点投影。
-/// 满版的图标放进 Dock 会比别的应用大一圈。原生 falcon-core 的 MAC_INSET / MAC_RADIUS 是同一组数
+/// 满版的图标放进 Dock 会比别的应用大一圈。falcon-core 的 MAC_INSET / MAC_RADIUS 是同一组数
 pub fn macos(icon: &Icon) -> String {
     svg(
         icon,

@@ -1,4 +1,4 @@
-//! 飞书项目列表的分组、本地翻页与过滤。对应 web 的 `lib/meegleGroups.ts`。
+//! 飞书项目列表的分组、本地翻页与过滤。对应旧 React 版的 `lib/meegleGroups.ts`。
 //!
 //! 三件事都只作用于**手上这一页**（搜索 / 最近的快照），不去猜远端的总数。
 
@@ -130,7 +130,7 @@ pub fn meegle_page<T>(items: &[T], requested: f64) -> LocalPage<'_, T> {
 }
 
 /// 按关键字过滤（大小写不敏感），只看手上这一页；看名称、编号、空间、类型、节点、
-/// 状态、业务线。空关键字原样返回全部（web 返回同一个数组）。
+/// 状态、业务线。空关键字原样返回全部（React 版返回同一个数组）。
 pub fn filter_meegle_items<'a, T: MeegleRow>(items: &'a [T], filter: &str) -> Vec<&'a T> {
     let q = js_trim(filter).to_lowercase();
     if q.is_empty() {
@@ -226,7 +226,7 @@ mod tests {
         assert!(filter_meegle_items(meegle_page(&rows, 1.0).items, "payments").is_empty());
         assert_eq!(filter_meegle_items(meegle_page(&rows, 2.0).items, " PAYMENTS ").len(), 1);
         assert_eq!(filter_meegle_items(&rows, "review").len(), 101);
-        // 空关键字：原样全给（web 返回同一个数组）
+        // 空关键字：原样全给（React 版返回同一个数组）
         let all = filter_meegle_items(&rows, " ");
         assert_eq!(all.len(), rows.len());
         assert!(all.iter().zip(&rows).all(|(a, b)| std::ptr::eq(*a, b)));

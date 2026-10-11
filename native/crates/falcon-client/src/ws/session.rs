@@ -1,5 +1,6 @@
-//! 会话通道 `/ws/sessions/:id`：照 web 的 `components/TerminalView.tsx` 与服务端
-//! `ws.ts` 逐条对齐（设计文档 §3.2）。那些时序都是踩过的坑，改之前先读这两处。
+//! 会话通道 `/ws/sessions/:id`：照旧 React 版的 `components/TerminalView.tsx`（提交 9c9d045 的
+//! `packages/web/src/`）与服务端 `ws.ts` 逐条对齐（设计文档 §3.2）。那些时序都是踩过的坑，
+//! 改之前先读这两处。
 //!
 //! 线上是混合协议：终端字节走二进制帧（1 字节类型头 + 载荷，`decode_term_frame`），
 //! 控制消息走 JSON 文本帧（`ServerMessage`）；客户端发的一律是 JSON 文本帧。
@@ -23,10 +24,6 @@ use crate::api::seg;
 use crate::client::{AuthEvent, AuthEvents, FalconClient, Relogin};
 use crate::runtime;
 
-/// 浏览器发不了 WS ping 帧：wasm 上不做心跳，`reconnect_now` 在连着时也不探活
-/// （半开连接由 online / visibilitychange 触发的重连兜，与 web 的 TerminalView 一致）。
-const HEARTBEAT: bool = cfg!(not(target_family = "wasm"));
-
 /// 会话 socket 推给 app 的事件。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
@@ -35,7 +32,7 @@ pub enum SessionEvent {
     /// resize 在此之前已经发出去了。
     ///
     /// 不在升级成功那一刻报：服务端是先接受升级、再用 4401 关掉未认证的连接，那种
-    /// 连接不该让 app 以为"连上了"（web 的 onopen 就会误报一次）。
+    /// 连接不该让 app 以为"连上了"（React 版的 onopen 就会误报一次）。
     ///
     /// `reconnected` = 这不是这个 socket 的第一次连接尝试：断开期间错过的会话状态
     /// 变化（别处 Terminate 了、改名了）不会经 WS 补发，app 应当立刻补拉一次会话
@@ -64,7 +61,7 @@ pub enum SessionEvent {
     /// （服务端广播）。单位是 zellij 的显示行，含义见 `ServerMessage::Scroll`。
     Scroll { position: u32, length: u32, rows: u32 },
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
-    /// 断线期间 `send_input` 的内容会被丢掉（与 web 一致：不能把断线时敲的字、
+    /// 断线期间 `send_input` 的内容会被丢掉（照 React 版：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
     Disconnected { retry_attempt: u32, retry_in: Duration },
     /// 服务端说未认证（关闭码 4401），自动重登没设密码或被拒：停止重连，等 app 弹
@@ -92,15 +89,16 @@ where
     }
 }
 
-/// 重连 / 心跳的节奏。缺省值与 web 一致，测试里调小。
+/// 重连 / 心跳的节奏。缺省值照 React 版，测试里调小。
 #[derive(Debug, Clone)]
 pub struct SocketOptions {
     /// 退避起点：1s 起步翻倍、15s 封顶——不打爆刚起来的后端，也不让用户干等太久
     pub backoff_base: Duration,
     pub backoff_max: Duration,
     /// WS ping 间隔。远处的 falcon 服务端通常在反向代理后面，代理的 idle timeout
-    /// 会悄悄掐掉安静的连接（服务端的 `ws` 库自动回 pong）。连着两个间隔什么都没
-    /// 收到就当连接已死，主动断开重连——半开的 TCP 自己是不会报错的。
+    /// 会悄悄掐掉安静的连接（原生发 ping 帧、协议层自动回 pong；浏览器版发应用层的
+    /// `{"type":"ping"}`，见 `web.rs`）。连着两个间隔什么都没收到就当连接已死，主动断开
+    /// 重连——半开的 TCP 自己是不会报错的。
     pub ping_interval: Duration,
     /// 建连（TCP + TLS + 升级）的超时
     pub connect_timeout: Duration,
@@ -202,7 +200,7 @@ impl SessionSocket {
     }
 
     /// 当前终端配色的深浅与底 / 字色（`#rrggbb`），服务端据此代答 OSC 10/11/12
-    /// （原生客户端自己**不答**颜色查询，§3.2）。主题切换时再调一次。
+    /// （客户端自己**不答**颜色查询，§3.2）。主题切换时再调一次。
     ///
     /// 记住最近一次：每条新 socket 连上后**先**发它、再发 resize——服务端的
     /// OscColorGate 要在 appearance 到了之后才代答，resize 触发的接回会让 zellij
@@ -280,7 +278,7 @@ struct Driver {
     size: Option<(u16, u16)>,
     /// 最近一次 appearance（序列化好的 JSON）
     appearance: Option<String>,
-    /// 退避轮次；连上就清零（web 的 `retries`）
+    /// 退避轮次；连上就清零（React 版的 `retries`）
     retries: u32,
     connected_before: bool,
     /// 连续撞上 4401 的次数。刚重登过还是 4401 就别再登了，免得"登录—4401—登录"
@@ -469,7 +467,7 @@ impl Driver {
                             }
                         }
                         WsMsg::Text(text) => {
-                            // 坏 JSON 与看不懂的消息都安静忽略（web 的 switch 没有 default）
+                            // 坏 JSON 与看不懂的消息都安静忽略（React 版的 switch 没有 default）
                             if let Ok(m) = serde_json::from_str::<ServerMessage>(&text) {
                                 self.dispatch(m);
                             }
@@ -520,7 +518,7 @@ impl Driver {
                         }
                         Cmd::Scroll(json) => ws.send_text(json).await.is_ok(),
                         Cmd::ReconnectNow => {
-                            if HEARTBEAT && !probing {
+                            if !probing {
                                 probing = true;
                                 probe = Box::pin(runtime::sleep(self.opts.probe_timeout));
                                 ws.ping().await.is_ok()
@@ -533,7 +531,7 @@ impl Driver {
                         return self.dropped("发送失败");
                     }
                 }
-                _ = &mut ping, if HEARTBEAT => {
+                _ = &mut ping => {
                     if awaiting {
                         return self.dropped("心跳超时");
                     }
@@ -572,13 +570,14 @@ impl Driver {
             ServerMessage::Scroll { position, length, rows } => {
                 SessionEvent::Scroll { position, length, rows }
             }
-            ServerMessage::Unknown => return,
+            // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报
+            ServerMessage::Pong | ServerMessage::Unknown => return,
         };
         self.emit(ev);
     }
 }
 
-/// 第 `retries` 次退避的等待：`base × 2^min(retries, 4)`，封顶 `max`（web 的 scheduleRetry）。
+/// 第 `retries` 次退避的等待：`base × 2^min(retries, 4)`，封顶 `max`（React 版的 scheduleRetry）。
 fn backoff_delay(base: Duration, max: Duration, retries: u32) -> Duration {
     base.saturating_mul(1 << retries.min(4)).min(max)
 }

@@ -1,4 +1,4 @@
-//! 新建 / 编辑项目表单（web 的 `components/ProjectForm.tsx`）。
+//! 新建 / 编辑项目表单（旧 React 版的 `components/ProjectForm.tsx`）。
 //!
 //! 三档填法：本地文件夹 / 远程 SSH / 多仓库。第三档「多仓库」是**纯 UI 概念**：服务端的
 //! type 仍只有 local / ssh，提交时映射成 type + repos（选了主机 ⇒ ssh，否则 local；编辑时跟
@@ -8,7 +8,7 @@
 //!   没有 hostId，可以继续手写 SSH 字段，也可以改绑到已保存主机。
 //! - 工作目录旁的「浏览…」打开 [`FolderPicker`]：列的是**宿主机**上的目录（本地项目是后端
 //!   所在机器，SSH 项目是远端），不是这台 Mac 的系统文件夹选择器。选择器嵌在同一个对话框里
-//!   （web 同样不叠第二层），Esc 只退回表单。
+//!   （沿用 React 版，不叠第二层），Esc 只退回表单。
 //! - 从侧栏某台服务器的菜单进来（preset 带了 kind）：类型已定，单仓库直接进选目录，选完就创建；
 //!   多仓库先弹一次「添加仓库」的选择器。这两种情况一个都没选就取消 = 反悔，整个对话框一起关。
 //! - shell 下拉：自动侦测宿主机可用的 shell（本地问后端本机，SSH 问远端），失败静默——退回
@@ -33,7 +33,7 @@ use crate::dialogs::host_form::{self, SshFields, SshInit};
 use crate::workspace::Workspace;
 use crate::zoom::zpx;
 
-/// 打开表单时的预填（web 的 ProjectFormPreset）
+/// 打开表单时的预填（React 版的 ProjectFormPreset）
 #[derive(Clone, Debug, Default)]
 pub struct Preset {
     /// "local" / "ssh"；None = 让用户选
@@ -51,7 +51,7 @@ impl Preset {
     }
 }
 
-/// shell 下拉的两个哨兵值（web 同名：Radix Select 不接受空字符串当 value）
+/// shell 下拉的两个哨兵值（沿用 React 版的名字：它的 Radix Select 不接受空字符串当 value）
 const SHELL_AUTO: &str = "__auto__";
 const SHELL_CUSTOM: &str = "__custom__";
 /// 多仓库档「位置」下拉的本机哨兵，理由同上
@@ -281,7 +281,7 @@ impl ProjectForm {
         this
     }
 
-    // ---------------- 派生出来的判断（web 里那几个 const） ----------------
+    // ---------------- 派生出来的判断（React 版里那几个 const） ----------------
 
     fn project_type(&self) -> ProjectType {
         match self.kind {
@@ -631,7 +631,7 @@ impl ProjectForm {
 
     fn fail(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
         self.error = Some(message);
-        // 错误写在表单上：选择器开着就收起来，不然看不见（web 在请求失败时同样退回表单）
+        // 错误写在表单上：选择器开着就收起来，不然看不见（照 React 版：请求失败时退回表单）
         if self.any_picking() {
             self.leave_picker(window, cx);
         }

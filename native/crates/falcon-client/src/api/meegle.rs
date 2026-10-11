@@ -1,8 +1,8 @@
 //! 右侧「飞书项目」面板（ADR 0010，`/api/meegle/*`）。
 //!
 //! 数据源是 falcon 后端本机上的 meegle CLI。错误码约定：CLI 没装 / 没登录是 409
-//! （`err.meegle_reason()` 给出原因，app 据此重新拉 `meegle_status` 切到安装 / 登录
-//! 提示）；CLI 跑了但飞书那边报错是 502；参数不合法 / 链接不支持是 400。
+//! （`err.meegle_reason()` 读得出原因；app 只判 `err.is_conflict()`，撞上就重新拉
+//! `meegle_status` 切到安装 / 登录提示）；CLI 跑了但飞书那边报错是 502；参数不合法 / 链接不支持是 400。
 //!
 //! 查询默认走服务端的 TTL 缓存（5 分钟）；`fresh = true` 打穿（面板的刷新按钮）。
 
@@ -47,7 +47,8 @@ impl FalconClient {
         self.bare(Method::POST, "/api/meegle/cache/clear".to_owned())
     }
 
-    /// `GET /api/meegle/spaces`。`q` 是按名字筛（服务端支持，web 的 api.ts 没用上）。
+    /// `GET /api/meegle/spaces`。`q` 是按名字筛（服务端支持，React 版的 api.ts 与现在的
+    /// 界面都没用上）。
     pub fn meegle_spaces(
         &self,
         q: Option<&str>,

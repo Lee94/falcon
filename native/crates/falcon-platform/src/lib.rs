@@ -99,8 +99,8 @@ pub trait Platform {
 
     // ---------------- 偏好（KvStore）----------------
 
-    /// 启动时把偏好整份读进来。键与 web 的 localStorage 一致（`falcon.themes` / `falcon.term` …），
-    /// 两边的数据可以直接对照，老用户的主题 / 终端设置原样继承
+    /// 启动时把偏好整份读进来。键沿用旧 React 版 localStorage 里的那些（`falcon.themes` /
+    /// `falcon.term` …），形状逐字一致——浏览器版因此直接接上 React 版老用户的主题 / 终端设置
     fn load_prefs(&self) -> BTreeMap<String, String>;
 
     /// 一个键改了。`all` 是改完之后的整份：存成一个文件的整份重写，localStorage 只写这一个键
@@ -108,7 +108,7 @@ pub trait Platform {
 
     // ---------------- 工作区（按服务端配置各一份）----------------
 
-    /// 落盘的工作区（web 的 `falcon.workspace`，形状逐字一致）
+    /// 落盘的工作区（形状沿用 React 版的 `falcon.workspace`）
     fn load_workspace(&self, profile_id: &str) -> Option<String>;
     fn store_workspace(&self, profile_id: &str, json: &str);
 
@@ -124,9 +124,21 @@ pub trait Platform {
     fn password(&self, profile_id: &str) -> Option<String>;
     /// `None` = 删掉
     fn store_password(&self, profile_id: &str, password: Option<&str>);
+    /// 有没有能记住访问密码的地方（原生的钥匙串）。没有的平台，设置页不画"记住的密码"那一行
+    fn has_password_store(&self) -> bool;
+    /// 登录成功后要不要离开这个页面。浏览器版被服务端从 px0 入口送来登录（`/?next=/px0/…`，
+    /// 原生客户端把 px0 地址交给系统浏览器时就是这样）时，跳回那里并返回 true——页面随即卸载，
+    /// app 不必再初始化；地址的校验在 falcon-core 的 `px0::login_next`。原生恒为 false
+    fn redirect_after_login(&self) -> bool;
 
     /// App 托管的本机服务；没有的平台（浏览器）返回 `None`，"本机"配置就直接连
     fn local_service(&self) -> Option<Arc<dyn LocalService>>;
+
+    /// 回到前台 / 网络恢复时调 `f`（不在 GPUI 的上下文里调，调用方自己转进去）。浏览器版接
+    /// window 的 `online` 与标签页切回可见（`visibilitychange`）：后台标签页的定时器被节流到
+    /// 分钟级，工作区看墙钟的唤醒检测在那里靠不住（旧 React 版 TerminalView 也是接这两个
+    /// 事件）。原生不调——睡眠唤醒由工作区看墙钟发现
+    fn on_resume(&self, f: Box<dyn Fn()>);
 
     // ---------------- 字体 ----------------
 

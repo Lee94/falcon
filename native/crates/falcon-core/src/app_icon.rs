@@ -23,7 +23,7 @@ pub fn is_builtin(id: &str) -> bool {
     APP_ICON_IDS.contains(&id)
 }
 
-/// 界面文案的 key：`appIcon.name_voltwing_spark`（web 的 `name_${id.replace(/-/g, "_")}`）
+/// 界面文案的 key：`appIcon.name_voltwing_spark`（React 版的 `name_${id.replace(/-/g, "_")}`）
 pub fn label_key(id: &str) -> String {
     format!("appIcon.name_{}", id.replace('-', "_"))
 }
@@ -36,7 +36,7 @@ pub struct Rect {
     pub h: u32,
 }
 
-/// web `containRect`：等比缩放到长边贴边、居中，不裁切；宽高为 0 按正方形铺满。
+/// React 版的 `containRect`：等比缩放到长边贴边、居中，不裁切；宽高为 0 按正方形铺满。
 /// 取整与 JS 的 `Math.round` 一致（正数的 .5 向上）。
 pub fn contain_rect(w: u32, h: u32, size: u32) -> Rect {
     if w == 0 || h == 0 {
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn contain_rect_matches_web() {
-        // 与 web lib/appIcon.test.ts 的 containRect 用例逐条对应
+        // 与 React 版 lib/appIcon.test.ts 的 containRect 用例逐条对应
         assert_eq!(contain_rect(1000, 500, 512), Rect { x: 0, y: 128, w: 512, h: 256 });
         assert_eq!(contain_rect(300, 600, 512), Rect { x: 128, y: 0, w: 256, h: 512 });
         assert_eq!(contain_rect(64, 64, 512), Rect { x: 0, y: 0, w: 512, h: 512 });

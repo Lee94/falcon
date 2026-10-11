@@ -16,71 +16,67 @@ mod js;
 
 /// 对应 shared 的 appIcon.ts（客户端用得到的部分）+ 原生 Dock 版式的像素运算（ADR 0018）
 pub mod app_icon;
-/// 对应 web 的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）
+/// 对应 React 版的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）
 pub mod layout;
-/// 对应 web 的 lib/paneKey.ts：窗口 key 约定
+/// 对应 React 版的 lib/paneKey.ts：窗口 key 约定
 pub mod pane_key;
-/// 对应 web 的 lib/projectTree.ts：侧栏「服务器 → 文件夹 → 检出」分组
+/// 对应 React 版的 lib/projectTree.ts：侧栏「服务器 → 文件夹 → 检出」分组
 pub mod project_tree;
-/// 对应 web 的 lib/sessionTitle.ts：会话自动标题
+/// 对应 React 版的 lib/sessionTitle.ts：会话自动标题
 pub mod session_title;
-/// 对应 web 的 lib/hostColor.ts：主机身份色
+/// 对应 React 版的 lib/hostColor.ts：主机身份色
 pub mod host_color;
-/// 对应 server 的 sessions/relaySpec.ts：中转的同端口槽位（设置「中转」页的徽标）
+/// 对应服务端的 sessions/relay_spec.rs：中转的同端口槽位（设置「中转」页的徽标）
 pub mod relay;
-/// 对应 web 的 lib/filePath.ts：宿主机路径（posix / windows，不用 std::path）
+/// 对应 React 版的 lib/filePath.ts：宿主机路径（posix / windows，不用 std::path）
 pub mod file_path;
-/// 对应 web 的 lib/fileTree.ts：改动文件的目录树
+/// 对应 React 版的 lib/fileTree.ts：改动文件的目录树
 pub mod file_tree;
-/// 对应 web 的 lib/fileSearch.ts：⌘P 文件搜索打分
+/// 对应 React 版的 lib/fileSearch.ts：⌘P 文件搜索打分
 pub mod file_search;
-/// 对应 web 的 lib/rawUrl.ts：原始字节地址
-pub mod raw_url;
 /// 对应 shared 的 px0BasePath：px0 审阅的挂载前缀
 pub mod px0;
-/// 对应 web 的 lib/mdLink.ts：Markdown 链接解析
+/// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
-/// 对应 web 的 lib/gitGraph.ts：提交图泳道
+/// 对应 React 版的 lib/gitGraph.ts：提交图泳道
 pub mod git_graph;
-/// 对应 web 的 lib/multiPath.ts：多仓库成员的公共父目录
+/// 对应 React 版的 lib/multiPath.ts：多仓库成员的公共父目录
 pub mod multi_path;
-/// 对应 web 的 lib/multiDerive.ts：批量派生的预演
+/// 对应 React 版的 lib/multiDerive.ts：批量派生的预演
 pub mod multi_derive;
-/// 对应 web 的 lib/worktreePath.ts：派生目录预览
+/// 对应 React 版的 lib/worktreePath.ts：派生目录预览
 pub mod worktree_path;
-/// 对应 web 的 lib/panelWidth.ts：左右栏宽度
+/// 对应 React 版的 lib/panelWidth.ts：左右栏宽度
 pub mod panel_width;
-/// 对应 web 的 lib/reason.ts：失败 / 非持久原因的文案 key
+/// 对应 React 版的 lib/reason.ts：失败 / 非持久原因的文案 key
 pub mod reason;
-/// 对应 web 的 lib/termFit.ts：终端尺寸能不能发给 PTY
-pub mod term_fit;
-/// 对应 web 的 lib/termCanvas.ts：画布滚轮轴向锁定、吸附、滚进视口
+/// 对应 React 版的 lib/termCanvas.ts：画布滚轮轴向锁定、横向手势翻画布
 pub mod term_canvas;
-/// 对应 web 的 lib/termScroll.ts：终端滚动条的滑块几何（ADR 0019）
+/// 对应 React 版的 lib/termScroll.ts：终端滚动条的滑块几何（ADR 0019）
 pub mod term_scroll;
-/// 对应 web 的 lib/pasteImage.ts：粘贴 / 拖入图片的判定
+/// 对应 React 版的 lib/pasteImage.ts：粘贴 / 拖入图片的判定
 pub mod paste_image;
-/// 对应 web 的 lib/term.ts：终端偏好模型（falcon.term）
+/// 对应 React 版的 lib/term.ts：终端偏好模型（falcon.term）
 pub mod term;
-/// 对应 web 的 lib/shortcuts.ts：快捷键定义表
+/// 对应 React 版的 lib/shortcuts.ts：快捷键定义表
 pub mod shortcuts;
 /// 对应 packages/shared/src/ttlCache.ts：TTL + in-flight 合并缓存
 pub mod ttl_cache;
 /// 原生要 `Send`、浏览器不要的那层约束（MaybeSend / MaybeBoxFuture）
 pub mod maybe_send;
-/// 对应 web 的 lib/meegleCache.ts：飞书项目面板缓存
+/// 对应 React 版的 lib/meegleCache.ts：飞书项目面板缓存
 pub mod meegle_cache;
-/// 对应 web 的 lib/meegleContext.ts：复制给 AI 的工作项上下文
+/// 对应 React 版的 lib/meegleContext.ts：复制给 AI 的工作项上下文
 pub mod meegle_context;
-/// 对应 web 的 lib/meegleDrag.ts：拖工作项的载荷
+/// 对应 React 版的 lib/meegleDrag.ts：拖工作项的载荷
 pub mod meegle_drag;
-/// 对应 web 的 lib/meegleDrill.ts：面板内下钻栈
+/// 对应 React 版的 lib/meegleDrill.ts：面板内下钻栈
 pub mod meegle_drill;
-/// 对应 web 的 lib/meegleGroups.ts：分组、本地翻页、过滤
+/// 对应 React 版的 lib/meegleGroups.ts：分组、本地翻页、过滤
 pub mod meegle_groups;
-/// 对应 web 的 lib/meegleKey.ts：工作项显示编号
+/// 对应 React 版的 lib/meegleKey.ts：工作项显示编号
 pub mod meegle_key;
-/// 对应 web 的 store.ts 里的纯逻辑：falcon.workspace 的形状与清洗、selector、状态迁移
+/// 对应 React 版的 store.ts 里的纯逻辑：falcon.workspace 的形状与清洗、selector、状态迁移
 pub mod workspace;
 
 /// 已安装本机服务的启动参数：升级时原样带上、"本机"配置按它的端口连

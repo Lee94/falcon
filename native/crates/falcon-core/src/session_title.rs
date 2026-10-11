@@ -1,8 +1,8 @@
-//! 会话在界面上显示成什么。对应 web 的 `lib/sessionTitle.ts`。
+//! 会话在界面上显示成什么。对应旧 React 版的 `lib/sessionTitle.ts`。
 //!
-//! 侧栏、命令面板、会话总览、各种确认框必须叫同一个名字——现在还要与 web 叫同一个
-//! 名字（设计文档 §4.3，`tests/vectors/sessionTitle.json` 兜住）。窗口标题栏例外：它右边
-//! 就是完整工作目录，没标题时那一格空着，别编占位名填进去。
+//! 侧栏、命令面板、会话总览、各种确认框必须叫同一个名字；规则沿用 React 版（设计文档
+//! §4.3，`tests/vectors/sessionTitle.json` 兜住）。窗口标题栏例外：它右边就是完整工作
+//! 目录，没标题时那一格空着，别编占位名填进去。
 
 use falcon_proto::{Project, Session, SessionAgent};
 
@@ -101,7 +101,7 @@ mod tests {
     fn agent_falls_back_to_its_wire_literal() {
         assert_eq!(title_of("", None, Some(SessionAgent::Grok)).as_deref(), Some("grok"));
         // 已知出入：新服务端的 agent（比如 "gemini"）在 falcon-proto 里落成 Unknown，
-        // 原值已丢，这里只能叫 "unknown"；web 会原样显示 "gemini"
+        // 原值已丢，这里只能叫 "unknown"；React 版会原样显示 "gemini"
         assert_eq!(title_of("", None, Some(SessionAgent::Unknown)).as_deref(), Some("unknown"));
     }
 }

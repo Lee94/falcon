@@ -328,8 +328,8 @@ fn hex_byte(b: &[u8], at: usize) -> Option<u8> {
 /// 2. 三级：一级全同时小写排在大写前面（`a.ts` < `A.ts`）；
 /// 3. 还分不出来按码位。
 ///
-/// 已知对不上的：汉字（web 在中文环境下是拼音序，这里是码位序）、带重音的拉丁字母
-/// （ICU 把 é 当 e 的二级差异，这里当"其它字符"）。纯 ASCII 的路径与 web 一致。
+/// 已知对不上的：汉字（React 版在中文环境下是拼音序，这里是码位序）、带重音的拉丁字母
+/// （ICU 把 é 当 e 的二级差异，这里当"其它字符"）。纯 ASCII 的路径与 React 版排出来的一样。
 pub(crate) fn locale_compare(a: &str, b: &str) -> Ordering {
     let primary = |s: &str| s.chars().map(primary_weight).collect::<Vec<_>>();
     primary(a)
@@ -370,8 +370,8 @@ fn primary_weight(c: char) -> (u8, u32) {
 
 /// f64 按 JS `JSON.stringify` 的样子写：整数不带 `.0`。
 ///
-/// 不是为了能解析（`320` 与 `320.0` 解出来一样），是为了原生与 web 落盘的 JSON 逐字
-/// 可比——排查时直接 diff 两份偏好文件。
+/// 不是为了能解析（`320` 与 `320.0` 解出来一样），是为了与 React 版落盘的 JSON 逐字
+/// 可比——当初排查时直接 diff 原生的偏好文件与浏览器里存的那份。
 pub(crate) mod js_num {
     use serde::{Deserialize, Deserializer, Serializer};
 

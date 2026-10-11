@@ -1,4 +1,4 @@
-//! 「服务器 → 文件夹 → 检出」的分组视图模型。对应 web 的 `lib/projectTree.ts`。
+//! 「服务器 → 文件夹 → 检出」的分组视图模型。对应旧 React 版的 `lib/projectTree.ts`。
 //!
 //! 侧栏与切换面板共用：两边必须看到同一棵树，分组规则只能有一份。纯函数，零 I/O。
 //! 这里的"服务器"是 SSH Host 分组（本机 / 已保存主机 / 没绑主机的存量 SSH），
@@ -11,7 +11,7 @@ use falcon_proto::{Project, ProjectType, SshHost};
 use crate::host_color::{HostBar, host_bar_from_ssh, ssh_bar, ssh_conn};
 
 /// 源项目工作区当前 HEAD，侧栏在没有 worktree 时用分支名代表默认仓库
-/// （web 的 `store.ts` 里的 `ProjectHead`）
+/// （React 版 `store.ts` 里的 `ProjectHead`）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectHead {
     pub branch: Option<String>,
@@ -29,7 +29,7 @@ pub enum ServerKind {
 }
 
 impl ServerKind {
-    /// web 里的字面量（`"local" | "host" | "legacy"`）
+    /// React 版里的字面量（`"local" | "host" | "legacy"`）
     pub fn as_str(self) -> &'static str {
         match self {
             ServerKind::Local => "local",
@@ -47,7 +47,7 @@ pub struct ServerGroup {
     pub kind: ServerKind,
     pub name: String,
     pub conn: Option<String>,
-    /// 身份色条；web 是 CSS 字符串，这里是结构化的（见 [`crate::host_color`]）
+    /// 身份色条；React 版是 CSS 字符串，这里是结构化的（见 [`crate::host_color`]）
     pub bar: Option<HostBar>,
     pub host: Option<SshHost>,
     pub folders: Vec<FolderGroup>,

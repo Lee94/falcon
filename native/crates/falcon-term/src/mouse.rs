@@ -1,9 +1,9 @@
 //! 鼠标按键上报：鼠标事件 → 发给程序的 VT 报文。`packages/web/src/lib/rio/mouse.ts` 的移植，
 //! 纯函数、零 GPUI。
 //!
-//! 为什么不抄 Zed 的 `mappings/mouse.rs`：web 的两个终端引擎（xterm / rio）已经按 xterm.js
-//! 的口径（MouseStateService 的协议筛选 / 编码 + MouseService 的移动去重）对齐过，原生客户端
-//! 与它们发出同样的字节，排查时才能互相对照。协议与编码从 [`crate::modes::TermModeTracker`]
+//! 为什么不抄 Zed 的 `mappings/mouse.rs`：旧 React 版的两个终端引擎（xterm / rio，已删）按
+//! xterm.js 的口径（MouseStateService 的协议筛选 / 编码 + MouseService 的移动去重）对齐过，
+//! 这里照搬那套口径，发出的字节与 xterm.js 一致。协议与编码从 [`crate::modes::TermModeTracker`]
 //! 读——alacritty 的 TermMode 分不出 ?9 也不认 ?1016。
 //!
 //! - 协议决定哪些事件出门：?9 只报按下且抹掉修饰键；?1000 报按下 / 松开；?1002 再加按住时的

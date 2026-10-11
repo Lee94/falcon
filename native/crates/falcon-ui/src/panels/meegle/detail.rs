@@ -1,4 +1,4 @@
-//! 工作项详情页（web 的 `ItemDetail`）：状态 / 优先级 / 编号药丸、基本字段、描述、角色，
+//! 工作项详情页（旧 React 版的 `ItemDetail`）：状态 / 优先级 / 编号药丸、基本字段、描述、角色，
 //! 底部一键跳去飞书。编号旁的抓手可拖到侧栏源项目上预填派生表单，右键复制 Key / 上下文。
 //!
 //! 描述是飞书富文本编辑器导出的 Markdown 方言；面板窄，按纯文本保留换行就够看个大概
@@ -101,7 +101,7 @@ fn text_or_empty(s: String) -> String {
     if s.is_empty() { t!("meegle.d_empty").to_string() } else { s }
 }
 
-/// 标签列按最宽的那个量（web 是 `grid-cols-[auto_minmax(0,1fr)]`）：中文 12px 一个字 12px
+/// 标签列按最宽的那个量（React 版是 `grid-cols-[auto_minmax(0,1fr)]`）：中文 12px 一个字 12px
 fn label_width(labels: &[String]) -> f32 {
     labels.iter().map(|l| l.chars().map(|c| if c.is_ascii() { 7.5 } else { 12. }).sum::<f32>()).fold(0., f32::max).ceil() + 2.
 }
@@ -120,7 +120,7 @@ impl ItemDetail {
         if let Some(p) = d.priority.as_ref().filter(|s| !s.is_empty()) {
             pills = pills.child(pill(p.clone(), false, cx));
         }
-        // 正文要能读，所以只让编号旁的抓手可拖（web 同理：整块详情不设 draggable）
+        // 正文要能读，所以只让编号旁的抓手可拖（沿用 React 版：整块详情不设 draggable）
         let tip: SharedString = t!("meegle.dragHint").to_string().into();
         let grip = div()
             .id("meegle-detail-grip")
@@ -149,7 +149,7 @@ impl ItemDetail {
             labels.push(t!("meegle.d_operators").to_string());
         }
         let w = label_width(&labels);
-        // 人名之间的顿号（web 是 `join("、")`）
+        // 人名之间的顿号（React 版是 `join("、")`）
         let sep = t!("native.meegle.listSep").to_string();
         let join = |parts: [Option<String>; 2]| parts.into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
 

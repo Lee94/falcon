@@ -15,7 +15,8 @@ pub const MEEGLE_HOSTS: [&str; 2] = ["project.feishu.cn", "meegle.com"];
 
 /// Meegle 标识符（空间 key、类型 key、视图 id）的边界：`^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$`。
 ///
-/// CLI / REST / 浏览器拖放共用同一套边界，避免某一层静默拒绝合法工作项。
+/// CLI / REST / 界面拖放（falcon-core 的 `meegle_drag`）共用同一套边界，避免某一层
+/// 静默拒绝合法工作项。
 pub fn is_valid_meegle_key(value: &str) -> bool {
     let b = value.as_bytes();
     let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';

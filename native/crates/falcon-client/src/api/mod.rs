@@ -1,4 +1,4 @@
-//! REST 方法，按功能域分文件，与 `packages/web/src/api.ts` 逐条对应（名字是它的
+//! REST 方法，按功能域分文件，与旧 React 版的 `packages/web/src/api.ts` 逐条对应（名字是它的
 //! snake_case）。路径、方法、query、请求体以服务端 `packages/server/src/routes.ts`
 //! （飞书项目在 `meegle/routes.ts`）为准，api.ts 有遗漏的地方照服务端补。
 //!
@@ -34,7 +34,7 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
 
 /// 路径里的一段，照 `encodeURIComponent` 编码。
 ///
-/// web 只给飞书项目的 key 编了码，项目 / 会话 id 直接拼——它们是 UUID，编不编码
+/// React 版只给飞书项目的 key 编了码，项目 / 会话 id 直接拼——它们是 UUID，编不编码
 /// 一个样。这里一律编：`/` 出现在段里时必须编掉，否则就换了一条路由。
 pub(crate) fn seg(s: &str) -> String {
     utf8_percent_encode(s, COMPONENT).to_string()
@@ -66,7 +66,7 @@ impl Query {
         }
     }
 
-    /// 有值且非空才带：对应 web 里 `if (x) q.set(...)` 这种按真值判断的写法。
+    /// 有值且非空才带：对应 React 版里 `if (x) q.set(...)` 这种按真值判断的写法。
     pub(crate) fn nonempty(self, key: &str, value: Option<&str>) -> Self {
         match value {
             Some(v) if !v.is_empty() => self.push(key, v),
