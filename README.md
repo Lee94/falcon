@@ -117,7 +117,7 @@ cargo xtask pkg --skip-bin     # 只用已有的 release/falcon-v*-darwin-*
 
 要 macOS 自带的 pkgbuild / iconutil / codesign，外加 `brew install librsvg`（rsvg-convert 现画 AppIcon）。
 
-产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。这台已经用 `--port 6789` / `~/.mojito` 跑着的不要拿它覆盖，会把服务改回默认端口。
+产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，系统设置里「仍要打开」即可。已经装过服务的机器可以直接拿它升级：postinstall 与 App 启动时都会先从 LaunchAgent 读出原来的 `--host` / `--port` / `--data-dir` 再 `service install`（`service-args.sh`），自定义端口与数据目录照旧。注意装着的 Falcon.app 每次启动都会用它自带的服务端重装服务，只换服务端二进制、不换 App 的话，下次打开旧 App 服务就被换回旧版。
 
 Windows 只能打原生客户端的安装包（服务端不支持 Windows，装好后在客户端里连别处的 falcon 服务）：
 
