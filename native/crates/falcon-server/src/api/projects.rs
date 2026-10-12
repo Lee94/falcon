@@ -264,12 +264,14 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
         // 不用改），代价就是这条手动传播。本地项目没有可传播的东西。
         state.db.update_children_ssh(&row.id, &row);
     }
-    // px0 开的是旧目录 / 旧 shell / 旧主机：停掉，下次打开按新配置起。只改名不打扰
+    // px0 开的是旧目录 / 旧 shell / 旧主机：停掉，下次打开按新配置起。只改名不打扰。
+    // 多仓库项目的 px0 按成员序号起（ADR 0017 决定九），成员一改序号就可能指到别的仓库了
     let stop_px0 = row.working_dir != existing.working_dir
         || row.shell != existing.shell
         || row.ssh_host != existing.ssh_host
         || row.ssh_port != existing.ssh_port
-        || row.ssh_username != existing.ssh_username;
+        || row.ssh_username != existing.ssh_username
+        || Db::parse_multi_repos(row.multi_repos.as_deref()) != Db::parse_multi_repos(existing.multi_repos.as_deref());
     let refreshed = row.clone();
     state.engine.send(move |engine| {
         let id = refreshed.id.clone();

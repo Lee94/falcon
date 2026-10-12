@@ -185,7 +185,6 @@ fn escape_html(s: &str) -> String {
 /// 文案写死中文：这一页由服务端直接吐出、不经客户端的 i18n，与服务端的错误文案同一口径。
 /// 颜色只用系统色（Canvas / CanvasText），跟着系统明暗走——这里拿不到 falcon 的主题。
 pub fn px0_status_page(state: &Px0PageState, base_path: &str, project_name: &str) -> String {
-    let title = escape_html(&format!("px0 · {project_name}"));
     let home = escape_html(base_path);
     let refresh = match state {
         Px0PageState::Starting { .. } => format!("<meta http-equiv=\"refresh\" content=\"1;url={home}\">"),
@@ -201,6 +200,47 @@ pub fn px0_status_page(state: &Px0PageState, base_path: &str, project_name: &str
             escape_html(message)
         ),
     };
+    page_html(project_name, &refresh, &body)
+}
+
+/// 选成员页上的一项
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Px0MemberLink {
+    /// 该成员的 px0 前缀（`/px0/<项目 id>/<序号>/`）
+    pub href: String,
+    /// 成员路径原文
+    pub dir: String,
+}
+
+/// 成员的显示名：路径最后一段。宿主机是 POSIX 还是 Windows 这里不知道（SSH 要连上才知道），
+/// 两种分隔符都认——只拿来给人看。取不出来（`/`）就用整条路径，链接不能是空的
+pub fn member_label(dir: &str) -> &str {
+    let dir = js::trim(dir);
+    dir.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(dir)
+}
+
+/// 多仓库项目的 px0 入口：px0 一次只看一个仓库（ADR 0017 决定九），列出成员让用户挑。
+/// 文案与配色的口径同 [`px0_status_page`]
+pub fn px0_member_page(project_name: &str, members: &[Px0MemberLink]) -> String {
+    let items: String = members
+        .iter()
+        .map(|m| {
+            format!(
+                "<li><a href=\"{}\">{}</a><span class=\"dir\">{}</span></li>",
+                escape_html(&m.href),
+                escape_html(member_label(&m.dir)),
+                escape_html(js::trim(&m.dir))
+            )
+        })
+        .collect();
+    let body = format!(
+        "<p class=\"lead\">选一个仓库用 px0 打开</p><p class=\"hint\">px0 一次只看一个仓库，多仓库项目按成员各开一个。</p><ul>{items}</ul>"
+    );
+    page_html(project_name, "", &body)
+}
+
+fn page_html(project_name: &str, head_extra: &str, body: &str) -> String {
+    let title = escape_html(&format!("px0 · {project_name}"));
     let title_line = format!("<title>{title}</title>");
     let body_line = format!("<body><main>{body}</main></body>");
     [
@@ -209,7 +249,7 @@ pub fn px0_status_page(state: &Px0PageState, base_path: &str, project_name: &str
         "<head>",
         "<meta charset=\"utf-8\">",
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
-        &refresh,
+        head_extra,
         &title_line,
         "<style>",
         ":root{color-scheme:light dark}",
@@ -220,6 +260,9 @@ pub fn px0_status_page(state: &Px0PageState, base_path: &str, project_name: &str
         ".hint{opacity:.6;margin:0}",
         "pre{white-space:pre-wrap;word-break:break-all;opacity:.8}",
         "a{color:LinkText}",
+        "ul{list-style:none;padding:0;margin:16px 0 0}",
+        "li{margin:0 0 10px}",
+        ".dir{display:block;opacity:.6;word-break:break-all}",
         "</style>",
         "</head>",
         &body_line,
@@ -396,6 +439,30 @@ mod tests {
     }
 
     // ---- 以下是 Rust 侧补的 ----
+
+    #[test]
+    fn member_page_lists_members_by_last_segment_and_escapes() {
+        let html = px0_member_page(
+            "九数云",
+            &[
+                Px0MemberLink { href: "/px0/p1/0/".into(), dir: "/home/fay/Code/fx-data-web".into() },
+                Px0MemberLink { href: "/px0/p1/1/".into(), dir: "~/a<b>/".into() },
+            ],
+        );
+        assert!(html.contains("<title>px0 · 九数云</title>"));
+        assert!(html.contains(r#"<a href="/px0/p1/0/">fx-data-web</a><span class="dir">/home/fay/Code/fx-data-web</span>"#));
+        assert!(html.contains(r#"<a href="/px0/p1/1/">a&lt;b&gt;</a>"#));
+        assert!(!html.contains(r#"http-equiv="refresh""#));
+    }
+
+    #[test]
+    fn member_label_takes_the_last_segment_of_either_kind() {
+        assert_eq!(member_label("/home/fay/Code/web"), "web");
+        assert_eq!(member_label(" /srv/api/ "), "api");
+        assert_eq!(member_label(r"C:\work\svc"), "svc");
+        assert_eq!(member_label("~"), "~");
+        assert_eq!(member_label("/"), "/");
+    }
 
     #[test]
     fn origin_compare_follows_url_host_rules() {

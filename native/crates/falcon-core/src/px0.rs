@@ -6,9 +6,16 @@
 
 use crate::js::encode_uri_component;
 
-/// `/px0/<项目 id>/`。服务端起 px0 时的 `-base-path`、反代路由、客户端菜单里开的地址都是它
+/// `/px0/<项目 id>/`。服务端起 px0 时的 `-base-path`、反代路由、客户端菜单里开的地址都是它。
+///
+/// 多仓库项目在这里是选成员的页面，px0 按成员各起一个，挂在 [`px0_member_base_path`]
 pub fn px0_base_path(project_id: &str) -> String {
     format!("/px0/{}/", encode_uri_component(project_id))
+}
+
+/// `/px0/<项目 id>/<成员序号>/`：多仓库项目某个成员仓库的 px0。序号是 `multi.repos` 的下标
+pub fn px0_member_base_path(project_id: &str, member: usize) -> String {
+    format!("{}{member}/", px0_base_path(project_id))
 }
 
 /// 登录后回跳的地址：页面查询串（`location.search`，带不带 `?` 都行）里的 `next`。
@@ -70,6 +77,7 @@ mod tests {
     fn matches_shared_px0_base_path() {
         assert_eq!(px0_base_path("d7697ab3-292d-4ef9-a8de-b10c4ebd962a"), "/px0/d7697ab3-292d-4ef9-a8de-b10c4ebd962a/");
         assert_eq!(px0_base_path("a/b c"), "/px0/a%2Fb%20c/");
+        assert_eq!(px0_member_base_path("a/b c", 3), "/px0/a%2Fb%20c/3/");
     }
 
     // 以下两条移植自 React 版的 lib/loginNext.test.ts

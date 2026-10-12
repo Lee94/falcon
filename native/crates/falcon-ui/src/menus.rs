@@ -352,8 +352,10 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
     let mut items = new_session_items(ws, &project.id, None);
     // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器——不嵌进
     // WebView，那得把登录 cookie 塞给它。浏览器没登录过时服务端会送去登录再回来。
-    // 没有工作目录（多仓库容器、未填目录的 SSH 项目）就没有东西可看，不给入口
-    if project.working_dir.as_deref().is_some_and(|d| !d.trim().is_empty()) {
+    // 多仓库项目看的是成员仓库（有没有工作目录都一样），服务端在入口页上让用户挑成员
+    // （决定九）；普通项目没有工作目录（未填目录的 SSH 项目）就没有东西可看，不给入口
+    let has_multi = project.multi.as_ref().is_some_and(|m| !m.repos.is_empty());
+    if has_multi || project.working_dir.as_deref().is_some_and(|d| !d.trim().is_empty()) {
         let url = format!(
             "{}{}",
             w.client.base_url().trim_end_matches('/'),

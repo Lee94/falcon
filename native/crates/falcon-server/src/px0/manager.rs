@@ -1,7 +1,8 @@
 //! 移植自 `packages/server/src/px0/manager.ts`。TS 没有它的单测；文件末的用例是 Rust 侧补的
 //! （本地项目，用临时目录里的假 px0 脚本跑真 pty；SSH 那条要真远端，没有自动化）。
 //!
-//! px0 实例的生命周期（ADR 0017 决定三、五、六）。一个项目最多一个实例，只在内存里。
+//! px0 实例的生命周期（ADR 0017 决定三、五、六）。实例只在内存里，按 [`Px0Key`] 记：普通项目
+//! 最多一个，多仓库项目每个成员仓库最多一个（决定九）。
 //!
 //! 两边都让 px0 挂在一个 pty 上，靠挂断收尸：px0 没有鉴权，一个没人管的孤儿就是
 //! 一个谁都能读仓库的服务，而 falcon 被 kill -9、崩溃、断网时我们没有机会去杀它。
@@ -41,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use falcon_core::px0::px0_base_path;
+use falcon_core::px0::{px0_base_path, px0_member_base_path};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use russh::client::Msg;
 use russh::{ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Sig};
@@ -55,7 +56,7 @@ use super::command::{
     remote_px0_path, tail_lines,
 };
 use super::proxy::{Px0PageState, Px0Stage};
-use crate::db::ProjectRow;
+use crate::db::{Db, ProjectRow};
 use crate::exec::{Exec as _, Utf8Decoder};
 use crate::sessions::local::{BaseEnvFn, local_base_env_fn};
 use crate::sessions::ssh::SshLink;
@@ -102,6 +103,46 @@ impl Usage {
     }
 }
 
+/// 一个 px0 实例看的范围（ADR 0017 决定九）。普通项目是整个工作目录；多仓库项目按成员仓库
+/// 各起一个——px0 只认一个仓库，指着装了几个仓库的父目录时它报 `git: false`，没有 diff 可看
+/// （0.1.16 实测），而多仓库项目本身（容器的虚拟目录、派生的集中目录）都不是仓库
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Px0Key {
+    pub project_id: String,
+    /// 多仓库项目的成员序号（`multi_repos` 的下标）
+    pub member: Option<usize>,
+}
+
+impl Px0Key {
+    pub fn project(project_id: &str) -> Self {
+        Px0Key { project_id: project_id.to_string(), member: None }
+    }
+
+    pub fn member(project_id: &str, member: usize) -> Self {
+        Px0Key { project_id: project_id.to_string(), member: Some(member) }
+    }
+
+    /// px0 的 `-base-path`，也是反代认它的前缀
+    pub fn base_path(&self) -> String {
+        match self.member {
+            None => px0_base_path(&self.project_id),
+            Some(i) => px0_member_base_path(&self.project_id, i),
+        }
+    }
+}
+
+/// 这个实例要看的目录：普通项目是工作目录，多仓库项目是那个成员仓库（原文，SSH 上可以是 `~/x`）
+fn site_dir(row: &ProjectRow, key: &Px0Key) -> Result<String, String> {
+    let non_empty = |d: &str| Some(js::trim(d).to_string()).filter(|d| !d.is_empty());
+    match key.member {
+        None => row.working_dir.as_deref().and_then(non_empty).ok_or_else(|| "这个项目没有工作目录。".to_string()),
+        Some(i) => Db::parse_multi_repos(row.multi_repos.as_deref())
+            .and_then(|members| members.into_iter().nth(i))
+            .and_then(|m| non_empty(&m.dir))
+            .ok_or_else(|| "这个多仓库项目里没有这个成员（成员可能刚改过），请回到上一级重新选。".to_string()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Upstream {
     /// 后端本机 127.0.0.1 上的端口
@@ -113,15 +154,15 @@ enum Upstream {
 /// 一次反代请求对某个跑着的 px0 的占用（TS 的 `acquire` / `release` 那一对）。
 /// 丢掉即 release：响应写完、客户端断开都会走到这里。`Send`，可以跟着响应体走
 pub struct Px0Lease {
-    project_id: String,
+    key: Px0Key,
     instance: u64,
     upstream: Upstream,
     usage: Arc<Usage>,
 }
 
 impl Px0Lease {
-    pub fn project_id(&self) -> &str {
-        &self.project_id
+    pub fn key(&self) -> &Px0Key {
+        &self.key
     }
 
     /// 本地实例的监听地址：反代可以在任何线程上直接连，不必回 LocalSet。远端实例为 None
@@ -165,7 +206,7 @@ enum Proc {
 
 /// 一个跑着的 px0
 struct Live {
-    project_id: String,
+    key: Px0Key,
     /// 实例编号：租约认它，同一项目停了再起的是另一个实例
     id: u64,
     upstream: Upstream,
@@ -229,9 +270,9 @@ pub struct Px0Manager {
     data_dir: PathBuf,
     link_for: Rc<dyn Fn(&ProjectRow) -> Rc<SshLink>>,
     opts: Px0Options,
-    live: RefCell<HashMap<String, Rc<Live>>>,
-    starting: RefCell<HashMap<String, Rc<Starting>>>,
-    errors: RefCell<HashMap<String, ErrorEntry>>,
+    live: RefCell<HashMap<Px0Key, Rc<Live>>>,
+    starting: RefCell<HashMap<Px0Key, Rc<Starting>>>,
+    errors: RefCell<HashMap<Px0Key, ErrorEntry>>,
     sweeper: RefCell<Option<tokio::task::JoinHandle<()>>>,
     next_id: Cell<u64>,
     me: Weak<Px0Manager>,
@@ -263,54 +304,55 @@ impl Px0Manager {
     }
 
     /// 入口页调用。跑着就返回 None（调用方直接反代）；否则按需拉起，返回该给用户看的
-    /// 页面状态。retry：用户点了重试，无视还没过期的失败。
-    pub fn open(&self, row: &ProjectRow, retry: bool) -> Option<Px0PageState> {
-        if self.live.borrow().contains_key(&row.id) {
+    /// 页面状态。`row` 是 `key` 所属的项目；retry：用户点了重试，无视还没过期的失败。
+    pub fn open(&self, key: &Px0Key, row: &ProjectRow, retry: bool) -> Option<Px0PageState> {
+        debug_assert_eq!(key.project_id, row.id);
+        if self.live.borrow().contains_key(key) {
             return None;
         }
-        if let Some(st) = self.starting.borrow().get(&row.id) {
+        if let Some(st) = self.starting.borrow().get(key) {
             return Some(Px0PageState::Starting { stage: st.stage.get() });
         }
-        if let Some(err) = self.errors.borrow().get(&row.id)
+        if let Some(err) = self.errors.borrow().get(key)
             && !retry
             && err.at.elapsed() < ERROR_TTL
         {
             return Some(Px0PageState::Error { message: err.message.clone() });
         }
-        self.errors.borrow_mut().remove(&row.id);
+        self.errors.borrow_mut().remove(key);
         self.ensure_sweeper();
 
         let state = Rc::new(Starting { stage: Cell::new(Px0Stage::Preparing), cancelled: Cell::new(false) });
         // TS 的 startNow 在第一个 await 之前就把本地项目的阶段定了（下载 / 启动），入口页第一眼
         // 看到的就是它；spawn_local 要等下一轮才跑，这里先照样定好
-        if row.project_type == "local" && row.working_dir.as_deref().map(js::trim).is_some_and(|d| !d.is_empty()) {
+        if row.project_type == "local" && site_dir(row, key).is_ok() {
             state.stage.set(self.local_stage());
         }
-        self.starting.borrow_mut().insert(row.id.clone(), state.clone());
+        self.starting.borrow_mut().insert(key.clone(), state.clone());
         let me = self.rc();
-        let row = row.clone();
+        let (key, row) = (key.clone(), row.clone());
         let st = state.clone();
         tokio::task::spawn_local(async move {
-            if let Err(StartError::Failed(message)) = me.start_now(&row, &st).await
+            if let Err(StartError::Failed(message)) = me.start_now(&key, &row, &st).await
                 && !st.cancelled.get()
             {
-                me.errors.borrow_mut().insert(row.id.clone(), ErrorEntry { message, at: Instant::now() });
+                me.errors.borrow_mut().insert(key.clone(), ErrorEntry { message, at: Instant::now() });
             }
             // finally：只清自己那条
             let mut starting = me.starting.borrow_mut();
-            if starting.get(&row.id).is_some_and(|s| Rc::ptr_eq(s, &st)) {
-                starting.remove(&row.id);
+            if starting.get(&key).is_some_and(|s| Rc::ptr_eq(s, &st)) {
+                starting.remove(&key);
             }
         });
         Some(Px0PageState::Starting { stage: state.stage.get() })
     }
 
     /// 反代每个请求开始时调用：跑着就记一次使用并交出租约，没跑返回 None
-    pub fn acquire(&self, project_id: &str) -> Option<Px0Lease> {
-        let live = self.live.borrow().get(project_id).cloned()?;
+    pub fn acquire(&self, key: &Px0Key) -> Option<Px0Lease> {
+        let live = self.live.borrow().get(key).cloned()?;
         live.usage.inflight.fetch_add(1, Ordering::SeqCst);
         live.usage.touch();
-        Some(Px0Lease { project_id: live.project_id.clone(), instance: live.id, upstream: live.upstream, usage: live.usage.clone() })
+        Some(Px0Lease { key: live.key.clone(), instance: live.id, upstream: live.upstream, usage: live.usage.clone() })
     }
 
     /// 给这次请求开一条到 px0 的新连接（每个请求一条，不进 keep-alive 池：远端的连接是
@@ -322,7 +364,7 @@ impl Px0Manager {
                 let link = self
                     .live
                     .borrow()
-                    .get(&lease.project_id)
+                    .get(&lease.key)
                     .filter(|l| l.id == lease.instance)
                     .and_then(|l| match &l.proc {
                         Proc::Remote(r) => Some(r.link.clone()),
@@ -337,13 +379,28 @@ impl Px0Manager {
         }
     }
 
-    /// 停掉某个项目的 px0（项目删了 / 工作目录改了 / 存档了）。没在跑也不报错
+    /// 停掉某个项目的 px0，多仓库项目连同各成员的（项目删了 / 工作目录或成员改了 / 存档了）。
+    /// 没在跑也不报错
     pub async fn stop(&self, project_id: &str) {
-        if let Some(st) = self.starting.borrow_mut().remove(project_id) {
-            st.cancelled.set(true);
-        }
-        self.errors.borrow_mut().remove(project_id);
-        let live = self.live.borrow_mut().remove(project_id);
+        self.starting.borrow_mut().retain(|key, st| {
+            let keep = key.project_id != project_id;
+            if !keep {
+                st.cancelled.set(true);
+            }
+            keep
+        });
+        self.errors.borrow_mut().retain(|key, _| key.project_id != project_id);
+        let lives: Vec<Rc<Live>> = {
+            let mut live = self.live.borrow_mut();
+            let keys: Vec<Px0Key> = live.keys().filter(|k| k.project_id == project_id).cloned().collect();
+            keys.iter().filter_map(|k| live.remove(k)).collect()
+        };
+        futures::future::join_all(lives.iter().map(|l| teardown(l))).await;
+    }
+
+    /// 只停一个实例（空闲回收）：同一个多仓库项目里别的成员可能还开着
+    async fn stop_one(&self, key: &Px0Key) {
+        let live = self.live.borrow_mut().remove(key);
         if let Some(live) = live {
             teardown(&live).await;
         }
@@ -381,23 +438,20 @@ impl Px0Manager {
     }
 
     fn sweep(&self, now: Instant) {
-        let idle: Vec<String> =
-            self.live.borrow().iter().filter(|(_, l)| l.usage.idle_at(now)).map(|(id, _)| id.clone()).collect();
-        for id in idle {
+        let idle: Vec<Px0Key> =
+            self.live.borrow().iter().filter(|(_, l)| l.usage.idle_at(now)).map(|(key, _)| key.clone()).collect();
+        for key in idle {
             let me = self.rc();
-            tokio::task::spawn_local(async move { me.stop(&id).await });
+            tokio::task::spawn_local(async move { me.stop_one(&key).await });
         }
     }
 
-    async fn start_now(&self, row: &ProjectRow, state: &Starting) -> Result<(), StartError> {
-        let Some(dir) = row.working_dir.as_deref().map(js::trim).filter(|d| !d.is_empty()) else {
-            return Err("这个项目没有工作目录。多仓库容器请在成员或附属项目上打开 px0。".to_string().into());
-        };
-        let base_path = px0_base_path(&row.id);
+    async fn start_now(&self, key: &Px0Key, row: &ProjectRow, state: &Starting) -> Result<(), StartError> {
+        let dir = site_dir(row, key)?;
         let live = if row.project_type == "local" {
-            self.start_local(&row.id, dir, &base_path, state).await?
+            self.start_local(key, &dir, state).await?
         } else {
-            self.start_remote(row, dir, &base_path, state).await?
+            self.start_remote(key, row, &dir, state).await?
         };
         if state.cancelled.get() {
             teardown(&live).await;
@@ -407,7 +461,7 @@ impl Px0Manager {
         if live.dead.get() {
             return Ok(());
         }
-        self.live.borrow_mut().insert(row.id.clone(), live);
+        self.live.borrow_mut().insert(key.clone(), live);
         Ok(())
     }
 
@@ -423,7 +477,7 @@ impl Px0Manager {
         if present { Px0Stage::Launching } else { Px0Stage::Downloading }
     }
 
-    async fn start_local(&self, project_id: &str, dir: &str, base_path: &str, state: &Starting) -> Result<Rc<Live>, StartError> {
+    async fn start_local(&self, key: &Px0Key, dir: &str, state: &Starting) -> Result<Rc<Live>, StartError> {
         let env_bin = self.opts.local_bin.as_deref();
         state.stage.set(self.local_stage());
         let bin = ensure_local_px0(&self.data_dir, env_bin, &self.opts.download).await.map_err(|e| e.0)?;
@@ -432,7 +486,7 @@ impl Px0Manager {
         // 与 cloudflared 同一份基底环境：login shell 解析出来的 PATH，px0 才找得到 claude / gh
         let base = (self.opts.base_env)().await;
         check_cancelled(state)?;
-        let args = px0_args(&Px0ArgsInput { base_path: base_path.to_string(), dir: dir.to_string() });
+        let args = px0_args(&Px0ArgsInput { base_path: key.base_path(), dir: dir.to_string() });
         let (proc, events) = spawn_pty(&bin, &args, &base).map_err(|e| format!("px0 没能启动：{e:#}"))?;
 
         let log = Rc::new(RefCell::new(LogTail::default()));
@@ -449,7 +503,7 @@ impl Px0Manager {
             }
         };
         let live = Rc::new(Live {
-            project_id: project_id.to_string(),
+            key: key.clone(),
             id: self.next_instance(),
             upstream: Upstream::Local(port),
             usage: Arc::new(Usage::new()),
@@ -463,7 +517,7 @@ impl Px0Manager {
         Ok(live)
     }
 
-    async fn start_remote(&self, row: &ProjectRow, dir: &str, base_path: &str, state: &Starting) -> Result<Rc<Live>, StartError> {
+    async fn start_remote(&self, key: &Px0Key, row: &ProjectRow, dir: &str, state: &Starting) -> Result<Rc<Live>, StartError> {
         let link = (self.link_for)(row);
         let facts = link.host_facts().await.map_err(|e| e.message)?;
         check_cancelled(state)?;
@@ -496,7 +550,7 @@ impl Px0Manager {
 
         state.stage.set(Px0Stage::Launching);
         let shell = row.shell.as_deref().map(js::trim).filter(|s| !s.is_empty()).map_or_else(|| facts.shell.clone(), str::to_string);
-        let args = px0_args(&Px0ArgsInput { base_path: base_path.to_string(), dir: expand_home(dir, &facts.home) });
+        let args = px0_args(&Px0ArgsInput { base_path: key.base_path(), dir: expand_home(dir, &facts.home) });
         let channel = link.exec_stream(&posix_launch_command(&shell, &bin, &args), true).await.map_err(failed)?;
         let (read, write) = channel.split();
         let log = Rc::new(RefCell::new(LogTail::default()));
@@ -513,7 +567,7 @@ impl Px0Manager {
             }
         };
         let live = Rc::new(Live {
-            project_id: row.id.clone(),
+            key: key.clone(),
             id: self.next_instance(),
             upstream: Upstream::Remote(port),
             usage: Arc::new(Usage::new()),
@@ -546,8 +600,8 @@ impl Px0Manager {
         live.dead.set(true);
         {
             let mut map = self.live.borrow_mut();
-            if map.get(&live.project_id).is_some_and(|l| Rc::ptr_eq(l, live)) {
-                map.remove(&live.project_id);
+            if map.get(&live.key).is_some_and(|l| Rc::ptr_eq(l, live)) {
+                map.remove(&live.key);
             }
         }
         if live.stopping.get() {
@@ -556,7 +610,7 @@ impl Px0Manager {
         let tail = tail_lines(&live.log.borrow().text, None, None);
         let message =
             if tail.is_empty() { "px0 已退出（SSH 链路断开或进程被杀）".to_string() } else { format!("px0 已退出：\n{tail}") };
-        self.errors.borrow_mut().insert(live.project_id.clone(), ErrorEntry { message, at: Instant::now() });
+        self.errors.borrow_mut().insert(live.key.clone(), ErrorEntry { message, at: Instant::now() });
     }
 }
 
@@ -813,9 +867,13 @@ mod tests {
         }
     }
 
-    async fn settle(mgr: &Px0Manager, row: &ProjectRow) -> Option<Px0PageState> {
+    fn p1() -> Px0Key {
+        Px0Key::project("p1")
+    }
+
+    async fn settle(mgr: &Px0Manager, key: &Px0Key, row: &ProjectRow) -> Option<Px0PageState> {
         for _ in 0..400 {
-            match mgr.open(row, false) {
+            match mgr.open(key, row, false) {
                 Some(Px0PageState::Starting { .. }) => tokio::time::sleep(Duration::from_millis(25)).await,
                 other => return other,
             }
@@ -838,9 +896,9 @@ mod tests {
             let mgr = fake.manager();
             let row = project(fake.dir.path());
             // 本地项目、本机已有 px0：第一眼就是「正在启动」
-            assert_eq!(mgr.open(&row, false), Some(Px0PageState::Starting { stage: Px0Stage::Launching }));
-            assert!(mgr.acquire("p1").is_none());
-            assert_eq!(settle(&mgr, &row).await, None);
+            assert_eq!(mgr.open(&p1(), &row, false), Some(Px0PageState::Starting { stage: Px0Stage::Launching }));
+            assert!(mgr.acquire(&p1()).is_none());
+            assert_eq!(settle(&mgr, &p1(), &row).await, None);
 
             // 参数：固定 flag、base path、去掉首尾空白的工作目录；环境：pty、NO_COLOR、TERM=dumb
             let args: Vec<String> = fake.read("args").lines().map(str::to_string).collect();
@@ -854,12 +912,12 @@ mod tests {
             );
             let env = fake.read("env");
             assert!(env.contains("NO_COLOR=1") && env.contains("TERM=dumb"), "{env}");
-            let live = mgr.live.borrow().get("p1").cloned().unwrap();
+            let live = mgr.live.borrow().get(&p1()).cloned().unwrap();
             assert!(live.log.borrow().text.contains("tty=yes"), "px0 应当挂在 pty 上：{}", live.log.borrow().text);
 
             // 租约：本地实例可以直连，也可以经 connect
-            let lease = mgr.acquire("p1").unwrap();
-            assert_eq!(lease.project_id(), "p1");
+            let lease = mgr.acquire(&p1()).unwrap();
+            assert_eq!(lease.key(), &p1());
             assert_eq!(lease.local_addr(), Some(SocketAddr::from((Ipv4Addr::LOCALHOST, port))));
             let mut stream = mgr.connect(&lease).await.unwrap();
             let (mut accepted, _) = upstream.accept().await.unwrap();
@@ -879,12 +937,12 @@ mod tests {
             mgr.stop("p1").await;
             assert!(started.elapsed() < STOP_GRACE, "TERM 应当让它立刻退出");
             assert!(*live.exited.borrow());
-            assert!(mgr.acquire("p1").is_none());
+            assert!(mgr.acquire(&p1()).is_none());
             // 再打开是新的一次启动，不是错误页
-            assert_eq!(mgr.open(&row, false), Some(Px0PageState::Starting { stage: Px0Stage::Launching }));
-            assert_eq!(settle(&mgr, &row).await, None);
+            assert_eq!(mgr.open(&p1(), &row, false), Some(Px0PageState::Starting { stage: Px0Stage::Launching }));
+            assert_eq!(settle(&mgr, &p1(), &row).await, None);
             mgr.shutdown().await;
-            assert!(mgr.acquire("p1").is_none());
+            assert!(mgr.acquire(&p1()).is_none());
         })
         .await;
     }
@@ -895,12 +953,12 @@ mod tests {
             let fake = Fake::new("echo 'listen tcp: permission denied'\nexit 1");
             let mgr = fake.manager();
             let row = project(fake.dir.path());
-            let Some(Px0PageState::Error { message }) = settle(&mgr, &row).await else { panic!("应当是错误页") };
+            let Some(Px0PageState::Error { message }) = settle(&mgr, &p1(), &row).await else { panic!("应当是错误页") };
             assert_eq!(message, "px0 没能启动：\nlisten tcp: permission denied");
             // 一分钟内再打开还是这页；点重试才重新起
-            assert_eq!(mgr.open(&row, false), Some(Px0PageState::Error { message }));
-            assert!(matches!(mgr.open(&row, true), Some(Px0PageState::Starting { .. })));
-            assert!(matches!(settle(&mgr, &row).await, Some(Px0PageState::Error { .. })));
+            assert_eq!(mgr.open(&p1(), &row, false), Some(Px0PageState::Error { message }));
+            assert!(matches!(mgr.open(&p1(), &row, true), Some(Px0PageState::Starting { .. })));
+            assert!(matches!(settle(&mgr, &p1(), &row).await, Some(Px0PageState::Error { .. })));
         })
         .await;
     }
@@ -911,15 +969,15 @@ mod tests {
             let fake = Fake::new("echo 'url: http://127.0.0.1:9/px0/p1/'\nsleep 1\necho 'panic: boom'\nexit 2");
             let mgr = fake.manager();
             let row = project(fake.dir.path());
-            assert_eq!(settle(&mgr, &row).await, None);
+            assert_eq!(settle(&mgr, &p1(), &row).await, None);
             for _ in 0..200 {
-                if mgr.acquire("p1").is_none() {
+                if mgr.acquire(&p1()).is_none() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-            assert!(mgr.acquire("p1").is_none());
-            let Some(Px0PageState::Error { message }) = mgr.open(&row, false) else { panic!("应当是错误页") };
+            assert!(mgr.acquire(&p1()).is_none());
+            let Some(Px0PageState::Error { message }) = mgr.open(&p1(), &row, false) else { panic!("应当是错误页") };
             assert!(message.starts_with("px0 已退出：\n") && message.ends_with("panic: boom"), "{message}");
         })
         .await;
@@ -931,12 +989,12 @@ mod tests {
             let fake = Fake::new("sleep 1\necho 'url: http://127.0.0.1:9/px0/p1/'\nexec sleep 30");
             let mgr = fake.manager();
             let row = project(fake.dir.path());
-            assert!(matches!(mgr.open(&row, false), Some(Px0PageState::Starting { .. })));
+            assert!(matches!(mgr.open(&p1(), &row, false), Some(Px0PageState::Starting { .. })));
             tokio::time::sleep(Duration::from_millis(200)).await;
             mgr.stop("p1").await;
             // 启动跑完后发现被取消：拆掉、不登记、不记错误
             tokio::time::sleep(Duration::from_millis(1500)).await;
-            assert!(mgr.acquire("p1").is_none());
+            assert!(mgr.acquire(&p1()).is_none());
             assert!(mgr.errors.borrow().is_empty());
             assert!(mgr.live.borrow().is_empty() && mgr.starting.borrow().is_empty());
         })
@@ -949,29 +1007,80 @@ mod tests {
             let fake = Fake::new("echo 'url: http://localhost:9/px0/p1/'\nexec sleep 30");
             let mgr = fake.manager();
             let row = project(fake.dir.path());
-            assert_eq!(settle(&mgr, &row).await, None);
-            let live = mgr.live.borrow().get("p1").cloned().unwrap();
+            assert_eq!(settle(&mgr, &p1(), &row).await, None);
+            let live = mgr.live.borrow().get(&p1()).cloned().unwrap();
             mgr.sweep(Instant::now());
-            assert!(mgr.acquire("p1").is_some(), "还没空闲");
+            assert!(mgr.acquire(&p1()).is_some(), "还没空闲");
             mgr.sweep(Instant::now() + IDLE * 2);
             let _ = tokio::time::timeout(Duration::from_secs(5), live.exited.clone().wait_for(|e| *e)).await;
             assert!(*live.exited.borrow());
-            assert!(mgr.acquire("p1").is_none());
+            assert!(mgr.acquire(&p1()).is_none());
             // 空闲回收不是故障
             assert!(mgr.errors.borrow().is_empty());
 
-            // 没有工作目录（多仓库容器）
-            let mut container = row.clone();
-            container.id = "p2".into();
-            container.working_dir = Some("   ".into());
-            mgr.open(&container, false);
-            let Some(Px0PageState::Error { message }) = settle(&mgr, &container).await else { panic!("应当是错误页") };
-            assert_eq!(message, "这个项目没有工作目录。多仓库容器请在成员或附属项目上打开 px0。");
+            // 没有工作目录
+            let mut bare = row.clone();
+            bare.id = "p2".into();
+            bare.working_dir = Some("   ".into());
+            let p2 = Px0Key::project("p2");
+            mgr.open(&p2, &bare, false);
+            let Some(Px0PageState::Error { message }) = settle(&mgr, &p2, &bare).await else { panic!("应当是错误页") };
+            assert_eq!(message, "这个项目没有工作目录。");
+            // 多仓库项目的成员序号越界（成员刚被删掉）
+            bare.multi_repos = Some(r#"[{"dir":"/a"}]"#.into());
+            let gone = Px0Key::member("p2", 1);
+            let Some(Px0PageState::Error { message }) = settle(&mgr, &gone, &bare).await else { panic!("应当是错误页") };
+            assert!(message.contains("没有这个成员"), "{message}");
 
             // FALCON_PX0_BIN 指了不存在的文件
             let opts_mgr = fake.manager_with(Some("/nonexistent/falcon-test/px0".into()));
-            let Some(Px0PageState::Error { message }) = settle(&opts_mgr, &row).await else { panic!("应当是错误页") };
+            let Some(Px0PageState::Error { message }) = settle(&opts_mgr, &p1(), &row).await else { panic!("应当是错误页") };
             assert_eq!(message, "FALCON_PX0_BIN 指向的文件不存在：/nonexistent/falcon-test/px0");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multi_repo_members_get_their_own_instances_and_stop_together() {
+        local(async {
+            // 端口随便给（没人去连），只看起没起、各自的参数对不对
+            let fake = Fake::new("echo \"$@\" >> \"$(dirname \"$0\")/all-args\"\necho 'url: http://127.0.0.1:9/x/'\nexec sleep 30");
+            let mgr = fake.manager();
+            let a = fake.dir.path().join("a");
+            let b = fake.dir.path().join("b");
+            let row = ProjectRow {
+                id: "m1".into(),
+                name: "多仓库".into(),
+                project_type: "local".into(),
+                // 容器没有工作目录；成员前后的空白照样去掉
+                working_dir: None,
+                multi_repos: Some(serde_json::json!([{ "dir": a }, { "dir": format!(" {} ", b.display()) }]).to_string()),
+                ..Default::default()
+            };
+            let (k0, k1) = (Px0Key::member("m1", 0), Px0Key::member("m1", 1));
+            assert_eq!(settle(&mgr, &k0, &row).await, None);
+            assert_eq!(settle(&mgr, &k1, &row).await, None);
+            assert!(mgr.acquire(&Px0Key::project("m1")).is_none(), "多仓库项目本身不起 px0");
+            let lines: Vec<String> = fake.read("all-args").lines().map(str::to_string).collect();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert!(lines[0].ends_with(&format!("-base-path /px0/m1/0/ {}", a.display())), "{}", lines[0]);
+            assert!(lines[1].ends_with(&format!("-base-path /px0/m1/1/ {}", b.display())), "{}", lines[1]);
+            let (l0, l1) = (mgr.live.borrow().get(&k0).cloned().unwrap(), mgr.live.borrow().get(&k1).cloned().unwrap());
+
+            // 空闲回收按实例算：只停闲着的那个
+            let hold = mgr.acquire(&k0).unwrap();
+            mgr.sweep(Instant::now() + IDLE * 2);
+            let _ = tokio::time::timeout(Duration::from_secs(5), l1.exited.clone().wait_for(|e| *e)).await;
+            assert!(mgr.acquire(&k1).is_none());
+            assert!(mgr.acquire(&k0).is_some());
+            drop(hold);
+
+            // 项目级的 stop 连同各成员一起停
+            assert_eq!(settle(&mgr, &k1, &row).await, None);
+            mgr.stop("m1").await;
+            assert!(*l0.exited.borrow());
+            assert!(mgr.acquire(&k0).is_none() && mgr.acquire(&k1).is_none());
+            assert!(mgr.live.borrow().is_empty());
         })
         .await;
     }
