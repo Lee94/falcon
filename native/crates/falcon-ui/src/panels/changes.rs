@@ -488,7 +488,19 @@ impl Render for ChangesPanel {
         if let Some(sel) = common::multi_repo_select("changes", &self.ws, project.as_ref(), cx) {
             header = header.child(sel);
         }
-        header = header.child(file_view_toggle("changes", cx)).child(
+        header = header.child(file_view_toggle("changes", cx));
+        // px0 审阅（ADR 0017）：看改动看到一半想跳定义、给 agent 回话，就在这里接着去。多仓库
+        // 项目直接进上面选着的那个成员；与项目菜单那一项一样交给系统浏览器
+        let px0_url = project.as_ref().and_then(|p| falcon_core::px0::px0_review_path(p, self.repo().as_deref())).map(
+            |path| format!("{}{path}", self.ws.read(cx).client.base_url().trim_end_matches('/')),
+        );
+        if let Some(url) = px0_url {
+            header = header.child(
+                tool_button("changes-px0", IconName::ExternalLink, t!("project.px0Review").to_string(), false, cx)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
+        header = header.child(
             tool_button(
                 "changes-refresh",
                 IconName::RefreshCw,
