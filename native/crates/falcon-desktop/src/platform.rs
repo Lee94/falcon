@@ -1,14 +1,14 @@
 //! falcon-platform 的原生实现。
 //!
-//! 数据目录：`~/Library/Application Support/Falcon/`（`FALCON_NATIVE_DATA_DIR` 可改指临时目录，
+//! 数据目录：`~/Library/Application Support/com.falcon.Falcon/`（`FALCON_NATIVE_DATA_DIR` 可改指临时目录，
 //! 测试 / 自动化验证时别动用户真实的偏好与工作区）：
 //!
 //! - `prefs.json`：旧 React 版（现在是浏览器版）存在 localStorage 里的那些键，形状逐字一致；
 //! - `profiles.json`：服务端配置表与上次连上的那台；
 //! - `servers/<配置 id>/workspace.json`：按服务端配置分开存的工作区。
 //!
-//! 写入一律走"临时文件 + 改名"，写到一半崩了不会留下半截 JSON。访问密码进登录钥匙串
-//! （按配置 id 分条）。
+//! 写入一律走"临时文件 + 改名"，写到一半崩了不会留下半截 JSON。记住的访问密码按配置 id 分条，
+//! macOS 上是数据目录里的 `passwords.json`（0600，为什么不用钥匙串见 passwords.rs），Windows 进凭据管理器。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,6 @@ use gpui_kit::Window;
 
 /// "本机"配置的缺省基址：没装过服务、也没用 FALCON_LOCAL_URL 改指别处时
 const LOCAL_URL: &str = "http://127.0.0.1:4923";
-const KEYCHAIN_SERVICE: &str = "com.falcon.app";
 
 pub struct Desktop {
     data_dir: PathBuf,
@@ -55,10 +54,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
-}
-
-fn keychain_entry(profile_id: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, profile_id).ok()
 }
 
 impl Platform for Desktop {
@@ -112,7 +107,7 @@ impl Platform for Desktop {
     }
 
     fn password(&self, profile_id: &str) -> Option<String> {
-        keychain_entry(profile_id)?.get_password().ok()
+        crate::passwords::get(&self.data_dir, profile_id)
     }
 
     fn has_password_store(&self) -> bool {
@@ -126,17 +121,7 @@ impl Platform for Desktop {
     fn on_resume(&self, _f: Box<dyn Fn()>) {}
 
     fn store_password(&self, profile_id: &str, password: Option<&str>) {
-        let Some(entry) = keychain_entry(profile_id) else { return };
-        let result = match password {
-            Some(p) => entry.set_password(p),
-            None => entry.delete_credential(),
-        };
-        if let Err(err) = result {
-            // 没有条目时删除会报 NoEntry，那是正常的
-            if password.is_some() {
-                log::warn!("钥匙串写入失败：{err}");
-            }
-        }
+        crate::passwords::set(&self.data_dir, profile_id, password);
     }
 
     fn local_service(&self) -> Option<Arc<dyn LocalService>> {

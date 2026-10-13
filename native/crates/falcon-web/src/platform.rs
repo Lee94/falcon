@@ -71,7 +71,7 @@ impl Platform for Browser {
 
     fn store_profiles(&self, _json: &str) {}
 
-    // 浏览器里没有钥匙串，登录态在 cookie 里
+    // 浏览器里不存访问密码，登录态在 cookie 里
     fn password(&self, _profile_id: &str) -> Option<String> {
         None
     }

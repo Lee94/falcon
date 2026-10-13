@@ -1,9 +1,10 @@
-//! 账户：访问密码（设置 / 修改）、钥匙串里记着的密码、退出登录。旧 React 版的 AccountPane。
+//! 账户：访问密码（设置 / 修改）、本机记着的密码、退出登录。旧 React 版的 AccountPane。
 //!
-//! "记住的密码"一行是原生独有的：浏览器里靠 cookie，原生把密码存进系统钥匙串，服务端重启
-//! （token 只在它内存里）后客户端用它自动重登（profiles.rs）。所以这里要能看见、能忘掉；
-//! 没有钥匙串的平台（`Platform::has_password_store`，即浏览器版）不画这一行——画了也恒为"未记住"。
-//! 改了访问密码时钥匙串里若记着旧的，一并换成新的——否则下次自动重登拿旧密码必然失败。
+//! "记住的密码"一行是原生独有的：浏览器里靠 cookie，原生把密码存在本机（存哪儿归平台：
+//! falcon-desktop 的 passwords.rs），服务端重启（token 只在它内存里）后客户端用它自动重登
+//! （profiles.rs）。所以这里要能看见、能忘掉；没有地方存的平台（`Platform::has_password_store`，
+//! 即浏览器版）不画这一行——画了也恒为"未记住"。
+//! 改了访问密码时本机若记着旧的，一并换成新的——否则下次自动重登拿旧密码必然失败。
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -23,9 +24,9 @@ pub struct AccountPane {
     next: Entity<InputState>,
     error: Option<String>,
     busy: bool,
-    /// 钥匙串里有没有这台服务端的密码。读钥匙串是一次系统调用（还可能弹授权），只在打开时
-    /// 与改动后读，不在每帧 render 里读
-    keychain: bool,
+    /// 本机有没有记着这台服务端的密码。读它是一次文件 / 凭据库调用，只在打开时与改动后读，
+    /// 不在每帧 render 里读
+    saved: bool,
 }
 
 impl AccountPane {
@@ -40,8 +41,8 @@ impl AccountPane {
             })
             .detach();
         }
-        let keychain = ws.read(cx).saved_password().is_some();
-        Self { ws, current, next, error: None, busy: false, keychain }
+        let saved = ws.read(cx).saved_password().is_some();
+        Self { ws, current, next, error: None, busy: false, saved }
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -70,11 +71,11 @@ impl AccountPane {
                             this.current.update(cx, |i, cx| i.set_value("", window, cx));
                             this.next.update(cx, |i, cx| i.set_value("", window, cx));
                             let ws = this.ws.clone();
-                            let keychain = this.keychain;
+                            let saved = this.saved;
                             // React 版的 refreshAuth：第一次设密码后服务端开始要求登录，这个客户端还没有
                             // token——整页换成登录（设置对话框一起收起，否则盖在登录框上面）
                             let need_login = ws.update(cx, |w, cx| {
-                                if keychain {
+                                if saved {
                                     w.store_password(Some(&next));
                                     w.client.set_relogin_password(Some(next.clone()));
                                 }
@@ -106,9 +107,9 @@ impl AccountPane {
         self.ws.update(cx, |w, cx| {
             w.store_password(None);
             w.client.set_relogin_password(None);
-            w.toast(ToastKind::Info, t!("native.settings.keychainForgot").to_string(), None, cx);
+            w.toast(ToastKind::Info, t!("native.settings.savedPasswordForgot").to_string(), None, cx);
         });
-        self.keychain = false;
+        self.saved = false;
         cx.notify();
     }
 }
@@ -129,22 +130,22 @@ impl Render for AccountPane {
         )];
         if falcon_platform::get(cx).has_password_store() {
             items.push((
-                t!("native.settings.keychain").to_string(),
-                Some(t!("native.settings.keychainHint").to_string()),
+                t!("native.settings.savedPassword").to_string(),
+                Some(t!("native.settings.savedPasswordHint").to_string()),
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(status(
-                        if self.keychain { t!("native.settings.keychainStored") } else { t!("native.settings.keychainEmpty") }
+                        if self.saved { t!("native.settings.savedPasswordStored") } else { t!("native.settings.savedPasswordEmpty") }
                             .to_string(),
                     ))
                     .child(
-                        Button::new("keychain-forget")
+                        Button::new("saved-password-forget")
                             .outline()
                             .small()
-                            .disabled(!self.keychain)
-                            .label(t!("native.settings.keychainForget").to_string())
+                            .disabled(!self.saved)
+                            .label(t!("native.settings.savedPasswordForget").to_string())
                             .on_click(cx.listener(|this, _, _, cx| this.forget(cx))),
                     )
                     .into_any_element(),

@@ -220,7 +220,7 @@ native/
 │   ├── falcon-term/     终端：alacritty_terminal + 按键 / 鼠标 / 滚轮编码
 │   ├── falcon-theme/    主题系统（Ghostty 主题、界面色派生）
 │   ├── falcon-core/     客户端纯逻辑（列式工作区排布、会话标题、快捷键……）
-│   ├── falcon-platform/ 平台能力接口（偏好、服务端来源、钥匙串、下载、HTML 预览……）
+│   ├── falcon-platform/ 平台能力接口（偏好、服务端来源、访问密码、下载、HTML 预览……）
 │   ├── falcon-ui/       GPUI 界面（不写平台分支，只认 falcon-platform）
 │   ├── falcon-desktop/  原生客户端：入口 + 平台能力的原生实现
 │   └── falcon-web/      浏览器版：wasm 入口 + 平台能力的浏览器实现

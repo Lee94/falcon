@@ -297,7 +297,7 @@ impl Workspace {
                 }
             };
             let mut need_login = status.required && !status.authenticated;
-            // 钥匙串里有密码就先静默登一次
+            // 本机记着密码就先静默登一次
             if need_login && let Some(pw) = password {
                 need_login = client.login(&pw).await.is_err();
             }
@@ -702,7 +702,7 @@ impl Workspace {
         persist::save(&*self.platform, &self.profile, &self.state);
     }
 
-    /// 存着的访问密码（钥匙串；浏览器里恒为 None）
+    /// 本机记着的访问密码（浏览器里恒为 None）
     pub fn saved_password(&self) -> Option<String> {
         self.platform.password(&self.profile.id)
     }

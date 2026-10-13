@@ -2,7 +2,7 @@
 //! docs/design/rust-unification.md。
 //!
 //! 一套界面、两种产物：原生桌面（falcon-desktop）与浏览器 wasm（falcon-web）。这里不写
-//! target cfg——"这台机器上有没有 / 怎么做"的事（偏好存哪儿、服务端从哪儿来、钥匙串、本机
+//! target cfg——"这台机器上有没有 / 怎么做"的事（偏好存哪儿、服务端从哪儿来、访问密码、本机
 //! 服务、字体、下载、HTML 预览、应用图标）都问 falcon-platform 的 [`Platform`]，由入口在
 //! [`init`] 时交进来。一台 falcon 服务端一个窗口。界面文案一律走 `t!`（locales/zh-CN.json——
 //! 原从 React 前端的 i18n.ts 导出，React 删除后它就是文案的真相来源，直接改它；原生 / 平台

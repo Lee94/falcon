@@ -5,7 +5,7 @@
 //! 的事都问这里的 [`Platform`]：偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、
 //! 字体、下载、HTML 预览视图、应用图标。两个入口在开窗口之前用 [`install`] 挂一份实现。
 //!
-//! 只放接口与少量数据类型，不放实现：钥匙串、文件、wry、AppKit 在 falcon-desktop，
+//! 只放接口与少量数据类型，不放实现：文件、凭据库、wry、AppKit 在 falcon-desktop，
 //! localStorage、DOM 在 falcon-web。所有方法都在 GPUI 的前台线程上调（实现可以是 `!Send` 的），
 //! 唯一的例外是 [`LocalService`]——它阻塞，要放到后台执行器上跑。
 
@@ -120,11 +120,12 @@ pub trait Platform {
     fn load_profiles(&self) -> Option<String>;
     fn store_profiles(&self, json: &str);
 
-    /// 访问密码（按配置分条，原生存钥匙串）。浏览器里没有钥匙串，登录态在 cookie 里，恒为 `None`
+    /// 记住的访问密码（按配置分条；原生在 macOS 上是数据目录里的 0600 文件、Windows 是凭据管理器，
+    /// macOS 为什么不用钥匙串见 falcon-desktop 的 passwords.rs）。浏览器里不存，登录态在 cookie 里，恒为 `None`
     fn password(&self, profile_id: &str) -> Option<String>;
     /// `None` = 删掉
     fn store_password(&self, profile_id: &str, password: Option<&str>);
-    /// 有没有能记住访问密码的地方（原生的钥匙串）。没有的平台，设置页不画"记住的密码"那一行
+    /// 有没有能记住访问密码的地方（原生有）。没有的平台，设置页不画"记住的密码"那一行
     fn has_password_store(&self) -> bool;
     /// 登录成功后要不要离开这个页面。浏览器版被服务端从 px0 入口送来登录（`/?next=/px0/…`，
     /// 原生客户端把 px0 地址交给系统浏览器时就是这样）时，跳回那里并返回 true——页面随即卸载，

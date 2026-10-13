@@ -36,14 +36,16 @@ serde_json.workspace = true
 futures.workspace = true
 url.workspace = true
 directories = "6"
-# 4.x 的默认 `v1` feature 保留 3.x 的 Entry 接口，底下换成 keyring-core + 各平台独立的 store crate；
-# 存储口径与 3.x 的 apple-native / windows-native 一致（登录钥匙串的 generic password，
-# service / account 两个属性；Windows 凭据名 `<user>.<service>`），升级前存的密码照样读得到
-keyring = "4"
 # HTML 预览（ADR 0007）：直接用 wry 自己挂 WKWebView。版本跟 gpui-wry =0.7.1 锁的那份一致
 # （它是 gpui-kit 同批发布的 WebView 封装，但不重新导出 wry，接口也不够我们控导航 / 下载），
 # 升级 gpui-kit 时照它的 Cargo.toml 一起换
 wry = { package = "lb-wry", version = "=0.53.3", optional = true }
+
+# 记住的访问密码（src/passwords.rs）：macOS 不用钥匙串（ad-hoc 签名每个版本都要重新授权），
+# 只有其它平台走系统凭据库。4.x 的默认 `v1` feature 保留 3.x 的 Entry 接口，底下换成 keyring-core +
+# 各平台独立的 store crate；Windows 凭据名与 3.x 一致（`<user>.<service>`），升级前存的密码照样读得到
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = "4"
 
 # 运行时换 Dock 图标（src/dock.rs）。版本跟 GPUI / wry 已经带进来的那份一致，不多编一套
 [target.'cfg(target_os = "macos")'.dependencies]

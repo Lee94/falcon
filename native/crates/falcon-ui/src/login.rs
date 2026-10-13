@@ -1,7 +1,7 @@
 //! 登录（旧 React 版的 `components/Login.tsx`）：服务端设了访问密码、或绑在非回环地址时需要。
 //!
-//! 默认"记住密码"：存进钥匙串，服务端重启（token 只在它内存里）后客户端自动重登，
-//! 不用每次重新输入。没有钥匙串的平台（`Platform::has_password_store`，即浏览器版：登录态
+//! 默认"记住密码"：存在本机（存哪儿归平台），服务端重启（token 只在它内存里）后客户端自动重登，
+//! 不用每次重新输入。没有地方存的平台（`Platform::has_password_store`，即浏览器版：登录态
 //! 在 cookie 里）不画这个勾选，也不记。
 
 use gpui_kit::component::button::{Button, ButtonVariants};

@@ -225,7 +225,7 @@ impl FalconClient {
         self.inner.auth.token()
     }
 
-    /// 设置自动重登用的访问密码（app 从钥匙串取出来）。设了之后：REST 收到 401
+    /// 设置自动重登用的访问密码（app 从本机记着的密码里取出来）。设了之后：REST 收到 401
     /// 时自动登录一次并重放原请求一次，WS 收到 4401 时自动登录再重连；再失败才
     /// 返回未认证 / 推 [`AuthEvent::LoginRequired`]。
     ///

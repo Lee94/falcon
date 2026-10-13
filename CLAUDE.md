@@ -70,7 +70,7 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 
 ### client（`native/crates/falcon-ui` / `falcon-platform` / `falcon-desktop` / `falcon-web` 及其下层 crate）
 
-Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id` + 登录 cookie）。一套界面两种产物（设计文档决定六，C1 拆层）：界面全在 `falcon-ui`，**不写 target cfg**——凡是"这台机器上有没有 / 怎么做"的事（偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、字体来源、下载、HTML 预览视图、应用图标、是不是 mac 键位）都问 `falcon-platform` 的 `Platform` trait（`falcon_platform::get(cx)`）；原生实现与入口在 `falcon-desktop`（数据目录 JSON、钥匙串、launchd 托管、wry、AppKit Dock、Windows 资源），浏览器实现与 wasm 入口在 `falcon-web`（localStorage、页面的源、`<a download>`，DOM 胶水在 `src/dom.rs`，服务端托管产物）。新的平台差异先加进 trait，别在 falcon-ui 里写 `cfg(target_family/target_os)`；执行器层面的差异（`block_in_place`、`MaybeSend`）在 falcon-client 里。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，浏览器版在 `docs/design/rust-unification.md`（附录 B 是浏览器端还没补齐的缺口），改动前先读。
+Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id` + 登录 cookie）。一套界面两种产物（设计文档决定六，C1 拆层）：界面全在 `falcon-ui`，**不写 target cfg**——凡是"这台机器上有没有 / 怎么做"的事（偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、字体来源、下载、HTML 预览视图、应用图标、是不是 mac 键位）都问 `falcon-platform` 的 `Platform` trait（`falcon_platform::get(cx)`）；原生实现与入口在 `falcon-desktop`（数据目录 JSON——macOS 上记住的访问密码也在这，**不用钥匙串**（ad-hoc 签名每个版本都要重新授权，原因见 `passwords.rs`）；Windows 的密码走凭据管理器、launchd 托管、wry、AppKit Dock、Windows 资源），浏览器实现与 wasm 入口在 `falcon-web`（localStorage、页面的源、`<a download>`，DOM 胶水在 `src/dom.rs`，服务端托管产物）。新的平台差异先加进 trait，别在 falcon-ui 里写 `cfg(target_family/target_os)`；执行器层面的差异（`block_in_place`、`MaybeSend`）在 falcon-client 里。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，浏览器版在 `docs/design/rust-unification.md`（附录 B 是浏览器端还没补齐的缺口），改动前先读。
 
 ```bash
 cd native

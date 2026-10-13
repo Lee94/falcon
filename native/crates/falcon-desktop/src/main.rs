@@ -1,6 +1,6 @@
 //! Falcon 原生客户端（macOS / Windows）。界面全在 falcon-ui，这里是入口与平台能力的原生实现
-//! （falcon-platform 的 trait）：偏好 / 配置 / 工作区存数据目录的 JSON 文件、访问密码进钥匙串、
-//! App 托管本机服务、HTML 预览用 wry、Dock 图标走 AppKit。
+//! （falcon-platform 的 trait）：偏好 / 配置 / 工作区存数据目录的 JSON 文件、记住的访问密码
+//! （macOS 也是数据目录里的文件，Windows 进凭据管理器）、App 托管本机服务、HTML 预览用 wry、Dock 图标走 AppKit。
 //!
 //! 会话活在 launchd 服务里，不在 App 进程里——关掉最后一个窗口就退出 App（= 全部 Detach）。
 
@@ -13,6 +13,7 @@ mod dock;
 mod html_view;
 mod http;
 mod local_service;
+mod passwords;
 mod platform;
 
 use std::rc::Rc;

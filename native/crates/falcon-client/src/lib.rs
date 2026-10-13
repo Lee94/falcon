@@ -28,7 +28,7 @@
 //!
 //! 服务端的登录 token 只存在内存里（`auth.ts`），**后端一重启就全部失效**——远处的
 //! 服务端升级、重启都会碰到。所以客户端可以记住访问密码
-//! （[`FalconClient::set_relogin_password`]，app 从钥匙串里取出来设进来）：REST 收到
+//! （[`FalconClient::set_relogin_password`]，app 从本机记着的密码里取出来设进来）：REST 收到
 //! 401、WS 收到关闭码 4401 时自动重新登录一次再重放 / 重连，失败才通知 app 弹登录框
 //! （[`AuthEvent::LoginRequired`]）。这样不用改服务端去加一种长效令牌（§4.7）。
 //!

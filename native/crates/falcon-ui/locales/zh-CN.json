@@ -900,12 +900,12 @@
       "listSep": "、"
     },
     "settings": {
-      "keychain": "记住的密码",
-      "keychainHint": "存在系统钥匙串里：服务端重启后客户端用它自动重新登录，不用再输一遍。",
-      "keychainStored": "已存在钥匙串里",
-      "keychainEmpty": "没有保存",
-      "keychainForget": "忘记密码",
-      "keychainForgot": "已从钥匙串删除这台服务端的密码",
+      "savedPassword": "记住的密码",
+      "savedPasswordHint": "存在这台电脑上：服务端重启后客户端用它自动重新登录，不用再输一遍。",
+      "savedPasswordStored": "已保存在本机",
+      "savedPasswordEmpty": "没有保存",
+      "savedPasswordForget": "忘记密码",
+      "savedPasswordForgot": "已删除本机记住的这台服务端的密码",
       "serverUrl": "服务端地址",
       "clientVersion": "客户端版本",
       "uiZoom": "界面缩放",
@@ -952,7 +952,7 @@
       "plaintext": "明文 HTTP：访问密码与终端内容未加密"
     },
     "login": {
-      "remember": "记住密码（存在钥匙串里，服务端重启后自动重新登录）"
+      "remember": "记住密码（存在本机，服务端重启后自动重新登录）"
     },
     "connect": {
       "add": "添加 falcon 服务端",

@@ -48,6 +48,7 @@ web 端是连上后先发 resize；原生必须**先发 appearance 再发 resize
 
 - 项目 id、会话 id、窗口 key 只在一台服务端内唯一，一个窗口挂多台就得给它们全加前缀、排布格式也和 web 对不上。所以一台一窗，工作区按服务端配置分开存（`<数据目录>/servers/<id>/workspace.json`，JSON 形状与 web 的 `falcon.workspace` 一致）。
 - server 的登录 token 只在内存里，重启就全失效。访问密码默认存钥匙串（`keyring`，service `com.falcon.app`），收到 401 / 4401 自动重登一次，失败才弹登录框。不为此改 server 加长效令牌。
+- **后记（2026-10-13）：macOS 不再用钥匙串**，改存数据目录里的 `passwords.json`（0600），Windows 照旧凭据管理器（`falcon-desktop/src/passwords.rs`）。安装包是 ad-hoc 签名，钥匙串条目的分区表按读写程序的 `cdhash:` 记，每装一个新版本 App 一启动就弹窗要 Mac 登录密码。实测过自签证书也不行：授权列表那层稳定了，但分区只有 Apple 签发的证书才记 `teamid:`，自签的照样记 cdhash（`security create-keychain` 建的是旧格式钥匙串，没有分区，别在那上面测）。代价是同一用户下的进程都读得到这个文件。旧的钥匙串条目不读也不删（碰它就再弹一次），升级后在登录框重输一次密码。顺带解决了截图自动化被钥匙串弹窗挡住的问题。
 - 非回环地址的 `http://` 要用户确认明文风险后才连；TLS 走 rustls + `rustls-platform-verifier`，认系统信任库，不做指纹固定。
 - "本机"配置指向 launchd 托管的服务：App 包 Resources 里带 SEA 服务程序，启动时 `service install`（幂等兼升级）再等端口，逻辑出自原来的 `launcher.sh`。**install 要带上已安装服务原来的 `--host` / `--port` / `--data-dir`**（从 `~/Library/LaunchAgents/com.falcon.server.plist` 读，解析口径同 `config.ts`，在 `falcon-core/src/service_args.rs`）：不带参数会写默认配置，自定义过端口 / 数据目录的人一升级，服务就换了个家、原来的会话全看不见——pkg 的 postinstall 与 launcher.sh 也照同一口径带上（`scripts/macos-pkg/service-args.sh`）。"本机"配置连的端口也按它现算，不信存下来的。退出 App = 全部 Detach。只在本机配置上出现的动作（Finder 中显示、本机路径粘贴）按配置开关。
 
@@ -65,7 +66,7 @@ HTML 预览用 wry 的 WebView（WKWebView），守 ADR 0007 的边界：只加�
 - **外链图片**（飞书头像、Markdown 里的 https 图片）：给 GPUI 装一个 `HttpClient`（`falcon-app/src/http.rs`），转给 `falcon_client::fetch_external`——同一个网络运行时与 TLS，不带 falcon 的 cookie，只许 GET / HEAD，响应体 20MB 封顶。
 - **图标字体走回退链而不是按码位指定**：GPUI 拒绝把不含 `m` 的字体当主字体（Symbols Nerd Font Mono 就是），所以它挂在回退链的第一位，排在 Ioskeley / Maple 前面——效果与 web 字体栈"图标字体排在主字体前"一致，Maple 的宽形 NF 图标不会被选中。
 - **界面验证靠 Metal 回读**：`--features snapshot` 打开 `Window::render_to_image()`，配 `FALCON_AUTOMATE` 的脚本步骤（选项目、开终端、打字、点击、拖拽、滚轮、派发动作、截图、定速重画）驱动。锁屏 / 远程时 `screencapture` 是黑的，这条路不受影响；但锁屏时显示链路也不走，notify 过的内容不会自己画出来，`snap` 前要手动画两帧（第一帧里画布这类靠 prepaint 量尺寸的视图还是空的）。`snapshot` 带着 gpui-kit 的 test-support，压测用只含脚本驱动的 `automation` feature。
-- **Windows 仍只守住不堵路**：平台相关的只有 `local_service.rs`（仅 macOS）、钥匙串与数据目录（跨平台 crate）、菜单栏；快捷键在非 mac 上是 ctrl-shift 系。
+- **Windows 仍只守住不堵路**：平台相关的只有 `local_service.rs`（仅 macOS）、记住的密码（`passwords.rs`：macOS 存文件、其它平台走 `keyring`）与数据目录（跨平台 crate）、菜单栏；快捷键在非 mac 上是 ctrl-shift 系。
 
 ## 踩过的坑
 
