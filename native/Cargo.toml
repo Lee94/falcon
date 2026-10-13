@@ -29,8 +29,13 @@ falcon-ui = { path = "crates/falcon-ui" }
 # GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
 # gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同
 # gpui-wry），并按新快照对应的 zed commit 重新比对从 Zed 抄来的文件。
-gpui-kit = { version = "=0.7.1" }
-# zed@279fe07（gpui-pre 0.3.8 的快照点）锁的 alacritty fork。抄来的 Zed 终端
+#
+# `gpui-fast`：核心、平台层与各层组件换成 Longbridge 的 GPUI Fast（Zed GPUI 的 fork，
+# 渲染与布局的性能优化），`gpui_kit::*` 的路径不变。上游 gpui-pre 一族照样是 gpui-kit 的
+# 非可选依赖、照样参与编译，只是不再导出。浏览器版因此跑在 gpui-fast-web 上，IME 补丁
+# 在 vendor/gpui-fast-web；gpui-fast 本身也带了一处补丁（见文件末尾的 [patch]）。
+gpui-kit = { version = "=0.7.3", features = ["gpui-fast"] }
+# zed@93d7456（gpui-pre 0.3.9 的快照点；与上一版 279fe07 锁的是同一个 rev）锁的 alacritty fork。抄来的 Zed 终端
 # 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
 # 实际编的是 vendor/alacritty_terminal（见文件末尾的 [patch]）：加了 `tty` 开关，falcon-term
 # 关掉它才编得到 wasm。Falcon 只用 Term / grid / vte，PTY 在服务端。
@@ -78,6 +83,14 @@ strip = false
 [patch."https://github.com/zed-industries/alacritty"]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
-# gpui-web 平台层的 fork（vendor/gpui-pre-web/Cargo.toml 顶部有改动清单）
+# GPUI 的 fork（各自 Cargo.toml 顶部有改动清单）：
+# - gpui-fast：文字排版跨帧沿用时比字体代数，浏览器版后到的中文字体才会生效；
+# - web / platform 两层：浏览器版跑的是 gpui-fast-web，IME 候选框跟随光标的补丁在它身上；四份都
+#   关掉了默认的 `multithreaded`——它拉进只能 nightly 编的 wasm_thread，而 gpui-kit 按默认
+#   feature 依赖这两层，上游 gpui-pre 那一族开了 gpui-fast 也照样参与编译，所以两族都得关
 [patch.crates-io]
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-web = { path = "vendor/gpui-fast-web" }
+gpui-fast-platform = { path = "vendor/gpui-fast-platform" }
 gpui-pre-web = { path = "vendor/gpui-pre-web" }
+gpui-pre-platform = { path = "vendor/gpui-pre-platform" }

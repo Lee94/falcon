@@ -1130,12 +1130,6 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen_input("compositionstart", move |_event: JsValue| {
             this.is_composing.set(true);
-            // Falcon fork（改动 2）：浏览器只有"推"——macOS 会在输入法弹出时向应用拉光标位置
-            // （firstRectForCharacterRange），浏览器只认焦点输入框自己的位置。组合一开始就
-            // 向 input handler 要候选框该在的格子，把 textarea 挪过去，候选框才会出现在光标下
-            if let Some(Some(bounds)) = this.with_input_handler(|handler| handler.ime_candidate_bounds()) {
-                this.place_ime_at(bounds);
-            }
         })
     }
 

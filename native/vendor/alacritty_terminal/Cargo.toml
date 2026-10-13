@@ -1,5 +1,6 @@
 # Vendored from https://github.com/zed-industries/alacritty @ 4c129667ce56611becdc82de6e28218c80e2e88f
-# （zed@279fe07 / gpui-pre 0.3.8 锁的那份），经 native/Cargo.toml 的 [patch] 替换 git 依赖。
+# （zed@279fe07 / gpui-pre 0.3.8 锁的那份；zed@93d7456 / gpui-pre 0.3.9 锁的仍是它），经
+# native/Cargo.toml 的 [patch] 替换 git 依赖。
 #
 # 与上游的唯一差别：新增默认开启的 `tty` feature，把 event_loop / thread / tty 三个模块
 # 和它们的平台依赖（polling、rustix、signal-hook、miow……）挂在它下面。

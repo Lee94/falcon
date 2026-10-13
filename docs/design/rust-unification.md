@@ -110,10 +110,18 @@ falcon-web        cdylib：wasm 入口、localStorage、DOM 胶水（文件选�
 
 gpui-kit 0.7.1 的 Web 后端就是 Zed `crates/gpui_web` 的重发（`gpui-pre-web` 0.3.8，快照点 zed@279fe07）。gpui-kit 文档把 WebAssembly 标为 "Showcase only — not to ship applications"。Falcon 会是第一个在上面跑的完整应用，平台层缺什么就在 fork 里补。
 
+（2026-10-13 后记）升到 gpui-kit 0.7.3 并打开 `gpui-fast` 之后，`gpui_kit::*` 导出的是 Longbridge 的 GPUI Fast（Zed GPUI 的 fork，保留式视图 / 布局 / 文字排版，原生空闲帧 p50 从 1.6ms 降到 0.3ms），浏览器版跑在 `gpui-fast-web` 上——源码与 `gpui-pre-web` 0.3.9（zed@93d7456）逐字相同。上游 `gpui-pre` 一族仍是 gpui-kit 的非可选依赖、照样参与编译，只是不再导出。
+
 做法：`native/vendor/` 下放 fork，workspace 用 `[patch]` 指过去，改动清单写在各自 Cargo.toml 顶部，升级 gpui-kit 时对着新快照重放。能回馈上游的（IME 候选框定位）提 PR。具体缺口见附录 B。C0 已落的两份：
 
 - `vendor/alacritty_terminal`（Zed fork @ 4c12966）：加默认开启的 `tty` feature，event_loop / thread / tty 与 polling、rustix 等挂在它下面，falcon-term 关掉它。
 - `vendor/gpui-pre-web`（0.3.8）：① default features 去掉 `multithreaded`（wasm_thread 只能 nightly 编）；② 实现 `update_ime_position`，并在 `compositionstart` 时主动向 input handler 拉光标格（`ime_candidate_bounds`）——浏览器只有"推"，macOS 是输入法弹出时向应用"拉"，终端只在提交后才推，不补这一拉候选框就还在左上角。
+
+gpui-kit 0.7.3 + `gpui-fast` 起变成五份（清单各在 Cargo.toml 顶部）：
+
+- `vendor/gpui-fast-web`（0.1.7）：上面 ① ② 原样重放，浏览器版真正跑的是它；
+- `vendor/gpui-fast-platform`（0.1.7）、`vendor/gpui-pre-platform`（0.3.9）、`vendor/gpui-pre-web`（0.3.9）：只改 default features。0.3.9 起两个平台层自己的默认 feature 也带了 `multithreaded`（转开 web 层的），gpui-kit 又按默认 feature 依赖 web 与 platform 两层，两族都参与编译，所以四份都得关；gpui-pre 那两份不在运行路径上，不重放 ②；
+- `vendor/gpui-fast`（0.1.7，核心）：③ 文字排版跨帧沿用（`adopt_measurement`）只比文字 / runs / 样式，不比字体代数——浏览器版的回退字体是首帧之后才 `add_fonts` 的，首帧排下、之后没变过的中文就一直是缺字形的方块，要等那块界面因别的原因重排才恢复。补成同时比 `fonts_generation`。原生字体启动时就全注册了，碰不到。上游修掉后这份可以整个删掉。
 
 ---
 
@@ -441,7 +449,7 @@ SSH Windows 远端没有环境，未测。
 
 ## 附录 B：浏览器版的平台缺口与补法
 
-gpui-pre-web 0.3.8 的现状出自源码（`gpui-pre-web-0.3.8/src/`）与 gpui-kit 文档，C0 时以实测为准。
+gpui-pre-web 0.3.8 的现状出自源码（`gpui-pre-web-0.3.8/src/`）与 gpui-kit 文档，C0 时以实测为准。现在跑的 gpui-fast-web 0.1.7 与 gpui-pre-web 0.3.9 源码逐字相同，0.3.8 → 0.3.9 只动了 display / http_client / platform / window 四个文件，下表仍然成立。
 
 | 缺口 | gpui-web 现状 | 补法 | 期 |
 |---|---|---|---|

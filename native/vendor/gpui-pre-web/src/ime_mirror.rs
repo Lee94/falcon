@@ -225,18 +225,6 @@ impl ImeMirror {
         }
     }
 
-    /// Falcon fork（vendor/gpui-pre-web/Cargo.toml 改动 2）：把隐藏的 textarea 挪到输入光标
-    /// 那一格上（页面 CSS 像素）。浏览器按焦点输入框的光标位置摆输入法候选框，textarea 钉在
-    /// 左上角时，中文 / 日文候选框就永远出现在页面左上角，离光标十万八千里。
-    /// 高度与行高取光标格的高，候选框落在这一行的正下方，与原生上的位置一致。
-    pub(crate) fn place_at(&self, left: f64, top: f64, height: f64) {
-        let style = self.element.style();
-        style.set_property("left", &format!("{left}px")).ok();
-        style.set_property("top", &format!("{top}px")).ok();
-        style.set_property("height", &format!("{height}px")).ok();
-        style.set_property("line-height", &format!("{height}px")).ok();
-    }
-
     pub(crate) fn remove(&self) {
         let element: &web_sys::Element = self.element.as_ref();
         element.remove();

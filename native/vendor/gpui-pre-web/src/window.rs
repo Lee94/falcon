@@ -567,17 +567,6 @@ impl WebWindowInner {
         ))
     }
 
-    /// Falcon fork（改动 2）：把 IME textarea 挪到窗口坐标 `bounds` 那一格。canvas 未必贴着
-    /// 视口原点，窗口坐标加上它的偏移才是 textarea（position: fixed）要的视口坐标
-    pub(crate) fn place_ime_at(&self, bounds: Bounds<Pixels>) {
-        let rect = self.canvas.get_bounding_client_rect();
-        self.ime_mirror.place_at(
-            rect.left() + f64::from(f32::from(bounds.origin.x)),
-            rect.top() + f64::from(f32::from(bounds.origin.y)),
-            f64::from(f32::from(bounds.size.height)),
-        );
-    }
-
     pub(crate) fn with_input_handler<R>(
         &self,
         f: impl FnOnce(&mut PlatformInputHandler) -> R,
@@ -983,6 +972,9 @@ impl PlatformWindow for WebWindow {
         self.inner.callbacks.borrow_mut().moved = Some(callback);
     }
 
+    // The browser is the only display, and it never changes.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.inner.callbacks.borrow_mut().should_close = Some(callback);
     }
@@ -1033,10 +1025,7 @@ impl PlatformWindow for WebWindow {
         self.inner.state.borrow().renderer.gpu_specs()
     }
 
-    // Falcon fork（改动 2）：上游是空实现，候选框钉在页面左上角
-    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
-        self.inner.place_ime_at(bounds);
-    }
+    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 
     fn request_decorations(&self, _decorations: WindowDecorations) {}
 

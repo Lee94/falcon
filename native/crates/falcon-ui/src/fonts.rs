@@ -67,7 +67,9 @@ pub fn embedded_fallbacks() -> Vec<&'static [u8]> {
 }
 
 /// 回退字体从 `<base>/fonts/*.ttf` 拉（浏览器版的构建脚本从 OUT_DIR 拷进产物），到了再注册、
-/// 重画——到之前缺的字形由 gpui-web 的 Canvas 回落顶着，与 React 版按 unicode-range 懒加载同一个思路
+/// 重画，与 React 版按 unicode-range 懒加载同一个思路。到之前 gpui-web 的 Canvas 回落只顶 emoji
+/// （它的默认档），中文先是缺字形的方块。到了以后已排好的文字要重新整形：gpui-fast 会把上一帧的
+/// 排版结果原样沿用，靠 vendor/gpui-fast 的改动 1 比字体代数才会重排
 fn fetch_fallbacks(base_url: &str, cx: &mut App) {
     // 小的先到：图标与拉丁回退几百 KB，中文 21MB 放最后
     for name in ["SymbolsNerdFontMono.ttf", "IoskeleyMonoTerm.ttf", "MapleMonoNL-NF-CN.ttf"] {
