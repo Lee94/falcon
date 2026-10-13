@@ -1,4 +1,4 @@
-//! 表单小件：项目 / 附属项目 / 主机表单与 Zellij 安装框共用（旧 React 版 `common/Field.tsx` 与
+//! 表单小件：项目 / 附属项目 / 主机表单与持久会话的部署框共用（旧 React 版 `common/Field.tsx` 与
 //! shadcn Select 的移植）。只有这几个表单用，所以放在这里而不是 `ui.rs`。
 //!
 //! - [`field`]：标签 + 控件 + 提示，提示带 ok / err 语气（React 版的 `Field`）；
@@ -21,7 +21,6 @@ pub enum Tone {
     Muted,
     Ok,
     Err,
-    Warn,
 }
 
 /// 表单一行：标签 + 控件 + 提示（React 版的 `Field`）
@@ -37,7 +36,6 @@ pub fn field(label: Option<String>, control: impl IntoElement, hint: Option<(Str
             Tone::Muted => ui.muted_foreground,
             Tone::Ok => ui.success,
             Tone::Err => ui.destructive,
-            Tone::Warn => ui.warning,
         };
         d = d.child(div().text_xs().line_height(zpx(18.)).text_color(color).child(text));
     }

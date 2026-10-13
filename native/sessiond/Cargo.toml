@@ -1,0 +1,36 @@
+# 会话守护进程 falcon-sessiond（ADR 0020，设计文档 docs/design/session-daemon.md）。
+#
+# 独立的工作区，不进 native/ 的：falcon-sessiond 链 libghostty-vt 的静态库，静态库要 Zig 编
+# （`cargo xtask ghostty`），放进主工作区的话日常的 `cargo test --workspace` 就离不开 Zig。
+# 构建与零警告检查走 `cargo xtask sessiond [--check]`；它用 cargo-zigbuild 交叉编 5 个目标。
+#
+# 与主工作区共用的只有 falcon-proto（path 依赖）：holder 与 falcon-server 说的协议就在那里。
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# 绑定生成器要 libclang，只在升 ghostty 时由 `cargo xtask ghostty-bindgen` 单独跑
+exclude = ["tools/bindgen"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+falcon-proto = { path = "../crates/falcon-proto" }
+ghostty-vt-sys = { path = "crates/ghostty-vt-sys" }
+ghostty-vt = { path = "crates/ghostty-vt" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.23"
+libc = "0.2.190"
+portable-pty = "0.9.0"
+
+[profile.release]
+# 二进制要经 SSH 推到每台宿主机上：体积与启动速度都要；panic 不能 abort——holder 靠
+# catch_unwind 把出错的连接隔离开，不能因为一个连接带走整个会话
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

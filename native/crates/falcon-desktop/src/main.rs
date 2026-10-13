@@ -8,6 +8,7 @@
 // （eprintln）没处去了——要看日志用 debug 构建（`cargo run -p falcon-desktop`），它仍是控制台程序
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod chime;
 mod dock;
 #[cfg(feature = "webview")]
 mod html_view;

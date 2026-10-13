@@ -1,6 +1,6 @@
 //! 设置（旧 React 版的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、
-//! 应用图标、终端字体 / 字号 / 行高 / 光标）、账户（访问密码、记住的密码、退出登录）、远端主机、
-//! 中转（端口转发与公网发布，按机器管理，ADR 0016）、关于。
+//! 应用图标、终端字体 / 字号 / 行高 / 光标）、通知（程序跑完时的提示音）、账户（访问密码、记住的
+//! 密码、退出登录）、远端主机、中转（端口转发与公网发布，按机器管理，ADR 0016）、关于。
 //!
 //! 设置是覆盖层，不是一页：几乎铺满窗口的对话框，左侧按模块切（顶上一个搜索框按名字 /
 //! 分组 / 关键字筛模块），右侧是当前模块的项，各自滚动。
@@ -17,7 +17,9 @@ mod relays;
 mod widgets;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Context, Entity, FontWeight, IntoElement, Render, SharedString, Window, div};
@@ -33,6 +35,7 @@ use crate::zoom::zpx;
 pub enum Tab {
     #[default]
     Appearance,
+    Notifications,
     Account,
     Hosts,
     Relays,
@@ -46,11 +49,12 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::Appearance, Tab::Account, Tab::About, Tab::Hosts, Tab::Relays];
+    const ALL: [Tab; 6] = [Tab::Appearance, Tab::Notifications, Tab::Account, Tab::About, Tab::Hosts, Tab::Relays];
 
     fn id(self) -> &'static str {
         match self {
             Tab::Appearance => "appearance",
+            Tab::Notifications => "notifications",
             Tab::Account => "account",
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
@@ -68,6 +72,7 @@ impl Tab {
     fn icon(self) -> IconName {
         match self {
             Tab::Appearance => IconName::Palette,
+            Tab::Notifications => IconName::Bell,
             Tab::Account => IconName::Shield,
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
@@ -221,6 +226,45 @@ impl SettingsView {
             .child(list)
     }
 
+    /// 程序跑完时的提示音（ADR 0020 决定六）。开关是本机偏好，不跟服务端走：同一台服务端在
+    /// 办公室的电脑上想响、在会议室投屏的那台上不想响
+    fn render_notifications(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let on = crate::chime::enabled(cx);
+        let toggle = Switch::new("finish-sound")
+            .checked(on)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                crate::chime::set_enabled(!on, cx);
+                cx.notify();
+            }));
+        let preview = Button::new("finish-sound-preview")
+            .outline()
+            .small()
+            .icon(IconName::Volume2)
+            .label(t!("settings.finishSoundPreview").to_string())
+            .on_click(|_, _, cx| crate::chime::play(cx));
+        widgets::section(
+            t!("settings.soundTitle").to_string(),
+            Some(t!("settings.soundDescription").to_string()),
+            widgets::rows(
+                vec![
+                    (
+                        t!("settings.finishSound").to_string(),
+                        Some(t!("settings.finishSoundHint").to_string()),
+                        toggle.into_any_element(),
+                    ),
+                    (
+                        t!("settings.finishSoundPreviewLabel").to_string(),
+                        None,
+                        preview.into_any_element(),
+                    ),
+                ],
+                false,
+                cx,
+            ),
+            cx,
+        )
+    }
+
     fn render_about(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let w = self.ws.read(cx);
@@ -290,6 +334,7 @@ impl Render for SettingsView {
         }
         let pane = match active {
             Tab::Appearance => self.appearance.clone().into_any_element(),
+            Tab::Notifications => self.render_notifications(cx).into_any_element(),
             Tab::Account => self.account.clone().into_any_element(),
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),

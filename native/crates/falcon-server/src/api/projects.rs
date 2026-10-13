@@ -305,7 +305,7 @@ struct DeleteQuery {
 /// 删除项目，连坐它的附属项目。
 ///
 /// 顺序上有三个硬约束：
-/// 1. 会话必须先死透，再动目录（Zellij pane 的 cwd 就在里面，见 terminate 的注释）。
+/// 1. 会话必须先死透，再动目录（会话里 shell 的 cwd 就在里面，见 terminate 的注释）。
 /// 2. dispose_link 必须排在 git 命令之后——那些命令要经这条 SSH 链路跑。
 /// 3. DB 行无条件删，文件系统清理 best-effort。留一条删不掉的项目行，用户唯一的
 ///    出路是去改 SQLite；残留目录他自己删得掉，路径已经写进 warnings 了。

@@ -60,7 +60,7 @@ use crate::db::{Db, ProjectRow};
 use crate::exec::{Exec as _, Utf8Decoder};
 use crate::sessions::local::{BaseEnvFn, local_base_env_fn};
 use crate::sessions::ssh::SshLink;
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 const LISTEN_WAIT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(2);

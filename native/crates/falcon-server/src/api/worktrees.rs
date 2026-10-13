@@ -34,7 +34,7 @@ use crate::virtualdir::{
     CentralMember, central_manifest_files, posix_write_manifest_command, windows_write_manifest_commands,
     write_local_manifest,
 };
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -71,12 +71,12 @@ fn worktree_api_error(e: &WorktreeError) -> ApiError {
 
 /// 附属项目行：ssh_* 与 host_id 从源项目整行复制（含密文，同一个 SecretBox 能解，全程不碰明文）。
 ///
-/// SshLink 由 ProjectRow 构造、按 project.id 缓存，get_link / prepare_zellij / GET host 全部
+/// SshLink 由 ProjectRow 构造、按 project.id 缓存，get_link / prepare_sessiond / GET host 全部
 /// 直接读 project.ssh_host。复制让这些点一处都不用改，也让删除清理不依赖源项目行还在不在。
 /// 代价是源项目改配置时要手动传播（见 PUT 里的 update_children_ssh）；已保存主机改配置走
 /// update_projects_from_host。
 ///
-/// 顺带一个白捡的正确行为：Zellij 授权按 host+port+username 记，所以附属项目第一次开
+/// 顺带一个白捡的正确行为：主机授权（`session_hosts`）按 host+port+username 记，所以附属项目第一次开
 /// 会话不会再弹一次安装授权。
 fn derived_row(src: &ProjectRow, name: String, working_dir: String, branch: &str) -> ProjectRow {
     ProjectRow {

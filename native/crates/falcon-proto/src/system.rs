@@ -3,11 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::wire::wire_enum;
-use crate::zellij::NonDurableReason;
+use crate::install::NonDurableReason;
 
 wire_enum! {
     /// 宿主机的两类执行环境。服务端把本地 Unix / 本地 Windows / SSH POSIX /
-    /// SSH Windows 四种抹平成这两类（`zellij/host.ts`、`git/host.ts`）。
+    /// SSH Windows 四种抹平成这两类（falcon-server 的 `host.rs`、`git/host.rs`）。
     ///
     /// shared 里没有给它起名字，`ShellsInfo.kind` 与 `SshProbeResult.kind` 各写了
     /// 一遍 `"posix" | "windows"`；Rust 侧合成一个类型。

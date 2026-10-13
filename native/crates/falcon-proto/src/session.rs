@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::project::ProjectType;
 use crate::term_env::TermAppearance;
 use crate::wire::wire_enum;
-use crate::zellij::NonDurableReason;
+use crate::install::NonDurableReason;
+use crate::program_status::ProgramStatusSummary;
 
 wire_enum! {
     /// 会话状态（CONTEXT.md「会话状态」）：
@@ -30,13 +31,13 @@ wire_enum! {
     ///
     /// Rust 侧加了 `Unknown` 兜底：原因类，服务端会随新的故障模式加值。
     pub enum DeadReason open {
-        /// shell 退出（持久会话则是 Zellij 会话在宿主机上也没了）
+        /// shell 退出（持久会话则是宿主机上的会话守护进程报告 shell 已退出）
         Exited => "exited",
         /// 非持久会话遭遇后端重启
         BackendRestart => "backend-restart",
         /// 非持久的 SSH 会话，SSH 链路断了（持久会话此时是 unverified，不会死）
         LinkLost => "link-lost",
-        /// 接回时发现 Zellij 会话已经不存在
+        /// 接回时发现宿主机上的会话已经不存在（守护进程不在了，或是升级前 Zellij 建的会话）
         SessionGone => "session-gone",
     }
 }
@@ -80,13 +81,19 @@ pub struct Session {
     /// 开场跑的 CLI；缺省是普通 shell
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgent>,
-    /// 持久会话 = Zellij 包装，可在断链 / 后端重启后接回
+    /// 持久会话 = 宿主机上的会话守护进程（falcon-sessiond）持有，可在断链 / 后端重启后接回。
+    /// 非持久会话是普通 PTY，终端查询由客户端自己回答（持久会话由宿主机的 VT 进程回答，
+    /// 客户端不答，ADR 0020 决定五）
     pub durable: bool,
     /// durable=false 时的具体原因，UI 据此标注"为什么不持久"而非笼统的"非持久"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_durable_reason: Option<NonDurableReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dead_reason: Option<DeadReason>,
+    /// 程序状态（OSC 7501）里最显眼的那一条；没有或全是 idle 时缺省。没人看着的会话也靠它
+    /// 在列表上显示「在等你授权」
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_status: Option<ProgramStatusSummary>,
     /// unix 毫秒
     pub created_at: i64,
     /// unix 毫秒

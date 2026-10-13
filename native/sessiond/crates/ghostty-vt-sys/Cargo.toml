@@ -1,0 +1,12 @@
+[package]
+name = "ghostty-vt-sys"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "libghostty-vt 的原始绑定（bindgen 生成、入库），链 cargo xtask ghostty 编出的静态库"
+links = "ghostty-vt"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"

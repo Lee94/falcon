@@ -1168,8 +1168,7 @@ const STDIO_DRAIN: Duration = Duration::from_millis(200);
 ///
 /// 两条流都关了、进程也退了才算完（Node 的 `close` 事件）——但进程退了之后最多再等
 /// [`STDIO_DRAIN`]：macOS 上没有 pipe2，std 建管道是 `pipe()` 再补 CLOEXEC，中间那一瞬
-/// 别的线程 spawn 的子进程会把这根管道的写端继承走。继承它的若是常驻进程（会话 PTY 里的
-/// Zellij 客户端、px0），这边永远等不到 EOF，每次调用都白等到 30s 超时（测试并行时实测
+/// 别的线程 spawn 的子进程会把这根管道的写端继承走。继承它的若是常驻进程（会话守护进程、px0），这边永远等不到 EOF，每次调用都白等到 30s 超时（测试并行时实测
 /// 撞上）。libuv 用一把 cloexec 锁挡掉了这个竞争，Node 版没有这个坑。进程已经退出，它写的
 /// 东西都在管道缓冲里，读到暂时没有新数据就够了
 async fn run_to_end(mut child: Child, timeout: Duration) -> CliExec {

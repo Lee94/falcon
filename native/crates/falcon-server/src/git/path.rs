@@ -1,6 +1,6 @@
 //! 宿主机路径运算与分支 slug。移植自 `packages/server/src/git/path.ts`。全部是纯函数，零 I/O。
 //!
-//! **不用 `std::path`**——与 zellij/host.rs 手工拼 sep 的决定同一个理由：后端跑在
+//! **不用 `std::path`**——与 host.rs 手工拼 sep 的决定同一个理由：后端跑在
 //! Windows 上也可能要为一台 Linux 远端构造路径，`std::path` 会用后端自己的平台规则，
 //! 方向直接反了。kind 一律由本机平台或 SshLink 的探测给出。
 //!

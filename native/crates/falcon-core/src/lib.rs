@@ -50,9 +50,13 @@ pub mod worktree_path;
 pub mod panel_width;
 /// 对应 React 版的 lib/reason.ts：失败 / 非持久原因的文案 key
 pub mod reason;
+/// 宿主机上的会话守护进程要不要先走授权 / 部署（ADR 0020）
+pub mod host_install;
+/// 程序状态（OSC 7501，ADR 0020）的徽标与 blocked 提醒的去重
+pub mod program_status;
 /// 对应 React 版的 lib/termCanvas.ts：画布滚轮轴向锁定、横向手势翻画布
 pub mod term_canvas;
-/// 对应 React 版的 lib/termScroll.ts：终端滚动条的滑块几何（ADR 0019）
+/// 对应 React 版的 lib/termScroll.ts：终端滚动条的滑块几何（位置读本地 Grid，ADR 0020）
 pub mod term_scroll;
 /// 对应 React 版的 lib/pasteImage.ts：粘贴 / 拖入图片的判定
 pub mod paste_image;

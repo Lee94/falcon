@@ -357,6 +357,23 @@ pub fn apply_session_title(sessions: &mut [SessionWithProject], id: &str, title:
     }
 }
 
+/// WS 推来的程序状态（OSC 7501）就地写进列表，不等 5s 轮询：侧栏与标题栏都只认
+/// `Session.program_status` 这一个字段。返回是否真的变了（没变就不必通知视图）
+pub fn apply_session_program_status(
+    sessions: &mut [SessionWithProject],
+    id: &str,
+    summary: Option<&falcon_proto::ProgramStatusSummary>,
+) -> bool {
+    let mut changed = false;
+    for s in sessions.iter_mut().filter(|s| s.id == id) {
+        if s.session.program_status.as_ref() != summary {
+            s.session.program_status = summary.cloned();
+            changed = true;
+        }
+    }
+    changed
+}
+
 // ---------------- 状态 ----------------
 
 /// React 版 store 里工作区那一部分的状态（不含服务端数据与弹层开关）
@@ -1535,5 +1552,26 @@ mod tests {
         assert_eq!(sessions[0].title.as_deref(), Some("pnpm dev"));
         apply_session_title(&mut sessions, "a", None);
         assert_eq!(sessions[0].title, None);
+    }
+
+    #[test]
+    fn program_status_updates() {
+        use falcon_proto::{ProgramState, ProgramStatusSummary};
+        let mut sessions = vec![session("a", "p", 0)];
+        let s = ProgramStatusSummary {
+            state: ProgramState::Working,
+            kind: None,
+            progress: Some(10),
+            app: None,
+            title: None,
+            message: None,
+            updated_at: 1,
+        };
+        assert!(apply_session_program_status(&mut sessions, "a", Some(&s)));
+        assert_eq!(sessions[0].program_status.as_ref(), Some(&s));
+        assert!(!apply_session_program_status(&mut sessions, "a", Some(&s)), "没变就不报变化");
+        assert!(!apply_session_program_status(&mut sessions, "zz", None), "不认识的会话");
+        assert!(apply_session_program_status(&mut sessions, "a", None));
+        assert_eq!(sessions[0].program_status, None);
     }
 }

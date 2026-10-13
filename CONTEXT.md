@@ -15,7 +15,7 @@ _Avoid_: Workspace、Folder、Connection
 
 **SSH Host（远端主机）**:
 预先保存的 SSH 连接配置（显示名称、主机、端口、用户名、凭据）。在设置里增删改，新建 SSH 项目时从列表里选一台，不用每次重填。项目行上的 ssh_* 是创建时从主机**复制**来的，不是解引用——改主机时再把五列刷回引用它的项目。存量项目可以没有绑定的远端主机，编辑时仍用手写字段。
-_Avoid_: Connection、Server、Remote（太宽）、Host（单独说会和 Zellij 的「宿主机」撞名；带「远端」或写 SSH Host）
+_Avoid_: Connection、Server、Remote（太宽）、Host（单独说会和「宿主机」撞名；带「远端」或写 SSH Host）
 
 **SSH Project（SSH 项目）**:
 以远程主机连接配置（主机、端口、凭据）定义的 Project；可选指定远端工作目录，不指定则使用登录默认目录。连接配置通常来自一台已保存的 SSH Host。
@@ -90,7 +90,7 @@ _Avoid_: 会话名（那专指用户手起的那个）、tab 标题（没有 tab
 _Avoid_: 关闭（语义不明确）
 
 **Terminate（终止）**:
-显式销毁会话及其底层 shell / tmux 的动作，与 Detach 严格区分。**手动关闭终端窗口就是 Terminate**——窗口即会话，用户收起它就是不要它了；离开页面则永远不是。
+显式销毁会话及其底层 shell 的动作（持久会话由宿主机上的会话守护进程结束 shell 的进程组），与 Detach 严格区分。**手动关闭终端窗口就是 Terminate**——窗口即会话，用户收起它就是不要它了；离开页面则永远不是。
 _Avoid_: 关闭、删除
 
 **Viewer（观看端）**:
@@ -117,14 +117,14 @@ _Avoid_: 主题（这是切槽位，不是切主题）、暗黑模式
 ### 会话状态
 
 **Active（活跃）**:
-后端持有 PTY / 连接、确认存活的会话状态。有无 Viewer 在看不影响此状态。
+后端持有 PTY / 到会话守护进程的连接、确认存活的会话状态。有无 Viewer 在看不影响此状态。
 
 **Unverified（待接回）**:
 链路中断（SSH 断连或后端重启）后，持久会话理论上仍存活但尚未验证的状态。
 _Avoid_: 断开（与 Detach 混淆）
 
 **Dead（已丢失）**:
-确认死亡的会话（shell 退出、tmux session 不存在、或非持久会话遭遇后端重启）。保留在列表中标注原因，由用户手动清除。
+确认死亡的会话（shell 退出、宿主机上的会话已经不在了、或非持久会话遭遇后端重启）。保留在列表中标注原因，由用户手动清除。
 
 **Reattach（接回）**:
 对 Unverified 会话重新建立链路、验证存活并恢复为 Active 的动作。后端自动接回（启动恢复、SSH 断线、本地 PTY 掉了都会自己试）；用户也可以手动再点一次。
@@ -136,5 +136,12 @@ _Avoid_: 懒惰验证（曾经是打开窗口才接，已经改成自动）
 所有会话的硬保证：关闭/断开浏览器页面绝不终止会话。
 
 **Durable Session（持久会话）**:
-在"后端与远端断连"或"后端重启"后仍能存活并被重新接回的会话。SSH 项目通过远端 tmux 包装实现；本地项目仅 macOS/Linux 支持，Windows 本地会话不具备（v1）。不具备持久能力的会话需在 UI 上明确标注。
+在"后端与远端断连"或"后端重启"后仍能存活并被重新接回的会话。由宿主机上 falcon 自己的会话守护进程（falcon-sessiond，ADR 0020）持有：本机项目与 SSH 项目都一样，守护进程推不上去 / 跑不起来时（目录不可写、noexec、Windows 的 Job 既不让脱离 WMI 也拉不起）会话就是非持久的。不具备持久能力的会话需在 UI 上明确标注具体原因。
 _Avoid_: 持久化（易与数据存储混淆）
+
+**Session Daemon（会话守护进程）**:
+宿主机上替持久会话持有 PTY 的 falcon-sessiond。每个会话一对进程：**holder** 持 PTY、转发字节、存程序状态，它活着会话就活着；**VT 进程** 在 libghostty-vt 里维护终端状态、回答终端查询、导出接回用的快照，挂了 holder 会重启它。人可以 ssh 上去用 `falcon-sessiond attach` 接回自己的会话（逃生通道）。
+_Avoid_: Zellij（已退役）、session host（与宿主机撞名）
+
+**Program Status（程序状态）**:
+程序经 OSC 7501（Program Status Protocol）报告自己在 idle / working / done / blocked / error；blocked 时还说明在等授权、回答还是凭据。宿主机的 VT 进程解析、holder 保存，界面在会话列表与窗口标题栏上显示徽标，blocked 时提醒一次。新提示符或程序退出时 working / blocked 自动清掉，done / error 在用户看过会话后清掉。

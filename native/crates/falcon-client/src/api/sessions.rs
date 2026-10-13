@@ -50,7 +50,7 @@ impl FalconClient {
         self.get(format!("/api/sessions/{}/foreground", seg(id)))
     }
 
-    /// `POST /api/sessions/:id/terminate`：Terminate，销毁会话及其 Zellij 会话。
+    /// `POST /api/sessions/:id/terminate`：Terminate，销毁会话（持久会话连同宿主机上的守护进程）。
     pub fn terminate_session(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/sessions/{}/terminate", seg(id)))
     }

@@ -13,7 +13,7 @@
 //! Terminate。开发时（不在 .app 里跑）找不到捆绑的服务程序，就假定服务已经在跑
 //! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。
 //!
-//! Windows 上没有本机服务（服务本身依赖 Zellij 与 POSIX shell，见 README），这一段只有 macOS 实现。
+//! Windows 上没有本机服务（服务本身依赖 POSIX shell，见 README），这一段只有 macOS 实现。
 
 use std::time::Duration;
 

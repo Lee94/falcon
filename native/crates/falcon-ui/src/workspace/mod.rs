@@ -25,7 +25,7 @@ pub use falcon_core::workspace::{
     WorkspaceState, is_pending_id,
 };
 use falcon_proto::{AppIconState, AuthStatus, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
-use gpui_kit::{AppContext, Context, Entity, EventEmitter, Task, Window};
+use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::profiles::ServerProfile;
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
@@ -65,11 +65,23 @@ pub enum WorkspaceEvent {
     Askpass,
     /// 某扇窗口要拿焦点
     FocusPane(String),
-    /// SSH 项目首次建会话前要先走 Zellij 授权 / 安装
+    /// SSH 项目首次建会话前要先走授权 / 把会话守护进程部署到宿主机（ADR 0020）
     NeedsInstall { project_id: String, agent: Option<SessionAgent> },
+    /// 程序状态（OSC 7501）的提醒：`Some` = 某个会话刚卡在 blocked、人又不在那扇窗口里，弹一条；
+    /// `None` = 它不卡了（或会话没了），撤掉先前那条。同一会话的提醒原地替换，不叠
+    ProgramAlert { session_id: String, alert: Option<ProgramAlertSpec> },
     Toast(Toast),
     /// 要用户确认的动作（关掉一个前台还在跑程序的终端等）
     Confirm(ConfirmSpec),
+}
+
+/// 一条 blocked 提醒的内容。标题里总带着会话的显示名：程序给的文字是不可信的，规范要求标明
+/// 来源，免得一个程序冒充别的会话（ADR 0020 决定六）
+#[derive(Clone, Debug)]
+pub struct ProgramAlertSpec {
+    pub title: String,
+    /// 程序那半句（已消毒、截断）
+    pub body: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +133,16 @@ pub struct Workspace {
 
     /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
+    /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
+    program_alerts: falcon_core::program_status::BlockedAlerts,
+    /// 「跑完了」提示音的判定（进入 done / error 才响，规则在 falcon-core）
+    finish_chimes: falcon_core::program_status::FinishChimes,
+    /// 终端状态栏上的计时（已运行 / 已等待 / 用时），时刻是相对 `clock_epoch` 的毫秒
+    program_clock: falcon_core::program_status::StateClock,
+    clock_epoch: web_time::Instant,
+    /// 窗口在不在前台（ServerWindow 跟着 GPUI 的窗口激活写进来）。终端的键盘焦点在窗口切到
+    /// 后台时并不丢，光看它会把"人去别的 App 了"当成还看着
+    pub window_active: bool,
     changes_in_flight: bool,
     _tasks: Vec<Task<()>>,
 }
@@ -156,6 +178,11 @@ impl Workspace {
             custom_icon: None,
             app_icon_busy: false,
             terminals: HashMap::new(),
+            program_alerts: Default::default(),
+            finish_chimes: Default::default(),
+            program_clock: Default::default(),
+            clock_epoch: web_time::Instant::now(),
+            window_active: true,
             changes_in_flight: false,
             _tasks: Vec::new(),
         };
@@ -475,12 +502,42 @@ impl Workspace {
         .detach();
     }
 
-    fn apply_sessions(&mut self, sessions: Vec<SessionWithProject>, cx: &mut Context<Self>) {
-        // 内容没变就整个跳过（React 版的 sameFlatArray）：tabs / active 在上一轮已经收敛
-        if self.sessions == sessions {
+    fn apply_sessions(&mut self, mut sessions: Vec<SessionWithProject>, cx: &mut Context<Self>) {
+        // 开着窗口、WS 推过程序状态的会话以推来的全集为准：这次轮询的请求可能发在推送之前、
+        // 响应却晚到，拿它覆盖会让刚清掉的 blocked 徽标又冒出来，一直挂到下一轮轮询
+        for s in sessions.iter_mut() {
+            let Some(view) = self.terminals.get(&s.id) else { continue };
+            if let Some(records) = view.read(cx).program_records() {
+                s.session.program_status = falcon_core::program_status::summarize(records);
+            }
+            // 窗口可能比列表先建出来（启动时恢复的、刚建好的会话），那时持久性还不知道。
+            // 放在下面「列表没变就跳过」之前：视图建出来之后列表可能就再没变过
+            let durable = s.durable;
+            view.update(cx, |v, _| v.set_durable(durable));
+        }
+        // 程序状态的提醒先对账：哪怕列表没变也要过一遍——头一次拿到列表（哪怕是空的）才算
+        // 「启动时已经卡着的都记下了」，之后的新 blocked 才提醒
+        let changes = self
+            .program_alerts
+            .observe_all(sessions.iter().map(|s| (s.id.as_str(), s.program_status.as_ref())));
+        let finished = self
+            .finish_chimes
+            .observe_all(sessions.iter().map(|s| (s.id.as_str(), s.program_status.as_ref())));
+        let now = self.clock_now();
+        self.program_clock.observe_all(sessions.iter().map(|s| (s.id.as_str(), s.program_status.as_ref())), now);
+        // 内容没变就整个跳过（React 版的 sameFlatArray）：tabs / active 在上一轮已经收敛。
+        // 提醒照发（它读的是换上之后的列表，没变时新旧一样）
+        let unchanged = self.sessions == sessions;
+        if !unchanged {
+            self.sessions = sessions;
+        }
+        for (id, change) in changes {
+            self.emit_program_alert(&id, change, cx);
+        }
+        self.chime_finished(&finished, cx);
+        if unchanged {
             return;
         }
-        self.sessions = sessions;
         self.state.apply_sessions(&self.sessions);
         let alive: HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
         self.selected.retain(|id| alive.contains(id.as_str()));
@@ -504,6 +561,73 @@ impl Workspace {
     pub fn apply_session_title(&mut self, id: &str, title: Option<String>, cx: &mut Context<Self>) {
         falcon_core::workspace::apply_session_title(&mut self.sessions, id, title.as_deref());
         cx.notify();
+    }
+
+    /// WS 推来的程序状态全集：自己算摘要写进列表（侧栏、标题栏只认 `Session.program_status`），
+    /// 不等 5s 轮询；再看要不要提醒
+    pub fn apply_program_records(&mut self, id: &str, records: &[falcon_proto::ProgramStatusRecord], cx: &mut Context<Self>) {
+        let summary = falcon_core::program_status::summarize(records);
+        falcon_core::workspace::apply_session_program_status(&mut self.sessions, id, summary.as_ref());
+        let now = self.clock_now();
+        self.program_clock.observe(id, summary.as_ref(), now);
+        // 摘要没变也要重画：终端状态栏还列着子任务，它们只在记录全集里
+        cx.notify();
+        let change = self.program_alerts.observe(id, summary.as_ref());
+        self.emit_program_alert(id, change, cx);
+        if self.finish_chimes.observe(id, summary.as_ref()) {
+            self.chime_finished(&[id.to_string()], cx);
+        }
+    }
+
+    /// 这几个会话刚跑完：响一声（一批里有几个都只响一声）。人正看着的那个不算——窗口在前台、
+    /// 活动视图就是它、键盘焦点在它的终端上，标题栏的徽标就在眼前
+    fn chime_finished(&self, ids: &[String], cx: &mut Context<Self>) {
+        if ids.is_empty() || !crate::chime::enabled(cx) {
+            return;
+        }
+        if ids.iter().all(|id| self.watching(id, cx)) {
+            return;
+        }
+        log::debug!("程序跑完了，响提示音：{}", ids.join(", "));
+        crate::chime::play(cx);
+    }
+
+    fn clock_now(&self) -> u64 {
+        self.clock_epoch.elapsed().as_millis() as u64
+    }
+
+    /// 终端状态栏上的计时读数（本客户端没亲眼看到这一轮开始时为 None）
+    pub fn program_clock(&self, id: &str) -> Option<falcon_core::program_status::ClockReading> {
+        self.program_clock.reading(id, self.clock_now())
+    }
+
+    fn watching(&self, id: &str, cx: &App) -> bool {
+        self.window_active
+            && matches!(&self.state.active, ActiveView::Terminal { session_id } if session_id == id)
+            && self.terminals.get(id).is_some_and(|v| v.read(cx).is_focused())
+    }
+
+    /// 刚卡住的会话弹一条提醒（人就在那扇窗口里时不弹：徽标就在眼前的标题栏上），不卡了就撤掉
+    fn emit_program_alert(&mut self, id: &str, change: falcon_core::program_status::AlertChange, cx: &mut Context<Self>) {
+        use falcon_core::program_status::{AlertChange, badge};
+        match change {
+            AlertChange::Unchanged => {}
+            AlertChange::Resolved => cx.emit(WorkspaceEvent::ProgramAlert { session_id: id.to_string(), alert: None }),
+            AlertChange::Blocked => {
+                let watching = matches!(&self.state.active, ActiveView::Terminal { session_id } if session_id == id)
+                    && self.terminals.get(id).is_some_and(|v| v.read(cx).is_focused());
+                if watching {
+                    return;
+                }
+                let Some(session) = self.session(id) else { return };
+                let Some(b) = session.program_status.as_ref().and_then(badge) else { return };
+                let name = crate::labels::session_label(session, &self.projects);
+                let what = rust_i18n::t!(b.label_key).to_string();
+                let title = rust_i18n::t!("programStatus.toastTitle", name = name, what = what).to_string();
+                let alert = ProgramAlertSpec { title, body: b.detail };
+                cx.emit(WorkspaceEvent::ProgramAlert { session_id: id.to_string(), alert: Some(alert) });
+            }
+        }
     }
 
     fn pull_askpass(&mut self, cx: &mut Context<Self>) {
@@ -668,7 +792,8 @@ impl Workspace {
         for id in ids {
             let client = self.client.clone();
             let sid = id.clone();
-            let view = cx.new(|cx| TerminalView::new(sid, client, local, window, cx));
+            let durable = self.session(&id).map(|s| s.durable);
+            let view = cx.new(|cx| TerminalView::new(sid, client, local, durable, window, cx));
             let sid = id.clone();
             cx.subscribe(&view, move |this, view, ev: &TerminalViewEvent, cx| match ev {
                 TerminalViewEvent::TitleChanged => {
@@ -692,6 +817,7 @@ impl Workspace {
                     }
                 }
                 TerminalViewEvent::Toast { kind, title, body } => this.toast(*kind, title.clone(), body.clone(), cx),
+                TerminalViewEvent::ProgramStatus(records) => this.apply_program_records(&sid, records, cx),
             })
             .detach();
             self.terminals.insert(id, view);

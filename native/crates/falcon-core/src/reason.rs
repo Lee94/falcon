@@ -24,15 +24,16 @@ pub fn worktree_reason_key(reason: Option<WorktreeFailure>) -> String {
     }
 }
 
-/// `zellij.reason_<原因，- 换成 _>`；没有原因按"没授权"说
+/// `durable.reason_<原因，- 换成 _>`；没有原因按"没授权"说。认不出的原因（`Unknown`，比如
+/// Zellij 时代留在库里的 no-tar）是 `durable.reason_unknown`
 pub fn non_durable_reason_key(reason: Option<NonDurableReason>) -> String {
     match reason {
-        None => "zellij.reason_not_authorized".into(),
-        Some(r) => format!("zellij.reason_{}", r.as_str().replace('-', "_")),
+        None => "durable.reason_not_authorized".into(),
+        Some(r) => format!("durable.reason_{}", r.as_str().replace('-', "_")),
     }
 }
 
-/// 把 WorktreeFailure 翻成给人看的一句话。key 约定与 `zellij.reason_*` 一致
+/// 把 WorktreeFailure 翻成给人看的一句话。key 约定与 `durable.reason_*` 一致
 pub fn worktree_reason_text(t: &impl Translate, reason: Option<WorktreeFailure>) -> String {
     t.t(&worktree_reason_key(reason), &[])
 }
@@ -42,16 +43,17 @@ pub fn reason_text(t: &impl Translate, reason: Option<NonDurableReason>) -> Stri
     t.t(&non_durable_reason_key(reason), &[])
 }
 
-/// 持久性徽标的 hover 文案：先说保住了什么，再说丢了什么
+/// 持久性徽标的 hover 文案：先说保住了什么，再说丢了什么。`sessiond_version` 是宿主机上
+/// 会话守护进程的版本（知道才带上）
 pub fn durability_hint(
     t: &impl Translate,
     durable: bool,
     reason: Option<NonDurableReason>,
-    zellij_version: Option<&str>,
+    sessiond_version: Option<&str>,
 ) -> String {
     if durable {
-        return match zellij_version.filter(|v| !v.is_empty()) {
-            Some(version) => t.t("session.durableHintZellij", &[("version", version)]),
+        return match sessiond_version.filter(|v| !v.is_empty()) {
+            Some(version) => t.t("session.durableHintVersion", &[("version", version)]),
             None => t.t("session.durableHint", &[]),
         };
     }
@@ -73,18 +75,20 @@ mod tests {
     fn keys_follow_the_web_convention() {
         assert_eq!(worktree_reason_key(Some(WorktreeFailure::BranchInUse)), "worktree.reason_branch_in_use");
         assert_eq!(worktree_reason_key(None), "common.error");
-        assert_eq!(non_durable_reason_key(Some(NonDurableReason::NotAuthorized)), "zellij.reason_not_authorized");
-        assert_eq!(non_durable_reason_key(None), "zellij.reason_not_authorized");
+        assert_eq!(non_durable_reason_key(Some(NonDurableReason::NotAuthorized)), "durable.reason_not_authorized");
+        assert_eq!(non_durable_reason_key(None), "durable.reason_not_authorized");
+        assert_eq!(non_durable_reason_key(Some(NonDurableReason::UploadFailed)), "durable.reason_upload_failed");
+        assert_eq!(non_durable_reason_key(Some(NonDurableReason::Unknown)), "durable.reason_unknown");
         assert_eq!(worktree_reason_text(&echo, Some(WorktreeFailure::GitMissing)), "worktree.reason_git_missing");
     }
 
     #[test]
     fn durability_hint_says_what_is_kept_then_what_is_lost() {
-        assert_eq!(durability_hint(&echo, true, None, Some("0.44.1")), "session.durableHintZellij(version=0.44.1)");
+        assert_eq!(durability_hint(&echo, true, None, Some("0.3.0")), "session.durableHintVersion(version=0.3.0)");
         assert_eq!(durability_hint(&echo, true, None, None), "session.durableHint");
         assert_eq!(
             durability_hint(&echo, false, Some(NonDurableReason::WindowsJobObject), None),
-            "session.nonDurableHint(reason=zellij.reason_windows_job_object)"
+            "session.nonDurableHint(reason=durable.reason_windows_job_object)"
         );
     }
 }

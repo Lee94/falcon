@@ -10,7 +10,7 @@
 //! 3. 从 GitHub release 下载锁定版本（darwin 是 tgz，linux 是裸二进制）；
 //! 4. PATH 上的 `cloudflared` —— 下载失败时的兜底，版本可能对不上。
 //!
-//! 不做完整性校验：走默认 GitHub 源时 HTTPS 已保证来源。Zellij 同一套权衡。
+//! 不做完整性校验：走默认 GitHub 源时 HTTPS 已保证来源（Zellij 时代的安装也是这套权衡）。
 //!
 //! # 与 TS 的差别
 //!

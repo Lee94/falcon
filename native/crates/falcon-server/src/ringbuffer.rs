@@ -4,18 +4,18 @@
 //! 块是 `String`：PTY 输出在进来之前已经做过 UTF-8 跨块拼接（附录 A），每个块都是完整的
 //! UTF-8，所以快照拼起来也是。字节数按 UTF-8 算（TS 的 `Buffer.byteLength`），即 `str::len`。
 //!
-//! 容量与 zellij 的 scrollback 深度（`zellij/command.ts` 的 `SCROLL_BUFFER` = 10000 行）是
-//! 一起定的，两个数要一起改。
+//! 现在只有非持久会话用它回放：持久会话的回放是宿主机上 VT 进程导出的快照（ADR 0020），
+//! 输出不进这里。容量是 Zellij 时代与它的 scrollback 深度（10000 行）一起定的，没再动。
 
 use std::collections::VecDeque;
 
-/// 4MB：要装得下 dump-screen 的整份快照（scroll_buffer_size 10000 行、
-/// 含 ANSI 时约 1-2MB）再留出后续实时输出的余量。快照是单个 chunk，
-/// 上限太小的话它会在之后第一次触顶时被整块淘汰，历史瞬间清零。
+/// 4MB：Zellij 时代要装得下 dump-screen 的整份快照（10000 行、含 ANSI 时约 1-2MB）
+/// 再留出后续实时输出的余量——快照是单个 chunk，上限太小的话它会在之后第一次触顶时被
+/// 整块淘汰，历史瞬间清零。那条路径已随 Zellij 删除，数没改。
 pub const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// 按字节数封顶的输出环形缓冲。超出上限时从最老的块开始整块淘汰，但至少留一块
-/// （单块比上限还大时原样留着——那多半就是 dump-screen 的快照）。
+/// （单块比上限还大时原样留着，免得整份历史一下子清空）。
 #[derive(Debug, Clone)]
 pub struct RingBuffer {
     chunks: VecDeque<String>,

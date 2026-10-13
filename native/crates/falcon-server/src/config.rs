@@ -19,7 +19,7 @@ pub fn is_loopback(host: &str) -> bool {
 /// 若新目录还不存在而旧的 `~/.mojito` 在，继续用旧的，避免用户丢库。
 /// 本机不能 `mv`：SQLite 开在这个目录里，进程还活着就抽走会把库弄丢。
 /// 远端由 SshLink 的探测在之后尝试把 `~/.mojito` 改名为 `~/.falcon`，
-/// 迁不了则沿用旧路径（见 zellij::host::migrate_remote_root_command）。
+/// 迁不了则沿用旧路径（见 host::migrate_remote_root_command）。
 ///
 /// 打包后的启动引导（S7，替换 scripts/build-binary.mjs 的 SEA bootstrap）必须与这里同一套回退。
 pub fn default_data_dir(home: &Path) -> PathBuf {
@@ -52,9 +52,9 @@ pub fn parse_args(argv: &[String], env: impl Fn(&str) -> Option<String>) -> anyh
     }
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("建数据目录 {} 失败", config.data_dir.display()))?;
-    // 与 Node 版的出入：相对路径在这里就解析成绝对路径。数据目录会拼进 Zellij 二进制、
-    // 启动脚本、askpass 包装的路径里；node-pty 的 execvp 对带斜杠的相对路径按 cwd 解析，
-    // portable-pty 却只在 PATH 里找，相对的 `target/fd/bin/zellij` 会 spawn 失败
+    // 与 Node 版的出入：相对路径在这里就解析成绝对路径。数据目录会拼进会话守护进程的
+    // 二进制、启动脚本、askpass 包装的路径里；node-pty 的 execvp 对带斜杠的相对路径按 cwd 解析，
+    // portable-pty 却只在 PATH 里找，相对的 `target/fd/agents/falcon-claude.sh` 会 spawn 失败
     config.data_dir = std::path::absolute(&config.data_dir)
         .with_context(|| format!("解析数据目录 {} 失败", config.data_dir.display()))?;
     Ok(config)

@@ -40,7 +40,7 @@ use crate::git::repo::{RunOpts, list_repo_files};
 use crate::sessions::local::local_kind;
 use crate::sessions::ssh::SshLink;
 use crate::transfer::{content_disposition, open_download, prepare_upload, receive_upload};
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 /// 要登录的那几条
 pub fn router() -> Router<AppState> {

@@ -1,5 +1,5 @@
-//! Zellij 安装通道 `/ws/install/:projectId`：照旧 React 版的 `ZellijInstallModal.tsx` 与服务端
-//! `ws.ts` 对齐。
+//! 会话守护进程的部署通道 `/ws/install/:projectId`（ADR 0020；Zellij 时代是同一条通道，时序照
+//! 旧 React 版的 `ZellijInstallModal.tsx` 与服务端 `ws.ts` 对齐，没变）。
 //!
 //! 每次连上来服务端都当作用户显式发起的安装（首次或重试），推若干 `stage` 后以
 //! `done` / `failed` 收尾并**自己关掉连接**。所以这条通道不重连：断了就是断了，
@@ -36,7 +36,7 @@ pub enum InstallEvent {
     Closed,
 }
 
-/// 一次 Zellij 安装的进度流。是 `futures::Stream<Item = InstallEvent>`，与执行器无关。
+/// 一次部署（探测 → 上传 → 校验）的进度流。是 `futures::Stream<Item = InstallEvent>`，与执行器无关。
 ///
 /// 丢掉即取消（关掉 socket 服务端就会 abort 这次安装）。
 pub struct InstallSocket {

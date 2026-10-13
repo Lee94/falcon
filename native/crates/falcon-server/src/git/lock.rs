@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use super::host::GitHost;
 use super::path::canon_key;
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 /// 仓库锁的唯一键构造。此前三处调用点手拼：派生用 `::`、commit 与 pull/push 用
 /// `:`——两个键空间不相交，同一仓库上的派生与 pull/push 根本不互斥（潜伏 bug，ADR 0003

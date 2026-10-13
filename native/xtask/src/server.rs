@@ -3,8 +3,10 @@
 //! `cargo xtask server` 出 `release/falcon-v<版本>-<平台>`，`cargo xtask pkg` 把它放进
 //! Falcon.app 的 Resources，`falcon service install` 再把它拷到 `<dataDir>/bin/falcon`。
 //! 不需要首次运行的解压步骤：
-//! - 浏览器版客户端（build-web.sh 的产物，rust-embed）与 Zellij 滚动插件直接从二进制里服务；
-//! - 锁定版本的 meegle CLI 编进二进制，首次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`。
+//! - 浏览器版客户端（build-web.sh 的产物，rust-embed）直接从二进制里服务；
+//! - 锁定版本的 meegle CLI 编进二进制，首次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`；
+//! - 5 个目标的会话守护进程（falcon-sessiond，ADR 0020）gzip 后编进二进制：Mac 上的后端也要往
+//!   Linux arm64 的远端推，用到哪个目标就释放 / 推送哪个（falcon-server 的 sessiond/bin.rs）。
 //!
 //! 浏览器版要 rustup 的 wasm32-unknown-unknown target 与同版本的 wasm-bindgen-cli（见 build-web.sh）。
 
@@ -14,7 +16,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::util::{self, host_platform, native, root, run_env, version};
 
-/// 平台名 → Rust 目标三元组。Windows 不做本机服务（服务本身依赖 Zellij 与 POSIX shell）
+/// 平台名 → Rust 目标三元组。Windows 不做本机服务（服务的打包与托管只做了 macOS / Linux）
 const TRIPLES: [(&str, &str); 4] = [
     ("darwin-arm64", "aarch64-apple-darwin"),
     ("darwin-x64", "x86_64-apple-darwin"),
@@ -61,7 +63,19 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
     // ---- 2. 本平台的 meegle CLI ----
     let meegle_bin = crate::meegle::ensure(target)?;
 
-    // ---- 3. cargo ----
+    // ---- 3. 5 个目标的会话守护进程（要 Zig 与 cargo-zigbuild，见 sessiond.rs）----
+    println!("== 构建会话守护进程（cargo xtask sessiond --targets all） ==");
+    crate::sessiond::build(&crate::sessiond::TARGETS, false, false)?;
+    let embed_dir = native().join("target-sessiond/embed");
+    std::fs::create_dir_all(&embed_dir)?;
+    for (t, _) in crate::sessiond::TARGETS {
+        let bytes = std::fs::read(crate::sessiond::artifact(t))?;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut gz, &bytes)?;
+        std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
+    }
+
+    // ---- 4. cargo ----
     // 发布产物不带调试信息（工作区的 release profile 为原生客户端留着 debuginfo）。改 profile 会让
     // 依赖全部重编，所以单独一个 target 目录，不跟原生客户端的 release 缓存互相冲掉
     let target_dir = native().join("target-server");
@@ -71,7 +85,7 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
         "-p",
         "falcon-server",
         "--features",
-        "embed-web,embed-meegle",
+        "embed-web,embed-meegle,embed-sessiond",
         "--config",
         "profile.release.debug=false",
         "--config",
@@ -91,6 +105,7 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
         &[
             ("FALCON_EMBED_WEB_DIR", web_dist.as_os_str()),
             ("FALCON_EMBED_MEEGLE_BIN", meegle_bin.as_os_str()),
+            ("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str()),
             ("CARGO_TARGET_DIR", target_dir.as_os_str()),
         ],
     )?;

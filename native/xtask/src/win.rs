@@ -1,7 +1,7 @@
 //! Windows 安装包（Inno Setup 的 setup.exe，原 scripts/build-windows-installer.mjs）：
 //! 只装原生客户端（GPUI）。
 //!
-//! 与 macOS pkg 不同，这里没有捆绑服务端——服务本身依赖 Zellij 与 POSIX shell（见 README），
+//! 与 macOS pkg 不同，这里没有捆绑服务端——服务的打包与托管只做了 macOS / Linux（见 README），
 //! 装好后在客户端里连别处的 falcon 服务。
 //!
 //! ```text

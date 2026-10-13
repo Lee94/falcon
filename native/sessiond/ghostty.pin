@@ -1,0 +1,6 @@
+# 钉死的 ghostty（ADR 0020 决定二）。cargo xtask ghostty 与 ghostty-vt-sys 的 build.rs 共用这一份。
+# 升级：改这两行 → cargo xtask ghostty → cargo xtask ghostty-bindgen（看 bindings.rs 的 diff）
+# → cargo xtask sessiond --check 与语料测试。sha256 是 GitHub 源码包
+# https://github.com/ghostty-org/ghostty/archive/<commit>.tar.gz 的。
+commit=05dcf887ef51ea27821f20979493306ec3a19149
+sha256=61a0158a9b2592f147d1e2e0f965d6c952c90410faab6e7265c169a1ccc9481a

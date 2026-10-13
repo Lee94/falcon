@@ -172,4 +172,8 @@ impl Platform for Desktop {
     fn current_app_icon(&self) -> Option<Vec<u8>> {
         crate::dock::current_icon_tiff()
     }
+
+    fn play_chime(&self) {
+        crate::chime::play();
+    }
 }

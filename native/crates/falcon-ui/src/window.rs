@@ -118,7 +118,14 @@ impl ServerWindow {
             cx.subscribe_in(&ws, window, Self::on_workspace_event),
             // 系统切明暗：跟随系统时重新派生主题
             cx.observe_window_appearance(window, |_, window, cx| crate::theme::on_window_appearance(window, cx)),
+            // 「跑完了」提示音要知道人还在不在这个窗口里（workspace 的 chime_finished）
+            cx.observe_window_activation(window, |this, window, cx| {
+                let active = window.is_window_active();
+                this.ws.update(cx, |w, _| w.window_active = active);
+            }),
         ];
+        let active = window.is_window_active();
+        ws.update(cx, |w, _| w.window_active = active);
 
         // 本机服务先确认起来了再初始化（launchd 拉起服务要时间）；远处的直接连。
         // 没有本机服务可托管的平台（浏览器：页面能打开就说明服务端在）也直接连
@@ -161,6 +168,9 @@ impl ServerWindow {
             }
             WorkspaceEvent::NeedsInstall { project_id, agent } => {
                 dialogs::install::open(&self.ws, project_id, Some(*agent), window, cx)
+            }
+            WorkspaceEvent::ProgramAlert { session_id, alert } => {
+                dialogs::show_program_alert(&self.ws, session_id, alert.as_ref(), window, cx)
             }
             WorkspaceEvent::Confirm(spec) => {
                 let ws = self.ws.clone();

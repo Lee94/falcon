@@ -14,23 +14,24 @@ mod icons;
 mod meegle;
 mod pkg;
 mod server;
+mod sessiond;
 mod themes;
 mod util;
 mod win;
-mod zellij;
 
 const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
-  server [--target <平台>] [--skip-web]   服务端发布单文件（内嵌浏览器版与 meegle CLI），产物 release/falcon-v<版本>-<平台>
+  server [--target <平台>] [--skip-web]   服务端发布单文件（内嵌浏览器版、meegle CLI 与 5 个目标的会话守护进程），产物 release/falcon-v<版本>-<平台>
   web                                    浏览器版客户端（native/scripts/build-web.sh），产物 native/target-wasm/dist
   pkg [--skip-bin] [--launcher]          macOS 安装包（Falcon.app = 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，只有原生客户端）
   meegle [--target <平台>]               取锁定版本的 meegle CLI 到 native/.cache/meegle/（server 会自动调）
 
-Zellij
-  zellij-update <版本|--latest>          改锁定的 Zellij 版本（校验五个 target 的产物齐全）
-  zellij-plugin                          重编滚动位置插件，产物提交在 falcon-server/assets/
+会话守护进程（ADR 0020；目标：host（默认）/ all / 逗号分隔的 Rust 三元组）
+  ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库，落在 native/.cache/ghostty/
+  ghostty-bindgen                        从钉死 commit 的头文件重新生成 ghostty-vt-sys 的绑定（升 pin 时跑）
+  sessiond [--targets …] [--check|--test] 编 falcon-sessiond（cargo-zigbuild 交叉编），产物 native/target-sessiond/
 
 资源（产物都已进仓库，只在要换时跑）
   icons                                  生成全部内置应用图标（浏览器版 native/web/icons 与原生 Dock 图标）
@@ -56,8 +57,9 @@ fn main() {
         "pkg" => pkg::run(&args),
         "win" => win::run(&args),
         "meegle" => meegle::run(&args),
-        "zellij-update" => zellij::update(&args),
-        "zellij-plugin" => zellij::build_plugin(&args),
+        "ghostty" => sessiond::ghostty(&args),
+        "ghostty-bindgen" => sessiond::bindgen(&args),
+        "sessiond" => sessiond::run(&args),
         "icons" => icons::run(&args),
         "vendor-fonts" => fonts::run(&args),
         "vendor-themes" => themes::run(&args),

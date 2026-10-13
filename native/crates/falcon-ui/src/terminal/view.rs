@@ -3,7 +3,11 @@
 //!
 //! 数据流（设计见 docs/design/gpui-client.md §3.1）：socket 的回调在网络线程上直接把字节
 //! 喂进 [`TermCore`]，脏位由 0 变 1 时才发一个唤醒过来；UI 线程收到唤醒只是 `notify`，
-//! 渲染时取一次快照。所以不管输出多密，UI 每帧至多处理一次。
+//! 渲染时取一次快照。所以不管输出多密，UI 每帧至多处理一次。终端产生的事件（回复、剪贴板）
+//! 不跟着脏位走：每段输出解析完都取一次，有就单独送过来（[`UiEvent::Term`]）。
+//!
+//! 宿主机上不再有 Zellij（ADR 0020）：程序的字节原样透传，滚动、滚动条、鼠标与滚轮的模式
+//! 全按本地 alacritty 的状态来；持久会话的终端查询由宿主机的 VT 进程回答，这里只答非持久会话的。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,13 +15,15 @@ use std::time::Duration;
 
 use falcon_client::{FalconClient, SessionEvent, SessionSink, SessionSocket};
 use falcon_core::term_scroll::{self, MIN_THUMB_PX, ScrollState};
+use falcon_proto::ProgramStatusRecord;
 use falcon_term::alacritty_terminal::index::Side;
 use falcon_term::alacritty_terminal::selection::SelectionType;
 use falcon_term::alacritty_terminal::term::TermMode;
 use falcon_term::keyroute::{KeyRoute, route_key};
 use falcon_term::{
     DeltaMode, MouseAction, MouseButton as TermMouseButton, MouseReportEvent, MouseReporter,
-    Snapshot, TermCore, TermEvent, TermOptions, TermSize, WheelAccumulator, keys, links, paste,
+    Snapshot, TermCore, TermEvent, TermOptions, TermSize, WheelAccumulator, WheelRoute, keys, links,
+    paste,
 };
 use futures::StreamExt;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,7 +34,6 @@ use gpui_kit::{
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
 };
-use web_time::Instant;
 
 use super::element::{HoveredLink, TerminalElement, TerminalGeometry};
 use crate::theme::TerminalLook;
@@ -51,6 +56,8 @@ pub enum ConnState {
 enum UiEvent {
     /// 终端内容变了（脏位由 0 变 1）
     Dirty,
+    /// 终端产生的事件（回复、剪贴板），每段输出解析完就取走送来
+    Term(Vec<TermEvent>),
     Control(SessionEvent),
 }
 
@@ -67,6 +74,9 @@ impl SessionSink for Sink {
                 if self.core.advance(&bytes) {
                     let _ = self.tx.unbounded_send(UiEvent::Dirty);
                 }
+                // 不管脏位翻没翻都取：脏位已经是 1（UI 还没画）时产生的回复，以前要等下一段输出
+                // 把脏位重新拨起来才被取走，程序就卡在等 DA / DSR 回复上（ADR 0020「客户端」）
+                self.drain_events();
             }
             SessionEvent::Replay(bytes) => {
                 // 回放最大 4MB：原生上解析期间让 tokio 把这个 worker 上的其他任务挪走（client 的
@@ -78,11 +88,22 @@ impl SessionSink for Sink {
                 if changed {
                     let _ = self.tx.unbounded_send(UiEvent::Dirty);
                 }
+                // 回放期间静音，照理没有事件；取一次是为了不留例外
+                self.drain_events();
             }
             other => {
                 log::debug!("session event {other:?}");
                 let _ = self.tx.unbounded_send(UiEvent::Control(other));
             }
+        }
+    }
+}
+
+impl Sink {
+    fn drain_events(&self) {
+        let events = self.core.take_events();
+        if !events.is_empty() {
+            let _ = self.tx.unbounded_send(UiEvent::Term(events));
         }
     }
 }
@@ -106,14 +127,12 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 /// 滚过之后滚动条亮多久（React 版的 LINGER_MS）
 const SCROLL_LINGER: Duration = Duration::from_millis(1200);
-/// 滚动条亮着时隔多久再问一次位置：期间输出还在涨，历史长度会变
-const SCROLL_REFRESH: Duration = Duration::from_millis(1000);
-/// 一串滚轮之后稍等一拍再问位置（zellij 滚完才知道滚到了哪），连发时每拍至多一次
-const SCROLL_PROBE_DELAY: Duration = Duration::from_millis(60);
-/// 拖滑块时发 seek 的最小间隔。服务端会把在飞期间的请求合并成最后一个，这里只是少发点
-const SEEK_INTERVAL: Duration = Duration::from_millis(16);
 
-/// 拖滑块中：滑块先跟手（本地像素），不等服务端回话
+/// 持久性还不知道时（会话列表还没到）最多替程序攒多少条回复。只是兜一下启动那一小会儿，
+/// 程序一般问一两条就停下来等了
+const PENDING_REPLIES_MAX: usize = 64;
+
+/// 拖滑块中：滑块跟手（本地像素），终端按换算出的行数同步滚过去
 #[derive(Clone, Copy, Debug)]
 struct ScrollDrag {
     start_y: f32,
@@ -121,11 +140,12 @@ struct ScrollDrag {
     top: f32,
 }
 
-/// 滚动条（ADR 0019，React 版的 TerminalScrollbar.tsx）。滚动发生在宿主机的 zellij 里，
-/// 位置是问服务端才知道的：滚轮、悬停、拖动时问，平时不问。
+/// 滚动条（React 版的 TerminalScrollbar.tsx）。位置一律读本地 Grid（ADR 0020：宿主机上不再有
+/// Zellij，字节原样透传，历史就在本地 alacritty 里；ADR 0019 那套问宿主机插件的探测、刷新
+/// 定时器与 WS `scroll` 消息全部退役）。每帧从快照推一次，滚轮、拖动都直接改本地终端。
 #[derive(Default)]
 struct Scrollbar {
-    /// 服务端推来的位置；None = 从没收到过回话（会话不支持），整个不画
+    /// 这一帧快照里的位置（render 时写）；还没画过时为 None
     state: Option<ScrollState>,
     /// 轨道在窗口里的位置（画的时候量）
     track: Option<Bounds<Pixels>>,
@@ -134,11 +154,6 @@ struct Scrollbar {
     lit_epoch: usize,
     hover: bool,
     drag: Option<ScrollDrag>,
-    /// 松手后到下一次回话之前，滑块停在松手处
-    settle_top: Option<f32>,
-    probe_pending: bool,
-    last_seek: Option<Instant>,
-    refresh_epoch: usize,
 }
 
 impl Scrollbar {
@@ -173,7 +188,7 @@ pub struct TerminalView {
     dragging: Option<SelectionDrag>,
     /// 在这扇终端里按下、已经报给程序的键（[`button_bit`] 的位）。拖动与松开只报这些键：
     /// 在标题栏 / 侧栏按下再拖过来的，程序没见过那次按下，收到带键的移动就当成在拖选
-    /// （zellij 会直接起一段选区），松开就把那段选区复制走
+    /// （开着鼠标的 tmux / vim 会直接起一段选区），松开就把那段选区复制走
     reported_held: u8,
     hovered_link: Option<HoveredLink>,
     scrollbar: Scrollbar,
@@ -184,6 +199,17 @@ pub struct TerminalView {
     attach_error: Option<String>,
     /// 服务端推的前台命令（自动标题的第二优先级）
     pub server_title: Option<String>,
+    /// 会话持不持久（`Session.durable`），决定终端回复发不发：持久会话的查询由宿主机的 VT 进程
+    /// 一处回答，客户端不答（ADR 0020 决定五）。None = 会话列表还没到（启动时恢复的窗口比列表
+    /// 先建出来），这期间的回复先攒在 `pending_replies`，知道了再决定发还是丢
+    durable: Option<bool>,
+    pending_replies: Vec<String>,
+    /// WS 推来的程序状态（OSC 7501）全集；只有持久会话有。None = 这条连接上还没推过（没连上、
+    /// 断开了、非持久会话），这时工作区以会话列表里的摘要为准
+    program_status: Option<Vec<ProgramStatusRecord>>,
+    /// 这一份全集里的 done / error 已经发过 status_seen：服务端清完会推新的全集，到那时为止
+    /// 别每敲一个键发一次
+    seen_sent: bool,
     /// 本机 falcon 服务端：拖进来的非图片文件直接粘路径（远端宿主机上没有这些文件）
     local_server: bool,
     _tasks: Vec<Task<()>>,
@@ -207,15 +233,19 @@ pub enum TerminalViewEvent {
     Unauthorized,
     /// 要用户看见的提示（图片粘贴超限 / 上传失败），由工作区转成通知
     Toast { kind: crate::workspace::ToastKind, title: String, body: Option<String> },
+    /// WS 推来的程序状态（OSC 7501）全集：工作区据此改列表里的摘要、决定要不要提醒
+    ProgramStatus(Vec<ProgramStatusRecord>),
 }
 
 impl gpui_kit::EventEmitter<TerminalViewEvent> for TerminalView {}
 
 impl TerminalView {
+    /// `durable` 取自会话列表；列表还没到时给 None，之后由工作区 [`Self::set_durable`] 补上
     pub fn new(
         session_id: String,
         client: FalconClient,
         local_server: bool,
+        durable: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -234,7 +264,8 @@ impl TerminalView {
             tx,
         });
         let socket = SessionSocket::open(&client, &session_id, sink);
-        // 服务端的 OscColorGate 要先拿到外观才代答颜色查询；socket 连上后先发它
+        // 颜色查询由宿主机的 VT 进程（持久）/ 服务端的 OscColorGate（非持久）按外观回答，
+        // 要先拿到外观；socket 连上后先发它
         set_appearance(&socket, &look.appearance);
 
         let pump = cx.spawn(async move |this, cx| {
@@ -248,7 +279,7 @@ impl TerminalView {
         let focus = cx.focus_handle();
         let focus_in = cx.on_focus_in(&focus, window, |this, _, cx| this.on_focus_change(true, cx));
         let focus_out = cx.on_focus_out(&focus, window, |this, _, _, cx| this.on_focus_change(false, cx));
-        // 主题 / 终端偏好变了：换配色、光标样式，并把新外观告诉服务端（它据此代答颜色查询、
+        // 主题 / 终端偏好变了：换配色、光标样式，并把新外观告诉服务端（据此回答颜色查询、
         // 给订阅了 ?2031 的程序发亮暗通知）
         let look_sub = cx.observe_global::<TerminalLook>(|this, cx| {
             let look = TerminalLook::global(cx).clone();
@@ -280,6 +311,10 @@ impl TerminalView {
             ws_retry: 0,
             attach_error: None,
             server_title: None,
+            durable,
+            pending_replies: Vec::new(),
+            program_status: None,
+            seen_sent: false,
             local_server,
             _tasks: vec![pump],
             _subs: vec![focus_in, focus_out, look_sub],
@@ -297,20 +332,69 @@ impl TerminalView {
         self.socket.reconnect_now();
     }
 
+    /// 键盘焦点在不在这扇终端上（工作区据此判断 blocked 提醒该不该弹：人就在这扇窗口里时不弹）
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    /// 这条 WS 上推来的程序状态全集；还没推过（或连接断了）为 None。工作区拿它盖掉轮询来的
+    /// 摘要：推送是实时的，轮询的响应可能比推送晚到、带着过时的状态
+    pub fn program_records(&self) -> Option<&[ProgramStatusRecord]> {
+        self.program_status.as_deref()
+    }
+
+    /// 会话列表到了：补上持久性，攒着的回复按它发掉或丢掉。持久性在会话的一生里不变，
+    /// 已经知道了就不再改
+    pub fn set_durable(&mut self, durable: bool) {
+        if self.durable.is_some() {
+            return;
+        }
+        self.durable = Some(durable);
+        let pending = std::mem::take(&mut self.pending_replies);
+        if !durable {
+            for text in pending {
+                self.socket.send_input(text);
+            }
+        }
+    }
+
+    /// 终端给程序的回复（DA、DSR、DECRQM……）：只有非持久会话由客户端答。持久会话的查询由
+    /// 宿主机的 VT 进程一处回答——没有 Viewer 时也有人答，多个 Viewer 时也只答一遍；客户端再答，
+    /// 程序就会多收到一份，可能当成按键显示出来（ADR 0020 决定五）
+    fn reply(&mut self, text: String) {
+        match self.durable {
+            Some(false) => self.socket.send_input(text),
+            Some(true) => {}
+            None if self.pending_replies.len() < PENDING_REPLIES_MAX => self.pending_replies.push(text),
+            None => {}
+        }
+    }
+
     fn on_ui_event(&mut self, ev: UiEvent, cx: &mut Context<Self>) {
         match ev {
-            UiEvent::Dirty => {
-                for event in self.core.take_events() {
+            UiEvent::Dirty => cx.notify(),
+            UiEvent::Term(events) => {
+                for event in events {
                     match event {
-                        TermEvent::PtyWrite(text) => self.socket.send_input(text),
+                        TermEvent::PtyWrite(text) => self.reply(text),
                         TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                         TermEvent::Title(_) | TermEvent::Bell => {}
                     }
                 }
-                cx.notify();
             }
             UiEvent::Control(ev) => self.on_control(ev, cx),
         }
+    }
+
+    /// 用户看过了这个会话（窗口获得焦点、在里面敲键 / 点鼠标 / 粘贴）：让宿主机清掉程序状态里的
+    /// done / error（ADR 0020 决定六）。没有可清的就不发；发过一次后等服务端推来新的全集再说
+    fn mark_seen(&mut self) {
+        let finished = self.program_status.as_deref().is_some_and(falcon_core::program_status::has_finished);
+        if self.seen_sent || !finished {
+            return;
+        }
+        self.seen_sent = true;
+        self.socket.status_seen(Vec::new());
     }
 
     fn on_control(&mut self, ev: SessionEvent, cx: &mut Context<Self>) {
@@ -330,6 +414,8 @@ impl TerminalView {
             }
             SessionEvent::Disconnected { retry_attempt, .. } => {
                 self.ws_retry = retry_attempt;
+                // 断开期间的变化收不到推送，交还给会话列表的轮询；连回来服务端会再推一次全集
+                self.program_status = None;
                 if !matches!(self.conn, ConnState::Dead(_) | ConnState::Unauthorized) {
                     self.set_conn(ConnState::Disconnected, cx);
                 }
@@ -345,10 +431,6 @@ impl TerminalView {
                     SessionState::Dead => ConnState::Dead(dead_reason.map(|r| r.as_str().to_string())),
                     _ => ConnState::Active,
                 };
-                // 接上了就先问一次滚动位置：不支持滚动条的会话不会回话，滚动条也就不出现
-                if conn == ConnState::Active {
-                    self.socket.scroll(None);
-                }
                 self.set_conn(conn, cx);
                 cx.emit(TerminalViewEvent::State { state, dead_reason });
             }
@@ -360,10 +442,14 @@ impl TerminalView {
                 cx.notify();
             }
             SessionEvent::Askpass { id, prompt } => cx.emit(TerminalViewEvent::Askpass { id, prompt }),
-            SessionEvent::Scroll { position, length, rows } => {
-                self.scrollbar.state = Some(ScrollState { position, length, rows });
-                self.scrollbar.settle_top = None;
-                cx.notify();
+            SessionEvent::ProgramStatus(records) => {
+                self.program_status = Some(records.clone());
+                self.seen_sent = false;
+                // 人正在这扇窗口里（重连后服务端补推全集时常见）：done / error 当场算看过
+                if self.focused {
+                    self.mark_seen();
+                }
+                cx.emit(TerminalViewEvent::ProgramStatus(records));
             }
             SessionEvent::Output(_) | SessionEvent::Replay(_) => {}
         }
@@ -407,6 +493,7 @@ impl TerminalView {
         self.core.clear_selection();
         self.core.scroll_to_bottom();
         self.send(text);
+        self.mark_seen();
         self.bump_blink(cx);
     }
 
@@ -461,6 +548,7 @@ impl TerminalView {
             self.core.clear_selection();
             self.core.scroll_to_bottom();
             self.send(esc.into_owned());
+            self.mark_seen();
             cx.stop_propagation();
         }
         // 编不出来的（普通字符、输入法）交给平台文本输入 → InputHandler::replace_text_in_range
@@ -470,6 +558,9 @@ impl TerminalView {
         self.focused = focused;
         if self.core.mode().contains(TermMode::FOCUS_IN_OUT) {
             self.send(falcon_term::focus_report(focused));
+        }
+        if focused {
+            self.mark_seen();
         }
         self.bump_blink(cx);
         cx.notify();
@@ -554,6 +645,7 @@ impl TerminalView {
         self.core.clear_selection();
         self.core.scroll_to_bottom();
         self.send(paste::encode_paste(text, bracketed));
+        self.mark_seen();
         self.bump_blink(cx);
     }
 
@@ -668,6 +760,7 @@ impl TerminalView {
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.mark_seen();
         let button = match e.button {
             MouseButton::Left => TermMouseButton::Left,
             MouseButton::Middle => TermMouseButton::Middle,
@@ -794,38 +887,36 @@ impl TerminalView {
             ScrollDelta::Lines(l) => (DeltaMode::Line, -l.y as f64),
         };
         let cell_h = f32::from(geo.line_height) as f64;
-        let term_mode = self.core.mode();
         let mouse = self.mouse_mode();
-        if mouse.protocol != 0 && !e.modifiers.shift {
-            // 程序接管滚轮：一个事件最多一次点击（zellij 收到每条上报自己再滚 3 行）
-            let dir = self.wheel.click(mode, delta_y, cell_h, geo.rows);
-            if dir != 0 {
-                let (row, col, _) = geo.cell_at(e.position);
-                if let Some(bytes) = wheel_report(dir > 0, row, col, &e.modifiers, mouse.encoding) {
-                    self.send(bytes);
-                    self.poke_scrollbar(cx);
+        // 归属按 xterm 语义判（falcon-term 的 route_wheel）：鼠标上报 > 备用屏 + ?1007 转方向键 >
+        // 本地 scrollback。字节是程序原样输出的，它关掉 ?1007 时备用屏里的滚轮就不再变成方向键
+        match falcon_term::route_wheel(self.core.mode(), mouse.protocol, e.modifiers.shift) {
+            WheelRoute::Report => {
+                // 程序接管滚轮：一个事件最多一次点击（程序收到每条上报自己会滚好几行）
+                let dir = self.wheel.click(mode, delta_y, cell_h, geo.rows);
+                if dir != 0 {
+                    let (row, col, _) = geo.cell_at(e.position);
+                    if let Some(bytes) = wheel_report(dir > 0, row, col, &e.modifiers, mouse.encoding) {
+                        self.send(bytes);
+                    }
                 }
+                cx.stop_propagation();
             }
-            cx.stop_propagation();
-        } else if term_mode.contains(TermMode::ALT_SCREEN) {
-            // alt screen 没开鼠标上报：照 xterm 的 alternateScroll 发方向键
-            let dir = self.wheel.click(mode, delta_y, cell_h, geo.rows);
-            if dir != 0 {
-                let app = term_mode.contains(TermMode::APP_CURSOR);
-                let seq = match (dir > 0, app) {
-                    (true, true) => "\x1bOA",
-                    (true, false) => "\x1b[A",
-                    (false, true) => "\x1bOB",
-                    (false, false) => "\x1b[B",
-                };
-                self.send(seq);
+            WheelRoute::Arrows { app_cursor } => {
+                let dir = self.wheel.click(mode, delta_y, cell_h, geo.rows);
+                if dir != 0 {
+                    self.send(falcon_term::arrow_for_wheel(dir > 0, app_cursor));
+                }
+                cx.stop_propagation();
             }
-            cx.stop_propagation();
-        } else if self.snapshot.history_size > 0 {
-            let lines = self.wheel.push(mode, delta_y, cell_h, geo.rows);
-            self.core.scroll_display(lines);
-            cx.notify();
-            cx.stop_propagation();
+            // 备用屏里没有历史（含程序关掉了 ?1007 的情形）：滚轮放行给画布
+            WheelRoute::Scrollback if self.snapshot.history_size > 0 => {
+                let lines = self.wheel.push(mode, delta_y, cell_h, geo.rows);
+                self.core.scroll_display(lines);
+                self.poke_scrollbar(cx);
+                cx.stop_propagation();
+            }
+            WheelRoute::Scrollback => {}
         }
     }
 
@@ -863,12 +954,11 @@ impl TerminalView {
     }
 }
 
-// ---------- 滚动条（ADR 0019） ----------
+// ---------- 滚动条（位置读本地 Grid，ADR 0020） ----------
 
 impl TerminalView {
-    /// 用户刚滚过：亮一会儿，并在这一串滚轮之后问一次位置
+    /// 用户刚滚过：亮一会儿
     fn poke_scrollbar(&mut self, cx: &mut Context<Self>) {
-        let was_visible = self.scrollbar.visible();
         self.scrollbar.lit = true;
         self.scrollbar.lit_epoch = self.scrollbar.lit_epoch.wrapping_add(1);
         let epoch = self.scrollbar.lit_epoch;
@@ -883,57 +973,11 @@ impl TerminalView {
             .ok();
         })
         .detach();
-        if !self.scrollbar.probe_pending {
-            self.scrollbar.probe_pending = true;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(SCROLL_PROBE_DELAY).await;
-                this.update(cx, |this, _| {
-                    this.scrollbar.probe_pending = false;
-                    this.socket.scroll(None);
-                })
-                .ok();
-            })
-            .detach();
-        }
-        if !was_visible {
-            self.start_scroll_refresh(cx);
-        }
         cx.notify();
     }
 
-    /// 亮着期间隔一阵再问一次；不亮了就停。换一轮时旧的那个自己退出（epoch 对不上）
-    fn start_scroll_refresh(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar.refresh_epoch = self.scrollbar.refresh_epoch.wrapping_add(1);
-        let epoch = self.scrollbar.refresh_epoch;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(SCROLL_REFRESH).await;
-                let keep = this
-                    .update(cx, |this, _| {
-                        if this.scrollbar.refresh_epoch != epoch || !this.scrollbar.visible() {
-                            return false;
-                        }
-                        this.socket.scroll(None);
-                        true
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
     fn scrollbar_hover(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        let was_visible = self.scrollbar.visible();
         self.scrollbar.hover = *hovered;
-        if *hovered {
-            self.socket.scroll(None);
-            if !was_visible {
-                self.start_scroll_refresh(cx);
-            }
-        }
         cx.notify();
     }
 
@@ -947,13 +991,9 @@ impl TerminalView {
         let y = f32::from(e.position.y - track.origin.y);
         let grabbed = y >= geo.top && y <= geo.top + geo.height;
         let start_top = if grabbed { geo.top } else { (y - geo.height / 2.0).clamp(0.0, track_h - geo.height) };
-        let was_visible = self.scrollbar.visible();
         self.scrollbar.drag = Some(ScrollDrag { start_y: f32::from(e.position.y), start_top, top: start_top });
         if !grabbed {
-            self.seek_to(start_top, true);
-        }
-        if !was_visible {
-            self.start_scroll_refresh(cx);
+            self.seek_to(start_top);
         }
         cx.notify();
     }
@@ -970,35 +1010,30 @@ impl TerminalView {
         let next = (drag.start_top + f32::from(e.position.y) - drag.start_y).clamp(0.0, track_h - geo.height);
         if next != drag.top {
             self.scrollbar.drag = Some(ScrollDrag { top: next, ..drag });
-            self.seek_to(next, false);
+            self.seek_to(next);
             cx.notify();
         }
     }
 
     fn scrollbar_release(&mut self, cx: &mut Context<Self>) {
-        if let Some(drag) = self.scrollbar.drag.take() {
-            // 节流可能吞掉了最后一下，松手时补发落点
-            self.seek_to(drag.top, true);
-            self.scrollbar.settle_top = Some(drag.top);
+        if self.scrollbar.drag.take().is_some() {
+            // 松手后滑块回到按真实位置算出的地方（取整到行，与跟手的像素差不到一行）
             cx.notify();
         }
     }
 
-    /// 滑块顶边拖到 top 处：换算成行数，让 zellij 滚过去
-    fn seek_to(&mut self, top: f32, force: bool) {
+    /// 滑块顶边拖到 top 处：换算成「视口下方的行数」，本地终端直接滚过去。本地操作，
+    /// 不用像 ADR 0019 那样节流、等回话
+    fn seek_to(&mut self, top: f32) {
         let Some((state, track_h, geo)) = self.scrollbar.geometry() else {
             return;
         };
-        let now = Instant::now();
-        if !force && self.scrollbar.last_seek.is_some_and(|t| now - t < SEEK_INTERVAL) {
-            return;
-        }
-        self.scrollbar.last_seek = Some(now);
-        self.socket.scroll(Some(term_scroll::position_for_thumb_top(state, track_h, geo.height, top)));
+        let position = term_scroll::position_for_thumb_top(state, track_h, geo.height, top);
+        self.core.scroll_to(position as usize);
     }
 
-    /// 叠在终端右缘的那一窄条。没有可滚的历史（含 vim 这类备用屏程序）时不画，
-    /// 不挡终端最右一列的点击
+    /// 叠在终端右缘的那一窄条。没有可滚的历史（含 vim 这类备用屏程序：备用屏没有历史）时
+    /// 不画，不挡终端最右一列的点击
     fn scrollbar_overlay(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let state = self.scrollbar.state?;
         if state.length == 0 {
@@ -1031,7 +1066,7 @@ impl TerminalView {
             .child(measure);
         if let Some((_, _, geo)) = self.scrollbar.geometry() {
             let sb = &self.scrollbar;
-            let top = sb.drag.map(|d| d.top).or(sb.settle_top).unwrap_or(geo.top);
+            let top = sb.drag.map(|d| d.top).unwrap_or(geo.top);
             let strong = sb.hover || sb.drag.is_some();
             strip = strip.child(
                 div()
@@ -1225,6 +1260,10 @@ impl Render for TerminalView {
         if self.core.take_dirty() {
             self.snapshot = Arc::new(self.core.snapshot());
         }
+        // 滚动条的位置每帧从快照推：输出在涨、回放换了整个终端、滚轮与拖动都会改它，
+        // 一处读就不会漏
+        let snap = &self.snapshot;
+        self.scrollbar.state = Some(ScrollState::from_grid(snap.display_offset, snap.history_size, snap.size.rows));
         let look = TerminalLook::global(cx).clone();
         let focused = self.focus.is_focused(window) && window.is_window_active();
         let element = TerminalElement::new(

@@ -1,4 +1,4 @@
 {
   "busy": true,
-  "command": "sleep 4"
+  "command": "sleep"
 }

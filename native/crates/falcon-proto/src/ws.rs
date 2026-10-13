@@ -1,21 +1,22 @@
-//! WebSocket 协议：会话通道 `/ws/sessions/:id` 与 Zellij 安装通道 `/ws/install/:projectId`。
+//! WebSocket 协议：会话通道 `/ws/sessions/:id` 与守护进程部署通道 `/ws/install/:projectId`。
 //!
 //! 会话通道是混合协议：**终端字节走二进制帧**（1 字节类型头 + UTF-8 载荷，见
 //! [`decode_term_frame`]），state / reconnecting / error / title / askpass 等控制消息
 //! 走 JSON 文本帧（[`ServerMessage`]）。客户端发的一律是 JSON 文本帧（[`ClientMessage`]）。
 //!
 //! 连接时序（设计文档 §3.2）：每条新 socket 都**强制**发一次 `resize`（服务端拿它当持久会话
-//! 懒惰接回的信号），以及 `appearance`（服务端的 OscColorGate 拿到它才代答 OSC 10/11/12）。
+//! 懒惰接回的信号），以及 `appearance`（持久会话由宿主机的 VT 进程按它回答 OSC 10/11/12，
+//! 非持久会话由服务端的 OscColorGate 代答）。
 //!
-//! 客户端先发 `appearance` 再发 `resize`，与旧 React 版（`TerminalView.tsx` 先 resize）相反，
-//! 是有意的：resize 触发懒惰接回，zellij 一 attach 就查 OSC 11；React 版的 xterm.js 会自己兜底
-//! 回答，现在的客户端不答颜色查询（多个 Viewer 会各答一遍），所以外观必须赶在接回之前到服务端。
+//! 客户端先发 `appearance` 再发 `resize`：resize 触发懒惰接回，接回那一刻程序可能正好在查
+//! 底色，外观必须赶在接回之前到服务端。客户端自己不答颜色查询（多个 Viewer 会各答一遍）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::session::{DeadReason, SessionState};
 use crate::term_env::TermAppearance;
-use crate::zellij::{NonDurableReason, ZellijInstallStage};
+use crate::install::{InstallStage, NonDurableReason};
+use crate::program_status::ProgramStatusRecord;
 
 // ---------------- 二进制帧 ----------------
 
@@ -26,7 +27,8 @@ use crate::zellij::{NonDurableReason, ZellijInstallStage};
 ///
 /// 输出帧：服务端已按 16ms 合并，单帧很小。
 pub const TERM_FRAME_OUTPUT: u8 = 0x01;
-/// 回放帧：整份 Scrollback 快照（最大 4MB 的 RingBuffer），客户端整体替换终端状态
+/// 回放帧：整份终端状态（持久会话是宿主机 VT 进程导出的快照，非持久会话是服务端最大 4MB
+/// 的 RingBuffer），客户端整体替换终端状态
 /// （falcon-term 在新 Term 上解析完再换上，等同先 reset 再写入）。可能在连接中途任意
 /// 时刻到达——服务端背压重同步（慢 Viewer 排空后整体重放）也走这条。
 pub const TERM_FRAME_REPLAY: u8 = 0x02;
@@ -121,13 +123,12 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         foreground: Option<String>,
     },
-    /// 滚动条（ADR 0019）：`seek` 缺省是问一次滚动位置，给了是让 zellij 滚到
-    /// 「视口下方还剩 seek 行」处。回话是广播的 [`ServerMessage::Scroll`]；会话不支持
-    /// （非持久、升级前用老配置建的）时没有回话。
-    #[serde(rename = "scroll")]
-    Scroll {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        seek: Option<u32>,
+    /// 用户看过了这个会话（窗口获得焦点）：清掉程序状态里的 done / error（ADR 0020 决定六）。
+    /// `ids` 为空表示全部
+    #[serde(rename = "status_seen")]
+    StatusSeen {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ids: Vec<String>,
     },
     /// 应用层心跳：服务端回一条 [`ServerMessage::Pong`]。浏览器的 WebSocket 发不了 ping 帧，
     /// 浏览器版拿它代替（心跳与唤醒后的探活，falcon-client 的 `ws/web.rs`）；原生仍发 ping 帧。
@@ -167,10 +168,10 @@ pub enum ServerMessage {
     /// `POST /api/askpass/:id/answer`
     #[serde(rename = "askpass")]
     Askpass { id: String, prompt: String },
-    /// 滚动位置（ADR 0019），单位都是 zellij 的显示行。position = 视口下方的行数
-    /// （0 = 在底部）；length = 视口上方 + 下方，0 = 没有可滚的历史；rows = 视口高度。
-    #[serde(rename = "scroll")]
-    Scroll { position: u32, length: u32, rows: u32 },
+    /// 程序状态（OSC 7501，ADR 0020 决定六）的全集，变化时推、连上时推一次。
+    /// `title` / `message` 是程序给的不可信文本，显示前过 `sanitize_display_text`
+    #[serde(rename = "program_status")]
+    ProgramStatus { records: Vec<ProgramStatusRecord> },
     /// [`ClientMessage::Ping`] 的回话，只发给问的那个 Viewer；客户端收到任何消息都算连接活着，
     /// 这条本身没有内容
     #[serde(rename = "pong")]
@@ -180,7 +181,7 @@ pub enum ServerMessage {
     Unknown,
 }
 
-// ---------------- Zellij 安装通道 ----------------
+// ---------------- 守护进程部署通道 ----------------
 
 /// 客户端 → 服务端（`/ws/install/:projectId`）。取消只影响本次，不写入拒绝状态：
 /// 取消按钮出现在进度条上，语境是"我不想等这次传输"，而不是"我撤销授权"。
@@ -203,7 +204,7 @@ pub enum InstallServerMessage {
     /// command 是宿主机上正在跑的命令，界面把相邻重复的去掉后列在进度下面。
     #[serde(rename = "stage")]
     Stage {
-        stage: ZellijInstallStage,
+        stage: InstallStage,
         attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
@@ -277,10 +278,10 @@ mod tests {
             r##"{"type":"appearance","appearance":"dark","background":"#0a0a0a","foreground":"#fafafa"}"##,
         );
         roundtrip::<ClientMessage>(r#"{"type":"appearance","appearance":"light"}"#);
-        let q = roundtrip::<ClientMessage>(r#"{"type":"scroll"}"#);
-        assert_eq!(q, ClientMessage::Scroll { seek: None });
-        let k = roundtrip::<ClientMessage>(r#"{"type":"scroll","seek":250}"#);
-        assert_eq!(k, ClientMessage::Scroll { seek: Some(250) });
+        let q = roundtrip::<ClientMessage>(r#"{"type":"status_seen"}"#);
+        assert_eq!(q, ClientMessage::StatusSeen { ids: vec![] });
+        let k = roundtrip::<ClientMessage>(r#"{"type":"status_seen","ids":["a"]}"#);
+        assert_eq!(k, ClientMessage::StatusSeen { ids: vec!["a".into()] });
         assert_eq!(roundtrip::<ClientMessage>(r#"{"type":"ping"}"#), ClientMessage::Ping);
     }
 
@@ -312,8 +313,10 @@ mod tests {
         roundtrip::<ServerMessage>(
             r#"{"type":"askpass","id":"ap-1","prompt":"fay@box's password:"}"#,
         );
-        let sc = roundtrip::<ServerMessage>(r#"{"type":"scroll","position":97,"length":473,"rows":30}"#);
-        assert_eq!(sc, ServerMessage::Scroll { position: 97, length: 473, rows: 30 });
+        let ps = roundtrip::<ServerMessage>(r#"{"type":"program_status","records":[{"id":"","state":"blocked","kind":"permission","updatedAt":1}]}"#);
+        assert!(matches!(ps, ServerMessage::ProgramStatus { ref records } if records.len() == 1));
+        // 老服务端的滚动消息：新客户端当成不认识的消息
+        assert_eq!(serde_json::from_str::<ServerMessage>(r#"{"type":"scroll","position":1,"length":2,"rows":3}"#).unwrap(), ServerMessage::Unknown);
         assert_eq!(roundtrip::<ServerMessage>(r#"{"type":"pong"}"#), ServerMessage::Pong);
     }
 
@@ -333,18 +336,18 @@ mod tests {
 
         roundtrip::<InstallServerMessage>(r#"{"type":"stage","stage":"probing","attempt":1}"#);
         let s = roundtrip::<InstallServerMessage>(
-            r#"{"type":"stage","stage":"downloading","attempt":2,"command":"curl -fsSL https://github.com/zellij-org/zellij/releases/download/v0.44.0/zellij.tar.gz"}"#,
+            r#"{"type":"stage","stage":"uploading","attempt":2,"command":"mkdir -p '/home/u/.falcon/bin' && cat > ..."}"#,
         );
         assert!(matches!(s, InstallServerMessage::Stage { attempt: 2, .. }));
-        roundtrip::<InstallServerMessage>(r#"{"type":"stage","stage":"extracting","attempt":1}"#);
+        roundtrip::<InstallServerMessage>(r#"{"type":"stage","stage":"uploading","attempt":1}"#);
         roundtrip::<InstallServerMessage>(r#"{"type":"stage","stage":"verifying","attempt":1}"#);
         assert_eq!(roundtrip::<InstallServerMessage>(r#"{"type":"done"}"#), InstallServerMessage::Done);
         let f = roundtrip::<InstallServerMessage>(
-            r#"{"type":"failed","reason":"download-failed","detail":"curl: (28) timeout","attempts":3}"#,
+            r#"{"type":"failed","reason":"upload-failed","detail":"channel closed","attempts":3}"#,
         );
         assert!(matches!(
             f,
-            InstallServerMessage::Failed { reason: NonDurableReason::DownloadFailed, attempts: Some(3), .. }
+            InstallServerMessage::Failed { reason: NonDurableReason::UploadFailed, attempts: Some(3), .. }
         ));
         // 项目不存在时服务端只给 reason + detail
         roundtrip::<InstallServerMessage>(r#"{"type":"failed","reason":"verify-failed","detail":"项目不存在"}"#);

@@ -1,4 +1,4 @@
-//! 浮层：确认框、重命名、askpass、Zellij 安装、各种表单与设置。
+//! 浮层：确认框、重命名、askpass、持久会话的授权与部署、各种表单与设置。
 //!
 //! 一律由 gpui-component 的 `window.open_dialog` 打开，Esc 只关最上面那一层（旧 React 版的全局 Esc
 //! 分发在这里由 Root 的对话框栈负责）。
@@ -20,7 +20,7 @@ use falcon_proto::SessionState;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::WindowExt;
+use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, SharedString, Window, div};
 use rust_i18n::t;
@@ -28,7 +28,7 @@ use rust_i18n::t;
 use crate::theme::Ui;
 use crate::toasts::ToastExt;
 use crate::ui::{Mark, status_mark};
-use crate::workspace::{Toast, ToastKind};
+use crate::workspace::{ProgramAlertSpec, Toast, ToastKind, Workspace};
 use crate::zoom::zpx;
 
 /// 确认框里的一行（被波及的会话 / 目录 / 脏文件）
@@ -108,6 +108,44 @@ pub fn confirm(
                 true
             })
     });
+}
+
+/// 程序状态提醒的通知 id（`id1` 用）：同一会话的提醒原地替换
+struct ProgramAlertNote;
+
+/// 某个会话卡在 blocked（ADR 0020 决定六）：弹一条不自动消失的提醒，带「切过去」；它不卡了
+/// （`alert` 为 None）就撤掉。按会话 id 记 key，同一会话的新提醒原地替换，不叠一摞
+pub fn show_program_alert(
+    ws: &gpui_kit::Entity<Workspace>,
+    session_id: &str,
+    alert: Option<&ProgramAlertSpec>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let key: SharedString = format!("program-alert-{session_id}").into();
+    let Some(alert) = alert else {
+        window.dismiss_toast(&key, cx);
+        return;
+    };
+    let title: SharedString = alert.title.clone().into();
+    let mut n = Notification::warning(title.clone()).id1::<ProgramAlertNote>(key.clone()).autohide(false);
+    if let Some(body) = &alert.body {
+        n = n.title(title).message(body.clone());
+    }
+    let (ws, sid) = (ws.clone(), session_id.to_string());
+    n = n.action(move |_, _, cx| {
+        let (ws, sid) = (ws.clone(), sid.clone());
+        let note = cx.entity();
+        Button::new("program-alert-go")
+            .small()
+            .primary()
+            .label(t!("programStatus.toastGo").to_string())
+            .on_click(move |_, window, cx| {
+                ws.update(cx, |w, cx| w.open_session(&sid, cx));
+                note.update(cx, |n, cx| n.dismiss(window, cx));
+            })
+    });
+    window.push_keyed_toast(key, n, cx);
 }
 
 /// 工作区事件里的 toast → gpui-component 的通知

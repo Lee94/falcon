@@ -3,7 +3,7 @@
 //! 客户端只报量好的格子，不会把未量好的 80×24 发给 PTY（当初 React 版靠 termFit 拦，现在是
 //! falcon-ui 的终端元素量出格子才报 resize），但服务端 liveEntry 以前硬编码 80×24，
 //! ensureAttached 会立刻按这个尺寸 attach。
-//! Zellij 跟着 SIGWINCH，grok / vim / htop 被挤成 24 行，状态就没了。
+//! 宿主机上的程序跟着 SIGWINCH，grok / vim / htop 被挤成 24 行，状态就没了。
 
 /// 终端格子数。行列用 `u16`：与 falcon-proto 的 `ClientMessage::Resize`、PTY 的 winsize 同宽
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

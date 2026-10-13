@@ -18,7 +18,7 @@ use crate::askpass::hub::uuid_v4;
 use crate::auth::now_ms;
 use crate::db::{Db, SshHostRow};
 use crate::sessions::manager::host_as_project;
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 pub fn router() -> Router<AppState> {
     Router::new()

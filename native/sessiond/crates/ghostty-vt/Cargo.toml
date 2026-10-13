@@ -1,0 +1,10 @@
+[package]
+name = "ghostty-vt"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "libghostty-vt 的安全封装：只覆盖守护进程的 VT 进程用到的部分（终端、格式化、快照、回调）"
+
+[dependencies]
+ghostty-vt-sys.workspace = true

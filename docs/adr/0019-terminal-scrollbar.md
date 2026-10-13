@@ -64,3 +64,7 @@
 - 老会话（升级前建的、Windows 远端的）没有滚动条，新建会话才有。
 - 位置靠问，空闲时滑块不会自己跟着输出长；只在亮着的那一会儿每秒刷新。
 - 「视口下方」向下翻页偶有一行的出入（seek 结果以回话为准，不影响显示）。
+
+## 后记（2026-10-13）：随 Zellij 一起退役
+
+Zellij 被 falcon 自己的会话守护进程取代（[ADR 0020](0020-session-daemon-libghostty.md)）之后，客户端收到的是程序的原始输出，alacritty 本地就有真正的 scrollback：滚动条直接读本地的 grid（`ScrollState::from_grid`，拖动走 `TermCore::scroll_to`），不再问宿主机。本 ADR 的插件、`zellij pipe` 一问一答、两套配置、`sessions.scroll_plugin` 列与 WS 的 `scroll` 消息都已删除，只剩历史参考。滚轮在备用屏里转方向键时补上了对 DECSET ?1007 的检查（程序关掉它就不转）。

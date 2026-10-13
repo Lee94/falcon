@@ -11,21 +11,20 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use falcon_proto::{
-    HostZellijStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
+    HostInstallStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
 };
 use serde_json::{Value, json};
 
 use super::AppState;
 use super::auth_routes::LenientJson;
 use super::error::{ApiError, ApiResult, ok};
-use crate::db::{Db, ZellijHostPatch};
+use crate::db::{Db, SessionHostPatch};
 use crate::exec::ExecResult;
 use crate::git::path::join_path;
 use crate::paste::{image_ext, paste_dir, paste_file_name, posix_write_command, windows_write_command, write_local_paste_file};
 use crate::term_env::js;
 use crate::term_env::sanitize_color_hint;
-use crate::zellij::host::HostKind;
-use crate::zellij::version::{DEFAULT_BASE_URL, ZELLIJ_VERSION};
+use crate::host::HostKind;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -58,22 +57,20 @@ fn ssh_host_key(project: &crate::db::ProjectRow) -> (String, u16, String) {
     )
 }
 
-/// 安装授权按主机记（host+port+username），不按项目：
-/// 同一台机器上的第二个项目不该再问一遍，二进制本来就已经装好了。
-async fn host_status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<HostZellijStatus>> {
+/// 授权按主机记（host+port+username），不按项目：
+/// 同一台机器上的第二个项目不该再问一遍，二进制本来就已经在那里了。
+async fn host_status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<HostInstallStatus>> {
     let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     if project.project_type != "ssh" {
         return Err(ApiError::bad_request("仅 SSH 项目有宿主机状态"));
     }
     let (host, port, user) = ssh_host_key(&project);
-    let row = state.db.get_zellij_host(&host, port, &user);
-    Ok(Json(HostZellijStatus {
+    let row = state.db.get_session_host(&host, port, &user);
+    Ok(Json(HostInstallStatus {
         authorized: row.as_ref().and_then(|r| r.authorized).map(|a| a == 1),
-        installed_version: row.as_ref().and_then(|r| r.installed_version.clone()),
-        base_url: row.as_ref().and_then(|r| r.base_url.clone()),
+        installed_version: row.as_ref().and_then(|r| r.sessiond_version.clone()),
         verified_durable: row.as_ref().and_then(|r| r.verified_durable).map(|v| v == 1),
-        default_base_url: DEFAULT_BASE_URL.into(),
-        required_version: ZELLIJ_VERSION.into(),
+        required_version: falcon_proto::sessiond::FALCON_VERSION.into(),
     }))
 }
 
@@ -82,23 +79,14 @@ async fn host_update(State(state): State<AppState>, Path(id): Path<String>, body
     if project.project_type != "ssh" {
         return Err(ApiError::bad_request("仅 SSH 项目有宿主机状态"));
     }
-    let mut patch = ZellijHostPatch::default();
+    let mut patch = SessionHostPatch::default();
     match body.0.get("authorized") {
         None | Some(Value::Null) => {}
         Some(v) => patch.authorized = Some(Some(i64::from(truthy(v)))),
     }
-    match body.0.get("baseUrl") {
-        None => {}
-        // 换了下载源就作废之前的安装记录，下次重新走一遍安装流程
-        Some(Value::String(url)) => {
-            let url = js::trim(url);
-            patch.base_url = Some((!url.is_empty()).then(|| url.to_string()));
-            patch.installed_version = Some(None);
-        }
-        Some(_) => return Err(ApiError::internal("baseUrl.trim is not a function")),
-    }
+    // 老客户端还会带 baseUrl（Zellij 的下载镜像）：宿主机不再自己下载，忽略
     let (host, port, user) = ssh_host_key(&project);
-    state.db.upsert_zellij_host(&host, port, &user, patch);
+    state.db.upsert_session_host(&host, port, &user, patch);
     state.engine.send(move |engine| engine.sessions.reset_prepare(&id));
     Ok(ok())
 }
@@ -117,6 +105,8 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                     let mut session = Db::to_session(&row);
                     // 自动标题不入库，只有还活着的 entry 手上有（可能是陈旧值，见 title_of）
                     session.title = engine.sessions.title_of(&row.id);
+                    // 程序状态同理：守护进程推来的，没人在看的会话也靠它在列表上显示
+                    session.program_status = engine.sessions.program_status_of(&row.id);
                     SessionWithProject {
                         session,
                         project_name: p.map(|p| p.name.clone()).unwrap_or_else(|| "?".into()),

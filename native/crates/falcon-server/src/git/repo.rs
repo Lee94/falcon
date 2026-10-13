@@ -28,7 +28,7 @@ use super::error::{WorktreeError, worktree_failure_text};
 use super::host::GitHost;
 use super::path::{canon_key, is_absolute, normalize_sep, sibling_worktree_path};
 use crate::exec::ExecResult;
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 /// 各类命令的超时。
 ///
@@ -1764,7 +1764,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn quote(s: &str) -> String {
-        crate::zellij::host::quote_posix(s)
+        crate::host::quote_posix(s)
     }
 
     /// 临时目录的物理路径：macOS 的 /var 是 /private/var 的符号链接，git 报的是物理路径

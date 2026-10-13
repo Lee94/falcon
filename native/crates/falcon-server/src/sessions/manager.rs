@@ -19,24 +19,24 @@ use std::time::Duration;
 use bytes::Bytes;
 use falcon_proto::term_modes::TermModeTracker;
 use falcon_proto::{
-    DeadReason, NonDurableReason, OscColorHint, ServerMessage, Session, SessionAgent, SessionForeground, SessionState,
-    TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY, TermAppearance,
+    DeadReason, NonDurableReason, OscColorHint, ProgramStatusRecord, ProgramStatusSummary, ServerMessage, Session, SessionAgent,
+    SessionForeground, SessionState, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY, TermAppearance, summarize,
 };
 use futures::FutureExt as _;
 use futures::future::Shared;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::backend::{Backend, BackendCallbacks, SessionGoneError};
+use super::backend::{Backend, BackendCallbacks, BackendEvent};
 use super::forward::ForwardManager;
+use super::local::{
+    LocalHost, LocalSessionState, attach_local, default_local_shell, local_kill, local_list_sessions, local_session_state,
+    open_local_sessiond, spawn_failure_reason,
+};
 use super::relay::{LinkFor, WantReconnect};
 use super::share::ShareManager;
-use super::local::{
-    LocalHost, attach_local, default_local_shell, local_foreground, local_has_session, local_kill, local_scroll_pipe,
-    local_terminal_pane,
-};
 use super::ssh::SshLink;
-use super::ssh_zellij::{AttachOptions, HostFacts};
+use super::ssh_host::{AttachOptions, HostFacts};
 use super::term_size::{TermSize, ViewerAttach, ViewerAttachInput, decide_viewer_attach, fallback_term_size, parse_stored_term_size};
 use super::viewer::Viewer;
 use super::viewer_arbiter::ViewerArbiter;
@@ -49,13 +49,13 @@ use crate::exec::{Exec as _, LocalBoxFuture};
 use crate::ringbuffer::RingBuffer;
 use crate::shells::is_shell_command;
 use crate::term_env::{OscColorGate, parse_hex_rgb};
+use crate::host::HostKind;
+use crate::sessiond::backend::ConnectError;
+use crate::sessiond::deploy::{Deployed, InstallError, StageFn};
 use crate::virtualdir::{
     container_manifest_files, posix_write_manifest_command, remove_local_virtual_dir, remove_virtual_dir_command,
     virtual_project_dir, windows_write_manifest_commands, write_local_manifest,
 };
-use crate::zellij::command::ScrollPosition;
-use crate::zellij::host::{HostKind, HostLayout};
-use crate::zellij::install::{InstallError, StageFn};
 
 /// 终端数据帧：1 字节类型 + UTF-8 载荷，广播前只序列化一次
 fn encode_term_frame(kind: u8, data: &str) -> Bytes {
@@ -70,8 +70,8 @@ fn encode_term_frame(kind: u8, data: &str) -> Bytes {
 /// 肉眼无感知延迟。
 const OUTPUT_FLUSH_MS: u64 = 16;
 
-/// 自动标题的探测节流窗口。每次探测是宿主机上一条实打实的命令（Zellij list-clients，
-/// SSH 上还要开一条 channel），不能跟着输出走。
+/// 自动标题的探测节流窗口。持久会话是问一次宿主机上的守护进程（一来一回），非持久的本地
+/// PTY 是一次系统调用；都不该跟着输出走。
 ///
 /// 2.5s 是"命令跑起来到标题出现"的可感延迟上限，也压住了 `yes` 这种满屏输出的会话——
 /// 窗口内无论来多少输出都只探一次。
@@ -129,10 +129,12 @@ pub struct DurableState {
     pub reason: Option<NonDurableReason>,
     /// 失败详情，供 UI 显示"到底卡在哪"，用户据此决定是修环境还是直接重试
     pub detail: Option<String>,
-    pub layout: Option<HostLayout>,
-    /// 滚动位置插件已就位（ADR 0019）；新会话据此用带插件的配置
-    pub scroll: bool,
+    /// 宿主机上已就位的会话守护进程（durable 时必有）
+    pub deployed: Option<Deployed>,
 }
+
+/// 孤儿清理的宽限：建会话时 holder 先起来、会话行后落库，刚起来的 holder 在库里还查不到
+const ORPHAN_GRACE_MS: i64 = 3600 * 1000;
 
 /// 会话操作的失败。Clone 是因为接回是单飞的（多个等待者共享同一个结果）
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -140,27 +142,37 @@ pub enum SessionError {
     /// 会话 / 项目不存在（TS 的 NotFoundError）
     #[error("{0}")]
     NotFound(String),
-    /// 接回时宿主机上的 Zellij 会话已经不在了（TS 的 SessionGoneError）
-    #[error("Zellij 会话不存在")]
+    /// 接回时宿主机上的会话已经不在了（TS 的 SessionGoneError）
+    #[error("会话在宿主机上已经不存在")]
     Gone,
+    /// 接回时发现会话在断线期间正常结束了
+    #[error("会话已经结束")]
+    Exited,
     #[error("{0}")]
     Failed(String),
 }
 
 impl From<anyhow::Error> for SessionError {
     fn from(e: anyhow::Error) -> Self {
-        if e.downcast_ref::<SessionGoneError>().is_some() {
-            SessionError::Gone
-        } else {
-            SessionError::Failed(e.to_string())
+        SessionError::Failed(e.to_string())
+    }
+}
+
+impl From<ConnectError> for SessionError {
+    fn from(e: ConnectError) -> Self {
+        match e {
+            ConnectError::Gone => SessionError::Gone,
+            ConnectError::Exited => SessionError::Exited,
+            other => SessionError::Failed(other.to_string()),
         }
     }
 }
 
 struct EntryState {
-    /// 持久会话所用的 Zellij 布局，接回时要用
-    layout: Option<HostLayout>,
+    /// 持久会话所用的守护进程，接回时要用
+    deployed: Option<Deployed>,
     backend: Option<Rc<dyn Backend>>,
+    /// 非持久会话的回放来源；持久会话的回放是守护进程给的快照，不用它
     buffer: RingBuffer,
     viewers: Vec<Rc<Viewer>>,
     /// 多个 Viewer 共用这一个 PTY：尺寸取最小、深浅跟最近操作的那端，见 viewer_arbiter.rs
@@ -171,7 +183,7 @@ struct EntryState {
     size: Option<TermSize>,
     attaching: Option<Shared<LocalBoxFuture<'static, Result<(), SessionError>>>>,
     terminating: bool,
-    /// 持有深浅的那个 Viewer 报的终端深浅；接回后的内层 env 冻住了，只影响 OSC 答复和新会话
+    /// 持有深浅的那个 Viewer 报的终端深浅；会话的 env 在创建时冻住了，只影响 OSC 答复和新会话
     appearance: Option<TermAppearance>,
     background: Option<String>,
     foreground: Option<String>,
@@ -182,14 +194,14 @@ struct EntryState {
     title: Option<String>,
     /// 探测在飞：Viewer 进出与输出可能同时点火，只许有一条在跑
     title_probing: bool,
-    /// 会话用带滚动位置插件的配置建的（sessions.scroll_plugin），见 scroll()
-    scroll: bool,
-    /// 插件按它找 pane；首次查询时问一次 list-panes 缓存下来
-    scroll_pane: Option<u32>,
-    /// 查询在飞：同一时刻只跑一条
-    scroll_busy: bool,
-    /// 排着的请求：只剩最后一个。内层 None = 只问位置
-    scroll_want: Option<Option<f64>>,
+    /// 守护进程会话：发了 Sync、快照还没回来。等回放的 Viewer 都搭这一班（设计文档 5.5）
+    sync_in_flight: bool,
+    /// 程序状态（OSC 7501）全集，守护进程推来的
+    program_status: Vec<ProgramStatusRecord>,
+    /// 守护进程报过 shell 退出（随后连接关闭）
+    exit_seen: bool,
+    /// SSH 上 bridge 的退出码（连接结束时给）
+    bridge_exit: Option<Option<u32>>,
 }
 
 struct LiveEntry {
@@ -206,8 +218,7 @@ struct EntryInit {
     session_id: String,
     project_id: String,
     durable: bool,
-    layout: Option<HostLayout>,
-    scroll: bool,
+    deployed: Option<Deployed>,
     size: Option<TermSize>,
     hint: OscColorHint,
 }
@@ -219,7 +230,7 @@ impl LiveEntry {
             project_id: init.project_id,
             durable: init.durable,
             s: RefCell::new(EntryState {
-                layout: init.layout,
+                deployed: init.deployed,
                 backend: None,
                 buffer: RingBuffer::new(),
                 viewers: Vec::new(),
@@ -235,10 +246,10 @@ impl LiveEntry {
                 modes: TermModeTracker::new(),
                 title: None,
                 title_probing: false,
-                scroll: init.scroll,
-                scroll_pane: None,
-                scroll_busy: false,
-                scroll_want: None,
+                sync_in_flight: false,
+                program_status: Vec::new(),
+                exit_seen: false,
+                bridge_exit: None,
             }),
             flush_timer: Rc::default(),
             title_timer: Rc::default(),
@@ -262,8 +273,8 @@ impl LiveEntry {
         self.s.borrow().backend.clone()
     }
 
-    fn layout(&self) -> Option<HostLayout> {
-        self.s.borrow().layout.clone()
+    fn deployed(&self) -> Option<Deployed> {
+        self.s.borrow().deployed.clone()
     }
 
     fn size(&self) -> Option<TermSize> {
@@ -316,7 +327,7 @@ pub struct SessionManager {
     secrets: Arc<SecretBox>,
     data_dir: PathBuf,
     pub askpass: Arc<AskpassHub>,
-    /// 本机这台宿主（Zellij 准备结果、PTY 基底环境）
+    /// 本机这台宿主（守护进程的准备结果、PTY 基底环境）
     pub local: LocalHost,
     links: RefCell<HashMap<String, Rc<SshLink>>>,
     /// 按 hostId 缓存的主机链路：「浏览远端目录」与中转（端口转发 / 远端公网发布）共用。
@@ -333,6 +344,8 @@ pub struct SessionManager {
     last_touch: RefCell<HashMap<String, i64>>,
     /// resize 落库的合并窗口：拖窗时前端逐帧发 resize，不能每次都同步 fsync
     size_flush: RefCell<HashSet<String>>,
+    /// 已经扫过孤儿会话的宿主机（"local" 或 user@host:port）
+    swept: RefCell<HashSet<String>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -376,6 +389,7 @@ impl SessionManager {
                 virtual_dirs: RefCell::default(),
                 last_touch: RefCell::default(),
                 size_flush: RefCell::default(),
+                swept: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -430,13 +444,13 @@ impl SessionManager {
         }
     }
 
-    /// 判定某项目的宿主机能否提供持久会话，必要时触发 Zellij 安装。
+    /// 判定某项目的宿主机能否提供持久会话，必要时把会话守护进程推上去（ADR 0020）。
     ///
     /// SSH 项目要求用户先授权——这会往用户的服务器上写入可执行文件，属于该问的那一类。
     /// 授权按主机记（host+port+username），不按项目：同一台机器上的第二个项目
-    /// 不该再问一遍，二进制本来就已经装好了。
+    /// 不该再问一遍，二进制本来就已经在那里了。
     ///
-    /// fresh：丢掉上一次的判定重新来过。用户显式发起安装/重试时必须带上——
+    /// fresh：丢掉上一次的判定重新来过。用户显式发起部署/重试时必须带上——
     /// 失败判定是缓存的，不清掉的话点一百次重试都是同一个秒回的失败。
     pub async fn prepare(
         &self,
@@ -449,17 +463,14 @@ impl SessionManager {
             if fresh {
                 self.local.reset();
             }
-            let local = self.local.prepare(on_stage, cancel).await;
-            return DurableState {
-                durable: local.durable,
-                reason: local.reason,
-                detail: local.detail,
-                layout: local.layout,
-                scroll: local.scroll,
-            };
+            let local = self.local.prepare().await;
+            if local.durable {
+                self.sweep_local_orphans_once();
+            }
+            return DurableState { durable: local.durable, reason: local.reason, detail: local.detail, deployed: local.deployed };
         }
 
-        let saved = self.db.get_zellij_host(
+        let saved = self.db.get_session_host(
             project.ssh_host.as_deref().unwrap_or_default(),
             project.ssh_port.unwrap_or(22) as u16,
             project.ssh_username.as_deref().unwrap_or_default(),
@@ -470,30 +481,77 @@ impl SessionManager {
 
         let link = self.get_link(project);
         if fresh {
-            link.reset_zellij();
+            link.reset_sessiond();
         }
-        let remote = link.prepare_zellij(on_stage, cancel).await;
-        DurableState {
-            durable: remote.durable,
-            reason: remote.reason,
-            detail: remote.detail,
-            layout: remote.layout,
-            scroll: remote.scroll,
+        let remote = link.prepare_sessiond(on_stage, cancel).await;
+        if let Some(d) = remote.deployed.clone() {
+            self.sweep_remote_orphans_once(&link, d);
         }
+        DurableState { durable: remote.durable, reason: remote.reason, detail: remote.detail, deployed: remote.deployed }
     }
 
-    /// 用户改了授权或下载源之后，清掉缓存的判定以便重试
+    /// 用户改了授权之后，清掉缓存的判定以便重试
     pub fn reset_prepare(&self, project_id: &str) {
         let link = self.links.borrow().get(project_id).cloned();
         if let Some(link) = link {
-            link.reset_zellij();
+            link.reset_sessiond();
         }
     }
 
-    /// 本地宿主的持久能力；None = 尚未探测（不主动触发安装）
+    /// 本地宿主的持久能力；None = 尚未探测（不主动触发部署）
     pub fn local_durable_state(&self) -> Option<DurableState> {
         let local = self.local.peek()?;
-        Some(DurableState { durable: local.durable, reason: local.reason, layout: local.layout, ..Default::default() })
+        Some(DurableState { durable: local.durable, reason: local.reason, detail: local.detail, deployed: local.deployed })
+    }
+
+    // ---------- 孤儿清理（设计文档 10.7） ----------
+    //
+    // 宿主机上守护进程起着、库里却没有这一行的会话：建会话的半路后端挂了、库被换掉了……
+    // 只清 owner 是本实例的（同一台远端可能同时被两台机器上的 falcon 用），而且只清起来超过
+    // 一小时的（建会话时 holder 先起来、行后落库，刚起来的在库里还查不到）。每台机器每次
+    // 后端启动只扫一次。
+
+    fn orphans(&self, entries: Vec<falcon_proto::sessiond::ListEntry>) -> Vec<String> {
+        let me = self.db.instance_id();
+        let now = now_ms();
+        entries
+            .into_iter()
+            .filter(|e| e.alive && e.owner == me && now - e.created_at > ORPHAN_GRACE_MS)
+            .filter(|e| self.db.get_session(&e.session_id).is_none())
+            .map(|e| e.sid)
+            .collect()
+    }
+
+    fn sweep_local_orphans_once(&self) {
+        if self.swept.borrow_mut().insert("local".into()) {
+            let me = self.me();
+            tokio::task::spawn_local(async move {
+                let Some(d) = me.local.peek().and_then(|l| l.deployed) else { return };
+                let Some(list) = local_list_sessions(&d).await else { return };
+                let orphans = me.orphans(list);
+                if !orphans.is_empty() {
+                    log::info!("清理本机的孤儿会话：{orphans:?}");
+                    local_kill(&d, &orphans).await;
+                }
+            });
+        }
+    }
+
+    fn sweep_remote_orphans_once(&self, link: &Rc<SshLink>, deployed: Deployed) {
+        let p = link.project();
+        let key = format!("{}@{}:{}", p.ssh_username.unwrap_or_default(), p.ssh_host.unwrap_or_default(), p.ssh_port.unwrap_or(22));
+        if self.swept.borrow_mut().insert(key.clone()) {
+            let me = self.me();
+            let link = link.clone();
+            tokio::task::spawn_local(async move {
+                let Some(list) = link.list_sessions(&deployed).await else { return };
+                let orphans = me.orphans(list);
+                if !orphans.is_empty() {
+                    log::info!("清理 {key} 上的孤儿会话：{orphans:?}");
+                    link.kill_sessions(&deployed, &orphans).await;
+                }
+            });
+        }
     }
 
     // ---------- 项目链路 ----------
@@ -787,7 +845,7 @@ impl SessionManager {
 
         let prep = self.prepare(project, None, None, false).await;
 
-        let row = SessionRow {
+        let mut row = SessionRow {
             id: id.clone(),
             project_id: project.id.clone(),
             name,
@@ -800,24 +858,46 @@ impl SessionManager {
             cols: None,
             rows: None,
             agent: agent.map(|a| a.as_str().to_string()),
-            // 建会话这一刻定终身：接回时必须照这套配置来，见 SessionRow.scroll_plugin
-            scroll_plugin: Some(i64::from(prep.durable && prep.scroll)),
         };
 
         let entry = LiveEntry::new(EntryInit {
             session_id: id.clone(),
             project_id: project.id.clone(),
             durable: prep.durable,
-            layout: prep.layout.clone(),
-            scroll: row.scroll_plugin == Some(1),
+            deployed: prep.deployed.clone(),
             size: None,
-            hint,
+            hint: hint.clone(),
         });
         self.entries.borrow_mut().insert(id.clone(), entry.clone());
 
-        if let Err(e) = self.attach_backend(&entry, project, &row, false).await {
-            self.entries.borrow_mut().remove(&id);
-            return Err(e);
+        match self.attach_backend(&entry, project, &row, false).await {
+            Ok(()) => {}
+            Err(e) if prep.durable => {
+                // 守护进程拉不起来（Windows 的 Job 不让脱离、WMI 也被禁了……）：按 ADR 0001 退成
+                // 非持久并写明原因，会话照样开得出来，而不是让用户看到一个建不了的会话
+                let reason =
+                    if project.project_type == "local" { spawn_failure_reason().await } else { NonDurableReason::VerifyFailed };
+                log::warn!("会话 {id} 起不来守护进程（{e}），退成非持久：{reason}");
+                row.durable = 0;
+                row.non_durable_reason = Some(reason.as_str().to_string());
+                let entry = LiveEntry::new(EntryInit {
+                    session_id: id.clone(),
+                    project_id: project.id.clone(),
+                    durable: false,
+                    deployed: None,
+                    size: None,
+                    hint,
+                });
+                self.entries.borrow_mut().insert(id.clone(), entry.clone());
+                if let Err(e) = self.attach_backend(&entry, project, &row, false).await {
+                    self.entries.borrow_mut().remove(&id);
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                self.entries.borrow_mut().remove(&id);
+                return Err(e);
+            }
         }
 
         self.db.insert_session(&row);
@@ -828,7 +908,7 @@ impl SessionManager {
     ///
     /// 普通会话就是项目配的 shell（或让下游按平台挑默认）；agent 会话则换成写在宿主机上
     /// 的启动脚本（sessions/agent.rs）。脚本没写成时**退回普通 shell**：把一个不存在的
-    /// 路径当 shell 交给 Zellij，pane 根本起不来，用户只会看到一片空白。
+    /// 路径当 shell 交给守护进程，会话根本起不来，用户只会看到一片空白。
     ///
     /// 每次附着都重写一遍脚本（本地一次 fs 写、远端一次往返）：用户删了它、换了登录
     /// shell、falcon 升级换了脚本内容，都能自愈。
@@ -855,7 +935,7 @@ impl SessionManager {
         row: &SessionRow,
         reattach: bool,
     ) -> Result<(), SessionError> {
-        // 附着返回之前就可能有 OSC 查询要答：先攒着，backend 到手再写
+        // 非持久会话：附着返回之前就可能有 OSC 查询要答（OscColorGate），先攒着，backend 到手再写
         let slot: Rc<RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>> =
             Rc::new(RefCell::new((entry.backend(), Vec::new())));
         let cb = {
@@ -864,6 +944,8 @@ impl SessionManager {
             let slot_data = slot.clone();
             let slot_exit = slot.clone();
             let me_exit = self.me.clone();
+            let me_event = self.me.clone();
+            let weak_event = Rc::downgrade(entry);
             let session_id = entry.session_id.clone();
             BackendCallbacks {
                 on_data: Rc::new(move |data: String| {
@@ -876,14 +958,24 @@ impl SessionManager {
                     let session_id = session_id.clone();
                     tokio::task::spawn_local(async move { me.handle_backend_exit(&session_id, mine).await });
                 }),
+                on_event: Rc::new(move |ev: BackendEvent| {
+                    let (Some(me), Some(entry)) = (me_event.upgrade(), weak_event.upgrade()) else { return };
+                    me.on_backend_event(&entry, ev);
+                }),
             }
         };
 
-        // 接回时 entry.layout 可能是空的（后端重启后重建的 entry），重新准备一次
-        if entry.durable && entry.layout().is_none() {
+        // 接回时 entry 可能还没有守护进程（后端重启后重建的 entry），重新准备一次
+        if entry.durable && entry.deployed().is_none() {
             let prep = self.prepare(project, None, None, false).await;
-            match (prep.durable, prep.layout) {
-                (true, Some(layout)) => entry.s.borrow_mut().layout = Some(layout),
+            match (prep.durable, prep.deployed, prep.reason) {
+                (true, Some(d), _) => entry.s.borrow_mut().deployed = Some(d),
+                // 链路一类的故障：会话多半还在，下次再试
+                (_, _, None | Some(NonDurableReason::ProbeFailed | NonDurableReason::UploadFailed | NonDurableReason::Cancelled))
+                | (_, _, Some(NonDurableReason::Unknown)) => {
+                    return Err(SessionError::Failed(prep.detail.unwrap_or_else(|| "宿主机上的守护进程没就位".into())));
+                }
+                // 稳定的环境事实（没有这个架构的构建、没授权……）：这样的宿主机上不可能有守护进程会话
                 _ => return Err(SessionError::Gone),
             }
         }
@@ -904,27 +996,57 @@ impl SessionManager {
         };
 
         let size = fallback_term_size(entry.size());
+        let hint = entry.color_hint();
         let opts = AttachOptions {
             session_id: entry.session_id.clone(),
             cwd,
-            shell: self.session_shell(project, row).await,
+            // 接回时用不上（会话早就起着了），省一次远端往返
+            shell: if reattach { None } else { self.session_shell(project, row).await },
             durable: entry.durable,
-            layout: entry.layout(),
+            deployed: entry.deployed(),
             reattach,
             cols: size.cols,
             rows: size.rows,
-            appearance: entry.s.borrow().appearance,
+            appearance: hint.appearance,
+            foreground: hint.foreground.clone(),
+            background: hint.background.clone(),
             askpass_bin,
-            scroll: row.scroll_plugin == Some(1),
+            owner: self.db.instance_id(),
         };
 
-        let result = if project.project_type == "local" {
-            attach_local(&self.local, &opts, cb).await?
+        let backend: Rc<dyn Backend> = if entry.durable {
+            let (backend, welcome) = if project.project_type == "local" {
+                open_local_sessiond(&self.local, &opts, cb).await?
+            } else {
+                self.get_link(project).open_sessiond(&opts, cb).await?
+            };
+            {
+                let mut s = entry.s.borrow_mut();
+                s.exit_seen = false;
+                s.bridge_exit = None;
+                s.sync_in_flight = false;
+            }
+            // 宿主机上的 VT 进程不是这份二进制里的 ghostty：热升级（设计文档 2.3），升级 ghostty
+            // 不必等存量会话自然消亡。holder 会用二进制快照交接，解不了就用原始尾巴重建
+            if let Some(d) = entry.deployed()
+                && !d.ghostty.is_empty()
+                && !welcome.vt_version.is_empty()
+                && welcome.vt_version != d.ghostty
+            {
+                log::info!("会话 {} 的 VT 进程是 ghostty {}，换成 {}", entry.session_id, welcome.vt_version, d.ghostty);
+                backend.upgrade_vt(&d.bin);
+            }
+            backend.set_appearance(&hint);
+            backend
         } else {
-            self.get_link(project).attach_session(&opts, cb).await?
+            let result = if project.project_type == "local" {
+                attach_local(&self.local, &opts, cb).await?
+            } else {
+                self.get_link(project).attach_session(&opts, cb).await?
+            };
+            result.backend
         };
 
-        let backend = result.backend;
         let queued = {
             let mut slot = slot.borrow_mut();
             slot.0 = Some(backend.clone());
@@ -938,13 +1060,16 @@ impl SessionManager {
         if let Some(size) = entry.size() {
             backend.resize(size.cols, size.rows);
         }
-        if reattach && let Some(history) = result.captured_history {
-            entry.s.borrow_mut().buffer.reset(Some(&history));
-        }
         Ok(())
     }
 
     fn on_backend_data(&self, entry: &Rc<LiveEntry>, slot: &RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>, data: &str) {
+        if entry.durable {
+            // 守护进程会话：终端查询由宿主机的 VT 进程回答，回放用它的快照、2031 由 holder 发，
+            // 这里只管转发
+            self.queue_output(entry, data.to_string());
+            return;
+        }
         let hint = entry.color_hint();
         let out = entry.s.borrow_mut().osc.push(&hint, data);
         for reply in out.replies {
@@ -965,8 +1090,50 @@ impl SessionManager {
         self.queue_output(entry, out.visible);
     }
 
+    /// 守护进程会话的事件。按连接上到达的顺序在 LocalSet 上同步调用
+    fn on_backend_event(&self, entry: &Rc<LiveEntry>, ev: BackendEvent) {
+        match ev {
+            BackendEvent::Synced(text) => {
+                // 快照之前到的输出都已含在快照里：先发给已经在看的 Viewer（等回放的那些
+                // flush 时会跳过），再把快照给等回放的，此后它们照常收输出（设计文档 5.5）
+                self.flush_output(entry);
+                entry.s.borrow_mut().sync_in_flight = false;
+                let frame = encode_term_frame(TERM_FRAME_REPLAY, &text);
+                for v in entry.viewers() {
+                    if v.syncing.get() {
+                        v.syncing.set(false);
+                        let ok = v.send_bytes(frame.clone());
+                        v.lagged.set(!ok);
+                    }
+                }
+            }
+            BackendEvent::ProgramStatus(records) => {
+                entry.s.borrow_mut().program_status = records.clone();
+                self.broadcast(entry, &ServerMessage::ProgramStatus { records });
+            }
+            BackendEvent::Exit(_) => entry.s.borrow_mut().exit_seen = true,
+            BackendEvent::BridgeExit(code) => entry.s.borrow_mut().bridge_exit = Some(code),
+            BackendEvent::VtRestarted => log::warn!("会话 {} 的 VT 进程挂过，已用原始尾巴重建", entry.session_id),
+            BackendEvent::VtDegraded => {
+                log::warn!("会话 {} 的 VT 进程反复崩溃，宿主机上只剩纯转发", entry.session_id)
+            }
+        }
+    }
+
+    /// 守护进程会话：要一份快照。已经有一班在路上就搭它（回来时所有等着的 Viewer 一起拿）
+    fn request_sync(&self, entry: &LiveEntry) {
+        if entry.s.borrow().sync_in_flight {
+            return;
+        }
+        if let Some(b) = entry.backend()
+            && b.request_sync()
+        {
+            entry.s.borrow_mut().sync_in_flight = true;
+        }
+    }
+
     /// 确保会话有活的 backend。
-    /// unverified 的持久会话在此被验证并恢复为 active；Zellij 不在了则标记 dead。
+    /// unverified 的持久会话在此被验证并恢复为 active；宿主机上的会话不在了 / 已经结束则标记 dead。
     ///
     /// force：用户点了「接回」，或后台自动接回时没有 Viewer 在量格子。
     /// 必须马上 attach 并把 DB 写成 active，不能卡在 unverified。
@@ -1018,8 +1185,10 @@ impl SessionManager {
                                 Ok(())
                             }
                             Err(err) => {
-                                if err == SessionError::Gone {
-                                    me.mark_dead(&e, DeadReason::SessionGone);
+                                match err {
+                                    SessionError::Gone => me.mark_dead(&e, DeadReason::SessionGone),
+                                    SessionError::Exited => me.mark_dead(&e, DeadReason::Exited),
+                                    _ => {}
                                 }
                                 Err(err)
                             }
@@ -1043,30 +1212,22 @@ impl SessionManager {
 
     /// 会话前台是否有程序在跑（关 tab 前的确认依据）。
     ///
-    /// 持久会话问 Zellij（list-clients 的 RUNNING_COMMAND 就是聚焦 pane 的前台
-    /// 命令）；非持久本地会话问 PTY 自己。侦测不到的场景一律按空闲放行：
-    /// 非持久 SSH（channel 里问不到远端 shell 的进程树）、Windows 远端
-    /// （Zellij 没有 /proc 可读，恒报 N/A）、unverified/断链（拿到的答案没有意义）。
-    /// 这是道保险，探测失败不能把关 tab 拦下来，所以也不报错。
+    /// 持久会话问宿主机上的守护进程（它直接 tcgetpgrp，Windows 上沿进程树找）；非持久本地
+    /// 会话问 PTY 自己。侦测不到的场景一律按空闲放行：非持久 SSH（channel 里问不到远端 shell
+    /// 的进程树）、unverified/断链（拿到的答案没有意义）。这是道保险，探测失败不能把关 tab
+    /// 拦下来，所以也不报错。
     pub async fn foreground(&self, session_id: &str) -> SessionForeground {
         let idle = SessionForeground { busy: false, command: None };
         let Some(row) = self.db.get_session(session_id).filter(|r| r.state == "active") else { return idle };
         let Some(project) = self.db.get_project(&row.project_id) else { return idle };
-        let entry = self.entry(session_id);
-
-        let command = if row.durable != 1 {
-            entry.as_ref().and_then(|e| e.backend()).and_then(|b| b.process_name())
-        } else if let Some(layout) = entry.as_ref().and_then(|e| e.layout()) {
-            // 没有活的附着就没有 Zellij 客户端，list-clients 必为空，不必跑
-            if project.project_type == "local" {
-                local_foreground(&layout, session_id).await
-            } else {
-                // 不为一次探测去重建链路
-                let Some(link) = self.existing_link(&project.id).filter(|l| l.is_connected()) else { return idle };
-                link.foreground(&layout, session_id).await.ok().flatten()
-            }
-        } else {
-            None
+        let backend = self.entry(session_id).and_then(|e| e.backend());
+        let command = match backend {
+            Some(b) if row.durable == 1 => match b.foreground() {
+                Some(f) => f.await,
+                None => None,
+            },
+            Some(b) => b.process_name(),
+            None => None,
         };
         match command {
             Some(c) if !is_shell_command(&c, project.shell.as_deref()) => SessionForeground { busy: true, command: Some(c) },
@@ -1125,76 +1286,19 @@ impl SessionManager {
         self.broadcast(entry, &ServerMessage::Title { title: next });
     }
 
-    // ---------- 滚动条（ADR 0019） ----------
+    // ---------- 程序状态（OSC 7501，ADR 0020 决定六） ----------
 
-    /// Viewer 要滚动位置（seek 缺省），或要滚到「视口下方还剩 seek 行」处。结果广播给
-    /// 所有 Viewer——大家看的是同一个 zellij 视口。
-    ///
-    /// 不支持的会话（非持久、升级前用老配置建的）直接不理：前端收不到回话就不画滚动条。
-    /// 单飞：一条在飞时后来的请求只记最后一个，seek 压过只问位置（seek 本身也回位置），
-    /// 拖滑块时几十个 seek 只会落地头尾几个。
-    pub fn scroll(&self, session_id: &str, seek: Option<f64>) {
+    /// 用户看过了这个会话（窗口获得焦点）：清掉 done / error
+    pub fn status_seen(&self, session_id: &str, ids: Vec<String>) {
         let Some(entry) = self.entry(session_id) else { return };
-        let busy = {
-            let mut s = entry.s.borrow_mut();
-            if !s.scroll || s.backend.is_none() || s.layout.is_none() {
-                return;
-            }
-            s.scroll_want = match seek {
-                Some(v) => Some(Some(v)),
-                None => Some(s.scroll_want.unwrap_or(None)),
-            };
-            s.scroll_busy
-        };
-        if !busy {
-            let me = self.me();
-            tokio::task::spawn_local(async move { me.run_scroll(&entry).await });
+        if let Some(b) = entry.backend() {
+            b.status_seen(&ids);
         }
     }
 
-    async fn run_scroll(&self, entry: &Rc<LiveEntry>) {
-        entry.s.borrow_mut().scroll_busy = true;
-        loop {
-            let Some(seek) = entry.s.borrow_mut().scroll_want.take() else { break };
-            let pos = self.scroll_pipe(entry, seek).await;
-            // 查询期间会话可能已被终止，entry 也可能被重建过
-            if !self.is_current(entry) {
-                break;
-            }
-            if let Some(pos) = pos {
-                let rows = entry.size().map(|s| u32::from(s.rows)).unwrap_or(0);
-                self.broadcast(entry, &ServerMessage::Scroll { position: pos.position, length: pos.length, rows });
-            }
-        }
-        entry.s.borrow_mut().scroll_busy = false;
-    }
-
-    async fn scroll_pipe(&self, entry: &Rc<LiveEntry>, seek: Option<f64>) -> Option<ScrollPosition> {
-        let layout = entry.layout()?;
-        let project = self.db.get_project(&entry.project_id)?;
-        let cached = entry.s.borrow().scroll_pane;
-        if project.project_type == "local" {
-            let pane = match cached {
-                Some(p) => p,
-                None => {
-                    let p = local_terminal_pane(&layout, &entry.session_id).await?;
-                    entry.s.borrow_mut().scroll_pane = Some(p);
-                    p
-                }
-            };
-            return local_scroll_pipe(&layout, &entry.session_id, pane, seek).await;
-        }
-        // 不为一次查询去重建链路
-        let link = self.existing_link(&project.id).filter(|l| l.is_connected())?;
-        let pane = match cached {
-            Some(p) => p,
-            None => {
-                let p = link.terminal_pane(&layout, &entry.session_id).await.ok().flatten()?;
-                entry.s.borrow_mut().scroll_pane = Some(p);
-                p
-            }
-        };
-        link.scroll_pipe(&layout, &entry.session_id, pane, seek).await.ok().flatten()
+    /// 会话列表上显示的那一条；没有 live entry 的会话没有
+    pub fn program_status_of(&self, session_id: &str) -> Option<ProgramStatusSummary> {
+        self.entry(session_id).and_then(|e| summarize(&e.s.borrow().program_status))
     }
 
     fn clear_title(&self, entry: &LiveEntry) {
@@ -1204,14 +1308,13 @@ impl SessionManager {
 
     /// 终止一个会话。
     ///
-    /// wait_gone：终止后等到宿主机上的 Zellij session 真的消失。删除 worktree 目录之前
-    /// 必须等——Zellij pane 的 cwd 就在那个目录里，Windows 上会被句柄占住直接删不掉；
-    /// POSIX 上删得掉，但没死透的会话 cwd 变成已删 inode，pwd 报错、任何碰 `.` 的命令
-    /// 行为诡异，比 Windows 隐蔽得多。
+    /// wait_gone：终止后等到宿主机上的会话真的结束。删除 worktree 目录之前必须等——shell 的
+    /// cwd 就在那个目录里，Windows 上会被句柄占住直接删不掉；POSIX 上删得掉，但没死透的会话
+    /// cwd 变成已删 inode，pwd 报错、任何碰 `.` 的命令行为诡异，比 Windows 隐蔽得多。
     ///
-    /// 用 Zellij 侧的会话存在性当信号，而不是等 backend 退出：Backend::destroy() 不返回
-    /// 结果（本地是发 SIGHUP、SSH 是关 channel，都是异步的），接口层面根本拿不到
-    /// "已经退出"。非持久会话没有可观测的信号，等不了——由调用方的退避重试兜底。
+    /// 持久会话交给守护进程结束（给 shell 的进程组 SIGHUP，2 秒后补 SIGKILL），它报了 Exit 就是
+    /// 结束了；连不上它时按 pid 动手（`falcon-sessiond kill`）。非持久会话没有可观测的信号，
+    /// 等不了——由调用方的退避重试兜底。
     pub async fn terminate(&self, session_id: &str, wait_gone: bool) {
         let Some(row) = self.db.get_session(session_id) else { return };
         let entry = self.entry(session_id);
@@ -1220,23 +1323,32 @@ impl SessionManager {
         }
 
         if row.durable == 1 {
-            let project = self.db.get_project(&row.project_id);
-            let layout = match (entry.as_ref().and_then(|e| e.layout()), &project) {
-                (Some(l), _) => Some(l),
-                (None, Some(p)) => self.prepare(p, None, None, false).await.layout,
-                (None, None) => None,
-            };
-            if let (Some(project), Some(layout)) = (project, layout) {
-                if project.project_type == "local" {
-                    local_kill(&layout, session_id).await;
-                    if wait_gone {
-                        wait_until_gone(|| local_has_session(&layout, session_id)).await;
+            let backend = entry.as_ref().and_then(|e| e.backend());
+            match backend {
+                Some(b) if b.terminate() => {
+                    if wait_gone && let Some(e) = &entry {
+                        for _ in 0..30 {
+                            if e.s.borrow().exit_seen {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
                     }
-                } else {
-                    let link = self.get_link(&project);
-                    link.kill_session(&layout, session_id).await;
-                    if wait_gone {
-                        wait_until_gone(|| async { link.has_session(&layout, session_id).await.unwrap_or(false) }).await;
+                }
+                _ => {
+                    let project = self.db.get_project(&row.project_id);
+                    let deployed = match (entry.as_ref().and_then(|e| e.deployed()), &project) {
+                        (Some(d), _) => Some(d),
+                        (None, Some(p)) => self.prepare(p, None, None, false).await.deployed,
+                        (None, None) => None,
+                    };
+                    if let (Some(project), Some(d)) = (project, deployed) {
+                        let sid = vec![falcon_proto::sessiond::sid_of(session_id)];
+                        if project.project_type == "local" {
+                            local_kill(&d, &sid).await;
+                        } else {
+                            self.get_link(&project).kill_sessions(&d, &sid).await;
+                        }
                     }
                 }
             }
@@ -1393,7 +1505,7 @@ impl SessionManager {
 
     // ---------- 内部 ----------
 
-    /// 仲裁出的尺寸落到 entry 上；变了才落库、才 resize PTY（每次 resize Zellij 都整屏重画）
+    /// 仲裁出的尺寸落到 entry 上；变了才落库、才 resize（每次 resize 前台程序都要整屏重画）
     fn apply_size(&self, entry: &Rc<LiveEntry>, size: TermSize) {
         if entry.size() == Some(size) {
             return;
@@ -1405,12 +1517,12 @@ impl SessionManager {
         }
     }
 
-    /// 换上一份终端深浅。接回已有 Zellij 会话改不了内层 env，
-    /// 但 OSC 10/11/12 答复跟这份走，主题切换后新启动的查询能拿到新底色。
+    /// 换上一份终端深浅。会话的 env 在创建时冻住了，改不了；但 OSC 10/11/12 的答复跟这份走，
+    /// 主题切换后新启动的查询能拿到新底色。
     ///
-    /// 深浅真的翻转且流里见过 DECSET 2031 订阅时，再注入 CSI ?997;1/2 n：
-    /// Claude Code 这类 auto 主题程序运行中只认这个通知。Zellij client 自己
-    /// 就会订并把通知转发给订阅的 pane（0.44 实测）；没人订阅时绝不能注入，
+    /// 持久会话交给守护进程：它的 VT 进程按这份回答查询，深浅翻转且程序订了 2031 时由 holder
+    /// 注入通知。非持久会话由服务端自己来：深浅真的翻转且流里见过 DECSET 2031 订阅时，注入
+    /// CSI ?997;1/2 n——Claude Code 这类 auto 主题程序运行中只认这个通知；没人订阅时绝不能注入，
     /// 这串字节会被前台程序当键盘输入吃掉。
     fn apply_colors(&self, entry: &LiveEntry, hint: &OscColorHint) {
         let Some(appearance) = hint.appearance else { return };
@@ -1426,6 +1538,12 @@ impl SessionManager {
             }
             flipped && s.modes.theme_notify()
         };
+        if entry.durable {
+            if let Some(b) = entry.backend() {
+                b.set_appearance(&entry.color_hint());
+            }
+            return;
+        }
         if notify && let Some(b) = entry.backend() {
             b.write(if appearance == TermAppearance::Light { "\x1b[?997;2n" } else { "\x1b[?997;1n" });
         }
@@ -1440,8 +1558,7 @@ impl SessionManager {
             session_id: row.id.clone(),
             project_id: row.project_id.clone(),
             durable: row.durable == 1,
-            layout: None,
-            scroll: row.scroll_plugin == Some(1),
+            deployed: None,
             size: parse_stored_term_size(row.cols.map(|c| c as f64), row.rows.map(|r| r as f64)),
             hint: OscColorHint::default(),
         });
@@ -1473,6 +1590,10 @@ impl SessionManager {
         // 序列化一次，N 个 Viewer 共享同一个帧
         let frame = encode_term_frame(TERM_FRAME_OUTPUT, &data);
         for v in viewers {
+            // 在等快照的 Viewer：这些输出都会含在快照里
+            if v.syncing.get() {
+                continue;
+            }
             if v.lagged.get() {
                 // 落后的 Viewer 不追增量（那正是它堆积的原因），排空后整体重放对齐
                 if v.drained() {
@@ -1526,6 +1647,14 @@ impl SessionManager {
     }
 
     fn send_replay(&self, entry: &LiveEntry, viewer: &Viewer) {
+        if entry.durable {
+            // 守护进程会话：要一份快照，回来之前这个 Viewer 不收输出（on_backend_event）。
+            // 还没连上（等接回）时先挂着，接回成功的 mark_active 会再要
+            viewer.syncing.set(true);
+            viewer.lagged.set(false);
+            self.request_sync(entry);
+            return;
+        }
         // 前端拿 replay 帧整体换掉终端状态（等同先 reset 再写入），会清掉全部 VT 模式；
         // 快照里往往已没有当初的模式序列（4MB 环挤掉了），这里用跟踪到的
         // 当前模式作前缀重建，否则重连后的 Viewer 永久丢失 mouse tracking
@@ -1556,7 +1685,12 @@ impl SessionManager {
         // 先把还没广播的尾巴发出去（shell 的告别输出），再释放
         self.flush_output(entry);
         // dead 会话不可能再回放（add_viewer 对 dead 行早退），立刻释放 Scrollback
-        entry.s.borrow_mut().buffer.reset(None);
+        {
+            let mut s = entry.s.borrow_mut();
+            s.buffer.reset(None);
+            // 进程都没了，working / blocked 不再成立；done / error 也没有可回去看的会话了
+            s.program_status.clear();
+        }
         self.last_touch.borrow_mut().remove(&entry.session_id);
         // 死了就没有前台命令可言，停掉待发的探测并把标题收回去
         self.clear_title(entry);
@@ -1615,24 +1749,27 @@ impl SessionManager {
             return;
         }
 
-        // 持久会话：Zellij session 还在 → unverified（可接回）；不在 → 真退出
-        let layout = entry.layout();
+        // 持久会话：守护进程报过 shell 退出 → 真退出；否则看它留下的痕迹
+        let (exit_seen, bridge_exit) = {
+            let s = entry.s.borrow();
+            (s.exit_seen, s.bridge_exit)
+        };
+        if exit_seen {
+            self.mark_dead(&entry, DeadReason::Exited);
+            return;
+        }
         if project.as_ref().is_some_and(|p| p.project_type == "local") {
-            match layout {
-                Some(l) if local_has_session(&l, session_id).await => self.mark_unverified(&entry),
-                _ => self.mark_dead(&entry, DeadReason::Exited),
+            match entry.deployed().map(|d| local_session_state(&d, session_id)) {
+                Some(LocalSessionState::Exited) => self.mark_dead(&entry, DeadReason::Exited),
+                Some(LocalSessionState::Alive) => self.mark_unverified(&entry),
+                _ => self.mark_dead(&entry, DeadReason::SessionGone),
             }
             return;
         }
-
-        let link = self.existing_link(&entry.project_id).filter(|l| l.is_connected());
-        let (Some(link), Some(layout)) = (link, layout) else {
-            // 链路断开，交给 handle_link_down / 重连流程
-            self.mark_unverified(&entry);
-            return;
-        };
-        match link.has_session(&layout, session_id).await {
-            Ok(false) => self.mark_dead(&entry, DeadReason::Exited),
+        // SSH：bridge 的退出码说了算；没有退出码（链路断了、bridge 被杀）就等重连再看
+        match bridge_exit.flatten().map(|c| c as i32) {
+            Some(falcon_proto::sessiond::BRIDGE_EXIT_GONE) => self.mark_dead(&entry, DeadReason::SessionGone),
+            Some(falcon_proto::sessiond::BRIDGE_EXIT_EXITED) => self.mark_dead(&entry, DeadReason::Exited),
             _ => self.mark_unverified(&entry),
         }
     }
@@ -1725,7 +1862,7 @@ impl SessionManager {
         self.reconnect_after(project_id, state, delay);
     }
 
-    /// 本地持久会话的自动接回。PTY 掉了但 Zellij 还在时，不必等用户点。
+    /// 本地持久会话的自动接回。连接掉了但守护进程还在时，不必等用户点。
     fn schedule_local_reattach(&self, session_id: &str) {
         let existing = self.local_reattach.borrow().get(session_id).cloned();
         if existing.as_ref().is_some_and(|s| s.timer.is_set()) {
@@ -1815,21 +1952,6 @@ fn fail_text(stderr: &str, what: &str, code: Option<i32>) -> String {
     match code {
         Some(c) => format!("{what}（exit {c}）"),
         None => format!("{what}（exit null）"),
-    }
-}
-
-/// 轮询到 still() 返回 false 为止，或用完次数。
-/// 超时不算失败：调用方还有退避重试，实在删不掉会如实报给用户。
-async fn wait_until_gone<F, Fut>(still: F)
-where
-    F: Fn() -> Fut,
-    Fut: Future<Output = bool>,
-{
-    for _ in 0..10 {
-        if !still().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
 

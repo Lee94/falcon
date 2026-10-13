@@ -1,4 +1,4 @@
-//! WebSocket：会话通道 `/ws/sessions/:id` 与 Zellij 安装通道 `/ws/install/:projectId`。
+//! WebSocket：会话通道 `/ws/sessions/:id` 与守护进程部署通道 `/ws/install/:projectId`。
 //! 移植自 `packages/server/src/ws.ts`。
 //!
 //! 未认证照 Node 版先升级、再以 4401 关闭（客户端认这个关闭码去重新登录，不重连）。
@@ -48,9 +48,9 @@ fn message_json(msg: &Message) -> Option<Value> {
     }
 }
 
-/// Zellij 安装通道。
+/// 会话守护进程的部署通道。
 ///
-/// 安装是主机级操作、可能耗时数十秒（宿主机自己下载 14 MiB 压缩包再解压），
+/// 部署是主机级操作、慢链路上可能耗时数十秒（经 SSH 推几 MB 的二进制再握手），
 /// 塞进创建会话的 REST 请求里会让前端只能干等。这里推分阶段状态，
 /// 并支持中途取消——取消只影响本次，不写入拒绝状态：取消按钮出现在进度条上，
 /// 语境是"我不想等这次传输"，而不是"我撤销授权"。
@@ -254,10 +254,13 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
                     state.engine.send(move |engine| engine.sessions.set_appearance(&id, viewer_id, hint));
                 }
             }
-            Some("scroll") => {
-                // 认不出的 seek 当成只问位置：宁可多回一次位置，也不要乱滚
-                let seek = msg["seek"].as_f64().filter(|s| s.is_finite() && *s >= 0.0);
-                state.engine.send(move |engine| engine.sessions.scroll(&id, seek));
+            Some("status_seen") => {
+                // 认不出的 id 丢掉；ids 缺省 = 全部
+                let ids: Vec<String> = msg["ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                state.engine.send(move |engine| engine.sessions.status_seen(&id, ids));
             }
             Some("ping") => {
                 let _ = pong_tx.send(());

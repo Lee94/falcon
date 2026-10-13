@@ -82,7 +82,7 @@ pub struct SshHostInput {
 /// SSH 连通性探测（`POST /api/hosts/:id/test`、`POST /api/hosts/test`）。
 ///
 /// 形状与 RepoInfo 同源：环境事实写在 ok/error 里，不抛 4xx。测的是「现在这组
-/// 凭据能不能登上」，不是 Zellij / git 好不好用。
+/// 凭据能不能登上」，不是会话守护进程 / git 好不好用。
 ///
 /// TS 是按布尔字段 `ok` 判别的联合；serde 的内部标签只认字符串，所以经
 /// [`SshProbeWire`] 这个平铺形状转一道。

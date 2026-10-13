@@ -1,6 +1,6 @@
 //! git 命令构造与输出解析。移植自 `packages/server/src/git/command.ts`。纯函数，零 I/O。
 //!
-//! 与 zellij/command.rs 同一条规矩：**只产出 argv 数组与 env 列表**，转义交给
+//! 与 sessiond/command.rs 同一条规矩：**只产出 argv 数组与 env 列表**，转义交给
 //! [`build_git_command_line`] 一处完成——远端 POSIX 与远端 Windows 的转义规则不同，
 //! 绝不在这里拼字符串。
 //!
@@ -29,7 +29,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::path::sep_for;
-use crate::zellij::host::{HostKind, build_command_line, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, build_command_line, encode_powershell, quote_posix, quote_powershell};
 
 /// 所有 git 调用共用的环境变量。有序：发到宿主机的命令串要与 TS 的 `Object.entries` 逐字节一致
 pub const GIT_ENV: &[(&str, &str)] = &[
@@ -903,7 +903,7 @@ pub fn parse_git_op_input(body: &Value) -> Result<GitOpInput, String> {
 /// 就是 build_command_line，只是带上 GIT_UNSET；env 通常传 [`GIT_ENV`] 或 [`GIT_ENV_RO`]
 /// （TS 的默认参数是 GIT_ENV）。
 ///
-/// git 对底座有两条硬要求，都已经在 zellij/host.rs 里满足了，这里只记为什么必须有：
+/// git 对底座有两条硬要求，都已经在 host.rs 里满足了，这里只记为什么必须有：
 /// - **退出码要如实传出**：`diff --quiet` 的全部语义就在退出码里（1 = 有改动），
 ///   `rev-list @{upstream}..` 的 128 表示"没有 upstream"而不是出错。压成 0/1 会让
 ///   "有没有未提交改动"这类判断悄悄失真——见 powershell_script 的注释。
@@ -2309,7 +2309,7 @@ mod tests {
     /// 期望值来自 TS 实现本身（tsx 跑 command.ts 落盘），不是手写推出来的。
     mod ts_vectors {
         use super::*;
-        use crate::zellij::host::tests::decode;
+        use crate::host::tests::decode;
 
         fn batch_argvs() -> Vec<Vec<String>> {
             vec![version_args("git"), status_args("git", "/home/u/it's repo")]

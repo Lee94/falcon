@@ -106,6 +106,88 @@ pub fn status_mark(mark: Mark, size: Pixels, cx: &App) -> AnyElement {
     icon(name).size(size).text_color(color).into_any_element()
 }
 
+/// 程序状态（OSC 7501，ADR 0020 决定六）的徽标。
+///
+/// - blocked 最醒目：警示色实底的小胶囊，图标 + 两个字直接写出要的是什么（授权 / 回答 / 凭据），
+///   不用悬停就知道该去干嘛；
+/// - error / done 只是一个上色的图标（红三角 / 绿勾），不和会话本身的状态记号（`Mark`，圆形）
+///   撞形状；
+/// - working 一个语义蓝的转圈图标，程序报了进度就跟一个百分比。
+///
+/// 悬停提示是完整短标签 + 程序那半句（`ProgramBadge::detail` 已经消毒、截断过）。会话名不在这里
+/// 写：徽标挂在侧栏那一行、标题栏那扇窗口上，位置本身就交代了来源。
+pub fn program_badge(
+    id: impl Into<ElementId>,
+    badge: &falcon_core::program_status::ProgramBadge,
+    size: Pixels,
+    cx: &App,
+) -> AnyElement {
+    use falcon_core::program_status::BadgeTone;
+    use rust_i18n::t;
+    let ui = Ui::global(cx);
+    let label = t!(badge.label_key).to_string();
+    let tip: SharedString = match &badge.detail {
+        Some(detail) => format!("{label} · {detail}"),
+        None => label,
+    }
+    .into();
+    let name = program_icon(badge.tone, badge.kind);
+    let el = div().id(id.into()).flex().flex_none().items_center().gap(zpx(3.));
+    let el = match badge.tone {
+        BadgeTone::Blocked => el
+            .h(size + zpx(4.))
+            .px(zpx(5.))
+            .rounded_full()
+            .bg(ui.warning)
+            .text_color(ui.warning_foreground)
+            .text_size(zpx(11.))
+            .child(icon(name).size(size * 0.85))
+            .child(t!(badge.short_key).to_string()),
+        BadgeTone::Working => el
+            .text_color(ui.tint_strong)
+            .text_size(zpx(11.))
+            .child(icon(name).size(size))
+            .when_some(badge.progress, |d, p| {
+                d.child(div().text_color(ui.muted_foreground).child(t!("programStatus.progress", n = p).to_string()))
+            }),
+        BadgeTone::Error => el.text_color(ui.destructive).child(icon(name).size(size)),
+        BadgeTone::Done => el.text_color(ui.success).child(icon(name).size(size)),
+    };
+    el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .into_any_element()
+}
+
+/// 程序状态的图标（徽标、终端状态栏共用）：blocked 按要的东西分（授权 / 回答 / 凭据），
+/// 其余按状态
+pub fn program_icon(
+    tone: falcon_core::program_status::BadgeTone,
+    kind: Option<falcon_proto::ProgramBlockKind>,
+) -> IconName {
+    use falcon_core::program_status::BadgeTone;
+    use falcon_proto::ProgramBlockKind;
+    match (tone, kind) {
+        (BadgeTone::Blocked, Some(ProgramBlockKind::Permission)) => IconName::ShieldQuestionMark,
+        (BadgeTone::Blocked, Some(ProgramBlockKind::Question)) => IconName::MessageCircleQuestionMark,
+        (BadgeTone::Blocked, Some(ProgramBlockKind::Auth)) => IconName::KeyRound,
+        (BadgeTone::Blocked, _) => IconName::Hand,
+        (BadgeTone::Error, _) => IconName::TriangleAlert,
+        (BadgeTone::Working, _) => IconName::LoaderCircle,
+        (BadgeTone::Done, _) => IconName::CircleCheck,
+    }
+}
+
+/// 程序状态的语义色（图标与文字）：blocked 警示、error 危险、working 强调蓝、done 成功绿
+pub fn program_color(tone: falcon_core::program_status::BadgeTone, cx: &App) -> Hsla {
+    use falcon_core::program_status::BadgeTone;
+    let ui = Ui::global(cx);
+    match tone {
+        BadgeTone::Blocked => ui.warning,
+        BadgeTone::Error => ui.destructive,
+        BadgeTone::Working => ui.tint_strong,
+        BadgeTone::Done => ui.success,
+    }
+}
+
 /// 主机身份色：色相由连接串散列而来，饱和度 / 亮度随主题（React 版 hostColor.ts 的 hsl(h, s%, l%)）
 pub fn host_color(hue: u32, cx: &App) -> Hsla {
     let ui = Ui::global(cx);

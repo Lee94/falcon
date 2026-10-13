@@ -32,7 +32,7 @@
 //! 服务端将来可能扩展的状态 / 原因类枚举多一个 `Unknown`（`#[serde(other)]`），
 //! 新服务端多一个值时，老客户端不至于让整张列表反序列化失败：
 //! [`SessionState`]、[`DeadReason`]、[`SessionAgent`]、[`NonDurableReason`]、
-//! [`ZellijInstallFailure`]、[`ZellijInstallStage`]、[`WorktreeFailure`]、
+//! [`InstallFailure`]、[`InstallStage`]、[`ProgramState`]、[`ProgramBlockKind`]、[`WorktreeFailure`]、
 //! [`GitUnavailableReason`]、[`GitConflictKind`]、[`ForwardState`]、
 //! [`MeegleUnavailableReason`]、[`MeeglePinKind`]，以及可辨识联合
 //! [`FilePreview`]、[`ServerMessage`]、[`InstallServerMessage`]。各自的理由写在类型注释里。
@@ -62,27 +62,32 @@ pub mod files;
 pub mod forward;
 pub mod git;
 pub mod meegle;
+pub mod program_status;
 pub mod project;
 pub mod session;
+/// falcon-server 与宿主机上会话守护进程（falcon-sessiond）之间的帧协议（ADR 0020）
+pub mod sessiond;
 pub mod system;
 pub mod term_env;
 /// VT 模式跟踪：服务端拼回放前缀、客户端合成鼠标报文共用一个跟踪器（shared/termModes.ts）
 pub mod term_modes;
 pub mod worktree;
 pub mod ws;
-pub mod zellij;
+/// 会话守护进程的部署（推二进制）与宿主机的持久能力
+pub mod install;
 
 pub use files::*;
 pub use forward::*;
 pub use git::*;
 pub use meegle::*;
+pub use program_status::*;
 pub use project::*;
 pub use session::*;
 pub use system::*;
 pub use term_env::*;
 pub use worktree::*;
+pub use install::*;
 pub use ws::*;
-pub use zellij::*;
 
 #[cfg(test)]
 mod test_util;

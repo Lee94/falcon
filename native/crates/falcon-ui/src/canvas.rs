@@ -30,7 +30,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Bounds, Context, CursorStyle, Div, Entity, FontWeight, Hsla, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Window, div, px,
+    SharedString, Task, Window, div, px,
 };
 use rust_i18n::t;
 
@@ -93,6 +93,8 @@ pub struct Canvas {
     epoch: Instant,
     /// 画布条上各格的矩形（窗口坐标），prepaint 时记下，拖拽落点靠它命中。每次 render 清空重记
     targets: Rc<RefCell<Vec<(String, Bounds<Pixels>)>>>,
+    /// 终端状态栏的计时（已运行 / 已等待）在涨时，一秒后再画一次
+    clock_tick: Option<Task<()>>,
 }
 
 impl Canvas {
@@ -114,6 +116,7 @@ impl Canvas {
             swipe: CanvasSwipe::new(),
             epoch: Instant::now(),
             targets: Rc::new(RefCell::new(Vec::new())),
+            clock_tick: None,
         }
     }
 
@@ -357,6 +360,7 @@ impl Render for Canvas {
         let shown_keys: Vec<String> = layout::pane_keys(&columns);
         // 画布条的格子每帧重记（prepaint 里填）
         self.targets.borrow_mut().clear();
+        self.schedule_clock_tick(&shown_keys, cx);
 
         // 每扇（非固定的）窗口在第几块画布上、哪些窗口独占一块（"移到新画布"对它等于没动）
         let canvas_ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
@@ -992,6 +996,15 @@ impl Canvas {
                 if let Some(name) = name {
                     info = info.child(div().flex_none().max_w(zpx(260.)).truncate().font_weight(FontWeight::MEDIUM).child(name));
                 }
+                // 程序状态（OSC 7501，ADR 0020）：与侧栏同一个徽标，跟在名字后面
+                if let Some(badge) = session.and_then(|s| s.program_status.as_ref()).and_then(falcon_core::program_status::badge) {
+                    info = info.child(crate::ui::program_badge(
+                        SharedString::from(format!("pane-ps-{id}")),
+                        &badge,
+                        zpx(12.),
+                        cx,
+                    ));
+                }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));
             }
             PaneItem::File { path, .. } => {
@@ -1106,6 +1119,13 @@ impl Canvas {
         let header = header.context_menu(move |m, _, _| to_popup(m, menu.clone()));
 
         // ---- 内容 ----
+        // 终端窗口底部常驻一条状态栏（不随状态出没，见 status_bar.rs）；会话还在建时没有
+        let status = match &item {
+            PaneItem::Terminal { id, .. } if ws.terminals.contains_key(id) => {
+                Some(crate::terminal::status_bar::status_bar(id, ws, cx))
+            }
+            _ => None,
+        };
         let body: AnyElement = match &item {
             PaneItem::Terminal { id, .. } => match ws.terminals.get(id) {
                 Some(view) => view.clone().into_any_element(),
@@ -1140,9 +1160,10 @@ impl Canvas {
                 div()
                     .flex_1()
                     .min_h_0()
-                    // 点进内容就成为活动窗口，必须在捕获阶段接：zellij 常开鼠标上报，终端的
-                    // mouse_down 上报完就 stop_propagation，冒泡阶段等不到——键盘焦点跟过去了，
-                    // 标题栏的着色却还留在原来那扇上。标题栏自己的 mouse_down 另有处理
+                    // 点进内容就成为活动窗口，必须在捕获阶段接：程序开着鼠标上报（vim、tmux、
+                    // 各家 agent 的 TUI）时终端的 mouse_down 上报完就 stop_propagation，冒泡阶段
+                    // 等不到——键盘焦点跟过去了，标题栏的着色却还留在原来那扇上。标题栏自己的
+                    // mouse_down 另有处理
                     .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
                         if !is_active {
                             let k = key_focus.clone();
@@ -1151,9 +1172,35 @@ impl Canvas {
                     }))
                     .child(body),
             )
+            .children(status)
             .child(corner_caps(round, &ui))
             .when(is_active && mark_active, |d| d.child(active_ring(round, &ui)))
             .into_any_element()
+    }
+
+    /// 看得见的终端里有计时在涨（working / blocked）：一秒后再画一次。只在需要时排，不常驻
+    fn schedule_clock_tick(&mut self, shown_keys: &[String], cx: &mut Context<Self>) {
+        if self.clock_tick.is_some() {
+            return;
+        }
+        let ticking = {
+            let ws = self.ws.read(cx);
+            shown_keys.iter().any(|k| match parse_pane_key(k) {
+                Some(PaneItem::Terminal { id, .. }) => crate::terminal::status_bar::ticking(&id, ws),
+                _ => false,
+            })
+        };
+        if !ticking {
+            return;
+        }
+        self.clock_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+            this.update(cx, |this, cx| {
+                this.clock_tick = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// 会话还没建起来时占住窗口：立刻有反馈，而不是等 REST 返回才出现（React 版的 PendingPane）

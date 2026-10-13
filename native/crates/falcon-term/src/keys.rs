@@ -6,8 +6,9 @@
 //! 改动：`gpui::Keystroke` 换成本 crate 的 [`crate::keystroke::Keystroke`]（falcon-term 不依赖
 //! GPUI），Zed 自己的 `Modes` 换成 alacritty 的 `TermMode`（位名一致）。映射表本身一字未改。
 //!
-//! 不编 kitty 键盘协议：Term 的 `kitty_keyboard` 配置关着（见 core.rs），zellij 协商不到就停在
-//! legacy 编码；打开它就必须同时在这里编 kitty 格式，否则 zellij 会误解按键。
+//! 不编 kitty 键盘协议：Term 的 `kitty_keyboard` 配置关着（见 core.rs），宿主机上的 VT 进程也把
+//! `CSI ? u` 的回复滤掉了（ADR 0020 决定五），程序协商不到就停在 legacy 编码；打开它就必须同时在
+//! 这里编 kitty 格式，否则程序会误解按键。两边要同一个版本一起放开。
 //!
 //! `to_esc_str` 返回 None 的按键由调用方按 `key_char`（IME / 输入法给的文本）原样作为输入发出。
 

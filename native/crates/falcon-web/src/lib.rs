@@ -7,6 +7,7 @@
 
 #![cfg(target_family = "wasm")]
 
+mod chime;
 mod dom;
 mod platform;
 
@@ -19,6 +20,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[wasm_bindgen]
 pub fn start() {
     gpui_kit::platform::web_init();
+    chime::unlock_on_gesture();
 
     // 图标 SVG 按需从 `<页面源>/assets/icons/*.svg` 取（gpui-kit-assets 的 wasm 实现），
     // 构建脚本把 gpui-kit-assets 的 icons 拷进产物。它拿 reqwest 去取，相对地址不认，得给全

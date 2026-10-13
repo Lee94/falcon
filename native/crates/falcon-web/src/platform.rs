@@ -123,4 +123,8 @@ impl Platform for Browser {
 
     // 标签页图标跟着换（`<link rel=icon>`）在 C3 补（附录 B）
     fn set_app_icon(&self, _png: &[u8]) {}
+
+    fn play_chime(&self) {
+        crate::chime::play();
+    }
 }

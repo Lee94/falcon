@@ -75,6 +75,8 @@ pub struct Ui {
     pub destructive_foreground: Hsla,
     pub success: Hsla,
     pub warning: Hsla,
+    /// 压在 `warning` 实底上的字色（程序状态 blocked 的徽标是警示色实底，ADR 0020）
+    pub warning_foreground: Hsla,
     pub border: Hsla,
     pub input: Hsla,
     pub ring: Hsla,
@@ -312,6 +314,7 @@ fn apply(cx: &mut App) {
         destructive_foreground: hsla(u.destructive_foreground),
         success: hsla(u.success),
         warning: hsla(u.warning),
+        warning_foreground: hsla(u.warning_foreground),
         border: hsla_a(u.border),
         input: hsla_a(u.input),
         ring: hsla_a(u.ring),

@@ -29,7 +29,7 @@ use super::repo::{
     AddWorktreeOptions, RunOpts, add_worktree, batch_git, checked_out_map, code_text, ensure_version, main_worktree_of,
     path_exists, paths_exist, root_from,
 };
-use crate::zellij::host::HostKind;
+use crate::host::HostKind;
 
 /// 成员级失败：在 WorktreeError 上多带"是哪个成员"（容器里配置的路径，用户认得
 /// 那一个）与回滚残留。路由据此组装 MultiDeriveError 响应体（TS 里是

@@ -24,7 +24,7 @@ use regex::Regex;
 use crate::exec::{Exec, ExecResult};
 use crate::files::{FileError, exec_timed, js_trim, js_trim_end, locale_compare_base, remote_failure_parts, split_lines};
 use crate::git::path::{dirname_of, is_absolute, join_path, normalize_sep};
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 pub const LIST_TIMEOUT: Duration = Duration::from_millis(15_000);
 
@@ -337,7 +337,7 @@ pub async fn list_remote_directories(
 mod tests {
     //! fs.ts 没有测试文件；这里是 Rust 侧补的。
     use super::*;
-    use crate::zellij::host::tests::decode;
+    use crate::host::tests::decode;
 
     const POSIX: HostKind = HostKind::Posix;
     const WINDOWS: HostKind = HostKind::Windows;

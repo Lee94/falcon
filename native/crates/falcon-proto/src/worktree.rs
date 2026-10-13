@@ -36,10 +36,11 @@ pub const WORKTREE_ARCHIVE_TTL_DAYS: i64 = 7;
 pub const WORKTREE_ARCHIVE_TTL_MS: i64 = WORKTREE_ARCHIVE_TTL_DAYS * 24 * 60 * 60 * 1000;
 
 wire_enum! {
-    /// worktree 操作的失败原因。与 ZellijInstallFailure 同构：闭集字符串联合，
+    /// worktree 操作的失败原因。与 InstallFailure 同构：闭集字符串联合，
     /// 前后端共用，前端据此渲染具体说明而不是笼统的"操作失败"。
     ///
-    /// 不做自动重试（与 Zellij 安装刻意不同）：那边一轮是 14 MiB 下载，重试期望收益极高；
+    /// 不做自动重试（与会话守护进程的部署刻意不同）：那边一轮是经 SSH 推几 MB 的二进制，
+    /// 通道半路断开很常见，重试期望收益极高；
     /// 这边每条 git 命令都是宿主机上百毫秒级的本地操作，用户重按一次按钮的成本约等于零，
     /// 加一套重试循环只会多一条没人走的代码路径。
     ///
@@ -93,7 +94,7 @@ pub struct RepoBranch {
 
 /// 源项目的仓库信息，`GET /api/projects/:id/repo`。
 ///
-/// 探测端点永不因环境事实报错——形状与 HostZellijStatus 同源：返回一份
+/// 探测端点永不因环境事实报错——形状与 HostInstallStatus 同源：返回一份
 /// "能不能干、为什么不能"的报告，而不是 4xx。创建端点则把同样的事实当状态冲突。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

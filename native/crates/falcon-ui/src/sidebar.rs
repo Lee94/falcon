@@ -3,7 +3,7 @@
 //! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
 //! - 会话行默认收起：一个检出能挂五六个终端，全摊开就占满侧栏；检出行尾巴上摆计数徽标 +
-//!   最重的异常状态，折叠着也看得出出没出事。
+//!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）。
 
 use falcon_core::meegle_drag::MeegleWorkItemDragPayload;
 use falcon_core::project_tree::{FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers};
@@ -21,7 +21,7 @@ use rust_i18n::t;
 use crate::labels::{local_word, session_label};
 use crate::menus::{self, to_popup};
 use crate::theme::{Ui, radius};
-use crate::ui::{Mark, host_bar, icon, status_mark};
+use crate::ui::{Mark, host_bar, icon, program_badge, status_mark};
 use crate::workspace::{ActiveView, PendingSession, ProjectChanges, ToastKind, Workspace};
 use crate::zoom::zpx;
 
@@ -333,6 +333,10 @@ impl Sidebar {
         // 存档的检出开不了会话，也就没有会话行可摊
         let expandable = archived_at.is_none() && count > 0;
         let worst = worst_state(&mine, &mine_pending);
+        // 收着的检出里有程序在等人：计数徽标上挂一个警示色的手，不用摊开也看得见
+        let blocked = mine
+            .iter()
+            .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
 
         let icon_name = if archived_at.is_some() {
             IconName::Archive
@@ -353,6 +357,7 @@ impl Sidebar {
                 format!("badge-{pid_badge}"),
                 count,
                 worst,
+                blocked && !sessions_open,
                 sessions_open,
                 move |cx| ws2.update(cx, |w, cx| w.toggle_sessions(&pid_badge, cx)),
                 cx,
@@ -432,6 +437,11 @@ impl Sidebar {
             .child(div().flex_none().size(zpx(18.)))
             .child(icon(icon_name).size(zpx(14.)).text_color(ui.muted_foreground))
             .child(div().flex_1().min_w_0().truncate().pl_1().child(label));
+        // 程序状态（OSC 7501）：blocked 是带字的警示色胶囊，最醒目；摘要由服务端算好随列表来，
+        // 开着窗口的会话由 WS 实时改写
+        if let Some(badge) = session.program_status.as_ref().and_then(falcon_core::program_status::badge) {
+            row = row.child(program_badge(SharedString::from(format!("sess-ps-{}", session.id)), &badge, zpx(12.), cx));
+        }
         // 运行中不摆状态记号，异常才值得占位置
         if session.state != SessionState::Active {
             row = row.child(status_mark(Mark::from(session.state), zpx(12.), cx));
@@ -498,12 +508,17 @@ fn session_count_badge(
     id: String,
     count: usize,
     worst: Option<Mark>,
+    blocked: bool,
     expanded: bool,
     on_toggle: impl Fn(&mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
     let ui = Ui::global(cx).clone();
-    let label: SharedString = t!("sidebar.sessionCount", n = count).to_string().into();
+    let mut label = t!("sidebar.sessionCount", n = count).to_string();
+    if blocked {
+        label = format!("{label} · {}", t!("programStatus.someoneBlocked"));
+    }
+    let label: SharedString = label.into();
     let mark = match worst {
         Some(m) => status_mark(m, zpx(12.), cx),
         None => icon(IconName::SquareTerminal).size(zpx(12.)).into_any_element(),
@@ -521,6 +536,7 @@ fn session_count_badge(
         .text_color(if expanded { ui.foreground } else { ui.muted_foreground })
         .hover(|s| s.text_color(ui.foreground))
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        .when(blocked, |d| d.child(icon(IconName::Hand).size(zpx(12.)).text_color(ui.warning)))
         .child(mark)
         .child(count.to_string())
         .on_click(move |_, _, cx| {

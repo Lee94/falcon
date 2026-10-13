@@ -341,7 +341,8 @@ impl Workspace {
 
     // ---------------- 新建会话 ----------------
 
-    /// 新建终端。SSH 项目首次用时先走授权 + 安装；已拒绝过的主机不再打扰，直接建非持久会话
+    /// 新建终端。SSH 项目首次用时先走授权 + 部署会话守护进程（版本对不上时也走一遍部署，看得见
+    /// 进度）；已拒绝过的主机不再打扰，直接建非持久会话
     pub fn new_terminal(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<String>, cx: &mut Context<Self>) {
         let Some(project) = self.project(project_id).cloned() else {
             return;
@@ -352,9 +353,8 @@ impl Workspace {
             cx.spawn(async move |this, cx| {
                 let status = client.host_status(&pid).await;
                 this.update(cx, |this, cx| {
-                    let needs_setup = status.as_ref().is_ok_and(|s| {
-                        s.authorized.is_none() || (s.authorized == Some(true) && s.installed_version.is_none())
-                    });
+                    // 没问过授权，或宿主机上没有这一版守护进程：先走对话框看着进度部署
+                    let needs_setup = status.as_ref().is_ok_and(falcon_core::host_install::needs_host_setup);
                     if needs_setup {
                         cx.emit(WorkspaceEvent::NeedsInstall { project_id: pid.clone(), agent });
                     } else {

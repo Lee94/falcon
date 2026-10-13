@@ -1,9 +1,11 @@
-//! 本地宿主（后端所在机器）的会话：Zellij 准备、会话查询、PTY 附着。移植自
-//! `packages/server/src/sessions/local.ts`，以及 `loginEnv.ts` / `zellij/exec.ts` 的运行时部分。
+//! 本地宿主（后端所在机器）的会话。移植自 `packages/server/src/sessions/local.ts` 与
+//! `loginEnv.ts` 的运行时部分。
 //!
-//! PTY 用 portable-pty（Unix openpty / Windows ConPTY）。读端是阻塞的：一个 PTY 一条读线程、
-//! 一条写线程，读到的字节经 channel 回到会话核心的 LocalSet 上按块流式解码（PTY 读块会把
-//! UTF-8 多字节字符切开）。
+//! - 持久会话：宿主机就是本机，会话守护进程（falcon-sessiond，ADR 0020）拷进 `--data-dir` 后
+//!   `spawn` 一个 holder，后端直接连它的 Unix socket / 命名管道；
+//! - 非持久会话：后端自己开 PTY。portable-pty（Unix openpty / Windows ConPTY），读端是阻塞的：
+//!   一个 PTY 一条读线程、一条写线程，读到的字节经 channel 回到会话核心的 LocalSet 上按块
+//!   流式解码（PTY 读块会把 UTF-8 多字节字符切开）。
 
 use std::cell::RefCell;
 use std::io::{Read as _, Write as _};
@@ -12,27 +14,26 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use falcon_proto::{NonDurableReason, ZellijInstallFailure};
+use falcon_proto::sessiond::{ExitRecord, ListEntry, SessionMeta, SpawnResult, Welcome, sid_of};
+use falcon_proto::{HostKind, InstallFailure, NonDurableReason};
 use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::io::AsyncReadExt as _;
-use tokio_util::sync::CancellationToken;
 
-use super::backend::{AttachResult, Backend, BackendCallbacks, SessionGoneError, normalize_captured};
+use super::backend::{AttachResult, Backend, BackendCallbacks};
 use super::login_env::{
     PROBE_OUTPUT_CAP, PROBE_TIMEOUT_MS, RESOLVING_ENV_VAR, detect_fallback_lang, has_locale, login_env_probe_args,
     merge_base_env, node_platform, parse_login_env, pick_login_probe_shell,
 };
-use super::scroll_plugin::ensure_local_scroll_plugin;
-use super::ssh_zellij::AttachOptions;
+use super::ssh_host::{AttachOptions, spawn_spec};
 use crate::askpass::install::prepend_path;
-use crate::exec::{ExecResult, LocalBoxFuture, LocalExec, Utf8Decoder, local_exec};
+use crate::exec::{LocalBoxFuture, Utf8Decoder, local_exec};
+use crate::host::{encode_powershell, merge_env};
+use crate::sessiond::backend::{ConnectError, SessiondBackend, Transport, connect};
+use crate::sessiond::command::{kill_argv, list_argv, spawn_argv};
+use crate::sessiond::deploy::{Deployed, ensure_local};
 use crate::term_env::apply_term_pty_env;
-use crate::zellij::command::{self as zcmd, ScrollPosition, SessionProfile};
-use crate::zellij::host::{Downloader, HostKind, HostLayout, build_command_line, encode_powershell, merge_env};
-use crate::zellij::install::{InstallError, InstallOptions, StageFn, ensure_zellij};
-use crate::zellij::version::local_target;
 
 pub fn local_kind() -> HostKind {
     if cfg!(windows) { HostKind::Windows } else { HostKind::Posix }
@@ -49,21 +50,19 @@ pub fn home_dir() -> String {
     crate::config::home_dir().to_string_lossy().into_owned()
 }
 
-/// 本地宿主的 Zellij 就绪状态。durable=false 时 reason 必定有值。
+/// 本地宿主的持久能力。durable=false 时 reason 必定有值。
 #[derive(Debug, Clone)]
-pub struct LocalZellij {
+pub struct LocalSessiond {
     pub durable: bool,
     pub reason: Option<NonDurableReason>,
-    /// 失败详情（命令 stderr 或异常消息），供用户判断该修什么再重试
+    /// 失败详情，供用户判断该修什么再重试
     pub detail: Option<String>,
-    pub layout: Option<HostLayout>,
-    /// 滚动位置插件已就位且已预授权（ADR 0019）；新会话据此决定用哪套配置
-    pub scroll: bool,
+    pub deployed: Option<Deployed>,
 }
 
-impl LocalZellij {
+impl LocalSessiond {
     pub(crate) fn non_durable(reason: NonDurableReason, detail: Option<String>) -> Self {
-        LocalZellij { durable: false, reason: Some(reason), detail, layout: None, scroll: false }
+        LocalSessiond { durable: false, reason: Some(reason), detail, deployed: None }
     }
 }
 
@@ -72,7 +71,7 @@ type BaseEnv = Shared<LocalBoxFuture<'static, Rc<Vec<(String, String)>>>>;
 /// 本机这台宿主：整个后端进程一份，挂在会话核心上
 pub struct LocalHost {
     data_dir: PathBuf,
-    prepared: RefCell<Option<LocalZellij>>,
+    prepared: RefCell<Option<LocalSessiond>>,
     base_env: RefCell<Option<BaseEnv>>,
 }
 
@@ -85,61 +84,24 @@ impl LocalHost {
         &self.data_dir
     }
 
-    /// 准备本地宿主的 Zellij。整个后端进程只做一次，结果缓存。
+    /// 准备本地宿主的会话守护进程：拷进 `<dataDir>/bin/` 并握手。整个后端进程只做一次，结果缓存。
     ///
-    /// 本地二进制落在后端的 --data-dir 下（不是硬编码 home）：用户指定了数据目录，
-    /// 依赖就该跟着走。一律用 falcon 锁定的版本，无视系统 PATH 里可能存在的 Zellij——
-    /// 版本锁定的全部价值就在于测试矩阵封闭，开一个"用户系统版本"的口子就等于放弃它。
-    pub async fn prepare(&self, on_stage: Option<StageFn<'_>>, cancel: Option<&CancellationToken>) -> LocalZellij {
+    /// Windows 上后端在 Job Object 里也照样试：守护进程自己会用 breakaway / WMI 脱离（spawn.rs），
+    /// 真脱离不了时 spawn 会失败，建会话那一步再标非持久（windows-job-object）。
+    pub async fn prepare(&self) -> LocalSessiond {
         if let Some(p) = self.prepared.borrow().clone() {
             return p;
         }
-        // Windows 上先问 Job Object：在 Job 里就拿不到持久性，装了也白装
-        if is_process_in_job().await {
-            let state = LocalZellij::non_durable(NonDurableReason::WindowsJobObject, None);
-            *self.prepared.borrow_mut() = Some(state.clone());
-            return state;
-        }
-        let Some(target) = local_target() else {
-            let state = LocalZellij::non_durable(NonDurableReason::ArchUnsupported, None);
-            *self.prepared.borrow_mut() = Some(state.clone());
-            return state;
-        };
-        let opts = InstallOptions {
-            kind: local_kind(),
-            root: self.data_dir.to_string_lossy().into_owned(),
-            target,
-            base_url: None,
-            downloader: local_downloader().await,
-            has_tar: Some(local_has_tar().await),
-            on_stage,
-            cancel,
-        };
-        let state = match ensure_zellij(&LocalExec, &opts).await {
-            Ok(layout) => {
-                // 插件部署失败不挡开会话，新会话退回老配置（没有滚动条）而已
-                let scroll = local_kind() == HostKind::Posix && ensure_local_scroll_plugin(&layout, target, &home_dir());
-                LocalZellij { durable: true, reason: None, detail: None, layout: Some(layout), scroll }
-            }
-            Err(InstallError { reason, detail, .. }) => {
-                let failed = LocalZellij::non_durable(
-                    NonDurableReason::from_wire(reason.as_str()).unwrap_or(NonDurableReason::VerifyFailed),
-                    detail,
-                );
-                // 取消是用户这一次的选择，不是这台机器的属性——缓存它会让后续会话
-                // 全部莫名其妙地非持久，直到后端重启
-                if reason == ZellijInstallFailure::Cancelled {
-                    return failed;
-                }
-                failed
-            }
+        let state = match ensure_local(&self.data_dir).await {
+            Ok(deployed) => LocalSessiond { durable: true, reason: None, detail: None, deployed: Some(deployed) },
+            Err(e) => LocalSessiond::non_durable(NonDurableReason::from(e.reason), e.detail),
         };
         *self.prepared.borrow_mut() = Some(state.clone());
         state
     }
 
-    /// 已探测到的本地状态；None = 还没探测过。供 /api/system 报告用——它不该触发下载
-    pub fn peek(&self) -> Option<LocalZellij> {
+    /// 已探测到的本地状态；None = 还没探测过。供 /api/system 报告用——它不该触发部署
+    pub fn peek(&self) -> Option<LocalSessiond> {
         self.prepared.borrow().clone()
     }
 
@@ -148,9 +110,9 @@ impl LocalHost {
         self.prepared.borrow_mut().take();
     }
 
-    /// 测试用：直接给定准备结果，不去装 Zellij
+    /// 测试用：直接给定准备结果，不去部署守护进程
     #[cfg(test)]
-    pub(crate) fn set_prepared(&self, state: LocalZellij) {
+    pub(crate) fn set_prepared(&self, state: LocalSessiond) {
         *self.prepared.borrow_mut() = Some(state);
     }
 
@@ -165,7 +127,7 @@ impl LocalHost {
     /// 就不用等 login shell 起完。
     ///
     /// 基底不是服务端进程自己的环境而是 login 解析结果：后端可能由 launchd / IDE 启动，
-    /// 进程环境缺 PATH 补全与 LANG，而 pane 里的 shell 是非 login 起的，修不回来。
+    /// 进程环境缺 PATH 补全与 LANG，而会话里的 shell 是非 login 起的，修不回来。
     pub async fn base_env(&self) -> Rc<Vec<(String, String)>> {
         let pending = self.base_env.borrow().clone();
         let fut = match pending {
@@ -284,38 +246,10 @@ fn passwd_shell() -> Option<String> {
     None
 }
 
-/// 本地是否有可用的下载工具
-async fn local_downloader() -> Downloader {
-    let probe = if local_kind() == HostKind::Windows { "where curl.exe" } else { "command -v curl || command -v wget" };
-    let res = local_exec(probe, None).await;
-    if !res.ok() {
-        return Downloader::None;
-    }
-    let out = res.stdout.to_lowercase();
-    if out.contains("curl") {
-        Downloader::Curl
-    } else if out.contains("wget") {
-        Downloader::Wget
-    } else {
-        Downloader::None
-    }
-}
-
-/// Windows 10 1803 起内置 tar.exe（bsdtar，能解 zip）
-async fn local_has_tar() -> bool {
-    if local_kind() != HostKind::Windows {
-        return true;
-    }
-    local_exec("where tar.exe", None).await.ok()
-}
-
-/// 后端进程是否处于 Job Object 中。
-///
-/// Zellij 在 Windows 上还没有让 server 脱离父进程 Job 的能力（PR #5195 至今未合并），
-/// 所以后端若身处 Job 中，后端一退出 Zellij server 会被连坐杀掉——持久性直接归零，而且是
-/// **静默**失效。这比诚实标注"非持久"更坏。用 PowerShell 的 P/Invoke 问一次 IsProcessInJob，
-/// 避免为一个布尔值引入 FFI。查不出来时按最坏情况处理：宁可标非持久，也不要骗用户。
-async fn is_process_in_job() -> bool {
+/// 后端进程是否处于 Job Object 中。只用来给失败起名：守护进程拉不起来、而后端又在 Job 里时，
+/// 原因多半就是 Job 不允许脱离（WMI 也被禁了），标 windows-job-object 让用户知道该查什么。
+/// 用 PowerShell 的 P/Invoke 问一次 IsProcessInJob，避免为一个布尔值引入 FFI。
+pub(crate) async fn is_process_in_job() -> bool {
     if !cfg!(windows) {
         return false;
     }
@@ -337,98 +271,14 @@ async fn is_process_in_job() -> bool {
     *CACHE.get_or_init(|| in_job)
 }
 
-// ---- Zellij 操作 ----
-
-async fn zellij(layout: &HostLayout, args: Vec<String>) -> ExecResult {
-    let argv: Vec<String> = std::iter::once(layout.bin.clone()).chain(args).collect();
-    local_exec(&build_command_line(local_kind(), &argv, &zcmd::zellij_env(layout), &[]), None).await
-}
-
-pub async fn local_has_session(layout: &HostLayout, session_id: &str) -> bool {
-    // `ls` 一个 session 都没有时退出码是 1（stderr 打 "No active zellij sessions found."），
-    // 所以非零退出码不代表出错，直接按"没有"处理即可。
-    let res = zellij(layout, zcmd::list_args(layout)).await;
-    res.ok() && zcmd::parse_live_sessions(&res.stdout).contains(&zcmd::zellij_session_name(session_id))
-}
-
-pub async fn local_capture(layout: &HostLayout, session_id: &str) -> String {
-    // 多一次调用换来的是接回时真能拿到内容，理由见 dump_screen_args
-    let panes = zellij(layout, zcmd::list_panes_args(layout, session_id)).await;
-    let Some(pane_id) = panes.ok().then(|| zcmd::parse_terminal_pane_id(&panes.stdout)).flatten() else {
-        return String::new();
-    };
-    let res = zellij(layout, zcmd::dump_screen_args(layout, session_id, &pane_id)).await;
-    if !res.ok() {
-        return String::new();
-    }
-    normalize_captured(&format!("{}\n", crate::term_env::js::trim_end(&res.stdout)))
-}
-
-/// 会话聚焦 pane 的前台命令；空闲或问不到时为 None。见 parse_client_running_command
-pub async fn local_foreground(layout: &HostLayout, session_id: &str) -> Option<String> {
-    let res = zellij(layout, zcmd::list_clients_args(layout, session_id)).await;
-    res.ok().then(|| zcmd::parse_client_running_command(&res.stdout)).flatten()
-}
-
-/// 会话里 terminal pane 的数字 id（滚动位置插件按它找 pane）；问不到为 None
-pub async fn local_terminal_pane(layout: &HostLayout, session_id: &str) -> Option<u32> {
-    let res = zellij(layout, zcmd::list_panes_args(layout, session_id)).await;
-    res.ok().then(|| zcmd::parse_terminal_pane_id(&res.stdout)).flatten().and_then(|id| zcmd::parse_terminal_pane_number(&id))
-}
-
-/// 插件没回话（会话里没有插件、或卡住了）时最多等多久
-const SCROLL_PIPE_TIMEOUT: Duration = Duration::from_millis(3000);
-
-/// 问滚动位置插件（ADR 0019）。会话里没有插件时回 None。local_exec 的 stdin 本来就是
-/// /dev/null，`zellij pipe` 读到 EOF 就会退出；仍然套一个超时防插件卡住
-pub async fn local_scroll_pipe(layout: &HostLayout, session_id: &str, pane: u32, seek: Option<f64>) -> Option<ScrollPosition> {
-    let argv: Vec<String> = std::iter::once(layout.bin.clone()).chain(zcmd::scroll_pipe_args(layout, session_id, pane, seek)).collect();
-    let cmd = build_command_line(local_kind(), &argv, &zcmd::zellij_env(layout), &[]);
-    let res = tokio::time::timeout(SCROLL_PIPE_TIMEOUT, local_exec(&cmd, None)).await.ok()?;
-    zcmd::parse_scroll_reply(&res.stdout)
-}
-
-pub async fn local_kill(layout: &HostLayout, session_id: &str) {
-    let _ = zellij(layout, zcmd::delete_session_args(layout, session_id)).await;
-}
-
-/// 列出该宿主机上所有 falcon 建的会话名（孤儿会话检测用）
-pub async fn local_list_falcon_sessions(layout: &HostLayout) -> Vec<String> {
-    let res = zellij(layout, zcmd::list_args(layout)).await;
-    if !res.ok() {
-        return Vec::new();
-    }
-    zcmd::parse_live_sessions(&res.stdout).into_iter().filter(|n| zcmd::is_falcon_session(n)).collect()
-}
-
 // ---- 附着 ----
 
+/// 非持久会话：后端自己开 PTY 跑 shell
 pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCallbacks) -> anyhow::Result<AttachResult> {
     let base = host.base_env().await;
-    let mut captured_history = None;
-
-    let (program, args, mut env, cwd) = if opts.durable {
-        let layout = opts.layout.as_ref().ok_or_else(|| anyhow::anyhow!("持久会话缺少 Zellij 布局"))?;
-        if opts.reattach {
-            if !local_has_session(layout, &opts.session_id).await {
-                return Err(SessionGoneError.into());
-            }
-            captured_history = Some(local_capture(layout, &opts.session_id).await);
-        }
-        let mut env: Vec<(String, String)> = base.as_ref().clone();
-        merge_env(&mut env, zcmd::zellij_env(layout));
-        let env = apply_term_pty_env(env.into_iter().map(|(k, v)| (k, Some(v))), opts.appearance);
-        // 始终显式给 shell：Zellij 在 $SHELL 缺失时 pane 起不来（见 POSIX_PROBE 注释）
-        let profile = SessionProfile {
-            cwd: opts.cwd.clone(),
-            shell: Some(opts.shell.clone().unwrap_or_else(default_local_shell)),
-            scroll: opts.scroll,
-        };
-        (layout.bin.clone(), zcmd::attach_args(layout, &opts.session_id, &profile), env, None)
-    } else {
-        let env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance);
-        (opts.shell.clone().unwrap_or_else(default_local_shell), Vec::new(), env, opts.cwd.clone())
-    };
+    let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance);
+    let program = opts.shell.clone().unwrap_or_else(default_local_shell);
+    let cwd = opts.cwd.clone();
     if let Some(bin) = &opts.askpass_bin {
         prepend_path(&mut env, bin);
         merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
@@ -436,7 +286,6 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
 
     let pair = native_pty_system().openpty(PtySize { rows: opts.rows, cols: opts.cols, pixel_width: 0, pixel_height: 0 })?;
     let mut cmd = CommandBuilder::new(&program);
-    cmd.args(&args);
     cmd.env_clear();
     for (k, v) in &env {
         cmd.env(k, v);
@@ -495,11 +344,149 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
         writer: wtx,
         killer: Mutex::new(killer),
         pid,
-        // 仅非持久会话有意义：持久会话外层 PTY 的前台永远是 Zellij 客户端。
         // Windows 上问不到前台进程，报出去只会造成误弹确认
-        report_process: !opts.durable && cfg!(unix),
+        report_process: cfg!(unix),
     };
-    Ok(AttachResult { backend: Rc::new(backend), durable: opts.durable, captured_history })
+    Ok(AttachResult { backend: Rc::new(backend), durable: false })
+}
+
+// ---- 守护进程会话 ----
+
+/// 本机上一个守护进程会话现在的情况（holder 留在 `<dataDir>/sessiond/sessions/` 的文件）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSessionState {
+    /// holder 还活着（连不上多半是刚起来 / 卡住，稍后再试）
+    Alive,
+    /// shell 正常结束了，留下了退出记录
+    Exited,
+    /// 什么都没留下：不在了
+    Gone,
+}
+
+fn sessions_dir(deployed: &Deployed) -> PathBuf {
+    Path::new(&deployed.root).join(falcon_proto::sessiond::SESSIOND_DIR).join("sessions")
+}
+
+fn read_meta(deployed: &Deployed, sid: &str) -> Option<SessionMeta> {
+    serde_json::from_slice(&std::fs::read(sessions_dir(deployed).join(format!("{sid}.json"))).ok()?).ok()
+}
+
+pub fn local_session_state(deployed: &Deployed, session_id: &str) -> LocalSessionState {
+    let sid = sid_of(session_id);
+    let dir = sessions_dir(deployed);
+    if serde_json::from_slice::<ExitRecord>(&std::fs::read(dir.join(format!("{sid}.exit"))).unwrap_or_default()).is_ok() {
+        return LocalSessionState::Exited;
+    }
+    match read_meta(deployed, &sid) {
+        Some(m) if pid_alive(m.pid) => LocalSessionState::Alive,
+        _ => LocalSessionState::Gone,
+    }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Windows：命名管道随 holder 一起消失，而连接那一步已经对"管道忙"重试过（sessiond/backend.rs）。
+/// 走到这里说明连不上：有 meta 也按不在了算（holder 被强杀时 meta 来不及删）
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
+/// 会话的连接端点：meta 里记的为准（holder 实际监听的那个），没有就按同一套规则算
+fn endpoint(deployed: &Deployed, sid: &str) -> String {
+    if let Some(m) = read_meta(deployed, sid) {
+        return m.endpoint;
+    }
+    #[cfg(unix)]
+    {
+        falcon_proto::sessiond::socket_path(&deployed.root, sid, unsafe { libc::getuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        falcon_proto::sessiond::pipe_name(&deployed.root, sid)
+    }
+}
+
+/// 跑一条守护进程子命令拿 stdout（spawn / list / kill）。15 秒兜底：spawn 自己等就绪最多 10 秒
+async fn run_sessiond(argv: &[String]) -> Result<String, String> {
+    let (bin, args) = argv.split_first().expect("argv");
+    let child = tokio::process::Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(15), child).await {
+        Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(Ok(out)) => Err([String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).trim().to_string()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("守护进程 15 秒内没有回话".into()),
+    }
+}
+
+/// 持久会话：新建时先 `spawn` 一个 holder，再直接连它
+pub async fn open_local_sessiond(
+    host: &LocalHost,
+    opts: &AttachOptions,
+    cb: BackendCallbacks,
+) -> Result<(Rc<SessiondBackend>, Welcome), ConnectError> {
+    let deployed = opts.deployed.as_ref().ok_or_else(|| ConnectError::Failed("缺少本机的守护进程".into()))?;
+    let sid = sid_of(&opts.session_id);
+    if !opts.reattach {
+        let base = host.base_env().await;
+        let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance);
+        if let Some(bin) = &opts.askpass_bin {
+            prepend_path(&mut env, bin);
+            merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
+        }
+        merge_env(&mut env, [("FALCON_SESSIOND_ID", sid.as_str())]);
+        let shell = opts.shell.clone().unwrap_or_else(default_local_shell);
+        // 本机：服务端已经解析好整份登录环境，子进程只拿这一份
+        let spec = spawn_spec(opts, vec![shell], env, true);
+        let out = run_sessiond(&spawn_argv(&deployed.bin, &deployed.root, &sid, &spec)).await.map_err(ConnectError::Failed)?;
+        let res: SpawnResult =
+            serde_json::from_str(out.trim()).map_err(|_| ConnectError::Failed(format!("守护进程的回话看不懂：{}", out.trim())))?;
+        if !res.ok {
+            return Err(ConnectError::Failed(res.error.unwrap_or_else(|| "守护进程起不来".into())));
+        }
+    }
+    match connect(Transport::Local(endpoint(deployed, &sid)), cb.clone()).await {
+        Ok(c) => Ok(c),
+        // 连不上：看 holder 留下的文件判断是退出了、不在了，还是暂时连不上
+        Err(ConnectError::Unavailable(e)) | Err(ConnectError::Failed(e)) => match local_session_state(deployed, &opts.session_id) {
+            LocalSessionState::Exited => Err(ConnectError::Exited),
+            LocalSessionState::Gone => Err(ConnectError::Gone),
+            LocalSessionState::Alive => Err(ConnectError::Unavailable(e)),
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// 本机这个数据目录下的全部守护进程会话（孤儿清理用）
+pub async fn local_list_sessions(deployed: &Deployed) -> Option<Vec<ListEntry>> {
+    let out = run_sessiond(&list_argv(&deployed.bin, &deployed.root)).await.ok()?;
+    serde_json::from_str(out.trim()).ok()
+}
+
+/// 连不上 holder 时按 pid 结束会话
+pub async fn local_kill(deployed: &Deployed, sids: &[String]) {
+    if !sids.is_empty() {
+        let _ = run_sessiond(&kill_argv(&deployed.bin, &deployed.root, sids)).await;
+    }
+}
+
+/// 守护进程拉不起来时的原因：Windows 上后端在 Job 里多半就是它
+pub async fn spawn_failure_reason() -> NonDurableReason {
+    if is_process_in_job().await { NonDurableReason::WindowsJobObject } else { NonDurableReason::from(InstallFailure::VerifyFailed) }
 }
 
 struct LocalPtyBackend {
@@ -586,6 +573,7 @@ pub(crate) mod tests {
                 let exit_tx = RefCell::new(Some(exit_tx));
                 let o2 = out.clone();
                 let cb = BackendCallbacks {
+                    on_event: Rc::new(|_| {}),
                     on_data: Rc::new(move |s| o2.borrow_mut().push_str(&s)),
                     on_exit: Rc::new(move || {
                         if let Some(tx) = exit_tx.borrow_mut().take() {

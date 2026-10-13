@@ -2305,6 +2305,7 @@ name = "falcon-proto"
 version = "0.2.4"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "serde",
  "serde_json",
 ]
@@ -2320,6 +2321,7 @@ dependencies = [
  "bytes",
  "falcon-core",
  "falcon-proto",
+ "flate2",
  "futures",
  "getrandom 0.4.3",
  "hex",

@@ -155,6 +155,11 @@ impl Utf8Decoder {
         out
     }
 
+    /// 压着还没吐出去的半个字符（下一块到了才完整）
+    pub fn pending(&self) -> &[u8] {
+        &self.pending
+    }
+
     /// 流结束：残留的半个字符按非法处理
     pub fn end(&mut self) -> String {
         if self.pending.is_empty() {

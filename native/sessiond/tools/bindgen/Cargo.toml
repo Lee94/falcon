@@ -1,0 +1,12 @@
+# 从钉死 commit 的 libghostty-vt 头文件重新生成 ghostty-vt-sys/src/bindings.rs。
+# 只由 `cargo xtask ghostty-bindgen` 调；要 libclang（macOS 用 CommandLineTools 自带的那份）。
+[package]
+name = "ghostty-bindgen"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bindgen = "0.72"
+
+[workspace]

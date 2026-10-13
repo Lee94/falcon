@@ -175,6 +175,13 @@ pub trait Platform {
     fn current_app_icon(&self) -> Option<Vec<u8>> {
         None
     }
+
+    // ---------------- 提示音 ----------------
+
+    /// 响一声「跑完了」（程序经 OSC 7501 报告 done / error，ADR 0020 决定六；设置里的试听）。
+    /// 原生用系统自带的提示音，浏览器用 Web Audio 合成；放不出来（没有声卡、浏览器还没等到
+    /// 用户手势）就静默不响，不报错——这是锦上添花
+    fn play_chime(&self);
 }
 
 struct Installed(Rc<dyn Platform>);

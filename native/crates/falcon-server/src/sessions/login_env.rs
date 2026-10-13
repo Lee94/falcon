@@ -10,7 +10,7 @@
 //! 背景：PTY 环境此前直接摊开后端进程的 process.env，而 process.env 取决于
 //! 后端被谁启动——launchd / IDE / 精简 shell 启动时 PATH 往往缺
 //! /opt/homebrew/bin 等，且完全没有 LANG（GUI / 服务进程的常态）。pane 里的
-//! shell 又是非 login 方式起的（Zellij 的 --default-shell 是 PathBuf，带不了
+//! shell 又是非 login 方式起的（当初 Zellij 的 --default-shell 是 PathBuf，带不了
 //! -l；非持久会话也是 `pty.spawn(shell, [])`），不会执行 ~/.zprofile 与
 //! /etc/zprofile（path_helper），PATH 无从自我修复；没有 UTF-8 locale 时
 //! zsh 的行编辑把中文按单字节回显，输入中文即乱码。
@@ -20,9 +20,9 @@
 //! 合并后仍无 locale 时按平台探测出一个 UTF-8 locale 注入 LANG。
 //! 任一环节失败都静默退回 process.env——这套是增强，不是门禁。
 //!
-//! 每个后端进程只解析一次，结果缓存（与 prepareLocalZellij 同节奏）。代价：
+//! 每个后端进程只解析一次，结果缓存（与 Node 版的 prepareLocalZellij 同节奏）。代价：
 //! 用户改了 rc 文件要重启后端才生效——和改了 rc 要重开终端窗口是同一个心智。
-//! 注意持久会话的 env 在 Zellij server 首次 attach 时就冻住了，本模块的修正
+//! 注意持久会话的 env 在会话建起来（守护进程 spawn）时就冻住了，本模块的修正
 //! 只影响之后新建的会话，已存在的持久会话要删掉重建。
 //!
 //! 环境变量是**有序**的 `(名, 值)` 列表（TS 对象的插入顺序；同名键就地改值）。

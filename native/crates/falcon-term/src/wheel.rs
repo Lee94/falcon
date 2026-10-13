@@ -1,15 +1,62 @@
-//! 滚轮事件 → 滚动量。`packages/web/src/lib/rio/wheel.ts` 的移植。两种口径，取决于滚轮归谁：
+//! 滚轮归谁（[`route_wheel`]）与滚轮事件 → 滚动量（`packages/web/src/lib/rio/wheel.ts` 的移植）。
+//!
+//! 归属按 xterm 的语义判：宿主机上不再有 Zellij 常驻备用屏、常开鼠标上报，客户端收到的是程序
+//! 原样输出的字节（ADR 0020），程序要不要滚轮、要哪种形式，都看它自己设的模式。
+//!
+//! 两种口径，取决于滚轮归谁：
 //!
 //! - [`WheelAccumulator::push`]：本地 scrollback 用，像素按 cell_height 折成行。不足一行的
 //!   小数余量攒起来，攒够一行才吐——触控板慢滚每个事件只有几像素，直接截断就滚不动；方向翻转时
 //!   清掉余量，免得反向滑动先"补"上一段。
-//! - [`WheelAccumulator::click`]：程序接管了滚轮（鼠标上报 / alt screen，也就是 zellij 会话的
-//!   常态）时用，一个事件最多折成一次点击。zellij 收到每条上报自己再滚 3 行，按行数发 n 条会让
-//!   鼠标一格冲出十几行。xterm.js 的口径（MouseService._consumeWheelEvent）是行数只当门槛、每个
-//!   事件最多发一条，多出的整行丢掉，且 |delta| < 50 的像素事件当作触控板再乘 0.3。照抄——
-//!   旧 React 版的两个引擎（xterm / rio）当初就按这套对齐手感。
+//! - [`WheelAccumulator::click`]：程序接管了滚轮（鼠标上报 / 备用屏转方向键）时用，一个事件最多
+//!   折成一次点击。程序收到每条上报自己会滚好几行（vim 默认 3 行），按行数发 n 条会让鼠标一格
+//!   冲出十几行。xterm.js 的口径（MouseService._consumeWheelEvent）是行数只当门槛、每个事件
+//!   最多发一条，多出的整行丢掉，且 |delta| < 50 的像素事件当作触控板再乘 0.3。照抄——旧 React
+//!   版的两个引擎（xterm / rio）当初就按这套对齐手感。
 //!
 //! GPUI 的 `ScrollDelta::Lines` 对应 DOM 的 deltaMode = 1，`ScrollDelta::Pixels` 对应 0。
+
+use alacritty_terminal::term::TermMode;
+
+/// 一次滚轮该交给谁
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelRoute {
+    /// 程序开了鼠标上报：按滚轮键（64 / 65）报给程序
+    Report,
+    /// 备用屏、没开鼠标上报、程序没关 ?1007（alternate scroll）：转成上下方向键。
+    /// `app_cursor` = DECCKM 开着，方向键用 SS3 形式
+    Arrows { app_cursor: bool },
+    /// 本地 scrollback（备用屏里没有历史，滚了也不动）
+    Scrollback,
+}
+
+/// 滚轮归谁。`mouse_protocol` 是模式跟踪器给的鼠标协议（0 = 没开上报），`shift` 按着时
+/// 绕过鼠标上报（与点击、拖选同一个约定）。
+///
+/// 备用屏转方向键要看 ?1007：alacritty 的 `TermMode` 默认就带 `ALTERNATE_SCROLL`（与 xterm 的
+/// alternateScroll 资源打开时一样），程序发 `CSI ? 1007 l` 关掉它时，滚轮就不该再变成一串方向键
+/// ——那时程序多半在备用屏里自己处理按键，凭空多出来的 ↑↓ 会被当成用户输入（翻命令历史、移光标）。
+/// 以前不判这一条也没出事，是因为备用屏一直是 Zellij 的，程序的模式根本到不了客户端。
+pub fn route_wheel(mode: TermMode, mouse_protocol: u16, shift: bool) -> WheelRoute {
+    if mouse_protocol != 0 && !shift {
+        return WheelRoute::Report;
+    }
+    if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        return WheelRoute::Arrows { app_cursor: mode.contains(TermMode::APP_CURSOR) };
+    }
+    WheelRoute::Scrollback
+}
+
+/// [`WheelRoute::Arrows`] 的一格：朝历史方向（`up`）是 ↑。DECCKM 开着用 SS3（`ESC O A`），
+/// 否则 CSI（`ESC [ A`），与按键编码同一个口径
+pub fn arrow_for_wheel(up: bool, app_cursor: bool) -> &'static str {
+    match (up, app_cursor) {
+        (true, true) => "\x1bOA",
+        (true, false) => "\x1b[A",
+        (false, true) => "\x1bOB",
+        (false, false) => "\x1b[B",
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeltaMode {
@@ -162,6 +209,41 @@ mod tests {
         assert_eq!(acc.click(Line, -3.0, 16.0, 24), 1);
         assert_eq!(acc.click(Line, 3.0, 16.0, 24), -1);
         assert_eq!(acc.click(Page, -1.0, 16.0, 40), 1);
+    }
+
+    #[test]
+    fn route_follows_xterm_semantics() {
+        let normal = TermMode::default();
+        let alt = TermMode::default() | TermMode::ALT_SCREEN;
+        assert!(normal.contains(TermMode::ALTERNATE_SCROLL), "alacritty 默认开着 ?1007");
+        // 鼠标上报优先；Shift 绕过
+        assert_eq!(route_wheel(alt, 1002, false), WheelRoute::Report);
+        assert_eq!(route_wheel(normal, 1000, false), WheelRoute::Report);
+        assert_eq!(route_wheel(normal, 1000, true), WheelRoute::Scrollback);
+        // 备用屏、没开上报：转方向键，DECCKM 决定形式
+        assert_eq!(route_wheel(alt, 0, false), WheelRoute::Arrows { app_cursor: false });
+        assert_eq!(route_wheel(alt | TermMode::APP_CURSOR, 0, false), WheelRoute::Arrows { app_cursor: true });
+        assert_eq!(route_wheel(alt, 1002, true), WheelRoute::Arrows { app_cursor: false });
+        // 主屏：本地 scrollback
+        assert_eq!(route_wheel(normal, 0, false), WheelRoute::Scrollback);
+    }
+
+    #[test]
+    fn alternate_scroll_off_stops_arrows() {
+        // 程序发了 CSI ? 1007 l
+        let alt = (TermMode::default() | TermMode::ALT_SCREEN) - TermMode::ALTERNATE_SCROLL;
+        assert_eq!(route_wheel(alt, 0, false), WheelRoute::Scrollback);
+        assert_eq!(route_wheel(alt | TermMode::APP_CURSOR, 0, false), WheelRoute::Scrollback);
+        // 关掉 ?1007 不影响鼠标上报
+        assert_eq!(route_wheel(alt, 1006, false), WheelRoute::Report);
+    }
+
+    #[test]
+    fn arrows() {
+        assert_eq!(arrow_for_wheel(true, false), "\x1b[A");
+        assert_eq!(arrow_for_wheel(false, false), "\x1b[B");
+        assert_eq!(arrow_for_wheel(true, true), "\x1bOA");
+        assert_eq!(arrow_for_wheel(false, true), "\x1bOB");
     }
 
     #[test]

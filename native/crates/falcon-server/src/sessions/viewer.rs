@@ -50,6 +50,9 @@ pub struct Viewer {
     queued: Arc<AtomicUsize>,
     /// sendBytes 因背压丢过帧：等它排空后用 replay 整体重同步（TS 里是 manager 上的 WeakSet）
     pub(crate) lagged: Cell<bool>,
+    /// 守护进程会话：在等快照（发了 Sync 还没收到 Synced）。期间的输出不发给它——都会含在
+    /// 快照里（设计文档 5.5，manager 的 on_backend_event）
+    pub(crate) syncing: Cell<bool>,
 }
 
 /// WS 写任务那一头
@@ -70,7 +73,7 @@ impl Viewer {
         let (tx, rx) = mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        (Viewer { id, tx, queued: queued.clone(), lagged: Cell::new(false) }, ViewerSink { rx, queued })
+        (Viewer { id, tx, queued: queued.clone(), lagged: Cell::new(false), syncing: Cell::new(false) }, ViewerSink { rx, queued })
     }
 
     fn push(&self, frame: ViewerFrame) {

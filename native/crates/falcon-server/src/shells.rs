@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use falcon_proto::ShellsInfo;
 
 use crate::exec::{Exec, ExecResult};
-use crate::zellij::host::{HostKind, encode_powershell};
+use crate::host::{HostKind, encode_powershell};
 
 /// 常见 POSIX shell。bash/zsh/fish 覆盖绝大多数；pwsh 是跨平台 PowerShell
 const POSIX_CANDIDATES: [&str; 9] = ["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu", "pwsh"];
@@ -187,7 +187,7 @@ pub async fn detect_shells(exec: &dyn Exec, kind: HostKind, default_shell: &str)
 
 // ---------------- JS 语义的私有小工具 ----------------
 //
-// 与 zellij/command.rs 里的同名函数是同一份（falcon-core 的 js.rs 是 crate 私有的，
+// 与 files.rs、git/command.rs 里的同名函数是同一份（falcon-core 的 js.rs 是 crate 私有的，
 // falcon-server 里还没有共用位置），先各留一份。
 
 /// ECMAScript 的 WhiteSpace + LineTerminator：`trim()` 与正则 `\s` 用的就是这一套

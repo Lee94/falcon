@@ -7,8 +7,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
-# 滚动位置插件（ADR 0019）是独立的 wasm32-wasip1 crate，有自己的 Cargo.lock，不进工作区
-exclude = ["zellij-plugin"]
+# 会话守护进程（ADR 0020）是独立的工作区：它链 libghostty-vt 的静态库（要 Zig 编），
+# 放进来的话 `cargo test --workspace` 就离不开 Zig 了
+exclude = ["sessiond"]
 default-members = ["crates/falcon-desktop"]
 
 [workspace.package]

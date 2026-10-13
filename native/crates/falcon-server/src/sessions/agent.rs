@@ -1,16 +1,16 @@
 //! Agent 会话：把会话的"开场命令"从 shell 换成 claude / codex / grok 这类 CLI（ADR 0013）。
 //! 移植自 `packages/server/src/sessions/agent.ts`。
 //!
-//! 实现上给 Zellij / PTY 的仍然是一个 shell——只不过这个 shell 是我们写在宿主机上的
+//! 实现上给会话守护进程 / PTY 的仍然是一个 shell——只不过这个 shell 是我们写在宿主机上的
 //! 一段启动脚本。不能把 CLI 本身当 shell 传下去：
-//! - `--default-shell` 是 PathBuf，不接受参数（见 zellij/command.rs 的 session_options），
-//!   "先跑 CLI 再落回 shell"这件事只能由脚本自己完成；
-//! - CLI 一退出就没人占着 pane 了，Zellij 会把 pane 连同会话一起收掉——用户按一次
-//!   Ctrl-D 整个会话就没了。脚本最后 exec 真实登录 shell 正是为此。
+//! - "先跑 CLI、退出后落回登录 shell"要有人编排。Zellij 时代 `--default-shell` 是 PathBuf、
+//!   不接受参数，只能交给脚本；守护进程的 argv 能带参数，但这件事照样是脚本最省事；
+//! - CLI 一退出 PTY 里就没有进程了，会话跟着结束——用户按一次 Ctrl-D 整个会话就没了。
+//!   脚本最后 exec 真实登录 shell 正是为此。
 //!
-//! 脚本里的登录 shell 是**生成时写死的绝对路径**，不读 $SHELL：Windows 远端那条路径上
-//! 我们自己把 SHELL 设成了传给 Zellij 的 shell（见 ssh.ts 的 WMI 兜底），脚本再去读
-//! $SHELL 就会递归调用自己。
+//! 脚本里的登录 shell 是**生成时写死的绝对路径**，不读 $SHELL：Zellij 时代 Windows 远端
+//! 那条路径上我们自己把 SHELL 设成了传给 Zellij 的 shell（见 ssh.ts 的 WMI 兜底），也就是
+//! 脚本自己，读它会递归调用自己。守护进程不设 SHELL，写死的做法照旧，不依赖谁设没设。
 //!
 //! CLI 不在 PATH 上不算错误：提示一句然后照常落回 shell——把会话开起来比报错有用，
 //! 用户可以就地 `npm i -g` 装完再开一个。
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 pub use falcon_proto::{SESSION_AGENTS, SessionAgent};
 
 use crate::git::path::join_path;
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 /// CLI 的可执行名。三个都是 npm 全局包，装完就在 PATH 上。
 ///

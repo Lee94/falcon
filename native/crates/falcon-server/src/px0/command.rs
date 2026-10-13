@@ -41,7 +41,7 @@ use falcon_proto::HostKind;
 use regex::Regex;
 
 use crate::git::path::join_path;
-use crate::zellij::host::quote_posix;
+use crate::host::quote_posix;
 
 pub const PX0_VERSION: &str = "0.1.16";
 
@@ -199,7 +199,7 @@ pub fn px0_args(input: &Px0ArgsInput) -> Vec<String> {
     ]
 }
 
-/// 远端的 px0 放在 <falcon 根>/bin，带版本号，与 Zellij 同一个目录。`version` 缺省为
+/// 远端的 px0 放在 <falcon 根>/bin，带版本号，与会话守护进程同一个目录。`version` 缺省为
 /// [`PX0_VERSION`]
 pub fn remote_px0_path(root: &str, version: Option<&str>) -> String {
     let name = format!("px0-{}", version.unwrap_or(PX0_VERSION));
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("/srv/app"));
     }
 
-    /// remote paths · puts the binary next to zellij under <root>/bin with the version
+    /// remote paths · puts the binary next to falcon-sessiond under <root>/bin with the version
     #[test]
     fn remote_path_under_root_bin() {
         assert_eq!(remote_px0_path("/home/u/.falcon/", None), format!("/home/u/.falcon/bin/px0-{PX0_VERSION}"));

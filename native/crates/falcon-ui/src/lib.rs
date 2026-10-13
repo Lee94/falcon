@@ -13,6 +13,7 @@ mod app_icon;
 #[cfg(feature = "automation")]
 mod automation;
 mod canvas;
+mod chime;
 mod dialogs;
 mod fonts;
 mod labels;

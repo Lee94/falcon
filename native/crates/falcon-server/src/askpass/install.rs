@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use super::hub::AskpassHub;
 use super::scripts::{ASKPASS_CONF_NAME, ASKPASS_NAME, SUDO_SHIM_NAME, render_askpass_conf, render_askpass_helper, render_sudo_shim};
 use crate::git::path::join_path;
-use crate::zellij::host::{HostKind, quote_posix};
+use crate::host::{HostKind, quote_posix};
 
 pub fn askpass_bin_dir(kind: HostKind, root: &str) -> String {
     join_path(kind, &[root, "bin"])

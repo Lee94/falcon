@@ -32,7 +32,7 @@ use std::path::Path;
 use base64::Engine as _;
 
 use crate::git::path::join_path;
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 /// 生成物标记，放 AGENTS.md 首行注释里。守护删除按"首行含此标记"判断文件
 /// 还是不是我们写的——刻意用 ASCII：跨编码可 grep，远端 head/grep 不吃编码亏。
@@ -349,7 +349,7 @@ pub fn central_manifest_sweep_command(kind: HostKind, central: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zellij::host::tests::decode;
+    use crate::host::tests::decode;
     use HostKind::{Posix, Windows};
     use regex::Regex;
 

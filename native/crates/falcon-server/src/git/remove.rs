@@ -28,7 +28,7 @@ use super::repo::{RunOpts, TIMEOUT_REMOVE, code_text, exec_raw, list_worktrees, 
 use crate::db::{Db, ProjectRow};
 use crate::exec::ExecResult;
 use crate::virtualdir::{CLAUDE_MD_BODY, FALCON_GENERATED_MARK, central_manifest_sweep_command};
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 fn remove_opts() -> RunOpts {
     RunOpts::timeout(TIMEOUT_REMOVE)
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn windows_remove_command_uses_literal_paths_and_directory_delete() {
-        let inner = crate::zellij::host::tests::decode(&windows_remove_command("D:\\code\\my[old]repo-feat"));
+        let inner = crate::host::tests::decode(&windows_remove_command("D:\\code\\my[old]repo-feat"));
         assert!(
             inner.contains(
                 "$p = 'D:\\code\\my[old]repo-feat'; if (-not (Test-Path -LiteralPath $p)) { 'gone'; exit 0 }; "

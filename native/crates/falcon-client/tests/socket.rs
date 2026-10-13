@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use falcon_client::{InstallEvent, InstallSocket, SessionEvent, SessionSocket, SocketOptions};
 use falcon_proto::{
-    InstallServerMessage, SessionState, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY, TermAppearance,
-    WS_MAX_PAYLOAD_BYTES, ZellijInstallStage,
+    InstallServerMessage, InstallStage, ProgramBlockKind, ProgramState, SessionState, TERM_FRAME_OUTPUT,
+    TERM_FRAME_REPLAY, TermAppearance, WS_MAX_PAYLOAD_BYTES,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -133,6 +133,35 @@ fn frames_and_control_messages_arrive_in_order() {
             },
         ]
     );
+}
+
+#[test]
+fn program_status_in_and_status_seen_out() {
+    let mock = plain_server();
+    let (sink, events) = Events::new();
+    let sock = SessionSocket::open_with(&mock.client(), "s-1", sink, fast());
+    let conn = mock.next_ws();
+    accept(&conn, &events);
+
+    conn.send_text(
+        r#"{"type":"program_status","records":[{"id":"","state":"blocked","kind":"permission","title":"Allow?","updatedAt":5}]}"#,
+    );
+    // 老服务端的滚动消息（ADR 0019 已退役）：认不出，安静丢掉
+    conn.send_text(r#"{"type":"scroll","position":1,"length":2,"rows":3}"#);
+    conn.send_text(r#"{"type":"program_status","records":[]}"#);
+    match events.next() {
+        SessionEvent::ProgramStatus(records) => {
+            assert_eq!(records.len(), 1);
+            assert_eq!((records[0].state, records[0].kind), (ProgramState::Blocked, Some(ProgramBlockKind::Permission)));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(events.next(), SessionEvent::ProgramStatus(vec![]));
+
+    sock.status_seen(vec![]);
+    assert_eq!(conn.recv_json(), json!({ "type": "status_seen" }));
+    sock.status_seen(vec!["a/b".into()]);
+    assert_eq!(conn.recv_json(), json!({ "type": "status_seen", "ids": ["a/b"] }));
 }
 
 #[test]
@@ -324,7 +353,7 @@ fn install_socket_streams_until_done_and_closed() {
     let conn = mock.next_ws();
     assert_eq!(conn.path, "/ws/install/p%201");
     conn.send_text(r#"{"type":"stage","stage":"probing","attempt":1}"#);
-    conn.send_text(r#"{"type":"stage","stage":"downloading","attempt":2,"command":"curl -fsSL x"}"#);
+    conn.send_text(r#"{"type":"stage","stage":"uploading","attempt":2,"command":"cat > x.partial"}"#);
     conn.send_text(r#"{"type":"log","line":"ignored"}"#);
     conn.send_text(r#"{"type":"done"}"#);
     conn.close(1000);
@@ -333,14 +362,14 @@ fn install_socket_streams_until_done_and_closed() {
         evs,
         vec![
             InstallEvent::Message(InstallServerMessage::Stage {
-                stage: ZellijInstallStage::Probing,
+                stage: InstallStage::Probing,
                 attempt: 1,
                 command: None
             }),
             InstallEvent::Message(InstallServerMessage::Stage {
-                stage: ZellijInstallStage::Downloading,
+                stage: InstallStage::Uploading,
                 attempt: 2,
-                command: Some("curl -fsSL x".into())
+                command: Some("cat > x.partial".into())
             }),
             InstallEvent::Message(InstallServerMessage::Done),
             InstallEvent::Closed,

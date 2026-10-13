@@ -78,8 +78,8 @@ fn table() -> Vec<(&'static str, Check)> {
         "project-archive" => Project,
         "project-restore" => Project,
         "project-delete" => DeleteProjectResult,
-        "host-zellij-status" => HostZellijStatus,
-        "host-zellij-status-denied" => HostZellijStatus,
+        "host-status" => HostInstallStatus,
+        "host-status-denied" => HostInstallStatus,
         "host-authorization" => OkResponse,
         // Git
         "git-snapshot" => GitSnapshot,

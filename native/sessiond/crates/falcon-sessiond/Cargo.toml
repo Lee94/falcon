@@ -1,0 +1,45 @@
+[package]
+name = "falcon-sessiond"
+# 版本号不在这里：二进制报的是 falcon 的发布版本（falcon_proto::sessiond::FALCON_VERSION，
+# 即 native 工作区的版本），服务端按它给二进制命名
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "falcon 的会话守护进程：holder 持 PTY，VT 进程跑 libghostty-vt（ADR 0020）"
+
+build = "build.rs"
+
+[[bin]]
+name = "falcon-sessiond"
+path = "src/main.rs"
+
+[dependencies]
+falcon-proto.workspace = true
+ghostty-vt.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+portable-pty.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# 接回比对语料（src/corpus_tests.rs）：客户端用的就是这份 vendor 的 alacritty
+alacritty_terminal = { path = "../../../vendor/alacritty_terminal", default-features = false }

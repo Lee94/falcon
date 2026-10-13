@@ -1,35 +1,36 @@
 //! 对真服务端的端到端测试（设计文档 §6.3）：会话链路以前没有任何自动化测试，这条补上。
 //!
-//! 跑法（默认 `#[ignore]`，还要显式打开开关——它会起服务端进程、建 zellij 会话）：
+//! 跑法（默认 `#[ignore]`，还要显式打开开关——它会起服务端进程、建持久会话）：
 //!
 //! ```text
-//! cd native && cargo build -p falcon-server
+//! cd native && cargo xtask sessiond && cargo build -p falcon-server
 //! FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored --nocapture
 //! ```
 //!
 //! 起的是 `native/target/debug/falcon-server`，`FALCON_E2E_SERVER_BIN` 可改指（比如发布产物）。
+//! 持久会话由宿主机上的会话守护进程 falcon-sessiond 持有（ADR 0020）：开发构建的服务端在
+//! `native/target-sessiond/` 里找 `cargo xtask sessiond` 编出来的那份；想用别处的，设
+//! `FALCON_E2E_SESSIOND_DIR`，原样转给子服务端的 `FALCON_SESSIOND_DIR`（子服务端的其它
+//! FALCON_* 一律去掉，见 `Server::start_again`）。
 //!
 //! 流程：拉起服务端（空数据目录、4940–4999 的空闲端口）→ 认证状态 → 建本地项目 → 建会话
 //! → 开 SessionSocket（连上前就设好外观与尺寸）→ 收到回放与 state active → 敲
 //! `echo falcon-e2e-$((6*7))-<随机数>` 在输出里看到 shell 算出来的 42 → resize 后
 //! `stty size` 对得上 → 设访问密码并登录 → **重启 #1**（socket 先 Detach）：REST 撞 401
-//! 自动重登 → 重新打开 socket，新 socket 强发 resize 触发接回，会话（zellij）活过了
+//! 自动重登 → 重新打开 socket，新 socket 强发 resize 触发接回，会话（守护进程）活过了
 //! 后端重启 → **重启 #2**（socket 开着）：socket 撞 4401 自动重登并重连，REST 随后
 //! 不用再登 → Terminate → socket 收到 dead → 清理。
 //!
-//! 几个坑（与 `cargo xtask fixtures` 同一套）：数据目录必须是短路径（zellij socket 路径 macOS
-//! 上限 104 字节）；全新数据目录首次建会话会去下载 zellij，先从 ~/.falcon/bin 或
-//! ~/.mojito/bin 拷一份锁定版本进去；绝不碰 4923；启动子服务端前去掉环境里的
-//! FALCON_* / MOJITO_*。
+//! 几个坑（与 `cargo xtask fixtures` 同一套）：数据目录用短路径（守护进程的 socket 路径 macOS
+//! 上限 104 字节，超了服务端会退到 /tmp 下另起目录，能用但不好查）；绝不碰 4923；启动子服务端
+//! 前去掉环境里的 FALCON_* / MOJITO_*。
 //!
-//! 最近一次跑通：2026-10-10，macOS 27（Apple Silicon），Rust 服务端（debug 构建），zellij
-//! 0.45.1（从 ~/.falcon/bin 拷入），本地项目（shell 用 /bin/sh，不吃本机 zsh 配置）+ 持久
-//! 会话，全程约 3s。两次重启后同一个 zellij 会话都接得回来，`$((6*7))` 的回显与
-//! `stty size` 的结果都对得上；重启 #1 由 REST 的 401 触发重登，重启 #2 由 socket 的
-//! 4401 触发重登，各只登了一次；被 4401 拒掉的那条连接没有报 Connected，全程没有
-//! 冒出 Unauthorized。
+//! 最近一次跑通是 2026-10-13（macOS 27，Apple Silicon，换成 falcon-sessiond 之后）：本地
+//! 项目（shell 用 /bin/sh，不吃本机 zsh 配置）+ 持久会话，两次重启后同一个会话都接得回来；
+//! 重启 #1 由 REST 的 401 触发重登，重启 #2 由 socket 的 4401 触发重登，各只登了一次。
+//! 回放与 state active 谁先到不固定（快照要等宿主机的 VT 进程导出），两种顺序都收。
 //!
-//! 踩过的坑：会话刚建好就敲命令会丢——zellij 接管 PTY 之前敲的字只被 tty 回显一下，
+//! 踩过的坑：会话刚建好就敲命令会丢——shell 起来、开始读终端之前敲的字只被 tty 回显一下，
 //! 没人读。所以先等 shell 提示符（`Terminal::wait_prompt`）。
 
 use std::path::{Path, PathBuf};
@@ -45,7 +46,7 @@ use futures::executor::block_on;
 const PASSWORD: &str = "e2e-pass-1234";
 
 #[test]
-#[ignore = "起真服务端与 zellij；FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored"]
+#[ignore = "起真服务端与会话守护进程；FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored"]
 fn session_survives_backend_restarts_with_auto_relogin() {
     if std::env::var("FALCON_E2E").as_deref() != Ok("1") {
         eprintln!("跳过：设 FALCON_E2E=1 才跑");
@@ -61,7 +62,6 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     let work = PathBuf::from(format!("/private/tmp/fal-e2e-{tag}-w"));
     let _cleanup = Cleanup(vec![data.clone(), work.clone()]);
     std::fs::create_dir_all(&work).unwrap();
-    seed_zellij(&root, &data);
 
     let port = free_port();
     let mut server = Server::start(&entry, &data, port);
@@ -93,7 +93,12 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     }))
     .unwrap();
     assert_eq!(session.state, SessionState::Active);
-    assert!(session.durable, "本地会话应当是持久的（zellij 没准备好？看 {}/server.log）", data.display());
+    assert!(
+        session.durable,
+        "本地会话应当是持久的（没跑 cargo xtask sessiond？原因 {:?}，看 {}/server.log）",
+        session.non_durable_reason,
+        data.display()
+    );
     step(&format!("建好项目与会话 {}", session.id));
 
     // ---- 连会话：连上之前就把外观与尺寸交代好 ----
@@ -102,8 +107,14 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     sock.set_appearance(TermAppearance::Dark, Some("#0a0a0a"), Some("#fafafa"));
     sock.resize(120, 40);
     term.wait("Connected", |e| matches!(e, SessionEvent::Connected { reconnected: false }));
-    term.wait("回放", |e| matches!(e, SessionEvent::Replay(_)));
-    term.wait("state active", |e| matches!(e, SessionEvent::State { state: SessionState::Active, .. }));
+    // 两样都要，顺序不定：持久会话的回放是守护进程的快照，要等它回来（设计文档 5.5），
+    // state active 往往先到
+    let (mut replay, mut active) = (false, false);
+    term.wait("回放与 state active", |e| {
+        replay |= matches!(e, SessionEvent::Replay(_));
+        active |= matches!(e, SessionEvent::State { state: SessionState::Active, .. });
+        replay && active
+    });
     step("socket 连上：收到回放与 state active");
     term.wait_prompt();
 
@@ -144,7 +155,7 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     term.wait("state active", |e| matches!(e, SessionEvent::State { state: SessionState::Active, .. }));
     term.echo(&sock, "重启 #1 之后");
     term.run(&sock, "stty size", "30 100");
-    step("新 socket 接回同一个 zellij 会话");
+    step("新 socket 接回同一个持久会话");
 
     // ---- 重启 #2：socket 开着，由它撞上 4401 ----
     server.stop();
@@ -223,9 +234,8 @@ impl Terminal {
         }
     }
 
-    /// 等 shell 提示符出现在屏幕上。会话刚建好时 zellij 还在起、shell 还没跑起来，
-    /// 这时敲的字会被 PTY 回显一下然后丢掉（zellij 接管终端之前的输入没人读）——
-    /// 真人手速碰不上，测试会。
+    /// 等 shell 提示符出现在屏幕上。会话刚建好时 shell 可能还没跑起来，这时敲的字会被
+    /// PTY 回显一下然后丢掉（shell 开始读终端之前的输入没人读）——真人手速碰不上，测试会。
     fn wait_prompt(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !strip_ansi(&self.screen).trim_end().ends_with('$') {
@@ -275,7 +285,7 @@ fn tail(s: &str) -> String {
     chars[chars.len().saturating_sub(300)..].iter().collect()
 }
 
-/// 粗略去掉 ANSI 转义：zellij 重绘时会在字符之间插光标移动与 SGR。
+/// 粗略去掉 ANSI 转义：shell 的提示符、回放（宿主机 VT 进程导出的画面）里都夹着光标移动与 SGR。
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -358,13 +368,17 @@ impl Server {
                 cmd.env_remove(k);
             }
         }
+        // 唯一有意转给子服务端的：守护进程二进制在哪（见文件头）
+        if let Some(dir) = std::env::var_os("FALCON_E2E_SESSIOND_DIR") {
+            cmd.env("FALCON_SESSIOND_DIR", dir);
+        }
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", "en_US.UTF-8");
         }
         self.child = Some(cmd.spawn().expect("起服务端失败"));
     }
 
-    /// SIGTERM（服务端会优雅退出：会话在库里保持 active，zellij 继续跑），等它真退了。
+    /// SIGTERM（服务端会优雅退出：会话在库里保持 active，守护进程继续跑），等它真退了。
     fn stop(&mut self) {
         let Some(mut child) = self.child.take() else { return };
         let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
@@ -412,15 +426,16 @@ fn wait_ready(client: &FalconClient, server: &mut Server) {
     panic!("服务端 30s 没起来，看 {}/server.log", server.data.display());
 }
 
-/// 收尾：删临时目录。测试中途 panic 时会话没来得及 Terminate，zellij server 是独立
-/// 进程、不随后端退出——按二进制路径把数据目录里起的那些收掉（只匹配自己的目录）。
+/// 收尾：删临时目录。测试中途 panic 时会话没来得及 Terminate，守护进程是独立进程、不随后端
+/// 退出——按命令行里的数据目录把这次起的那些收掉。不能按二进制路径收：开发构建用的是
+/// `native/target-sessiond/` 里共用的那份，别的开发实例的会话也是它
 struct Cleanup(Vec<PathBuf>);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
         for d in &self.0 {
             let _ = Command::new("pkill")
-                .args(["-f", &format!("{}/bin/zellij", d.display())])
+                .args(["-f", &format!("falcon-sessiond.*{}", d.display())])
                 .stderr(Stdio::null())
                 .status();
             let _ = std::fs::remove_dir_all(d);
@@ -437,30 +452,4 @@ fn free_port() -> u16 {
     (4940..=4999)
         .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
         .expect("4940–4999 没有空闲端口")
-}
-
-/// 把锁定版本的 zellij 拷进数据目录（服务端安装流程会先检查 binDir 里现成的），
-/// 省掉全新数据目录第一次建会话时的 14MB 下载。找不到就让服务端自己下。
-fn seed_zellij(root: &Path, data: &Path) {
-    let version_rs = std::fs::read_to_string(root.join("native/crates/falcon-server/src/zellij/version.rs")).unwrap();
-    let version = version_rs
-        .split("ZELLIJ_VERSION: &str = \"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .expect("version.rs 里找不到 ZELLIJ_VERSION");
-    let name = format!("zellij-{version}");
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let found = std::env::var_os("FALCON_E2E_ZELLIJ")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain([home.join(".falcon/bin").join(&name), home.join(".mojito/bin").join(&name)])
-        .find(|p| p.exists());
-    let Some(src) = found else {
-        eprintln!("没找到现成的 {name}，服务端会自己下载（慢）");
-        return;
-    };
-    let bin = data.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    // macOS 上 std::fs::copy 走 clonefile，33MB 也是瞬间
-    std::fs::copy(&src, bin.join(&name)).unwrap();
 }

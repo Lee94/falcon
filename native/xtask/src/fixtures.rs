@@ -29,11 +29,10 @@
 //!   cargo xtask compare-fixtures crates/falcon-proto/tests/fixtures /tmp/fx-new
 //!
 //! 几个坑：
-//!   - 数据目录必须是短路径：zellij 的 IPC socket 全路径在 macOS 上限 104 字节，
-//!     长路径会让会话建完立刻 exited。所以一律放 /private/tmp/fal-fx-*。
-//!   - 全新数据目录第一次建本地会话会去 GitHub 下载 zellij（14MB）。先从
-//!     ~/.falcon/bin 或 ~/.mojito/bin 拷一份锁定版本的二进制进去（服务端安装流程会先
-//!     检查 binDir 里现成的），找不到才让它下载。也可以用 FALCON_FIXTURE_ZELLIJ 指定。
+//!   - 数据目录用短路径（/private/tmp/fal-fx-*）：会话守护进程的 socket 全路径在 macOS 上限
+//!     104 字节，超长时虽然会落到 /tmp 的私有目录，短路径让它走常规的那条。
+//!   - 本地会话要会话守护进程：开发构建的服务端从 native/target-sessiond 里拿（先跑
+//!     `cargo xtask sessiond`），否则会话是非持久的、fixture 的形状也跟着变。
 //!   - 端口只在 4940–4999 里挑，绝不碰 4923（那是日常在用、设了密码的实例）。
 //!   - 从 falcon 终端里跑时环境里会带着父实例的 FALCON_* 变量（FALCON_WEB_DIST 之类），
 //!     启动子服务端前全部去掉。
@@ -84,8 +83,8 @@ fn png() -> Vec<u8> {
 pub fn run(args: &[String]) -> Result<()> {
     if let Some(arg) = args.first() {
         bail!(
-            "fixtures 不带参数（收到 {arg}）：换服务端 / 输出目录 / zellij 用环境变量 \
-             FALCON_FIXTURE_SERVER_BIN / FALCON_FIXTURE_OUT / FALCON_FIXTURE_ZELLIJ"
+            "fixtures 不带参数（收到 {arg}）：换服务端 / 输出目录用环境变量 \
+             FALCON_FIXTURE_SERVER_BIN / FALCON_FIXTURE_OUT"
         );
     }
     let server_bin = match env_path("FALCON_FIXTURE_SERVER_BIN") {
@@ -366,13 +365,13 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     out.save("share-delete", &api.bare("DELETE", &format!("/api/shares/{share_id}"))?)?;
     api.bare("DELETE", &format!("/api/shares/{}", id(&host_share)?))?;
 
-    // ---- 宿主机 Zellij（仅 SSH 项目；只读写库，不连远端）----
-    out.save("host-zellij-status", &api.get(&format!("/api/projects/{ssh_id}/host"))?)?;
+    // ---- 宿主机上的会话守护进程（仅 SSH 项目；只读写库，不连远端）----
+    out.save("host-status", &api.get(&format!("/api/projects/{ssh_id}/host"))?)?;
     out.save(
         "host-authorization",
         &api.call("POST", &format!("/api/projects/{ssh_id}/host"), json!({ "authorized": false }))?,
     )?;
-    out.save("host-zellij-status-denied", &api.get(&format!("/api/projects/{ssh_id}/host"))?)?;
+    out.save("host-status-denied", &api.get(&format!("/api/projects/{ssh_id}/host"))?)?;
 
     // ---- 附属项目：派生 → 预检 → 存档 → 恢复 → 删除（会在仓库旁边建一棵 worktree）----
     let wt = api.call(
@@ -435,7 +434,7 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     out.save("ws-session-dead", &Js::Arr(ws_collect(api, &format!("/ws/sessions/{doomed_id}"), Until::Ms(800))?))?;
     out.save("session-clear", &api.bare("DELETE", &format!("/api/sessions/{doomed_id}"))?)?;
 
-    // ---- Zellij 安装通道：本地项目已经装好，直接 done；项目不存在是 failed ----
+    // ---- 守护进程部署通道：本地项目已经就位，直接 done；项目不存在是 failed ----
     out.save("ws-install-local", &Js::Arr(ws_collect(api, &format!("/ws/install/{local_id}"), Until::Close)?))?;
     out.save("ws-install-missing", &Js::Arr(ws_collect(api, "/ws/install/no-such-project", Until::Close)?))?;
 
@@ -646,7 +645,7 @@ fn parse_msg(s: &str) -> Result<Js> {
     Js::parse(s).map_err(|e| anyhow!("WS 文本帧不是 JSON（{e}）：{s}"))
 }
 
-/// 粗略去掉 ANSI 转义：zellij 重绘时会在字符之间插光标移动与 SGR。
+/// 粗略去掉 ANSI 转义：shell 回显与提示符里会夹着光标移动与 SGR。
 ///
 /// 照脚本里的三条正则依次各扫一遍（顺序有关：先去 CSI，再去 OSC，再去字符集切换）：
 /// `\x1b\[[0-9;?]*[ -\/]*[@-~]`、`\x1b\][^\x07\x1b]*(\x07|\x1b\\)`、`\x1b[()][A-Z0-9]`。
@@ -890,37 +889,9 @@ fn commit_at(date: &str, message: &str) -> Result<()> {
     )
 }
 
-/// 把锁定版本的 zellij 拷进数据目录，省掉首次建会话时的下载。
-/// 源文件只读不写（~/.falcon 是日常实例的数据目录）
+/// 数据目录先建好（会话守护进程由服务端自己拷进 bin/）
 fn prepare_data_dir() -> Result<()> {
-    let bin_dir = Path::new(DATA).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-    let version_rs = fs::read_to_string(util::native().join("crates/falcon-server/src/zellij/version.rs"))?;
-    let marker = "ZELLIJ_VERSION: &str = \"";
-    let Some(version) = version_rs.split_once(marker).and_then(|(_, rest)| rest.split_once('"')).map(|(v, _)| v) else {
-        eprintln!("version.rs 里没找到 ZELLIJ_VERSION，服务端会自己下载 zellij（慢）");
-        return Ok(());
-    };
-    let name = format!("zellij-{version}");
-    let home = env::var_os("HOME").map(PathBuf::from);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.extend(env_path("FALCON_FIXTURE_ZELLIJ").map(PathBuf::from));
-    if let Some(home) = &home {
-        candidates.push(home.join(".falcon/bin").join(&name));
-        candidates.push(home.join(".mojito/bin").join(&name));
-    }
-    let Some(found) = candidates.iter().find(|c| c.exists()) else {
-        eprintln!("没找到现成的 {name}，服务端会自己下载（慢）");
-        return Ok(());
-    };
-    let dest = bin_dir.join(&name);
-    // macOS 上 fs::copy 先试 clonefile（APFS 写时复制），与脚本的 COPYFILE_FICLONE 一样
-    fs::copy(found, &dest).with_context(|| format!("拷不了 {}", found.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))?;
-    }
+    fs::create_dir_all(Path::new(DATA).join("bin"))?;
     Ok(())
 }
 
@@ -978,11 +949,11 @@ fn stop_server(child: Option<Child>) {
 }
 
 fn cleanup_dirs() {
-    // 中途失败时会话没来得及 Terminate，zellij server 是独立进程、不随后端退出：
+    // 中途失败时会话没来得及 Terminate，会话守护进程是独立进程、不随后端退出：
     // 按二进制路径把数据目录里起的那些收掉（只匹配我们自己的数据目录）。
     // 没有匹配的进程时 pkill 退出码是 1，不算错
     let _ = Command::new("pkill")
-        .args(["-f", &format!("{DATA}/bin/zellij")])
+        .args(["-f", &format!("{DATA}/bin/falcon-sessiond")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();

@@ -47,8 +47,9 @@ wry = { package = "lb-wry", version = "=0.53.3", optional = true }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 keyring = "4"
 
-# 运行时换 Dock 图标（src/dock.rs）。版本跟 GPUI / wry 已经带进来的那份一致，不多编一套
+# 运行时换 Dock 图标（src/dock.rs）与「跑完了」的系统提示音（src/chime.rs）。版本跟 GPUI / wry
+# 已经带进来的那份一致，不多编一套
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSSound"] }

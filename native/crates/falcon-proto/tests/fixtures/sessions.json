@@ -1,12 +1,12 @@
 [
   {
-    "id": "a4190088-54d5-42d8-9c8a-9b42302e22f9",
-    "projectId": "c27b1ad5-ef99-4d96-93b0-bf007c0ece38",
+    "id": "6295e86b-f752-488f-ada3-64440a14a05e",
+    "projectId": "bdcae325-9b23-43f0-b1d2-97a1a0c24a84",
     "name": "fixture shell",
     "state": "active",
     "durable": true,
-    "createdAt": 1791650626144,
-    "lastActiveAt": 1791650626560,
+    "createdAt": 1791898279674,
+    "lastActiveAt": 1791898280235,
     "projectName": "fixture",
     "projectType": "local"
   }

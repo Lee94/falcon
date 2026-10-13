@@ -74,10 +74,6 @@ pub struct SessionRow {
     pub rows: Option<i64>,
     /// 开场跑的 CLI（claude / codex / grok）；None = 普通 shell
     pub agent: Option<String>,
-    /// 1 = 建会话时滚动位置插件已就位，会话用 scroll.kdl 那套配置（ADR 0019）；
-    /// 0 / None（升级前建的）= 老配置。接回时必须照建会话时的那套来：拿新配置去接回
-    /// 跑在老 zellij 上的会话会画出整圈边框（见 zellij::command::scroll_config_body）。
-    pub scroll_plugin: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -135,29 +131,27 @@ pub struct MeeglePinRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ZellijHostRow {
+pub struct SessionHostRow {
     pub host: String,
     pub port: i64,
     pub username: String,
-    /// None = 未询问过；1 = 已授权在该主机安装；0 = 已拒绝
+    /// None = 未询问过；1 = 已授权 falcon 往该主机上放东西（会话守护进程）；0 = 已拒绝
     pub authorized: Option<i64>,
-    pub installed_version: Option<String>,
-    /// 该主机的下载源覆盖；None 表示用官方地址
-    pub base_url: Option<String>,
-    /// Windows 远端的真实断线验证结果；None = 未验证
+    /// 宿主机上已经推好的守护进程版本
+    pub sessiond_version: Option<String>,
+    /// Windows 远端的真实断线验证结果（只对 sessiond_version 那个版本有效）；None = 未验证
     pub verified_durable: Option<i64>,
     pub updated_at: i64,
 }
 
-/// `upsert_zellij_host` 的部分更新：外层 None = 不动这一列，`Some(None)` = 清空。
+/// `upsert_session_host` 的部分更新：外层 None = 不动这一列，`Some(None)` = 清空。
 ///
-/// 判据是"字段给没给"而不是"值是不是空"：显式清空（作废安装记录、作废持久性判定）
-/// 用合并语义会被旧值顶回去、清空静默失效——这正是 Node 版曾经的 bug。
+/// 判据是"字段给没给"而不是"值是不是空"：显式清空（作废持久性判定）用合并语义会被旧值
+/// 顶回去、清空静默失效——这正是 Node 版曾经的 bug。
 #[derive(Debug, Clone, Default)]
-pub struct ZellijHostPatch {
+pub struct SessionHostPatch {
     pub authorized: Option<Option<i64>>,
-    pub installed_version: Option<Option<String>>,
-    pub base_url: Option<Option<String>>,
+    pub sessiond_version: Option<Option<String>>,
     pub verified_durable: Option<Option<i64>>,
 }
 
@@ -200,7 +194,6 @@ fn session_from_row(r: &Row) -> rusqlite::Result<SessionRow> {
         cols: r.get("cols")?,
         rows: r.get("rows")?,
         agent: r.get("agent")?,
-        scroll_plugin: r.get("scroll_plugin")?,
     })
 }
 
@@ -259,14 +252,13 @@ fn pin_from_row(r: &Row) -> rusqlite::Result<MeeglePinRow> {
     })
 }
 
-fn zellij_host_from_row(r: &Row) -> rusqlite::Result<ZellijHostRow> {
-    Ok(ZellijHostRow {
+fn session_host_from_row(r: &Row) -> rusqlite::Result<SessionHostRow> {
+    Ok(SessionHostRow {
         host: r.get("host")?,
         port: r.get("port")?,
         username: r.get("username")?,
         authorized: r.get("authorized")?,
-        installed_version: r.get("installed_version")?,
-        base_url: r.get("base_url")?,
+        sessiond_version: r.get("sessiond_version")?,
         verified_durable: r.get("verified_durable")?,
         updated_at: r.get("updated_at")?,
     })
@@ -358,23 +350,36 @@ impl Db {
                     secret_enc TEXT,
                     created_at INTEGER NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS zellij_hosts (
+                CREATE TABLE IF NOT EXISTS session_hosts (
                     host TEXT NOT NULL,
                     port INTEGER NOT NULL,
                     username TEXT NOT NULL,
                     authorized INTEGER,
-                    installed_version TEXT,
-                    base_url TEXT,
+                    sessiond_version TEXT,
                     verified_durable INTEGER,
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (host, port, username)
                 );",
             )?;
+            // Zellij 退役（ADR 0020 决定七）：旧表只把授权抄过来一次——用户同意过"往这台机器上
+            // 放东西"，不该再问一遍；Zellij 的版本、下载镜像、Windows 断线验证结果都不要。
+            // 旧表不删（迁移只加不删），之后也不再读写。OR IGNORE：再跑一次不会覆盖新表里的值
+            let has_old: bool = conn
+                .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'zellij_hosts'", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map(|n| n > 0)?;
+            if has_old {
+                conn.execute(
+                    "INSERT OR IGNORE INTO session_hosts (host, port, username, authorized, updated_at)
+                     SELECT host, port, username, authorized, updated_at FROM zellij_hosts WHERE authorized IS NOT NULL",
+                    [],
+                )?;
+            }
             add_column(&conn, "sessions", "non_durable_reason", "TEXT")?;
             add_column(&conn, "sessions", "cols", "INTEGER")?;
             add_column(&conn, "sessions", "rows", "INTEGER")?;
             add_column(&conn, "sessions", "agent", "TEXT")?;
-            add_column(&conn, "sessions", "scroll_plugin", "INTEGER")?;
             // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
             conn.execute("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'", [])?;
         }
@@ -816,7 +821,7 @@ impl Db {
     /// 源项目改了 SSH 配置后，把五列刷到它的全部附属项目。
     ///
     /// 附属项目的 ssh_* 是从源项目**复制**来的，不是解引用——SshLink 由 ProjectRow
-    /// 构造、按 project.id 缓存，get_link / prepare_zellij / GET /host 全部直接读
+    /// 构造、按 project.id 缓存，get_link / prepare_sessiond / GET /host 全部直接读
     /// project.ssh_host。复制让这些点一处都不用改，代价就是这条手动传播。
     pub fn update_children_ssh(&self, source_id: &str, src: &ProjectRow) {
         self.exec(
@@ -1098,6 +1103,7 @@ impl Db {
                 .non_durable_reason
                 .as_deref()
                 .map(|r| NonDurableReason::from_wire(r).unwrap_or(NonDurableReason::Unknown)),
+            program_status: None,
             dead_reason: row.dead_reason.as_deref().map(|r| DeadReason::from_wire(r).unwrap_or(DeadReason::Unknown)),
             created_at: row.created_at,
             last_active_at: row.last_active_at,
@@ -1122,14 +1128,14 @@ impl Db {
 
     pub fn insert_session(&self, row: &SessionRow) {
         self.exec(
-            "INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows, agent, scroll_plugin)
-             VALUES (:id, :project_id, :name, :state, :durable, :dead_reason, :non_durable_reason, :created_at, :last_active_at, :cols, :rows, :agent, :scroll_plugin)",
+            "INSERT INTO sessions (id, project_id, name, state, durable, dead_reason, non_durable_reason, created_at, last_active_at, cols, rows, agent)
+             VALUES (:id, :project_id, :name, :state, :durable, :dead_reason, :non_durable_reason, :created_at, :last_active_at, :cols, :rows, :agent)",
             named_params! {
                 ":id": row.id, ":project_id": row.project_id, ":name": row.name, ":state": row.state,
                 ":durable": row.durable, ":dead_reason": row.dead_reason,
                 ":non_durable_reason": row.non_durable_reason, ":created_at": row.created_at,
                 ":last_active_at": row.last_active_at, ":cols": row.cols, ":rows": row.rows,
-                ":agent": row.agent, ":scroll_plugin": row.scroll_plugin,
+                ":agent": row.agent,
             },
         );
     }
@@ -1181,50 +1187,59 @@ impl Db {
         );
     }
 
-    // ---- Zellij 主机状态 ----
+    // ---- 宿主机上的守护进程状态 ----
     //
-    // zellij_hosts / known_hosts / ssh_hosts 三张表键不同，不合：
+    // session_hosts / known_hosts / ssh_hosts 三张表键不同，不合：
     // known_hosts 表达"这台机器的身份可信"（主机级事实，与登录用户无关，键是 host+port），
-    // zellij_hosts 表达"这个账户下装了什么"（账户级事实，键必须含 username——
+    // session_hosts 表达"这个账户下装了什么"（账户级事实，键必须含 username——
     // alice@srv 授权过不代表 bob@srv 的 home 里也有二进制），
     // ssh_hosts 表达"用户预先保存的连接配置"（有别名、可改、被项目引用，键是自己的 id）。
 
-    pub fn get_zellij_host(&self, host: &str, port: u16, username: &str) -> Option<ZellijHostRow> {
+    pub fn get_session_host(&self, host: &str, port: u16, username: &str) -> Option<SessionHostRow> {
         self.query_one(
-            "SELECT * FROM zellij_hosts WHERE host = ? AND port = ? AND username = ?",
+            "SELECT * FROM session_hosts WHERE host = ? AND port = ? AND username = ?",
             params![host, port, username],
-            zellij_host_from_row,
+            session_host_from_row,
         )
     }
 
-    /// 部分更新：只写给了的字段，其余保持原值（见 [`ZellijHostPatch`]）。
-    pub fn upsert_zellij_host(&self, host: &str, port: u16, username: &str, patch: ZellijHostPatch) {
-        let cur = self.get_zellij_host(host, port, username).unwrap_or_default();
-        let row = ZellijHostRow {
+    /// 部分更新：只写给了的字段，其余保持原值（见 [`SessionHostPatch`]）。
+    pub fn upsert_session_host(&self, host: &str, port: u16, username: &str, patch: SessionHostPatch) {
+        let cur = self.get_session_host(host, port, username).unwrap_or_default();
+        let row = SessionHostRow {
             host: host.to_string(),
             port: port as i64,
             username: username.to_string(),
             authorized: patch.authorized.unwrap_or(cur.authorized),
-            installed_version: patch.installed_version.unwrap_or(cur.installed_version),
-            base_url: patch.base_url.unwrap_or(cur.base_url),
+            sessiond_version: patch.sessiond_version.unwrap_or(cur.sessiond_version),
             verified_durable: patch.verified_durable.unwrap_or(cur.verified_durable),
             updated_at: crate::auth::now_ms(),
         };
         self.exec(
-            "INSERT INTO zellij_hosts (host, port, username, authorized, installed_version, base_url, verified_durable, updated_at)
-             VALUES (:host, :port, :username, :authorized, :installed_version, :base_url, :verified_durable, :updated_at)
+            "INSERT INTO session_hosts (host, port, username, authorized, sessiond_version, verified_durable, updated_at)
+             VALUES (:host, :port, :username, :authorized, :sessiond_version, :verified_durable, :updated_at)
              ON CONFLICT(host, port, username) DO UPDATE SET
                authorized = excluded.authorized,
-               installed_version = excluded.installed_version,
-               base_url = excluded.base_url,
+               sessiond_version = excluded.sessiond_version,
                verified_durable = excluded.verified_durable,
                updated_at = excluded.updated_at",
             named_params! {
                 ":host": row.host, ":port": row.port, ":username": row.username, ":authorized": row.authorized,
-                ":installed_version": row.installed_version, ":base_url": row.base_url,
-                ":verified_durable": row.verified_durable, ":updated_at": row.updated_at,
+                ":sessiond_version": row.sessiond_version, ":verified_durable": row.verified_durable,
+                ":updated_at": row.updated_at,
             },
         );
+    }
+
+    /// 这个 falcon 实例的随机 id（首次用到时生成并落库）。宿主机上的会话记着它（`owner`），
+    /// 孤儿清理只动自己建的：同一台远端可能同时被两台机器上的 falcon 用（设计文档 3、10.7）
+    pub fn instance_id(&self) -> String {
+        if let Some(id) = self.get_setting("instance_id").filter(|s| !s.is_empty()) {
+            return id;
+        }
+        let id = crate::askpass::hub::uuid_v4();
+        self.set_setting("instance_id", &id);
+        id
     }
 }
 
@@ -1237,7 +1252,7 @@ impl SettingsStore for std::sync::Arc<Db> {
     }
 }
 
-/// zellij_hosts / known_hosts / ssh_hosts 三张表的注释见上；这里是 `ALTER TABLE ADD COLUMN` 的幂等版
+/// session_hosts / known_hosts / ssh_hosts 几张表的注释见上；这里是 `ALTER TABLE ADD COLUMN` 的幂等版
 fn add_column(conn: &Connection, table: &str, column: &str, ty: &str) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let has = stmt.query_map([], |r| r.get::<_, String>("name"))?.collect::<Result<Vec<_>, _>>()?.iter().any(|c| c == column);
@@ -1273,45 +1288,63 @@ mod tests {
     }
 
     #[test]
-    fn upsert_zellij_host_keeps_omitted_clears_null() {
+    fn upsert_session_host_keeps_omitted_clears_null() {
         let (_d, db) = tmp_db();
-        db.upsert_zellij_host(
+        db.upsert_session_host(
             "h",
             22,
             "u",
-            ZellijHostPatch {
+            SessionHostPatch {
                 authorized: Some(Some(1)),
-                installed_version: Some(Some("0.44.3".into())),
+                sessiond_version: Some(Some("0.3.0".into())),
                 verified_durable: Some(Some(0)),
-                ..Default::default()
             },
         );
         // 省略的字段保持原值
-        db.upsert_zellij_host(
-            "h",
-            22,
-            "u",
-            ZellijHostPatch { base_url: Some(Some("https://mirror.example".into())), ..Default::default() },
-        );
-        let row = db.get_zellij_host("h", 22, "u").unwrap();
+        db.upsert_session_host("h", 22, "u", SessionHostPatch { authorized: Some(Some(1)), ..Default::default() });
+        let row = db.get_session_host("h", 22, "u").unwrap();
         assert_eq!(row.verified_durable, Some(0));
-        assert_eq!(row.installed_version.as_deref(), Some("0.44.3"));
-        assert_eq!(row.base_url.as_deref(), Some("https://mirror.example"));
-        // 显式 null = 清空：重试前作废持久性判定、换下载源作废安装记录
-        db.upsert_zellij_host(
-            "h",
-            22,
-            "u",
-            ZellijHostPatch {
-                verified_durable: Some(None),
-                installed_version: Some(None),
-                base_url: Some(None),
-                ..Default::default()
-            },
-        );
-        let row = db.get_zellij_host("h", 22, "u").unwrap();
-        assert_eq!((row.verified_durable, row.installed_version, row.base_url), (None, None, None));
-        assert_eq!(row.authorized, Some(1));
+        assert_eq!(row.sessiond_version.as_deref(), Some("0.3.0"));
+        // 显式 null = 清空：重试前作废持久性判定
+        db.upsert_session_host("h", 22, "u", SessionHostPatch { verified_durable: Some(None), ..Default::default() });
+        let row = db.get_session_host("h", 22, "u").unwrap();
+        assert_eq!((row.verified_durable, row.authorized), (None, Some(1)));
+    }
+
+    #[test]
+    fn zellij_host_authorization_is_carried_over_once() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = rusqlite::Connection::open(dir.path().join("falcon.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE zellij_hosts (host TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL,
+                   authorized INTEGER, installed_version TEXT, base_url TEXT, verified_durable INTEGER,
+                   updated_at INTEGER NOT NULL, PRIMARY KEY (host, port, username));
+                 INSERT INTO zellij_hosts VALUES ('a', 22, 'u', 1, '0.45.1', 'https://m', 1, 5);
+                 INSERT INTO zellij_hosts VALUES ('b', 22, 'u', 0, NULL, NULL, NULL, 6);
+                 INSERT INTO zellij_hosts VALUES ('c', 22, 'u', NULL, '0.45.1', NULL, NULL, 7);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(dir.path()).unwrap();
+        let a = db.get_session_host("a", 22, "u").unwrap();
+        // 只沿用授权：Zellij 的版本与断线验证结果不算数
+        assert_eq!((a.authorized, a.sessiond_version, a.verified_durable), (Some(1), None, None));
+        assert_eq!(db.get_session_host("b", 22, "u").unwrap().authorized, Some(0));
+        assert_eq!(db.get_session_host("c", 22, "u"), None, "没问过的不抄");
+        // 再迁移一次不覆盖新表
+        db.upsert_session_host("b", 22, "u", SessionHostPatch { authorized: Some(Some(1)), ..Default::default() });
+        drop(db);
+        let db = Db::open(dir.path()).unwrap();
+        assert_eq!(db.get_session_host("b", 22, "u").unwrap().authorized, Some(1));
+    }
+
+    #[test]
+    fn instance_id_is_stable() {
+        let (_d, db) = tmp_db();
+        let id = db.instance_id();
+        assert_eq!(id.len(), 36);
+        assert_eq!(db.instance_id(), id);
     }
 
     #[test]

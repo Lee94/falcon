@@ -5,7 +5,7 @@
 //! 主题画在客户端上，进程只看得到 PTY。grok / vim / less 靠
 //! COLORFGBG、GROK_APPEARANCE，或启动时问一声 OSC 11。这边给出统一的值。
 //!
-//! 环境变量一律是**有序**的 `(名, 值)` 列表（与 `zellij::host` 同一约定）：TS 里是
+//! 环境变量一律是**有序**的 `(名, 值)` 列表（与 `host` 同一约定）：TS 里是
 //! 对象的插入顺序，发到宿主机的命令串要逐字节一致。
 
 use std::sync::LazyLock;
@@ -229,13 +229,11 @@ pub struct GateOutput {
 /// 从 PTY 输出里抽出 OSC 10/11/12 查询，自己答、不转给 viewer。
 ///
 /// 交给客户端答有两个坑（旧 React 版就是让 xterm.js 答的）：回放历史会再答一次（键入一串
-/// ESC 垃圾），多个 Viewer 会每人答一次。Zellij 0.44 实测会把 pane 里的查询实时
-/// 转发到外层并把答复带回，所以这里的答复就是内层程序看到的底色；
-/// zellij client 自己 attach 时也会查一次。
+/// ESC 垃圾），多个 Viewer 会每人答一次。现在只有非持久会话过这道门：持久会话的查询由
+/// 宿主机上的 VT 进程一处回答（ADR 0020 决定五），`on_backend_data` 直接转发。
 ///
 /// appearance 还没到时原样放过。当初有 xterm.js 兜底；现在的客户端不答颜色查询（falcon-term
-/// 的 `Listener`），靠的是客户端先发 appearance 再发 resize（`falcon_proto::ws` 顶部），
-/// zellij attach 时的那次查询到这里时 appearance 已经在了。
+/// 的 `Listener`），靠的是客户端先发 appearance 再发 resize（`falcon_proto::ws` 顶部）。
 ///
 /// 输入是已经做过 UTF-8 跨块拼接的字符串（TS 的 onData 给的也是字符串）；跨块的只有
 /// 半截查询，扣在 `pending` 里。TS 构造时传一个取深浅的闭包、每块调一次；这里改成每块把
@@ -258,7 +256,7 @@ impl OscColorGate {
             return GateOutput { visible: combined, replies: Vec::new() };
         }
 
-        // 快路径：查询极罕见（Zellij 持久会话里通常到不了外层），而这段跑在
+        // 快路径：查询极罕见（持久会话根本不过这里），而这段跑在
         // PTY 输出的热路径上，不该让每个 chunk 都过一遍正则。所有查询前缀都以
         // \x1b] 开头，唯一不含 \x1b] 的"可能是前缀"的形态是结尾的孤立 ESC
         // （下个 chunk 可能以 ] 续上），这两种都没有时直接原样放行。
@@ -302,11 +300,6 @@ pub(crate) mod js {
     }
 
     /// 正则 `/\s/.test(s)`
-    /// `s.replace(/\s+$/, "")`
-    pub(crate) fn trim_end(s: &str) -> &str {
-        s.trim_end_matches(is_whitespace)
-    }
-
     pub(crate) fn has_whitespace(s: &str) -> bool {
         s.chars().any(is_whitespace)
     }

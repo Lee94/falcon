@@ -2,14 +2,14 @@
 //! 前端随后把路径粘进终端输入——Claude Code 等 TUI 认"输入框里的图片路径"。
 //!
 //! 落脚点统一是 falcon 根目录下的 paste/（本地 = --data-dir，远端 = ~/.falcon），
-//! 与 Zellij 布局同根，卸载时一并带走。SSH 侧不走 SFTP（理由同 fs.ts）：
+//! 与会话守护进程同根，卸载时一并带走。SSH 侧不走 SFTP（理由同 fs.ts）：
 //! POSIX 用 `cat > file` 收 stdin 原始字节；Windows 的 exec 通道对二进制
 //! 不可靠，改收 base64 再在 PowerShell 里解码。
 //!
 //! 移植自 `packages/server/src/paste.ts`。
 
 use crate::git::path::join_path;
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 /// 超过这个岁数的旧图在下一次粘贴时顺手删掉；正常粘贴当场就被读走了
 const MAX_AGE_HOURS: u32 = 24;
@@ -106,7 +106,7 @@ pub fn write_local_paste_file(data_dir: &std::path::Path, ext: &str, data: &[u8]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zellij::host::tests::decode;
+    use crate::host::tests::decode;
     use HostKind::{Posix, Windows};
     use regex::Regex;
 

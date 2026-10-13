@@ -21,7 +21,7 @@ pub use keystroke::{Keystroke, Modifiers};
 pub use falcon_proto::term_modes as modes;
 pub use modes::TermModeTracker;
 pub use mouse::{MouseAction, MouseButton, MouseMode, MouseReportEvent, MouseReporter};
-pub use wheel::{DeltaMode, WheelAccumulator};
+pub use wheel::{DeltaMode, WheelAccumulator, WheelRoute, arrow_for_wheel, route_wheel};
 
 /// 焦点上报（`?1004h` 时）：CSI I / CSI O。
 pub fn focus_report(focused: bool) -> &'static str {

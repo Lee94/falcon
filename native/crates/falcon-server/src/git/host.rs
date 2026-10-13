@@ -19,7 +19,7 @@ use crate::db::ProjectRow;
 use crate::exec::{Exec, LocalExec};
 use crate::sessions::local::{home_dir, local_kind};
 use crate::sessions::ssh::SshLink;
-use crate::zellij::host::{HostKind, encode_powershell};
+use crate::host::{HostKind, encode_powershell};
 
 /// 一台能跑 git 的宿主机。clone 只是多一份 `Rc`
 #[derive(Clone)]
@@ -91,7 +91,7 @@ fn link_failed(detail: String) -> WorktreeError {
 /// `/etc/profile`、`~/.profile`、`~/.bash_profile` 里的 PATH 一概不读——而
 /// Homebrew(/opt/homebrew/bin)、asdf、nix、~/.local/bin 恰恰大多写在那里。
 /// 不套这一层，用户会发现"终端里 git 用得好好的，功能却说没装 git"，
-/// 与 zellij/host.rs 里 build_pty_command_line 注释描述的是同一类症状。
+/// 与 host.rs 里 build_pty_command_line 注释描述的是同一类症状。
 ///
 /// 但只在**探测**时套：拿到绝对路径之后一律直接调用，这样 stdout 干净（profile 里的
 /// echo 不会混进 git 输出）、快（不必每条命令都重跑一遍 profile）。

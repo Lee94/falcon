@@ -41,7 +41,7 @@ use crate::files::{
     ExecChannel, FileError, FileHost, RemoteHost, js_trim, local_error, read_workspace_bytes, remote_error, split_lines,
 };
 use crate::git::path::join_path;
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 // ---------------- base64 行编解码 ----------------
 
@@ -789,7 +789,7 @@ fn validate_entry_name(kind: HostKind, name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zellij::host::tests::decode;
+    use crate::host::tests::decode;
     use HostKind::{Posix, Windows};
     use base64::engine::general_purpose::STANDARD;
     use regex::Regex;

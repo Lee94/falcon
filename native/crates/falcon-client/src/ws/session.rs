@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use falcon_proto::{
-    ClientMessage, DeadReason, ServerMessage, SessionState, TermAppearance, TermFrameKind,
-    WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES, decode_term_frame,
+    ClientMessage, DeadReason, ProgramStatusRecord, ServerMessage, SessionState, TermAppearance,
+    TermFrameKind, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES, decode_term_frame,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -43,7 +43,8 @@ pub enum SessionEvent {
     Output(Bytes),
     /// 整份回放（最大 4MB）：先 reset 再写，或者新建一个 Term 离锁解析后整体换上。
     /// 可能在连接中途任意时刻到达（服务端的背压重同步），不只是连上的那一刻。
-    /// 回放期间终端产生的应答（DA / DSR）一律丢掉，别写回 PTY。
+    /// 回放期间终端产生的应答（DA / DSR）一律丢掉，别写回 PTY。持久会话的回放是宿主机上
+    /// VT 进程导出的画面，非持久会话的是服务端 RingBuffer 里的原始输出。
     Replay(Bytes),
     /// 会话状态变化。连上时服务端会先推一次当前状态（等 resize 的持久会话推
     /// unverified，已死的会话推 dead + 原因）。
@@ -57,9 +58,10 @@ pub enum SessionEvent {
     Title(Option<String>),
     /// sudo / SSH askpass 在等密码：弹对话框，答复走 `FalconClient::answer_askpass`
     Askpass { id: String, prompt: String },
-    /// 滚动位置（ADR 0019），回应 [`SessionSocket::scroll`]，也可能是别的 Viewer 问出来的
-    /// （服务端广播）。单位是 zellij 的显示行，含义见 `ServerMessage::Scroll`。
-    Scroll { position: u32, length: u32, rows: u32 },
+    /// 程序状态（OSC 7501，ADR 0020 决定六）的全集：变化时推、连上时推一次。`title` /
+    /// `message` 是程序给的不可信文本，显示到终端之外前要过 `sanitize_display_text`。
+    /// 只有持久会话有（解析在宿主机的 VT 进程里）；Windows 宿主机上 ConPTY 会吞掉它，收不到
+    ProgramStatus(Vec<ProgramStatusRecord>),
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
     /// 断线期间 `send_input` 的内容会被丢掉（照 React 版：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
@@ -124,8 +126,8 @@ enum Cmd {
     Resize(u16, u16),
     /// 已经序列化好的 appearance 消息
     Appearance(String),
-    /// 已经序列化好的 scroll 消息
-    Scroll(String),
+    /// 已经序列化好的 status_seen 消息
+    StatusSeen(String),
     ReconnectNow,
     Close,
 }
@@ -199,12 +201,12 @@ impl SessionSocket {
         }
     }
 
-    /// 当前终端配色的深浅与底 / 字色（`#rrggbb`），服务端据此代答 OSC 10/11/12
-    /// （客户端自己**不答**颜色查询，§3.2）。主题切换时再调一次。
+    /// 当前终端配色的深浅与底 / 字色（`#rrggbb`），据此回答 OSC 10/11/12：持久会话由宿主机
+    /// 的 VT 进程回答，非持久会话由服务端的 OscColorGate 代答（客户端自己**不答**颜色查询，
+    /// §3.2）。主题切换时再调一次。
     ///
-    /// 记住最近一次：每条新 socket 连上后**先**发它、再发 resize——服务端的
-    /// OscColorGate 要在 appearance 到了之后才代答，resize 触发的接回会让 zellij
-    /// 立刻发颜色查询。
+    /// 记住最近一次：每条新 socket 连上后**先**发它、再发 resize——resize 触发懒惰接回，
+    /// 接回那一刻程序可能正好在查底色，外观必须先到。
     pub fn set_appearance(&self, appearance: TermAppearance, background: Option<&str>, foreground: Option<&str>) {
         let msg = ClientMessage::Appearance {
             appearance,
@@ -216,12 +218,12 @@ impl SessionSocket {
         }
     }
 
-    /// 滚动条（ADR 0019）：`None` 问一次滚动位置，`Some(n)` 让 zellij 滚到「视口下方
-    /// 还剩 n 行」处。回话是 [`SessionEvent::Scroll`]；会话不支持时没有回话。没连着时
-    /// 直接丢掉——位置是一问一答的瞬时状态，攒到重连后再问没有意义。
-    pub fn scroll(&self, seek: Option<u32>) {
-        if let Ok(json) = serde_json::to_string(&ClientMessage::Scroll { seek }) {
-            let _ = self.cmd.send(Cmd::Scroll(json));
+    /// 用户看过了这个会话（窗口获得焦点、在里面操作）：让宿主机清掉程序状态里的 done / error
+    /// 记录（ADR 0020 决定六）。`ids` 为空 = 全部。没连着时直接丢掉——重连后服务端会再推一次
+    /// 全集，那时用户若还在看着，界面自会再发。
+    pub fn status_seen(&self, ids: Vec<String>) {
+        if let Ok(json) = serde_json::to_string(&ClientMessage::StatusSeen { ids }) {
+            let _ = self.cmd.send(Cmd::StatusSeen(json));
         }
     }
 
@@ -312,8 +314,8 @@ impl Driver {
                 self.unauthorized_streak = 0;
                 Offline::ConnectNow
             }
-            // 断线期间的输入丢掉，理由见 SessionEvent::Disconnected；滚动查询同理
-            Some(Cmd::Input(_)) | Some(Cmd::Scroll(_)) => Offline::Continue,
+            // 断线期间的输入丢掉，理由见 SessionEvent::Disconnected；status_seen 理由见方法注释
+            Some(Cmd::Input(_)) | Some(Cmd::StatusSeen(_)) => Offline::Continue,
             Some(Cmd::Resize(c, r)) => {
                 self.size = Some((c, r));
                 Offline::Continue
@@ -516,7 +518,7 @@ impl Driver {
                             self.appearance = Some(a.clone());
                             ws.send_text(a).await.is_ok()
                         }
-                        Cmd::Scroll(json) => ws.send_text(json).await.is_ok(),
+                        Cmd::StatusSeen(json) => ws.send_text(json).await.is_ok(),
                         Cmd::ReconnectNow => {
                             if !probing {
                                 probing = true;
@@ -567,10 +569,9 @@ impl Driver {
             ServerMessage::Error { message } => SessionEvent::Error(message),
             ServerMessage::Title { title } => SessionEvent::Title(title),
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
-            ServerMessage::Scroll { position, length, rows } => {
-                SessionEvent::Scroll { position, length, rows }
-            }
-            // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报
+            ServerMessage::ProgramStatus { records } => SessionEvent::ProgramStatus(records),
+            // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
+            // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown
             ServerMessage::Pong | ServerMessage::Unknown => return,
         };
         self.emit(ev);

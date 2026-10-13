@@ -1,5 +1,7 @@
 .DS_Store
 *.bin
+# 例外：会话守护进程的接回比对语料是录下来的 PTY 原始输出，测试要读（设计文档 session-daemon.md 第 15 节）
+!native/sessiond/crates/falcon-sessiond/tests/corpus/*.bin
 release/
 Berkeley-Mono-*.zip
 .cube

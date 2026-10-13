@@ -1,0 +1,33 @@
+top -l 0 -s 1 -n 15 -stats pid,command,cpu,mem
+Processes: 588 total, 2 running, 586 sleeping, 4459 threads 
+2026/10/13 20:40:23
+Load Avg: 2.36, 1.83, 1.92 
+CPU usage: 5.60% user, 12.4% sys, 82.35% idle 
+SharedLibs: 431M resident, 101M data, 106M linkedit.
+MemRegions: 535500 total, 3278M resident, 233M private, 1434M shared.
+PhysMem: 15G used (2644M wired, 6196M compressor), 155M unused.
+VM: 303T vsize, 57G framework vsize, 695101(0) swapins, 1659913(0) swapouts.
+Networks: packets: 99866202/86G in, 79355372/44G out.
+Disks: 32919429/654G read, 11546752/349G written.
+
+PID    COMMAND          %CPU MEM  
+95425  Google Chrome He 0.0  452M 
+94681  com.apple.Safari 0.0  22M  
+94641  crashpad_handler 0.0  1792K
+94639  snow_shot        0.0  41M  
+94486  universalAccessA 0.0  12M  
+94420  DiskUnmountWatch 0.0  2704K
+94177  SakuraLauncher   0.0  43M  
+94022  DisplayControls  0.0  10M  
+93255  node             0.0  25M  
+93251  node             0.0  81M  
+93205  node             0.0  43M  
+93174  2.1.296          0.0  300M 
+91992  Google Chrome He 0.0  315M 
+88926  WeChatAppEx Help 0.0  65M  
+88459  homed            0.0  18M  
+Processes: 588 total, 2 running, 586 sleeping, 4440 threads 
+2026/10/13 20:40:24
+Load Avg: 2.25, 1.81, 1.92 
+CPU usage: 6.0% user, 4.56% sys, 89.42% idle 
+SharedLibs: 431M resident, 101M data, 106M linkedit.

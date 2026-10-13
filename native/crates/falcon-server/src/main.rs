@@ -12,7 +12,6 @@ use falcon_server::config::{is_loopback, parse_args};
 use falcon_server::crypto::SecretBox;
 use falcon_server::db::Db;
 use falcon_server::engine::{self, EngineDeps};
-use falcon_server::zellij::version::ZELLIJ_VERSION;
 
 fn main() -> anyhow::Result<()> {
     init_logging();
@@ -68,7 +67,7 @@ fn main() -> anyhow::Result<()> {
         let addr = format!("{}:{}", config.host, config.port);
         let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("监听 {addr} 失败"))?;
         log::info!(
-            "falcon 已启动: http://{}:{}（数据目录 {}，Zellij {ZELLIJ_VERSION}）",
+            "falcon 已启动: http://{}:{}（数据目录 {}）",
             if loopback { "localhost" } else { &config.host },
             config.port,
             config.data_dir.display()

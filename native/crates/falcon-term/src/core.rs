@@ -5,6 +5,7 @@
 //! - REPLAY 帧（最大 4MB，可能在连接中途任意时刻到达——背压重同步）走
 //!   [`TermCore::replace_with_replay`]：在一个**新 Term** 上离锁解析，完成后加锁整体换上。语义就是
 //!   旧 React 版的"reset 再 write"，但 UI 线程既不会被 4MB 解析卡住，也不会画出半截画面；
+//!   用户正往上翻着看历史时，换上之后按原来的位置接着看（不然一次背压重同步就把人打回底部）；
 //! - UI 线程每帧 [`TermCore::snapshot`]：加锁把可见区拷出来立即解锁，排版绘制只用快照。
 //!
 //! 同一个会话的 advance / replace 由同一条 socket 任务顺序调用，不会并发；resize / 选区 / 滚动
@@ -61,11 +62,17 @@ impl Dimensions for TermSize {
 
 /// 需要 app 处理的终端事件。颜色查询（OSC 10/11/12）、文本区尺寸查询（CSI 14t）、剪贴板读取
 /// （OSC 52 查询）在这里就被丢掉了，理由见 [`Listener`]。
+///
+/// app 每次 [`TermCore::advance`] 之后都要 [`TermCore::take_events`]，别只在脏位 0→1 时取：
+/// 脏位已经是 1 时（UI 还没来得及画）产生的回复会一直躺在队列里，直到下一段输出把脏位重新
+/// 拨起来——程序等 DA / DSR 回复时就卡在那儿（ADR 0020「客户端」一节）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// OSC 52 写剪贴板（只写不读，`Osc52::OnlyCopy`；沿用 React 版的口径）
     ClipboardStore(String),
-    /// 终端要回写给程序的应答（DA / DSR 等），app 按 `input` 发回会话
+    /// 终端要回写给程序的应答（DA / DSR 等），app 按 `input` 发回会话。**只有非持久会话该发**：
+    /// 持久会话的查询由宿主机上的 VT 进程一处回答，客户端再答一遍，程序就会多收到一份回复
+    /// （多个 Viewer 时还是每个各一份），可能被当成按键显示出来（ADR 0020 决定五）
     PtyWrite(String),
     /// OSC 0/2 标题；None 是重置。界面标题以服务端推的前台命令为准，这个只作备用
     Title(Option<String>),
@@ -74,13 +81,14 @@ pub enum TermEvent {
 
 /// alacritty 的事件出口。所有 Term 共享同一个队列；`muted` 只在回放解析期间为真。
 ///
-/// 回放期间一律静音：回放里带着 zellij attach 时发的查询（DA、DSR 之类），再答一次就是往
-/// zellij 里敲一串垃圾（服务端 `term_env.rs` 的 OscColorGate 注释写过同一个坑，原 `termEnv.ts`）；
-/// 历史里的 OSC 52 也不该在重连时再写一遍剪贴板。
+/// 回放期间一律静音：非持久会话的回放是服务端 RingBuffer 里的原始输出，带着程序当年发过的
+/// 查询（DA、DSR 之类），现在再答一次就是往程序里敲一串垃圾（服务端 `term_env.rs` 的
+/// OscColorGate 注释写过同一个坑，原 `termEnv.ts`）；历史里的 OSC 52 也不该在重连时再写一遍
+/// 剪贴板。持久会话的回放是宿主机 VT 进程导出的画面，本来就不该有查询，静音照样无害。
 ///
-/// 颜色查询不答：服务端的 OscColorGate 在 Viewer 发过 `appearance` 之后代答 OSC 10/11/12，
-/// 客户端再答一次，多个 Viewer 就会各答一遍。CSI 14t（文本区像素尺寸）照 xterm.js 默认
-/// （windowOptions 关）不答。
+/// 颜色查询不答：持久会话由宿主机的 VT 进程按 `appearance` 回答，非持久会话由服务端的
+/// OscColorGate 在 Viewer 发过 `appearance` 之后代答 OSC 10/11/12；客户端再答一次，多个 Viewer
+/// 就会各答一遍。CSI 14t（文本区像素尺寸）照 xterm.js 默认（windowOptions 关）不答。
 #[derive(Clone)]
 pub struct Listener {
     queue: Arc<Mutex<Vec<TermEvent>>>,
@@ -106,8 +114,9 @@ impl EventListener for Listener {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermOptions {
-    /// 取 10000，对齐服务端给 zellij 的 scroll_buffer（`zellij::command::SCROLL_BUFFER`）。zellij 会话在
-    /// alt screen 里，本地 scrollback 实际用不上，按需增长不占内存。
+    /// 取 10000。宿主机上不再有 Zellij 重画画面，程序的字节原样透传过来，滚动全在本地：这就是
+    /// 滚动条能滚到的历史深度。接回时宿主机导出多少历史由服务端定，超出这里的部分在本地被
+    /// 截掉。按需增长，没用到的不占内存。
     pub scrollback: usize,
     pub cursor_shape: CursorShape,
     pub cursor_blinking: bool,
@@ -130,8 +139,9 @@ fn term_config(opts: &TermOptions) -> Config {
             shape: opts.cursor_shape,
             blinking: opts.cursor_blinking,
         },
-        // 不编 kitty 键盘协议（keys.rs 只有 legacy 编码）：开了它 zellij 协商成功就会期待
-        // kitty 格式的按键
+        // 不编 kitty 键盘协议（keys.rs 只有 legacy 编码）：开了它程序（非持久会话里直接问到
+        // 这里）协商成功就会期待 kitty 格式的按键。持久会话由宿主机的 VT 进程回答，那边为同一个
+        // 原因把 `CSI ? u` 的回复过滤掉了（ADR 0020 决定五）；两边要放开得同一个版本一起放
         kitty_keyboard: false,
         osc52: Osc52::OnlyCopy,
         ..Config::default()
@@ -243,7 +253,7 @@ impl TermCore {
         let mut parser = self.parser.lock();
         parser.modes.track(bytes);
         let mut term = self.term.lock();
-        // 同步输出（?2026）的超时只有在解析时才检查：zellij 的一帧若开了同步却迟迟不收尾，
+        // 同步输出（?2026）的超时只有在解析时才检查：程序的一帧若开了同步却迟迟不收尾，
         // 下一段输出到来时先把过期的缓冲冲掉，免得画面停住
         flush_expired_sync(&mut parser.processor, &mut term);
         parser.processor.advance(&mut *term, bytes);
@@ -253,6 +263,12 @@ impl TermCore {
     }
 
     /// 回放：在新 Term 上离锁解析整份快照，完成后整体替换。返回值同 [`Self::advance`]。
+    ///
+    /// 用户原本往上翻着（display_offset > 0）就按原来的行数恢复阅读位置（新 Term 历史不够就
+    /// 夹到最顶上）；在底部的留在底部。字节原样透传之后 replay 可能在连接中途到达（服务端对慢
+    /// Viewer 的背压重同步），不保留的话正在看的历史会被一下打回底部。偏移是从底部往上数的，
+    /// 重同步期间又涨了几行输出时，看到的会往上错开那几行——与"新输出到来时视口跟着历史走"
+    /// 相比差这一点，换来的是不用在两份历史之间做行对齐。
     pub fn replace_with_replay(&self, bytes: &[u8]) -> bool {
         let size = *self.size.lock();
         let options = *self.options.lock();
@@ -279,8 +295,14 @@ impl TermCore {
         {
             let mut guard = self.parser.lock();
             let mut term = self.term.lock();
+            // 换上与恢复位置在同一把锁里：UI 线程取快照不会看到"已换上、还在底部"的中间态
+            let offset = term.grid().display_offset();
             *term = fresh;
             *guard = parser;
+            if offset > 0 {
+                // alacritty 自己按历史长度夹住；备用屏没有历史，夹成 0
+                term.scroll_display(Scroll::Delta(offset.min(i32::MAX as usize) as i32));
+            }
         }
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.mark_dirty()
@@ -506,7 +528,7 @@ impl TermCore {
 
     // ---------- 本地 scrollback ----------
 
-    /// 正数朝历史方向。zellij 会话在 alt screen 里没有本地历史，这里只对普通缓冲有效。
+    /// 正数朝历史方向。备用屏（vim、less 这类全屏程序）没有历史，滚不动。
     pub fn scroll_display(&self, lines: i32) {
         if lines == 0 {
             return;
@@ -518,6 +540,23 @@ impl TermCore {
     pub fn scroll_to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);
         self.mark_dirty();
+    }
+
+    /// 滚到「视口下方还有 `offset` 行」处（0 = 底部），超过历史长度就停在最顶上。拖滚动条滑块
+    /// 用：滑块位置换算出的是绝对位置，按增量滚的话拖动中每一下都要先知道当前在哪。
+    /// 返回位置变没变。
+    pub fn scroll_to(&self, offset: usize) -> bool {
+        let mut term = self.term.lock();
+        let current = term.grid().display_offset();
+        let target = offset.min(term.history_size());
+        if target == current {
+            return false;
+        }
+        // 两者都不超过历史长度（≤ 10000 行），差值放得进 i32
+        term.scroll_display(Scroll::Delta(target as i32 - current as i32));
+        drop(term);
+        self.mark_dirty();
+        true
     }
 }
 
@@ -645,6 +684,65 @@ mod tests {
         assert_eq!(snap.selection.map(|s| (s.start, s.end)), Some(((0, 0), (0, 4))));
         core.clear_selection();
         assert!(!core.has_selection());
+    }
+
+    /// 往一个 rows 行高的终端里写 n 行，造出 n - rows（左右）行历史
+    fn lines(n: usize) -> Vec<u8> {
+        (0..n).map(|i| format!("line {i}\r\n")).collect::<String>().into_bytes()
+    }
+
+    #[test]
+    fn scroll_to_is_absolute_and_clamped() {
+        let core = TermCore::new(TermSize::new(20, 4), TermOptions::default());
+        core.advance(&lines(30));
+        let history = core.snapshot().history_size;
+        assert!(history > 20, "{history}");
+        assert!(core.scroll_to(5));
+        assert_eq!(core.snapshot().display_offset, 5);
+        assert!(!core.scroll_to(5), "已经在那儿就不算变");
+        assert!(core.scroll_to(2));
+        assert_eq!(core.snapshot().display_offset, 2);
+        core.scroll_to(9999);
+        assert_eq!(core.snapshot().display_offset, history, "超过历史就停在最顶上");
+        core.scroll_to(0);
+        assert_eq!(core.snapshot().display_offset, 0);
+    }
+
+    #[test]
+    fn replay_keeps_the_reading_position() {
+        let core = TermCore::new(TermSize::new(20, 4), TermOptions::default());
+        core.advance(&lines(30));
+        core.scroll_to(7);
+        core.replace_with_replay(&lines(40));
+        assert_eq!(core.snapshot().display_offset, 7, "翻着看的时候回放，位置不动");
+        // 新历史比原位置短：夹到最顶上
+        core.scroll_to(30);
+        core.replace_with_replay(&lines(10));
+        let snap = core.snapshot();
+        assert_eq!(snap.display_offset, snap.history_size);
+        assert!(snap.history_size < 30);
+    }
+
+    #[test]
+    fn replay_at_the_bottom_stays_at_the_bottom() {
+        let core = TermCore::new(TermSize::new(20, 4), TermOptions::default());
+        core.advance(&lines(30));
+        core.replace_with_replay(&lines(40));
+        assert_eq!(core.snapshot().display_offset, 0);
+        // 回放停在备用屏里：备用屏没有历史，原来的位置无从恢复
+        core.scroll_to(3);
+        core.replace_with_replay(b"\x1b[?1049hfull screen");
+        assert_eq!(core.snapshot().display_offset, 0);
+    }
+
+    #[test]
+    fn replies_queue_up_while_dirty_until_taken() {
+        // 脏位已经是 1 时 advance 返回 false，但回复照样进了队列：调用方每次都要取
+        let core = TermCore::new(TermSize::new(20, 4), TermOptions::default());
+        core.take_dirty();
+        assert!(core.advance(b"x"));
+        assert!(!core.advance(b"\x1b[c"));
+        assert!(matches!(core.take_events().as_slice(), [TermEvent::PtyWrite(_)]));
     }
 
     #[test]

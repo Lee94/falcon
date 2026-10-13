@@ -47,3 +47,14 @@ Linux 远端（Docker sshd，debian:12）上端到端验证通过：探测 → �
 - 已知会带着走的缺陷：#5311（alternate-screen 程序 resize 后 `dump-screen` 带陈旧行，历史重建有视觉瑕疵）、#5052（pwsh 下 cwd 失效）、Windows 无 ARM64 产物（靠 x64 模拟，`--version` 握手裁决）。
 - Zellij 未来若把 `CLIENT_SERVER_CONTRACT_VERSION` 提到 2，跨版本会话断裂会重演；二进制按版本命名、旧版不自动删，正是为此留的余地。
 - falcon 只管理自己创建的会话（`mj-` 前缀），绝不接管用户自有的 Zellij 会话。
+
+## 后记（2026-10-13）：被 ADR 0020 取代
+
+宿主机上的 Zellij 已整体换成 falcon 自己的会话守护进程 falcon-sessiond（[ADR 0020](0020-session-daemon-libghostty.md)），一个版本里切换，旧会话不兼容。本 ADR 里「自研 session host 否决」那一条被推翻（理由见 ADR 0020 的背景一节），以下结论仍然有效、守护进程照样遵守：
+
+- 持久会话的语义（断链 / 后端重启后存活并接回），非持久会话在 UI 上标注**具体原因**；
+- SSH 远端在最外层套一层登录 shell 拉起会话（守护进程的 holder 也由它拉起，环境一次修到底）；
+- 只管 falcon 自己建的会话（孤儿清理只动 owner 是本实例的）；
+- 部署前先征得用户对该主机的授权，授权按主机记。
+
+不再成立的：宿主机自己下载二进制（改由后端推送，文件名带内容哈希）、Zellij 的 locked 模式 / 键位清空 / 配置文件那一整套、`dump-screen` 重建历史、Windows 上 Zellij server 的 WMI 拉起（守护进程自己先 breakaway、再 WMI）。代码在提交历史里：`zellij/`、`sessions/ssh_zellij.rs`、`sessions/scroll_plugin.rs`、`native/zellij-plugin` 都已删除。

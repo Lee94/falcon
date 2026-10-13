@@ -1,0 +1,77 @@
+ls -G /usr/bin | head -60
+aa
+actool
+aea
+afclip
+afconvert
+afhash
+afida
+afinfo
+afktool
+afplay
+afscexpand
+agentxtrap
+agvtool
+alias
+app-sso
+applesingle
+apply
+apropos
+ar
+arch
+archiveutil
+as
+asa
+AssetCacheLocatorUtil
+AssetCacheManagerUtil
+AssetCacheTetheratorUtil
+assetutil
+at
+atos
+atq
+atrm
+atsutil
+automationmodetool
+automator
+auval
+auvaltool
+avbanalyse
+avbcapture
+avbdiagnose
+avbutil
+avconvert
+avmediainfo
+avmetareadwrite
+awk
+b64decode
+b64encode
+banner
+base64
+basename
+bashbug
+batch
+bc
+bg
+binhex
+binhex.pl
+binhex5.34.pl
+bintrans
+bioutil
+bison
+bitesize.d
+$ for i in 0 1 2 3 4 5 6 7; do printf '\033[3%dm普通%d \033[1;3%dm粗体%d\033[0m \033[9%dm亮%d\033[0m \n' $i $i $i $i $i $i; done
+[30m普通0 [1;30m粗体0[0m [90m亮0[0m
+[31m普通1 [1;31m粗体1[0m [91m亮1[0m
+[32m普通2 [1;32m粗体2[0m [92m亮2[0m
+[33m普通3 [1;33m粗体3[0m [93m亮3[0m
+[34m普通4 [1;34m粗体4[0m [94m亮4[0m
+[35m普通5 [1;35m粗体5[0m [95m亮5[0m
+[36m普通6 [1;36m粗体6[0m [96m亮6[0m
+[37m普通7 [1;37m粗体7[0m [97m亮7[0m
+$ printf '中文宽字符 😀 👨‍👩‍👧 🇨🇳 e\xcc\x81 \033[4;38;2;255;100;0m真彩下划线\033[0m\n'
+中文宽字符 😀 👨‍👩‍👧 🇨🇳 é [4;38;2;255;100;0m真彩下划线[0m
+$ printf '%0250d\n' 7
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007
+$ printf '\033]8;;https://example.com\033\\链接\033]8;;\033\\ 之后\n'
+]8;;https://example.com\链接]8;;\ 之后
+$ 

@@ -8,7 +8,7 @@
 //! 不是 SFTP（理由同 fs.rs：sftp-server 被禁的机器并不少见）。
 //!
 //! 命令构造是纯函数（list_command / read_command / mkdir_command 等）、输出解析
-//! 也是（parse_entries / parse_read / classify），照 git 与 zellij 那两套的分层
+//! 也是（parse_entries / parse_read / classify），照 git 那套的分层
 //! 来，测试主要打这一层。mkdir / rename / remove 开头那段路径运算与护栏另拆成
 //! [`mkdir_target`] / [`rename_target`] / [`remove_target`]（TS 里是内联在 async 函数里的），
 //! 远端失败时 `remoteError(res.stdout || res.stderr, res.stderr.trim() || …)` 这个反复出现的
@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::exec::{Exec, ExecResult, LocalBoxFuture};
 use crate::git::path::{dirname_of, is_ancestor, join_path, normalize_sep, same_path};
 use crate::sessions::ssh::SshLink;
-use crate::zellij::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
+use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
 pub const LIST_TIMEOUT: Duration = Duration::from_millis(15_000);
 pub const READ_TIMEOUT: Duration = Duration::from_millis(30_000);
@@ -1342,7 +1342,7 @@ mod tests {
         // POSIX 上反斜杠是合法的文件名字符，`a\..` 就是一个叫这名字的文件，不拦
         assert!(resolve_inside(HostKind::Posix, "/code/repo", Some("a\\..")).is_ok());
     }
-    use crate::zellij::host::tests::decode;
+    use crate::host::tests::decode;
     use base64::Engine as _;
 
     const POSIX: HostKind = HostKind::Posix;

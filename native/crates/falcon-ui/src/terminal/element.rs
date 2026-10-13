@@ -850,9 +850,9 @@ impl Element for TerminalElement {
         };
         // 视图据此 resize 终端 / 通知服务端，并在鼠标事件里换算格子。
         // 量不出像样的格子（画布首帧还没拿到自己的 bounds，窗格按 0 排；列被挤没）时不报：
-        // zellij 在 alt screen 里，没有回滚，缩到 2×3 再放回来整屏内容就丢了——回放先于
-        // 首次测量到达时正是这样，服务端尺寸没变不会重画，终端就一直是空的。xterm 的 fit
-        // addon 同样在量不出尺寸时保留旧值
+        // 缩到 2×3 再放回来，本地终端按 2×3 重排过的内容回不去了（备用屏里的全屏程序没有回滚，
+        // 整屏直接丢）——回放先于首次测量到达时正是这样，服务端尺寸没变不会重画，终端就一直是
+        // 空的。xterm 的 fit addon 同样在量不出尺寸时保留旧值
         if fit_cols >= 2 && fit_rows >= 1 {
             self.view.update(cx, |view, cx| view.set_geometry(geometry, cx));
         }

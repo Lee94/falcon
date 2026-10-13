@@ -1,9 +1,9 @@
-//! 项目、附属项目（派生 / 存档 / 删除前预检）与宿主机 Zellij 授权。
+//! 项目、附属项目（派生 / 存档 / 删除前预检）与宿主机上会话守护进程的授权（ADR 0020）。
 
 use std::future::Future;
 
 use falcon_proto::{
-    DeleteProjectResult, HostZellijStatus, MultiRepoProbe, MultiWorktreeInput, OkResponse, Project,
+    DeleteProjectResult, HostInstallStatus, MultiRepoProbe, MultiWorktreeInput, OkResponse, Project,
     ProjectInput, RepoInfo, WorktreeInput, WorktreeStatus,
 };
 use reqwest::Method;
@@ -35,17 +35,15 @@ impl From<MultiWorktreeInput> for DeriveInput {
     }
 }
 
-/// `POST /api/projects/:id/host` 的请求体（TS 里是内联的 `{ authorized?, baseUrl? }`）。
+/// `POST /api/projects/:id/host` 的请求体：允许 / 拒绝 falcon 往这台主机上放东西。
 ///
-/// 只带要改的字段。`base_url` 给了（哪怕是空串 = 恢复官方源）就会作废该主机之前的
-/// 安装记录，下次重新走一遍安装流程。
+/// Zellij 时代还有个 `baseUrl`（宿主机自己下载 Zellij 用的镜像）；会话守护进程由后端推过去，
+/// 宿主机不下载，没有镜像可设，这个字段随之删掉（ADR 0020 决定七）。
 #[derive(Serialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HostAuthorizationPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorized: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
 }
 
 impl FalconClient {
@@ -122,13 +120,13 @@ impl FalconClient {
         self.bare(Method::POST, format!("/api/projects/{}/restore", seg(id)))
     }
 
-    /// `GET /api/projects/:id/host`：SSH 项目宿主机上的 Zellij 状态（授权按主机记）。
+    /// `GET /api/projects/:id/host`：SSH 项目宿主机上会话守护进程的状态（授权按主机记）。
     /// 本地项目是 400。
-    pub fn host_status(&self, project_id: &str) -> impl Future<Output = ApiResult<HostZellijStatus>> + MaybeSend + 'static {
+    pub fn host_status(&self, project_id: &str) -> impl Future<Output = ApiResult<HostInstallStatus>> + MaybeSend + 'static {
         self.get(format!("/api/projects/{}/host", seg(project_id)))
     }
 
-    /// `POST /api/projects/:id/host`：授权 / 拒绝在该主机安装 Zellij、改下载源。
+    /// `POST /api/projects/:id/host`：授权 / 拒绝往该主机部署会话守护进程。
     pub fn set_host_authorization(
         &self,
         project_id: &str,

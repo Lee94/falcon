@@ -2,8 +2,8 @@
 //!
 //! 同项目的多个会话复用同一条连接（多 channel）。连接断开时通知 `on_down` 的订阅者，
 //! 重连由 SessionManager 编排。这一份是传输层（S3）：连接、首次连接记指纹（TOFU）、认证、
-//! exec / 带 stdin 的 exec / 流式通道、正反两向的端口转发。探测、Zellij 安装与会话附着在
-//! 同目录的 `ssh_zellij.rs`。
+//! exec / 带 stdin 的 exec / 流式通道、正反两向的端口转发。探测、会话守护进程的部署与会话附着
+//! 在同目录的 `ssh_host.rs`。
 //!
 //! 库用 russh（设计文档决定四）：一条连接上要同时跑多路 PTY、转发与探测，libssh2 的 Session
 //! 不是线程安全的，做不到。与 Node 版 ssh2 必须对齐的几处：
@@ -153,8 +153,8 @@ pub struct SshLink {
     pub(crate) askpass_port: Cell<Option<u16>>,
     on_up: RefCell<Vec<Rc<dyn Fn()>>>,
     on_down: RefCell<Vec<Rc<dyn Fn()>>>,
-    /// 探测与 Zellij 的缓存（ssh_zellij.rs）
-    pub(crate) remote: RefCell<super::ssh_zellij::RemoteCache>,
+    /// 探测与会话守护进程的缓存（ssh_host.rs）
+    pub(crate) remote: RefCell<super::ssh_host::RemoteCache>,
     me: Weak<SshLink>,
 }
 
@@ -307,7 +307,7 @@ impl SshLink {
     // ---- 远端命令 ----
 
     /// 同 [`Exec::exec`]，但把 `input` 写进远端命令的 stdin，写完即 EOF（粘贴图片、
-    /// `zellij pipe` 这类要读到 EOF 才退出的命令）
+    /// 推会话守护进程这类要读到 EOF 才退出的命令）
     pub async fn exec_with_input(&self, command_line: &str, input: &[u8]) -> anyhow::Result<ExecResult> {
         let conn = self.get_client().await?;
         let channel = conn.handle.channel_open_session().await?;

@@ -201,7 +201,7 @@ if __name__ == "__main__":
 
 /// ECMAScript 的 WhiteSpace + LineTerminator（`String.prototype.trim` 去的那一套：
 /// 含 U+FEFF、不含 U+0085，与 Rust 的 `str::trim` 恰好相反）。falcon-server 里还没有
-/// 共用位置，zellij/command.rs、shells.rs 各有一份同样的。
+/// 共用位置，files.rs、shells.rs、git/command.rs 各有一份同样的。
 fn js_trim(s: &str) -> &str {
     s.trim_matches(|c| {
         matches!(

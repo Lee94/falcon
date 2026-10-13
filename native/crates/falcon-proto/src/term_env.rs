@@ -3,7 +3,7 @@
 //! termEnv.ts 其余都是服务端的运行时逻辑（写 PTY 环境、代答 OSC 10/11/12 的
 //! `OscColorGate`），这里不镜像：客户端只负责把深浅与底字色报上去（WS 的
 //! `appearance`、建会话的请求体），**自己不答颜色查询**——多个 Viewer 各答一次
-//! 就是往 zellij 里敲垃圾（设计文档 §3.2）。
+//! 就是往 PTY 里敲垃圾（设计文档 §3.2）。
 
 use serde::{Deserialize, Serialize};
 

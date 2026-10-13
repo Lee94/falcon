@@ -10,9 +10,13 @@ Web 端持久化终端工作台：以项目为单位管理终端会话，**会�
 | --- | --- |
 | 关闭 / 刷新浏览器页面 | 所有会话继续运行（硬保证），重开时回放历史输出 |
 | SSH 链路断开 | 持久会话中的命令继续运行，自动指数退避重连并接回 |
-| 后端进程重启 | 持久会话可懒惰接回（`dump-screen` 重建历史）；非持久会话标记为已丢失 |
+| 后端进程重启 | 持久会话自动接回，历史从宿主机上的终端状态完整重建；非持久会话标记为已丢失 |
 
-**持久会话 = Zellij 包装**。宿主机（本地 = 后端所在机器，SSH = 远端机器）上没有 Zellij 时，由**宿主机自行下载**锁定版本的二进制到 `~/.falcon/bin/`——不经后端中转，不走 SFTP。装不上则降级为普通会话，并在 UI 上标注具体原因（缺 curl、`noexec` 挂载、架构不支持等），而不是笼统的"非持久"。
+**持久会话 = falcon 自己的会话守护进程**（falcon-sessiond）。宿主机（本地 = 后端所在机器，SSH = 远端机器）上的每个会话由一对进程持有：holder 持 PTY、VT 进程（libghostty-vt）维护终端状态、回答终端查询、导出接回用的快照。守护进程由**后端推到宿主机**的 `~/.falcon/bin/`（文件名带内容哈希，推完握手校验），宿主机不需要能出网、不需要 curl / tar。推不上或跑不起来则降级为普通会话，并在 UI 上标注具体原因（目录不可写、`noexec` 挂载、架构不支持等），而不是笼统的"非持久"。
+
+程序可以用 OSC 7501（Program Status Protocol）报告自己在工作、等授权、完成还是出错——Claude Code 就会这么做。falcon 在侧栏和窗口标题栏上显示状态徽标，会话卡在等授权 / 等回答时弹一次提醒，没人在看的会话也一样。
+
+ssh 到宿主机上也能直接接回自己的会话：`~/.falcon/bin/falcon-sessiond-<版本>-<哈希> list` 看有哪些，`… attach <SID>` 接上（Ctrl+\ 断开，会话照常运行）。
 
 SSH 连接可以在设置里预先保存成远端主机，新建 SSH 项目时直接选择，不用每次重填主机、端口和凭据。
 
@@ -26,14 +30,15 @@ SSH 项目的右侧面板可以加端口转发：本地转发把远端服务映�
 
 首次在某台远端主机上创建会话时会询问一次授权——这会往你的服务器写入可执行文件。授权按主机记（host + port + username），同一台机器上的后续项目不再询问。
 
-装的过程会失败——远端网络抖动、镜像抽风、SSH 通道半路断开都很常见。因此：探测 / 下载 / 解压这类瞬时故障会**自动重试 3 次**（退避 1.5s、4s，进度条上会说明"正在第几次重试"）；下载带连接与停滞超时，连上却一个字节不来的黑洞路由不会让进度条转到天荒地老；三次都失败则给出远端的原始报错（如 `curl: (28) ...`）和一个**重试**按钮。跑不起来（`noexec`、架构不符）、缺 curl、缺 tar 这类稳定的环境事实不做自动重试——先去改环境，改完再点重试。
+推送会失败——SSH 通道半路断开很常见。因此：探测 / 上传这类瞬时故障会**自动重试 3 次**（退避 1.5s、4s，进度条上会说明"正在第几次重试"）；三次都失败则给出远端的原始报错和一个**重试**按钮。跑不起来（`noexec`、架构不符）、目录不可写这类稳定的环境事实不做自动重试——先去改环境，改完再点重试。
+
+**升级 falcon 时**：新版本推上去的守护进程按内容另起文件名，旧的不覆盖，已有会话照常运行、照常接回；只有 VT 进程会被热换成新版本（libghostty-vt 的二进制快照交接，换不了就用原始输出重建）。
 
 ### 已知限制
 
-- **内网 / 无出网的远端**：宿主机下不到二进制时，手动把 [Zellij](https://github.com/zellij-org/zellij/releases) 的 `no-web` 二进制放到远端 `~/.falcon/bin/zellij-<版本>` 即可（版本号见安装失败提示）。
-- **Windows 本地宿主**：若 falcon 后端进程处于 Job Object 中（被某些进程管理器或 IDE 拉起时常见），Zellij server 会随后端退出被杀。falcon 启动时会实测并诚实降级为非持久，而不是让你以为会话持久。
-- **Windows 远端**：Zellij 的 server 进程无法脱离 Win32-OpenSSH 的 Job Object（上游未修复），普通方式拉起的会话活不过 SSH 通道关闭。falcon 改经 WMI（`Win32_Process.Create`）把 server 生到 sshd 进程树之外，因此依赖宿主机允许本用户做 WMI 进程创建（默认允许）。首次使用时仍会做一次真实断线验证，验证不通过则标注为非持久。
-- Windows 无官方 ARM64 构建，靠 x64 模拟运行，能否跑起来由安装时的 `--version` 握手裁决。
+- **Windows 宿主**：守护进程先用 `CREATE_BREAKAWAY_FROM_JOB` 脱离调用方所在的 Job Object（sshd 的会话、被进程管理器拉起的后端都在 Job 里，Job 关闭时整棵进程树陪葬）；Job 不允许脱离时改经 WMI（`Win32_Process.Create`）拉起，依赖宿主机允许本用户做 WMI 进程创建（默认允许）。远端首次使用时会做一次真实断线验证，验证不通过则标注为非持久。**这条路径还没在 Windows 真机上验证过**。
+- **Windows 上没有程序状态**：ConPTY 会吞掉它不认识的 OSC，OSC 7501 到不了守护进程。
+- Windows ARM64 跑 x64 的构建，靠系统的 x64 模拟，能否跑起来由部署时的 `version` 握手裁决。
 - **派生超大仓库**：`git worktree add` 要物化整个工作区，几 GB 的仓库可能要几十秒。派生走的是普通 REST 请求（没有分阶段进度可报，加一套 WebSocket 只会多一层协议），放在反向代理后面时请确认 idle timeout 够长。
 - **Windows 上的派生路径长度**：目标路径超过 200 字符会被拒绝创建。建得出来却因为 `MAX_PATH` 删不掉，比一开始就说不行更糟。
 
@@ -77,11 +82,13 @@ cargo run -p falcon-desktop           # 或者直接开原生客户端
 | --- | --- | --- |
 | `--port` | `4923` | 监听端口 |
 | `--host` | `127.0.0.1` | 绑定地址；绑非 localhost 前必须先设置访问密码 |
-| `--data-dir` | `~/.falcon` | 数据目录（SQLite、加密密钥、本地 Zellij 二进制） |
+| `--data-dir` | `~/.falcon` | 数据目录（SQLite、加密密钥、本机的会话守护进程与它的会话） |
 
 对应环境变量：`FALCON_PORT` / `FALCON_HOST` / `FALCON_DATA_DIR`。旧名 `MOJITO_*` 仍可作回退。
 
-本机若已有 `~/.mojito` 且还没有 `~/.falcon`，会继续用旧目录（库文件同理：只有 `mojito.db` 时不另开空库）——后端自己的 SQLite 开在里面，不能边跑边改名。远端在探测到宿主机后会尝试把 `~/.mojito` 改名为 `~/.falcon`；改不了（被占用、没权限）则沿用旧路径，不会指向一个空目录把会话弄丢。Zellij 会话名前缀仍是 `mj-`，改掉会接不回已有持久会话。
+本机若已有 `~/.mojito` 且还没有 `~/.falcon`，会继续用旧目录（库文件同理：只有 `mojito.db` 时不另开空库）——后端自己的 SQLite 开在里面，不能边跑边改名。远端在探测到宿主机后会尝试把 `~/.mojito` 改名为 `~/.falcon`；改不了（被占用、没权限）则沿用旧路径。
+
+**从 Zellij 版本升级**：Zellij 已整体换成 falcon 自己的会话守护进程，旧会话不兼容——升级后旧的持久会话在列表里显示为已丢失，由你手动清除。会话里的程序其实还活在宿主机的 Zellij 里，falcon 不再管它们：想救可以 ssh 上去 `zellij attach mj-<…>`，用完自己结束（`zellij kill-all-sessions`）。
 
 ### 开发模式
 
@@ -134,14 +141,15 @@ GitHub Actions（`.github/workflows/package.yml`）跑的就是这两条命令�
 macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上；Actions 页手动触发只出构建产物、不发版。
 包里的版本号都取 `native/Cargo.toml` 的工作区版本（`[workspace.package] version`），打 tag 前先改好。
 
-原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle`——浏览器版客户端
-（rust-embed）、本平台的 meegle CLI、Zellij 滚动插件都编进二进制，没有首次运行的解压步骤；
-meegle 在第一次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`。
+原理：`cargo build --release -p falcon-server --features embed-web,embed-meegle,embed-sessiond`——浏览器版客户端
+（rust-embed）、本平台的 meegle CLI、5 个目标的会话守护进程（gzip）都编进二进制，没有首次运行的解压步骤；
+meegle 在第一次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`，守护进程在第一次用到时释放 / 推送。
+守护进程要 Zig（xtask 自己按钉死的版本下载）、rustup 的 5 个目标与 `cargo install cargo-zigbuild`。
 
 注意事项：
 
 - 体积约 40 MB，其中 meegle CLI 约 11 MB。
-- 不支持 Windows 目标：服务本身依赖 Zellij 与 POSIX shell。
+- 不支持 Windows 目标：服务的打包与托管只做了 macOS / Linux（Windows 宿主作为 SSH 远端是支持的）。
 
 ### 常驻运行（守护）
 
@@ -191,23 +199,26 @@ DB 迁移，旧代码不一定认识新库，降级前先备份数据目录里�
 - SSH 凭据：密码 / passphrase 以 AES-256-GCM 加密落盘，密钥在数据目录 `secret.key` —— 防数据库文件单独泄露，不防整机被攻破。
 - Host key：TOFU（首次连接记录指纹，之后指纹变化告警拒连）。
 - TLS 不内置，对外部署请置于反向代理之后。
-- **Zellij 二进制不做完整性校验**：走默认 GitHub 源时依赖 HTTPS 保证来源。若你为某台主机配置了自定义下载地址，控制该地址者即可在该主机上执行任意代码——请只填可信来源。
+- 会话守护进程由后端推送，不从网络下载；它的 socket 只给当前用户（目录 0700、socket 0600、accept 时核对对端 uid），Windows 上的命名管道 DACL 只放行当前用户并拒绝远程客户端。
 
 ## 从远端卸载
 
-falcon 在远端只写 `~/.falcon/`（二进制、Zellij 的 socket / config / data / cache），删掉即可完全卸载。删除项目不会自动清理远端——那台机器上可能还有你想留着的会话。
+falcon 在远端只写 `~/.falcon/`（二进制、守护进程的会话记录 / socket / 日志），删掉即可完全卸载（先 `falcon-sessiond kill` 掉还在跑的会话）。会话路径太长时 socket 会落到 `/tmp/falcon-sd-<uid>-<哈希>/`。删除项目不会自动清理远端——那台机器上可能还有你想留着的会话。
 
 **唯一的例外是附属项目**：它的工作目录是 falcon 自己 `git worktree add` 出来的，删除时会跑 `git worktree remove --force` 并清理该目录。清理失败（被 lock、被占用、权限不足）时会把残留路径原样告诉你，项目记录照删——留一条删不掉的项目行，你唯一的出路是去改 SQLite；残留目录你自己删得掉。源项目自己的目录、`~/.falcon/` 一概不动，**分支也永远不删**（未推送的提交只有那一份）。
 
-例外：macOS 远端上 Zellij 的 cache 路径由其依赖库硬编码，无法重定向，会残留 `~/Library/Caches/org.Zellij-Contributors.Zellij`。Linux 远端无此问题。
+## 升级 ghostty（会话守护进程里的 libghostty-vt）
 
-## 升级 Zellij 版本
+改 `native/sessiond/ghostty.pin` 的 commit 与源码包 sha256，然后：
 
 ```bash
-cd native && cargo xtask zellij-update 0.44.4
+cd native
+cargo xtask ghostty --targets all     # 按新 pin 编静态库
+cargo xtask ghostty-bindgen           # 重新生成绑定，diff 就是这次的 ABI 变化
+cargo xtask sessiond --check --targets all && cargo xtask sessiond --test   # 零警告 + 真 PTY 用例 + 接回比对语料
 ```
 
-它会校验该 tag 下五个 target 的 `no-web` 产物齐全，然后更新锁定版本。升级前请确认 Zellij 的 `CLIENT_SERVER_CONTRACT_VERSION` 未变——它一变，宿主机上已有的会话就接不回来了。
+宿主机上已有的会话不受影响：新版 falcon 接回时把它们的 VT 进程热换成新版本。
 
 ## 工程结构
 
@@ -225,7 +236,7 @@ native/
 │   ├── falcon-desktop/  原生客户端：入口 + 平台能力的原生实现
 │   └── falcon-web/      浏览器版：wasm 入口 + 平台能力的浏览器实现
 ├── web/                 浏览器版的宿主页与内置图标
-├── zellij-plugin/       滚动位置插件（wasm32-wasip1）
+├── sessiond/            会话守护进程 falcon-sessiond（独立工作区：libghostty-vt 绑定、holder / VT 进程）
 ├── xtask/               构建 / 打包 / 资源生成任务（cargo xtask）
 └── assets/fonts/        内嵌字体（woff2）
 ```
