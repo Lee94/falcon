@@ -207,6 +207,10 @@ pub struct TerminalView {
     attach_error: Option<String>,
     /// 服务端推的前台命令（自动标题的第二优先级）
     pub server_title: Option<String>,
+    /// 程序自己设的终端标题（OSC 0 / 2），只给标题栏胶囊的悬停提示当「在干什么」用
+    /// （`program_status::activity_text`）。改了不 notify：Claude Code 跑的时候标题前缀每秒换
+    /// 一次，不值得为它重画终端，提示弹出时再来取
+    osc_title: Option<String>,
     /// 会话持不持久（`Session.durable`），决定终端回复发不发：持久会话的查询由宿主机的 VT 进程
     /// 一处回答，客户端不答（ADR 0020 决定五）。None = 会话列表还没到（启动时恢复的窗口比列表
     /// 先建出来），这期间的回复先攒在 `pending_replies`，知道了再决定发还是丢
@@ -319,6 +323,7 @@ impl TerminalView {
             ws_retry: 0,
             attach_error: None,
             server_title: None,
+            osc_title: None,
             durable,
             pending_replies: Vec::new(),
             program_status: None,
@@ -349,6 +354,11 @@ impl TerminalView {
     /// 摘要：推送是实时的，轮询的响应可能比推送晚到、带着过时的状态
     pub fn program_records(&self) -> Option<&[ProgramStatusRecord]> {
         self.program_status.as_deref()
+    }
+
+    /// 程序设的终端标题（OSC 0 / 2）；没设过或被复位为 None
+    pub fn osc_title(&self) -> Option<&str> {
+        self.osc_title.as_deref()
     }
 
     /// 会话列表到了：补上持久性，攒着的回复按它发掉或丢掉。持久性在会话的一生里不变，
@@ -386,7 +396,8 @@ impl TerminalView {
                     match event {
                         TermEvent::PtyWrite(text) => self.reply(text),
                         TermEvent::ClipboardStore(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                        TermEvent::Title(_) | TermEvent::Bell => {}
+                        TermEvent::Title(title) => self.osc_title = title,
+                        TermEvent::Bell => {}
                     }
                 }
             }

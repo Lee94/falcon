@@ -121,11 +121,33 @@ pub fn detail_text(summary: &ProgramStatusSummary, max_chars: usize) -> Option<S
     Some(sanitize_display_text(&joined, max_chars))
 }
 
-/// 程序标识（`app`）显示到终端之外：同样是程序给的文本
-pub fn app_text(summary: &ProgramStatusSummary) -> Option<String> {
-    let app = sanitize_display_text(summary.app.as_deref()?, 40);
-    let app = app.trim();
-    (!app.is_empty()).then(|| app.to_string())
+/// 终端标题（OSC 0 / 2）当成「手上在干什么」的一句话，放进标题栏胶囊的悬停提示。
+///
+/// 为什么借终端标题：Claude Code（2.1.299 实测）的根记录只在 blocked / done 时带 msg，working
+/// 时什么都不说（title 从来不填），悬停提示里只剩"运行中 + 计时"；而它一直把会话的话题写在终端
+/// 标题里（`✳ 话题`，跑的时候前缀在 ◐ / ◑ 之间每 960ms 换一次）。别的程序没设标题时，shell 的
+/// preexec 通常写的是正在跑的命令，也算一句简述。
+///
+/// 标题同样是程序给的不可信文本：消毒、截断。打头的状态符号（✳ ◐ 这类符号区的字符、盲文点阵、
+/// emoji）去掉——它是给标签页看的动画，提示里只剩一帧没意义。去掉后与程序名一样的不要：Claude
+/// Code 还没生成话题时标题就是 "Claude Code"，说了等于没说
+pub fn activity_text(title: &str, app: Option<&str>) -> Option<String> {
+    let clean = sanitize_display_text(title, DETAIL_MAX_CHARS);
+    let text = clean.trim_start_matches(|c: char| c.is_whitespace() || is_status_glyph(c)).trim_end();
+    if text.is_empty() {
+        return None;
+    }
+    let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    if app.is_some_and(|app| squash(app) == squash(text)) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+/// 标签页标题前面那种状态符号：箭头 / 技术符号 / 几何图形 / 杂项符号 / 装饰符号 / 盲文点阵
+/// （U+2190–U+2BFF）与 emoji（U+1F000–U+1FAFF），再加上 `*` 与 `·`
+fn is_status_glyph(c: char) -> bool {
+    matches!(c, '\u{2190}'..='\u{2BFF}' | '\u{1F000}'..='\u{1FAFF}' | '*' | '·')
 }
 
 /// 终端标题栏上的一个子任务（胶囊旁边计数，悬停列出）
@@ -638,11 +660,23 @@ mod tests {
     }
 
     #[test]
-    fn app_text_is_sanitized() {
-        let s = ProgramStatusSummary { app: Some("claude-code\u{200B}".into()), ..summary(ProgramState::Working, 1) };
-        assert_eq!(app_text(&s).as_deref(), Some("claude-code"));
-        assert_eq!(app_text(&ProgramStatusSummary { app: Some(" \u{202E}".into()), ..summary(ProgramState::Working, 1) }), None);
-        assert_eq!(app_text(&summary(ProgramState::Working, 1)), None);
+    fn activity_text_strips_status_glyphs_and_program_name() {
+        let app = Some("claude-code");
+        // Claude Code 空闲时 ✳、跑的时候 ◐ ◑ 来回换；别的程序有用盲文点阵转圈的
+        assert_eq!(activity_text("✳ 去掉标题栏的计时", app).as_deref(), Some("去掉标题栏的计时"));
+        assert_eq!(activity_text("◑ Fix tooltip timer", app).as_deref(), Some("Fix tooltip timer"));
+        assert_eq!(activity_text("⠐ npm test", None).as_deref(), Some("npm test"));
+        assert_eq!(activity_text("🤖 * ship it ", app).as_deref(), Some("ship it"));
+        // 还没生成话题：标题就是程序名
+        assert_eq!(activity_text("✳ Claude Code", app), None);
+        assert_eq!(activity_text("Claude Code", None).as_deref(), Some("Claude Code"));
+        // shell 写的命令照样算；空的、只有符号的不要
+        assert_eq!(activity_text("cargo build", None).as_deref(), Some("cargo build"));
+        assert_eq!(activity_text(" ✳ ", app), None);
+        // 消毒：方向覆盖去掉
+        assert_eq!(activity_text("a\u{202E}b", None).as_deref(), Some("ab"));
+        // 打头的普通标点留着
+        assert_eq!(activity_text("(wip) x", None).as_deref(), Some("(wip) x"));
     }
 
     #[test]

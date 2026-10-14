@@ -18,9 +18,10 @@
 //! 呼吸）限帧到 `motion::FPS`。会动的两块（胶囊、底边线）各是一个小视图（[`StatusSlot`]），
 //! 每帧只重画它们自己，不连累整块画布。
 //!
-//! 胶囊悬停是完整的一段：短标签 + 程序那半句、计时、程序名、子任务。程序给的文本（title /
-//! message / app）一律是 falcon-core 消过毒的；会话名不用写——胶囊就挂在那扇窗口的标题栏上，
-//! 位置本身交代了来源。
+//! 胶囊上只有图标、两个字和进度；计时（已运行 / 已等待 / 用时）不占标题栏，放进悬停提示。提示是
+//! 完整的一段：短标签 + 程序那半句、手上在干什么（借终端标题，为什么见
+//! `program_status::activity_text`）、计时、子任务。程序给的文本（title / message / 终端标题）一律是 falcon-core 消过毒的；
+//! 会话名、程序名不用写——胶囊就挂在那扇窗口的标题栏上，位置本身交代了来源。
 
 use std::f32::consts::PI;
 
@@ -28,8 +29,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnimationExt, AnyElement, App, Context, Entity, FontWeight, Hsla, Render, SharedString, SpringAnimation,
-    SpringConfig, Subscription, Task, Transformation, Window, div, ease_in_out, linear_color_stop, linear_gradient, point, px,
+    AnimationExt, AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, Render, SharedString, SpringAnimation,
+    SpringConfig, Subscription, Transformation, Window, div, ease_in_out, linear_color_stop, linear_gradient, point, px,
     relative, size,
 };
 use rust_i18n::t;
@@ -68,40 +69,18 @@ pub struct StatusSlot {
     ws: Entity<Workspace>,
     session_id: String,
     part: Part,
-    /// 胶囊上的计时（已运行 / 已等待）在涨时，一秒后再画一次
-    clock_tick: Option<Task<()>>,
     _observe: Subscription,
 }
 
 impl StatusSlot {
     pub fn new(ws: Entity<Workspace>, session_id: String, part: Part, cx: &mut Context<Self>) -> Self {
         let _observe = cx.observe(&ws, |_, _, cx| cx.notify());
-        Self { ws, session_id, part, clock_tick: None, _observe }
-    }
-
-    /// 计时在涨就一秒后再画一次。只在需要时排，不常驻。眼下 working / blocked 都有持续动画在
-    /// 重画，这里是兜底——计时不该指望动画常驻
-    fn schedule_clock_tick(&mut self, cx: &mut Context<Self>) {
-        if self.part != Part::Chip || self.clock_tick.is_some() {
-            return;
-        }
-        if !self.ws.read(cx).program_clock(&self.session_id).is_some_and(ClockReading::ticking) {
-            return;
-        }
-        self.clock_tick = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-            this.update(cx, |this, cx| {
-                this.clock_tick = None;
-                cx.notify();
-            })
-            .ok();
-        }));
+        Self { ws, session_id, part, _observe }
     }
 }
 
 impl Render for StatusSlot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.schedule_clock_tick(cx);
         let ws = self.ws.read(cx);
         let Some(badge) = badge(&self.session_id, ws) else {
             return div().into_any_element();
@@ -110,24 +89,29 @@ impl Render for StatusSlot {
         // 状态（blocked 再加上要的是什么）进 id：换了就是新元素，一次性的动画从头播
         let tag = format!("{}-{:?}-{:?}", self.session_id, badge.tone, badge.kind);
         match self.part {
-            Part::Chip => chip(&self.session_id, &badge, color, &tag, ws, cx),
+            Part::Chip => chip(&self.session_id, &badge, color, &tag, &self.ws, ws, cx),
             Part::Edge => edge(&badge, color, &tag),
         }
     }
 }
 
 /// 状态胶囊 + 子任务数
-fn chip(session_id: &str, badge: &ProgramBadge, color: Hsla, tag: &str, ws: &Workspace, cx: &App) -> AnyElement {
-    let clock = ws.program_clock(session_id);
+fn chip(
+    session_id: &str,
+    badge: &ProgramBadge,
+    color: Hsla,
+    tag: &str,
+    ws_handle: &Entity<Workspace>,
+    ws: &Workspace,
+    cx: &App,
+) -> AnyElement {
     let tasks = ws
         .terminals
         .get(session_id)
         .and_then(|v| v.read(cx).program_records())
         .map(program_status::subtasks)
         .unwrap_or_default();
-    let app = ws.session(session_id).and_then(|s| s.program_status.as_ref()).and_then(program_status::app_text);
-    let tip = tooltip_text(badge, clock, app, &tasks);
-    let mut chip = div().flex().flex_none().items_center().gap(zpx(6.)).child(pill(badge, color, clock, tag, tip, cx));
+    let mut chip = div().flex().flex_none().items_center().gap(zpx(6.)).child(pill(badge, color, tag, tip(ws_handle, session_id), cx));
     if !tasks.is_empty() {
         // 子任务里有在等人的，图标跟着变警示色——主状态可能是 working（根记录还在跑）
         let waiting = tasks.iter().any(|task| task.tone == BadgeTone::Blocked);
@@ -147,11 +131,34 @@ fn chip(session_id: &str, badge: &ProgramBadge, color: Hsla, tag: &str, ws: &Wor
     chip.into_any_element()
 }
 
-/// 悬停提示：短标签 · 程序那半句，下面依次是计时、程序名、子任务
+/// 胶囊的悬停提示：文本在提示弹出时现算，计时是弹出那一刻的读数，悬停期间不跳（重新悬停就是新
+/// 的）。gpui-fast 的视图是保留式的，Tooltip 没人 notify 就不重画；而只要提示里的视图被 notify
+/// （试过每秒 notify Tooltip 本身、也试过挂一个自己 notify 的小视图），截图验证里提示就时有时无，
+/// 有时被标题栏自己的「拖标题栏…」提示顶掉——嵌套的两个提示谁在前像是跟着缓存视图的复用乱了。
+/// 为了计时多跳几秒不值得去动 vendor，就停在弹出那一刻
+fn tip(ws: &Entity<Workspace>, session_id: &str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let (ws, session_id) = (ws.clone(), session_id.to_string());
+    move |window, cx| {
+        let (ws, session_id) = (ws.clone(), session_id.clone());
+        Tooltip::element(move |_, cx| tip_text(ws.read(cx), &session_id, cx).unwrap_or_default()).build(window, cx)
+    }
+}
+
+fn tip_text(ws: &Workspace, session_id: &str, cx: &App) -> Option<SharedString> {
+    let badge = badge(session_id, ws)?;
+    let clock = ws.program_clock(session_id);
+    let terminal = ws.terminals.get(session_id).map(|v| v.read(cx));
+    let tasks = terminal.and_then(|v| v.program_records()).map(program_status::subtasks).unwrap_or_default();
+    let app = ws.session(session_id).and_then(|s| s.program_status.as_ref()).and_then(|s| s.app.as_deref());
+    let activity = terminal.and_then(|v| v.osc_title()).and_then(|t| program_status::activity_text(t, app));
+    Some(tooltip_text(&badge, activity, clock, &tasks))
+}
+
+/// 悬停提示：短标签 · 程序那半句，下面依次是手上在干什么、计时、子任务
 fn tooltip_text(
     badge: &ProgramBadge,
+    activity: Option<String>,
     clock: Option<ClockReading>,
-    app: Option<String>,
     tasks: &[program_status::SubTask],
 ) -> SharedString {
     let label = t!(badge.label_key).to_string();
@@ -159,11 +166,12 @@ fn tooltip_text(
         Some(detail) => format!("{label} · {detail}"),
         None => label,
     }];
+    // 程序那半句已经说了同一句话时不重复
+    lines.extend(activity.filter(|a| badge.detail.as_ref() != Some(a)));
     if let Some(reading) = clock {
         let (key, ms) = clock_key(reading);
         lines.push(t!(key, t = program_status::format_duration(ms)).to_string());
     }
-    lines.extend(app);
     if !tasks.is_empty() {
         lines.push(t!("programStatus.subtasks", n = tasks.len()).to_string());
         lines.extend(tasks.iter().map(|task| match &task.detail {
@@ -182,9 +190,15 @@ fn clock_key(reading: ClockReading) -> (&'static str, u64) {
     }
 }
 
-/// 状态胶囊：图标 + 两个字 + 进度 + 计时。blocked 是警示色实底（外加一圈呼吸的光晕），其余是
-/// 语义色的淡底
-fn pill(badge: &ProgramBadge, color: Hsla, clock: Option<ClockReading>, tag: &str, tip: SharedString, cx: &App) -> AnyElement {
+/// 状态胶囊：图标 + 两个字 + 进度（计时在悬停提示里）。blocked 是警示色实底（外加一圈呼吸的
+/// 光晕），其余是语义色的淡底
+fn pill(
+    badge: &ProgramBadge,
+    color: Hsla,
+    tag: &str,
+    tip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+    cx: &App,
+) -> AnyElement {
     let ui = Ui::global(cx);
     let blocked = badge.tone == BadgeTone::Blocked;
     let (bg, fg) = if blocked { (ui.warning, ui.warning_foreground) } else { (color.opacity(0.14), color) };
@@ -202,16 +216,7 @@ fn pill(badge: &ProgramBadge, color: Hsla, clock: Option<ClockReading>, tag: &st
         .font_weight(FontWeight::MEDIUM)
         .child(state_icon(badge, tag))
         .child(t!(badge.short_key).to_string())
-        .when_some(badge.progress, |d, p| d.child(t!("programStatus.progress", n = p).to_string()))
-        .when_some(clock, |d, reading| {
-            d.child(
-                div()
-                    .font_family(crate::fonts::BERKELEY)
-                    .font_weight(FontWeight::NORMAL)
-                    .opacity(0.8)
-                    .child(program_status::format_duration(clock_key(reading).1)),
-            )
-        });
+        .when_some(badge.progress, |d, p| d.child(t!("programStatus.progress", n = p).to_string()));
     // 光晕占着位置（2px 一圈），不在 blocked 时也留着：换状态时胶囊不挪窝
     let warning = ui.warning;
     let halo = div()
@@ -220,7 +225,7 @@ fn pill(badge: &ProgramBadge, color: Hsla, clock: Option<ClockReading>, tag: &st
         .p(zpx(2.))
         .rounded_full()
         .child(pill)
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+        .tooltip(tip);
     let halo = if blocked {
         halo.motion(
             SharedString::from(format!("pane-ps-halo-{tag}")),
