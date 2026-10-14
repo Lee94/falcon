@@ -204,29 +204,33 @@ pub fn windows_bridge_command(argv: &[String]) -> String {
     encode_powershell(&script)
 }
 
-/// POSIX 远端：从 stdin 收二进制写到 `file`。先写 `.partial` 再改名：推到一半断了不会留下
-/// 一个截断的可执行文件（同 px0）；目录 0700，只给自己
+/// POSIX 远端：从 stdin 收二进制写到 `file`。先写临时文件再改名：推到一半断了不会留下
+/// 一个截断的可执行文件（同 px0）；目录 0700，只给自己。
+///
+/// 临时文件名带远端 shell 的 pid：同一台机器上可能有几条推送同时在跑（升级后重启，几个项目的
+/// 会话一起接回、各自的链路都要推新版本）。共用一个 `.partial` 时，先写完的那条把它 `mv` 走，
+/// 后写完的那条 `chmod` 就是 "cannot access"；先写完的那条去握手时文件还被另一条开着写，
+/// 就是 Text file busy（2026-10-14 实际撞上过，两个活着的会话因此被判没了）。
+/// 失败时删掉自己的临时文件：名字不再复用，不删的话每失败一次留一个几 MB 的残骸
 pub fn posix_install_command(file: &str) -> String {
     let dir = match file.rfind('/') {
         Some(i) if i > 0 => &file[..i],
         _ => "/",
     };
     format!(
-        "d={}; f={}; mkdir -p \"$d\" && chmod 700 \"$d\" && cat > \"$f.partial\" && chmod 755 \"$f.partial\" && mv -f \"$f.partial\" \"$f\"",
+        "d={}; f={}; t=\"$f.partial.$$\"; \
+         {{ mkdir -p \"$d\" && chmod 700 \"$d\" && cat > \"$t\" && chmod 755 \"$t\" && mv -f \"$t\" \"$f\"; }} \
+         || {{ c=$?; rm -f \"$t\"; exit $c; }}",
         crate::host::quote_posix(dir),
         crate::host::quote_posix(file)
     )
 }
 
 /// Windows 远端：stdin 上逐行 base64（ADR 0008 的行协议，`transfer.rs` 的编码器），写临时文件、
-/// 核对字节数后改名。PowerShell 读不了 stdin 上的原始字节（同 windows_bridge_command 的理由）
+/// 核对字节数后改名。PowerShell 读不了 stdin 上的原始字节（同 windows_bridge_command 的理由）。
+/// 临时文件名带 PowerShell 的 pid、失败时删掉，理由同 [`posix_install_command`]
 pub fn windows_install_command(file: &str, size: u64) -> String {
-    let script = [
-        "$ErrorActionPreference = 'Stop'".to_string(),
-        format!("$f = {}", quote_powershell(file)),
-        "$t = $f + '.partial'".to_string(),
-        "$d = Split-Path -Parent $f".to_string(),
-        "New-Item -ItemType Directory -Force -Path $d | Out-Null".to_string(),
+    let body = [
         "$fs = [IO.File]::Create($t)".to_string(),
         "try { while ($null -ne ($line = [Console]::In.ReadLine())) { \
          if ($line.Length -gt 0) { $b = [Convert]::FromBase64String($line); $fs.Write($b, 0, $b.Length) } } \
@@ -234,6 +238,15 @@ pub fn windows_install_command(file: &str, size: u64) -> String {
             .to_string(),
         format!("if ((Get-Item -LiteralPath $t -Force).Length -ne {size}) {{ Remove-Item -LiteralPath $t -Force; Write-Output 'ESHORT'; exit 1 }}"),
         "Move-Item -LiteralPath $t -Destination $f -Force".to_string(),
+    ]
+    .join("; ");
+    let script = [
+        "$ErrorActionPreference = 'Stop'".to_string(),
+        format!("$f = {}", quote_powershell(file)),
+        "$t = $f + '.partial.' + $PID".to_string(),
+        "$d = Split-Path -Parent $f".to_string(),
+        "New-Item -ItemType Directory -Force -Path $d | Out-Null".to_string(),
+        format!("try {{ {body} }} catch {{ Remove-Item -LiteralPath $t -Force -ErrorAction SilentlyContinue; throw }}"),
     ]
     .join("; ");
     encode_powershell(&script)
@@ -329,8 +342,43 @@ mod tests {
     #[test]
     fn install_commands_write_partial_then_rename() {
         let c = posix_install_command("/h/.falcon/bin/sd");
-        assert!(c.contains("cat > \"$f.partial\"") && c.contains("mv -f \"$f.partial\" \"$f\""), "{c}");
+        assert!(c.contains("t=\"$f.partial.$$\"") && c.contains("cat > \"$t\"") && c.contains("mv -f \"$t\" \"$f\""), "{c}");
         let w = decode(&windows_install_command("C:\\h\\.falcon\\bin\\sd.exe", 42));
         assert!(w.contains("FromBase64String") && w.contains("-ne 42") && w.contains("Move-Item"), "{w}");
+        assert!(w.contains("'.partial.' + $PID") && w.contains("catch { Remove-Item -LiteralPath $t"), "{w}");
+    }
+
+    /// 两条推送同时往同一个文件推（升级后几个项目的会话一起接回）：各写各的临时文件、都成功，
+    /// 落下的是完整的可执行文件，没有残骸。共用 `.partial` 的旧命令在这里是后收尾的那条
+    /// `chmod: cannot access`
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_posix_installs_do_not_trip_over_each_other() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bin").join("sd");
+        let cmd = posix_install_command(file.to_str().unwrap());
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut kids: Vec<_> = (0..2)
+            .map(|_| Command::new("sh").arg("-c").arg(&cmd).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap())
+            .collect();
+        // 交替喂：两个 cat 同时开着
+        for chunk in bytes.chunks(50_000) {
+            for k in &mut kids {
+                k.stdin.as_mut().unwrap().write_all(chunk).unwrap();
+            }
+        }
+        // 一条先写完、改名到位，另一条再收尾
+        for mut k in kids {
+            drop(k.stdin.take());
+            let out = k.wait_with_output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o755);
+        let left: Vec<_> = std::fs::read_dir(file.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("sd")]);
     }
 }

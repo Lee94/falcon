@@ -313,7 +313,7 @@ fn upgrade_vt(&self, _binary: &str) {}
 - **创建**：`prepare` 先部署守护进程（10.5），成功则 `durable = true`。附着失败（守护进程拉不起来：Windows 的 Job 不让脱离、WMI 也被禁）时**退成非持久**并写明原因（本机且后端在 Job 里 → `windows-job-object`，其余 → `verify-failed`），会话照样开得出来。没有退回 Zellij 这条路。
 - **输出路径**：只做 16ms 合并与背压，不过 `OscColorGate`、不跟踪模式、不进 RingBuffer。
 - **回放**：见 5.5。
-- **接回**：不再有 `captured_history`。连上 holder 即视为存活，`mark_active(replay=true)` 之后所有 Viewer 搭一班 Sync。接回时 entry 还没有部署信息（后端重启后重建的 entry）就重新 prepare：链路一类的失败（probe / upload / cancelled / unknown）返回可重试的错误，稳定的环境事实（没有这个架构的构建、没授权）说明这台机器上不可能有守护进程会话，记 `SessionGone`。接回时如果 VT 进程的 ghostty 与这次部署的不同，发 `UpgradeVt`（2.3）。
+- **接回**：不再有 `captured_history`。连上 holder 即视为存活，`mark_active(replay=true)` 之后所有 Viewer 搭一班 Sync。接回时 entry 还没有部署信息（后端重启后重建的 entry）就重新 prepare：**失败一律返回可重试的错误、会话留在 unverified**，不论原因——部署失败只说明这一次没把守护进程放好、握上手，说明不了宿主机上的会话没了，`SessionGone` 只认宿主机给的证据（下面的退出判定）。缓存在链路上的部署失败放凉（60 秒）之后，下一次接回会重推；本机的每次都重来。（原先把"稳定的环境事实"当成"这台机器上不可能有会话"直接记 `SessionGone`：2026-10-14 升级后重启，同一台机器上两个项目同时重推、踩了同一个 `.partial`，`chmod: cannot access` 被认成目录写不了，两个活着的会话被判没了，之后还会被孤儿清理杀掉。）接回时如果 VT 进程的 ghostty 与这次部署的不同，发 `UpgradeVt`（2.3）。
 - **退出判定**（替换 Zellij 的 `has_session`）：
   - 收到过 `Exit` → `dead(exited)`；
   - 本机连接断开：有 `<sid>.exit` → `dead(exited)`；meta 里的 pid 还活着 → `unverified`（自动接回）；否则 `dead(session-gone)`；
@@ -338,11 +338,13 @@ fn upgrade_vt(&self, _binary: &str) {}
 | 探测 | 不需要 | `RemoteProbe`：home、`uname -sm`、登录 shell → 目标三元组 | `PROCESSOR_ARCHITECTURE`（ARM64 跑 x64 构建） |
 | 二进制从哪来 | `bin.rs`（见下） | 同左，取对应目标 | 同左 |
 | 是否已在 | — | `[ -x <bin> ]`，在就直接握手 | `Test-Path` 同理 |
-| 推送 | 拷到 `<dataDir>/bin/` | `exec_with_input`：`mkdir -p; chmod 700; cat > f.partial; chmod 755; mv -f`（同 px0） | base64 行协议（`transfer.rs` 的编码器），核对字节数，`Move-Item` |
+| 推送 | 拷到 `<dataDir>/bin/` | `exec_with_input`：`mkdir -p; chmod 700; cat > f.partial.$$; chmod 755; mv -f`，失败删掉临时文件 | base64 行协议（`transfer.rs` 的编码器），临时文件带 `$PID`，核对字节数，`Move-Item`，失败删掉临时文件 |
 | 握手 | `version --json`：版本、目标、协议区间都要对得上 | 同左 | 同左 |
 | 失败原因 | `dir-not-writable` / `verify-failed` / `sessiond-unavailable` | 另有 `probe-failed` / `upload-failed`（自动重试 3 次） / `arch-unsupported`；noexec 挂载卡在握手（隔离 sshd 用例验证：报 `verify-failed`，详情是远端的 Permission denied） | 同左；另有真实断线验证（12） |
 
 阶段经 `/ws/install/{project_id}` 上报：`probing` → `verifying`（已在）或 `uploading` → `verifying`。本机只是拷文件，不报阶段。
+
+**同一台机器一次只部署一处**。链路按项目开，同一台机器（user@host:port）上的几个项目各一条：升级后重启时它们的会话一起接回、一起要推新版本。`SessionManager::prepare` 按机器排队（已有结论的链路不排），排在后面的拿到锁时，二进制多半已经被前一处推好，只剩"在不在 + 握手"。临时文件名再各不相同，挡住排队管不到的并发（同一台机器换个主机名、另一台机器上的 falcon）。`dir-not-writable` 只认权限不够 / 只读文件系统 / Windows 的拒绝访问，`cannot access` / `cannot stat` / 文件被占用 / Text file busy 都按瞬时故障自动重试——旧的判法按 "access" 一个词归成目录写不了。
 
 **二进制定位**（`bin.rs`，照 `meegle/bin.rs` 的优先级链）：
 
@@ -465,7 +467,7 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 | 接回比对语料 | `tests/corpus/`（shell 颜色与 CJK / emoji / ZWJ / 国旗 / 组合字符 / 真彩下划线 / 250 字符软折行 / OSC 8、vim 备用屏带鼠标模式、less、git log --graph、top、清屏、bracketed paste 等模式）各自「直接喂 alacritty」与「VT 导出后再喂」逐行比较文字、软折行、样式、OSC 8 链接、光标、模式，备用屏下再比主屏历史；另有切点落在每一个字节上的续接用例、末尾空行与关自动换行的用例 | 通过（补回末尾空行之前 less / top 两份对不上，见 6.2） |
 | falcon-server | 原有 669 个用例；新增守护进程会话：从快照回放给第二个 Viewer、退出判定、后端重启后接回且历史还在、终止后宿主机上不再有活的 holder、Zellij 时代的行接回后 `dead(session-gone)`、程序状态推给 Viewer 并进列表摘要；`session_hosts` 的部分更新、授权只抄一次 | 通过（守护进程那几个在没编守护进程时跳过） |
 | 端到端 | `FALCON_E2E=1` 的 falcon-client e2e：起服务端 → 建会话 → 回显与 resize → 设密码 → 两次重启（REST 401 / socket 4401 各自动重登一次）后接回 → Terminate | 通过（2 秒） |
-| SSH | 隔离的 sshd 容器（alpine aarch64、bash 登录 shell，`.profile` / `.bashrc` 往 stdout 打字）：未授权非持久 → 授权后探测 / 上传 / 握手 → 建会话（尺寸、TERM、rc 的噪音没混进帧流）→ 「重启后端」后接回且历史还在 → 前台探测 → 退出 → 终止后远端没有活的会话；另一个容器把 `~/.falcon` 挂成 noexec：报 `verify-failed`，会话照样建（非持久） | 通过（`FALCON_SSH_TEST` / `FALCON_SSH_TEST_NOEXEC` 的 #[ignore] 用例） |
+| SSH | 隔离的 sshd 容器（alpine aarch64、bash 登录 shell，`.profile` / `.bashrc` 往 stdout 打字）：未授权非持久 → 授权后探测 / 上传 / 握手 → 建会话（尺寸、TERM、rc 的噪音没混进帧流）→ 「重启后端」后接回且历史还在 → 前台探测 → 退出 → 终止后远端没有活的会话；另一个容器把 `~/.falcon` 挂成 noexec：报 `verify-failed`，会话照样建（非持久）；同一台机器上两个项目各一个会话、删掉二进制后「重启」一起接回：两个都回来、宿主机上不留临时文件（修之前的代码跑 3 次有 2 次是 `dead(session-gone)`，与 2026-10-14 的现场一致） | 通过（`FALCON_SSH_TEST` / `FALCON_SSH_TEST_NOEXEC` 的 #[ignore] 用例，几个 SSH 用例共用远端家目录，要 `--test-threads=1`） |
 | 界面 | 原生客户端 Metal 截图：持久会话的终端正常；发 OSC 7501 blocked 后侧栏与标题栏出现「授权」徽标、弹出带会话名与消息的提醒 | 看过 |
 | Windows | 真机手测清单：本机后端在 Job 内外、breakaway 与 WMI 两条路、SSH 推送（base64 行）与 bridge（.NET Process 继承句柄、二进制不被改写）、首次断线验证、ConPTY resize、前台命令、命名管道权限与 PIPE_BUSY、attach 的控制台模式 | **未做**：只有交叉编译与零警告检查 |
 

@@ -207,27 +207,42 @@ pub async fn ensure_remote(
     }
     if !res.ok() {
         let text = [res.stderr.trim(), res.stdout.trim()].into_iter().find(|s| !s.is_empty()).unwrap_or("").to_string();
-        let lower = text.to_ascii_lowercase();
-        // 稳定的环境事实（目录写不了）与瞬时故障分开：前者重试白搭
-        let reason = if lower.contains("permission denied") || lower.contains("read-only") || lower.contains("access") {
-            InstallFailure::DirNotWritable
-        } else {
-            InstallFailure::UploadFailed
-        };
         let detail = if text.is_empty() { format!("远端命令退出码 {}", res.code.map_or("null".into(), |c| c.to_string())) } else { text };
-        return Err(InstallError::new(reason, Some(detail)));
+        return Err(InstallError::new(upload_failure(&detail), Some(detail)));
     }
 
     stage(InstallStage::Verifying, format!("{path} version --json"));
     match link.exec(&version_cmd, cancel).await {
         Ok(r) if r.ok() && version_matches(&r.stdout, target) => Ok(deployed(&r.stdout)),
-        Ok(r) => Err(InstallError::new(
-            InstallFailure::VerifyFailed,
-            Some([r.stderr.trim(), r.stdout.trim()].into_iter().find(|s| !s.is_empty()).unwrap_or("没有输出").to_string()),
-        )),
+        Ok(r) => {
+            let text = [r.stderr.trim(), r.stdout.trim()].into_iter().find(|s| !s.is_empty()).unwrap_or("没有输出").to_string();
+            Err(InstallError::new(verify_failure(&text), Some(text)))
+        }
         // 握手那一瞬链路断了与"二进制跑不动"是两码事：前者重试有救
         Err(e) => Err(InstallError::new(InstallFailure::ProbeFailed, Some(format!("验证握手时与宿主机失去联系：{e:#}")))),
     }
+}
+
+/// 推送命令失败时按报错分类：稳定的环境事实（目录写不了）重试白搭，其余都按瞬时故障自动重试。
+///
+/// 只认确实说明"这里写不了"的几种：权限不够（EACCES / EPERM）、只读文件系统、Windows 的拒绝访问。
+/// 别按 "access" 一个词判——GNU coreutils 的 `chmod: cannot access '…': No such file or directory`、
+/// .NET 的 "cannot access the file … because it is being used by another process" 都是另一条推送
+/// 踩了同一个文件，下一次就好（2026-10-14 实际撞上过：被认成目录写不了，不重试，接回的会话被判没了）
+fn upload_failure(text: &str) -> InstallFailure {
+    let lower = text.to_ascii_lowercase();
+    let stable = lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("read-only file system")
+        || lower.contains("access is denied")
+        || (lower.contains("access to the path") && lower.contains("denied"));
+    if stable { InstallFailure::DirNotWritable } else { InstallFailure::UploadFailed }
+}
+
+/// 握手失败的分类。Text file busy 是有人还开着这个文件在写（并发的推送）——等一下再推一次就好，
+/// 不是"这份二进制在这台机器上跑不起来"
+fn verify_failure(text: &str) -> InstallFailure {
+    if text.to_ascii_lowercase().contains("text file busy") { InstallFailure::UploadFailed } else { InstallFailure::VerifyFailed }
 }
 
 #[cfg(test)]
@@ -246,6 +261,32 @@ mod tests {
         )
         .await;
         assert_eq!((r.unwrap_err().reason, calls.get()), (InstallFailure::VerifyFailed, 1));
+    }
+
+    #[test]
+    fn only_real_permission_problems_count_as_dir_not_writable() {
+        for stable in [
+            "mkdir: cannot create directory '/h/.falcon/bin': Permission denied",
+            "chmod: changing permissions of '/h/.falcon/bin': Operation not permitted",
+            "sh: 1: cannot create /h/.falcon/bin/sd.partial.42: Read-only file system",
+            "Access to the path 'C:\\Users\\a\\.falcon\\bin\\sd.exe.partial.7' is denied.",
+            "Access is denied.",
+        ] {
+            assert_eq!(upload_failure(stable), InstallFailure::DirNotWritable, "{stable}");
+        }
+        for transient in [
+            // 两条推送共用一个临时文件时实际报出来的（GNU coreutils）
+            "chmod: cannot access '/h/.falcon/bin/falcon-sessiond-0.3.3-694c46fe.partial': No such file or directory",
+            "mv: cannot stat '/h/.falcon/bin/sd.partial': No such file or directory",
+            "The process cannot access the file 'C:\\h\\sd.exe.partial' because it is being used by another process.",
+            "sh: 1: cannot create /h/.falcon/bin/sd.partial: Text file busy",
+            "ESHORT",
+            "远端命令退出码 1",
+        ] {
+            assert_eq!(upload_failure(transient), InstallFailure::UploadFailed, "{transient}");
+        }
+        assert_eq!(verify_failure("sh: 1: /h/.falcon/bin/sd: Text file busy"), InstallFailure::UploadFailed);
+        assert_eq!(verify_failure("sh: 1: /h/.falcon/bin/sd: Permission denied"), InstallFailure::VerifyFailed);
     }
 
     #[test]

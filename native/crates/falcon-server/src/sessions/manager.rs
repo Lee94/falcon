@@ -81,6 +81,10 @@ const TITLE_PROBE_MS: u64 = 2_500;
 
 const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
 
+/// 接回时，宿主机上一次部署失败的判定放多久就不作数、再推一次（[`SshLink::forget_failed_sessiond`]）。
+/// 比重连退避的上限长一档：退避到顶后每两轮重推一次，而不是每轮
+const REDEPLOY_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// 指数退避：1s 起翻倍，封顶 30s
 fn backoff_ms(attempt: u32) -> u64 {
     RECONNECT_MAX_DELAY_MS.min(1000 * 2u64.pow(attempt.saturating_sub(1).min(10)))
@@ -351,6 +355,10 @@ pub struct SessionManager {
     size_flush: RefCell<HashSet<String>>,
     /// 已经扫过孤儿会话的宿主机（"local" 或 user@host:port）
     swept: RefCell<HashSet<String>>,
+    /// 往宿主机部署守护进程的排队锁，键是 user@host:port（[`host_key`]）。链路按项目开，同一台
+    /// 机器上几个项目各有一条：升级后重启，它们的会话一起接回、一起推新版本，不排队就会在
+    /// 宿主机上踩同一个文件（见 prepare）
+    deploying: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -395,6 +403,7 @@ impl SessionManager {
                 last_touch: RefCell::default(),
                 size_flush: RefCell::default(),
                 swept: RefCell::default(),
+                deploying: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -485,14 +494,47 @@ impl SessionManager {
         }
 
         let link = self.get_link(project);
-        if fresh {
-            link.reset_sessiond();
-        }
-        let remote = link.prepare_sessiond(on_stage, cancel).await;
+        let remote = match link.cached_sessiond().filter(|_| !fresh) {
+            Some(remote) => remote,
+            None => {
+                // 同一台机器一次只部署一处：几个项目（各一条链路）、同一项目的几个会话同时接回时，
+                // 排在后面的拿到锁再看——同一条链路上已经有结论就直接用，别的链路推好了的，
+                // 它自己的 ensure_remote 只剩"在不在 + 握手"两个往返
+                let lock = self.deploying.borrow_mut().entry(host_key(project)).or_default().clone();
+                let _turn = match cancel {
+                    Some(token) => tokio::select! {
+                        turn = lock.lock() => turn,
+                        _ = token.cancelled() => {
+                            return DurableState { durable: false, reason: Some(NonDurableReason::Cancelled), ..Default::default() };
+                        }
+                    },
+                    None => lock.lock().await,
+                };
+                // 拿到锁之后再清：排队期间别处定下的结论，也是这次 fresh 要丢掉的
+                if fresh {
+                    link.reset_sessiond();
+                }
+                link.prepare_sessiond(on_stage, cancel).await
+            }
+        };
         if let Some(d) = remote.deployed.clone() {
             self.sweep_remote_orphans_once(&link, d);
         }
         DurableState { durable: remote.durable, reason: remote.reason, detail: remote.detail, deployed: remote.deployed }
+    }
+
+    /// 接回用的 prepare：上一次部署失败的判定放凉了就不作数，再推一次（本机的部署只是拷个
+    /// 文件、握个手，失败了每次都重来）。不这样的话，一次失败会把等着接回的会话一直钉在
+    /// unverified，直到后端重启或用户去点部署重试
+    async fn prepare_for_reattach(&self, project: &ProjectRow) -> DurableState {
+        if project.project_type == "local" {
+            if self.local.peek().is_some_and(|l| !l.durable) {
+                self.local.reset();
+            }
+        } else if let Some(link) = self.existing_link(&project.id) {
+            link.forget_failed_sessiond(REDEPLOY_COOLDOWN);
+        }
+        self.prepare(project, None, None, false).await
     }
 
     /// 用户改了授权之后，清掉缓存的判定以便重试
@@ -543,8 +585,7 @@ impl SessionManager {
     }
 
     fn sweep_remote_orphans_once(&self, link: &Rc<SshLink>, deployed: Deployed) {
-        let p = link.project();
-        let key = format!("{}@{}:{}", p.ssh_username.unwrap_or_default(), p.ssh_host.unwrap_or_default(), p.ssh_port.unwrap_or(22));
+        let key = host_key(&link.project());
         if self.swept.borrow_mut().insert(key.clone()) {
             let me = self.me();
             let link = link.clone();
@@ -970,18 +1011,22 @@ impl SessionManager {
             }
         };
 
-        // 接回时 entry 可能还没有守护进程（后端重启后重建的 entry），重新准备一次
+        // 接回时 entry 可能还没有守护进程（后端重启后重建的 entry），重新准备一次。
+        //
+        // 准备不成只说明这一次没能把守护进程放好、握上手，说明不了宿主机上的会话没了：一律留在
+        // unverified 等下一轮，判 Gone 只认宿主机给的证据（bridge 的退出码、本机的会话目录）。
+        // 以前把"稳定的环境事实"（目录写不了、跑不起来、没授权……）当成"这台机器上不可能有会话"：
+        // 2026-10-14 升级后重启，同一台机器上两个项目同时重推新版本、踩了同一个临时文件，报错被认成
+        // 目录写不了，两个活得好好的会话被标成 session-gone，之后还会被孤儿清理杀掉
         if entry.durable && entry.deployed().is_none() {
-            let prep = self.prepare(project, None, None, false).await;
-            match (prep.durable, prep.deployed, prep.reason) {
-                (true, Some(d), _) => entry.s.borrow_mut().deployed = Some(d),
-                // 链路一类的故障：会话多半还在，下次再试
-                (_, _, None | Some(NonDurableReason::ProbeFailed | NonDurableReason::UploadFailed | NonDurableReason::Cancelled))
-                | (_, _, Some(NonDurableReason::Unknown)) => {
-                    return Err(SessionError::Failed(prep.detail.unwrap_or_else(|| "宿主机上的守护进程没就位".into())));
+            let prep = self.prepare_for_reattach(project).await;
+            match (prep.durable, prep.deployed) {
+                (true, Some(d)) => entry.s.borrow_mut().deployed = Some(d),
+                _ => {
+                    let reason = prep.reason.map_or("unknown", |r| r.as_str());
+                    let detail = prep.detail.map(|d| format!("：{d}")).unwrap_or_default();
+                    return Err(SessionError::Failed(format!("宿主机上的守护进程没就位（{reason}）{detail}")));
                 }
-                // 稳定的环境事实（没有这个架构的构建、没授权……）：这样的宿主机上不可能有守护进程会话
-                _ => return Err(SessionError::Gone),
             }
         }
 
@@ -1976,6 +2021,16 @@ impl SessionManager {
 
 fn dead_reason_of(row: &SessionRow) -> Option<DeadReason> {
     row.dead_reason.as_deref().map(|r| DeadReason::from_wire(r).unwrap_or(DeadReason::Unknown))
+}
+
+/// 一台 SSH 宿主机的身份：同一台机器上的几个项目（各一条链路）共用它（部署排队、孤儿清理）
+fn host_key(project: &ProjectRow) -> String {
+    format!(
+        "{}@{}:{}",
+        project.ssh_username.as_deref().unwrap_or_default(),
+        project.ssh_host.as_deref().unwrap_or_default(),
+        project.ssh_port.unwrap_or(22)
+    )
 }
 
 /// 远端命令失败的文案：stderr 优先，没有就带上退出码

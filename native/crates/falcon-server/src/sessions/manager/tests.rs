@@ -491,6 +491,125 @@ fn program_status_is_pushed_to_viewers_and_listed() {
     });
 }
 
+/// 「升级后重启」的接回撞上一次失败的部署（缓存在那儿的判定）：会话照样接得回来。
+/// 以前部署失败里"稳定的那几种"直接判 session-gone——2026-10-14 两条推送踩了同一个临时文件，
+/// 报错被认成目录写不了，活着的会话就这样被标成没了
+#[test]
+fn a_cached_deploy_failure_does_not_bury_a_live_session() {
+    if !sessiond_available() {
+        return;
+    }
+    run(async {
+        let h = durable_harness("f").await;
+        let s = new_session(&h).await;
+        let mut a = Peer::new();
+        h.mgr.add_viewer(&s.id, a.viewer.clone());
+        h.mgr.resize(&s.id, a.id(), 80, 24);
+        a.wait("提示符", has_output("$")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        h.mgr.input(&s.id, a.id(), "echo st$((3+4))ill\n");
+        a.wait("输出", has_output("st7ill")).await;
+
+        h.db.update_session_state(&s.id, SessionState::Unverified, None);
+        let Harness { dir, db, mgr, project } = h;
+        drop(mgr);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let secrets = Arc::new(SecretBox::open(dir.path()).unwrap());
+        let mgr = SessionManager::new(db.clone(), secrets, dir.path().to_path_buf(), Arc::new(AskpassHub::new()));
+        mgr.local.set_base_env(test_env());
+        mgr.local.set_prepared(LocalSessiond::non_durable(
+            NonDurableReason::DirNotWritable,
+            Some("chmod: cannot access '….partial': No such file or directory".into()),
+        ));
+        let h = Harness { dir, db, mgr, project };
+
+        let mut b = Peer::new();
+        h.mgr.add_viewer(&s.id, b.viewer.clone());
+        h.mgr.resize(&s.id, b.id(), 80, 24);
+        b.wait("接回后 active", has_state("active")).await;
+        b.wait("历史还在", has_replay("st7ill")).await;
+        assert!(h.mgr.local.peek().is_some_and(|l| l.durable), "接回时重新部署过，新会话也该是持久的");
+        h.mgr.terminate(&s.id, true).await;
+        kill_all(&h).await;
+    });
+}
+
+fn ssh_project(id: &str) -> ProjectRow {
+    ProjectRow {
+        id: id.into(),
+        name: "remote".into(),
+        project_type: "ssh".into(),
+        // TEST-NET-1：用例走不到连接那一步，万一走到了也连不上任何真机器
+        ssh_host: Some("192.0.2.1".into()),
+        ssh_port: Some(22),
+        ssh_username: Some("fx".into()),
+        ssh_auth_method: Some("key".into()),
+        created_at: now_ms(),
+        ..Default::default()
+    }
+}
+
+/// 接回时宿主机上的守护进程没就位（这里是没授权）：说明不了会话没了，留在 unverified 等下一轮
+#[test]
+fn reattach_keeps_waiting_when_the_daemon_is_not_ready() {
+    run(async {
+        let h = harness();
+        let project = ssh_project("ssh-na");
+        h.db.insert_project(&project);
+        let row = SessionRow {
+            id: "1667c495-0ab4-4a6f-b096-ec458f0af07a".into(),
+            project_id: project.id.clone(),
+            state: "unverified".into(),
+            durable: 1,
+            created_at: now_ms(),
+            last_active_at: now_ms(),
+            ..Default::default()
+        };
+        h.db.insert_session(&row);
+        let res = h.mgr.ensure_attached(&row.id, true).await;
+        assert!(matches!(&res, Err(SessionError::Failed(m)) if m.contains("not-authorized")), "{res:?}");
+        let after = h.db.get_session(&row.id).unwrap();
+        assert_eq!((after.state.as_str(), after.dead_reason.as_deref()), ("unverified", None));
+    });
+}
+
+/// 缓存的部署失败：放凉之前接回照用（同一轮里排队接回的几个会话别各推一遍），放凉之后丢掉重推；
+/// 成功的结论不丢
+#[test]
+fn stale_deploy_failures_are_retried_after_the_cooldown() {
+    use crate::sessions::ssh_host::RemoteSessiond;
+    use std::time::Instant;
+    run(async {
+        let h = harness();
+        let link = h.mgr.get_link(&ssh_project("ssh-cd"));
+        let failed = RemoteSessiond {
+            durable: false,
+            reason: Some(NonDurableReason::DirNotWritable),
+            detail: None,
+            deployed: None,
+            kind: HostKind::Posix,
+        };
+        let long_ago = Instant::now().checked_sub(REDEPLOY_COOLDOWN + Duration::from_secs(1)).unwrap();
+        let set = |state: &RemoteSessiond, at: Instant| {
+            let mut r = link.remote.borrow_mut();
+            r.sessiond = Some(state.clone());
+            r.sessiond_at = Some(at);
+        };
+
+        set(&failed, Instant::now());
+        link.forget_failed_sessiond(REDEPLOY_COOLDOWN);
+        assert!(link.cached_sessiond().is_some(), "刚失败：同一轮里接着用");
+
+        set(&failed, long_ago);
+        link.forget_failed_sessiond(REDEPLOY_COOLDOWN);
+        assert!(link.cached_sessiond().is_none(), "放凉了：下次重推");
+
+        set(&RemoteSessiond { durable: true, reason: None, ..failed.clone() }, long_ago);
+        link.forget_failed_sessiond(REDEPLOY_COOLDOWN);
+        assert!(link.cached_sessiond().is_some_and(|s| s.durable), "成功的结论不丢");
+    });
+}
+
 /// 等到会话的自动标题是 want（每 50ms 看一次，最多 15s）
 async fn wait_title(h: &Harness, id: &str, want: &str) {
     for _ in 0..300 {
@@ -541,7 +660,7 @@ fn auto_title_follows_the_program_even_with_nobody_watching() {
 /// SSH 上的守护进程会话：推送 → bridge 建会话 → 「重启后端」后接回 → 退出判定 → 终止。
 ///
 /// 只对**隔离的** sshd 跑（CLAUDE.md），手动：起一个容器（docs/design/session-daemon.md 第 15 节），
-/// `FALCON_SSH_TEST=127.0.0.1:2299:fx:/path/to/id_ed25519 cargo test -p falcon-server --lib ssh_durable -- --ignored`
+/// `FALCON_SSH_TEST=127.0.0.1:2299:fx:/path/to/id_ed25519 cargo test -p falcon-server --lib ssh_durable -- --ignored --test-threads=1`
 #[test]
 #[ignore]
 fn ssh_durable_session_round_trip() {
@@ -620,6 +739,100 @@ fn ssh_durable_session_round_trip() {
         let link = mgr.get_link(&project);
         let list = link.list_sessions(prep.deployed.as_ref().unwrap()).await.unwrap();
         assert!(list.iter().all(|e| !e.alive), "{list:?}");
+    });
+}
+
+/// 升级后重启：同一台机器上两个项目各有一个会话等着接回，宿主机上没有这个版本的守护进程
+/// （删掉二进制来模拟换了版本号），两条链路都要推。两个会话都得接回来、宿主机上不留临时文件——
+/// 2026-10-14 两条推送踩了同一个 `.partial`，报错被认成目录写不了，两个活着的会话被判 session-gone。
+/// 手动：同 ssh_durable_session_round_trip。两个用例共用远端家目录、这个会删远端的二进制，
+/// 要 `--test-threads=1`
+#[test]
+#[ignore]
+fn ssh_durable_two_projects_on_one_host_resume_together() {
+    use crate::exec::Exec as _;
+    let Ok(spec) = std::env::var("FALCON_SSH_TEST") else {
+        eprintln!("跳过：没设 FALCON_SSH_TEST=host:port:user:key");
+        return;
+    };
+    let parts: Vec<&str> = spec.splitn(4, ':').collect();
+    let (host, port, user, key) = (parts[0], parts[1].parse::<i64>().unwrap(), parts[2], parts[3]);
+    run(async {
+        let dir = tempfile::Builder::new().prefix("fsd-ssh2-").tempdir_in("/tmp").unwrap();
+        let db = Arc::new(Db::open(dir.path()).unwrap());
+        let new_mgr = |db: &Arc<Db>| {
+            let secrets = Arc::new(SecretBox::open(dir.path()).unwrap());
+            SessionManager::new(db.clone(), secrets, dir.path().to_path_buf(), Arc::new(AskpassHub::new()))
+        };
+        let projects: Vec<ProjectRow> = ["ssh-a", "ssh-b"]
+            .into_iter()
+            .map(|id| ProjectRow {
+                id: id.into(),
+                name: id.into(),
+                project_type: "ssh".into(),
+                ssh_host: Some(host.into()),
+                ssh_port: Some(port),
+                ssh_username: Some(user.into()),
+                ssh_auth_method: Some("key".into()),
+                ssh_key_path: Some(key.into()),
+                created_at: now_ms(),
+                ..Default::default()
+            })
+            .collect();
+        for p in &projects {
+            db.insert_project(p);
+        }
+        db.upsert_session_host(host, port as u16, user, crate::db::SessionHostPatch { authorized: Some(Some(1)), ..Default::default() });
+
+        let mgr = new_mgr(&db);
+        let marks = [("echo a$((1+1))lpha\n", "a2lpha"), ("echo b$((2+2))eta\n", "b4eta")];
+        let mut ids = Vec::new();
+        for (p, (cmd, mark)) in projects.iter().zip(marks) {
+            let s = mgr.create_session(p, String::new(), OscColorHint::default(), None).await.unwrap();
+            assert!(s.durable, "{s:?}");
+            let mut a = Peer::new();
+            mgr.add_viewer(&s.id, a.viewer.clone());
+            mgr.resize(&s.id, a.id(), 80, 24);
+            a.wait("提示符", has_output("$")).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            mgr.input(&s.id, a.id(), cmd);
+            a.wait("输出", has_output(mark)).await;
+            mgr.remove_viewer(&s.id, a.id());
+            ids.push(s.id);
+        }
+        let deployed = mgr.prepare(&projects[0], None, None, false).await.deployed.unwrap();
+
+        // 「升级后重启」：库停在 unverified，宿主机上这个版本的二进制还没有
+        for id in &ids {
+            db.update_session_state(id, SessionState::Unverified, None);
+        }
+        let rm = mgr.get_link(&projects[0]).exec(&format!("rm -f {}", crate::host::quote_posix(&deployed.bin)), None).await.unwrap();
+        assert!(rm.ok(), "{rm:?}");
+        drop(mgr);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mgr = new_mgr(&db);
+        mgr.resume_unverified();
+        for _ in 0..1000 {
+            if ids.iter().all(|id| db.get_session(id).is_some_and(|r| r.state != "unverified")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for id in &ids {
+            let row = db.get_session(id).unwrap();
+            assert_eq!((row.state.as_str(), row.dead_reason.as_deref()), ("active", None), "{id}");
+        }
+        for (id, (_, mark)) in ids.iter().zip(marks) {
+            let mut b = Peer::new();
+            mgr.add_viewer(id, b.viewer.clone());
+            mgr.resize(id, b.id(), 80, 24);
+            b.wait("历史还在", has_replay(mark)).await;
+        }
+        let ls = mgr.get_link(&projects[0]).exec("ls -a ~/.falcon/bin", None).await.unwrap();
+        assert!(!ls.stdout.contains(".partial"), "宿主机上留了临时文件：{}", ls.stdout);
+        for id in &ids {
+            mgr.terminate(id, true).await;
+        }
     });
 }
 

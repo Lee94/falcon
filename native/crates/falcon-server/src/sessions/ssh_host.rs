@@ -3,6 +3,7 @@
 //! 持久会话改由宿主机上的 falcon-sessiond 承担（ADR 0020）。
 
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use falcon_proto::sessiond::{ListEntry, SpawnSpec, sid_of};
 use falcon_proto::{HostKind, InstallFailure, InstallStage, NonDurableReason, SessionAgent, TermAppearance};
@@ -59,6 +60,8 @@ pub struct RemoteSessiond {
 pub struct RemoteCache {
     pub probed: Option<RemoteProbe>,
     pub sessiond: Option<RemoteSessiond>,
+    /// sessiond 是什么时候定下的：接回时放凉了的失败不作数（[`SshLink::forget_failed_sessiond`]）
+    pub sessiond_at: Option<Instant>,
 }
 
 /// 宿主机类型、家目录与默认 shell，供 git 层与 shell 侦测使用
@@ -370,8 +373,30 @@ impl SshLink {
                 failed
             }
         };
-        self.remote.borrow_mut().sessiond = Some(state.clone());
+        let mut remote = self.remote.borrow_mut();
+        remote.sessiond = Some(state.clone());
+        remote.sessiond_at = Some(Instant::now());
         state
+    }
+
+    /// 已经定下的持久能力（不触发探测与部署）
+    pub fn cached_sessiond(&self) -> Option<RemoteSessiond> {
+        self.remote.borrow().sessiond.clone()
+    }
+
+    /// 缓存的部署失败定下超过 `cooldown` 了就丢掉，下次 prepare 重新推。
+    ///
+    /// 失败缓存着是给建会话用的：每建一个都重推一遍太亏，用户点「重试」才清（[`Self::reset_sessiond`]）。
+    /// 等着接回的会话却不能被一次失败钉死，不然它只能一直黄着，直到后端重启。冷却挡的是同一轮里
+    /// 排队接回的几个会话、以及退避到顶后每 30 秒一轮的重连，别各推一遍几 MB 的二进制。
+    /// 只丢内存里的：Windows 断线验证的结论在库里，换了版本才重验（见 prepare_sessiond）
+    pub fn forget_failed_sessiond(&self, cooldown: Duration) {
+        let mut remote = self.remote.borrow_mut();
+        let failed = remote.sessiond.as_ref().is_some_and(|s| !s.durable);
+        if failed && remote.sessiond_at.is_none_or(|at| at.elapsed() >= cooldown) {
+            remote.sessiond = None;
+            remote.sessiond_at = None;
+        }
     }
 
     /// 重试部署前清掉缓存的判定。
