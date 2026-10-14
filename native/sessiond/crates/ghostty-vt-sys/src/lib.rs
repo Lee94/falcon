@@ -8,5 +8,6 @@
 
 include!("bindings.rs");
 
-/// 静态库对应的 ghostty commit（来自 ghostty.pin）
+/// 静态库对应的 ghostty（来自 ghostty.pin）：commit，打了 falcon 的补丁时是
+/// `<commit>+falcon.<补丁哈希前 12 位>`。VT 进程把它报给服务端，不同就热升级
 pub const GHOSTTY_COMMIT: &str = env!("GHOSTTY_COMMIT");

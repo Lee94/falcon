@@ -138,9 +138,15 @@ fn full_options() -> FormatOptions {
     }
 }
 
-/// 只要正文（带样式），不要模式、光标这些附加状态
+/// 只要正文（带样式与链接），不要模式、光标这些附加状态。
+///
+/// `style` / `hyperlink` 开关管的是**附加状态**（光标当前的 SGR / 链接），不管正文：正文的样式
+/// 跟着 VT 格式走，正文里的 OSC 8 由打过补丁的格式化器写（`sessiond/ghostty-patches/`）。
+/// `style` 留着只为末尾那个 `SGR 0`（[`screen_bytes`] 靠它在整份导出里定位正文）；`hyperlink`
+/// 不能开——光标停在没收尾的链接里时，正文末尾会多出一个打开的链接：整份导出里那一处隔着
+/// 光标位置，正文就定位不到了；备用屏的路径上它还会接着包住备用屏的内容
 fn content_options() -> FormatOptions {
-    FormatOptions { style: true, hyperlink: true, ..FormatOptions::plain(Format::Vt) }
+    FormatOptions { style: true, ..FormatOptions::plain(Format::Vt) }
 }
 
 /// 格式化器总是省掉末尾的空行（formatter.zig 的 Options.trim 注释："Trailing blank lines are
@@ -364,3 +370,4 @@ mod tests {
         assert!(!out.contains("38;5;1"), "16 色改写过了：{out:?}");
     }
 }
+

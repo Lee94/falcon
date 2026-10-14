@@ -276,7 +276,7 @@ pub(crate) async fn is_process_in_job() -> bool {
 /// 非持久会话：后端自己开 PTY 跑 shell
 pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCallbacks) -> anyhow::Result<AttachResult> {
     let base = host.base_env().await;
-    let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance);
+    let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
     let program = opts.shell.clone().unwrap_or_else(default_local_shell);
     let cwd = opts.cwd.clone();
     if let Some(bin) = &opts.askpass_bin {
@@ -443,7 +443,7 @@ pub async fn open_local_sessiond(
     let sid = sid_of(&opts.session_id);
     if !opts.reattach {
         let base = host.base_env().await;
-        let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance);
+        let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
         if let Some(bin) = &opts.askpass_bin {
             prepend_path(&mut env, bin);
             merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);

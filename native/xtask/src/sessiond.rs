@@ -1,7 +1,8 @@
 //! 会话守护进程 falcon-sessiond 的工具链（ADR 0020「构建与分发」，设计文档第 13 节）：
 //!
-//! - `ghostty`：确保钉死版本的 Zig 与 ghostty 源码就绪，按目标编 libghostty-vt 的静态库
-//!   （`zig build -Demit-lib-vt -Doptimize=ReleaseSafe`），放进 `native/.cache/ghostty/<commit>/<三元组>/`；
+//! - `ghostty`：确保钉死版本的 Zig 与 ghostty 源码（打上 `sessiond/ghostty-patches/` 的补丁）就绪，
+//!   按目标编 libghostty-vt 的静态库（`zig build -Demit-lib-vt -Doptimize=ReleaseSafe`），放进
+//!   `native/.cache/ghostty/<标识>/<三元组>/`（标识见 [`Pin::build_id`]）；
 //! - `ghostty-bindgen`：从同一份头文件重新生成 `ghostty-vt-sys/src/bindings.rs`（只在升 pin 时跑）；
 //! - `sessiond`：用 cargo-zigbuild 交叉编 5 个目标，产物在 `native/target-sessiond/<三元组>/release/`。
 //!
@@ -48,15 +49,58 @@ const X64_MACOS_DEPLOYMENT: &str = "10.15";
 struct Pin {
     commit: String,
     sha256: String,
+    /// 打在源码上的补丁（`sessiond/ghostty-patches/*.patch`），按文件名排好；已与 pin 的
+    /// `patches=` 核对过
+    patches: Vec<PathBuf>,
+    /// 全部补丁按文件名顺序拼起来的 sha256；没有补丁时为 None
+    patches_sha256: Option<String>,
+}
+
+impl Pin {
+    /// 这份 libghostty-vt 的标识：commit，有补丁时再加 `+falcon.<补丁哈希前 12 位>`。
+    /// 源码与静态库的缓存目录按它分（改了补丁不会捡到旧库），VT 进程报的 ghostty 版本也是它
+    /// （ghostty-vt-sys 的 build.rs 照同一规则拼）——服务端看到存量会话的 VT 进程版本与新部署的
+    /// 不同才热升级它（sessions/manager.rs），补丁不进版本号的话旧会话会一直用旧的格式化器
+    fn build_id(&self) -> String {
+        match &self.patches_sha256 {
+            Some(h) => format!("{}+falcon.{}", self.commit, &h[..12]),
+            None => self.commit.clone(),
+        }
+    }
 }
 
 fn pin() -> Result<Pin> {
     let path = native().join("sessiond/ghostty.pin");
     let text = std::fs::read_to_string(&path).with_context(|| format!("读不到 {}", path.display()))?;
-    let field = |k: &str| {
-        text.lines().find_map(|l| l.trim().strip_prefix(k).map(str::to_string)).with_context(|| format!("ghostty.pin 缺 {k}"))
+    let get = |k: &str| text.lines().find_map(|l| l.trim().strip_prefix(k).map(str::to_string));
+    let field = |k: &str| get(k).with_context(|| format!("ghostty.pin 缺 {k}"));
+    let commit = field("commit=")?;
+    let sha256 = field("sha256=")?;
+    let pinned = get("patches=").filter(|v| !v.is_empty());
+
+    let dir = native().join("sessiond/ghostty-patches");
+    let mut patches: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "patch")).collect(),
+        Err(_) => Vec::new(),
     };
-    Ok(Pin { commit: field("commit=")?, sha256: field("sha256=")? })
+    patches.sort();
+    let patches_sha256 = if patches.is_empty() {
+        None
+    } else {
+        let mut h = sha2::Sha256::new();
+        for p in &patches {
+            h.update(std::fs::read(p)?);
+        }
+        Some(hex::encode(h.finalize()))
+    };
+    if patches_sha256 != pinned {
+        bail!(
+            "{} 与 ghostty.pin 的 patches= 对不上：补丁改过的话把它换成 `patches={}`（没有补丁就删掉这一行）",
+            dir.display(),
+            patches_sha256.as_deref().unwrap_or("")
+        );
+    }
+    Ok(Pin { commit, sha256, patches, patches_sha256 })
 }
 
 fn cache() -> PathBuf {
@@ -106,9 +150,9 @@ fn ensure_zig() -> Result<PathBuf> {
     Ok(zig)
 }
 
-/// 确保钉死 commit 的 ghostty 源码就绪，返回源码目录
+/// 确保钉死 commit 的 ghostty 源码就绪（补丁已打上），返回源码目录
 fn ensure_ghostty_src(pin: &Pin) -> Result<PathBuf> {
-    let base = cache().join("ghostty").join(&pin.commit);
+    let base = cache().join("ghostty").join(pin.build_id());
     let src = base.join("src");
     if src.join("build.zig").is_file() {
         return Ok(src);
@@ -136,6 +180,11 @@ fn ensure_ghostty_src(pin: &Pin) -> Result<PathBuf> {
         }
         entry.unpack(tmp.join(rel))?;
     }
+    // 补丁打在解到一半的目录上，全部打完才改名成 src：中途失败不会留下半打补丁的源码
+    for p in &pin.patches {
+        println!("== ghostty 补丁：{} ==", p.file_name().unwrap_or_default().to_string_lossy());
+        crate::util::run("patch", [OsString::from("-p1"), "--batch".into(), "--forward".into(), "-i".into(), p.into()], Some(&tmp))?;
+    }
     std::fs::rename(&tmp, &src)?;
     Ok(src)
 }
@@ -161,14 +210,14 @@ fn prepend_path(dirs: &[&Path]) -> OsString {
 }
 
 /// 某个目标的静态库目录（里面只有 libghostty-vt.a），ghostty-vt-sys 的 build.rs 认这个位置
-pub fn lib_dir(commit: &str, triple: &str) -> PathBuf {
-    cache().join("ghostty").join(commit).join(triple)
+pub fn lib_dir(build_id: &str, triple: &str) -> PathBuf {
+    cache().join("ghostty").join(build_id).join(triple)
 }
 
 /// 编一个目标的静态库（已有就跳过），返回 zig 的安装前缀（include 在里面）
 fn build_lib(zig: &Path, src: &Path, pin: &Pin, triple: &str, zig_target: &str, force: bool) -> Result<PathBuf> {
-    let prefix = cache().join("ghostty").join(&pin.commit).join(format!("out-{triple}"));
-    let dest_dir = lib_dir(&pin.commit, triple);
+    let prefix = cache().join("ghostty").join(pin.build_id()).join(format!("out-{triple}"));
+    let dest_dir = lib_dir(&pin.build_id(), triple);
     let dest = dest_dir.join("libghostty-vt.a");
     if dest.is_file() && prefix.join("include/ghostty/vt.h").is_file() && !force {
         return Ok(prefix);
@@ -248,7 +297,7 @@ pub fn ghostty(args: &[String]) -> Result<()> {
     let src = ensure_ghostty_src(&pin)?;
     for (triple, zt) in targets {
         build_lib(&zig, &src, &pin, triple, zt, force)?;
-        println!("libghostty-vt（{triple}）：{}", lib_dir(&pin.commit, triple).display());
+        println!("libghostty-vt（{triple}）：{}", lib_dir(&pin.build_id(), triple).display());
     }
     Ok(())
 }

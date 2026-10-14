@@ -271,7 +271,10 @@ pub struct FormatOptions {
     pub pwd: bool,
     pub keyboard: bool,
     pub cursor: bool,
+    /// 附加状态：正文之后恢复**光标当前**的 SGR。正文的样式不归它管，跟着格式走
     pub style: bool,
+    /// 附加状态：正文之后恢复**光标当前**所在的 OSC 8 链接。正文里的链接不归它管：HTML
+    /// 总是写，VT 由 falcon 的补丁写（`sessiond/ghostty-patches/`）
     pub hyperlink: bool,
     pub protection: bool,
     pub kitty_keyboard: bool,

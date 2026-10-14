@@ -4,3 +4,7 @@
 # https://github.com/ghostty-org/ghostty/archive/<commit>.tar.gz 的。
 commit=05dcf887ef51ea27821f20979493306ec3a19149
 sha256=61a0158a9b2592f147d1e2e0f965d6c952c90410faab6e7265c169a1ccc9481a
+# sessiond/ghostty-patches/*.patch 按文件名顺序拼起来的 sha256（xtask 解包后逐个 patch -p1 打上）。
+# 改了补丁就跟着改它；它的前 12 位进静态库的缓存目录与 VT 进程报的 ghostty 版本，
+# 服务端据此热升级存量会话的 VT 进程。升 commit 时逐个核对补丁还要不要、还打不打得上。
+patches=a321f36bfc9e6fa4ef0773d905ce46c04cb4deb69e0bbd1fc02017c21264b570

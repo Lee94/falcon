@@ -204,7 +204,9 @@ PTY 读取绝不因为连接慢而阻塞：每条连接一个发送队列，积�
 4. 当前在备用屏：先编码二进制快照、解到一个副本里，在副本上写 `CSI ? 1049 l` 退出备用屏，导出副本的正文（主屏 + 历史，同样补回末尾空行），再把光标放回主屏进备用屏时存下的位置（退出备用屏时 1049 恢复的就是它）。然后拼上 `CSI ? 1049 h CSI H CSI 2 J`，最后接当前终端的完整导出（备用屏 + 模式）。
 5. 后处理：`38;5;N`（N < 16）改写成 `3N` / `9N`（`48;5;N` 改成 `4N` / `10N`，冒号形式同理），否则客户端存成 `Indexed`，「粗体用亮色」失效。跑在字节上的纯函数，带单测。
 
-已知差异（照单接受，语料比对时归一掉）：正文里的 OSC 8 链接不导出（格式化器只恢复光标当前的链接状态）；`CSI 2 J` 清掉的那一屏不进历史；从没写过的空格带着前一段的前景色（不可见）。
+6. **正文里的 OSC 8 链接**：钉死的 ghostty（截至 2026-10-14 的 main 也一样）只给 HTML 输出写正文里的链接，VT 输出只在附加状态里恢复光标当前的链接——接回后屏幕与历史里的链接全丢，点不开。falcon 给它打了补丁（`native/sessiond/ghostty-patches/0001-vt-formatter-osc8-hyperlinks.patch`，见 13.2）：VT 与 HTML 走同一条路，链接开始处写 `ESC ] 8 ; [id=…] ; <uri> ESC \`、结束处写 `ESC ] 8 ; ; ESC \`，显式 id 保留；结束的链接**先收尾再补攒下的空白格**，不然补出来的空格会落进链接（只照搬 HTML 那条路就会这样）。另外注意格式化选项里的 `style` / `hyperlink` 管的是**附加状态**（光标当前的 SGR / 链接），不管正文：单独导正文时 `hyperlink` 必须关——光标停在没收尾的链接里时，正文末尾会多出一个打开的链接，整份导出里那一处隔着光标位置，正文就定位不到了（退回原样导出，第 3 条的模式挪动随之失效）；`style` 留着只为末尾那个 `SGR 0`。语料比对连链接的 URI 一起比。
+
+已知差异（照单接受，语料比对时归一掉）：`CSI 2 J` 清掉的那一屏不进历史；从没写过的空格带着前一段的前景色（不可见）；alacritty 进备用屏时光标带着主屏当前的链接、ghostty 不带（程序在主屏开了链接不关就切备用屏，只有这种情况会差）。
 
 ### 6.3 服务端何时要快照
 
@@ -393,7 +395,8 @@ fn upgrade_vt(&self, _binary: &str) {}
 ```
 native/sessiond/                      独立的 Cargo 工作区，不进 native/ 工作区（主工作区 exclude 了它）
   Cargo.toml                          release：opt-level 3、lto、strip，panic 保持 unwind（holder 靠 catch_unwind 隔离连接）
-  ghostty.pin                         钉死的 ghostty commit 与 GitHub 源码包的 sha256（xtask 与 build.rs 共用）
+  ghostty.pin                         钉死的 ghostty commit、GitHub 源码包的 sha256、补丁集的 sha256（xtask 与 build.rs 共用）
+  ghostty-patches/*.patch             打在钉死源码上的补丁（xtask 解包后按文件名顺序 patch -p1），见 13.2
   crates/ghostty-vt-sys/              bindgen 生成的 bindings.rs（入库，含布局断言）+ build.rs（只设链接路径）
   crates/ghostty-vt/                  安全封装：Terminal、回调、格式化、二进制快照、continuation
   crates/falcon-sessiond/             二进制：hold / vt / spawn / bridge / attach / list / kill / history / version
@@ -411,10 +414,13 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 | Zig | `xtask/src/sessiond.rs`：版本 + 四个宿主平台 tarball 的 sha256 | 0.16.0 |
 | ghostty | `native/sessiond/ghostty.pin`：commit + 源码包 sha256 | `05dcf887ef51ea27821f20979493306ec3a19149` |
 | 绑定 | `ghostty-vt-sys/src/bindings.rs`，文件头注明 commit | 随 pin 一起更新 |
+| ghostty 补丁 | `native/sessiond/ghostty-patches/*.patch`；`ghostty.pin` 的 `patches=` 是它们按文件名顺序拼起来的 sha256 | `0001`：VT 输出正文里的 OSC 8 链接（6.2 第 6 条） |
+
+补丁只改 Zig 源码、不碰头文件（绑定不用重生）。xtask 每次都核对补丁与 `patches=`，对不上直接报错并给出新值。打了补丁的那份库有自己的**标识** `<commit>+falcon.<补丁哈希前 12 位>`：源码与静态库的缓存目录按它分（`native/.cache/ghostty/<标识>/`，改了补丁不会捡到没打补丁的旧库），`ghostty-vt-sys` 的 build.rs 照同一规则拼，VT 进程报给服务端的 ghostty 版本也是它——服务端看到存量会话的 VT 进程版本与新部署的不同才热升级（2.3），所以补丁一变，旧会话下次接回就换上新的格式化器（实测：未打补丁时开的会话，换上新二进制后接回，链接回来了）。升 commit 时逐个核对补丁还要不要、还打不打得上；上游哪天支持了，删掉补丁与 `patches=` 即可。
 
 ### 13.3 xtask 任务
 
-- `cargo xtask ghostty [--targets host|all|<三元组>,…] [--force]`：确保 Zig（下载到 `native/.cache/zig/`，比对 sha256）和 ghostty 源码（`native/.cache/ghostty/<commit>/src`，源码包比对 sha256）就绪，按目标 `zig build -Demit-lib-vt -Doptimize=ReleaseSafe -Dtarget=…`，静态库拷到 `native/.cache/ghostty/<commit>/<三元组>/libghostty-vt.a`（目录里只有静态库：同目录有 dylib 时 macOS 链接器会挑 dylib；Windows 上 zig 出的静态库叫 `ghostty-vt-static.lib`，拷成同一个名字）。Zig 的包缓存指到 `native/.cache/zig-global`。两个实测的坑：
+- `cargo xtask ghostty [--targets host|all|<三元组>,…] [--force]`：确保 Zig（下载到 `native/.cache/zig/`，比对 sha256）和 ghostty 源码（`native/.cache/ghostty/<标识>/src`，源码包比对 sha256，解包后打上 `ghostty-patches/` 的补丁，见 13.2）就绪，按目标 `zig build -Demit-lib-vt -Doptimize=ReleaseSafe -Dtarget=…`，静态库拷到 `native/.cache/ghostty/<标识>/<三元组>/libghostty-vt.a`（目录里只有静态库：同目录有 dylib 时 macOS 链接器会挑 dylib；Windows 上 zig 出的静态库叫 `ghostty-vt-static.lib`，拷成同一个名字）。Zig 的包缓存指到 `native/.cache/zig-global`。两个实测的坑：
   - ghostty 的 build.zig 用 `git describe` 取版本号，而 `.cache` 在 falcon 自己的仓库里——git 一路往上找到 falcon 的仓库和它的 tag，ghostty 当成"打了 tag 的发布版"去核对版本号直接 panic。用 `GIT_CEILING_DIRECTORIES` 挡在源码目录的上一层；
   - macOS 的 Zig 目标带上最低系统版本（`aarch64-macos.11.0`、`x86_64-macos.10.15`），与 Rust 的部署目标对齐，否则链接器对每个目标文件报 "built for newer macOS version"。
 - `cargo xtask ghostty-bindgen`：用 bindgen（macOS 用 CommandLineTools 自带的 libclang）从 pin 对应的头文件重新生成 `bindings.rs`。只在升 pin 时跑，diff 就是 ABI 变化。
@@ -451,7 +457,7 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 | ghostty-vt 封装 | 查询经 WRITE_PTY 回答且顺序对（7501 `?` → DA → XTVERSION）、深浅与默认色、7501 / 133 / 标题 / RIS 事件、continuation 重建半截序列与半个 UTF-8、快照往返与备用屏 | 通过（macOS、alpine aarch64） |
 | sessiond 单测 | `CSI ? u` 回复过滤、16 色改写、内部帧往返、`replay` 期间不答查询、备用屏导出、spec 文件只读一次 | 通过 |
 | sessiond 真 PTY 用例 | spawn → Sync → 输入 → 退出（`Exit` 带退出码、`.exit` 留下、bridge 退出码 5 / 3）；没有客户端时 VT 进程替程序答 DA；kitty 查询不答、DA 先到；程序状态存储、新连接拿全集、133 A 清 blocked、StatusSeen；`kill -9` VT 进程后会话存活、快照里崩溃前后的输出都在；60 秒内崩 3 次进入降级、降级后照常转发；热升级换掉 VT 进程且备用屏状态还在；最近操作的连接决定尺寸、断开后回落；`kill` 子命令；bridge 的前导标记、`--create`、stdin 关闭后会话还在 | 10 个全部通过（macOS；alpine aarch64 容器里同样通过） |
-| 接回比对语料 | `tests/corpus/`（shell 颜色与 CJK / emoji / ZWJ / 国旗 / 组合字符 / 真彩下划线 / 250 字符软折行 / OSC 8、vim 备用屏带鼠标模式、less、git log --graph、top、清屏、bracketed paste 等模式）各自「直接喂 alacritty」与「VT 导出后再喂」逐行比较文字、软折行、样式、光标、模式，备用屏下再比主屏历史；另有切点落在每一个字节上的续接用例、末尾空行与关自动换行的用例 | 通过（补回末尾空行之前 less / top 两份对不上，见 6.2） |
+| 接回比对语料 | `tests/corpus/`（shell 颜色与 CJK / emoji / ZWJ / 国旗 / 组合字符 / 真彩下划线 / 250 字符软折行 / OSC 8、vim 备用屏带鼠标模式、less、git log --graph、top、清屏、bracketed paste 等模式）各自「直接喂 alacritty」与「VT 导出后再喂」逐行比较文字、软折行、样式、OSC 8 链接、光标、模式，备用屏下再比主屏历史；另有切点落在每一个字节上的续接用例、末尾空行与关自动换行的用例 | 通过（补回末尾空行之前 less / top 两份对不上，见 6.2） |
 | falcon-server | 原有 669 个用例；新增守护进程会话：从快照回放给第二个 Viewer、退出判定、后端重启后接回且历史还在、终止后宿主机上不再有活的 holder、Zellij 时代的行接回后 `dead(session-gone)`、程序状态推给 Viewer 并进列表摘要；`session_hosts` 的部分更新、授权只抄一次 | 通过（守护进程那几个在没编守护进程时跳过） |
 | 端到端 | `FALCON_E2E=1` 的 falcon-client e2e：起服务端 → 建会话 → 回显与 resize → 设密码 → 两次重启（REST 401 / socket 4401 各自动重登一次）后接回 → Terminate | 通过（2 秒） |
 | SSH | 隔离的 sshd 容器（alpine aarch64、bash 登录 shell，`.profile` / `.bashrc` 往 stdout 打字）：未授权非持久 → 授权后探测 / 上传 / 握手 → 建会话（尺寸、TERM、rc 的噪音没混进帧流）→ 「重启后端」后接回且历史还在 → 前台探测 → 退出 → 终止后远端没有活的会话；另一个容器把 `~/.falcon` 挂成 noexec：报 `verify-failed`，会话照样建（非持久） | 通过（`FALCON_SSH_TEST` / `FALCON_SSH_TEST_NOEXEC` 的 #[ignore] 用例） |

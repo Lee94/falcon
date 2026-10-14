@@ -10,7 +10,7 @@
 
 use std::sync::LazyLock;
 
-use falcon_proto::{OscColorHint, TermAppearance};
+use falcon_proto::{HostKind, OscColorHint, TermAppearance};
 use regex::{Captures, Regex};
 use serde_json::Value;
 
@@ -78,10 +78,21 @@ fn fallback(appearance: TermAppearance) -> (&'static str, &'static str) {
 /// 不该被我们误触发。COLORTERM 与 TERM 分开：TERM 仍是 xterm-256color
 /// （terminfo 最稳的名字），truecolor 靠 COLORTERM 声明。
 ///
+/// FORCE_HYPERLINK=1：认 `supports-hyperlinks` 的 CLI（Claude Code、多数 Node 工具、Rust 的
+/// 同名 crate）按终端白名单决定发不发 OSC 8 链接，TERM_PROGRAM=falcon 不在任何白名单里，它们
+/// 就退回纯文本——程序自己硬折行的长地址只认得出半截（Claude Code 2.1 的白名单是 ghostty /
+/// kitty / iTerm 等几个）。falcon 认 OSC 8：客户端画下划线、⌘+点击打开，持久会话接回时由打过
+/// 补丁的 ghostty 导出（`native/sessiond/ghostty-patches/`）。Windows 宿主机不写：会话跑在
+/// ConPTY 上，它不认的 OSC 直接吞掉（OSC 7501 就是这样），不转发 OSC 8 的 conhost 上程序反而
+/// 只剩链接文字、地址没了。
+///
 /// appearance 缺省时不写 COLORFGBG / GROK_*：调用方必须先清掉宿主进程
 /// 带来的同名变量，否则会继承「启动 falcon 的那个 iTerm」的深浅。
-pub fn term_pty_env(appearance: Option<TermAppearance>) -> Vec<(&'static str, &'static str)> {
+pub fn term_pty_env(appearance: Option<TermAppearance>, host: HostKind) -> Vec<(&'static str, &'static str)> {
     let mut env = vec![("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "falcon")];
+    if host == HostKind::Posix {
+        env.push(("FORCE_HYPERLINK", "1"));
+    }
     match appearance {
         Some(TermAppearance::Light) => {
             env.extend([("COLORFGBG", "0;15"), ("GROK_APPEARANCE", "light"), ("LC_GROK_APPEARANCE", "light")])
@@ -108,7 +119,7 @@ fn env_set(env: &mut Vec<(String, String)>, key: String, value: String) {
 /// base 里的 undefined（这里是 `None`）会被扔掉，node-pty 不接受。
 ///
 /// base 的值可以是 `String`（普通 env）或 `Option<String>`（带 undefined 的）。
-pub fn apply_term_pty_env<I, K, V>(base: I, appearance: Option<TermAppearance>) -> Vec<(String, String)>
+pub fn apply_term_pty_env<I, K, V>(base: I, appearance: Option<TermAppearance>, host: HostKind) -> Vec<(String, String)>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<String>,
@@ -121,7 +132,7 @@ where
         }
     }
     env.retain(|(k, _)| !TERM_APPEARANCE_KEYS.contains(&k.as_str()));
-    for (k, v) in term_pty_env(appearance) {
+    for (k, v) in term_pty_env(appearance, host) {
         env_set(&mut env, k.to_string(), v.to_string());
     }
     env
@@ -474,19 +485,29 @@ mod tests {
 
     #[test]
     fn term_pty_env_always_declares_truecolor_and_stamps_polarity_only_when_known() {
-        let bare = term_pty_env(None);
+        let bare = term_pty_env(None, HostKind::Posix);
         assert_eq!(get_static(&bare, "COLORTERM"), Some("truecolor"));
         assert_eq!(get_static(&bare, "TERM_PROGRAM"), Some("falcon"));
         assert_eq!(get_static(&bare, "COLORFGBG"), None);
         assert_eq!(get_static(&bare, "GROK_APPEARANCE"), None);
 
-        let dark = term_pty_env(Some(TermAppearance::Dark));
+        let dark = term_pty_env(Some(TermAppearance::Dark), HostKind::Posix);
         assert_eq!(get_static(&dark, "COLORFGBG"), Some("15;0"));
         assert_eq!(get_static(&dark, "GROK_APPEARANCE"), Some("dark"));
         assert_eq!(get_static(&dark, "LC_GROK_APPEARANCE"), Some("dark"));
-        let light = term_pty_env(Some(TermAppearance::Light));
+        let light = term_pty_env(Some(TermAppearance::Light), HostKind::Posix);
         assert_eq!(get_static(&light, "COLORFGBG"), Some("0;15"));
         assert_eq!(get_static(&light, "GROK_APPEARANCE"), Some("light"));
+    }
+
+    #[test]
+    fn hyperlinks_are_forced_on_posix_hosts_only() {
+        assert_eq!(get_static(&term_pty_env(None, HostKind::Posix), "FORCE_HYPERLINK"), Some("1"));
+        // ConPTY 可能吞掉 OSC 8：Windows 上让程序自己判断
+        assert_eq!(get_static(&term_pty_env(None, HostKind::Windows), "FORCE_HYPERLINK"), None);
+        // 宿主进程带来的 FORCE_HYPERLINK=0 在 POSIX 上被盖掉
+        let env = apply_term_pty_env([("FORCE_HYPERLINK", "0".to_string())], None, HostKind::Posix);
+        assert_eq!(get(&env, "FORCE_HYPERLINK"), Some("1"));
     }
 
     #[test]
@@ -500,6 +521,7 @@ mod tests {
                 ("EMPTY", None),
             ],
             Some(TermAppearance::Dark),
+            HostKind::Posix,
         );
         assert_eq!(get(&env, "PATH"), Some("/bin"));
         assert_eq!(get(&env, "COLORFGBG"), Some("15;0"));
@@ -512,6 +534,7 @@ mod tests {
         let env = apply_term_pty_env(
             [("COLORFGBG".to_string(), "0;15".to_string()), ("GROK_APPEARANCE".to_string(), "light".to_string())],
             None,
+            HostKind::Posix,
         );
         assert_eq!(get(&env, "COLORFGBG"), None);
         assert_eq!(get(&env, "GROK_APPEARANCE"), None);
@@ -613,9 +636,9 @@ mod tests {
     #[test]
     fn apply_keeps_key_order_like_a_js_object() {
         // 已有的 TERM 就地改值，新键追加在后
-        let env = apply_term_pty_env([("TERM", "dumb".to_string()), ("PATH", "/bin".to_string())], None);
+        let env = apply_term_pty_env([("TERM", "dumb".to_string()), ("PATH", "/bin".to_string())], None, HostKind::Posix);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["TERM", "PATH", "COLORTERM", "TERM_PROGRAM"]);
+        assert_eq!(keys, ["TERM", "PATH", "COLORTERM", "TERM_PROGRAM", "FORCE_HYPERLINK"]);
         assert_eq!(get(&env, "TERM"), Some("xterm-256color"));
     }
 }

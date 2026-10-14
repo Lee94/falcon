@@ -455,7 +455,7 @@ impl SshLink {
         let spec = (!opts.reattach).then(|| {
             // 项目没指定就用探测到的登录 shell，不能不传
             let shell = opts.shell.clone().or_else(|| self.probed_shell()).unwrap_or_else(|| "/bin/sh".into());
-            let mut env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance);
+            let mut env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance, kind);
             if opts.askpass_bin.is_some() {
                 env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
             }
@@ -475,7 +475,7 @@ impl SshLink {
         let kind = self.kind();
         let probed_shell = self.probed_shell();
 
-        let mut term_env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance);
+        let mut term_env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance, kind);
         if opts.askpass_bin.is_some() {
             term_env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
         }

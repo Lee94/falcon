@@ -17,10 +17,10 @@ cargo build --release -p falcon-desktop   # 原生客户端 release 构建
 cargo xtask pkg             # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
 cargo xtask win             # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
 cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 5 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试
-cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（sessiond 会自动调）；`ghostty-bindgen` 只在升 ghostty 的 pin 时跑
+cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（sessiond 会自动调），源码先打上 `native/sessiond/ghostty-patches/` 的补丁（改补丁要同步 ghostty.pin 的 patches=）；`ghostty-bindgen` 只在升 ghostty 的 pin 时跑
 ```
 
-xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、curl（meegle tarball、Zig 与 ghostty 源码包，都钉了哈希）、`native/scripts/build-web.sh`（bash，要 rustup 的 wasm32 target 与同版本 wasm-bindgen-cli）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
+xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、curl（meegle tarball、Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`native/scripts/build-web.sh`（bash，要 rustup 的 wasm32 target 与同版本 wasm-bindgen-cli）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
 
 ### 门禁：零警告编译 + 单元测试
 

@@ -1,0 +1,124 @@
+falcon 对钉死的 ghostty 打的补丁：VT 格式化输出正文里的 OSC 8 超链接。
+
+钉死的 commit（截至 2026-10-14 的 main 也一样）只给 HTML 输出写链接，VT 输出只在附加状态里
+恢复光标当前的链接——持久会话接回时，屏幕与历史里的链接全丢（设计文档 6.2 原先记作已知差异）。
+补丁让 VT 与 HTML 走同一条路：链接开始处写 `ESC ] 8 ; [id=…] ; <uri> ESC \`，结束处写
+`ESC ] 8 ; ; ESC \`；结束的链接先收尾再补攒下的空白格，免得补出来的空格落进链接。
+
+xtask 解开源码包后按文件名顺序 `patch -p1` 打上；改了补丁要同步 ghostty.pin 的 patches=。
+
+--- a/src/terminal/formatter.zig
++++ b/src/terminal/formatter.zig
+@@ -1369,6 +1369,23 @@
+                     if (cell.codepoint() == ' ' and self.opts.trim) {
+                         blank_cells += 1;
+                         continue;
++                    }
++                }
++
++                // falcon: a VT hyperlink that ends here must be closed
++                // before the accumulated blanks are written, otherwise the
++                // padding spaces become part of the link. (HTML keeps its
++                // original behavior: spaces inside <a> are harmless.)
++                if (comptime emit == .vt) {
++                    if (current_hyperlink_id != null) {
++                        const cell_link_id: ?hyperlink.Id = if (cell.hyperlink)
++                            self.page.lookupHyperlink(cell)
++                        else
++                            null;
++                        if (cell_link_id != current_hyperlink_id) {
++                            try self.formatHyperlinkClose(emit, writer);
++                            current_hyperlink_id = null;
++                        }
+                     }
+                 }
+ 
+@@ -1470,10 +1487,9 @@
+ 
+                 // Hyperlink state
+                 hyperlink: {
+-                    // We currently only emit hyperlinks for HTML. In the
+-                    // future we can support emitting OSC 8 hyperlinks for
+-                    // VT output as well.
+-                    if (comptime emit != .html) break :hyperlink;
++                    // HTML emits <a>, VT emits OSC 8 (falcon patch: upstream
++                    // only supports HTML here).
++                    if (comptime emit == .plain) break :hyperlink;
+ 
+                     // Get the hyperlink ID. This ID is our internal ID,
+                     // not necessarily the OSC8 ID.
+@@ -1498,17 +1514,21 @@
+                     current_hyperlink_id = link_id;
+ 
+                     // Emit the opening hyperlink tag
+-                    const uri = uri: {
+-                        const link = self.page.hyperlink_set.get(
+-                            self.page.memory,
+-                            link_id,
+-                        );
+-                        break :uri link.uri.offset.ptr(self.page.memory)[0..link.uri.len];
++                    const page_link = self.page.hyperlink_set.get(
++                        self.page.memory,
++                        link_id,
++                    );
++                    const uri = page_link.uri.offset.ptr(self.page.memory)[0..page_link.uri.len];
++                    // falcon: OSC 8 keeps an explicit id (HTML ignores it).
++                    const explicit_id: ?[]const u8 = switch (page_link.id) {
++                        .explicit => |v| v.offset.ptr(self.page.memory)[0..v.len],
++                        .implicit => null,
+                     };
+                     try self.formatHyperlinkOpen(
+                         emit,
+                         writer,
+                         uri,
++                        explicit_id,
+                     );
+ 
+                     // If we have a point map, we map the hyperlink to
+@@ -1519,6 +1539,7 @@
+                             emit,
+                             &discarding.writer,
+                             uri,
++                            explicit_id,
+                         );
+                         map.map.appendNTimes(
+                             map.alloc,
+@@ -1693,7 +1714,8 @@
+             // cell must belong to the currently open hyperlink (or none).
+             // Transitions take the slow path. This is checked after blank
+             // accounting because blank cells never touch hyperlink state.
+-            if (comptime emit == .html) {
++            // (falcon: VT output carries OSC 8 hyperlinks too.)
++            if (comptime emit != .plain) {
+                 if (cell.hyperlink) {
+                     const run_id = run_hyperlink_id orelse break;
+                     const cell_id = self.page.lookupHyperlink(cell) orelse break;
+@@ -2092,10 +2114,17 @@
+         comptime emit: Format,
+         writer: *std.Io.Writer,
+         uri: []const u8,
++        explicit_id: ?[]const u8,
+     ) std.Io.Writer.Error!void {
+         switch (emit) {
+-            .plain, .vt => unreachable,
++            .plain => unreachable,
+ 
++            // falcon: same form as the cursor hyperlink in the screen extras.
++            .vt => if (explicit_id) |id|
++                try writer.print("\x1b]8;id={s};{s}\x1b\\", .{ id, uri })
++            else
++                try writer.print("\x1b]8;;{s}\x1b\\", .{uri}),
++
+             // layout since we're primarily using it as a CSS wrapper.
+             .html => {
+                 try writer.writeAll("<a href=\"");
+@@ -2116,7 +2145,8 @@
+     ) std.Io.Writer.Error!void {
+         const str: []const u8 = switch (emit) {
+             .html => "</a>",
+-            .plain, .vt => return,
++            .vt => "\x1b]8;;\x1b\\",
++            .plain => return,
+         };
+ 
+         try writer.writeAll(str);

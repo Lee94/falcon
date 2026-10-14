@@ -29,7 +29,7 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
   meegle [--target <平台>]               取锁定版本的 meegle CLI 到 native/.cache/meegle/（server 会自动调）
 
 会话守护进程（ADR 0020；目标：host（默认）/ all / 逗号分隔的 Rust 三元组）
-  ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库，落在 native/.cache/ghostty/
+  ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库（先打 sessiond/ghostty-patches/ 的补丁），落在 native/.cache/ghostty/
   ghostty-bindgen                        从钉死 commit 的头文件重新生成 ghostty-vt-sys 的绑定（升 pin 时跑）
   sessiond [--targets …] [--check|--test] 编 falcon-sessiond（cargo-zigbuild 交叉编），产物 native/target-sessiond/
 
