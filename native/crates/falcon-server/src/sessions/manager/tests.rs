@@ -491,6 +491,53 @@ fn program_status_is_pushed_to_viewers_and_listed() {
     });
 }
 
+/// 等到会话的自动标题是 want（每 50ms 看一次，最多 15s）
+async fn wait_title(h: &Harness, id: &str, want: &str) {
+    for _ in 0..300 {
+        if h.mgr.title_of(id).as_deref() == Some(want) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("等不到标题 {want:?}，现在是 {:?}", h.mgr.title_of(id));
+}
+
+#[test]
+fn auto_title_follows_the_program_even_with_nobody_watching() {
+    if !sessiond_available() {
+        return;
+    }
+    run(async {
+        let h = durable_harness("t").await;
+        let s = new_session(&h).await;
+        let mut a = Peer::new();
+        h.mgr.add_viewer(&s.id, a.viewer.clone());
+        h.mgr.resize(&s.id, a.id(), 80, 24);
+        a.wait("提示符", has_output("$")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // 一条命令走完全程：shell 在提示符写的标题（不算）→ sleep → 没人看着时换成 awk → awk 报 7501
+        // （身份）→ awk 写标题（带 Claude Code 的状态符号）。报状态、写标题的得是 shell 之外的进程：
+        // shell 自己写的标题守护进程不收，`sh -c` 又会被当成 shell
+        h.mgr.input(
+            &s.id,
+            a.id(),
+            "printf '\\033]2;fay@mac: ~\\007'; sleep 4; echo go; awk 'BEGIN{system(\"sleep 4\"); \
+             printf \"\\033]7501;state=working:app=claude-code\\033\\\\\"; fflush(); system(\"sleep 3\"); \
+             printf \"\\033]2;\u{2733} 修复登录 bug\\007\"; fflush(); system(\"sleep 30\")}'\n",
+        );
+        a.wait("前台命令", |seen| seen.iter().any(|g| matches!(g, Got::Msg(m) if m["type"] == "title" && m["title"] == "sleep")))
+            .await;
+        assert!(a.msgs("title").iter().all(|m| m["title"] != "fay@mac: ~"), "{:?}", a.msgs("title"));
+        // 走开：之后的变化照样探得到（侧栏上的后台会话不再停在最后一次有人看时）
+        h.mgr.remove_viewer(&s.id, a.id());
+        wait_title(&h, &s.id, "awk").await;
+        wait_title(&h, &s.id, "claude").await;
+        wait_title(&h, &s.id, "修复登录 bug").await;
+        h.mgr.terminate(&s.id, false).await;
+        kill_all(&h).await;
+    });
+}
+
 /// SSH 上的守护进程会话：推送 → bridge 建会话 → 「重启后端」后接回 → 退出判定 → 终止。
 ///
 /// 只对**隔离的** sshd 跑（CLAUDE.md），手动：起一个容器（docs/design/session-daemon.md 第 15 节），

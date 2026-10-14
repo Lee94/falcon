@@ -158,7 +158,7 @@ u8 kind | u32 LE len | payload
 | `Exported{req, bytes}` | |
 | `Status{records}` | 程序状态全集（变化时推，握手后先推一次） |
 | `ForegroundIs{req, name}` | |
-| `Event{type, …}` | `vtRestarted{atOffset}`、`vtDegraded`（`title` / `bell` / `prompt` 预留，暂不发） |
+| `Event{type, …}` | `vtRestarted{atOffset}`、`vtDegraded`、`title{title}`（前台程序设的终端标题，空串 = 没有；变了才发，握手后紧跟 `Status` 发一次当前的；0.3.3 起，见 9）（`bell` / `prompt` 预留，暂不发） |
 | `Exit{code, signal}` | shell 退出，随后 holder 关闭连接 |
 | `Pong` / `Error{message}` / `Upgraded{req, ok, message}` | |
 
@@ -263,7 +263,12 @@ PTY 读取绝不因为连接慢而阻塞：每条连接一个发送队列，积�
 
 - **Unix**：holder 用 `tcgetpgrp(master)` 拿前台进程组 leader，取名字：macOS 用 `proc_name`，Linux 读 `/proc/<pid>/comm`（15 个字符截断）。
 - **Windows**：没有前台进程组。holder 用 Toolhelp 快照沿 shell 的子孙往下找最深的那个（同深取 pid 大的），跳过 conhost / OpenConsole，去掉 `.exe`。启发式，但比 Zellij 时代恒为空要好。
-- 服务端的节流（2.5 秒、只在有 Viewer 时探测）与 `is_shell_command` 过滤不变，数据源换成 `Foreground` 帧（2 秒超时）。SSH 会话不再每次 exec 一条命令。
+- 服务端的节流（2.5 秒）与 `is_shell_command` 过滤不变，数据源换成 `Foreground` 帧（2 秒超时）。SSH 会话不再每次 exec 一条命令。
+- **没人看着的会话也探**（2026-10-14 起）：早先只在有 Viewer 时探，因为那时每次探测是宿主机上的一条命令；换成 `Foreground` 帧之后这条理由没了，后台会话的标题不该停在最后一次有人看的时候。仍然不定时轮询，点火的只有输出、程序状态、程序标题。
+- **自动标题不只是前台命令**（服务端 `sessions/auto_title.rs`）：报了 OSC 7501 的程序，标题用它设的终端标题（OSC 0 / 2；Claude Code 写的是会话主题 `✳ 主题`，去掉打头的状态符号），没设、或设的只是程序自己的名字（`Claude Code`）就用它自报的 `app`（`claude-code` 显示成 `claude`，与 agent 兜底同形）；其余程序照旧是前台命令。原因：macOS 上 Claude Code 原生安装版的进程名是版本号（可执行文件叫 `versions/2.1.299`，`proc_name` 拿到 `2.1.299`）；几个 Claude 会话的前台命令都一样，只有主题分得开。
+  - 终端标题由 holder 存（`Event::Title`，变了才发，握手后紧跟 `Status` 发一次当前的，服务端重连后不用等程序再写）。**shell 自己写的不收**：标题到达那一刻 `fg::at_shell` 为真就当作没有、并清掉之前那个——oh-my-zsh 在提示符时写 `user@host: ~/dir`，它和程序写的在字节流里长得一样，只有写的那一刻谁在前台分得开，服务端隔着一来一回的探测分不出（用例实测：照收的话 shell 写的标题会被下一个报 7501 的程序认领）。RIS 也清。
+  - 7501 记录与标题可能比程序活得久（kill -9 来不及 `state=clear`，idle / done 按规范留着）：探测看到前台回到 shell，**那次探测开始之前**到的素材全部作废；程序报 7501 后第一次探到的前台命令记作它，之后探到换了人也作废。只删记录的 Status 不算新素材——Claude Code 退出时先 `state=clear` 再收尾，那一两秒标题不变，等探到 shell 再收。
+  - 0.3.2 及之前的 holder 不发标题：那些会话只有 `app` 与前台命令，新建的会话才有主题。
 
 ---
 

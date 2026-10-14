@@ -11,7 +11,8 @@ pub fn foreground(master: &dyn MasterPty, shell_pid: u32) -> Option<String> {
     imp::foreground(master, shell_pid)
 }
 
-/// 前台回到了 shell 自己：进程组就是 shell 的、而且 shell 没有子进程。
+/// 前台回到了 shell 自己：进程组就是 shell 的、而且 shell 没有子进程。holder 拿它清程序状态、
+/// 判断终端标题是不是 shell 自己写的。
 ///
 /// 只看进程组不够：agent 会话的启动脚本是 `sh -c`（没有作业控制），CLI 和脚本在同一个
 /// 进程组里，前台进程组一直是 shell 的 pid——再看一眼有没有子进程才分得清
@@ -43,7 +44,12 @@ mod imp {
 
     #[cfg(not(target_os = "macos"))]
     fn has_children(pid: u32) -> bool {
-        // /proc/<pid>/task/<pid>/children 要内核开 CONFIG_PROC_CHILDREN，不保证有；扫一遍 stat 稳妥
+        // 内核开了 CONFIG_PROC_CHILDREN（主流发行版都开）就有现成的：程序写标题时 holder 要现查一次
+        // （Claude Code 干活时标题每秒换一下），扫 /proc 太重。只列这个线程的子进程，shell 是单线程的
+        if let Ok(list) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) {
+            return !list.trim().is_empty();
+        }
+        // 没开就扫一遍 stat
         let Ok(dir) = std::fs::read_dir("/proc") else { return false };
         for e in dir.flatten() {
             let name = e.file_name();

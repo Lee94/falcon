@@ -70,11 +70,13 @@ pub struct Session {
     /// 不再摆 "Terminal 3" 这种占位名：会话挂在侧栏树的哪个检出下面、窗口标题栏右边
     /// 的工作目录，已经把"这是谁"说完了，序号只是噪音。
     pub name: String,
-    /// 自动标题：宿主机上这个会话**此刻**的前台命令（`pnpm dev`、`vim x.ts`），
-    /// 空闲在 shell 里时为空。后端探测（manager.foreground）得来，不入库。
+    /// 自动标题：宿主机上这个会话**此刻**在前台的程序叫什么，空闲在 shell 里时为空。服务端
+    /// 拼好的（`sessions/auto_title.rs`）：报了 OSC 7501 的程序用它设的终端标题（Claude Code 的
+    /// 会话主题），没设就用它自报的身份（`claude`）；其余程序是探到的前台命令（`pnpm dev`、`vim`）。
+    /// 不入库。
     ///
-    /// 只在有 Viewer 看着时刷新，所以后台会话上可能是陈旧值——见 manager 的
-    /// scheduleTitleProbe 注释。name 非空时 UI 一律以 name 为准。
+    /// 没人看着的会话也刷新，但只跟着输出、程序状态这些信号探（manager 的 schedule_title_probe），
+    /// 安静的会话上可能稍旧。name 非空时 UI 一律以 name 为准。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub state: SessionState,

@@ -1,6 +1,6 @@
 //! holder（`falcon-sessiond hold`）：会话生命周期的锚——它活着，会话就活着（ADR 0020 决定一）。
 //!
-//! 只做这些事：持 PTY、把输出原样转给每条连接、存程序状态、探前台命令、拉起并看护 VT 进程。
+//! 只做这些事：持 PTY、把输出原样转给每条连接、存程序状态与终端标题、探前台命令、拉起并看护 VT 进程。
 //! 不碰 libghostty-vt。线程模型：PTY 读 / 写、监听、每条连接的读 / 写、VT 进程的读 / 写各一条
 //! 线程，全部经一个 channel 汇到主循环，状态只在主循环里改，不加锁。
 //!
@@ -150,6 +150,11 @@ struct Holder {
     scrollback: u32,
     appearance: Option<Appearance>,
     status: ProgramStatusStore,
+    /// 前台程序设的终端标题（OSC 0 / 2，VT 进程解析）；空串 = 没有。shell 自己写的不算（见
+    /// [`Holder::on_title`]）。存在这里而不是只转发：服务端重连（重启、升级）后照样拿得到——Claude
+    /// Code 的会话主题只在变的时候写一次。用不用由服务端定（只认报过 OSC 7501 的程序的，见
+    /// falcon-server 的 sessions/auto_title.rs）
+    title: String,
     conns: HashMap<u64, Conn>,
     next_conn: u64,
     activity: u64,
@@ -312,6 +317,7 @@ fn run_inner(layout: &Layout, sid: &str) -> Result<()> {
         scrollback: spec.scrollback_lines,
         appearance: spec.appearance.clone(),
         status: ProgramStatusStore::new(),
+        title: String::new(),
         conns: HashMap::new(),
         next_conn: 1,
         activity: 0,
@@ -616,6 +622,29 @@ impl Holder {
         self.broadcast(&HolderMsg::Status { records: self.status.records().to_vec() });
     }
 
+    /// 终端标题变了：是 shell 自己写的就当没有。
+    ///
+    /// shell 也写标题——oh-my-zsh 在提示符时写 `user@host: ~/dir`、执行命令前写命令行——它和程序
+    /// 写的在字节流里长得一样，只有写的那一刻谁在前台分得开，而这一刻只有 holder 看得到（服务端
+    /// 隔着一来一回的探测，分不清标题是程序起来之前还是之后写的）。shell 写标题说明它在前台，之前
+    /// 那个程序已经不在了，所以顺手清掉。Windows 上 `at_shell` 恒为 false，标题都留着；那边 ConPTY
+    /// 吞掉 OSC 7501，服务端本来也不会用
+    fn on_title(&mut self, title: String) {
+        if title == self.title {
+            return;
+        }
+        let title = if crate::fg::at_shell(self.master.as_ref(), self.shell_pid) { String::new() } else { title };
+        self.set_title(title);
+    }
+
+    /// 标题变了才发：程序可能反复写同一个
+    fn set_title(&mut self, title: String) {
+        if title != self.title {
+            self.title = title;
+            self.broadcast(&HolderMsg::Event(Event::Title { title: self.title.clone() }));
+        }
+    }
+
     fn on_frame(&mut self, id: u64, msg: ClientMsg) {
         let hello = self.conns.get(&id).is_some_and(|c| c.hello);
         if !hello {
@@ -647,6 +676,8 @@ impl Holder {
             });
             self.send(id, &welcome);
             self.send(id, &HolderMsg::Status { records: self.status.records().to_vec() });
+            // 空的也发：断线期间标题可能被清掉了（RIS），对端手上那个已经不对
+            self.send(id, &HolderMsg::Event(Event::Title { title: self.title.clone() }));
             if let Some(c) = self.conns.get_mut(&id) {
                 c.hello = true;
                 c.role = hi.role;
@@ -941,11 +972,13 @@ impl Holder {
                     self.broadcast_status();
                 }
             }
-            FromVt::Title(_) => {}
+            FromVt::Title(title) => self.on_title(title),
             FromVt::Reset => {
                 if self.status.reset() {
                     self.broadcast_status();
                 }
+                // RIS 也把窗口标题复位
+                self.set_title(String::new());
             }
             FromVt::Snapshotted { req, snapshot, continuation } => {
                 if let Some(VtPending::Sync { conn, req: creq }) = self.vt_pending.remove(&req) {

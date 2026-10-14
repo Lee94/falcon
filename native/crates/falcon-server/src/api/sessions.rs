@@ -103,7 +103,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                 .map(|row| {
                     let p = projects.get(&row.project_id);
                     let mut session = Db::to_session(&row);
-                    // 自动标题不入库，只有还活着的 entry 手上有（可能是陈旧值，见 title_of）
+                    // 自动标题不入库，只有还活着的 entry 手上有（安静的会话上可能稍旧，见 title_of）
                     session.title = engine.sessions.title_of(&row.id);
                     // 程序状态同理：守护进程推来的，没人在看的会话也靠它在列表上显示
                     session.program_status = engine.sessions.program_status_of(&row.id);

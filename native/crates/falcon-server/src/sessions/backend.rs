@@ -52,6 +52,8 @@ pub enum BackendEvent {
     Synced(String),
     /// 程序状态（OSC 7501）全集
     ProgramStatus(Vec<ProgramStatusRecord>),
+    /// 程序设的终端标题（OSC 0 / 2）；空串 = 没有。连上时守护进程先发一次当前的，旧版守护进程不发
+    Title(String),
     /// shell 退出了（守护进程随后关闭连接）
     Exit(ExitStatus),
     /// 宿主机上的 VT 进程挂了、已经用原始尾巴重建

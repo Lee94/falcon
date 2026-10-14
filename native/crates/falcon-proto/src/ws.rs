@@ -158,7 +158,7 @@ pub enum ServerMessage {
     /// 如"会话不存在"、接回失败的原因；一句可以直接展示的话
     #[serde(rename = "error")]
     Error { message: String },
-    /// 前台命令变了（含变空：`null`），UI 据此换会话的自动标题
+    /// 自动标题变了（含变空：`null`），UI 据此换会话的标题。内容见 `Session.title`
     #[serde(rename = "title")]
     Title {
         #[serde(default)]

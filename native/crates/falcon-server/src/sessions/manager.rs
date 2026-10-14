@@ -27,6 +27,7 @@ use futures::future::Shared;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::auto_title::{AutoTitle, Probe};
 use super::backend::{Backend, BackendCallbacks, BackendEvent};
 use super::forward::ForwardManager;
 use super::local::{
@@ -74,7 +75,8 @@ const OUTPUT_FLUSH_MS: u64 = 16;
 /// PTY 是一次系统调用；都不该跟着输出走。
 ///
 /// 2.5s 是"命令跑起来到标题出现"的可感延迟上限，也压住了 `yes` 这种满屏输出的会话——
-/// 窗口内无论来多少输出都只探一次。
+/// 窗口内无论来多少输出都只探一次。报了 OSC 7501 的程序不受这个延迟：它的状态一到，标题就
+/// 能出来（auto_title.rs）。
 const TITLE_PROBE_MS: u64 = 2_500;
 
 const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
@@ -190,8 +192,10 @@ struct EntryState {
     osc: OscColorGate,
     /// 输出流里的 VT 模式跟踪，replay 时重建（模式序列早被 RingBuffer 挤掉了）
     modes: TermModeTracker,
-    /// 最近一次探到的前台命令（自动标题）；None = 空闲在 shell 里或探不到
+    /// 最近一次推出去的自动标题；None = 空闲在 shell 里或探不到
     title: Option<String>,
+    /// 自动标题的素材（前台命令、程序状态里的身份、程序设的标题）与它们的新旧，见 auto_title.rs
+    auto_title: AutoTitle,
     /// 探测在飞：Viewer 进出与输出可能同时点火，只许有一条在跑
     title_probing: bool,
     /// 守护进程会话：发了 Sync、快照还没回来。等回放的 Viewer 都搭这一班（设计文档 5.5）
@@ -245,6 +249,7 @@ impl LiveEntry {
                 osc: OscColorGate::new(),
                 modes: TermModeTracker::new(),
                 title: None,
+                auto_title: AutoTitle::new(),
                 title_probing: false,
                 sync_in_flight: false,
                 program_status: Vec::new(),
@@ -1108,8 +1113,20 @@ impl SessionManager {
                 }
             }
             BackendEvent::ProgramStatus(records) => {
-                entry.s.borrow_mut().program_status = records.clone();
+                {
+                    let mut s = entry.s.borrow_mut();
+                    let old = std::mem::replace(&mut s.program_status, records.clone());
+                    s.auto_title.on_status(&old, &records);
+                }
                 self.broadcast(entry, &ServerMessage::ProgramStatus { records });
+                // 程序报了状态多半是前台换了人（或刚起来）：标题先按它出，再排一次探测认前台
+                self.publish_title(entry);
+                self.schedule_title_probe(entry);
+            }
+            BackendEvent::Title(title) => {
+                entry.s.borrow_mut().auto_title.on_program_title(&title);
+                self.publish_title(entry);
+                self.schedule_title_probe(entry);
             }
             BackendEvent::Exit(_) => entry.s.borrow_mut().exit_seen = true,
             BackendEvent::BridgeExit(code) => entry.s.borrow_mut().bridge_exit = Some(code),
@@ -1217,9 +1234,17 @@ impl SessionManager {
     /// 的进程树）、unverified/断链（拿到的答案没有意义）。这是道保险，探测失败不能把关 tab
     /// 拦下来，所以也不报错。
     pub async fn foreground(&self, session_id: &str) -> SessionForeground {
-        let idle = SessionForeground { busy: false, command: None };
-        let Some(row) = self.db.get_session(session_id).filter(|r| r.state == "active") else { return idle };
-        let Some(project) = self.db.get_project(&row.project_id) else { return idle };
+        match self.probe_foreground(session_id).await {
+            Probe::Busy(c) => SessionForeground { busy: true, command: Some(c) },
+            Probe::Shell | Probe::Unknown => SessionForeground { busy: false, command: None },
+        }
+    }
+
+    /// [`SessionManager::foreground`] 的细分版：自动标题要分清"在 shell 里"和"问不到"——前者让
+    /// 旧的标题素材作废，后者什么都不该改（auto_title.rs）
+    async fn probe_foreground(&self, session_id: &str) -> Probe {
+        let Some(row) = self.db.get_session(session_id).filter(|r| r.state == "active") else { return Probe::Unknown };
+        let Some(project) = self.db.get_project(&row.project_id) else { return Probe::Unknown };
         let backend = self.entry(session_id).and_then(|e| e.backend());
         let command = match backend {
             Some(b) if row.durable == 1 => match b.foreground() {
@@ -1230,29 +1255,32 @@ impl SessionManager {
             None => None,
         };
         match command {
-            Some(c) if !is_shell_command(&c, project.shell.as_deref()) => SessionForeground { busy: true, command: Some(c) },
-            _ => idle,
+            Some(c) if is_shell_command(&c, project.shell.as_deref()) => Probe::Shell,
+            Some(c) => Probe::Busy(c),
+            None => Probe::Unknown,
         }
     }
 
     // ---------- 自动标题 ----------
 
-    /// 会话此刻的自动标题（前台命令）。没有 live entry 的会话没有标题，不为它现探。
+    /// 会话此刻的自动标题（程序设的标题 > 程序身份 > 前台命令，auto_title.rs）。没有 live entry
+    /// 的会话没有标题，不为它现探。
     pub fn title_of(&self, session_id: &str) -> Option<String> {
         self.entry(session_id).and_then(|e| e.s.borrow().title.clone())
     }
 
     /// 安排一次前台命令探测。
     ///
-    /// 只在有 Viewer 时探：每次探测是宿主机上一条实打实的命令（SSH 上还要开一条
-    /// channel），没人看着的会话探出来也没人用。代价是**后台会话的标题会陈旧**——
-    /// 停在最后一个 Viewer 离开时探到的那次，直到下次有人打开它。宁可陈旧也不轮询：
-    /// 会话可以有十几个，定时全量探测会把 SSH 链路占满。
+    /// 没人看着的会话也探：侧栏上的后台会话要看得出此刻在跑什么。早先只在有 Viewer 时探，因为
+    /// 那时每次探测是宿主机上一条实打实的命令（SSH 上还要开一条 channel）；现在持久会话是守护
+    /// 进程连接上一来一回的小帧，非持久的本地 PTY 是一次系统调用，非持久 SSH 会话根本不探
+    /// （`process_name` 恒为 None）。仍然不定时轮询：点火的只有输出、程序状态与程序标题这些
+    /// "前台可能换了人"的信号，安静的会话不花一分钱。
     ///
     /// 节流而非 debounce：窗口内重复点火直接忽略，所以满屏输出的会话也按固定间隔
     /// 出标题，不必等它安静下来。
     fn schedule_title_probe(&self, entry: &Rc<LiveEntry>) {
-        if entry.title_timer.is_set() || entry.viewer_count() == 0 {
+        if entry.title_timer.is_set() {
             return;
         }
         let me = self.me();
@@ -1266,19 +1294,29 @@ impl SessionManager {
         tokio::task::spawn_local(async move { me.probe_title(&e).await });
     }
 
-    /// 探一次并广播变化。foreground() 自己吞掉所有错误，这里不会失败。
+    /// 探一次并广播变化。probe_foreground() 自己吞掉所有错误，这里不会失败。
     async fn probe_title(&self, entry: &Rc<LiveEntry>) {
-        if entry.s.borrow().title_probing {
-            return;
-        }
-        entry.s.borrow_mut().title_probing = true;
-        let fg = self.foreground(&entry.session_id).await;
+        let started = {
+            let mut s = entry.s.borrow_mut();
+            if s.title_probing {
+                return;
+            }
+            s.title_probing = true;
+            s.auto_title.probe_started()
+        };
+        let probe = self.probe_foreground(&entry.session_id).await;
         entry.s.borrow_mut().title_probing = false;
         // 探测期间会话可能已被终止，entry 也可能被重建过
         if !self.is_current(entry) {
             return;
         }
-        let next = fg.command;
+        entry.s.borrow_mut().auto_title.on_probe(started, probe);
+        self.publish_title(entry);
+    }
+
+    /// 自动标题变了就广播
+    fn publish_title(&self, entry: &LiveEntry) {
+        let next = entry.s.borrow().auto_title.title();
         if next == entry.s.borrow().title {
             return;
         }
@@ -1303,7 +1341,9 @@ impl SessionManager {
 
     fn clear_title(&self, entry: &LiveEntry) {
         entry.title_timer.clear();
-        entry.s.borrow_mut().title = None;
+        let mut s = entry.s.borrow_mut();
+        s.title = None;
+        s.auto_title = AutoTitle::new();
     }
 
     /// 终止一个会话。
@@ -1441,11 +1481,6 @@ impl SessionManager {
         }
         if let Some(hint) = outcome.hint {
             self.apply_colors(&entry, &hint);
-        }
-        // 最后一个人走之前再探一次：Detach 掉的会话在侧栏上要还看得出在跑什么，
-        // 而这是它能更新标题的最后时机（此后不再探，见 schedule_title_probe）
-        if entry.viewer_count() == 0 {
-            self.spawn_probe_title(&entry);
         }
     }
 

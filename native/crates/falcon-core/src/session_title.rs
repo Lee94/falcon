@@ -10,13 +10,15 @@ use crate::js::js_trim;
 
 /// 会话的自动标题。
 ///
-/// 优先级：手起的名字 > 前台命令（后端探的自动标题）> agent 的 CLI 名。
+/// 优先级：手起的名字 > 服务端给的自动标题（程序设的标题 / 程序身份 / 前台命令，服务端的
+/// `sessions/auto_title.rs`）> agent 的 CLI 名。
 /// 三样都没有就返回 `None`——**这时不要编一个占位名出来**，调用方各自兜底：
 /// 窗口标题栏右边紧跟着完整工作目录，什么都不显示才对；侧栏只有一个文本槽，
 /// 落到 [`shell_label`]。
 ///
-/// agent 兜底取 CLI 名小写（claude / codex / grok），与前台命令同形：CLI 正跑着时
-/// 探到的前台命令本来就是同一个词，它退出回到 shell 也不会跳成另一种写法。
+/// agent 兜底取 CLI 名小写（claude / codex / grok），与服务端给的程序身份同形：CLI 正跑着时
+/// 那边给的也是同一个词（Claude Code 自报 `claude-code`，服务端改写成 `claude`；macOS 上它的
+/// 进程名是版本号，不能指望前台命令），它退出回到 shell 也不会跳成另一种写法。
 pub fn session_title(session: &Session) -> Option<String> {
     title_of(&session.name, session.title.as_deref(), session.agent)
 }

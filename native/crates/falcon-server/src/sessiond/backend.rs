@@ -392,6 +392,7 @@ pub async fn connect(transport: Transport, cb: BackendCallbacks) -> Result<(Rc<S
                             let _ = tx.send(name);
                         }
                     }
+                    HolderMsg::Event(Event::Title { title }) => (cb.on_event)(BackendEvent::Title(title)),
                     HolderMsg::Event(Event::VtRestarted { .. }) => (cb.on_event)(BackendEvent::VtRestarted),
                     HolderMsg::Event(Event::VtDegraded) => (cb.on_event)(BackendEvent::VtDegraded),
                     HolderMsg::Exit(s) => (cb.on_event)(BackendEvent::Exit(s)),

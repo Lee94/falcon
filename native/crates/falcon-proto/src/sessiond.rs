@@ -284,7 +284,8 @@ pub enum Event {
     VtRestarted { at_offset: u64 },
     /// 反复崩溃，不再重启：快照退化成原始尾巴，终端查询没人答
     VtDegraded,
-    /// OSC 0 / 2
+    /// 程序设的终端标题（OSC 0 / 2）；空串 = 没有。变了才发，握手后紧跟 `Status` 先发一次当前的
+    /// （0.3.2 及之前的 holder 一次都不发）。holder 只管存与转，算不算数由服务端定
     Title { title: String },
     Bell,
     /// OSC 133：A 提示符开始、B 输入开始、C 命令开始输出、D 命令结束
