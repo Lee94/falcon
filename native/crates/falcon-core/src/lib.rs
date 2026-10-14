@@ -36,6 +36,8 @@ pub mod file_tree;
 pub mod file_search;
 /// 对应 shared 的 px0BasePath：px0 审阅的挂载前缀
 pub mod px0;
+/// 「用 Zed / VS Code 打开」：项目目录在哪、编辑器的自定义协议链接
+pub mod editor;
 /// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
 /// 对应 React 版的 lib/gitGraph.ts：提交图泳道

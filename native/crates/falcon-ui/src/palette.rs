@@ -285,6 +285,19 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 run: run(move |_, cx| w.update(cx, |w, cx| w.new_terminal(&pid, Some(a), None, cx))),
             });
         }
+        if let Some(target) = falcon_core::editor::editor_target(p, ws.profile.is_loopback()) {
+            for editor in falcon_core::editor::Editor::ALL {
+                let (w, pid, target) = (ws_entity.clone(), p.id.clone(), target.clone());
+                project_items.push(PickItem {
+                    key: format!("#{} {}", p.name, editor.name()),
+                    label: t!("palette.openInEditor", editor = editor.name(), name = p.name.clone()).to_string(),
+                    meta: Some(host.clone()),
+                    icon: IconName::ExternalLink,
+                    tone: None,
+                    run: run(move |_, cx| crate::menus::open_in_editor(&w, &pid, editor, &target, cx)),
+                });
+            }
+        }
     }
     {
         let w = ws_entity.clone();

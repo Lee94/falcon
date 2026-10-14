@@ -1295,7 +1295,7 @@ impl Canvas {
         pinned: bool,
         shown_keys: &[String],
         place: CanvasPlace,
-        _cx: &App,
+        cx: &App,
     ) -> Vec<MenuItemSpec> {
         let mut items = Vec::new();
         if let Some(pid) = project_id {
@@ -1325,6 +1325,10 @@ impl Canvas {
             items.push(MenuItemSpec::new(t!("session.rename").to_string(), move |window, cx| {
                 crate::dialogs::rename::open(&ws, &id, window, cx)
             }));
+        }
+        // 正看着的项目一键进编辑器
+        if let Some(project) = project_id.and_then(|pid| self.ws.read(cx).project(pid)) {
+            items.extend(crate::menus::first_sep(crate::menus::editor_items(&self.ws, project, cx)));
         }
         // 换画布：别的每一块各一项，再加"新画布"——已经独占一块的窗口挪去新画布等于没动，不给
         let mut moves: Vec<MenuItemSpec> = Vec::new();

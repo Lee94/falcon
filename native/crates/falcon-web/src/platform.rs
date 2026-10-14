@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use falcon_platform::{Downloads, FontSource, HtmlView, LocalService, Platform, PlatformInfo, ServerSource};
-use gpui_kit::Window;
+use gpui_kit::{App, Window};
 
 use crate::dom::{self, local_storage};
 
@@ -119,6 +119,13 @@ impl Platform for Browser {
         _window: &mut Window,
     ) -> Option<Result<Rc<dyn HtmlView>, String>> {
         None
+    }
+
+    fn open_app_link(&self, url: &str, _cx: &App) -> bool {
+        if let Err(err) = dom::open_app_link(url) {
+            log::warn!("交出链接失败（{url}）：{err}");
+        }
+        true
     }
 
     // 标签页图标跟着换（`<link rel=icon>`）在 C3 补（附录 B）

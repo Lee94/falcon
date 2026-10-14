@@ -6,6 +6,8 @@
 
 use std::rc::Rc;
 
+use falcon_client::ProbeTarget;
+use falcon_core::editor::{Editor, EditorTarget, editor_target, editor_url};
 use falcon_proto::{Project, SESSION_AGENTS, SessionAgent, SessionState, SessionWithProject, SshHost};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::*;
@@ -332,6 +334,73 @@ pub fn session_menu_items(ws: &Entity<Workspace>, session: &SessionWithProject, 
     items
 }
 
+/// 一组菜单项的第一项前画分隔线
+pub fn first_sep(items: Vec<MenuItemSpec>) -> impl Iterator<Item = MenuItemSpec> {
+    items.into_iter().enumerate().map(|(i, item)| if i == 0 { item.sep() } else { item })
+}
+
+// ---------------- 用编辑器打开 ----------------
+
+/// 「用 Zed / VS Code 打开」（falcon-core 的 editor 模块）。编辑器开在这台机器上：本地项目
+/// 而服务端在别的机器上、项目没有工作目录时一项都没有
+pub fn editor_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -> Vec<MenuItemSpec> {
+    let Some(target) = editor_target(project, ws.read(cx).profile.is_loopback()) else { return Vec::new() };
+    Editor::ALL
+        .into_iter()
+        .map(|editor| {
+            let (ws, pid, target) = (ws.clone(), project.id.clone(), target.clone());
+            MenuItemSpec::new(t!("project.openIn", editor = editor.name()).to_string(), move |_, cx| {
+                open_in_editor(&ws, &pid, editor, &target, cx)
+            })
+        })
+        .collect()
+}
+
+/// 把项目目录交给编辑器。工作目录写成 `~/x` 或相对路径时，家目录 / 当前目录在宿主机上，
+/// 先找服务端展开（`/api/fs/list` 回的 `path`，顺带确认目录还在）再交
+pub fn open_in_editor(ws: &Entity<Workspace>, project_id: &str, editor: Editor, target: &EditorTarget, cx: &mut App) {
+    if let Some(url) = editor_url(editor, target) {
+        hand_to_editor(ws, editor, &url, cx);
+        return;
+    }
+    let probe = match target {
+        EditorTarget::Local { .. } => ProbeTarget::Backend,
+        EditorTarget::Ssh { .. } => ProbeTarget::Project(project_id.to_string()),
+    };
+    let fut = ws.read(cx).client.list_dir(Some(target.dir()), &probe);
+    let (ws, target) = (ws.clone(), target.clone());
+    cx.spawn(async move |cx| {
+        let result = fut.await;
+        cx.update(|cx| match result {
+            Ok(listing) => match editor_url(editor, &target.with_dir(listing.path.clone())) {
+                Some(url) => hand_to_editor(&ws, editor, &url, cx),
+                // 展开了还不是绝对路径（Windows 的 UNC 路径），两家的链接都写不了
+                None => toast(
+                    &ws,
+                    ToastKind::Danger,
+                    t!("project.openInFailed", editor = editor.name()).to_string(),
+                    Some(listing.path),
+                    cx,
+                ),
+            },
+            Err(err) => fail(&ws, &err, cx),
+        });
+    })
+    .detach();
+}
+
+fn hand_to_editor(ws: &Entity<Workspace>, editor: Editor, url: &str, cx: &mut App) {
+    if !falcon_platform::get(cx).open_app_link(url, cx) {
+        toast(
+            ws,
+            ToastKind::Warning,
+            t!("project.editorMissing", editor = editor.name()).to_string(),
+            Some(t!("project.editorMissingBody", editor = editor.name()).to_string()),
+            cx,
+        );
+    }
+}
+
 // ---------------- 项目 ----------------
 
 pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -> Vec<MenuItemSpec> {
@@ -350,6 +419,8 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
         ];
     }
     let mut items = new_session_items(ws, &project.id, None);
+    // 去别处看：px0 审阅、外部编辑器，一组
+    let mut elsewhere = Vec::new();
     // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器——不嵌进
     // WebView，那得把登录 cookie 塞给它。浏览器没登录过时服务端会送去登录再回来。
     // 多仓库项目看的是成员仓库（有没有工作目录都一样），服务端在入口页上让用户挑成员
@@ -361,8 +432,10 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
             w.client.base_url().trim_end_matches('/'),
             falcon_core::px0::px0_base_path(&project.id)
         );
-        items.push(MenuItemSpec::new(t!("project.px0Review").to_string(), move |_, cx| cx.open_url(&url)).sep());
+        elsewhere.push(MenuItemSpec::new(t!("project.px0Review").to_string(), move |_, cx| cx.open_url(&url)));
     }
+    elsewhere.extend(editor_items(ws, project, cx));
+    items.extend(first_sep(elsewhere));
     {
         let ws = ws.clone();
         let pid = project.id.clone();

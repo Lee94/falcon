@@ -3,7 +3,7 @@
 //! 客户端一套界面代码（falcon-ui）、两种产物：原生桌面（falcon-desktop）与浏览器 wasm
 //! （falcon-web）。界面层不写 `cfg(target_family = "wasm")`，凡是"这台机器上有没有 / 怎么做"
 //! 的事都问这里的 [`Platform`]：偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、
-//! 字体、下载、HTML 预览视图、应用图标。两个入口在开窗口之前用 [`install`] 挂一份实现。
+//! 字体、下载、HTML 预览视图、交给别的应用的链接、应用图标。两个入口在开窗口之前用 [`install`] 挂一份实现。
 //!
 //! 只放接口与少量数据类型，不放实现：文件、凭据库、wry、AppKit 在 falcon-desktop，
 //! localStorage、DOM 在 falcon-web。所有方法都在 GPUI 的前台线程上调（实现可以是 `!Send` 的），
@@ -165,6 +165,15 @@ pub trait Platform {
         open_external: Box<dyn Fn(String) + Send + Sync>,
         window: &mut Window,
     ) -> Option<Result<Rc<dyn HtmlView>, String>>;
+
+    // ---------------- 交给别的应用 ----------------
+
+    /// 把自定义协议的链接（`zed://`、`vscode://`，「用编辑器打开」）交给认领它的应用。
+    /// false = 确定没有应用认领这个协议（编辑器没装）；问不到的平台一律 true，没人认领时由
+    /// 系统 / 浏览器自己提示。浏览器不走 `cx.open_url`：GPUI 网页版那是 `window.open`，会为
+    /// 外部协议先开一个空白标签页、处理完也不关。尽量在用户手势里调——浏览器会拦没有手势
+    /// 的外部协议跳转（点完几秒内都还算）
+    fn open_app_link(&self, url: &str, cx: &App) -> bool;
 
     // ---------------- 应用图标 ----------------
 
