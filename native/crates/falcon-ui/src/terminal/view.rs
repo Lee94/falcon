@@ -20,9 +20,10 @@ use falcon_term::alacritty_terminal::index::Side;
 use falcon_term::alacritty_terminal::selection::SelectionType;
 use falcon_term::alacritty_terminal::term::TermMode;
 use falcon_term::keyroute::{KeyRoute, route_key};
+use falcon_term::links::LinkSpan;
 use falcon_term::{
     DeltaMode, MouseAction, MouseButton as TermMouseButton, MouseReportEvent, MouseReporter,
-    Snapshot, TermCore, TermEvent, TermOptions, TermSize, WheelAccumulator, WheelRoute, keys, links,
+    Snapshot, TermCore, TermEvent, TermOptions, TermSize, WheelAccumulator, WheelRoute, keys,
     paste,
 };
 use futures::StreamExt;
@@ -30,12 +31,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
+    InteractiveElement, IntoElement, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
 };
 
-use super::element::{HoveredLink, TerminalElement, TerminalGeometry};
+use super::element::{TerminalElement, TerminalGeometry};
 use crate::theme::TerminalLook;
 use crate::zoom::zpx;
 
@@ -122,6 +123,12 @@ fn button_bit(b: MouseButton) -> u8 {
     }
 }
 
+/// 点开链接要按的修饰键：mac 键位是 ⌘，其余是 Ctrl（Windows Terminal、VS Code 的习惯）。
+/// GPUI 的 `platform` 在 Windows 上是 Win 键，不能直接拿来用
+fn link_modifier(m: &Modifiers) -> bool {
+    if crate::ui::mac_keys() { m.platform } else { m.control }
+}
+
 /// xterm.js 的光标闪烁间隔
 const BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
@@ -190,7 +197,8 @@ pub struct TerminalView {
     /// 在标题栏 / 侧栏按下再拖过来的，程序没见过那次按下，收到带键的移动就当成在拖选
     /// （开着鼠标的 tmux / vim 会直接起一段选区），松开就把那段选区复制走
     reported_held: u8,
-    hovered_link: Option<HoveredLink>,
+    /// 按着链接修饰键（[`link_modifier`]）时指针下的链接：画下划线、换手形指针
+    hovered_link: Option<LinkSpan>,
     scrollbar: Scrollbar,
     pub conn: ConnState,
     /// WS 断开后第几次自动重连（0 = 没断）
@@ -503,6 +511,15 @@ impl TerminalView {
         self.commit_text(text, cx);
     }
 
+    /// 自动化脚本查窗口坐标处的链接（不打开）。用最新的画面，不等下一帧
+    #[cfg(feature = "automation")]
+    pub fn automation_link_at(&mut self, pos: gpui_kit::Point<gpui_kit::Pixels>) -> Option<String> {
+        if self.core.take_dirty() {
+            self.snapshot = Arc::new(self.core.snapshot());
+        }
+        self.link_at(pos).map(|l| l.url)
+    }
+
     pub(super) fn set_marked_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.marked_text = Some(text);
         cx.notify();
@@ -767,6 +784,17 @@ impl TerminalView {
             MouseButton::Right => TermMouseButton::Right,
             _ => return,
         };
+        // ⌘+点击（Windows / Linux 上 Ctrl+点击）打开链接。排在鼠标上报前面：程序接管了鼠标
+        // （Claude Code 的全屏界面、vim 的 mouse=a、开着鼠标的 tmux）时照样能开——iTerm2 /
+        // Ghostty 也是这样，SGR 上报里本来就没有 ⌘ 这一位。这次按下不报，松开也就不报
+        if e.button == MouseButton::Left
+            && link_modifier(&e.modifiers)
+            && let Some(link) = self.link_at(e.position)
+        {
+            cx.open_url(&link.url);
+            cx.stop_propagation();
+            return;
+        }
         if self.reporting(&e.modifiers) {
             self.report(MouseAction::Down, button, e.position, &e.modifiers);
             self.reported_held |= button_bit(e.button);
@@ -774,13 +802,6 @@ impl TerminalView {
             return;
         }
         if e.button != MouseButton::Left {
-            return;
-        }
-        // ⌘+点击打开链接
-        if e.modifiers.platform
-            && let Some(link) = self.link_at(e.position)
-        {
-            cx.open_url(&link.url);
             return;
         }
         let Some(geo) = self.geometry else {
@@ -807,6 +828,10 @@ impl TerminalView {
         if e.pressed_button.is_none() {
             // 空手移动：之前按着的键肯定都松了（兜住没收到的松开）
             self.reported_held = 0;
+            // 悬停链接在上报之前算：程序接管鼠标时也要看得出哪里能点
+            if self.refresh_hovered_link(e.position, &e.modifiers) {
+                cx.notify();
+            }
         }
         if self.reporting(&e.modifiers) {
             let button = match e.pressed_button {
@@ -828,11 +853,23 @@ impl TerminalView {
             }
             return;
         }
-        let hovered = if e.modifiers.platform { self.link_at(e.position) } else { None };
-        if hovered != self.hovered_link {
-            self.hovered_link = hovered;
+    }
+
+    /// 光按下 / 松开修饰键、指针不动：链接也要马上亮起 / 熄灭（只有聚焦的终端收得到这个事件）
+    fn modifiers_changed(&mut self, e: &ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refresh_hovered_link(window.mouse_position(), &e.modifiers) {
             cx.notify();
         }
+    }
+
+    /// 按指针位置与修饰键重算悬停的链接，变了返回 true
+    fn refresh_hovered_link(&mut self, pos: gpui_kit::Point<gpui_kit::Pixels>, modifiers: &Modifiers) -> bool {
+        let hovered = if link_modifier(modifiers) { self.link_at(pos) } else { None };
+        if hovered == self.hovered_link {
+            return false;
+        }
+        self.hovered_link = hovered;
+        true
     }
 
     /// 松开：落在终端上（on_mouse_up）或终端外（on_mouse_up_out）都走这里。按下时报过的键
@@ -920,37 +957,14 @@ impl TerminalView {
         }
     }
 
-    fn link_at(&self, pos: gpui_kit::Point<gpui_kit::Pixels>) -> Option<HoveredLink> {
+    /// 指针下的链接（网格外——内边距、滚动条那一条——不算）
+    fn link_at(&self, pos: gpui_kit::Point<gpui_kit::Pixels>) -> Option<LinkSpan> {
         let geo = self.geometry?;
-        let (row, col, _) = geo.cell_at(pos);
-        let snap = &self.snapshot;
-        if row >= snap.size.rows || col >= snap.size.cols {
+        if !geo.contains(pos) {
             return None;
         }
-        // OSC 8 超链接优先
-        if let Some(link) = snap.cell(row, col).hyperlink() {
-            let uri = link.uri().to_string();
-            let same = |c: usize| snap.cell(row, c).hyperlink().is_some_and(|h| h.uri() == uri);
-            let mut start = col;
-            while start > 0 && same(start - 1) {
-                start -= 1;
-            }
-            let mut end = col + 1;
-            while end < snap.size.cols && same(end) {
-                end += 1;
-            }
-            return Some(HoveredLink { row, start_col: start, end_col: end, url: uri });
-        }
-        let (text, cols) = snap.row_text(row);
-        for (start, end, url) in links::find_urls(&text) {
-            let (Some(&s), Some(&e)) = (cols.get(start), cols.get(end.saturating_sub(1))) else {
-                continue;
-            };
-            if col >= s && col <= e {
-                return Some(HoveredLink { row, start_col: s, end_col: e + 1, url });
-            }
-        }
-        None
+        let (row, col, _) = geo.cell_at(pos);
+        self.snapshot.link_at(row, col)
     }
 }
 
@@ -1259,6 +1273,10 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.core.take_dirty() {
             self.snapshot = Arc::new(self.core.snapshot());
+            // 链接底下的内容变了（滚动、输出把它顶走）：按现在的画面重认
+            if self.hovered_link.is_some() {
+                self.refresh_hovered_link(window.mouse_position(), &window.modifiers());
+            }
         }
         // 滚动条的位置每帧从快照推：输出在涨、回放换了整个终端、滚轮与拖动都会改它，
         // 一处读就不会漏
@@ -1294,6 +1312,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))

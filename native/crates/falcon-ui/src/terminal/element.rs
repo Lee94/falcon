@@ -18,6 +18,7 @@ use std::mem;
 use std::sync::Arc;
 
 use falcon_term::Snapshot;
+use falcon_term::links::LinkSpan;
 use falcon_term::alacritty_terminal::term::TermMode;
 use falcon_term::alacritty_terminal::term::cell::{Cell, Flags};
 use falcon_term::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
@@ -79,6 +80,16 @@ impl TerminalGeometry {
         (row, col, right_half)
     }
 
+    /// 窗口坐标落在网格里（不含内边距）
+    pub fn contains(&self, pos: Point<Pixels>) -> bool {
+        let x = f32::from(pos.x - self.origin.x);
+        let y = f32::from(pos.y - self.origin.y);
+        x >= 0.0
+            && y >= 0.0
+            && x < f32::from(self.cell_width) * self.cols as f32
+            && y < f32::from(self.line_height) * self.rows as f32
+    }
+
     /// 相对终端左上角的像素坐标（?1016 的鼠标上报用），夹到画布内。
     pub fn pixel_at(&self, pos: Point<Pixels>) -> (i32, i32) {
         let w = f32::from(self.cell_width) * self.cols as f32;
@@ -87,15 +98,6 @@ impl TerminalGeometry {
         let y = f32::from(pos.y - self.origin.y).clamp(0.0, (h - 1.0).max(0.0));
         (x as i32, y as i32)
     }
-}
-
-/// 悬停中的链接在可见区里的范围（同一行，列含首不含尾）。
-#[derive(Clone, Debug, PartialEq)]
-pub struct HoveredLink {
-    pub row: usize,
-    pub start_col: usize,
-    pub end_col: usize,
-    pub url: String,
 }
 
 pub struct TerminalElement {
@@ -107,7 +109,7 @@ pub struct TerminalElement {
     focused: bool,
     cursor_visible: bool,
     marked_text: Option<String>,
-    hovered_link: Option<HoveredLink>,
+    hovered_link: Option<LinkSpan>,
     /// 左 / 上的内边距（React 版是 pl-2 py-1.5）
     padding: Point<Pixels>,
 }
@@ -123,7 +125,7 @@ impl TerminalElement {
         focused: bool,
         cursor_visible: bool,
         marked_text: Option<String>,
-        hovered_link: Option<HoveredLink>,
+        hovered_link: Option<LinkSpan>,
     ) -> Self {
         Self {
             view,
@@ -675,7 +677,7 @@ impl TerminalElement {
                 let hovered = self
                     .hovered_link
                     .as_ref()
-                    .is_some_and(|l| l.row == row && col >= l.start_col && col < l.end_col);
+                    .is_some_and(|l| l.contains(row, col));
                 let style = self.cell_run_style(cell, color, hovered);
 
                 match current.as_mut() {

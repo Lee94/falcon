@@ -230,6 +230,10 @@ pub(crate) fn set_mac_keys(mac: bool) {
     MAC_KEYS.store(mac, Ordering::Relaxed);
 }
 
+pub(crate) fn mac_keys() -> bool {
+    MAC_KEYS.load(Ordering::Relaxed)
+}
+
 /// 键位提示（菜单 / tooltip 里显示的主键位），字面沿用 React 版 `chord()` 的写法
 /// （falcon-core 的快捷键表）。不认识的动作 id 给空串
 pub fn chord(action: &str) -> String {

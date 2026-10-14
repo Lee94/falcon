@@ -11,8 +11,10 @@
 //! | `type:<文本>` | 往活动终端送输入，支持 `\r` `\n` `\t` `\e` `\xHH` 转义（`;` 写成 `\x3b`） |
 //! | `key:<键>` | 派发一次按键（GPUI 写法，如 `cmd-shift-p`、`enter`） |
 //! | `action:<名字>` | 派发动作（如 `falcon::ToggleFilesPanel`） |
-//! | `click:<x>,<y>` / `rclick:<x>,<y>` | 在窗口逻辑坐标处左 / 右击 |
-//! | `move:<x>,<y>` | 鼠标移动 |
+//! | `click:<x>,<y>[,<修饰键>]` / `rclick:<x>,<y>[,<修饰键>]` | 在窗口逻辑坐标处左 / 右击；修饰键用 `-` 连，如 `cmd`、`ctrl-shift` |
+//! | `move:<x>,<y>[,<修饰键>]` | 鼠标移动 |
+//! | `mods:[<修饰键>]` | 修饰键变成这样（指针不动；空 = 全松开） |
+//! | `link:<x>,<y>` | 打印活动终端里该点的链接（不打开；没有链接算步骤失败） |
 //! | `scroll:<x>,<y>,<dx>,<dy>` | 在该点滚一次像素滚轮（dy 为负往下翻） |
 //! | `drag:<x1>,<y1>,<x2>,<y2>` | 左键按住从 1 拖到 2（中间插 8 个移动事件） |
 //! | `frames:<ms>[:refresh]` | 按 60Hz 手动画这么久（锁屏时模拟显示链路，压测要算上渲染开销），打印 p50 / p95 / 最慢；带 `:refresh` 时每帧无视视图缓存 |
@@ -83,8 +85,30 @@ fn unescape(s: &str) -> String {
 }
 
 fn point(arg: &str) -> Option<Point<gpui_kit::Pixels>> {
-    let (x, y) = arg.split_once(',')?;
+    let mut it = arg.split(',');
+    let (x, y) = (it.next()?, it.next()?);
     Some(Point::new(px(x.trim().parse().ok()?), px(y.trim().parse().ok()?)))
+}
+
+/// `x,y` 之后可选的第三段，见 [`parse_modifiers`]
+fn modifiers(arg: &str) -> Result<Modifiers, String> {
+    parse_modifiers(arg.split(',').nth(2).unwrap_or(""))
+}
+
+/// `cmd` / `ctrl` / `alt` / `shift` / `fn` 用 `-` 连；空串 = 一个都没按
+fn parse_modifiers(spec: &str) -> Result<Modifiers, String> {
+    let mut m = Modifiers::default();
+    for k in spec.trim().split('-').filter(|k| !k.is_empty()) {
+        match k {
+            "cmd" | "platform" => m.platform = true,
+            "ctrl" => m.control = true,
+            "alt" => m.alt = true,
+            "shift" => m.shift = true,
+            "fn" => m.function = true,
+            other => return Err(format!("不认识的修饰键 {other}")),
+        }
+    }
+    Ok(m)
 }
 
 async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, cx: &mut AsyncApp) -> Result<(), String> {
@@ -146,6 +170,20 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                 return Err("没有活动终端".into());
             }
         }
+        "link" => {
+            let p = point(arg).ok_or("link 要 x,y")?;
+            let url = cx.update(|cx| {
+                let view = match &ws.read(cx).state.active {
+                    ActiveView::Terminal { session_id: id } => ws.read(cx).terminals.get(id).cloned(),
+                    _ => None,
+                };
+                view.and_then(|v| v.update(cx, |v, _| v.automation_link_at(p)))
+            });
+            match url {
+                Some(url) => log::info!("automate: ({arg}) 处的链接 {url}"),
+                None => return Err(format!("({arg}) 处没有链接")),
+            }
+        }
         "key" => {
             let ks = Keystroke::parse(arg).map_err(|e| format!("{e:#}"))?;
             let _ = window.update(cx, |_, window, cx| {
@@ -160,10 +198,11 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
         }
         "click" | "rclick" => {
             let p = point(arg).ok_or("click 要 x,y")?;
+            let m = modifiers(arg)?;
             let button = if cmd == "rclick" { MouseButton::Right } else { MouseButton::Left };
             let _ = window.update(cx, |_, window, cx| {
                 window.dispatch_event(
-                    PlatformInput::MouseMove(MouseMoveEvent { position: p, pressed_button: None, modifiers: Modifiers::default() }),
+                    PlatformInput::MouseMove(MouseMoveEvent { position: p, pressed_button: None, modifiers: m }),
                     cx,
                 );
             });
@@ -172,11 +211,11 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
             cx.background_executor().timer(Duration::from_millis(50)).await;
             let _ = window.update(cx, |_, window, cx| {
                 window.dispatch_event(
-                    PlatformInput::MouseDown(MouseDownEvent { button, position: p, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }),
+                    PlatformInput::MouseDown(MouseDownEvent { button, position: p, modifiers: m, click_count: 1, first_mouse: false }),
                     cx,
                 );
                 window.dispatch_event(
-                    PlatformInput::MouseUp(MouseUpEvent { button, position: p, modifiers: Modifiers::default(), click_count: 1 }),
+                    PlatformInput::MouseUp(MouseUpEvent { button, position: p, modifiers: m, click_count: 1 }),
                     cx,
                 );
             });
@@ -236,11 +275,21 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                 );
             });
         }
-        "move" => {
-            let p = point(arg).ok_or("move 要 x,y")?;
+        "mods" => {
+            let modifiers = parse_modifiers(arg)?;
             let _ = window.update(cx, |_, window, cx| {
                 window.dispatch_event(
-                    PlatformInput::MouseMove(MouseMoveEvent { position: p, pressed_button: None, modifiers: Modifiers::default() }),
+                    PlatformInput::ModifiersChanged(gpui_kit::ModifiersChangedEvent { modifiers, capslock: Default::default() }),
+                    cx,
+                );
+            });
+        }
+        "move" => {
+            let p = point(arg).ok_or("move 要 x,y")?;
+            let m = modifiers(arg)?;
+            let _ = window.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent { position: p, pressed_button: None, modifiers: m }),
                     cx,
                 );
             });
