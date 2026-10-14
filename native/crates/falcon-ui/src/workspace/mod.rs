@@ -137,7 +137,7 @@ pub struct Workspace {
     program_alerts: falcon_core::program_status::BlockedAlerts,
     /// 「跑完了」提示音的判定（进入 done / error 才响，规则在 falcon-core）
     finish_chimes: falcon_core::program_status::FinishChimes,
-    /// 终端状态栏上的计时（已运行 / 已等待 / 用时），时刻是相对 `clock_epoch` 的毫秒
+    /// 终端标题栏上的计时（已运行 / 已等待 / 用时），时刻是相对 `clock_epoch` 的毫秒
     program_clock: falcon_core::program_status::StateClock,
     clock_epoch: web_time::Instant,
     /// 窗口在不在前台（ServerWindow 跟着 GPUI 的窗口激活写进来）。终端的键盘焦点在窗口切到
@@ -570,7 +570,7 @@ impl Workspace {
         falcon_core::workspace::apply_session_program_status(&mut self.sessions, id, summary.as_ref());
         let now = self.clock_now();
         self.program_clock.observe(id, summary.as_ref(), now);
-        // 摘要没变也要重画：终端状态栏还列着子任务，它们只在记录全集里
+        // 摘要没变也要重画：终端标题栏还列着子任务，它们只在记录全集里
         cx.notify();
         let change = self.program_alerts.observe(id, summary.as_ref());
         self.emit_program_alert(id, change, cx);
@@ -596,7 +596,7 @@ impl Workspace {
         self.clock_epoch.elapsed().as_millis() as u64
     }
 
-    /// 终端状态栏上的计时读数（本客户端没亲眼看到这一轮开始时为 None）
+    /// 终端标题栏上的计时读数（本客户端没亲眼看到这一轮开始时为 None）
     pub fn program_clock(&self, id: &str) -> Option<falcon_core::program_status::ClockReading> {
         self.program_clock.reading(id, self.clock_now())
     }

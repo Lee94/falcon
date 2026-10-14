@@ -1,3 +1,3 @@
 pub mod element;
-pub mod status_bar;
+pub mod title_status;
 pub mod view;

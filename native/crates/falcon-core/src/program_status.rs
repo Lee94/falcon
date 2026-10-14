@@ -128,7 +128,7 @@ pub fn app_text(summary: &ProgramStatusSummary) -> Option<String> {
     (!app.is_empty()).then(|| app.to_string())
 }
 
-/// 状态栏上的一个子任务
+/// 终端标题栏上的一个子任务（胶囊旁边计数，悬停列出）
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubTask {
     pub tone: BadgeTone,
@@ -159,7 +159,7 @@ pub fn subtasks(records: &[ProgramStatusRecord]) -> Vec<SubTask> {
         .collect()
 }
 
-/// 状态栏上的计时读数（毫秒）
+/// 终端标题栏上的计时读数（毫秒）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockReading {
     /// 这一轮从开始跑到现在（中间卡在 blocked 等人的时间也算，那也是这一轮）
@@ -190,7 +190,7 @@ struct ClockEntry {
     last_run: Option<u64>,
 }
 
-/// 状态栏上的计时：各会话的程序状态是**本客户端亲眼看到**从什么时候变的。
+/// 终端标题栏上的计时：各会话的程序状态是**本客户端亲眼看到**从什么时候变的。
 ///
 /// 宿主机给的 `updated_at` 是"最后一次报告"的时间，不是"开始"的时间：Claude Code 跑一轮时会
 /// 反复重报 working（msg 在变），拿它算"已运行多久"永远是几秒。所以开始时刻只能自己记——

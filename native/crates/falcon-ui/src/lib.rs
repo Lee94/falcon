@@ -20,6 +20,7 @@ mod labels;
 mod local_time;
 mod login;
 mod menus;
+mod motion;
 mod palette;
 mod panels;
 mod prefs;

@@ -14,6 +14,7 @@
 //! 不在场的窗口（别的项目的、别的画布上的）不画，但它的终端视图仍活在工作区里：解析照跑，只省渲染。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use web_time::Instant;
 
@@ -30,7 +31,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Bounds, Context, CursorStyle, Div, Entity, FontWeight, Hsla, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, Window, div, px,
+    SharedString, Window, div, px,
 };
 use rust_i18n::t;
 
@@ -38,6 +39,7 @@ use crate::menus::{MenuItemSpec, to_popup};
 use crate::panels::diff_view::DiffView;
 use crate::panels::file_view::FileView;
 use crate::theme::{Ui, radius};
+use crate::terminal::title_status::{self, Part, StatusSlot};
 use crate::ui::{Mark, host_bar, icon, status_mark};
 use crate::workspace::{ActiveView, Workspace, is_pending_id};
 use crate::zoom::zpx;
@@ -93,8 +95,9 @@ pub struct Canvas {
     epoch: Instant,
     /// 画布条上各格的矩形（窗口坐标），prepaint 时记下，拖拽落点靠它命中。每次 render 清空重记
     targets: Rc<RefCell<Vec<(String, Bounds<Pixels>)>>>,
-    /// 终端状态栏的计时（已运行 / 已等待）在涨时，一秒后再画一次
-    clock_tick: Option<Task<()>>,
+    /// 终端标题栏里会动的两块（状态胶囊、底边线）：各是一个小视图，动画只重画它们自己。按会话 id，
+    /// 只留看得见、程序报了状态的
+    status_slots: HashMap<String, [Entity<StatusSlot>; 2]>,
 }
 
 impl Canvas {
@@ -116,7 +119,7 @@ impl Canvas {
             swipe: CanvasSwipe::new(),
             epoch: Instant::now(),
             targets: Rc::new(RefCell::new(Vec::new())),
-            clock_tick: None,
+            status_slots: HashMap::new(),
         }
     }
 
@@ -360,7 +363,7 @@ impl Render for Canvas {
         let shown_keys: Vec<String> = layout::pane_keys(&columns);
         // 画布条的格子每帧重记（prepaint 里填）
         self.targets.borrow_mut().clear();
-        self.schedule_clock_tick(&shown_keys, cx);
+        self.sync_status_slots(&shown_keys, cx);
 
         // 每扇（非固定的）窗口在第几块画布上、哪些窗口独占一块（"移到新画布"对它等于没动）
         let canvas_ids: Vec<String> = groups.iter().map(|g| g.id.clone()).collect();
@@ -972,8 +975,10 @@ impl Canvas {
         let label = pane_label(ws, key);
 
         // ---- 标题栏内容 ----
-        let mut info = div().flex().flex_1().min_w_0().items_center().gap(zpx(6.));
+        let mut info = div().flex().flex_1().min_w_0().overflow_hidden().items_center().gap(zpx(6.));
         let where_color = if is_active { ui.muted_foreground } else { ui.muted_foreground.opacity(0.7) };
+        // 标题栏底边那条随程序状态变的线（只有终端窗口、程序报了状态时有）
+        let mut edge = None;
         match &item {
             PaneItem::Terminal { id, .. } => {
                 let pending = ws.state.pending.iter().find(|p| &p.id == id);
@@ -992,18 +997,25 @@ impl Canvas {
                 if let Some(state) = state {
                     info = info.child(status_mark(state, zpx(12.), cx));
                 }
-                // 标题这一格空着是正常的：右边紧跟着完整工作目录，编一个占位名只会挤掉路径
+                // 标题这一格空着是正常的：右边紧跟着完整工作目录，编一个占位名只会挤掉路径。
+                // 窄窗口里名字可以让：状态胶囊不缩，名字缩到剩一点再截断
                 if let Some(name) = name {
-                    info = info.child(div().flex_none().max_w(zpx(260.)).truncate().font_weight(FontWeight::MEDIUM).child(name));
+                    info = info.child(
+                        div().flex_shrink(1.).min_w(zpx(32.)).max_w(zpx(260.)).truncate().font_weight(FontWeight::MEDIUM).child(name),
+                    );
                 }
-                // 程序状态（OSC 7501，ADR 0020）：与侧栏同一个徽标，跟在名字后面
-                if let Some(badge) = session.and_then(|s| s.program_status.as_ref()).and_then(falcon_core::program_status::badge) {
-                    info = info.child(crate::ui::program_badge(
-                        SharedString::from(format!("pane-ps-{id}")),
-                        &badge,
-                        zpx(12.),
-                        cx,
-                    ));
+                // 程序状态（OSC 7501，ADR 0020）：胶囊跟在名字后面，程序那半句与工作目录分剩下
+                // 的宽度——半句话按内容宽度先拿（封顶），路径只吃剩下的。胶囊与底边线是会动的
+                // 小视图（见 sync_status_slots），这里只管挂
+                if let Some([chip, line]) = self.status_slots.get(id) {
+                    info = info.child(chip.clone());
+                    if let Some(detail) = title_status::badge(id, ws).and_then(|b| b.detail) {
+                        info = info.child(
+                            // 比路径亮一档（跟标题栏的字色走），两段挨着也分得开
+                            div().flex_shrink(1.).min_w_0().max_w(zpx(360.)).truncate().text_size(zpx(11.)).opacity(0.85).child(detail),
+                        );
+                    }
+                    edge = Some(line.clone());
                 }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));
             }
@@ -1037,6 +1049,7 @@ impl Canvas {
 
         let mut header = div()
             .id(SharedString::from(format!("pane-head-{key}")))
+            .relative()
             .h(zpx(HEADER_H))
             .flex_none()
             .flex()
@@ -1072,7 +1085,8 @@ impl Canvas {
                 this.ws.update(cx, |w, cx| w.focus_pane(&key_drag, cx));
                 this.focus_pane(&key_drag, window, cx);
             }))
-            .child(info);
+            .child(info)
+            .children(edge);
         if pinned {
             header = header.child(icon(IconName::Pin).size(zpx(12.)).text_color(ui.muted_foreground));
         }
@@ -1119,13 +1133,6 @@ impl Canvas {
         let header = header.context_menu(move |m, _, _| to_popup(m, menu.clone()));
 
         // ---- 内容 ----
-        // 终端窗口底部常驻一条状态栏（不随状态出没，见 status_bar.rs）；会话还在建时没有
-        let status = match &item {
-            PaneItem::Terminal { id, .. } if ws.terminals.contains_key(id) => {
-                Some(crate::terminal::status_bar::status_bar(id, ws, cx))
-            }
-            _ => None,
-        };
         let body: AnyElement = match &item {
             PaneItem::Terminal { id, .. } => match ws.terminals.get(id) {
                 Some(view) => view.clone().into_any_element(),
@@ -1172,35 +1179,36 @@ impl Canvas {
                     }))
                     .child(body),
             )
-            .children(status)
             .child(corner_caps(round, &ui))
             .when(is_active && mark_active, |d| d.child(active_ring(round, &ui)))
             .into_any_element()
     }
 
-    /// 看得见的终端里有计时在涨（working / blocked）：一秒后再画一次。只在需要时排，不常驻
-    fn schedule_clock_tick(&mut self, shown_keys: &[String], cx: &mut Context<Self>) {
-        if self.clock_tick.is_some() {
-            return;
-        }
-        let ticking = {
+    /// 看得见、程序报了状态的终端窗口挂上标题栏的两个状态视图，其余的丢掉（丢了再来时一次性的
+    /// 进场动画会再播一遍，算是"刚看到"）
+    fn sync_status_slots(&mut self, shown_keys: &[String], cx: &mut Context<Self>) {
+        let ids: Vec<String> = {
             let ws = self.ws.read(cx);
-            shown_keys.iter().any(|k| match parse_pane_key(k) {
-                Some(PaneItem::Terminal { id, .. }) => crate::terminal::status_bar::ticking(&id, ws),
-                _ => false,
-            })
+            shown_keys
+                .iter()
+                .filter_map(|k| match parse_pane_key(k) {
+                    Some(PaneItem::Terminal { id, .. }) if title_status::badge(&id, ws).is_some() => Some(id),
+                    _ => None,
+                })
+                .collect()
         };
-        if !ticking {
-            return;
+        self.status_slots.retain(|id, _| ids.contains(id));
+        for id in ids {
+            if self.status_slots.contains_key(&id) {
+                continue;
+            }
+            let slot = |part, cx: &mut Context<Self>| {
+                let (ws, id) = (self.ws.clone(), id.clone());
+                cx.new(|cx| StatusSlot::new(ws, id, part, cx))
+            };
+            let slots = [slot(Part::Chip, cx), slot(Part::Edge, cx)];
+            self.status_slots.insert(id, slots);
         }
-        self.clock_tick = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-            this.update(cx, |this, cx| {
-                this.clock_tick = None;
-                cx.notify();
-            })
-            .ok();
-        }));
     }
 
     /// 会话还没建起来时占住窗口：立刻有反馈，而不是等 REST 返回才出现（React 版的 PendingPane）

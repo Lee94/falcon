@@ -8,8 +8,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Pixels, SharedString,
-    Stateful, Window, div, hsla,
+    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Pixels, SharedString, Stateful, Transformation,
+    Window, div, hsla, percentage,
 };
 
 use crate::theme::{Ui, radius};
@@ -106,16 +106,27 @@ pub fn status_mark(mark: Mark, size: Pixels, cx: &App) -> AnyElement {
     icon(name).size(size).text_color(color).into_any_element()
 }
 
+/// 转圈的图标（程序在跑）：一秒一圈，限帧到 `motion::FPS`，不看「减少动态效果」（转圈就是
+/// "还在跑"这个状态本身，见 [`crate::motion`]）。`id` 只要在父元素里唯一
+pub fn spinner(id: impl Into<ElementId>, name: IconName, size: Pixels) -> AnyElement {
+    use crate::motion::{Motion, MotionExt};
+    icon(name)
+        .size(size)
+        .motion(id, Motion::repeat(1000), |i, t| i.transform(Transformation::rotate(percentage(t))))
+        .into_any_element()
+}
+
 /// 程序状态（OSC 7501，ADR 0020 决定六）的徽标。
 ///
 /// - blocked 最醒目：警示色实底的小胶囊，图标 + 两个字直接写出要的是什么（授权 / 回答 / 凭据），
 ///   不用悬停就知道该去干嘛；
 /// - error / done 只是一个上色的图标（红三角 / 绿勾），不和会话本身的状态记号（`Mark`，圆形）
 ///   撞形状；
-/// - working 一个语义蓝的转圈图标，程序报了进度就跟一个百分比。
+/// - working 一个语义蓝的图标在转圈（[`spinner`]），程序报了进度就跟一个百分比。
 ///
 /// 悬停提示是完整短标签 + 程序那半句（`ProgramBadge::detail` 已经消毒、截断过）。会话名不在这里
-/// 写：徽标挂在侧栏那一行、标题栏那扇窗口上，位置本身就交代了来源。
+/// 写：徽标挂在侧栏那一行上，位置本身就交代了来源。终端标题栏上用的是展开的版本
+/// （`terminal/title_status.rs`）。
 pub fn program_badge(
     id: impl Into<ElementId>,
     badge: &falcon_core::program_status::ProgramBadge,
@@ -146,7 +157,7 @@ pub fn program_badge(
         BadgeTone::Working => el
             .text_color(ui.tint_strong)
             .text_size(zpx(11.))
-            .child(icon(name).size(size))
+            .child(spinner("ps-spin", name, size))
             .when_some(badge.progress, |d, p| {
                 d.child(div().text_color(ui.muted_foreground).child(t!("programStatus.progress", n = p).to_string()))
             }),
@@ -157,7 +168,7 @@ pub fn program_badge(
         .into_any_element()
 }
 
-/// 程序状态的图标（徽标、终端状态栏共用）：blocked 按要的东西分（授权 / 回答 / 凭据），
+/// 程序状态的图标（侧栏徽标、终端标题栏的状态胶囊共用）：blocked 按要的东西分（授权 / 回答 / 凭据），
 /// 其余按状态
 pub fn program_icon(
     tone: falcon_core::program_status::BadgeTone,
