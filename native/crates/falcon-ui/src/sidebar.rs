@@ -92,6 +92,7 @@ impl Render for Sidebar {
 
         let ws_handle = self.ws.clone();
         let ws_handle2 = self.ws.clone();
+        let ws_assistant = self.ws.clone();
         let bottom = div()
             .h(zpx(36.))
             .flex_none()
@@ -108,6 +109,15 @@ impl Render for Sidebar {
                     .on_click(move |_, window, cx| {
                         crate::dialogs::settings::open(&ws_handle, Default::default(), window, cx)
                     }),
+            )
+            .child(
+                Button::new("sidebar-assistant")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Sparkles)
+                    .label(t!("sidebar.assistant").to_string())
+                    .tooltip(format!("{} · {}", t!("assistant.title"), crate::ui::chord("toggleAssistant")))
+                    .on_click(move |_, window, cx| crate::assistant::toggle(&ws_assistant, window, cx)),
             )
             .child(div().flex_1())
             .child(

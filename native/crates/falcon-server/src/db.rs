@@ -117,6 +117,24 @@ pub struct HostShareRow {
     pub created_at: i64,
 }
 
+/// AI 助手的一段对话（docs/design/ai-assistant.md 第 5 节）
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AssistantThreadRow {
+    pub id: String,
+    /// `local` 或 SSH Host 的 id
+    pub machine: String,
+    pub agent: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// 界面条目（JSON 的 Entry[]）：重开面板、服务端重启后照样看得到
+    pub entries: String,
+    /// agent 自己的状态（JSON）：内置 agent 是 API 的原始 messages（继续对话要原样回传）
+    pub provider: String,
+    /// 这段对话的终端会话（一段对话一个 shell）
+    pub session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MeeglePinRow {
     pub id: String,
@@ -249,6 +267,20 @@ fn pin_from_row(r: &Row) -> rusqlite::Result<MeeglePinRow> {
         label: r.get("label")?,
         url: r.get("url")?,
         created_at: r.get("created_at")?,
+    })
+}
+
+fn assistant_thread_from_row(r: &Row) -> rusqlite::Result<AssistantThreadRow> {
+    Ok(AssistantThreadRow {
+        id: r.get("id")?,
+        machine: r.get("machine")?,
+        agent: r.get("agent")?,
+        title: r.get("title")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
+        entries: r.get("entries")?,
+        provider: r.get("provider")?,
+        session_id: r.get("session_id")?,
     })
 }
 
@@ -445,6 +477,20 @@ impl Db {
                 created_at INTEGER NOT NULL
             );",
         )?;
+        // AI 助手的对话（docs/design/ai-assistant.md 第 5 节）。按机器挂，不挂项目
+        self.lock().execute_batch(
+            "CREATE TABLE IF NOT EXISTS assistant_threads (
+                id TEXT PRIMARY KEY,
+                machine TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                entries TEXT NOT NULL,
+                provider TEXT NOT NULL
+            );",
+        )?;
+        add_column(&self.lock(), "assistant_threads", "session_id", "TEXT")?;
         Ok(())
     }
 
@@ -967,6 +1013,56 @@ impl Db {
             url: row.url.clone(),
             created_at: row.created_at,
         }
+    }
+
+    // ---- AI 助手的对话 ----
+
+    /// 某台机器上的对话，新的在前
+    pub fn list_assistant_threads(&self, machine: &str) -> Vec<AssistantThreadRow> {
+        self.query_all(
+            "SELECT * FROM assistant_threads WHERE machine = ? ORDER BY updated_at DESC",
+            [machine],
+            assistant_thread_from_row,
+        )
+    }
+
+    /// 全部对话，新的在前（面板的对话列表跨机器）
+    pub fn list_all_assistant_threads(&self) -> Vec<AssistantThreadRow> {
+        self.query_all("SELECT * FROM assistant_threads ORDER BY updated_at DESC", [], assistant_thread_from_row)
+    }
+
+    /// 这个终端会话属于哪段对话
+    pub fn find_assistant_thread_by_session(&self, session_id: &str) -> Option<AssistantThreadRow> {
+        self.query_one("SELECT * FROM assistant_threads WHERE session_id = ?", [session_id], assistant_thread_from_row)
+    }
+
+    pub fn get_assistant_thread(&self, id: &str) -> Option<AssistantThreadRow> {
+        self.query_one("SELECT * FROM assistant_threads WHERE id = ?", [id], assistant_thread_from_row)
+    }
+
+    /// 整行写入（新建与每次保存都走它）
+    pub fn upsert_assistant_thread(&self, row: &AssistantThreadRow) {
+        self.exec(
+            "INSERT INTO assistant_threads (id, machine, agent, title, created_at, updated_at, entries, provider, session_id)
+             VALUES (:id, :machine, :agent, :title, :created_at, :updated_at, :entries, :provider, :session_id)
+             ON CONFLICT(id) DO UPDATE SET agent = excluded.agent, title = excluded.title,
+               updated_at = excluded.updated_at, entries = excluded.entries, provider = excluded.provider,
+               session_id = excluded.session_id",
+            named_params! {
+                ":id": row.id, ":machine": row.machine, ":agent": row.agent, ":title": row.title,
+                ":created_at": row.created_at, ":updated_at": row.updated_at, ":entries": row.entries,
+                ":provider": row.provider, ":session_id": row.session_id,
+            },
+        );
+    }
+
+    pub fn delete_assistant_thread(&self, id: &str) {
+        self.exec("DELETE FROM assistant_threads WHERE id = ?", [id]);
+    }
+
+    /// 主机删掉了：它上面的对话跟着删
+    pub fn delete_assistant_threads_of(&self, machine: &str) {
+        self.exec("DELETE FROM assistant_threads WHERE machine = ?", [machine]);
     }
 
     pub fn list_meegle_pins(&self) -> Vec<MeeglePinRow> {

@@ -172,6 +172,20 @@ pub enum ServerMessage {
     /// `title` / `message` 是程序给的不可信文本，显示前过 `sanitize_display_text`
     #[serde(rename = "program_status")]
     ProgramStatus { records: Vec<ProgramStatusRecord> },
+    /// 对话终端的 shell 状态（docs/design/ai-assistant.md 4.2）：shell integration 报的当前目录
+    /// （OSC 7）与有没有命令在跑（OSC 133）。只有按机器挂的对话终端有，变化时推、连上时推一次；
+    /// 普通会话不注入集成，永远收不到
+    #[serde(rename = "shell")]
+    Shell {
+        #[serde(default)]
+        cwd: Option<String>,
+        busy: bool,
+        /// 宿主机上的登录用户与家目录：界面拼 `用户@机器:~/目录` 用
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        home: Option<String>,
+    },
     /// [`ClientMessage::Ping`] 的回话，只发给问的那个 Viewer；客户端收到任何消息都算连接活着，
     /// 这条本身没有内容
     #[serde(rename = "pong")]

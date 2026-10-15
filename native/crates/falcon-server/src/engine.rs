@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::askpass::hub::AskpassHub;
+use crate::assistant::hub::AssistantHub;
 use crate::crypto::SecretBox;
 use crate::db::{Db, ProjectRow};
 use crate::git::error::WorktreeError;
@@ -78,6 +79,8 @@ pub struct Engine {
     pub sessions: Rc<SessionManager>,
     /// px0 审阅实例（ADR 0017）：SSH 项目复用项目链路
     pub px0: Rc<Px0Manager>,
+    /// AI 助手的对话（docs/design/ai-assistant.md）：命令要进对话终端，跟会话核心在同一条线程上
+    pub assistant: Rc<AssistantHub>,
 }
 
 /// 起引擎时要的东西
@@ -125,7 +128,16 @@ impl Engine {
                 Rc::new(move |row: &ProjectRow| sessions.upgrade().expect("SessionManager 还活着").get_link(row)),
             )
         };
-        Rc::new(Engine { db: deps.db, secrets: deps.secrets, data_dir: deps.data_dir, askpass: deps.askpass, sessions, px0 })
+        let assistant = AssistantHub::new(deps.db.clone(), deps.secrets.clone(), sessions.clone());
+        Rc::new(Engine {
+            db: deps.db,
+            secrets: deps.secrets,
+            data_dir: deps.data_dir,
+            askpass: deps.askpass,
+            sessions,
+            px0,
+            assistant,
+        })
     }
 
     /// 项目宿主机上的 git 执行环境。SSH 侧复用项目链路（按 projectId 缓存），不另开连接

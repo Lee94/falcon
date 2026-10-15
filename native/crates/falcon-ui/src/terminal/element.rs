@@ -100,6 +100,11 @@ impl TerminalGeometry {
     }
 }
 
+/// 网格离元素左 / 上边的留白（真实像素，不随界面缩放）。AI 助手的实时区域按它把网格对齐到
+/// 要露出的那几行
+pub const PADDING_X: f32 = 8.;
+pub const PADDING_Y: f32 = 6.;
+
 pub struct TerminalElement {
     view: Entity<TerminalView>,
     snapshot: Arc<Snapshot>,
@@ -137,7 +142,7 @@ impl TerminalElement {
             cursor_visible,
             marked_text,
             hovered_link,
-            padding: point(px(8.), px(6.)),
+            padding: point(px(PADDING_X), px(PADDING_Y)),
         }
     }
 }
@@ -470,6 +475,25 @@ fn block_element_regions_to_rects(regions: Vec<BackgroundRegion>) -> Vec<BlockEl
 // ---------------------------------------------------------------------------
 // 颜色
 // ---------------------------------------------------------------------------
+
+/// 调色板里第 `index` 色：0–15 取主题的 16 色，16–255 取主题给的扩展色或 xterm 标准色立方。
+/// AI 助手的命令块（静态文字）按它上色，与终端画面同一套颜色
+pub fn indexed_color(palette: &TermPalette, index: u8) -> Hsla {
+    if index < 16 {
+        return palette.ansi[index as usize];
+    }
+    if let Some(ext) = &palette.extended
+        && let Some(c) = ext.get(index as usize - 16)
+    {
+        return *c;
+    }
+    let (r, g, b) = indexed_rgb(index);
+    rgb_to_hsla(r, g, b)
+}
+
+pub fn rgb_color(r: u8, g: u8, b: u8) -> Hsla {
+    rgb_to_hsla(r, g, b)
+}
 
 /// xterm 256 色表里 16–255 的部分：6×6×6 色立方 + 24 级灰。
 fn indexed_rgb(index: u8) -> (u8, u8, u8) {

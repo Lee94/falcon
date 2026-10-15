@@ -10,6 +10,7 @@
 
 pub mod app_icon;
 pub mod askpass;
+pub mod assistant;
 pub mod auth_routes;
 pub mod body;
 pub mod error;
@@ -112,6 +113,7 @@ pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .merge(auth_routes::router())
         .merge(ws::router())
+        .merge(assistant::ws_router())
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)));
     router = match web_dist {
@@ -135,6 +137,7 @@ fn public_router() -> Router<AppState> {
 fn protected_router() -> Router<AppState> {
     Router::new()
         .merge(sessions::router())
+        .merge(assistant::router())
         .merge(askpass::router())
         .merge(system::router())
         .merge(files::router())

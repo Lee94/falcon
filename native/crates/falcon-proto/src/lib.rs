@@ -58,6 +58,8 @@
 
 mod wire;
 
+/// AI 助手：对话、条目（照 ACP 的形状）、WS 消息、设置（docs/design/ai-assistant.md）
+pub mod assistant;
 pub mod files;
 pub mod forward;
 pub mod git;

@@ -515,6 +515,13 @@ impl TermCore {
             .filter(|s| !s.is_empty())
     }
 
+    /// 光标所在行的绝对位置（从历史最顶上数）。AI 助手的实时区域拿它记「提示符从哪一行开始」：
+    /// 之后输出把它顶进历史，减去那时的 history_size 就还原成屏幕行号
+    pub fn cursor_abs_line(&self) -> i64 {
+        let term = self.term.lock();
+        term.history_size() as i64 + term.grid().cursor.point.line.0 as i64
+    }
+
     /// 清屏（右键菜单的"清屏"）：只清本地显示，与 xterm 的 `clear()` 一致，不给程序发任何东西。
     pub fn clear_screen(&self) {
         use alacritty_terminal::vte::ansi::{ClearMode, Handler};

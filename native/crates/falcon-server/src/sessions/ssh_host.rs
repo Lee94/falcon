@@ -165,6 +165,20 @@ impl SshLink {
         res.ok().then(|| remote_launcher_path(probe.kind, &probe.root, agent))
     }
 
+    /// 对话终端的 shell integration（shell_integration.rs）：写脚本与启动器，返回启动器的路径。
+    /// Windows 宿主机不注入（没在真机上验过），给 None 让调用方退回原 shell
+    pub async fn ensure_shell_integration(self: &Rc<Self>, shell: Option<&str>) -> Option<String> {
+        use super::shell_integration::{integration_dir, remote_launcher_path, write_remote_command};
+        let probe = self.probe(None, 1).await.ok()?;
+        if probe.kind == HostKind::Windows {
+            return None;
+        }
+        let dir = integration_dir(probe.kind, &probe.root);
+        let shell = shell.map(str::to_string).unwrap_or_else(|| probe.shell.clone());
+        let res = self.exec(&write_remote_command(&dir, &shell), None).await.ok()?;
+        res.ok().then(|| remote_launcher_path(&dir))
+    }
+
     async fn ensure_askpass_tunnel(self: &Rc<Self>, hub: &AskpassHub) -> Option<u16> {
         if let Some(p) = self.askpass_port.get()
             && self.is_connected()

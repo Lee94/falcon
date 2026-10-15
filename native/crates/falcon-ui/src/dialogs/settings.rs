@@ -12,6 +12,7 @@
 mod account;
 mod app_icon;
 mod appearance;
+mod assistant;
 mod hosts;
 mod relays;
 mod widgets;
@@ -39,6 +40,8 @@ pub enum Tab {
     Account,
     Hosts,
     Relays,
+    /// AI 助手：模型、API key、审批策略（docs/design/ai-assistant.md 2.3）
+    Assistant,
     About,
 }
 
@@ -49,7 +52,8 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::Appearance, Tab::Notifications, Tab::Account, Tab::About, Tab::Hosts, Tab::Relays];
+    const ALL: [Tab; 7] =
+        [Tab::Appearance, Tab::Notifications, Tab::Account, Tab::Assistant, Tab::About, Tab::Hosts, Tab::Relays];
 
     fn id(self) -> &'static str {
         match self {
@@ -58,6 +62,7 @@ impl Tab {
             Tab::Account => "account",
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
+            Tab::Assistant => "assistant",
             Tab::About => "about",
         }
     }
@@ -76,6 +81,7 @@ impl Tab {
             Tab::Account => IconName::Shield,
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
+            Tab::Assistant => IconName::Sparkles,
             Tab::About => IconName::Info,
         }
     }
@@ -127,6 +133,8 @@ struct SettingsView {
     hosts: Entity<hosts::HostsPane>,
     /// 只在停在中转页时存在（见模块注释）
     relays: Option<Entity<relays::RelaysPane>>,
+    /// 切到时才建：建的时候要向服务端取一次设置
+    assistant: Option<Entity<assistant::AssistantPane>>,
 }
 
 impl SettingsView {
@@ -142,7 +150,7 @@ impl SettingsView {
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
         let account = cx.new(|cx| account::AccountPane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
-        Self { ws, tab, search, appearance, account, hosts, relays: None }
+        Self { ws, tab, search, appearance, account, hosts, relays: None, assistant: None }
     }
 
     /// 按名字 / 分组名 / 关键字（`settings.tab_*_keys`）筛模块
@@ -305,6 +313,16 @@ impl SettingsView {
 }
 
 impl SettingsView {
+    fn assistant_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<assistant::AssistantPane> {
+        if let Some(pane) = &self.assistant {
+            return pane.clone();
+        }
+        let ws = self.ws.clone();
+        let pane = cx.new(|cx| assistant::AssistantPane::new(ws, window, cx));
+        self.assistant = Some(pane.clone());
+        pane
+    }
+
     fn relays_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<relays::RelaysPane> {
         if let Some(pane) = &self.relays {
             return pane.clone();
@@ -338,6 +356,7 @@ impl Render for SettingsView {
             Tab::Account => self.account.clone().into_any_element(),
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),
+            Tab::Assistant => self.assistant_pane(window, cx).into_any_element(),
             Tab::About => self.render_about(cx).into_any_element(),
         };
         let ui = Ui::global(cx).clone();

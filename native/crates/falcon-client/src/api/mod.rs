@@ -9,6 +9,7 @@
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 pub(crate) mod app_icon;
+pub(crate) mod assistant;
 pub(crate) mod auth;
 pub(crate) mod files;
 pub(crate) mod forwards;

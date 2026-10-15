@@ -10,6 +10,7 @@ pub mod api;
 pub mod app_icon;
 pub mod archive;
 pub mod askpass;
+pub mod assistant;
 pub mod auth;
 pub mod cloudflared;
 pub mod config;

@@ -34,8 +34,10 @@ use super::local::{
     LocalHost, LocalSessionState, attach_local, default_local_shell, local_kill, local_list_sessions, local_session_state,
     open_local_sessiond, spawn_failure_reason,
 };
+use super::machine::{Machine, is_machine_owner, owner_row};
 use super::relay::{LinkFor, WantReconnect};
 use super::share::ShareManager;
+use super::shell_marks::{CommandBlock, PromptState, ShellTracker, Tracked};
 use super::ssh::SshLink;
 use super::ssh_host::{AttachOptions, HostFacts};
 use super::term_size::{TermSize, ViewerAttach, ViewerAttachInput, decide_viewer_attach, fallback_term_size, parse_stored_term_size};
@@ -210,6 +212,11 @@ struct EntryState {
     exit_seen: bool,
     /// SSH 上 bridge 的退出码（连接结束时给）
     bridge_exit: Option<Option<u32>>,
+    /// 对话终端才有：输出流上的 shell 标记（OSC 133 / OSC 7）、提示符状态、当前目录，以及替
+    /// agent 收命令输出（shell_marks.rs）。普通会话不注入集成，是 None
+    shell: Option<ShellTracker>,
+    /// 正在替 agent 收输出的那条命令（manager/machine_run.rs）
+    shell_waiter: Option<machine_run::ShellWaiter>,
 }
 
 struct LiveEntry {
@@ -233,6 +240,7 @@ struct EntryInit {
 
 impl LiveEntry {
     fn new(init: EntryInit) -> Rc<Self> {
+        let shell = is_machine_owner(&init.project_id).then(ShellTracker::default);
         Rc::new(LiveEntry {
             session_id: init.session_id,
             project_id: init.project_id,
@@ -259,6 +267,8 @@ impl LiveEntry {
                 program_status: Vec::new(),
                 exit_seen: false,
                 bridge_exit: None,
+                shell,
+                shell_waiter: None,
             }),
             flush_timer: Rc::default(),
             title_timer: Rc::default(),
@@ -311,6 +321,21 @@ struct ReconnectState {
     timer: Rc<Timer>,
 }
 
+/// 对话终端的 `shell` 消息；普通会话、或者还没见过任何标记时给 None（界面照旧显示 `用户@机器`）
+fn shell_message(entry: &LiveEntry) -> Option<ServerMessage> {
+    let s = entry.s.borrow();
+    let t = s.shell.as_ref()?;
+    if t.state() == PromptState::Unknown && t.cwd().is_none() {
+        return None;
+    }
+    Some(ServerMessage::Shell {
+        cwd: t.cwd().map(str::to_string),
+        busy: t.state() == PromptState::Running,
+        user: t.user.clone(),
+        home: t.home.clone(),
+    })
+}
+
 /// 浏览远端目录时把已保存主机构成一条假 ProjectRow，好复用 SshLink。
 pub fn host_as_project(host: &SshHostRow) -> ProjectRow {
     ProjectRow {
@@ -359,6 +384,13 @@ pub struct SessionManager {
     /// 机器上几个项目各有一条：升级后重启，它们的会话一起接回、一起推新版本，不排队就会在
     /// 宿主机上踩同一个文件（见 prepare）
     deploying: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    /// 取或建对话终端的排队锁，键是对话 id：连点两下、两个窗口同时打开，
+    /// 不排队会各建一个（见 machine_shell）
+    machine_shell_locks: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    /// 往对话终端里跑命令的排队锁，键是会话 id：一个 shell 上一次只跑一条
+    machine_run_locks: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    /// 对话终端里用户敲完的命令交给谁（AI 助手的 hub）
+    block_listener: RefCell<Option<Rc<dyn Fn(&str, CommandBlock)>>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -404,6 +436,9 @@ impl SessionManager {
                 size_flush: RefCell::default(),
                 swept: RefCell::default(),
                 deploying: RefCell::default(),
+                machine_shell_locks: RefCell::default(),
+                machine_run_locks: RefCell::default(),
+                block_listener: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -877,6 +912,63 @@ impl SessionManager {
         Ok(left.then(|| format!("虚拟项目目录未删除（内有其他文件）：{dir}")))
     }
 
+    // ---------- 按机器挂的会话（AI 助手的对话终端，sessions/machine.rs） ----------
+
+    /// 在这台机器上为一段对话新开一个对话终端（一段对话一个 shell，ADR 0021 后记）
+    pub async fn create_machine_session(&self, machine: &Machine, hint: OscColorHint) -> Result<Session, SessionError> {
+        let project =
+            owner_row(&self.db, &machine.owner_id()).ok_or_else(|| SessionError::NotFound("主机不存在".into()))?;
+        self.create_session(&project, String::new(), hint, None).await
+    }
+
+    /// 对话的终端还活着（active / unverified）就交出去；丢了（shell 退出、被终止）就清掉记录、
+    /// 在同一台机器上另开一个。unverified 的不在这里接：Viewer 连上 WS 时照常走 ensure_attached。
+    /// 按对话排队：连点两下、两个窗口同时打开，不会各开一个
+    pub async fn ensure_machine_session(
+        &self,
+        key: &str,
+        session_id: Option<&str>,
+        machine: &Machine,
+        hint: OscColorHint,
+    ) -> Result<Session, SessionError> {
+        let lock = self.machine_shell_locks.borrow_mut().entry(key.to_string()).or_default().clone();
+        let _turn = lock.lock().await;
+        if let Some(row) = session_id.and_then(|id| self.db.get_session(id)) {
+            if row.state != "dead" {
+                let mut session = Db::to_session(&row);
+                session.title = self.title_of(&row.id);
+                session.program_status = self.program_status_of(&row.id);
+                return Ok(session);
+            }
+            self.delete_dead(&row.id);
+        }
+        self.create_machine_session(machine, hint).await
+    }
+
+    /// 对话终端此刻的 shell 状态：(当前目录, 登录用户, 家目录)。没接上给 None。AI 助手拿它解析
+    /// 相对路径、在每轮消息前告诉模型当前目录
+    pub fn session_shell_info(&self, session_id: &str) -> Option<(Option<String>, Option<String>, Option<String>)> {
+        let entry = self.entry(session_id)?;
+        let s = entry.s.borrow();
+        let t = s.shell.as_ref()?;
+        Some((t.cwd().map(str::to_string), t.user.clone(), t.home.clone()))
+    }
+
+    /// 对话终端里用户自己敲完一条命令时调（AI 助手把它记成时间线上的命令块）
+    pub fn set_block_listener(&self, f: Rc<dyn Fn(&str, CommandBlock)>) {
+        *self.block_listener.borrow_mut() = Some(f);
+    }
+
+    /// 主机删掉了：它上面的对话终端跟着终止，链路拆掉（主机的行没了，断线重连也找不到它）
+    pub async fn forget_machine(&self, machine: &Machine) {
+        let owner = machine.owner_id();
+        for row in self.db.list_sessions_by_project(&owner) {
+            self.terminate(&row.id, false).await;
+        }
+        self.dispose_link(&owner);
+        self.machine_shell_locks.borrow_mut().remove(&owner);
+    }
+
     // ---------- 会话生命周期 ----------
 
     pub async fn create_session(
@@ -962,6 +1054,9 @@ impl SessionManager {
         let shell = project.shell.clone();
         let Some(agent) = row.agent.as_deref().and_then(SessionAgent::from_wire).filter(|a| *a != SessionAgent::Unknown)
         else {
+            if is_machine_owner(&row.project_id) {
+                return self.assistant_shell(project, shell).await;
+            }
             return shell;
         };
         if project.project_type == "local" {
@@ -974,6 +1069,46 @@ impl SessionManager {
         self.get_link(project).ensure_agent_launcher(agent, shell.as_deref()).await.or(shell)
     }
 
+    /// 对话终端那台机器上的登录用户与家目录（面板底栏的 `用户@机器:~/目录`）。SSH 的探测结果
+    /// 链路上有缓存，不多一次往返；拿不到就各自是 None
+    ///
+    /// 第三个是「这个 shell 注入了集成」：与 assistant_shell 的判定同一个口径（认得出的 shell、
+    /// 不是 Windows）。接回时不再走 assistant_shell，所以这里另算一遍
+    async fn machine_identity(&self, project: &ProjectRow) -> (Option<String>, Option<String>, bool) {
+        use super::shell_integration::detect;
+        if project.project_type == "local" {
+            let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok().filter(|u| !u.is_empty());
+            let shell = project.shell.clone().unwrap_or_else(default_local_shell);
+            let integrated = !cfg!(windows) && detect(&shell).is_some();
+            return (user, Some(crate::config::home_dir().to_string_lossy().into_owned()), integrated);
+        }
+        let facts = self.get_link(project).host_facts().await.ok();
+        let integrated = facts.as_ref().is_some_and(|f| {
+            f.kind != crate::host::HostKind::Windows && detect(project.shell.as_deref().unwrap_or(&f.shell)).is_some()
+        });
+        (project.ssh_username.clone(), facts.map(|f| f.home), integrated)
+    }
+
+    /// 对话终端的 shell：带 shell integration 的启动器（shell_integration.rs）。写不成、或者是
+    /// Windows 宿主机（集成没在真机上验过，v1 不上）就退回原 shell——没有集成也是一个能用的终端，
+    /// 只是 agent 的命令改走独立进程
+    async fn assistant_shell(&self, project: &ProjectRow, shell: Option<String>) -> Option<String> {
+        if project.project_type == "local" {
+            if cfg!(windows) {
+                return shell;
+            }
+            let login = shell.clone().unwrap_or_else(default_local_shell);
+            return match super::shell_integration::write_local(&self.data_dir, &login) {
+                Ok(p) => Some(p.to_string_lossy().into_owned()),
+                Err(e) => {
+                    log::warn!("对话终端的 shell integration 没写成（{e}），退回普通 shell");
+                    shell
+                }
+            };
+        }
+        self.get_link(project).ensure_shell_integration(shell.as_deref()).await.or(shell)
+    }
+
     async fn attach_backend(
         &self,
         entry: &Rc<LiveEntry>,
@@ -981,6 +1116,14 @@ impl SessionManager {
         row: &SessionRow,
         reattach: bool,
     ) -> Result<(), SessionError> {
+        if entry.s.borrow().shell.is_some() {
+            let (user, home, integrated) = self.machine_identity(project).await;
+            if let Some(t) = entry.s.borrow_mut().shell.as_mut() {
+                t.user = user;
+                t.home = home;
+                t.integrated = integrated;
+            }
+        }
         // 非持久会话：附着返回之前就可能有 OSC 查询要答（OscColorGate），先攒着，backend 到手再写
         let slot: Rc<RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>> =
             Rc::new(RefCell::new((entry.backend(), Vec::new())));
@@ -1114,6 +1257,7 @@ impl SessionManager {
     }
 
     fn on_backend_data(&self, entry: &Rc<LiveEntry>, slot: &RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>, data: &str) {
+        self.track_shell(entry, data);
         if entry.durable {
             // 守护进程会话：终端查询由宿主机的 VT 进程回答，回放用它的快照、2031 由 holder 发，
             // 这里只管转发
@@ -1138,6 +1282,40 @@ impl SessionManager {
             s.buffer.append(out.visible.clone());
         }
         self.queue_output(entry, out.visible);
+    }
+
+    /// 对话终端：输出过一遍 shell 标记的状态机，提示符状态 / 当前目录变了就推给 Viewer。
+    /// 只旁观，不改转发出去的字节（shell_marks.rs）
+    fn track_shell(&self, entry: &Rc<LiveEntry>, data: &str) -> Option<Tracked> {
+        let tracked = entry.s.borrow_mut().shell.as_mut()?.feed(data);
+        if tracked.changed
+            && let Some(msg) = shell_message(entry)
+        {
+            self.broadcast(entry, &msg);
+        }
+        // 替 agent 收的输出：先给实时的一段，收完再交结果。回调里会碰对话的状态与广播，
+        // 不能借着 entry 调
+        if !tracked.captured.is_empty() {
+            let on_chunk = entry.s.borrow().shell_waiter.as_ref().map(|w| w.on_chunk.clone());
+            if let Some(f) = on_chunk {
+                f(&tracked.captured);
+            }
+        }
+        if let Some((output, code)) = tracked.finished.clone() {
+            let waiter = entry.s.borrow_mut().shell_waiter.take();
+            if let Some(w) = waiter {
+                let _ = w.done.send((output, code));
+            }
+        }
+        if !tracked.blocks.is_empty() {
+            let listener = self.block_listener.borrow().clone();
+            if let Some(f) = listener {
+                for b in tracked.blocks.clone() {
+                    f(&entry.session_id, b);
+                }
+            }
+        }
+        Some(tracked)
     }
 
     /// 守护进程会话的事件。按连接上到达的顺序在 LocalSet 上同步调用
@@ -1237,9 +1415,7 @@ impl SessionManager {
                 let e = entry.clone();
                 tokio::task::spawn_local(async move {
                     let res = async {
-                        let project = me
-                            .db
-                            .get_project(&row.project_id)
+                        let project = owner_row(&me.db, &row.project_id)
                             .ok_or_else(|| SessionError::NotFound("项目不存在".into()))?;
                         match me.attach_backend(&e, &project, &row, true).await {
                             Ok(()) => {
@@ -1289,7 +1465,7 @@ impl SessionManager {
     /// 旧的标题素材作废，后者什么都不该改（auto_title.rs）
     async fn probe_foreground(&self, session_id: &str) -> Probe {
         let Some(row) = self.db.get_session(session_id).filter(|r| r.state == "active") else { return Probe::Unknown };
-        let Some(project) = self.db.get_project(&row.project_id) else { return Probe::Unknown };
+        let Some(project) = owner_row(&self.db, &row.project_id) else { return Probe::Unknown };
         let backend = self.entry(session_id).and_then(|e| e.backend());
         let command = match backend {
             Some(b) if row.durable == 1 => match b.foreground() {
@@ -1421,7 +1597,7 @@ impl SessionManager {
                     }
                 }
                 _ => {
-                    let project = self.db.get_project(&row.project_id);
+                    let project = owner_row(&self.db, &row.project_id);
                     let deployed = match (entry.as_ref().and_then(|e| e.deployed()), &project) {
                         (Some(d), _) => Some(d),
                         (None, Some(p)) => self.prepare(p, None, None, false).await.deployed,
@@ -1506,6 +1682,9 @@ impl SessionManager {
 
         self.send_replay(&entry, &viewer);
         viewer.send(&ServerMessage::State { state: SessionState::Active, dead_reason: None });
+        if let Some(msg) = shell_message(&entry) {
+            viewer.send(&msg);
+        }
         self.flush_askpass(&viewer, session_id);
         self.touch(session_id, true);
         // 刚打开的窗口不等节流窗口，立刻给一次标题
@@ -1793,7 +1972,7 @@ impl SessionManager {
         if !entry.durable {
             return;
         }
-        let Some(project) = self.db.get_project(&entry.project_id) else { return };
+        let Some(project) = owner_row(&self.db, &entry.project_id) else { return };
         if project.project_type == "ssh" {
             self.schedule_reconnect(&project.id);
         } else {
@@ -1820,7 +1999,7 @@ impl SessionManager {
         if self.db.get_session(session_id).is_none() {
             return;
         }
-        let project = self.db.get_project(&entry.project_id);
+        let project = owner_row(&self.db, &entry.project_id);
 
         if !entry.durable {
             let link_lost = project.as_ref().is_some_and(|p| p.project_type == "ssh")
@@ -1918,7 +2097,7 @@ impl SessionManager {
         for e in &waiting {
             self.broadcast(e, &ServerMessage::Reconnecting { attempt: state.attempt.get() });
         }
-        let Some(project) = self.db.get_project(&project_id) else {
+        let Some(project) = owner_row(&self.db, &project_id) else {
             self.reconnects.borrow_mut().remove(&project_id);
             return;
         };
@@ -2044,6 +2223,9 @@ fn fail_text(stderr: &str, what: &str, code: Option<i32>) -> String {
         None => format!("{what}（exit null）"),
     }
 }
+
+mod machine_run;
+pub use machine_run::{CANCELLED, ShellRun, shell_input};
 
 #[cfg(test)]
 mod tests;

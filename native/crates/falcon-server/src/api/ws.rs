@@ -76,7 +76,7 @@ async fn run_install(state: AppState, project_id: String, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let send = |msg: &InstallServerMessage| Message::Text(serde_json::to_string(msg).unwrap_or_default().into());
 
-    let Some(project) = state.db.get_project(&project_id) else {
+    let Some(project) = crate::sessions::machine::owner_row(&state.db, &project_id) else {
         let failed = InstallServerMessage::Failed {
             reason: NonDurableReason::VerifyFailed,
             detail: Some("项目不存在".into()),

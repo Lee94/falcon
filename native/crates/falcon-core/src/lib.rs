@@ -14,6 +14,10 @@
 
 mod js;
 
+/// AI 助手：切机器的清单与标签（docs/design/ai-assistant.md）
+pub mod assistant;
+/// 终端输出流上的 shell 标记（OSC 133 / 633;E / 7）
+pub mod shell_marks;
 /// 对应 shared 的 appIcon.ts（客户端用得到的部分）+ 原生 Dock 版式的像素运算（ADR 0018）
 pub mod app_icon;
 /// 对应 React 版的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）

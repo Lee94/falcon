@@ -62,6 +62,9 @@ pub enum SessionEvent {
     /// `message` 是程序给的不可信文本，显示到终端之外前要过 `sanitize_display_text`。
     /// 只有持久会话有（解析在宿主机的 VT 进程里）；Windows 宿主机上 ConPTY 会吞掉它，收不到
     ProgramStatus(Vec<ProgramStatusRecord>),
+    /// 对话终端的 shell 状态（shell integration 报的当前目录、有没有命令在跑）。只有按机器挂的
+    /// 对话终端有（docs/design/ai-assistant.md 4.2）
+    Shell { cwd: Option<String>, busy: bool, user: Option<String>, home: Option<String> },
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
     /// 断线期间 `send_input` 的内容会被丢掉（照 React 版：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
@@ -570,6 +573,7 @@ impl Driver {
             ServerMessage::Title { title } => SessionEvent::Title(title),
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
             ServerMessage::ProgramStatus { records } => SessionEvent::ProgramStatus(records),
+            ServerMessage::Shell { cwd, busy, user, home } => SessionEvent::Shell { cwd, busy, user, home },
             // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
             // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown
             ServerMessage::Pong | ServerMessage::Unknown => return,

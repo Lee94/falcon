@@ -34,6 +34,9 @@ pub enum Command {
     OpenRelays,
     ToggleFilesPanel,
     ToggleMeeglePanel,
+    /// 打开 / 收起 AI 助手（docs/design/ai-assistant.md）。J 在 VS Code 是开合底部面板，
+    /// 「随叫随到的终端」与它同一种肌肉记忆
+    ToggleAssistant,
     Reattach,
     Overview,
     NextTab,
@@ -47,7 +50,7 @@ pub enum Command {
 
 impl Command {
     /// 固定的那些（不含 `Tab(n)`），React 版的书写顺序
-    pub const FIXED: [Command; 16] = [
+    pub const FIXED: [Command; 17] = [
         Command::Palette,
         Command::QuickOpen,
         Command::NewTerminal,
@@ -58,6 +61,7 @@ impl Command {
         Command::OpenRelays,
         Command::ToggleFilesPanel,
         Command::ToggleMeeglePanel,
+        Command::ToggleAssistant,
         Command::Reattach,
         Command::Overview,
         Command::NextTab,
@@ -66,7 +70,7 @@ impl Command {
         Command::PrevCanvas,
     ];
 
-    /// 全部命令：固定的 16 个 + tab1…tab9
+    /// 全部命令：固定的 17 个 + tab1…tab9
     pub fn all() -> Vec<Command> {
         Self::FIXED.into_iter().chain((1..=9).map(Command::Tab)).collect()
     }
@@ -84,6 +88,7 @@ impl Command {
             Command::OpenRelays => "openRelays".into(),
             Command::ToggleFilesPanel => "toggleFilesPanel".into(),
             Command::ToggleMeeglePanel => "toggleMeeglePanel".into(),
+            Command::ToggleAssistant => "toggleAssistant".into(),
             Command::Reattach => "reattach".into(),
             Command::Overview => "overview".into(),
             Command::NextTab => "nextTab".into(),
@@ -141,6 +146,7 @@ pub fn shortcut_defs() -> Vec<ShortcutDef> {
         def(OpenRelays, Some("palette.openRelays"), Panels),
         def(ToggleFilesPanel, Some("files.panel"), Panels),
         def(ToggleMeeglePanel, Some("meegle.panel"), Panels),
+        def(ToggleAssistant, Some("assistant.title"), Panels),
         def(Reattach, Some("session.reattach"), Session),
         def(Overview, Some("palette.overview"), Navigation),
         def(NextTab, None, Navigation),
@@ -269,6 +275,8 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
         Command::OpenRelays => panel("f"),
         Command::ToggleFilesPanel => panel("e"),
         Command::ToggleMeeglePanel => panel("m"),
+        // 浏览器里 Ctrl+Shift+J 是 Chrome 的开发者工具（控制台），靠 Alt+J 别名
+        Command::ToggleAssistant => plain("j"),
         Command::Overview | Command::Tab(_) => {
             let key = match cmd {
                 Command::Tab(n) => DIGITS[n as usize % 10],
@@ -318,6 +326,7 @@ pub fn chord(cmd: Command, mac: bool) -> String {
         Command::OpenRelays => pick("⌘⇧F", "Ctrl+Shift+F"),
         Command::ToggleFilesPanel => pick("⌘⇧E", "Ctrl+Shift+E"),
         Command::ToggleMeeglePanel => pick("⌘⇧M", "Ctrl+Shift+M"),
+        Command::ToggleAssistant => pick("⌘J", "Ctrl+Shift+J"),
         Command::Reattach => pick("⌘R", "Ctrl+Shift+R"),
         Command::Overview => pick("⌘0", "Alt+0"),
         Command::NextTab => pick("⌘⇧]", "Ctrl+Tab"),
@@ -339,6 +348,7 @@ pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
         Command::OpenRelays => "Alt+F",
         Command::ToggleFilesPanel => "Alt+E",
         Command::ToggleMeeglePanel => "Alt+M",
+        Command::ToggleAssistant => "Alt+J",
         Command::Reattach => "Alt+R",
         // VS Code 主键位之外：旧的 ⌘/Ctrl+K，以及 F1
         Command::Palette => {
@@ -381,6 +391,7 @@ fn alt_letter(code: &str) -> Option<Command> {
         "KeyF" => Command::OpenRelays,
         "KeyE" => Command::ToggleFilesPanel,
         "KeyM" => Command::ToggleMeeglePanel,
+        "KeyJ" => Command::ToggleAssistant,
         "KeyR" => Command::Reattach,
         "KeyP" => Command::QuickOpen,
         _ => return None,
@@ -398,6 +409,7 @@ fn modshift_letter(code: &str) -> Option<Command> {
         "KeyF" => Command::OpenRelays,
         "KeyE" => Command::ToggleFilesPanel,
         "KeyM" => Command::ToggleMeeglePanel,
+        "KeyJ" => Command::ToggleAssistant,
         "KeyR" => Command::Reattach,
         _ => return None,
     })
@@ -411,6 +423,7 @@ fn mac_mod_letter(code: &str) -> Option<Command> {
         "KeyT" => Command::NewTerminal,
         "KeyW" => Command::CloseTab,
         "KeyB" => Command::ToggleSidebar,
+        "KeyJ" => Command::ToggleAssistant,
         "KeyR" => Command::Reattach,
         _ => return None,
     })
@@ -636,6 +649,20 @@ mod tests {
     fn cmd_shift_p_stays_the_palette() {
         assert_eq!(hit(true, "KeyP", META_SHIFT), Some(Command::Palette));
         assert_eq!(hit(false, "KeyP", CTRL_SHIFT), Some(Command::Palette));
+    }
+
+    // ---- matchCommand: AI 助手 ----
+
+    #[test]
+    fn assistant_is_cmd_j_ctrl_shift_j_and_alt_j() {
+        assert_eq!(hit(true, "KeyJ", META), Some(Command::ToggleAssistant));
+        assert_eq!(hit(false, "KeyJ", CTRL_SHIFT), Some(Command::ToggleAssistant));
+        assert_eq!(hit(true, "KeyJ", ALT), Some(Command::ToggleAssistant));
+        assert_eq!(hit(false, "KeyJ", ALT), Some(Command::ToggleAssistant));
+        // 裸 Ctrl+J 是 shell 的换行，不能抢
+        assert_eq!(hit(false, "KeyJ", CTRL), None);
+        assert_eq!(chord(Command::ToggleAssistant, true), "⌘J");
+        assert_eq!(chord(Command::ToggleAssistant, false), "Ctrl+Shift+J");
     }
 
     // ---- matchCommand: VS Code 新建终端 Ctrl+Shift+` ----

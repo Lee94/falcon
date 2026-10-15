@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use falcon_client::{FalconClient, SessionEvent, SessionSink, SessionSocket};
@@ -66,13 +67,30 @@ enum UiEvent {
 struct Sink {
     core: Arc<TermCore>,
     tx: UnboundedSender<UiEvent>,
+    /// AI 助手的实时区域（见 [`LiveTrack`]）；普通终端是 None
+    live: Option<Arc<LiveTrack>>,
+}
+
+/// AI 助手的实时区域：从输出流上认出提示符开始（OSC 133;A，falcon 给助手 shell 注入的集成打的），
+/// 记下那一刻光标的绝对行。面板只露出「当前提示符到光标」那几行，跑完的命令由时间线上的命令块
+/// 接着显示（docs/design/ai-assistant.md 2.2）
+struct LiveTrack {
+    scanner: std::sync::Mutex<falcon_core::shell_marks::MarkScanner>,
+    /// 提示符开始的绝对行；`i64::MIN` = 还不知道（刚连上，用光标所在行）
+    prompt_abs: std::sync::atomic::AtomicI64,
+    /// C 之后、D 之前：有命令在跑
+    running: AtomicBool,
 }
 
 impl SessionSink for Sink {
     fn on_event(&self, ev: SessionEvent) {
         match ev {
             SessionEvent::Output(bytes) => {
-                if self.core.advance(&bytes) {
+                let woke = match &self.live {
+                    Some(live) => self.advance_live(live, &bytes),
+                    None => self.core.advance(&bytes),
+                };
+                if woke {
                     let _ = self.tx.unbounded_send(UiEvent::Dirty);
                 }
                 // 不管脏位翻没翻都取：脏位已经是 1（UI 还没画）时产生的回复，以前要等下一段输出
@@ -86,6 +104,11 @@ impl SessionSink for Sink {
                 // 紧跟的实时输出必须在它换上之后才应用，顺序由"回调顺序执行"保证
                 log::debug!("replay {} bytes", bytes.len());
                 let changed = falcon_client::block_in_place(|| self.core.replace_with_replay(&bytes));
+                // 回放里没有提示符标记（守护进程导出的是画面）：先把光标所在行当提示符，下一个
+                // 提示符到了再校准
+                if let Some(live) = &self.live {
+                    live.prompt_abs.store(self.core.cursor_abs_line(), Ordering::Relaxed);
+                }
                 if changed {
                     let _ = self.tx.unbounded_send(UiEvent::Dirty);
                 }
@@ -101,6 +124,30 @@ impl SessionSink for Sink {
 }
 
 impl Sink {
+    /// 实时区域的输出：按标记切开喂进终端，提示符开始时记下光标的绝对行。标记本身不喂（alacritty
+    /// 本来也不认，丢掉就是了）
+    fn advance_live(&self, live: &LiveTrack, bytes: &[u8]) -> bool {
+        use falcon_core::shell_marks::{Mark, Piece};
+        let pieces = live.scanner.lock().map(|mut s| s.feed(&String::from_utf8_lossy(bytes))).unwrap_or_default();
+        let mut woke = false;
+        for piece in pieces {
+            match piece {
+                Piece::Text(t) => woke |= self.core.advance(t.as_bytes()),
+                Piece::Mark(Mark::PromptStart) => {
+                    live.prompt_abs.store(self.core.cursor_abs_line(), Ordering::Relaxed);
+                    live.running.store(false, Ordering::Relaxed);
+                    woke = true;
+                }
+                Piece::Mark(Mark::CommandStart) => {
+                    live.running.store(true, Ordering::Relaxed);
+                    woke = true;
+                }
+                Piece::Mark(_) => {}
+            }
+        }
+        woke
+    }
+
     fn drain_events(&self) {
         let events = self.core.take_events();
         if !events.is_empty() {
@@ -211,6 +258,12 @@ pub struct TerminalView {
     /// （`program_status::activity_text`）。改了不 notify：Claude Code 跑的时候标题前缀每秒换
     /// 一次，不值得为它重画终端，提示弹出时再来取
     osc_title: Option<String>,
+    /// 对话终端的 shell 状态（服务端经 WS 推的 `shell`）：当前目录、有没有命令在跑。普通会话恒为
+    /// 默认值（不注入 shell integration）
+    pub shell_cwd: Option<String>,
+    pub shell_busy: bool,
+    pub shell_user: Option<String>,
+    pub shell_home: Option<String>,
     /// 会话持不持久（`Session.durable`），决定终端回复发不发：持久会话的查询由宿主机的 VT 进程
     /// 一处回答，客户端不答（ADR 0020 决定五）。None = 会话列表还没到（启动时恢复的窗口比列表
     /// 先建出来），这期间的回复先攒在 `pending_replies`，知道了再决定发还是丢
@@ -224,6 +277,10 @@ pub struct TerminalView {
     seen_sent: bool,
     /// 本机 falcon 服务端：拖进来的非图片文件直接粘路径（远端宿主机上没有这些文件）
     local_server: bool,
+    /// AI 助手的实时区域模式（[`LiveTrack`]）：滚轮交给外面的时间线、不画滚动条
+    live: Option<Arc<LiveTrack>>,
+    /// 上一帧的 (live_slice, live_running)：变了才发 [`TerminalViewEvent::LiveChanged`]
+    live_shape: Option<(Option<(usize, usize)>, bool)>,
     _tasks: Vec<Task<()>>,
     /// 焦点进出、外观变化的订阅：随视图一起注销
     _subs: Vec<gpui_kit::Subscription>,
@@ -247,6 +304,11 @@ pub enum TerminalViewEvent {
     Toast { kind: crate::workspace::ToastKind, title: String, body: Option<String> },
     /// WS 推来的程序状态（OSC 7501）全集：工作区据此改列表里的摘要、决定要不要提醒
     ProgramStatus(Vec<ProgramStatusRecord>),
+    /// 对话终端的 shell 状态变了（[`TerminalView::shell_cwd`] / [`TerminalView::shell_busy`]）
+    ShellChanged,
+    /// 实时区域要露的那几行（或「有命令在跑」）变了：时间线据此重排。光标闪烁、行内重画这些不发
+    ///——终端自己是一个视图，自己重画就够了，不必拖着整条时间线
+    LiveChanged,
 }
 
 impl gpui_kit::EventEmitter<TerminalViewEvent> for TerminalView {}
@@ -261,6 +323,30 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_inner(session_id, client, local_server, durable, false, window, cx)
+    }
+
+    /// AI 助手时间线底部的实时区域：只露出当前提示符到光标那几行（[`Self::live_slice`]）
+    pub fn new_live(
+        session_id: String,
+        client: FalconClient,
+        local_server: bool,
+        durable: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(session_id, client, local_server, durable, true, window, cx)
+    }
+
+    fn new_inner(
+        session_id: String,
+        client: FalconClient,
+        local_server: bool,
+        durable: Option<bool>,
+        live: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let look = TerminalLook::global(cx).clone();
         let core = Arc::new(TermCore::new(
             TermSize::new(80, 24),
@@ -271,9 +357,17 @@ impl TerminalView {
             },
         ));
         let (tx, mut rx) = unbounded();
+        let live = live.then(|| {
+            Arc::new(LiveTrack {
+                scanner: std::sync::Mutex::new(falcon_core::shell_marks::MarkScanner::default()),
+                prompt_abs: std::sync::atomic::AtomicI64::new(i64::MIN),
+                running: AtomicBool::new(false),
+            })
+        });
         let sink = Arc::new(Sink {
             core: core.clone(),
             tx,
+            live: live.clone(),
         });
         let socket = SessionSocket::open(&client, &session_id, sink);
         // 颜色查询由宿主机的 VT 进程（持久）/ 服务端的 OscColorGate（非持久）按外观回答，
@@ -324,16 +418,47 @@ impl TerminalView {
             attach_error: None,
             server_title: None,
             osc_title: None,
+            shell_cwd: None,
+            shell_busy: false,
+            shell_user: None,
+            shell_home: None,
             durable,
             pending_replies: Vec::new(),
             program_status: None,
             seen_sent: false,
             local_server,
+            live,
+            live_shape: None,
             _tasks: vec![pump],
             _subs: vec![focus_in, focus_out, look_sub],
         };
         this.restart_blink(cx);
         this
+    }
+
+    /// 实时区域要露出的那几行：`(第一行, 行数)`，屏幕行号。备用屏（vim、claude 这类全屏程序）
+    /// 或者普通终端给 None——整块都露出来。提示符还没见过时从光标所在行起
+    pub fn live_slice(&self) -> Option<(usize, usize)> {
+        let live = self.live.as_ref()?;
+        let snap = &self.snapshot;
+        if snap.mode.contains(TermMode::ALT_SCREEN) || snap.size.rows == 0 {
+            return None;
+        }
+        let cursor = snap.cursor.as_ref().map_or(0, |c| c.row).min(snap.size.rows - 1);
+        let prompt = live.prompt_abs.load(Ordering::Relaxed);
+        let first = if prompt == i64::MIN { cursor as i64 } else { prompt - snap.history_size as i64 };
+        let first = first.clamp(0, cursor as i64) as usize;
+        Some((first, cursor - first + 1))
+    }
+
+    /// 实时区域里有命令在跑（OSC 133 的 C 之后、D 之前）
+    pub fn live_running(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| l.running.load(Ordering::Relaxed))
+    }
+
+    /// 一行多高（画过一次之后才知道）
+    pub fn line_height(&self) -> Option<gpui_kit::Pixels> {
+        self.geometry.map(|g| g.line_height)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -470,6 +595,13 @@ impl TerminalView {
                 }
                 cx.emit(TerminalViewEvent::ProgramStatus(records));
             }
+            SessionEvent::Shell { cwd, busy, user, home } => {
+                self.shell_cwd = cwd;
+                self.shell_busy = busy;
+                self.shell_user = user;
+                self.shell_home = home;
+                cx.emit(TerminalViewEvent::ShellChanged);
+            }
             SessionEvent::Output(_) | SessionEvent::Replay(_) => {}
         }
     }
@@ -486,7 +618,18 @@ impl TerminalView {
     pub(super) fn set_geometry(&mut self, geo: TerminalGeometry, cx: &mut Context<Self>) {
         let changed = self.geometry.is_none_or(|g| g.cols != geo.cols || g.rows != geo.rows);
         self.geometry = Some(geo);
+        // 实时区域记的是提示符的绝对行；改尺寸时 alacritty 重排折行，行会在历史与屏幕之间挪，
+        // 绝对行就对不上了。改之前记下提示符在光标上面几行，改完按光标还原
+        let live_dist = self
+            .live
+            .as_ref()
+            .map(|l| l.prompt_abs.load(Ordering::Relaxed))
+            .filter(|p| *p != i64::MIN)
+            .map(|p| self.core.cursor_abs_line() - p);
         if changed && self.core.resize(TermSize::new(geo.cols, geo.rows)) {
+            if let (Some(live), Some(dist)) = (&self.live, live_dist) {
+                live.prompt_abs.store(self.core.cursor_abs_line() - dist, Ordering::Relaxed);
+            }
             self.socket.resize(geo.cols as u16, geo.rows as u16);
             cx.notify();
         } else if changed {
@@ -957,6 +1100,8 @@ impl TerminalView {
                 }
                 cx.stop_propagation();
             }
+            // 实时区域：历史在时间线上的命令块里，滚轮交给外面的时间线
+            WheelRoute::Scrollback if self.live.is_some() => {}
             // 备用屏里没有历史（含程序关掉了 ?1007 的情形）：滚轮放行给画布
             WheelRoute::Scrollback if self.snapshot.history_size > 0 => {
                 let lines = self.wheel.push(mode, delta_y, cell_h, geo.rows);
@@ -1307,7 +1452,16 @@ impl Render for TerminalView {
             self.hovered_link.clone(),
         );
         let banner = self.banner(cx);
-        let scrollbar = self.scrollbar_overlay(cx);
+        // 实时区域不画滚动条：它没有自己的历史可滚
+        if self.live.is_some() {
+            // 快照在上面刚换过：这一刻的形状才是准的（在 observe 里算拿到的是上一帧的快照）
+            let shape = Some((self.live_slice(), self.live_running()));
+            if shape != self.live_shape {
+                self.live_shape = shape;
+                cx.emit(TerminalViewEvent::LiveChanged);
+            }
+        }
+        let scrollbar = if self.live.is_some() { None } else { self.scrollbar_overlay(cx) };
         let items = self.context_items(cx);
         let dim = self.conn != ConnState::Active && self.conn != ConnState::Connecting;
         use gpui_kit::component::menu::ContextMenuExt;

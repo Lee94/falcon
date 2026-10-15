@@ -248,6 +248,7 @@ impl ServerWindow {
         let show_sidebar = ws.state.sidebar_visible();
         let show_right = ws.state.right_open;
         let overview = ws.state.active == ActiveView::Overview;
+        let assistant = ws.assistant.clone().filter(|p| p.read(cx).open);
 
         // 侧栏、右侧面板、图标栏走缓存视图：没被 notify 就复用上一帧的布局与绘制。终端刷屏时
         // 只有终端视图在变，不缓存的话整棵树每帧重排——实测 7 行的侧栏每帧就要 3ms 多，
@@ -267,7 +268,10 @@ impl ServerWindow {
                 .min_w_0()
                 .h_full()
                 .child(self.canvas.clone())
-                .when(overview, |d| d.child(div().absolute().inset_0().child(self.overview.clone()))),
+                .when(overview, |d| d.child(div().absolute().inset_0().child(self.overview.clone())))
+                // AI 助手面板浮在主区左下角、贴着侧栏（入口按钮就在侧栏左下角）。不是对话框：开着时
+                // 照样能点画布里的终端，⌘J 也走窗口上这一份
+                .when_some(assistant, |d, panel| d.child(panel)),
         );
         if show_right {
             main = main
@@ -475,6 +479,7 @@ impl Render for ServerWindow {
                 dialogs::settings::open(&this.ws, dialogs::settings::Tab::Relays, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleMeeglePanel, _, cx| this.ws.update(cx, |w, cx| w.toggle_right_panel(RightPanelId::Meegle, cx))))
+            .on_action(cx.listener(|this, _: &ToggleAssistant, window, cx| crate::assistant::toggle(&this.ws, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.ws.update(cx, |w, cx| w.toggle_term_zoom(cx))))
             .on_action(cx.listener(|this, _: &Overview, _, cx| this.ws.update(cx, |w, cx| w.show_overview(cx))))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.ws.update(cx, |w, cx| w.cycle_tab(1, cx))))

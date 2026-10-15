@@ -8,7 +8,12 @@
 //! | `ready` | 等工作区登录完、数据拉回来（最多 15s） |
 //! | `select:<项目名>` | 在侧栏选中项目 |
 //! | `new-terminal[:claude]` | 在当前项目新建终端（可带 agent） |
-//! | `type:<文本>` | 往活动终端送输入，支持 `\r` `\n` `\t` `\e` `\xHH` 转义（`;` 写成 `\x3b`） |
+//! | `assistant` | 打开 / 收起 AI 助手面板（同 ⌘J） |
+//! | `assistant-new:<机器>` | 在这台机器上开新对话（`local` 或 hostId） |
+//! | `assistant-expand` | 助手面板铺满主区 / 还原（同 ⤢） |
+//! | `assistant-prompt:<文字>` | 当前对话切到 Agent 输入，填进输入框并发送 |
+//! | `assistant-agent:<agent>` | 当前对话换这个 agent（`builtin` 或 `acp:<id>`） |
+//! | `type:<文本>` | 往活动终端送输入，支持 `\r` `\n` `\t` `\e` `\xHH` 转义（`;` 写成 `\x3b`）；助手面板开着且在 Shell 输入时送进当前对话的终端 |
 //! | `key:<键>` | 派发一次按键（GPUI 写法，如 `cmd-shift-p`、`enter`） |
 //! | `action:<名字>` | 派发动作（如 `falcon::ToggleFilesPanel`） |
 //! | `click:<x>,<y>[,<修饰键>]` / `rclick:<x>,<y>[,<修饰键>]` | 在窗口逻辑坐标处左 / 右击；修饰键用 `-` 连，如 `cmd`、`ctrl-shift` |
@@ -154,10 +159,46 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                 }
             });
         }
+        "assistant" => {
+            let _ = window.update(cx, |_, window, cx| crate::assistant::toggle(ws, window, cx));
+        }
+        "assistant-new" => {
+            let machine = if arg.is_empty() { "local".to_string() } else { arg.to_string() };
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(a) = ws.read(cx).assistant.clone() {
+                    a.update(cx, |a, cx| a.automation_new(&machine, window, cx));
+                }
+            });
+        }
+        "assistant-expand" => {
+            cx.update(|cx| {
+                if let Some(a) = ws.read(cx).assistant.clone() {
+                    a.update(cx, |a, cx| a.automation_toggle_expand(cx));
+                }
+            });
+        }
+        "assistant-agent" => {
+            let agent = arg.to_string();
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(a) = ws.read(cx).assistant.clone() {
+                    a.update(cx, |a, cx| a.automation_pick_agent(&agent, window, cx));
+                }
+            });
+        }
+        "assistant-prompt" => {
+            let text = unescape(arg);
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(a) = ws.read(cx).assistant.clone() {
+                    a.update(cx, |a, cx| a.automation_prompt(&text, window, cx));
+                }
+            });
+        }
         "type" => {
             let text = unescape(arg);
             let ok = cx.update(|cx| {
+                let assistant = ws.read(cx).assistant.clone().and_then(|a| a.read(cx).automation_terminal(cx));
                 let view = match &ws.read(cx).state.active {
+                    _ if assistant.is_some() => assistant,
                     ActiveView::Terminal { session_id: id } => ws.read(cx).terminals.get(id).cloned(),
                     _ => None,
                 };

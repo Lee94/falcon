@@ -392,6 +392,15 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
         });
         let w = ws_entity.clone();
         actions.push(PickItem {
+            key: format!(">{} AI Agent Shell", t!("assistant.title")),
+            label: t!("assistant.title").to_string(),
+            meta: Some(chord("toggleAssistant").to_string()),
+            icon: IconName::Sparkles,
+            tone: None,
+            run: run(move |window, cx| crate::assistant::toggle(&w, window, cx)),
+        });
+        let w = ws_entity.clone();
+        actions.push(PickItem {
             key: format!(">{} {}", t!("palette.toggleSidebarOn"), t!("palette.toggleSidebarOff")),
             label: if ws.state.sidebar_open { t!("palette.toggleSidebarOn") } else { t!("palette.toggleSidebarOff") }.to_string(),
             meta: Some(chord("toggleSidebar").to_string()),

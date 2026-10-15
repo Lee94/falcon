@@ -6,6 +6,7 @@
 //!   浏览器发不了 ping 帧，[`WsConn::ping`] 改发应用层的 `{"type":"ping"}`（服务端回 pong），
 //!   所以心跳与唤醒后的探活两边是同一套逻辑（`session.rs`）。
 
+pub(crate) mod assistant;
 pub(crate) mod install;
 pub(crate) mod session;
 

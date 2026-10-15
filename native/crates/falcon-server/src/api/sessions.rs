@@ -22,6 +22,7 @@ use crate::db::{Db, SessionHostPatch};
 use crate::exec::ExecResult;
 use crate::git::path::join_path;
 use crate::paste::{image_ext, paste_dir, paste_file_name, posix_write_command, windows_write_command, write_local_paste_file};
+use crate::sessions::machine::{is_machine_owner, owner_row};
 use crate::term_env::js;
 use crate::term_env::sanitize_color_hint;
 use crate::host::HostKind;
@@ -100,6 +101,8 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                 db.list_projects().into_iter().map(|p| (p.id.clone(), p)).collect();
             db.list_sessions()
                 .into_iter()
+                // 对话终端按机器挂、不属于任何项目，侧栏 / 总览 / 命令面板都不该看见（sessions/machine.rs）
+                .filter(|row| !is_machine_owner(&row.project_id))
                 .map(|row| {
                     let p = projects.get(&row.project_id);
                     let mut session = Db::to_session(&row);
@@ -204,7 +207,7 @@ async fn paste_image(
     })?;
 
     let row = state.db.get_session(&id).ok_or_else(|| ApiError::not_found("会话不存在"))?;
-    let project = state.db.get_project(&row.project_id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let project = owner_row(&state.db, &row.project_id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     let Some(ext) = image_ext(content_type.as_deref()) else {
         return Err(ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "不支持的图片类型"));
     };

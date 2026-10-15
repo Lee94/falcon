@@ -131,6 +131,8 @@ pub struct Workspace {
     /// 换 / 传 / 删应用图标的请求在路上
     pub app_icon_busy: bool,
 
+    /// AI 助手面板（assistant/mod.rs）：第一次打开时建，之后常驻——收起不卸载，各段对话的 WS 一直连着
+    pub assistant: Option<Entity<crate::assistant::AssistantPanel>>,
     /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
     /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
@@ -177,6 +179,7 @@ impl Workspace {
             app_icon: None,
             custom_icon: None,
             app_icon_busy: false,
+            assistant: None,
             terminals: HashMap::new(),
             program_alerts: Default::default(),
             finish_chimes: Default::default(),
@@ -818,6 +821,7 @@ impl Workspace {
                 }
                 TerminalViewEvent::Toast { kind, title, body } => this.toast(*kind, title.clone(), body.clone(), cx),
                 TerminalViewEvent::ProgramStatus(records) => this.apply_program_records(&sid, records, cx),
+                TerminalViewEvent::ShellChanged | TerminalViewEvent::LiveChanged => {}
             })
             .detach();
             self.terminals.insert(id, view);

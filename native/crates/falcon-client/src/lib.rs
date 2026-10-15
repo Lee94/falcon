@@ -58,6 +58,7 @@ pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
 #[cfg(not(target_family = "wasm"))]
 pub use runtime::runtime;
 pub use runtime::{MaybeSend, block_in_place};
+pub use ws::assistant::{AssistantEvent, AssistantSink, AssistantSocket};
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 

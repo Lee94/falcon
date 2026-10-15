@@ -10,6 +10,7 @@
 
 mod actions;
 mod app_icon;
+mod assistant;
 #[cfg(feature = "automation")]
 mod automation;
 mod canvas;
