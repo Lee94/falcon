@@ -27,6 +27,9 @@ use crate::zoom::zpx;
 
 const ROW_H: f32 = 30.;
 const SESSION_ROW_H: f32 = 28.;
+/// 树里相邻两行之间的缝。选中的项目（检出行）与当前会话各自高亮、又常常上下挨着（会话行就摊在它的
+/// 检出下面），没有缝两块圆角底色会粘成一条；每一层的 flex_col 都要带上，跨层的相邻行才同样有缝
+const ROW_GAP: f32 = 2.;
 
 fn indent(depth: usize) -> Pixels {
     zpx(4. + depth as f32 * 12.)
@@ -206,7 +209,7 @@ impl Sidebar {
         }
         let row = row.context_menu(move |menu, _, _| to_popup(menu, ctx_items.clone()));
 
-        let mut node = div().mb(zpx(2.)).flex().flex_col().child(row);
+        let mut node = div().mb(zpx(ROW_GAP)).flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expanded {
             if server.folders.is_empty() {
                 node = node.child(
@@ -270,7 +273,7 @@ impl Sidebar {
             meegle_drop: project.worktree.is_none().then(|| (self.ws.clone(), project.id.clone())),
         }, cx);
 
-        let mut node = div().flex().flex_col().child(row);
+        let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if open {
             let label = if project.multi.is_some() {
                 t!("multi.repoCount", n = member_names.len()).to_string()
@@ -397,7 +400,7 @@ impl Sidebar {
             meegle_drop: None,
         }, cx);
 
-        let mut node = div().flex().flex_col().child(row);
+        let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expandable && sessions_open {
             let active = match &ws.state.active {
                 ActiveView::Terminal { session_id: id } => Some(id.clone()),
