@@ -6,7 +6,8 @@
 //! - 远端转发（ssh -R）的监听在远端，只和同一台主机上的远端转发冲突；
 //! - 公网发布指的是发布同一台机器上的同一个目标端口。
 //!
-//! 只比端口不比监听地址：界面上只能填端口。
+//! 只比端口不比监听地址：界面上监听那一头只能填端口（目标那一头可以填地址，见
+//! [`parse_forward_dest`]）。
 
 use std::collections::HashMap;
 
@@ -24,6 +25,54 @@ pub fn forward_slot(f: &PortForward) -> String {
 
 pub fn share_slot(s: &PublicShare) -> String {
     format!("{}\0{}", s.host_id.as_deref().unwrap_or(LOCAL), s.dest_port)
+}
+
+/// 转发表单「目标地址」一栏（IP 或主机名）的输入，返回 `(地址, 顺带的端口)`：
+/// - 空 → `(None, None)`：不带 destHost，服务端按默认的 127.0.0.1；
+/// - IPv6 可以带方括号（`[fd00::5]`），去掉——服务端拿它直接连，带着括号连不上；
+/// - 粘进来的 `host:port` / `[v6]:port` 拆开，端口交给目标端口那一栏。裸 IPv6 至少两个冒号，
+///   只有一个冒号的才当成带端口；
+/// - 中间有空白、超过 253 个字符、端口不是 1–65535 → `Err`（服务端 `parse_host` 同样会拒，
+///   这里先拦住，提示就地给出）
+pub fn parse_forward_dest(raw: &str) -> Result<(Option<String>, Option<u16>), ()> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok((None, None));
+    }
+    if s.chars().any(char::is_whitespace) || s.chars().count() > 253 {
+        return Err(());
+    }
+    let port = |p: &str| p.parse::<u16>().ok().filter(|p| *p >= 1).ok_or(());
+    if let Some(rest) = s.strip_prefix('[') {
+        let (host, after) = rest.split_once(']').ok_or(())?;
+        if host.is_empty() {
+            return Err(());
+        }
+        let port = match after {
+            "" => None,
+            p => Some(port(p.strip_prefix(':').ok_or(())?)?),
+        };
+        return Ok((Some(host.to_string()), port));
+    }
+    if s.matches(':').count() == 1 {
+        let (host, p) = s.split_once(':').ok_or(())?;
+        if host.is_empty() {
+            return Err(());
+        }
+        return Ok((Some(host.to_string()), Some(port(p)?)));
+    }
+    Ok((Some(s.to_string()), None))
+}
+
+/// 列表里显示的一端：回环地址是默认值，只显示端口；别的带上地址，IPv6 加方括号
+pub fn endpoint_label(host: &str, port: u16) -> String {
+    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        port.to_string()
+    } else if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// 规则 id → 它所在槽位上共有几条规则（含自己，不论启用与否）。大于 1 的才需要徽标
@@ -100,6 +149,32 @@ mod tests {
             forward_slot(&fwd("a", "h1", ForwardKind::Local, 80)),
             forward_slot(&fwd("b", "h1", ForwardKind::Remote, 80))
         );
+    }
+
+    #[test]
+    fn dest_host_input() {
+        assert_eq!(parse_forward_dest(""), Ok((None, None)));
+        assert_eq!(parse_forward_dest("  "), Ok((None, None)));
+        assert_eq!(parse_forward_dest(" 10.0.0.5 "), Ok((Some("10.0.0.5".into()), None)));
+        assert_eq!(parse_forward_dest("db.internal"), Ok((Some("db.internal".into()), None)));
+        // 粘进来的 host:port 拆开
+        assert_eq!(parse_forward_dest("10.0.0.5:5432"), Ok((Some("10.0.0.5".into()), Some(5432))));
+        // IPv6：裸的不拆，方括号去掉，带端口的拆开
+        assert_eq!(parse_forward_dest("fd00::5"), Ok((Some("fd00::5".into()), None)));
+        assert_eq!(parse_forward_dest("[fd00::5]"), Ok((Some("fd00::5".into()), None)));
+        assert_eq!(parse_forward_dest("[fd00::5]:8080"), Ok((Some("fd00::5".into()), Some(8080))));
+        for bad in ["10.0.0.5 x", "10.0.0.5:0", "10.0.0.5:99999", ":80", "[]", "[fd00::5", "[fd00::5]x"] {
+            assert_eq!(parse_forward_dest(bad), Err(()), "{bad}");
+        }
+        assert_eq!(parse_forward_dest(&"a".repeat(254)), Err(()));
+    }
+
+    #[test]
+    fn endpoint_labels() {
+        assert_eq!(endpoint_label("127.0.0.1", 5432), "5432");
+        assert_eq!(endpoint_label("::1", 5432), "5432");
+        assert_eq!(endpoint_label("10.0.0.5", 5432), "10.0.0.5:5432");
+        assert_eq!(endpoint_label("fd00::5", 5432), "[fd00::5]:5432");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use falcon_client::{ApiResult, FalconClient};
 use falcon_core::host_color::ssh_conn;
-use falcon_core::relay::same_port_counts;
+use falcon_core::relay::{endpoint_label, parse_forward_dest, same_port_counts};
 use falcon_proto::{
     ForwardKind, ForwardState, PortForward, PortForwardInput, PortForwardPatch, PublicShare, PublicShareInput,
     PublicSharePatch, RelayList, SshHost,
@@ -52,11 +52,14 @@ pub enum RelaysEvent {
     GoHosts,
 }
 
-/// 添加转发的表单。只填两个端口：监听地址与目标地址一律走后端默认的 127.0.0.1——绑 0.0.0.0 /
-/// 具体网卡是少数派需求，真要改可以直接调 API
+/// 添加转发的表单：监听端口 → 目标地址 : 目标端口。监听地址一律走后端默认的 127.0.0.1——绑
+/// 0.0.0.0 / 具体网卡是少数派需求，真要改可以直接调 API。目标地址可以填 IP 或主机名（空着 =
+/// 127.0.0.1）：本地转发由远端去连它（远端内网里的另一台机器），远端转发由本机去连它
 struct ForwardForm {
     kind: ForwardKind,
     bind: Entity<InputState>,
+    /// 目标地址，见 [`parse_forward_dest`]
+    host: Entity<InputState>,
     dest: Entity<InputState>,
     name: Entity<InputState>,
     /// 上一次的监听端口：目标端口没被单独改过（还等于它）就跟着监听端口走
@@ -109,17 +112,21 @@ fn port_input(placeholder: String, window: &mut Window, cx: &mut Context<RelaysP
     })
 }
 
+/// 目标地址输入：IP / 主机名 / 带方括号的 IPv6，粘贴 `host:port` 时拆开（见 new_forms）
+fn host_input(window: &mut Window, cx: &mut Context<RelaysPane>) -> Entity<InputState> {
+    cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder(t!("forward.destHostPlaceholder").to_string())
+            .validate(|s, _| s.chars().count() <= 253 && !s.chars().any(char::is_whitespace))
+    })
+}
+
 fn name_input(window: &mut Window, cx: &mut Context<RelaysPane>) -> Entity<InputState> {
     cx.new(|cx| InputState::new(window, cx).placeholder(t!("forward.namePlaceholder").to_string()))
 }
 
 fn parse_port(s: &str) -> Option<u16> {
     s.parse::<u16>().ok().filter(|p| *p >= 1)
-}
-
-/// 回环地址是默认值，显示出来只是噪音；非默认的（直接调 API 建的）才带上
-fn endpoint_label(host: &str, port: u16) -> String {
-    if matches!(host, "127.0.0.1" | "localhost" | "::1") { port.to_string() } else { format!("{host}:{port}") }
 }
 
 fn route_label(row: &PortForward) -> String {
@@ -261,7 +268,7 @@ impl RelaysPane {
         for forms in self.forms.values_mut() {
             if let Some(fwd) = forms.fwd.as_mut().filter(|f| f.clear) {
                 fwd.clear = false;
-                for input in [&fwd.bind, &fwd.dest, &fwd.name] {
+                for input in [&fwd.bind, &fwd.host, &fwd.dest, &fwd.name] {
                     input.update(cx, |s, cx| s.set_value("", window, cx));
                 }
                 fwd.last_bind.clear();
@@ -281,6 +288,7 @@ impl RelaysPane {
             let form = ForwardForm {
                 kind: ForwardKind::Local,
                 bind: port_input(a, window, cx),
+                host: host_input(window, cx),
                 dest: port_input(b, window, cx),
                 name: name_input(window, cx),
                 last_bind: String::new(),
@@ -297,6 +305,23 @@ impl RelaysPane {
                     _ => {}
                 }));
             }
+            // 粘进来的 `10.0.0.5:5432`：地址留下，端口挪到目标端口那一栏（之后它就算被单独改过，
+            // 不再跟着监听端口走）
+            let k = key.clone();
+            subs.push(cx.subscribe_in(&form.host, window, move |this, state, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.submit_forward(&k, cx),
+                InputEvent::Change => {
+                    let value = state.read(cx).value().to_string();
+                    if let Ok((Some(host), Some(port))) = parse_forward_dest(&value)
+                        && let Some(fwd) = this.forms.get_mut(&k).and_then(|f| f.fwd.as_mut())
+                    {
+                        fwd.host.update(cx, |h, cx| h.set_value(host, window, cx));
+                        fwd.dest.update(cx, |d, cx| d.set_value(port.to_string(), window, cx));
+                    }
+                    cx.notify();
+                }
+                _ => {}
+            }));
             let k = key.clone();
             subs.push(cx.subscribe_in(&form.bind, window, move |this, state, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.submit_forward(&k, cx),
@@ -356,6 +381,11 @@ impl RelaysPane {
             cx.notify();
             return;
         };
+        let Ok((dest_host, _)) = parse_forward_dest(&fwd.host.read(cx).value()) else {
+            fwd.error = Some(t!("forward.hostInvalid").to_string());
+            cx.notify();
+            return;
+        };
         let name = fwd.name.read(cx).value().trim().to_string();
         let input = PortForwardInput {
             host_id: key.to_string(),
@@ -363,7 +393,7 @@ impl RelaysPane {
             kind: fwd.kind,
             bind_host: None,
             bind_port,
-            dest_host: None,
+            dest_host,
             dest_port,
             enabled: None,
         };
@@ -695,7 +725,17 @@ impl RelaysPane {
         let fwd = self.forms.get(key)?.fwd.as_ref()?;
         let ui = Ui::global(cx).clone();
         let this = cx.weak_entity();
-        let hint_text = if fwd.kind == ForwardKind::Local { t!("forward.hint_local") } else { t!("forward.hint_remote") }.to_string();
+        // 提示照填的目标说：本地转发是远端去连它，远端转发是本机去连它
+        let dest = match parse_forward_dest(&fwd.host.read(cx).value()) {
+            Ok((Some(host), _)) => host,
+            _ => "127.0.0.1".to_string(),
+        };
+        let hint_text = if fwd.kind == ForwardKind::Local {
+            t!("forward.hint_local", dest = dest)
+        } else {
+            t!("forward.hint_remote", dest = dest)
+        }
+        .to_string();
         let bind_empty = fwd.bind.read(cx).value().is_empty();
         let (k_kind, k_add) = (key.to_string(), key.to_string());
         Some(
@@ -724,9 +764,11 @@ impl RelaysPane {
                             },
                             cx,
                         )))
-                        .child(div().w(zpx(110.)).flex_none().child(Input::new(&fwd.bind).small()))
+                        .child(div().w(zpx(92.)).flex_none().child(Input::new(&fwd.bind).small()))
                         .child(icon(IconName::ArrowRight).size(zpx(12.)).text_color(ui.muted_foreground))
-                        .child(div().w(zpx(110.)).flex_none().child(Input::new(&fwd.dest).small()))
+                        .child(div().w(zpx(132.)).flex_none().child(Input::new(&fwd.host).small()))
+                        .child(div().flex_none().text_color(ui.muted_foreground).child(":"))
+                        .child(div().w(zpx(92.)).flex_none().child(Input::new(&fwd.dest).small()))
                         .child(div().flex_1().min_w_0().child(Input::new(&fwd.name).small()))
                         .child(
                             Button::new(SharedString::from(format!("fwd-add-{key}")))
