@@ -10,6 +10,12 @@
 //!
 //! 客户端先发 `appearance` 再发 `resize`：resize 触发懒惰接回，接回那一刻程序可能正好在查
 //! 底色，外观必须赶在接回之前到服务端。客户端自己不答颜色查询（多个 Viewer 会各答一遍）。
+//! 窗口在后台时 `visibility` 排在两者之间：服务端拿它决定这条连接参不参与定尺寸，得在它报
+//! 格子之前知道，不然后台窗口一连上就先抢一次尺寸。
+//!
+//! 尺寸（docs/adr/0022）：PTY 只有一个尺寸，按「最近真操作过的、看得见的那扇窗口」定；服务端
+//! 经 [`ServerMessage::Size`] 把生效尺寸推给每条连接，不是它定的那几扇按这个尺寸建网格、在
+//! 本地缩放或裁剪着画，而不是按自己的窗口重排（那样会折乱）。
 
 use serde::{Deserialize, Serialize};
 
@@ -109,10 +115,16 @@ pub enum ClientMessage {
     /// 键盘 / 粘贴 / IME 上屏的输入。整帧超过 [`WS_MAX_PAYLOAD_BYTES`] 要分片。
     #[serde(rename = "input")]
     Input { data: String },
-    /// 终端格子数。服务端只收正整数；新 socket 必须强发一次（懒惰接回的信号），
-    /// 之后格子数没变就别发（服务端每条 resize 都有落库逻辑）。
+    /// 这扇窗口按自己的大小能放下的格子数（不是它眼下画着的网格：不定尺寸的窗口按
+    /// [`ServerMessage::Size`] 建网格）。服务端只收正整数；新 socket 必须强发一次（懒惰接回的
+    /// 信号），之后格子数没变就别发（服务端每条 resize 都有落库逻辑）。
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
+    /// 这扇窗口此刻在不在屏幕上：切走的画布、总览盖住的、收起的助手面板、最小化 / 被整个盖住的
+    /// 窗口、后台标签页都是 `false`。看不见的窗口不参与定尺寸（除非谁都看不见）。没报过当看得见
+    /// （老客户端）；新 socket 上是 `false` 时开场强发一次，`true` 不必发
+    #[serde(rename = "visibility")]
+    Visibility { visible: bool },
     /// 当前 Viewer 的终端深浅；主题切换时再推一次，供 OSC 10/11/12 答复
     #[serde(rename = "appearance")]
     Appearance {
@@ -190,6 +202,11 @@ pub enum ServerMessage {
     /// 这条本身没有内容
     #[serde(rename = "pong")]
     Pong,
+    /// PTY 眼下的尺寸，以及它是不是按收信这条连接报的格子定的（`owner`）。变了（尺寸或定它的
+    /// 人）就推给每条连接，新连接在回放之前先收一次——回放要按这个尺寸解析才不折乱。
+    /// `owner` 的那扇窗口照旧按自己的格子建网格（拖窗不等往返），其余的按这里的尺寸建
+    #[serde(rename = "size")]
+    Size { cols: u16, rows: u16, owner: bool },
     /// 本版本不认识的控制消息（服务端比客户端新）。只在反序列化时出现，忽略即可。
     #[serde(rename = "unknown", other)]
     Unknown,
@@ -297,6 +314,8 @@ mod tests {
         let k = roundtrip::<ClientMessage>(r#"{"type":"status_seen","ids":["a"]}"#);
         assert_eq!(k, ClientMessage::StatusSeen { ids: vec!["a".into()] });
         assert_eq!(roundtrip::<ClientMessage>(r#"{"type":"ping"}"#), ClientMessage::Ping);
+        let v = roundtrip::<ClientMessage>(r#"{"type":"visibility","visible":false}"#);
+        assert_eq!(v, ClientMessage::Visibility { visible: false });
     }
 
     #[test]
@@ -332,6 +351,8 @@ mod tests {
         // 老服务端的滚动消息：新客户端当成不认识的消息
         assert_eq!(serde_json::from_str::<ServerMessage>(r#"{"type":"scroll","position":1,"length":2,"rows":3}"#).unwrap(), ServerMessage::Unknown);
         assert_eq!(roundtrip::<ServerMessage>(r#"{"type":"pong"}"#), ServerMessage::Pong);
+        let z = roundtrip::<ServerMessage>(r#"{"type":"size","cols":120,"rows":40,"owner":true}"#);
+        assert_eq!(z, ServerMessage::Size { cols: 120, rows: 40, owner: true });
     }
 
     #[test]

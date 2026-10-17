@@ -177,7 +177,7 @@ holder 往 VT 进程管道里写的字节，与发给连接的字节是同一个
 
 ### 5.6 尺寸
 
-holder 记每条连接最后一次请求的尺寸，生效尺寸取**最近有过输入或 resize 的那条连接**的请求（与服务端 ViewerArbiter「深浅跟最近操作的那端」同一思路）。falcon-server 自己的多 Viewer 仍按 arbiter 取最小后作为一条连接提交。人手 `attach` 断开后，生效尺寸回到 falcon-server 的请求。
+holder 记每条连接最后一次请求的尺寸，生效尺寸取**最近有过输入或 resize 的那条连接**的请求（与服务端 ViewerArbiter「深浅跟最近操作的那端」同一思路）。falcon-server 自己的多 Viewer 先由 arbiter 按同一口径（最近真操作过的、看得见的那扇窗口，ADR 0022）选出一份，作为一条连接提交。人手 `attach` 断开后，生效尺寸回到 falcon-server 的请求。
 
 ### 5.7 慢连接
 

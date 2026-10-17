@@ -123,9 +123,25 @@ impl ServerWindow {
                 let active = window.is_window_active();
                 this.ws.update(cx, |w, _| w.window_active = active);
             }),
+            // 窗口看不见了（最小化、整个被盖住、后台标签页）：里面的终端都不再参与定 PTY 的尺寸
+            //（ADR 0022）。只看可见性、不看前台：切去别的 App 时窗口还摆在那，那时让给别的设备
+            // 会来回整屏重画
+            cx.observe_window_visibility(window, |this, visibility, _, cx| {
+                let visible = visibility.is_visible();
+                this.ws.update(cx, |w, cx| {
+                    if w.window_visible != visible {
+                        w.window_visible = visible;
+                        cx.notify();
+                    }
+                });
+            }),
         ];
         let active = window.is_window_active();
-        ws.update(cx, |w, _| w.window_active = active);
+        let visible = window.is_visible();
+        ws.update(cx, |w, _| {
+            w.window_active = active;
+            w.window_visible = visible;
+        });
 
         // 本机服务先确认起来了再初始化（launchd 拉起服务要时间）；远处的直接连。
         // 没有本机服务可托管的平台（浏览器：页面能打开就说明服务端在）也直接连

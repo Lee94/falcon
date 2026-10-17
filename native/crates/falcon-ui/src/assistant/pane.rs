@@ -242,7 +242,7 @@ impl ThreadPane {
         cx.notify();
     }
 
-    #[cfg(feature = "automation")]
+    /// 这段对话的终端（打开了才有）
     pub fn terminal(&self) -> Option<Entity<TerminalView>> {
         match &self.term {
             Term::Ready(v) => Some(v.clone()),

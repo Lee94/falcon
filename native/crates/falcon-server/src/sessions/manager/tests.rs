@@ -164,8 +164,14 @@ fn non_durable_session_round_trip() {
     });
 }
 
+/// 收到的最后一条 size：(cols, rows, owner)
+fn last_size(p: &Peer) -> Option<(u64, u64, bool)> {
+    let m = p.msgs("size").into_iter().last()?;
+    Some((m["cols"].as_u64()?, m["rows"].as_u64()?, m["owner"].as_bool()?))
+}
+
 #[test]
-fn smallest_viewer_wins_and_size_returns_when_it_leaves() {
+fn size_follows_the_latest_visible_typist_and_is_pushed_to_every_viewer() {
     run(async {
         let h = harness();
         let s = new_session(&h).await;
@@ -175,14 +181,36 @@ fn smallest_viewer_wins_and_size_returns_when_it_leaves() {
         h.mgr.resize(&s.id, big.id(), 200, 50);
         h.mgr.add_viewer(&s.id, small.viewer.clone());
         h.mgr.resize(&s.id, small.id(), 90, 60);
+        // 后连上来的只是看：尺寸还是先到的那扇的，两边看到的是同一份输出
         h.mgr.input(&s.id, big.id(), "stty size\n");
-        big.wait("最小格子", has_output("50 90")).await;
-        // 两个 Viewer 看到的是同一份输出
-        small.wait("小屏也收到", has_output("50 90")).await;
+        big.wait("先到的那扇定尺寸", has_output("50 200")).await;
+        small.wait("小屏也收到", has_output("50 200")).await;
+        assert_eq!(last_size(&big), Some((200, 50, true)));
+        // 小屏一连上就知道生效尺寸（回放之前），自己不是定尺寸的那扇
+        assert!(matches!(small.seen.first(), Some(Got::Msg(m)) if m["type"] == "size"), "{:?}", small.seen);
+        assert_eq!(last_size(&small), Some((200, 50, false)));
 
-        h.mgr.remove_viewer(&s.id, small.id());
-        h.mgr.input(&s.id, big.id(), "stty size\n");
-        big.wait("尺寸还给大屏", has_output("50 200")).await;
+        // 小屏一敲键尺寸就换过去，两边都被告知
+        big.seen.clear();
+        small.seen.clear();
+        h.mgr.input(&s.id, small.id(), "stty size\n");
+        small.wait("敲键的那扇定尺寸", has_output("60 90")).await;
+        big.drain();
+        assert_eq!(last_size(&small), Some((90, 60, true)));
+        assert_eq!(last_size(&big), Some((90, 60, false)));
+
+        // 小屏到了后台：尺寸还给看得见的大屏；后台窗口里的输入不再抢回去
+        small.seen.clear();
+        h.mgr.set_visibility(&s.id, small.id(), false);
+        h.mgr.input(&s.id, small.id(), "stty size\n");
+        small.wait("后台不算活跃", has_output("50 200")).await;
+        assert_eq!(last_size(&small), Some((200, 50, false)));
+
+        // 大屏走了，只剩后台的小屏：谁都看不见时跟剩下的人
+        small.seen.clear();
+        h.mgr.remove_viewer(&s.id, big.id());
+        h.mgr.input(&s.id, small.id(), "stty size\n");
+        small.wait("只剩后台的人", has_output("60 90")).await;
         h.mgr.terminate(&s.id, false).await;
     });
 }

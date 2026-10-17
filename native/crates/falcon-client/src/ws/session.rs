@@ -65,6 +65,10 @@ pub enum SessionEvent {
     /// 对话终端的 shell 状态（shell integration 报的当前目录、有没有命令在跑）。只有按机器挂的
     /// 对话终端有（docs/design/ai-assistant.md 4.2）
     Shell { cwd: Option<String>, busy: bool, user: Option<String>, home: Option<String> },
+    /// PTY 眼下的尺寸，`owner` = 是按这扇窗口报的格子定的（ADR 0022）。不是的话终端网格要按这个
+    /// 尺寸建、在本地缩放 / 裁剪着画——**和输出、回放同在网络线程上按顺序处理**：服务端在回放、
+    /// 在按新尺寸排的输出之前发它，换到 UI 线程上再改网格就晚了。老服务端不发
+    Size { cols: u16, rows: u16, owner: bool },
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
     /// 断线期间 `send_input` 的内容会被丢掉（照 React 版：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
@@ -127,6 +131,7 @@ impl Default for SocketOptions {
 enum Cmd {
     Input(String),
     Resize(u16, u16),
+    Visible(bool),
     /// 已经序列化好的 appearance 消息
     Appearance(String),
     /// 已经序列化好的 status_seen 消息
@@ -170,6 +175,7 @@ impl SessionSocket {
             closed: closed.clone(),
             size: None,
             appearance: None,
+            visible: true,
             retries: 0,
             connected_before: false,
             unauthorized_streak: 0,
@@ -202,6 +208,13 @@ impl SessionSocket {
         if cols > 0 && rows > 0 {
             let _ = self.cmd.send(Cmd::Resize(cols, rows));
         }
+    }
+
+    /// 这扇窗口此刻在不在屏幕上（切走的画布、最小化的窗口、后台标签页是 `false`）。看不见的
+    /// 窗口不参与定尺寸（ADR 0022）。记住最近一次：新 socket 上是 `false` 时开场排在 resize
+    /// 之前补发（服务端没收到就当看得见，后台窗口一连上会先抢一次尺寸）；同一条 socket 上去重
+    pub fn set_visible(&self, visible: bool) {
+        let _ = self.cmd.send(Cmd::Visible(visible));
     }
 
     /// 当前终端配色的深浅与底 / 字色（`#rrggbb`），据此回答 OSC 10/11/12：持久会话由宿主机
@@ -283,6 +296,8 @@ struct Driver {
     size: Option<(u16, u16)>,
     /// 最近一次 appearance（序列化好的 JSON）
     appearance: Option<String>,
+    /// 最近一次报的可见性；没报过当看得见（与服务端的缺省一致）
+    visible: bool,
     /// 退避轮次；连上就清零（React 版的 `retries`）
     retries: u32,
     connected_before: bool,
@@ -325,6 +340,10 @@ impl Driver {
             }
             Some(Cmd::Appearance(a)) => {
                 self.appearance = Some(a);
+                Offline::Continue
+            }
+            Some(Cmd::Visible(v)) => {
+                self.visible = v;
                 Offline::Continue
             }
         }
@@ -421,12 +440,20 @@ impl Driver {
     }
 
     async fn serve(&mut self, mut ws: WsConn, token_used: Option<String>) -> Next {
-        // 开场：先 appearance、再 resize（顺序与理由见 SessionSocket 的方法注释）
+        // 开场：先 appearance、（看不见时）visibility、再 resize（顺序与理由见 SessionSocket 的方法注释）
         let mut sent_size = None;
         if let Some(a) = self.appearance.clone()
             && ws.send_text(a).await.is_err()
         {
             return self.dropped("发送 appearance 失败");
+        }
+        // 服务端对新连接的缺省是看得见
+        let mut sent_visible = true;
+        if !self.visible {
+            if ws.send_text(visibility_json(false)).await.is_err() {
+                return self.dropped("发送 visibility 失败");
+            }
+            sent_visible = false;
         }
         if let Some((cols, rows)) = self.size {
             if ws.send_text(resize_json(cols, rows)).await.is_err() {
@@ -521,6 +548,15 @@ impl Driver {
                             self.appearance = Some(a.clone());
                             ws.send_text(a).await.is_ok()
                         }
+                        Cmd::Visible(v) => {
+                            self.visible = v;
+                            if sent_visible == v {
+                                true
+                            } else {
+                                sent_visible = v;
+                                ws.send_text(visibility_json(v)).await.is_ok()
+                            }
+                        }
                         Cmd::StatusSeen(json) => ws.send_text(json).await.is_ok(),
                         Cmd::ReconnectNow => {
                             if !probing {
@@ -574,6 +610,7 @@ impl Driver {
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
             ServerMessage::ProgramStatus { records } => SessionEvent::ProgramStatus(records),
             ServerMessage::Shell { cwd, busy, user, home } => SessionEvent::Shell { cwd, busy, user, home },
+            ServerMessage::Size { cols, rows, owner } => SessionEvent::Size { cols, rows, owner },
             // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
             // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown
             ServerMessage::Pong | ServerMessage::Unknown => return,
@@ -589,6 +626,10 @@ fn backoff_delay(base: Duration, max: Duration, retries: u32) -> Duration {
 
 fn resize_json(cols: u16, rows: u16) -> String {
     serde_json::to_string(&ClientMessage::Resize { cols, rows }).expect("resize 消息总能序列化")
+}
+
+fn visibility_json(visible: bool) -> String {
+    serde_json::to_string(&ClientMessage::Visibility { visible }).expect("visibility 消息总能序列化")
 }
 
 /// `{"type":"input","data":""}` 的长度：每条 input 帧在数据之外的固定开销。

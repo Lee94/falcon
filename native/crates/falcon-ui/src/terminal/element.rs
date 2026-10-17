@@ -17,7 +17,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use falcon_term::Snapshot;
+use falcon_term::{Snapshot, TermSize};
 use falcon_term::links::LinkSpan;
 use falcon_term::alacritty_terminal::term::TermMode;
 use falcon_term::alacritty_terminal::term::cell::{Cell, Flags};
@@ -105,6 +105,10 @@ impl TerminalGeometry {
 pub const PADDING_X: f32 = 8.;
 pub const PADDING_Y: f32 = 6.;
 
+/// PTY 的尺寸由别的窗口定、比这扇窗口大时，字最多缩到这个倍数（ADR 0022）；再放不下就裁掉，
+/// 平移到刚好看得见光标。再小就认不出字了，那时还不如看光标附近那一块
+const MIN_FOLLOW_SCALE: f32 = 0.5;
+
 pub struct TerminalElement {
     view: Entity<TerminalView>,
     snapshot: Arc<Snapshot>,
@@ -117,6 +121,12 @@ pub struct TerminalElement {
     hovered_link: Option<LinkSpan>,
     /// 左 / 上的内边距（React 版是 pl-2 py-1.5）
     padding: Point<Pixels>,
+    /// AI 助手的实时区域：外面按行号裁着露，这里不缩放、不竖着平移
+    live: bool,
+    /// PTY 的尺寸跟着别的窗口时为 Some（ADR 0022）：网格放不下就缩放 / 裁剪，网格比窗口小时
+    /// 网格之外那块铺这个色，一眼看出那里不属于终端。这扇窗口自己定尺寸时 None，照旧原样画——
+    /// 拖窗那一帧快照还是旧尺寸，这时缩放或标窗口外都会闪一下
+    follow: Option<Hsla>,
 }
 
 impl TerminalElement {
@@ -131,6 +141,8 @@ impl TerminalElement {
         cursor_visible: bool,
         marked_text: Option<String>,
         hovered_link: Option<LinkSpan>,
+        live: bool,
+        follow: Option<Hsla>,
     ) -> Self {
         Self {
             view,
@@ -143,6 +155,8 @@ impl TerminalElement {
             marked_text,
             hovered_link,
             padding: point(px(PADDING_X), px(PADDING_Y)),
+            live,
+            follow,
         }
     }
 }
@@ -605,6 +619,8 @@ fn in_selection(sel: &falcon_term::SnapSelection, row: usize, col: usize, cols: 
 pub struct LayoutState {
     hitbox: Hitbox,
     geometry: TerminalGeometry,
+    /// 网格比窗口小时网格之外的那几块（[`TerminalElement::follow`] 色）
+    outside: Vec<Bounds<Pixels>>,
     rects: Vec<LayoutRect>,
     selection_rects: Vec<LayoutRect>,
     runs: Vec<BatchedTextRun>,
@@ -845,21 +861,24 @@ impl Element for TerminalElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let text_system = window.text_system().clone();
         let font_id = text_system.resolve_font(&self.style.font);
-        let font_size = self.style.font_size;
-        let cell_width = text_system
-            .advance(font_id, font_size, 'm')
-            .map(|a| a.width)
-            .unwrap_or(font_size * 0.6);
-        // xterm 的 lineHeight 倍数乘的是字体自然高度（ascent + descent），不是字号
-        let natural = text_system.ascent(font_id, font_size) + text_system.descent(font_id, font_size).abs();
         let scale = window.scale_factor().max(1.0);
-        let line_height = {
+        // 字号 → (格宽, 行高)
+        let metrics = |font_size: Pixels| {
+            let cell_width = text_system
+                .advance(font_id, font_size, 'm')
+                .map(|a| a.width)
+                .unwrap_or(font_size * 0.6);
+            // xterm 的 lineHeight 倍数乘的是字体自然高度（ascent + descent），不是字号
+            let natural = text_system.ascent(font_id, font_size) + text_system.descent(font_id, font_size).abs();
             let lh = f32::from(natural) * self.style.line_height_factor;
-            px((lh * scale).ceil().max(1.0) / scale)
+            (cell_width, px((lh * scale).ceil().max(1.0) / scale))
         };
+        let mut font_size = self.style.font_size;
+        let (mut cell_width, mut line_height) = metrics(font_size);
+        let (base_cw, base_lh) = (cell_width, line_height);
 
         let snap_px = |v: Pixels| px((f32::from(v) * scale).floor() / scale);
-        let origin = point(
+        let mut origin = point(
             snap_px(bounds.origin.x + self.padding.x),
             snap_px(bounds.origin.y + self.padding.y),
         );
@@ -867,21 +886,55 @@ impl Element for TerminalElement {
         let avail_h = (bounds.size.height - self.padding.y * 2.).max(px(0.));
         let fit_cols = (f32::from(avail_w) / f32::from(cell_width)).floor() as usize;
         let fit_rows = (f32::from(avail_h) / f32::from(line_height)).floor() as usize;
-        let geometry = TerminalGeometry {
-            origin,
-            cell_width,
-            line_height,
-            cols: fit_cols.max(2),
-            rows: fit_rows.max(1),
-        };
-        // 视图据此 resize 终端 / 通知服务端，并在鼠标事件里换算格子。
         // 量不出像样的格子（画布首帧还没拿到自己的 bounds，窗格按 0 排；列被挤没）时不报：
         // 缩到 2×3 再放回来，本地终端按 2×3 重排过的内容回不去了（备用屏里的全屏程序没有回滚，
         // 整屏直接丢）——回放先于首次测量到达时正是这样，服务端尺寸没变不会重画，终端就一直是
         // 空的。xterm 的 fit addon 同样在量不出尺寸时保留旧值
-        if fit_cols >= 2 && fit_rows >= 1 {
-            self.view.update(cx, |view, cx| view.set_geometry(geometry, cx));
+        let fit = (fit_cols >= 2 && fit_rows >= 1).then(|| TermSize::new(fit_cols, fit_rows));
+
+        // 画的是本地网格（快照）。这扇窗口定尺寸时它就是 fit；PTY 的尺寸跟着别的窗口时它是那个
+        // 尺寸（ADR 0022）：比窗口大就缩小字号放进来，缩到下限还放不下就裁掉、平移到光标看得见；
+        // 比窗口小就画在左上角，余下的标成「窗口外」
+        let (cols, rows) = (self.snapshot.size.cols.max(1), self.snapshot.size.rows.max(1));
+        let following = self.follow.is_some();
+        let need_w = f32::from(cell_width) * cols as f32;
+        let need_h = f32::from(line_height) * rows as f32;
+        if following && !self.live && (need_w > f32::from(avail_w) || need_h > f32::from(avail_h)) {
+            let k = (f32::from(avail_w) / need_w).min(f32::from(avail_h) / need_h).clamp(MIN_FOLLOW_SCALE, 1.0);
+            if k < 1.0 {
+                font_size = font_size * k;
+                (cell_width, line_height) = metrics(font_size);
+            }
         }
+        let vis_cols = ((f32::from(avail_w) / f32::from(cell_width)).floor() as usize).max(1);
+        let vis_rows = ((f32::from(avail_h) / f32::from(line_height)).floor() as usize).max(1);
+        if following && let Some(c) = self.snapshot.cursor {
+            if cols > vis_cols {
+                let ox = (c.col + 1).saturating_sub(vis_cols).min(cols - vis_cols);
+                origin.x -= cell_width * ox as f32;
+            }
+            if !self.live && rows > vis_rows {
+                let oy = (c.row + 1).saturating_sub(vis_rows).min(rows - vis_rows);
+                origin.y -= line_height * oy as f32;
+            }
+        }
+        let geometry = TerminalGeometry { origin, cell_width, line_height, cols, rows };
+        // 窗口外：跟着别的窗口的尺寸、网格右边 / 下边空出至少一整格（按原字号）才标，不到一格的
+        // 零头本来就有
+        let mut outside = Vec::new();
+        if following && !self.live {
+            let right = origin.x + cell_width * cols as f32;
+            let bottom = origin.y + line_height * rows as f32;
+            let (max_x, max_y) = (bounds.origin.x + bounds.size.width, bounds.origin.y + bounds.size.height);
+            if max_x - right >= base_cw + px(1.) {
+                outside.push(Bounds::from_corners(point(right, bounds.origin.y), point(max_x, max_y)));
+            }
+            if max_y - bottom >= base_lh + self.padding.y + px(1.) {
+                outside.push(Bounds::from_corners(point(bounds.origin.x, bottom), point(right.min(max_x), max_y)));
+            }
+        }
+        // 视图据此通知服务端、重建本地网格，并在鼠标事件里换算格子
+        self.view.update(cx, |view, cx| view.set_geometry(fit, geometry, cx));
 
         let colors = Colorizer {
             palette: &self.palette,
@@ -925,6 +978,7 @@ impl Element for TerminalElement {
         LayoutState {
             hitbox,
             geometry,
+            outside,
             rects,
             selection_rects,
             runs,
@@ -948,6 +1002,11 @@ impl Element for TerminalElement {
     ) {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, self.palette.background));
+            if let Some(color) = self.follow {
+                for b in &layout.outside {
+                    window.paint_quad(fill(*b, color));
+                }
+            }
             let origin = layout.geometry.origin;
             let geo = layout.geometry;
 

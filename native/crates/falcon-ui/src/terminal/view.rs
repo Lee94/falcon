@@ -69,6 +69,82 @@ struct Sink {
     tx: UnboundedSender<UiEvent>,
     /// AI 助手的实时区域（见 [`LiveTrack`]）；普通终端是 None
     live: Option<Arc<LiveTrack>>,
+    grid: Arc<GridPlan>,
+}
+
+/// 本地网格按什么尺寸建（ADR 0022）。PTY 只有一个尺寸，跟最近操作过的那扇看得见的窗口：
+/// - 是这扇定的（或还不知道服务端的尺寸——老服务端、刚连上）：跟自己窗口放得下的格子走，
+///   拖窗当场生效，不等往返；
+/// - 是别的窗口定的：按服务端推来的尺寸建，元素里缩小 / 裁剪着画。按自己的窗口建就是按另一个
+///   宽度重排程序的输出，全屏程序与 shell 的行编辑都会折乱。
+///
+/// UI 线程写 fit（元素量出来的），网络线程写 server（WS 的 `size`，必须与输出、回放同在网络
+/// 线程上按顺序生效：服务端在回放、在按新尺寸排的输出之前发它）。两边都在锁里改本地终端，
+/// 免得交错着把旧尺寸写回去
+#[derive(Default)]
+struct GridPlan {
+    state: std::sync::Mutex<GridState>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct GridState {
+    fit: Option<TermSize>,
+    /// (PTY 的尺寸, 是不是按这扇窗口定的)
+    server: Option<(TermSize, bool)>,
+}
+
+impl GridState {
+    fn grid(&self) -> Option<TermSize> {
+        match self.server {
+            Some((size, false)) => Some(size),
+            _ => self.fit,
+        }
+    }
+}
+
+impl GridPlan {
+    fn set_fit(&self, fit: TermSize, core: &TermCore, live: Option<&LiveTrack>) -> bool {
+        self.update(core, live, |s| s.fit = Some(fit))
+    }
+
+    fn set_server(&self, size: TermSize, owner: bool, core: &TermCore, live: Option<&LiveTrack>) -> bool {
+        self.update(core, live, |s| s.server = Some((size, owner)))
+    }
+
+    /// 不是这扇窗口定的尺寸时为 Some（标题栏据此提示）
+    fn follower_of(&self) -> Option<TermSize> {
+        let s = self.state.lock().ok()?;
+        match s.server {
+            Some((size, false)) => Some(size),
+            _ => None,
+        }
+    }
+
+    /// 改完按新状态重建网格；网格变了返回 true
+    fn update(&self, core: &TermCore, live: Option<&LiveTrack>, f: impl FnOnce(&mut GridState)) -> bool {
+        let Ok(mut s) = self.state.lock() else { return false };
+        f(&mut s);
+        match s.grid() {
+            Some(size) => resize_core(core, live, size),
+            None => false,
+        }
+    }
+}
+
+/// 改本地终端的格数。实时区域记的是提示符的绝对行；改尺寸时 alacritty 重排折行，行会在历史与
+/// 屏幕之间挪，绝对行就对不上了。改之前记下提示符在光标上面几行，改完按光标还原
+fn resize_core(core: &TermCore, live: Option<&LiveTrack>, size: TermSize) -> bool {
+    let live_dist = live
+        .map(|l| l.prompt_abs.load(Ordering::Relaxed))
+        .filter(|p| *p != i64::MIN)
+        .map(|p| core.cursor_abs_line() - p);
+    if !core.resize(size) {
+        return false;
+    }
+    if let (Some(live), Some(dist)) = (live, live_dist) {
+        live.prompt_abs.store(core.cursor_abs_line() - dist, Ordering::Relaxed);
+    }
+    true
 }
 
 /// AI 助手的实时区域：从输出流上认出提示符开始（OSC 133;A，falcon 给助手 shell 注入的集成打的），
@@ -114,6 +190,14 @@ impl SessionSink for Sink {
                 }
                 // 回放期间静音，照理没有事件；取一次是为了不留例外
                 self.drain_events();
+            }
+            SessionEvent::Size { cols, rows, owner } => {
+                // 就地改网格：紧跟着的回放 / 输出是按这个尺寸排的（见 GridPlan）
+                let size = TermSize::new(cols as usize, rows as usize);
+                if self.grid.set_server(size, owner, &self.core, self.live.as_deref()) {
+                    let _ = self.tx.unbounded_send(UiEvent::Dirty);
+                }
+                let _ = self.tx.unbounded_send(UiEvent::Control(SessionEvent::Size { cols, rows, owner }));
             }
             other => {
                 log::debug!("session event {other:?}");
@@ -230,7 +314,16 @@ pub struct TerminalView {
     core: Arc<TermCore>,
     socket: SessionSocket,
     focus: FocusHandle,
+    /// 这一帧画出来的网格（含缩放、裁剪后的位置），鼠标据此换算格子
     geometry: Option<TerminalGeometry>,
+    /// 这扇窗口放得下的格子（报给服务端的那份），见 [`GridPlan`]
+    fit: Option<TermSize>,
+    grid: Arc<GridPlan>,
+    /// 工作区说这扇窗口此刻在不在屏幕上（切走的画布、收起的助手面板、最小化的窗口是 false）；
+    /// 看不见的不参与定 PTY 的尺寸（ADR 0022）
+    visible: bool,
+    /// 标题栏上「尺寸跟着另一扇窗口」的提示最近一次按的是哪个尺寸
+    following_shown: Option<(usize, usize)>,
     snapshot: Arc<Snapshot>,
     marked_text: Option<String>,
     cursor_on: bool,
@@ -364,10 +457,12 @@ impl TerminalView {
                 running: AtomicBool::new(false),
             })
         });
+        let grid = Arc::new(GridPlan::default());
         let sink = Arc::new(Sink {
             core: core.clone(),
             tx,
             live: live.clone(),
+            grid: grid.clone(),
         });
         let socket = SessionSocket::open(&client, &session_id, sink);
         // 颜色查询由宿主机的 VT 进程（持久）/ 服务端的 OscColorGate（非持久）按外观回答，
@@ -402,6 +497,10 @@ impl TerminalView {
             socket,
             focus,
             geometry: None,
+            fit: None,
+            grid,
+            visible: true,
+            following_shown: None,
             snapshot,
             marked_text: None,
             cursor_on: true,
@@ -459,6 +558,20 @@ impl TerminalView {
     /// 一行多高（画过一次之后才知道）
     pub fn line_height(&self) -> Option<gpui_kit::Pixels> {
         self.geometry.map(|g| g.line_height)
+    }
+
+    /// 这扇窗口在不在屏幕上（工作区 / 助手面板按画布、面板开合、窗口可见性算好了告诉它）。
+    /// 只是转告服务端，画面不用重画
+    pub fn set_visible(&mut self, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.socket.set_visible(visible);
+        }
+    }
+
+    /// PTY 的尺寸不是按这扇窗口定的时候是那个尺寸（标题栏提示「尺寸跟随另一扇窗口」）
+    pub fn following_size(&self) -> Option<(usize, usize)> {
+        self.grid.follower_of().map(|s| (s.cols, s.rows))
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -602,6 +715,16 @@ impl TerminalView {
                 self.shell_home = home;
                 cx.emit(TerminalViewEvent::ShellChanged);
             }
+            // 网格在网络线程上已经改好了（Sink）。跟不跟着别的窗口变了才让工作区重画标题栏的提示
+            //（自己拖窗时每一步都会回一条 size，不能每条都惊动整个画布）
+            SessionEvent::Size { .. } => {
+                let following = self.following_size();
+                if following != self.following_shown {
+                    self.following_shown = following;
+                    cx.emit(TerminalViewEvent::StateChanged);
+                }
+                cx.notify();
+            }
             SessionEvent::Output(_) | SessionEvent::Replay(_) => {}
         }
     }
@@ -614,28 +737,21 @@ impl TerminalView {
         }
     }
 
-    /// 元素 prepaint 时回报本帧的网格几何：格数变了就改本地终端并通知服务端。
-    pub(super) fn set_geometry(&mut self, geo: TerminalGeometry, cx: &mut Context<Self>) {
-        let changed = self.geometry.is_none_or(|g| g.cols != geo.cols || g.rows != geo.rows);
+    /// 元素 prepaint 时回报本帧量到的格子（`fit`，量不出像样的格子时 None）与画出来的网格几何。
+    /// 格子变了就通知服务端，并按 [`GridPlan`] 重建本地网格（不是这扇窗口定尺寸时网格不跟着变）
+    pub(super) fn set_geometry(&mut self, fit: Option<TermSize>, geo: TerminalGeometry, cx: &mut Context<Self>) {
         self.geometry = Some(geo);
-        // 实时区域记的是提示符的绝对行；改尺寸时 alacritty 重排折行，行会在历史与屏幕之间挪，
-        // 绝对行就对不上了。改之前记下提示符在光标上面几行，改完按光标还原
-        let live_dist = self
-            .live
-            .as_ref()
-            .map(|l| l.prompt_abs.load(Ordering::Relaxed))
-            .filter(|p| *p != i64::MIN)
-            .map(|p| self.core.cursor_abs_line() - p);
-        if changed && self.core.resize(TermSize::new(geo.cols, geo.rows)) {
-            if let (Some(live), Some(dist)) = (&self.live, live_dist) {
-                live.prompt_abs.store(self.core.cursor_abs_line() - dist, Ordering::Relaxed);
-            }
-            self.socket.resize(geo.cols as u16, geo.rows as u16);
-            cx.notify();
-        } else if changed {
-            // 本地尺寸没变（例如首帧恰好 80×24）也要让 socket 知道已量好的尺寸
-            self.socket.resize(geo.cols as u16, geo.rows as u16);
+        let Some(fit) = fit else { return };
+        if self.fit == Some(fit) {
+            return;
         }
+        self.fit = Some(fit);
+        if self.grid.set_fit(fit, &self.core, self.live.as_deref()) {
+            cx.notify();
+        }
+        // 本地网格没变（例如首帧恰好 80×24、或者尺寸跟着别的窗口）也要让服务端知道量好的格子：
+        // 它是持久会话接回的信号，也是这扇窗口接手尺寸时要换成的格子
+        self.socket.resize(fit.cols as u16, fit.rows as u16);
     }
 
     // ---------- 输入 ----------
@@ -1450,6 +1566,9 @@ impl Render for TerminalView {
             self.cursor_on || !focused,
             self.marked_text.clone(),
             self.hovered_link.clone(),
+            self.live.is_some(),
+            // 跟着别的窗口的尺寸时，网格之外露出窗口底（与岛之间的缝同一层，ADR 0011）
+            self.grid.follower_of().map(|_| crate::theme::Ui::global(cx).app),
         );
         let banner = self.banner(cx);
         // 实时区域不画滚动条：它没有自己的历史可滚

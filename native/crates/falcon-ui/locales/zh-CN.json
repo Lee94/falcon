@@ -644,7 +644,8 @@
     "pinRight": "固定到最右边",
     "moveToCanvas": "移到画布 %{n}",
     "moveToNewCanvas": "移到新画布",
-    "resizeColumn": "调整列宽 · 双击还原"
+    "resizeColumn": "调整列宽 · 双击还原",
+    "followingSize": "终端尺寸跟着另一扇窗口（%{cols}×%{rows}），这里按比例缩小或裁着显示；在这里输入就改成按这扇窗口的大小"
   },
   "canvas": {
     "empty": "这个项目还没有打开的窗口，从侧栏的 ＋ 开一个",

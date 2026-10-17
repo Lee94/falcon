@@ -18,7 +18,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use falcon_client::FalconClient;
-use falcon_core::layout::ColumnLayout;
+use falcon_core::layout::{self as layout, ColumnLayout};
+use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_platform::Platform;
 pub use falcon_core::workspace::{
     ActiveView, DiffCommit, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
@@ -145,6 +146,9 @@ pub struct Workspace {
     /// 窗口在不在前台（ServerWindow 跟着 GPUI 的窗口激活写进来）。终端的键盘焦点在窗口切到
     /// 后台时并不丢，光看它会把"人去别的 App 了"当成还看着
     pub window_active: bool,
+    /// 窗口在不在屏幕上（GPUI 的窗口可见性：最小化、整个被盖住、切到别的桌面、浏览器后台标签页
+    /// 都是 false）。看不见时所有终端都算在后台（[`Self::sync_terminal_visibility`]）
+    pub window_visible: bool,
     changes_in_flight: bool,
     _tasks: Vec<Task<()>>,
 }
@@ -186,12 +190,17 @@ impl Workspace {
             program_clock: Default::default(),
             clock_epoch: web_time::Instant::now(),
             window_active: true,
+            window_visible: true,
             changes_in_flight: false,
             _tasks: Vec::new(),
         };
         // 画布的收尾挂在自己的每次通知上（React 版挂在 store 订阅上的 settleCanvases）：会改排布 /
         // 焦点 / 可见性的动作有十几处，每处各调一遍迟早漏一处，新列就一直没有画布
-        cx.observe_self(|this, cx| this.settle_canvases(cx)).detach();
+        cx.observe_self(|this, cx| {
+            this.settle_canvases(cx);
+            this.sync_terminal_visibility(cx);
+        })
+        .detach();
         this.start(cx);
         this
     }
@@ -738,6 +747,50 @@ impl Workspace {
         self.state.layout_columns(&self.sessions)
     }
 
+    /// 当前视图的画布、正在显示哪块、这块上画哪些列。最大化时只留活动那一扇（它不在场就当
+    /// 没最大化）。画布照它画，终端的可见性（[`Self::sync_terminal_visibility`]）也照它算
+    pub fn shown_canvas(&self) -> (Vec<layout::CanvasGroup>, usize, Vec<ColumnLayout>) {
+        let groups = layout::canvas_groups(&self.visible_columns());
+        let active = self.active_key();
+        let current = layout::canvas_index(&groups, active.as_deref(), self.state.canvas_id.as_deref());
+        let shown = groups.get(current).map(|g| g.columns.clone()).unwrap_or_default();
+        let columns = match active.as_deref().filter(|_| self.state.term_zoomed).and_then(|k| layout::find_pane(&shown, k)) {
+            Some(at) => {
+                let col = &shown[at.col];
+                vec![ColumnLayout { basis: None, panes: vec![col.panes[at.index].clone()], ..col.clone() }]
+            }
+            None => shown,
+        };
+        (groups, current, columns)
+    }
+
+    /// 告诉每扇终端它此刻在不在屏幕上：正在显示的画布上（最大化时只算那一扇）、没被总览盖住、
+    /// 窗口本身看得见（没最小化 / 整个被盖住 / 在后台标签页）。看不见的不参与定 PTY 的尺寸
+    /// （ADR 0022）。挂在工作区的每次通知上：切画布、开合总览、窗口可见性变化都会经过这里
+    pub(crate) fn sync_terminal_visibility(&mut self, cx: &mut Context<Self>) {
+        let shown: HashSet<String> = if self.window_visible && self.state.active != ActiveView::Overview {
+            let (_, _, columns) = self.shown_canvas();
+            columns
+                .iter()
+                .flat_map(|c| c.panes.iter())
+                .filter_map(|p| match parse_pane_key(&p.key) {
+                    Some(PaneItem::Terminal { id, .. }) => Some(id),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        for (id, view) in &self.terminals {
+            let visible = shown.contains(id);
+            view.update(cx, |v, _| v.set_visible(visible));
+        }
+        if let Some(panel) = self.assistant.clone() {
+            let window_visible = self.window_visible;
+            panel.update(cx, |p, cx| p.sync_visibility(window_visible, cx));
+        }
+    }
+
     /// 某个终端窗口属于哪个项目
     pub fn tab_project_id(&self, id: &str) -> Option<String> {
         falcon_core::workspace::tab_project_id(id, &self.sessions, &self.state.pending).map(str::to_string)
@@ -826,6 +879,8 @@ impl Workspace {
             .detach();
             self.terminals.insert(id, view);
         }
+        // 新建的视图在 socket 上默认看得见；建在后台画布上的要在它报格子之前说清楚
+        self.sync_terminal_visibility(cx);
     }
 
     pub fn persist(&self) {

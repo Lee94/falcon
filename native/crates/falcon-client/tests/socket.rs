@@ -77,6 +77,35 @@ fn every_new_socket_sends_appearance_then_forced_resize() {
 }
 
 #[test]
+fn a_hidden_window_says_so_before_its_size_and_hears_the_session_size() {
+    let mock = plain_server();
+    let (sink, events) = Events::new();
+    let sock = SessionSocket::open_with(&mock.client(), "s-1", sink, fast());
+    // 连上之前就到了后台：开场排在 resize 之前补发，免得服务端先拿它的格子定一次尺寸
+    sock.set_visible(false);
+    sock.resize(120, 40);
+    let conn = mock.next_ws();
+    assert_eq!(conn.recv_json(), json!({ "type": "visibility", "visible": false }));
+    assert_eq!(conn.recv_json(), json!({ "type": "resize", "cols": 120, "rows": 40 }));
+    accept(&conn, &events);
+
+    // 同一条 socket 上去重；看得见了才发
+    sock.set_visible(false);
+    sock.set_visible(true);
+    assert_eq!(conn.recv_json(), json!({ "type": "visibility", "visible": true }));
+    conn.assert_silent(Duration::from_millis(100));
+
+    conn.send_text(r#"{"type":"size","cols":200,"rows":50,"owner":false}"#);
+    assert_eq!(events.next(), SessionEvent::Size { cols: 200, rows: 50, owner: false });
+
+    // 看得见是服务端的缺省：新 socket 上不必说
+    conn.kill();
+    events.until(|e| matches!(e, SessionEvent::Disconnected { .. }));
+    let conn2 = mock.next_ws();
+    assert_eq!(conn2.recv_json(), json!({ "type": "resize", "cols": 120, "rows": 40 }));
+}
+
+#[test]
 fn no_size_no_resize() {
     // 格子没量好之前不发 resize
     let mock = plain_server();

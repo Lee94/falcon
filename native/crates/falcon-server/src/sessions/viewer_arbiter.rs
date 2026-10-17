@@ -2,20 +2,25 @@
 //! 纯状态，零 I/O。
 //!
 //! 一个会话在服务端只有一个 PTY / 一条守护进程连接，宿主机那一侧的多客户端协调用不上
-//! （守护进程只按"最近操作的那条连接"取尺寸，falcon-server 的所有 Viewer 合起来算一条）。以前尺寸与深浅都是谁最后报谁说了算：窄屏一连上，宽屏收到的就是按窄屏排的
-//! 整屏重画（光标定位、折行全错，而宽屏自己格子没变不会再报，一直错下去，窄屏走了也不还）；
-//! 一端浅色一端深色，OSC 10/11 答复和 997 通知跟着最后连上的那端翻，Claude Code 来回换色。
+//! （守护进程只按"最近操作的那条连接"取尺寸，falcon-server 的所有 Viewer 合起来算一条）。
 //!
-//! - 尺寸取所有报过格子的 Viewer 的最小 cols × 最小 rows（tmux / Zellij 多客户端同一口径），
-//!   谁都不会收到比自己大的画面。大屏那端只用左上一块：多半的全屏程序缩小时整屏重画
-//!   （Zellij 0.45.1 实测是先 `2J` 再画），剩下的是空白而不是残字。有人走了就重算，尺寸还给留下的人；最后一个人
-//!   走了维持原样——没人看着的会话没必要为此重画一次。
+//! - 尺寸跟「最近真操作过的、看得见的那扇窗口」（ADR 0022，tmux 的 `window-size latest`、zmx 的
+//!   leader 同一口径）：谁真的敲键 / 粘贴 / 点击 / 滚轮（[`is_user_input`]）PTY 就换成谁的格子；
+//!   客户端报了看不见的（切走的画布、最小化的窗口、后台标签页）不参与，都看不见时才退回到全部
+//!   ——不然没人看着时新开的会话一直等不到尺寸。没操作过的人之间按连上来的先后：后连上来的人
+//!   只是看，不抢。持有者走了或看不见了，交给剩下的人里最近操作过的那个；所有报过格子的人都
+//!   走了维持原样（没人看着的会话没必要为此重画一次）。
+//!   以前取的是所有人的最小 cols × 最小 rows：后台挂着的窄窗口把所有人压小，cols 与 rows 分开
+//!   取还能拼出谁都不是的尺寸。取最小当初是因为客户端不知道 PTY 的尺寸、只能按自己的窗口排，
+//!   PTY 比它大就折乱（宽屏收到按窄屏排的整屏重画，自己格子没变不会再报，一直错下去）——现在
+//!   生效尺寸经 WS 的 `size` 推给每扇窗口，不是它定的按这个尺寸建网格、在本地缩放 / 裁剪着画。
 //! - 深浅跟「最近操作的那端」：后来连上的人只是看，不该把正在干活那端的配色翻掉。第一个报
 //!   深浅的人先持有；之后谁真的敲键 / 粘贴 / 点击 / 滚轮谁接手；持有者走了交给剩下的人里
-//!   最近操作过的那个。见 [`is_user_input`]——终端自动发的答复不算操作。
+//!   最近操作过的那个。见 [`is_user_input`]——终端自动发的答复不算操作。深浅不看可见性：
+//!   后台窗口没人操作，本来就接不了手。
 //!
 //! Viewer 的座位按**连上来的先后**排（TS 的 `Map` 保插入顺序）：持有者走了、剩下的人都没
-//! 操作过时，交给最早连上来的那个报过深浅的人。所以这里用 `Vec` 而不是 `HashMap`。
+//! 操作过时，交给最早连上来的那个。所以这里用 `Vec` 而不是 `HashMap`。
 
 use std::sync::LazyLock;
 
@@ -24,19 +29,25 @@ use regex::{Captures, Regex};
 
 use super::term_size::TermSize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Seat {
     size: Option<TermSize>,
     hint: Option<OscColorHint>,
     /// 最近一次真操作的序号；0 = 连上来之后还没操作过
     active_at: u64,
+    /// 客户端报的这扇窗口在不在屏幕上；没报过（老客户端）当看得见
+    visible: bool,
+}
+
+impl Default for Seat {
+    fn default() -> Self {
+        Self { size: None, hint: None, active_at: 0, visible: true }
+    }
 }
 
 /// [`ViewerArbiter::leave`] 的结果
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LeaveOutcome {
-    /// 剩下的人的尺寸（没人报过为 None）
-    pub size: Option<TermSize>,
     /// 换上来的持有者的深浅（没换人为 None）
     pub hint: Option<OscColorHint>,
 }
@@ -61,19 +72,34 @@ impl<V: PartialEq + Clone> ViewerArbiter<V> {
         Self::default()
     }
 
-    /// 记下这个 Viewer 量到的格子，返回该给 PTY 的尺寸
-    pub fn resize(&mut self, viewer: &V, size: TermSize) -> TermSize {
+    /// 记下这个 Viewer 的窗口放得下的格子。生效尺寸看 [`Self::size_owner`]
+    pub fn resize(&mut self, viewer: &V, size: TermSize) {
         self.seat(viewer).size = Some(size);
-        // 刚记下了一个，最小值一定存在
-        self.size().unwrap_or(size)
     }
 
-    /// 所有报过格子的 Viewer 的最小格子；没人报过时 None（调用方保留原尺寸）
+    /// 记下这扇窗口看不看得见。生效尺寸看 [`Self::size_owner`]
+    pub fn set_visible(&mut self, viewer: &V, visible: bool) {
+        self.seat(viewer).visible = visible;
+    }
+
+    /// 尺寸跟谁、是多少：报过格子的人里，看得见的优先（都看不见才看全部），取最近真操作过的
+    /// 那个，同分（都没操作过）取先连上来的。没人报过格子时 None（调用方保留原尺寸）
+    pub fn size_owner(&self) -> Option<(&V, TermSize)> {
+        let sized = || self.seats.iter().filter_map(|(v, s)| s.size.map(|size| (v, s, size)));
+        let any_visible = sized().any(|(_, s, _)| s.visible);
+        let mut best: Option<(&V, u64, TermSize)> = None;
+        for (v, seat, size) in sized().filter(|(_, s, _)| s.visible || !any_visible) {
+            // 严格大于：同分时留住先连上来的
+            if best.is_none_or(|(_, at, _)| seat.active_at > at) {
+                best = Some((v, seat.active_at, size));
+            }
+        }
+        best.map(|(v, _, size)| (v, size))
+    }
+
+    /// 生效尺寸（[`Self::size_owner`] 的尺寸）
     pub fn size(&self) -> Option<TermSize> {
-        self.seats
-            .iter()
-            .filter_map(|(_, s)| s.size)
-            .reduce(|a, b| TermSize { cols: a.cols.min(b.cols), rows: a.rows.min(b.rows) })
+        self.size_owner().map(|(_, size)| size)
     }
 
     /// Viewer 报来深浅。它是（或成为）持有者时返回要生效的那份，否则 None——先存着，等它操作时再用
@@ -85,7 +111,8 @@ impl<V: PartialEq + Clone> ViewerArbiter<V> {
         if self.owner.as_ref() == Some(viewer) { Some(hint) } else { None }
     }
 
-    /// Viewer 的输入。真操作、报过深浅、又不是现任持有者时换人，返回它的深浅
+    /// Viewer 的输入。真操作就记一次（尺寸据此换人，见 [`Self::size_owner`]）；报过深浅、又不是
+    /// 现任深浅持有者时换人，返回它的深浅
     pub fn input(&mut self, viewer: &V, data: &str) -> Option<OscColorHint> {
         if !is_user_input(data) {
             return None;
@@ -103,7 +130,7 @@ impl<V: PartialEq + Clone> ViewerArbiter<V> {
         Some(hint)
     }
 
-    /// Viewer 离开。size：剩下的人的尺寸（没人报过为 None）；hint：换上来的持有者的深浅（没换人为 None）
+    /// Viewer 离开。hint：换上来的深浅持有者的深浅（没换人为 None）。尺寸照常看 [`Self::size_owner`]
     pub fn leave(&mut self, viewer: &V) -> LeaveOutcome {
         self.seats.retain(|(v, _)| v != viewer);
         let mut hint = None;
@@ -122,7 +149,7 @@ impl<V: PartialEq + Clone> ViewerArbiter<V> {
                 }
             }
         }
-        LeaveOutcome { size: self.size(), hint }
+        LeaveOutcome { hint }
     }
 
     fn seat(&mut self, viewer: &V) -> &mut Seat {
@@ -211,7 +238,7 @@ mod tests {
         ViewerArbiter::new()
     }
 
-    // describe("ViewerArbiter size")
+    // 尺寸：最近真操作过的、看得见的那扇窗口（ADR 0022）
 
     #[test]
     fn size_has_no_size_until_someone_measured() {
@@ -220,35 +247,109 @@ mod tests {
     }
 
     #[test]
-    fn size_takes_min_cols_and_min_rows_independently_across_viewers() {
-        let mut a = arbiter();
-        assert_eq!(a.resize(&"wide", size(200, 30)), size(200, 30));
-        assert_eq!(a.resize(&"tall", size(80, 50)), size(80, 30));
-        // 大屏那端再怎么拖也越不过小屏
-        assert_eq!(a.resize(&"wide", size(220, 60)), size(80, 50));
-    }
-
-    #[test]
-    fn size_gives_the_size_back_when_the_small_viewer_leaves() {
+    fn size_a_newcomer_only_watching_does_not_take_the_size() {
         let mut a = arbiter();
         a.resize(&"desk", size(200, 50));
         a.resize(&"phone", size(60, 30));
-        assert_eq!(a.leave(&"phone").size, Some(size(200, 50)));
+        // 没人操作过：先连上来的说了算，后来的手机只是看
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
+        // 先到的那扇拖窗照样生效
+        a.resize(&"desk", size(220, 60));
+        assert_eq!(a.size(), Some(size(220, 60)));
     }
 
     #[test]
-    fn size_ignores_viewers_that_have_not_measured_yet() {
+    fn size_follows_whoever_really_types() {
         let mut a = arbiter();
         a.resize(&"desk", size(200, 50));
-        a.hint(&"fresh", dark());
-        assert_eq!(a.size(), Some(size(200, 50)));
+        a.resize(&"phone", size(60, 30));
+        a.input(&"phone", "l");
+        assert_eq!(a.size_owner(), Some((&"phone", size(60, 30))));
+        a.input(&"desk", "\r");
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
     }
 
     #[test]
-    fn size_reports_null_once_the_last_measured_viewer_is_gone() {
+    fn size_automatic_terminal_replies_do_not_take_the_size() {
         let mut a = arbiter();
         a.resize(&"desk", size(200, 50));
-        assert_eq!(a.leave(&"desk").size, None);
+        a.resize(&"phone", size(60, 30));
+        a.input(&"phone", "\x1b[?62;22c\x1b[I\x1b[<35;10;5M");
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
+    }
+
+    #[test]
+    fn size_is_never_a_mix_of_two_viewers() {
+        let mut a = arbiter();
+        a.resize(&"wide", size(200, 20));
+        a.resize(&"tall", size(80, 60));
+        a.input(&"tall", "x");
+        // 以前分别取最小会拼出 80×20，谁都不是这个尺寸
+        assert_eq!(a.size(), Some(size(80, 60)));
+    }
+
+    #[test]
+    fn size_a_hidden_window_does_not_count_even_if_it_typed_last() {
+        let mut a = arbiter();
+        a.resize(&"desk", size(200, 50));
+        a.resize(&"phone", size(60, 30));
+        a.input(&"desk", "x");
+        a.set_visible(&"desk", false);
+        assert_eq!(a.size_owner(), Some((&"phone", size(60, 30))));
+        // 切回来：它最近操作过，尺寸还给它
+        a.set_visible(&"desk", true);
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
+    }
+
+    #[test]
+    fn size_a_hidden_newcomer_does_not_take_the_size_on_connect() {
+        let mut a = arbiter();
+        a.resize(&"desk", size(200, 50));
+        a.input(&"desk", "x");
+        a.set_visible(&"bg", false);
+        a.resize(&"bg", size(60, 30));
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
+    }
+
+    #[test]
+    fn size_falls_back_to_everyone_when_nobody_is_visible() {
+        let mut a = arbiter();
+        a.resize(&"desk", size(200, 50));
+        a.resize(&"phone", size(60, 30));
+        a.input(&"phone", "x");
+        a.set_visible(&"desk", false);
+        a.set_visible(&"phone", false);
+        // 没人看着时照样有尺寸（新开的会话要靠它接回），跟最近操作过的那个
+        assert_eq!(a.size_owner(), Some((&"phone", size(60, 30))));
+    }
+
+    #[test]
+    fn size_viewers_that_never_measured_do_not_count() {
+        let mut a = arbiter();
+        a.resize(&"desk", size(200, 50));
+        a.input(&"fresh", "x");
+        assert_eq!(a.size_owner(), Some((&"desk", size(200, 50))));
+    }
+
+    #[test]
+    fn size_goes_to_the_most_recently_active_when_the_owner_leaves() {
+        let mut a = arbiter();
+        a.resize(&"A", size(200, 50));
+        a.resize(&"B", size(120, 40));
+        a.resize(&"C", size(60, 30));
+        a.input(&"C", "x");
+        a.input(&"B", "x");
+        a.input(&"A", "x");
+        a.leave(&"A");
+        assert_eq!(a.size_owner(), Some((&"B", size(120, 40))));
+    }
+
+    #[test]
+    fn size_reports_none_once_the_last_measured_viewer_is_gone() {
+        let mut a = arbiter();
+        a.resize(&"desk", size(200, 50));
+        a.leave(&"desk");
+        assert_eq!(a.size(), None);
     }
 
     // describe("ViewerArbiter colors")

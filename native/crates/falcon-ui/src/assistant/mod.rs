@@ -139,6 +139,17 @@ impl AssistantPanel {
         cx.notify();
     }
 
+    /// 各段对话的终端看不看得见：面板开着、是当前那段、窗口本身看得见。收起的面板、切走的对话
+    /// 里的终端不参与定 PTY 的尺寸（ADR 0022）。工作区每次通知时调（面板开合、切对话都会通知它）
+    pub fn sync_visibility(&mut self, window_visible: bool, cx: &mut Context<Self>) {
+        for (id, pane) in &self.panes {
+            let visible = window_visible && self.open && self.current.as_deref() == Some(id.as_str());
+            if let Some(view) = pane.read(cx).terminal() {
+                view.update(cx, |v, _| v.set_visible(visible));
+            }
+        }
+    }
+
     /// 设置页存了新的设置（填了 API key、加了 ACP agent）：各段对话的底栏跟着变
     pub fn set_settings(&mut self, settings: AssistantSettings, cx: &mut Context<Self>) {
         self.settings = Some(settings);
@@ -220,6 +231,8 @@ impl AssistantPanel {
         if self.open {
             self.focus_current(window, cx);
         }
+        // 切了对话：工作区据此重算各段对话终端的可见性
+        self.ws.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
 

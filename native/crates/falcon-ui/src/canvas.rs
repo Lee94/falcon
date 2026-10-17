@@ -173,23 +173,9 @@ impl Canvas {
         }
     }
 
-    /// 当前视图的画布、正在显示哪块、这块上画哪些列。最大化时只留活动那一扇（它不在场就当
-    /// 没最大化）
+    /// 当前视图的画布、正在显示哪块、这块上画哪些列（[`Workspace::shown_canvas`]）
     fn shown(&self, cx: &App) -> Shown {
-        let ws = self.ws.read(cx);
-        let groups = layout::canvas_groups(&ws.visible_columns());
-        let active = ws.active_key();
-        let current = layout::canvas_index(&groups, active.as_deref(), ws.state.canvas_id.as_deref());
-        let shown = groups.get(current).map(|g| g.columns.clone()).unwrap_or_default();
-        let columns = match active.as_deref().filter(|_| ws.state.term_zoomed).and_then(|k| {
-            layout::find_pane(&shown, k).map(|at| (at, k))
-        }) {
-            Some((at, _)) => {
-                let col = &shown[at.col];
-                vec![ColumnLayout { basis: None, panes: vec![col.panes[at.index].clone()], ..col.clone() }]
-            }
-            None => shown,
-        };
+        let (groups, current, columns) = self.ws.read(cx).shown_canvas();
         Shown { groups, current, columns }
     }
 
@@ -1087,6 +1073,19 @@ impl Canvas {
             }))
             .child(info)
             .children(edge);
+        // PTY 的尺寸跟着别的窗口（ADR 0022）：字缩小了、四周有空白，标出来免得当成显示出错
+        if let PaneItem::Terminal { id, .. } = &item
+            && let Some((cols, rows)) = ws.terminals.get(id).and_then(|v| v.read(cx).following_size())
+        {
+            let tip: SharedString = t!("pane.followingSize", cols = cols, rows = rows).to_string().into();
+            header = header.child(
+                div()
+                    .id(SharedString::from(format!("pane-follow-{key}")))
+                    .flex_none()
+                    .child(icon(IconName::Monitor).size(zpx(12.)).text_color(ui.muted_foreground))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
+            );
+        }
         if pinned {
             header = header.child(icon(IconName::Pin).size(zpx(12.)).text_color(ui.muted_foreground));
         }

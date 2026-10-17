@@ -183,12 +183,15 @@ struct EntryState {
     /// 非持久会话的回放来源；持久会话的回放是守护进程给的快照，不用它
     buffer: RingBuffer,
     viewers: Vec<Rc<Viewer>>,
-    /// 多个 Viewer 共用这一个 PTY：尺寸取最小、深浅跟最近操作的那端，见 viewer_arbiter.rs
+    /// 多个 Viewer 共用这一个 PTY：尺寸跟最近真操作过的、看得见的那扇窗口，深浅跟最近操作的
+    /// 那端，见 viewer_arbiter.rs
     arbiter: ViewerArbiter<u64>,
     /// 合并窗口内攒下的输出（已过 OSC 网关、已进 RingBuffer），flush 时一次广播
     pending_out: String,
-    /// 给 PTY 的尺寸（各 Viewer 的最小格子）。None = 从未被 Viewer 量过；接回时不能用 80×24 顶替
+    /// 给 PTY 的尺寸（仲裁出的那扇窗口的格子）。None = 从未被 Viewer 量过；接回时不能用 80×24 顶替
     size: Option<TermSize>,
+    /// 最近一次推给各 Viewer 的 (尺寸, 定它的 Viewer)：两样都没变就不再推（输入每一键都会来问）
+    published_size: Option<(TermSize, Option<u64>)>,
     attaching: Option<Shared<LocalBoxFuture<'static, Result<(), SessionError>>>>,
     terminating: bool,
     /// 持有深浅的那个 Viewer 报的终端深浅；会话的 env 在创建时冻住了，只影响 OSC 答复和新会话
@@ -253,6 +256,7 @@ impl LiveEntry {
                 arbiter: ViewerArbiter::new(),
                 pending_out: String::new(),
                 size: init.size,
+                published_size: None,
                 attaching: None,
                 terminating: false,
                 appearance: init.hint.appearance,
@@ -1659,6 +1663,11 @@ impl SessionManager {
         // RingBuffer，不冲的话新 Viewer 会在 replay 之后再收到重复段
         self.flush_output(&entry);
         entry.s.borrow_mut().viewers.push(viewer.clone());
+        // 生效尺寸先于回放：不定尺寸的窗口按它建网格再解析回放，不然按自己的窗口排就折乱。
+        // 刚连上的人还没报格子，定尺寸的不会是它
+        if let Some(size) = entry.size() {
+            viewer.send(&ServerMessage::Size { cols: size.cols, rows: size.rows, owner: false });
+        }
 
         let gate = decide_viewer_attach(ViewerAttachInput { durable: entry.durable, has_backend: already_live });
 
@@ -1696,13 +1705,11 @@ impl SessionManager {
         let outcome = {
             let mut s = entry.s.borrow_mut();
             s.viewers.retain(|v| v.id != viewer_id);
-            // 走的若是格子最小的那个，尺寸还给留下的人（只剩没量过的人或没人了就维持原样）；
-            // 深浅的持有者走了，交给剩下的人里最近操作过的那个
+            // 定尺寸的人走了，尺寸交给剩下的人里最近操作过的那个（只剩没量过的人或没人了就维持
+            // 原样）；深浅的持有者走了同理
             s.arbiter.leave(&viewer_id)
         };
-        if let Some(size) = outcome.size {
-            self.apply_size(&entry, size);
-        }
+        self.settle_size(&entry);
         if let Some(hint) = outcome.hint {
             self.apply_colors(&entry, &hint);
         }
@@ -1710,9 +1717,10 @@ impl SessionManager {
 
     pub fn input(&self, session_id: &str, viewer_id: u64, data: &str) {
         if let Some(entry) = self.entry(session_id) {
-            // 谁在操作深浅就跟谁（见 viewer_arbiter.rs）。先翻色再送这次按键：
-            // 997 通知排在前面，前台程序对这一键的响应已经按新配色画
+            // 谁在操作尺寸与深浅就跟谁（见 viewer_arbiter.rs）。先改尺寸、翻色再送这次按键：
+            // SIGWINCH 与 997 通知排在前面，前台程序对这一键的响应已经按新尺寸、新配色画
             let hint = entry.s.borrow_mut().arbiter.input(&viewer_id, data);
+            self.settle_size(&entry);
             if let Some(hint) = hint {
                 self.apply_colors(&entry, &hint);
             }
@@ -1725,12 +1733,12 @@ impl SessionManager {
 
     pub fn resize(&self, session_id: &str, viewer_id: u64, cols: u16, rows: u16) {
         let Some(entry) = self.entry(session_id) else { return };
-        // 给 PTY 的是各 Viewer 的最小格子：大屏那端拖窗不一定改得动它。
+        // 给 PTY 的是定尺寸那扇窗口的格子：别的窗口拖窗只是记下，等它操作时才换过去。
         // 尺寸没变时只跳过落库与 backend.resize，attach 分支必须照走：
         // decide_viewer_attach 的 wait-size 门控靠这条 resize 触发接回，
         // 而重连的 Viewer 报上来的尺寸很可能与存量一致。
-        let size = entry.s.borrow_mut().arbiter.resize(&viewer_id, TermSize { cols, rows });
-        self.apply_size(&entry, size);
+        entry.s.borrow_mut().arbiter.resize(&viewer_id, TermSize { cols, rows });
+        self.settle_size(&entry);
         if entry.backend().is_some() {
             return;
         }
@@ -1749,6 +1757,13 @@ impl SessionManager {
         }
     }
 
+    /// Viewer 报上来的窗口看不看得见：看不见的不参与定尺寸（见 viewer_arbiter.rs）
+    pub fn set_visibility(&self, session_id: &str, viewer_id: u64, visible: bool) {
+        let Some(entry) = self.entry(session_id) else { return };
+        entry.s.borrow_mut().arbiter.set_visible(&viewer_id, visible);
+        self.settle_size(&entry);
+    }
+
     /// Viewer 报上来的终端深浅。多个 Viewer 时只有持有者（最近操作的那端）的这份生效，
     /// 其余的先存着，等它操作时再换上（见 viewer_arbiter.rs）。
     pub fn set_appearance(&self, session_id: &str, viewer_id: u64, hint: OscColorHint) {
@@ -1763,6 +1778,29 @@ impl SessionManager {
     }
 
     // ---------- 内部 ----------
+
+    /// 仲裁有了变化（格子、可见性、输入、有人走了）：生效尺寸落到 PTY 上，尺寸或定它的人变了
+    /// 就告诉每扇窗口（[`ServerMessage::Size`]）
+    fn settle_size(&self, entry: &Rc<LiveEntry>) {
+        let owner = entry.s.borrow().arbiter.size_owner().map(|(v, size)| (*v, size));
+        if let Some((_, size)) = owner {
+            self.apply_size(entry, size);
+        }
+        let Some(size) = entry.size() else { return };
+        let owner = owner.map(|(v, _)| v);
+        {
+            let mut s = entry.s.borrow_mut();
+            if s.published_size == Some((size, owner)) {
+                return;
+            }
+            s.published_size = Some((size, owner));
+        }
+        // 与输出保持时序：按旧尺寸排的输出先出去，新尺寸之后的输出排在这条之后
+        self.flush_output(entry);
+        for v in entry.viewers() {
+            v.send(&ServerMessage::Size { cols: size.cols, rows: size.rows, owner: owner == Some(v.id) });
+        }
+    }
 
     /// 仲裁出的尺寸落到 entry 上；变了才落库、才 resize（每次 resize 前台程序都要整屏重画）
     fn apply_size(&self, entry: &Rc<LiveEntry>, size: TermSize) {

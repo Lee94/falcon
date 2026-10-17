@@ -248,6 +248,11 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
                     state.engine.send(move |engine| engine.sessions.resize(&id, viewer_id, cols, rows));
                 }
             }
+            Some("visibility") => {
+                if let Some(visible) = msg["visible"].as_bool() {
+                    state.engine.send(move |engine| engine.sessions.set_visibility(&id, viewer_id, visible));
+                }
+            }
             Some("appearance") => {
                 let hint = sanitize_color_hint(&msg);
                 if hint.appearance.is_some() {
