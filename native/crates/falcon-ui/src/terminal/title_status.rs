@@ -2,7 +2,8 @@
 //!
 //! 原先窗口底部有一条常驻状态栏：为了不让终端行数跟着状态一出一没（PTY 一 resize，正在干活的
 //! TUI 就整屏重画），没状态时也白占一行。现在状态并进标题栏——标题栏本来就在，挂什么终端都不多
-//! 不少，resize 的顾虑跟着没了。标题栏里依次是：名字 → 状态胶囊 → 子任务 → 程序那半句 → 工作目录，
+//! 不少，resize 的顾虑跟着没了。标题栏里依次是：名字 → 状态胶囊 → 子任务 → 工作目录（程序那半句
+//! 只在胶囊的悬停提示里：它跑一轮时一直在换，挂在标题栏上一跳一跳，还跟路径抢宽度），
 //! 标题栏底边还有一条细线随状态变：
 //!
 //! - working：胶囊里图标转圈；报了进度时底边是进度线（宽度用弹簧追过去，不跳），没报时一段光
@@ -44,7 +45,7 @@ use crate::workspace::Workspace;
 use crate::zoom::zpx;
 
 /// 这扇终端的标题栏上要显示的程序状态。会话不在、不是 active（标题栏的记号已经说了会话的情况）
-/// 或程序没报状态时没有。画布据此决定挂不挂 [`StatusSlot`]、程序那半句（`detail`）写不写
+/// 或程序没报状态时没有。画布据此决定挂不挂 [`StatusSlot`]
 pub fn badge(session_id: &str, ws: &Workspace) -> Option<ProgramBadge> {
     let session = ws.session(session_id)?;
     if session.state != falcon_proto::SessionState::Active {

@@ -19,6 +19,13 @@
     "projectContext": "右键打开菜单",
     "empty": "还没有项目。新建一个本地文件夹或远程 SSH 项目开始。",
     "emptyServer": "这台服务器上还没有项目",
+    "ageNow": "刚刚",
+    "ageMin": "%{n}分钟",
+    "ageHour": "%{n}小时",
+    "ageDay": "%{n}天",
+    "statusSeen": "已看过",
+    "statusIdle": "上次操作 · %{t}",
+    "statusInactive": "已闲置 · %{t}",
     "assistant": "助手"
   },
   "assistant": {

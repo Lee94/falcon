@@ -210,7 +210,50 @@ struct ClockEntry {
     run_start: Option<u64>,
     /// 上一轮跑完用了多久
     last_run: Option<u64>,
+    /// 第一次见它时摘要的 `updated_at`（宿主机墙钟）：`since` 不知道时，侧栏拿它估 blocked / done /
+    /// error 进这个状态多久了。程序重报同一状态会刷新它，所以只会估短、不会估长；working 不用它——
+    /// Claude Code 跑一轮时一直在重报，它永远是几秒前
+    first_reported: Option<i64>,
+    /// 本客户端看着它从 done / error 被清掉（用户看过了，或程序自己收了状态）：侧栏那一行还挂一个
+    /// 淡的勾，到下一轮开始为止
+    cleared_finish: Option<ClearedFinish>,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct ClearedFinish {
+    error: bool,
+    /// 被清掉之前那个 done / error 的 `since` / `first_reported`：「看过了」的时长照旧从跑完算
+    since: Option<u64>,
+    first_reported: Option<i64>,
+}
+
+/// 侧栏会话行尾巴上的那一格是哪一档
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowStatus {
+    Working,
+    /// blocked：在等你
+    NeedsYou,
+    /// 跑完了、还没看（done / error 还挂着，等 `status_seen` 清）
+    Unread { error: bool },
+    /// 跑完了、看过了（本客户端看着它被清掉的；启动前就清掉了的认不出，算 Idle）
+    Read { error: bool },
+    /// 没报状态、最近操作过
+    Idle,
+    /// 很久没人操作（[`INACTIVE_AFTER_MS`]）。只盖过 Idle / Read：在跑、在等你、跑完没看的再久也照实说
+    Inactive,
+}
+
+/// 侧栏会话行尾巴上的读数
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowReading {
+    pub status: RowStatus,
+    /// 进这一档多久了（毫秒）：working 从这一轮开始、在等你从卡住、跑完的从跑完、Idle / Inactive
+    /// 从最后一次操作算。不知道时为 None，界面就不写
+    pub age: Option<u64>,
+}
+
+/// 多久没操作算「很久没碰」（会话的 `last_active_at`：服务端在接上窗口、敲键时记）
+pub const INACTIVE_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// 终端标题栏上的计时：各会话的程序状态是**本客户端亲眼看到**从什么时候变的。
 ///
@@ -237,13 +280,24 @@ impl StateClock {
         let state = summary.map(|s| s.state).filter(|s| !matches!(s, ProgramState::Idle | ProgramState::Unknown));
         let kind = summary.and_then(|s| s.kind).filter(|_| state == Some(ProgramState::Blocked));
         let Some(e) = self.entries.get_mut(id) else {
-            self.entries.insert(id.to_string(), ClockEntry { state, kind, ..Default::default() });
+            let first_reported = summary.map(|s| s.updated_at);
+            self.entries.insert(id.to_string(), ClockEntry { state, kind, first_reported, ..Default::default() });
             return;
         };
         if e.state == state && e.kind == kind {
             return;
         }
         let prev = e.state;
+        // 跑完的那一条被清掉：记下来给侧栏画「看过了」。别的变化（下一轮开始、跑到一半被打断后
+        // 收了状态）都把它作废——一个早先的勾挂在被打断的那一轮后面是在撒谎
+        e.cleared_finish = match prev {
+            Some(p @ (ProgramState::Done | ProgramState::Error)) if state.is_none() => Some(ClearedFinish {
+                error: p == ProgramState::Error,
+                since: e.since,
+                first_reported: e.first_reported,
+            }),
+            _ => None,
+        };
         e.state = state;
         e.kind = kind;
         e.since = Some(now);
@@ -290,6 +344,45 @@ impl StateClock {
             ProgramState::Done | ProgramState::Error => e.last_run.map(ClockReading::Took),
             ProgramState::Idle | ProgramState::Unknown => None,
         }
+    }
+
+    /// 侧栏会话行的读数。`summary` 是会话眼下的摘要（与喂给 [`Self::observe`] 的同一份），
+    /// `last_active_at` / `wall_now` 是墙钟毫秒，`now` 是与 observe 同一套的单调毫秒
+    pub fn row(
+        &self,
+        id: &str,
+        summary: Option<&ProgramStatusSummary>,
+        last_active_at: i64,
+        now: u64,
+        wall_now: i64,
+    ) -> RowReading {
+        // 墙钟差：宿主机 / 服务端与本机的钟可能差一点，倒着走的按「刚刚」算
+        let wall_age = |t: i64| (wall_now - t).max(0) as u64;
+        let held = |since: Option<u64>, first: Option<i64>| since.map(|s| now.saturating_sub(s)).or(first.map(wall_age));
+        let e = self.entries.get(id);
+        // 还没 observe 过（不该发生，防一手）：当第一次见
+        let (since, first) = match e {
+            Some(e) => (e.since, e.first_reported),
+            None => (None, summary.map(|s| s.updated_at)),
+        };
+        let (status, age) = match summary.map(|s| s.state) {
+            Some(ProgramState::Working) => {
+                (RowStatus::Working, e.and_then(|e| e.run_start).map(|r| now.saturating_sub(r)))
+            }
+            Some(ProgramState::Blocked) => (RowStatus::NeedsYou, held(since, first)),
+            Some(s @ (ProgramState::Done | ProgramState::Error)) => {
+                (RowStatus::Unread { error: s == ProgramState::Error }, held(since, first))
+            }
+            Some(ProgramState::Idle | ProgramState::Unknown) | None => {
+                let idle = wall_age(last_active_at);
+                match e.and_then(|e| e.cleared_finish) {
+                    _ if idle >= INACTIVE_AFTER_MS as u64 => (RowStatus::Inactive, Some(idle)),
+                    Some(f) => (RowStatus::Read { error: f.error }, held(f.since, f.first_reported)),
+                    None => (RowStatus::Idle, Some(idle)),
+                }
+            }
+        };
+        RowReading { status, age }
     }
 }
 
@@ -733,6 +826,76 @@ mod tests {
         // 忘了之后再出现：当第一次见
         c.observe_all([("s1", Some(&summary(ProgramState::Working, 1)))], 5_000);
         assert_eq!(c.reading("s1", 6_000), None);
+    }
+
+    /// 墙钟基准：会话在这一刻操作过，测试的墙钟从这里往后数
+    const WALL: i64 = 1_000_000_000_000;
+
+    fn row_of(c: &StateClock, s: Option<&ProgramStatusSummary>, now: u64, wall_now: i64) -> RowReading {
+        c.row("s1", s, WALL, now, wall_now)
+    }
+
+    #[test]
+    fn row_ages_come_from_observed_transitions() {
+        let mut c = StateClock::new();
+        c.observe("s1", None, 0);
+        let w = summary(ProgramState::Working, WALL + 1);
+        c.observe("s1", Some(&w), 1_000);
+        assert_eq!(row_of(&c, Some(&w), 61_000, WALL), RowReading { status: RowStatus::Working, age: Some(60_000) });
+        let b = blocked(ProgramBlockKind::Question, "q", WALL + 2);
+        c.observe("s1", Some(&b), 70_000);
+        assert_eq!(row_of(&c, Some(&b), 75_000, WALL), RowReading { status: RowStatus::NeedsYou, age: Some(5_000) });
+        let d = done(None, WALL + 3);
+        c.observe("s1", Some(&d), 80_000);
+        assert_eq!(row_of(&c, Some(&d), 320_000, WALL), RowReading { status: RowStatus::Unread { error: false }, age: Some(240_000) });
+        // 看过、清掉：勾还在，时长照旧从跑完算
+        c.observe("s1", None, 400_000);
+        assert_eq!(row_of(&c, None, 800_000, WALL), RowReading { status: RowStatus::Read { error: false }, age: Some(720_000) });
+        // 下一轮开始：勾没了
+        c.observe("s1", Some(&w), 900_000);
+        assert_eq!(row_of(&c, Some(&w), 900_000, WALL).status, RowStatus::Working);
+        // 跑到一半收了状态（被打断）：不拿上一轮的勾冒充
+        c.observe("s1", None, 950_000);
+        assert_eq!(row_of(&c, None, 950_000, WALL + 3_000), RowReading { status: RowStatus::Idle, age: Some(3_000) });
+    }
+
+    #[test]
+    fn row_first_seen_falls_back_to_reported_time_except_working() {
+        let mut c = StateClock::new();
+        // 启动时已经在跑：不知道从什么时候开始，不写
+        let w = summary(ProgramState::Working, WALL);
+        c.observe("s1", Some(&w), 5_000);
+        assert_eq!(row_of(&c, Some(&w), 9_000, WALL + 60_000).age, None);
+        // 启动时已经跑完：按宿主机报的时间估
+        let mut c = StateClock::new();
+        let e = summary(ProgramState::Error, WALL - 120_000);
+        c.observe("s1", Some(&e), 5_000);
+        assert_eq!(row_of(&c, Some(&e), 9_000, WALL), RowReading { status: RowStatus::Unread { error: true }, age: Some(120_000) });
+        // 清掉之后同样照它算
+        c.observe("s1", None, 10_000);
+        assert_eq!(row_of(&c, None, 10_000, WALL + 60_000), RowReading { status: RowStatus::Read { error: true }, age: Some(180_000) });
+        // 宿主机的钟比本机快：不出负数
+        let mut c = StateClock::new();
+        let b = blocked(ProgramBlockKind::Auth, "k", WALL + 30_000);
+        c.observe("s1", Some(&b), 0);
+        assert_eq!(row_of(&c, Some(&b), 0, WALL).age, Some(0));
+    }
+
+    #[test]
+    fn row_inactive_only_covers_idle_and_read() {
+        let day = INACTIVE_AFTER_MS;
+        let mut c = StateClock::new();
+        c.observe("s1", None, 0);
+        assert_eq!(row_of(&c, None, 0, WALL + day - 1).status, RowStatus::Idle);
+        assert_eq!(row_of(&c, None, 0, WALL + 2 * day), RowReading { status: RowStatus::Inactive, age: Some(2 * day as u64) });
+        let d = done(None, WALL);
+        c.observe("s1", Some(&d), 1_000);
+        assert_eq!(row_of(&c, Some(&d), 1_000, WALL + 2 * day).status, RowStatus::Unread { error: false }, "没看的再久也照实说");
+        c.observe("s1", None, 2_000);
+        assert_eq!(row_of(&c, None, 2_000, WALL + 2 * day).status, RowStatus::Inactive);
+        let b = blocked(ProgramBlockKind::Permission, "p", WALL);
+        c.observe("s1", Some(&b), 3_000);
+        assert_eq!(row_of(&c, Some(&b), 3_000, WALL + 2 * day).status, RowStatus::NeedsYou);
     }
 
     #[test]

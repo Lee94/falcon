@@ -613,6 +613,15 @@ impl Workspace {
         self.program_clock.reading(id, self.clock_now())
     }
 
+    /// 侧栏会话行尾巴上的那一格：哪一档、进这一档多久了
+    pub fn row_status(&self, s: &falcon_proto::Session) -> falcon_core::program_status::RowReading {
+        let wall_now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.program_clock.row(&s.id, s.program_status.as_ref(), s.last_active_at, self.clock_now(), wall_now)
+    }
+
     fn watching(&self, id: &str, cx: &App) -> bool {
         self.window_active
             && matches!(&self.state.active, ActiveView::Terminal { session_id } if session_id == id)

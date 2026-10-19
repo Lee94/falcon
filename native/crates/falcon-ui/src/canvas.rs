@@ -990,17 +990,11 @@ impl Canvas {
                         div().flex_shrink(1.).min_w(zpx(32.)).max_w(zpx(260.)).truncate().font_weight(FontWeight::MEDIUM).child(name),
                     );
                 }
-                // 程序状态（OSC 7501，ADR 0020）：胶囊跟在名字后面，程序那半句与工作目录分剩下
-                // 的宽度——半句话按内容宽度先拿（封顶），路径只吃剩下的。胶囊与底边线是会动的
-                // 小视图（见 sync_status_slots），这里只管挂
+                // 程序状态（OSC 7501，ADR 0020）：胶囊跟在名字后面。程序那半句（msg）不进标题栏——
+                // Claude Code 跑一轮时它一直在换，标题栏跟着一跳一跳，还跟路径抢宽度；放在胶囊的
+                // 悬停提示里。胶囊与底边线是会动的小视图（见 sync_status_slots），这里只管挂
                 if let Some([chip, line]) = self.status_slots.get(id) {
                     info = info.child(chip.clone());
-                    if let Some(detail) = title_status::badge(id, ws).and_then(|b| b.detail) {
-                        info = info.child(
-                            // 比路径亮一档（跟标题栏的字色走），两段挨着也分得开
-                            div().flex_shrink(1.).min_w_0().max_w(zpx(360.)).truncate().text_size(zpx(11.)).opacity(0.85).child(detail),
-                        );
-                    }
                     edge = Some(line.clone());
                 }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));

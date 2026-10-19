@@ -6,6 +6,7 @@
 //!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）。
 
 use falcon_core::meegle_drag::MeegleWorkItemDragPayload;
+use falcon_core::program_status::{RowReading, RowStatus};
 use falcon_core::project_tree::{FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers};
 use falcon_proto::{Project, SessionState, SessionWithProject};
 use gpui_kit::assets::IconName;
@@ -18,10 +19,10 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
-use crate::labels::{local_word, session_label};
+use crate::labels::{age_text, local_word, session_label};
 use crate::menus::{self, to_popup};
 use crate::theme::{Ui, radius};
-use crate::ui::{Mark, host_bar, icon, program_badge, status_mark};
+use crate::ui::{Mark, host_bar, icon, needs_you_mark, spinner, status_mark};
 use crate::workspace::{ActiveView, PendingSession, ProjectChanges, ToastKind, Workspace};
 use crate::zoom::zpx;
 
@@ -42,6 +43,17 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new(ws: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+        // 会话行尾巴上的时长按分钟走，列表没变时工作区不通知（轮询结果一样就跳过）：自己隔一会儿
+        // 重画一次，不然「刚刚」能一直挂着。侧栏是缓存视图，半分钟一次重画不值一提
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(30)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self { ws }
     }
 }
@@ -346,7 +358,7 @@ impl Sidebar {
         // 存档的检出开不了会话，也就没有会话行可摊
         let expandable = archived_at.is_none() && count > 0;
         let worst = worst_state(&mine, &mine_pending);
-        // 收着的检出里有程序在等人：计数徽标上挂一个警示色的手，不用摊开也看得见
+        // 收着的检出里有程序在等人：计数徽标上挂「在等你」的记号（与会话行同一个），不用摊开也看得见
         let blocked = mine
             .iter()
             .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
@@ -422,15 +434,17 @@ impl Sidebar {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
         let label = session_label(session, &ws.projects);
-        let items = menus::session_menu_items(&self.ws, session, cx);
-        let ctx = items.clone();
+        // 菜单只走右键：行尾那一格留给状态，悬停再冒一个「…」会把时长挤得一跳一跳
+        let ctx = menus::session_menu_items(&self.ws, session, cx);
+        // 会话本身不在（待接回 / 已丢失）时尾巴上摆会话的记号，程序状态那时没意义
+        let reading = (session.state == SessionState::Active).then(|| ws.row_status(session));
+        let status = reading.map(|r| r.status);
         let ws_open = self.ws.clone();
         let sid = session.id.clone();
         let icon_name = if session.agent.is_some() { IconName::Bot } else { IconName::SquareTerminal };
         let tip: SharedString = format!("{label} · {}", t!("sidebar.projectContext")).into();
         let mut row = div()
             .id(SharedString::from(format!("sess-{}", session.id)))
-            .group("sess-row")
             .h(zpx(SESSION_ROW_H))
             .flex()
             .items_center()
@@ -449,28 +463,95 @@ impl Sidebar {
         row = row
             .child(div().flex_none().size(zpx(18.)))
             .child(icon(icon_name).size(zpx(14.)).text_color(ui.muted_foreground))
-            .child(div().flex_1().min_w_0().truncate().pl_1().child(label));
-        // 程序状态（OSC 7501）：blocked 是带字的警示色胶囊，最醒目；摘要由服务端算好随列表来，
-        // 开着窗口的会话由 WS 实时改写
-        if let Some(badge) = session.program_status.as_ref().and_then(falcon_core::program_status::badge) {
-            row = row.child(program_badge(SharedString::from(format!("sess-ps-{}", session.id)), &badge, zpx(12.), cx));
-        }
-        // 运行中不摆状态记号，异常才值得占位置
-        if session.state != SessionState::Active {
-            row = row.child(status_mark(Mark::from(session.state), zpx(12.), cx));
-        }
-        row = row.child(
-            div().opacity(0.).group_hover("sess-row", |s| s.opacity(1.)).child(
-                Button::new(SharedString::from(format!("sess-menu-{}", session.id)))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Ellipsis)
-                    .dropdown_menu(move |menu, _, _| to_popup(menu, items.clone())),
-            ),
-        );
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .pl_1()
+                    // 跑完了还没看的名字加粗（像未读邮件）；很久没碰的名字淡下去
+                    .when(matches!(status, Some(RowStatus::Unread { .. })), |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .when(status == Some(RowStatus::Inactive) && !selected, |d| d.text_color(ui.muted_foreground))
+                    .child(label),
+            );
+        row = row.child(match reading {
+            Some(reading) => status_cell(session, reading, selected, cx),
+            None => status_mark(Mark::from(session.state), zpx(12.), cx),
+        });
         row.context_menu(move |menu, _, _| to_popup(menu, ctx.clone()))
             .into_any_element()
     }
+}
+
+/// 会话行尾巴：时长 + 状态记号，五档——转圈（在跑）/ 琥珀色的圈（在等你）/ 实心勾（跑完了还没看）/
+/// 淡的勾（看过了）/ 月亮（很久没碰）；什么都没报的只写时长。只有「在等你」上色，其余跟着字色走：
+/// 一列灰白里一点琥珀色，扫一眼就知道该去哪儿。程序给的那半句、进度、要的是什么都在悬停提示里。
+///
+/// 程序状态的摘要由服务端算好随列表来，开着窗口的会话由 WS 实时改写；时长见
+/// `program_status::StateClock::row`（本客户端没亲眼看到这一轮开始的 working 不写时长）
+fn status_cell(session: &SessionWithProject, reading: RowReading, selected: bool, cx: &App) -> AnyElement {
+    let ui = Ui::global(cx);
+    // 选中的行是 tint 底：记号与时长跟着换成 tint 上的字色
+    let (fg, bg, sub) = if selected {
+        (ui.tint_foreground, ui.tint, ui.tint_foreground.opacity(0.7))
+    } else {
+        (ui.foreground, ui.background, ui.muted_foreground)
+    };
+    let mark = |name: IconName, size: f32, color| icon(name).size(zpx(size)).text_color(color).into_any_element();
+    let glyph = match reading.status {
+        RowStatus::Working => Some(div().text_color(fg).child(spinner("ps-spin", IconName::LoaderCircle, zpx(13.))).into_any_element()),
+        RowStatus::NeedsYou => Some(needs_you_mark(zpx(13.), cx)),
+        // 实心圆里镂一个勾：比「看过了」那个淡勾重得多，没看的一眼分得出来
+        RowStatus::Unread { error: false } => Some(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(zpx(13.))
+                .rounded_full()
+                .bg(fg)
+                .child(icon(IconName::Check).size(zpx(9.)).text_color(bg))
+                .into_any_element(),
+        ),
+        RowStatus::Unread { error: true } => Some(mark(IconName::TriangleAlert, 13., ui.destructive)),
+        RowStatus::Read { error } => Some(mark(if error { IconName::TriangleAlert } else { IconName::Check }, 12., sub)),
+        RowStatus::Inactive => Some(mark(IconName::Moon, 12., sub)),
+        RowStatus::Idle => None,
+    };
+    let tip = status_tip(session, reading);
+    div()
+        .id(SharedString::from(format!("sess-ps-{}", session.id)))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(zpx(6.))
+        .text_size(zpx(11.))
+        .text_color(sub)
+        .when_some(reading.age, |d, ms| d.child(age_text(ms)))
+        // 记号占一个定宽的格子：有没有记号、记号多大，时长都对得齐
+        .child(div().flex().flex_none().items_center().justify_center().size(zpx(14.)).children(glyph))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .into_any_element()
+}
+
+/// 会话行状态那一格的悬停提示：短标签（· 进度）· 程序那半句（已消毒、截断过）
+fn status_tip(session: &SessionWithProject, reading: RowReading) -> SharedString {
+    use falcon_core::program_status::badge;
+    let age = reading.age.map(age_text).unwrap_or_default();
+    let finished = |error: bool| t!(if error { "programStatus.error" } else { "programStatus.done" }).to_string();
+    match reading.status {
+        RowStatus::Working | RowStatus::NeedsYou | RowStatus::Unread { .. } => {
+            let Some(b) = session.program_status.as_ref().and_then(badge) else { return SharedString::default() };
+            let mut parts = vec![t!(b.label_key).to_string()];
+            parts.extend(b.progress.map(|n| t!("programStatus.progress", n = n).to_string()));
+            parts.extend(b.detail);
+            parts.join(" · ")
+        }
+        RowStatus::Read { error } => format!("{} · {}", finished(error), t!("sidebar.statusSeen")),
+        RowStatus::Idle => t!("sidebar.statusIdle", t = age).to_string(),
+        RowStatus::Inactive => t!("sidebar.statusInactive", t = age).to_string(),
+    }
+    .into()
 }
 
 fn pending_row(p: &PendingSession, depth: usize, cx: &App) -> AnyElement {
@@ -549,7 +630,7 @@ fn session_count_badge(
         .text_color(if expanded { ui.foreground } else { ui.muted_foreground })
         .hover(|s| s.text_color(ui.foreground))
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-        .when(blocked, |d| d.child(icon(IconName::Hand).size(zpx(12.)).text_color(ui.warning)))
+        .when(blocked, |d| d.child(needs_you_mark(zpx(12.), cx)))
         .child(mark)
         .child(count.to_string())
         .on_click(move |_, _, cx| {

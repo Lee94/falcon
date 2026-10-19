@@ -35,6 +35,22 @@ pub fn idle_text(last_active_at: i64) -> String {
     t!("overview.idleDay", n = hours / 24).to_string()
 }
 
+/// 侧栏会话行尾巴上的时长（进这一档多久了）：紧凑写法，一行窄
+pub fn age_text(ms: u64) -> String {
+    let min = ms / 60_000;
+    if min < 1 {
+        return t!("sidebar.ageNow").to_string();
+    }
+    if min < 60 {
+        return t!("sidebar.ageMin", n = min).to_string();
+    }
+    let hours = min / 60;
+    if hours < 24 {
+        return t!("sidebar.ageHour", n = hours).to_string();
+    }
+    t!("sidebar.ageDay", n = hours / 24).to_string()
+}
+
 /// 本机项目的简称（"本机"）
 pub fn local_word() -> String {
     t!("project.typeLocalShort").to_string()
