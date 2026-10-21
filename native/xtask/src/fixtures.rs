@@ -316,6 +316,15 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     let upload = format!("/api/projects/{local_id}/upload?{}", qs(&[("path", "uploads"), ("name", "hello.txt")]));
     out.save("upload", &api.request("PUT", &upload, Body::Bytes(b"hello falcon\n", OCTET_STREAM), &[200])?.json)?;
     out.save("error-conflict", &api.request("PUT", &upload, Body::Bytes(b"again\n", OCTET_STREAM), &[409])?.json)?;
+    // 查看窗口里编辑后写回：带着查看时拿到的内容版本
+    let viewed = api.get(&format!("/api/projects/{local_id}/file?{}", qs(&[("path", "uploads/hello.txt")])))?;
+    let version = viewed
+        .get("preview")
+        .ok_or_else(|| anyhow!("查看结果里没有 preview：{}", viewed.compact()))?
+        .text("version")
+        .map_err(|e| anyhow!(e))?;
+    let save = format!("/api/projects/{local_id}/file?{}", qs(&[("path", "uploads/hello.txt"), ("base", &version)]));
+    out.save("file-save", &api.request("PUT", &save, Body::Bytes(b"hello again\n", OCTET_STREAM), &[200])?.json)?;
     out.save(
         "rename",
         &api.call(

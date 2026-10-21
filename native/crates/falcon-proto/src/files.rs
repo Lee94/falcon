@@ -88,6 +88,12 @@ pub enum FilePreview {
         text: String,
         size: u64,
         truncated: bool,
+        /// 内容版本（这些字节的 sha256，hex）。只有**能原样写回**的文本才有：没截断、
+        /// 本来就是合法 UTF-8（否则 `text` 里是替换过的 U+FFFD，存回去等于改坏原文件）。
+        /// 编辑后保存（`PUT /api/projects/:id/file`）时原样带回，服务端据此判断文件在
+        /// 这段时间里有没有被别人改过。没有它的文本只读。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     #[serde(rename = "image")]
     Image { mime: String, size: u64 },
@@ -116,6 +122,21 @@ pub enum FilePreview {
 pub struct WorkspaceFile {
     pub preview: FilePreview,
     pub raw_base: String,
+}
+
+/// 保存一个文本文件（`PUT /api/projects/:id/file`）的请求体上限。编辑器只打开
+/// [`WORKSPACE_FILE_CAP`] 以内的文件，留的余量是给"打开之后又粘进去一大段"的；
+/// Windows 远端要把整份内容攒在内存里再写，再大就不合适了（同 [`WORKSPACE_RAW_CAP`]）。
+pub const WORKSPACE_SAVE_CAP: u64 = WORKSPACE_RAW_CAP;
+
+/// `PUT /api/projects/:id/file` 的响应：写进去的字节数与新的内容版本
+/// （下一次保存带它当 `base`，见 [`FilePreview::Text::version`]）
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFileResult {
+    pub path: String,
+    pub size: u64,
+    pub version: String,
 }
 
 /// `PUT /api/projects/:id/upload` 的响应：落盘后的工作目录相对路径与字节数
@@ -179,7 +200,11 @@ mod tests {
         let text = roundtrip::<WorkspaceFile>(&format!(
             r#"{{"preview":{{"kind":"text","text":"fn main() {{}}\n","size":13,"truncated":false}},{raw}}}"#
         ));
-        assert!(matches!(text.preview, FilePreview::Text { size: 13, .. }));
+        assert!(matches!(text.preview, FilePreview::Text { size: 13, version: None, .. }));
+        let editable = roundtrip::<WorkspaceFile>(&format!(
+            r#"{{"preview":{{"kind":"text","text":"x","size":1,"truncated":false,"version":"2d71"}},{raw}}}"#
+        ));
+        assert!(matches!(editable.preview, FilePreview::Text { version: Some(ref v), .. } if v == "2d71"));
         roundtrip::<WorkspaceFile>(&format!(
             r#"{{"preview":{{"kind":"image","mime":"image/png","size":20480}},{raw}}}"#
         ));
@@ -202,6 +227,7 @@ mod tests {
     #[test]
     fn file_ops() {
         roundtrip::<UploadResult>(r#"{"path":"docs/a.pdf","size":1048576}"#);
+        roundtrip::<SaveFileResult>(r#"{"path":"src/a.rs","size":12,"version":"9f86"}"#);
         roundtrip::<FileOpResult>(r#"{"path":"docs/new"}"#);
         let r = roundtrip::<FileRemoveResult>(
             r#"{"removed":["a.txt","dir"],"errors":[{"path":"locked.db","error":"Permission denied"}]}"#,

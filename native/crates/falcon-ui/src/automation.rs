@@ -8,6 +8,7 @@
 //! | `ready` | 等工作区登录完、数据拉回来（最多 15s） |
 //! | `select:<项目名>` | 在侧栏选中项目 |
 //! | `new-terminal[:claude]` | 在当前项目新建终端（可带 agent） |
+//! | `open:<路径>` | 在当前项目的文件窗口里打开一个文件（工作目录相对路径；有没存的修改时同样先问） |
 //! | `assistant` | 打开 / 收起 AI 助手面板（同 ⌘J） |
 //! | `assistant-new:<机器>` | 在这台机器上开新对话（`local` 或 hostId） |
 //! | `assistant-expand` | 助手面板铺满主区 / 还原（同 ⤢） |
@@ -158,6 +159,18 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                     ws.update(cx, |w, cx| w.new_terminal(&pid, agent, None, cx));
                 }
             });
+        }
+        "open" => {
+            let ok = cx.update(|cx| {
+                let pid = ws.read(cx).current_project_id();
+                if let Some(pid) = &pid {
+                    ws.update(cx, |w, cx| w.open_file(pid, arg, cx));
+                }
+                pid.is_some()
+            });
+            if !ok {
+                return Err("没有选中的项目".into());
+            }
         }
         "assistant" => {
             let _ = window.update(cx, |_, window, cx| crate::assistant::toggle(ws, window, cx));

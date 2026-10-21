@@ -42,6 +42,8 @@ pub mod file_search;
 pub mod px0;
 /// 「用 Zed / VS Code 打开」：项目目录在哪、编辑器的自定义协议链接
 pub mod editor;
+/// 查看窗口里编辑文本：磁盘上的文本 ↔ 编辑器里的内容（换行风格、末尾换行）
+pub mod file_text;
 /// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
 /// 对应 React 版的 lib/gitGraph.ts：提交图泳道

@@ -1,6 +1,7 @@
 //! DOM 胶水：gpui-web 平台层没覆盖、又必须走浏览器原生能力的那几件事
 //! （docs/design/rust-unification.md 附录 B）。
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
@@ -48,6 +49,31 @@ pub fn on_resume(f: Box<dyn Fn()>) {
     };
     let _ = doc.add_event_listener_with_callback("visibilitychange", visible.as_ref().unchecked_ref());
     visible.forget();
+}
+
+thread_local! {
+    static UNSAVED: Cell<bool> = const { Cell::new(false) };
+    static UNLOAD_GUARD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 有没存的修改时，关标签页 / 刷新 / 离开要浏览器先问一句（`beforeunload`；文案是浏览器自己的
+/// "离开此网站？"，改不了）。监听在第一次有修改时才装（装了 `beforeunload` 的页面进不了往返缓存），
+/// 之后跟页面同寿，看的是这面旗
+pub fn set_unsaved_changes(unsaved: bool) {
+    UNSAVED.set(unsaved);
+    if !unsaved || UNLOAD_GUARD.replace(true) {
+        return;
+    }
+    let Some(window) = web_sys::window() else { return };
+    let guard = Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(|e: web_sys::BeforeUnloadEvent| {
+        if UNSAVED.get() {
+            e.prevent_default();
+            // 老一些的 Chrome / Safari 只认 returnValue 是真值
+            e.set_return_value("unsaved");
+        }
+    });
+    let _ = window.add_event_listener_with_callback("beforeunload", guard.as_ref().unchecked_ref());
+    guard.forget();
 }
 
 /// 浏览器的 localStorage。拿不到（隐私模式、被禁用）时返回 `None`，读写都安静地跳过

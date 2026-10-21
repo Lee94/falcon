@@ -82,6 +82,10 @@ impl Platform for Browser {
         false
     }
 
+    fn set_unsaved_changes(&self, unsaved: bool) {
+        dom::set_unsaved_changes(unsaved);
+    }
+
     fn on_resume(&self, f: Box<dyn Fn()>) {
         dom::on_resume(f);
     }

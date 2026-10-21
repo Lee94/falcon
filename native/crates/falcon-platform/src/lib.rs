@@ -135,6 +135,10 @@ pub trait Platform {
     /// App 托管的本机服务；没有的平台（浏览器）返回 `None`，"本机"配置就直接连
     fn local_service(&self) -> Option<Arc<dyn LocalService>>;
 
+    /// 文件窗口里有没有没存的修改。浏览器版据此在关标签页 / 刷新 / 离开时让浏览器先问一句
+    /// （`beforeunload`）；原生在窗口关闭与 ⌘Q 上自己弹确认框，不用这个
+    fn set_unsaved_changes(&self, _unsaved: bool) {}
+
     /// 回到前台 / 网络恢复时调 `f`（不在 GPUI 的上下文里调，调用方自己转进去）。浏览器版接
     /// window 的 `online` 与标签页切回可见（`visibilitychange`）：后台标签页的定时器被节流到
     /// 分钟级，工作区看墙钟的唤醒检测在那里靠不住（旧 React 版 TerminalView 也是接这两个

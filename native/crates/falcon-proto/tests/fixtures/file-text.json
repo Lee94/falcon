@@ -3,7 +3,8 @@
     "kind": "text",
     "text": "# fixture\n\n协议 fixture 用的临时仓库。\n\n第二段说明。\n",
     "size": 68,
-    "truncated": false
+    "truncated": false,
+    "version": "4b71bbd27ecd76053f60efc3cf889b82b1c4ddd901705faaf871b50304d1982e"
   },
-  "rawBase": "/api/projects/bdcae325-9b23-43f0-b1d2-97a1a0c24a84/raw/59bbe6d43f4852d11ec56e66bebe2c32f1c310101e311608/"
+  "rawBase": "/api/projects/0988cb7c-bb33-4b29-8769-6485d1da1b5b/raw/42b3d08ccf06807e697a214f850df227057e4904b01560a8/"
 }

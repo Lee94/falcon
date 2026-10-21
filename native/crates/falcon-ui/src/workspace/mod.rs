@@ -149,8 +149,22 @@ pub struct Workspace {
     /// 窗口在不在屏幕上（GPUI 的窗口可见性：最小化、整个被盖住、切到别的桌面、浏览器后台标签页
     /// 都是 false）。看不见时所有终端都算在后台（[`Self::sync_terminal_visibility`]）
     pub window_visible: bool,
+    /// 文件窗口里有没存的修改（FileView 经 [`Self::set_file_dirty`] 写进来）。换文件 / 关文件
+    /// 窗口 / 关窗口 / 退出之前据此先问一句；只在变的时候写、不触发重画——它不画在别处
+    pub file_dirty: bool,
+    /// 文件面板刚把正开着的文件改了名（[`Self::follow_file_rename`]）：画布据此让文件窗口
+    /// 只换路径、不重读（没存的修改跟过去）。下一次 open / close 文件时清掉
+    pub file_renamed: Option<FileRename>,
     changes_in_flight: bool,
     _tasks: Vec<Task<()>>,
+}
+
+/// [`Workspace::file_renamed`]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileRename {
+    pub project_id: String,
+    pub from: String,
+    pub to: String,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -191,6 +205,8 @@ impl Workspace {
             clock_epoch: web_time::Instant::now(),
             window_active: true,
             window_visible: true,
+            file_dirty: false,
+            file_renamed: None,
             changes_in_flight: false,
             _tasks: Vec::new(),
         };

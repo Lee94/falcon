@@ -109,6 +109,7 @@ fn table() -> Vec<(&'static str, Check)> {
         "file-binary" => WorkspaceFile,
         "mkdir" => FileOpResult,
         "upload" => UploadResult,
+        "file-save" => SaveFileResult,
         "rename" => FileOpResult,
         "remove" => FileRemoveResult,
         // 中转：转发 / 发布（挂机器，ADR 0016）
@@ -269,7 +270,7 @@ fn fixture_semantics() {
         .iter()
         .map(|n| serde_json::from_str::<WorkspaceFile>(&de(n)).unwrap().preview)
         .collect();
-    assert!(matches!(kinds[0], FilePreview::Text { truncated: false, .. }));
+    assert!(matches!(kinds[0], FilePreview::Text { truncated: false, version: Some(_), .. }));
     assert!(matches!(&kinds[1], FilePreview::Image { mime, .. } if mime == "image/png"));
     assert!(matches!(kinds[2], FilePreview::Binary { .. }));
 

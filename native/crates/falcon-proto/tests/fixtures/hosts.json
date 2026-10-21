@@ -1,6 +1,6 @@
 [
   {
-    "id": "d2cccf4d-212a-45ed-914e-7c4a37d442dd",
+    "id": "79abcdbc-b0d1-4310-aefe-54b48fec5d65",
     "name": "fixture-host-renamed",
     "host": "127.0.0.1",
     "port": 1,
@@ -8,6 +8,6 @@
     "authMethod": "password",
     "hasSecret": true,
     "projectCount": 1,
-    "createdAt": 1791898278651
+    "createdAt": 1792463499878
   }
 ]

@@ -626,11 +626,11 @@ impl FilesPanel {
                         let ws = this.ws.clone();
                         match result {
                             Ok(res) => {
-                                // 改名后让查看窗口跟到新路径上（open_file 是就地换内容，不会多开一扇）
+                                // 改名后让查看窗口跟到新路径上（就地换内容，不会多开一扇；没存的修改跟过去）
                                 let follow = ws.read(cx).file_tab().is_some_and(|f| f.project_id == pid && f.path == path);
                                 ws.update(cx, |w, cx| {
                                     if follow {
-                                        w.open_file(&pid, &res.path, cx);
+                                        w.follow_file_rename(&pid, &path, &res.path, cx);
                                     }
                                     w.toast(ToastKind::Success, t!("files.renamed", name = name).to_string(), None, cx);
                                 });
@@ -1243,13 +1243,14 @@ fn unique_name(base: &str, taken: &HashSet<String>) -> String {
     (2..).map(|i| format!("{base} {i}")).find(|n| !taken.contains(n)).unwrap_or_else(|| base.to_string())
 }
 
-/// 删掉的文件如果正开着（或它在被删的目录里），把那扇查看窗口收起来
+/// 删掉的文件如果正开着（或它在被删的目录里），把那扇查看窗口收起来。不再问"有没存的修改"：
+/// 文件已经没了，删之前也确认过
 fn close_matching_file(ws: &Entity<Workspace>, project_id: &str, removed: &[String], cx: &mut App) {
     let hit = ws.read(cx).file_tab().is_some_and(|f| {
         f.project_id == project_id && removed.iter().any(|p| f.path == *p || f.path.starts_with(&format!("{p}/")))
     });
     if hit {
-        ws.update(cx, |w, cx| w.close_file(cx));
+        ws.update(cx, |w, cx| w.close_file_now(cx));
     }
 }
 

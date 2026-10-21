@@ -6,7 +6,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use falcon_proto::{FileOpResult, FileRemoveResult, WorkspaceFile, WorkspaceIndex, WorkspaceListing};
+use falcon_proto::{FileOpResult, FileRemoveResult, SaveFileResult, WorkspaceFile, WorkspaceIndex, WorkspaceListing};
 use reqwest::Method;
 use reqwest::header::CONTENT_TYPE;
 use serde::Serialize;
@@ -61,6 +61,22 @@ impl FalconClient {
     pub fn read_file(&self, project_id: &str, path: &str) -> impl Future<Output = ApiResult<WorkspaceFile>> + MaybeSend + 'static {
         let q = Query::new().push("path", path).finish();
         self.get(format!("/api/projects/{}/file{q}", seg(project_id)))
+    }
+
+    /// `PUT /api/projects/:id/file?path=&base=`：把编辑过的文本写回去，请求体是要写进去的
+    /// 原始字节。`base` 是查看时拿到的内容版本（`FilePreview::Text::version`）：文件在这期间
+    /// 被改过或已经没了是 409（`is_conflict()`），问过用户再带 `None` 重发 = 覆盖。
+    pub fn save_file(
+        &self,
+        project_id: &str,
+        path: &str,
+        content: impl Into<Bytes>,
+        base: Option<&str>,
+    ) -> impl Future<Output = ApiResult<SaveFileResult>> + MaybeSend + 'static {
+        let q = Query::new().push("path", path).nonempty("base", base).finish();
+        let url = format!("/api/projects/{}/file{q}", seg(project_id));
+        let body = ReqBody::Raw { data: content.into(), content_type: "application/octet-stream".to_owned() };
+        self.call(move |inner| async move { inner.fetch_json(&Req::new(Method::PUT, url, body)).await })
     }
 
     /// `POST /api/projects/:id/mkdir`。`recursive` 给文件夹上传用：中间层已存在算成功；

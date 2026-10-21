@@ -125,15 +125,24 @@ impl Canvas {
 
     /// 文件 / 差异窗口的视图跟着工作区的 file_tab / diff_tab 建与换
     fn sync_views(&mut self, cx: &mut Context<Self>) {
-        let (file_tab, has_diff) = {
+        let (file_tab, renamed, has_diff) = {
             let ws = self.ws.read(cx);
-            (ws.state.file_tab.clone(), ws.state.diff_tab.is_some())
+            (ws.state.file_tab.clone(), ws.file_renamed.clone(), ws.state.diff_tab.is_some())
         };
         match (&file_tab, &self.file_view) {
             (Some(tab), Some(view)) => {
                 let (pid, path) = (tab.project_id.clone(), tab.path.clone());
                 view.update(cx, |v, cx| {
-                    if v.project_id != pid || v.path != path {
+                    if v.project_id == pid && v.path == path {
+                        return;
+                    }
+                    // 文件面板里改的名：同一个文件，换路径不重读（没存的修改跟过去）
+                    let rename = renamed
+                        .as_ref()
+                        .is_some_and(|r| r.project_id == pid && v.project_id == pid && r.from == v.path && r.to == path);
+                    if rename {
+                        v.rename_to(path, cx);
+                    } else {
                         v.set_target(pid, path, cx);
                     }
                 });

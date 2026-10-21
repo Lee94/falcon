@@ -1,5 +1,5 @@
 {
-  "id": "b6ccc011-d283-487c-9775-421e7986e2ce",
+  "id": "ee57e28c-247e-45ad-9903-4c4f2a1bffd3",
   "name": "fixture-ssh",
   "type": "ssh",
   "workingDir": "/srv/app",
@@ -10,6 +10,6 @@
     "authMethod": "password",
     "hasSecret": true
   },
-  "hostId": "d2cccf4d-212a-45ed-914e-7c4a37d442dd",
-  "createdAt": 1791898278654
+  "hostId": "79abcdbc-b0d1-4310-aefe-54b48fec5d65",
+  "createdAt": 1792463499881
 }

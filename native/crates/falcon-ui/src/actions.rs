@@ -57,6 +57,12 @@ pub mod assistant {
     actions!(assistant, [ToggleMode, AllowOnce, AllowAlways, Reject]);
 }
 
+/// 文件窗口里的动作（key context "FileView"）
+pub mod file_view {
+    use gpui_kit::actions;
+    actions!(file_view, [Save]);
+}
+
 /// 终端窗口里的动作（key context "Terminal"）
 pub mod term {
     use gpui_kit::actions;
@@ -128,6 +134,9 @@ pub fn init(cx: &mut App) {
         // NoAction 在更深的 context 上屏蔽掉它，按键落回终端自己的 key_down 编码。
         KeyBinding::new("tab", NoAction, Some("Terminal")),
         KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
+        // 文件窗口里保存。不在终端里，裸 Ctrl+S 没有 shell 语义要让（浏览器的「存网页」被
+        // 处理过的按键 preventDefault 掉）
+        KeyBinding::new(if info.mac { "cmd-s" } else { "ctrl-s" }, file_view::Save, Some("FileView")),
         // 助手面板里切 Shell / Agent 输入。浏览器里 Ctrl+Shift+I（mac 的 ⌘⌥I）是开发者工具，另给 Alt+I
         KeyBinding::new(if info.mac { "cmd-shift-i" } else { "ctrl-shift-i" }, assistant::ToggleMode, Some("Assistant")),
     ]);
@@ -152,7 +161,7 @@ pub fn init(cx: &mut App) {
     }
     cx.bind_keys(bindings);
 
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| crate::window::quit(cx));
     cx.on_action(|_: &ZoomIn, cx| crate::zoom::step(1, cx));
     cx.on_action(|_: &ZoomOut, cx| crate::zoom::step(-1, cx));
     cx.on_action(|_: &ZoomReset, cx| crate::zoom::reset(cx));

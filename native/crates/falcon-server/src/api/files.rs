@@ -1,5 +1,6 @@
 //! 项目工作目录的文件路由（routes.ts 里 `fileHostFor` 往下那一段）：列目录、Quick Open 索引、
-//! 查看、原始字节（ADR 0007）、下载 / 上传（ADR 0008）、mkdir / rename / remove（ADR 0009）。
+//! 查看、原始字节（ADR 0007）、下载 / 上传（ADR 0008）、mkdir / rename / remove（ADR 0009），
+//! 以及 Rust 版新加的写回（查看窗口里编辑过的文本，`PUT …/file`）。
 //!
 //! 文件操作要么碰 SshLink、要么（多仓库容器）要会话引擎里的虚拟目录缓存，所以一律经
 //! `engine.call` 在引擎上跑；本机那一路的阻塞 fs 在 files.rs 里进了阻塞线程池，不占引擎。
@@ -7,7 +8,7 @@
 //!
 //! 状态码照 Node 版**按错误消息原文**分：读失败一律 400（路径不存在、没权限、SSH 连不上，
 //! 都是调用方能处理并且该如实转述的事实），原始字节与下载遇到"路径不存在或不可访问"回 404，
-//! 写操作遇到"同名文件已存在"回 409。
+//! 写操作遇到"同名文件已存在"回 409；写回遇到"文件在打开之后被改动过 / 已被删除"也是 409。
 
 use std::rc::Rc;
 
@@ -20,20 +21,20 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use falcon_proto::{
-    FileOpResult, FileRemoveResult, UploadResult, WORKSPACE_RAW_CAP, WorkspaceFile, WorkspaceIndex, WorkspaceListing,
-    WorktreeFailure,
+    FileOpResult, FileRemoveResult, SaveFileResult, UploadResult, WORKSPACE_RAW_CAP, WORKSPACE_SAVE_CAP, WorkspaceFile,
+    WorkspaceIndex, WorkspaceListing, WorktreeFailure,
 };
 use serde_json::Value;
 
 use super::auth_routes::LenientJson;
-use super::body::{Media, drain_in_background, media_of, query_param, unsupported_media_type};
+use super::body::{Media, body_too_large, drain_body, drain_in_background, media_of, query_param, unsupported_media_type};
 use super::error::{ApiError, ApiResult};
 use super::{AppState, encode_uri_component};
 use crate::db::ProjectRow;
 use crate::engine::Engine;
 use crate::files::{
-    FileHost, cap_file_index, index_workspace, list_workspace, mime_of, mkdir_workspace,
-    read_workspace_bytes, read_workspace_file, remove_workspace, rename_workspace,
+    FileError, FileHost, cap_file_index, index_workspace, list_workspace, mime_of, mkdir_workspace,
+    read_workspace_bytes, read_workspace_file, remove_workspace, rename_workspace, save_workspace_file,
 };
 use crate::git::error::worktree_failure_text;
 use crate::git::repo::{RunOpts, list_repo_files};
@@ -47,7 +48,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{id}/files", get(list))
         .route("/api/projects/{id}/files/index", get(index))
-        .route("/api/projects/{id}/file", get(file))
+        .route("/api/projects/{id}/file", get(file).put(save))
         .route("/api/projects/{id}/download", get(download))
         .route("/api/projects/{id}/upload", put(upload))
         .route("/api/projects/{id}/mkdir", post(mkdir))
@@ -179,6 +180,59 @@ async fn file(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -
         .await?;
     let preview = res.map_err(ApiError::bad_request)?;
     Ok(Json(WorkspaceFile { preview, raw_base: raw_base_for(&state, &id) }))
+}
+
+/// 把查看窗口里编辑过的文本写回去（Node 版的查看窗口只读，没有这条）。
+///
+/// 请求体是要写进去的原始字节（application/octet-stream；清空成空文件时可以不带
+/// Content-Type），整份收进内存：编辑器只打开 WORKSPACE_FILE_CAP 以内、能原样写回的
+/// 文本，WORKSPACE_SAVE_CAP 是给"打开之后又粘进去一大段"留的余量。
+///
+/// `base` 是查看时拿到的内容版本（`FilePreview::Text::version`）：给了就先比对，文件在这期间
+/// 被改过 / 已经没了回 409，前端问过用户再不带 base 重发（= 覆盖）。写法是原地覆盖，
+/// 权限位与链接都保住（files.rs 的 `save_command`）。
+async fn save(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<Json<SaveFileResult>> {
+    match media_of(&headers) {
+        Media::OctetStream | Media::None => {}
+        Media::Unsupported => {
+            drain_body(body);
+            return Err(unsupported_media_type());
+        }
+        Media::Json | Media::Text | Media::Image => {
+            drain_body(body);
+            return Err(ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "请求体必须是 application/octet-stream"));
+        }
+    }
+    let bytes = axum::body::to_bytes(body, WORKSPACE_SAVE_CAP as usize).await.map_err(|_| body_too_large())?;
+    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let Some(p) = query_param(&uri, "path").filter(|p| !p.is_empty()) else {
+        return Err(ApiError::bad_request("缺少文件路径"));
+    };
+    let base = query_param(&uri, "base").filter(|b| !b.is_empty());
+    state
+        .engine
+        .call(move |engine| async move {
+            let loc = file_host_for(&engine, &row).await.map_err(ApiError::bad_request)?;
+            let version = save_workspace_file(&loc.host(), &loc.root, &p, &bytes, base.as_deref())
+                .await
+                .map_err(save_error)?;
+            Ok(Json(SaveFileResult { path: p.clone(), size: bytes.len() as u64, version }))
+        })
+        .await?
+}
+
+/// 写回的错误：内容对不上（被改过 / 没了）回 409，其余 400
+fn save_error(e: FileError) -> ApiError {
+    match e {
+        FileError::Changed | FileError::Gone => ApiError::new(StatusCode::CONFLICT, e.to_string()),
+        _ => ApiError::bad_request(e.to_string()),
+    }
 }
 
 // ---------------- 原始字节（ADR 0007） ----------------
@@ -538,7 +592,11 @@ mod tests {
 
         let (status, body) = json_of(app.get("/api/projects/p%201/file?path=docs/index.html").await).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["preview"], json!({ "kind": "text", "text": "<p>hi</p>", "size": 9, "truncated": false }));
+        let version = crate::files::content_version(b"<p>hi</p>");
+        assert_eq!(
+            body["preview"],
+            json!({ "kind": "text", "text": "<p>hi</p>", "size": 9, "truncated": false, "version": version })
+        );
         let raw_base = body["rawBase"].as_str().unwrap().to_string();
         assert!(raw_base.starts_with("/api/projects/p%201/raw/") && raw_base.ends_with('/'));
 
@@ -653,6 +711,46 @@ mod tests {
             req = req.header("content-length", len.to_string());
         }
         req.body(body.into()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_checks_version_and_maps_errors() {
+        let app = TestApp::new();
+        let wd = app.local_project("p1");
+        write(&wd.join("src/a.rs"), "fn a() {}\n");
+        let oct = Some("application/octet-stream");
+        let send = |req: Request<Body>| app.send(req);
+
+        let (_, body) = json_of(app.get("/api/projects/p1/file?path=src/a.rs").await).await;
+        let v1 = body["preview"]["version"].as_str().unwrap().to_string();
+        let uri = format!("/api/projects/p1/file?path=src%2Fa.rs&base={v1}");
+        let (status, body) = json_of(send(put(&uri, oct, "fn b() {}\n", None)).await).await;
+        let v2 = crate::files::content_version(b"fn b() {}\n");
+        assert_eq!((status, body), (StatusCode::OK, json!({ "path": "src/a.rs", "size": 10, "version": v2 })));
+        assert_eq!(std::fs::read(wd.join("src/a.rs")).unwrap(), b"fn b() {}\n");
+
+        // 还拿着旧版本：409，原文件不动；不带 base 就是覆盖
+        let (status, body) = json_of(send(put(&uri, oct, "x", None)).await).await;
+        assert_eq!((status, body), (StatusCode::CONFLICT, json!({ "error": "文件在打开之后被改动过" })));
+        assert_eq!(std::fs::read(wd.join("src/a.rs")).unwrap(), b"fn b() {}\n");
+        let (status, _) = json_of(send(put("/api/projects/p1/file?path=src/a.rs", None, Body::empty(), Some(0))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(std::fs::read(wd.join("src/a.rs")).unwrap(), b"");
+
+        let (status, body) = json_of(send(put(&format!("/api/projects/p1/file?path=gone&base={v1}"), oct, "x", None)).await).await;
+        assert_eq!((status, body), (StatusCode::CONFLICT, json!({ "error": "文件已被删除或移走" })));
+        let (status, body) = json_of(send(put("/api/projects/p1/file?path=src", oct, "x", None)).await).await;
+        assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({ "error": "这是一个文件夹" })));
+        let (status, body) = json_of(send(put("/api/projects/p1/file", oct, "x", None)).await).await;
+        assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({ "error": "缺少文件路径" })));
+        let (status, body) = json_of(send(put("/api/projects/zz/file?path=a", oct, "x", None)).await).await;
+        assert_eq!((status, body), (StatusCode::NOT_FOUND, json!({ "error": "项目不存在" })));
+        let (status, _) = json_of(send(put("/api/projects/p1/file?path=a", Some("application/json"), "{}", None)).await).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let big = vec![b'x'; falcon_proto::WORKSPACE_SAVE_CAP as usize + 1];
+        let (status, _) = json_of(send(put("/api/projects/p1/file?path=a", oct, big, None)).await).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!wd.join("a").exists());
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use gpui_kit::Context;
 use rust_i18n::t;
 
 use super::{
-    ActiveView, DiffCommit, DiffTabTarget, FileTabTarget, RightPanelId, ToastKind, Workspace,
+    ActiveView, DiffCommit, DiffTabTarget, FileRename, FileTabTarget, RightPanelId, ToastKind, Workspace,
     WorkspaceEvent, is_pending_id,
 };
 
@@ -76,16 +76,72 @@ impl Workspace {
         }
     }
 
+    /// 开确认框，确认了再跑 `on_confirm`
+    pub fn confirm(&mut self, spec: ConfirmSpec, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Confirm(spec));
+    }
+
     // ---------------- 文件 / 差异窗口 ----------------
 
+    /// 打开一个文件（文件窗口就地换内容）。正开着的文件有没存的修改时先问一句
     pub fn open_file(&mut self, project_id: &str, path: &str, cx: &mut Context<Self>) {
+        let switching = self.state.file_tab.as_ref().is_some_and(|f| f.project_id != project_id || f.path != path);
+        if self.file_dirty && switching {
+            let (pid, p) = (project_id.to_string(), path.to_string());
+            self.confirm_discard_file(Rc::new(move |w, cx| {
+                w.set_file_dirty(false);
+                w.open_file(&pid, &p, cx);
+            }), cx);
+            return;
+        }
+        self.file_renamed = None;
         self.state.open_file(project_id, path, &self.sessions);
         self.commit(true, cx);
     }
 
+    /// 关文件窗口。有没存的修改时先问一句
     pub fn close_file(&mut self, cx: &mut Context<Self>) {
+        if self.file_dirty {
+            self.confirm_discard_file(Rc::new(|w, cx| w.close_file_now(cx)), cx);
+            return;
+        }
+        self.close_file_now(cx);
+    }
+
+    /// 不问、直接关（文件已经被用户删掉了；或者已经问过）
+    pub fn close_file_now(&mut self, cx: &mut Context<Self>) {
+        self.set_file_dirty(false);
+        self.file_renamed = None;
         self.state.close_file(None, &self.sessions);
         self.commit(false, cx);
+    }
+
+    /// 文件面板把正开着的文件改了名：窗口跟到新路径上，没存的修改不丢（画布看
+    /// [`Self::file_renamed`]，让文件窗口只换路径、不重读）
+    pub fn follow_file_rename(&mut self, project_id: &str, from: &str, to: &str, cx: &mut Context<Self>) {
+        self.file_renamed =
+            Some(FileRename { project_id: project_id.to_string(), from: from.to_string(), to: to.to_string() });
+        self.state.open_file(project_id, to, &self.sessions);
+        self.commit(true, cx);
+    }
+
+    /// FileView 报来的脏标记；浏览器版顺手挂上 / 摘掉关标签页前的那一问
+    pub fn set_file_dirty(&mut self, dirty: bool) {
+        if self.file_dirty != dirty {
+            self.file_dirty = dirty;
+            self.platform.set_unsaved_changes(dirty);
+        }
+    }
+
+    /// 文件窗口里有没存的修改时，那个文件的名字（确认框里用）
+    pub fn dirty_file_name(&self) -> Option<String> {
+        let tab = self.state.file_tab.as_ref().filter(|_| self.file_dirty)?;
+        Some(tab.path.rsplit('/').next().unwrap_or(&tab.path).to_string())
+    }
+
+    fn confirm_discard_file(&mut self, on_confirm: Rc<dyn Fn(&mut Workspace, &mut Context<Workspace>)>, cx: &mut Context<Self>) {
+        let name = self.dirty_file_name().unwrap_or_default();
+        self.confirm(crate::panels::file_view::discard_spec(&name, on_confirm), cx);
     }
 
     pub fn open_diff(

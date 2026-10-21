@@ -1,5 +1,6 @@
 //! 项目工作目录的浏览与改动：列一层目录、取一个文件的内容、新建文件夹、
-//! 重命名、删除（ADR 0009）。移植自 `packages/server/src/files.ts`。
+//! 重命名、删除（ADR 0009）。移植自 `packages/server/src/files.ts`；查看窗口里编辑过的
+//! 文本写回去（[`save_workspace_file`]）是 Rust 版新加的，Node 版的查看窗口只读。
 //!
 //! 与 fs.rs 是两件不同的事。那边服务于项目表单——只列文件夹、能一路往上走到根；
 //! 这边只在**项目工作目录内部**打转，文件和目录都要列，还得把文件内容取回来，
@@ -24,7 +25,7 @@
 //! [`FileError`]）。这里换成枚举，`Display` 与 TS 的消息逐字一致。
 
 use std::cmp::Ordering;
-use std::io;
+use std::io::{self, Write as _};
 use std::sync::LazyLock;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -33,6 +34,7 @@ use falcon_proto::{
     WORKSPACE_LIST_CAP, WORKSPACE_RAW_CAP, WorkspaceEntry, WorkspaceEntryKind, WorkspaceIndex, WorkspaceListing,
 };
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::exec::{Exec, ExecResult, LocalBoxFuture};
@@ -49,6 +51,8 @@ pub const RENAME_TIMEOUT: Duration = Duration::from_millis(15_000);
 /// 递归删 node_modules 那种目录，远端可能要一会儿
 pub const REMOVE_TIMEOUT: Duration = Duration::from_millis(120_000);
 pub const INDEX_TIMEOUT: Duration = Duration::from_millis(20_000);
+/// 写回一个编辑过的文本：先比对现在的内容（一次读），再经通道把新内容送过去
+pub const SAVE_TIMEOUT: Duration = Duration::from_millis(60_000);
 
 // ---------------- 错误 ----------------
 
@@ -90,6 +94,16 @@ pub enum FileError {
     /// EEXIST
     #[error("同名文件已存在")]
     Exists,
+    /// 保存时带的内容版本与文件现在的对不上：打开之后有别人（终端里的编辑器、git、agent）改过它。
+    /// 与 [`FileError::Gone`] 一起回 409，前端问过用户再不带版本重发（= 覆盖）
+    #[error("文件在打开之后被改动过")]
+    Changed,
+    /// 保存时带了内容版本，文件却已经不在了（删掉 / 改名 / 切了分支）
+    #[error("文件已被删除或移走")]
+    Gone,
+    /// 远端写回时收到的字节数与发出的不一致（远端脚本以 ESHORT 报告）
+    #[error("写入中断，宿主机收到的字节数与发出的不一致")]
+    ShortWrite,
     /// 没有约定码时的兜底：调用方给的 fallback 文案，或远端 stderr 原文
     #[error("{0}")]
     Other(String),
@@ -603,13 +617,80 @@ pub fn classify(name: &str, size: u64, bytes: &[u8]) -> FilePreview {
     if head.contains(&0) {
         return FilePreview::Binary { size };
     }
-    FilePreview::Text {
+    let truncated = size > bytes.len() as u64;
+    let (text, lossless) = match std::str::from_utf8(bytes) {
+        Ok(s) => (s.to_string(), true),
         // Buffer#toString("utf8") 与 from_utf8_lossy 都按"最大子部分"替换成 U+FFFD，
         // 被 cap 切开的末尾半个字符两边都变成一个 U+FFFD
-        text: String::from_utf8_lossy(bytes).into_owned(),
-        size,
-        truncated: size > bytes.len() as u64,
+        Err(_) => (String::from_utf8_lossy(bytes).into_owned(), false),
+    };
+    // 只有原样写得回去的才给版本（= 才能编辑）：截断的存回去丢掉后半截，替换过 U+FFFD 的
+    // 存回去把 GBK / Latin-1 的原字节改成了 EF BF BD
+    let version = (lossless && !truncated).then(|| content_version(bytes));
+    FilePreview::Text { text, size, truncated, version }
+}
+
+/// 内容版本：字节的 sha256（hex）。查看时给出、保存时比对（[`save_workspace_file`]）。
+///
+/// 用内容哈希而不用 mtime：远端的读命令本来就把字节带回来了，不必为 mtime 再改四种环境的
+/// 读脚本；mtime 的精度（FAT / 某些网络盘是 2 秒）与"git checkout 回同一份内容"也都不是问题
+pub fn content_version(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+// ---------------- 写回文本（查看窗口的编辑） ----------------
+
+/// 写回一个文本文件：stdin → 临时文件 → 核对字节数 → **原地覆盖**目标。
+///
+/// 原地覆盖（`cat 临时文件 > 目标`，Windows 是 Truncate 打开）而不是"临时文件改名到位"：
+/// 改名换掉的是 inode，权限位（脚本的 +x）、属主、硬链接一并丢失，符号链接被换成一个普通
+/// 文件——编辑一个文件不该改动这些。临时文件只是为了**先收满**再动目标：通道中途断开时
+/// `cat` 照样退 0（同上传，见 transfer.rs 文件头），直接 `cat > 目标` 就会留下半个文件。
+/// 收满之后的覆盖在宿主机本地完成，不经网络。
+///
+/// POSIX 的临时文件放在 `$TMPDIR`（mktemp）而不是目标旁边：目标所在目录不一定可写（可写的
+/// 文件放在只读目录里），中途被掐断时也不在工作目录里留下垃圾。Windows 那边内容只有几 MB，
+/// 攒在 MemoryStream 里比对，不落临时文件。
+///
+/// 目标不存在时新建（覆盖一个已被删掉的文件 = 把它写回来），上级目录不在就报 ENOENT。
+pub fn save_command(kind: HostKind, file: &str, parent: &str, size: u64) -> String {
+    if kind == HostKind::Windows {
+        return encode_powershell(
+            &[
+                "$ErrorActionPreference = 'Stop'".to_string(),
+                format!("$f = {}", quote_powershell(file)),
+                format!("$p = {}", quote_powershell(parent)),
+                "if (Test-Path -LiteralPath $f -PathType Container) { Write-Output 'EISDIR'; exit 1 }".to_string(),
+                "if (-not (Test-Path -LiteralPath $p -PathType Container)) { Write-Output 'ENOENT'; exit 1 }".to_string(),
+                "$ms = New-Object IO.MemoryStream".to_string(),
+                // 每行独立的 base64（transfer.rs 的 Base64LineEncoder），ReadLine 到 EOF 给 $null
+                "while ($null -ne ($line = [Console]::In.ReadLine())) { \
+                 if ($line.Length -gt 0) { $b = [Convert]::FromBase64String($line); $ms.Write($b, 0, $b.Length) } }"
+                    .to_string(),
+                format!("if ($ms.Length -ne {size}) {{ Write-Output 'ESHORT'; exit 1 }}"),
+                // Truncate 而不是 Create：CREATE_ALWAYS 会清掉隐藏 / 系统属性，碰上隐藏文件还直接拒绝
+                "if (Test-Path -LiteralPath $f) { $m = [IO.FileMode]::Truncate } else { $m = [IO.FileMode]::CreateNew }"
+                    .to_string(),
+                "$fs = [IO.File]::Open($f, $m, [IO.FileAccess]::Write)".to_string(),
+                "try { $ms.WriteTo($fs) } finally { $fs.Close() }".to_string(),
+            ]
+            .join("; "),
+        );
     }
+    [
+        format!("f={}", quote_posix(file)),
+        format!("p={}", quote_posix(parent)),
+        r#"if [ -d "$f" ]; then printf '%s\n' EISDIR; exit 1; fi"#.to_string(),
+        r#"if [ ! -d "$p" ]; then printf '%s\n' ENOENT; exit 1; fi"#.to_string(),
+        r#"if [ -e "$f" ] && [ ! -w "$f" ]; then printf '%s\n' EACCES; exit 1; fi"#.to_string(),
+        r#"t=$(mktemp "${TMPDIR:-/tmp}/falcon-save.XXXXXX") || exit 1"#.to_string(),
+        r#"cat > "$t" || { rm -f "$t"; exit 1; }"#.to_string(),
+        r#"n=$(wc -c < "$t" | tr -d ' ')"#.to_string(),
+        format!(r#"if [ "$n" -ne {size} ]; then rm -f "$t"; printf '%s\n' ESHORT; exit 1; fi"#),
+        r#"cat "$t" > "$f" || { rm -f "$t"; exit 1; }"#.to_string(),
+        r#"rm -f "$t""#.to_string(),
+    ]
+    .join("; ")
 }
 
 // ---------------- 改目录（mkdir / rename / remove） ----------------
@@ -844,12 +925,19 @@ pub type ExecChannel = russh::Channel<russh::client::Msg>;
 /// 正式实现是 [`SshLink`]；测试里用一个经本机 sh 跑命令的假远端，把远端脚本也跑一遍。
 pub trait RemoteHost: Exec {
     fn exec_stream<'a>(&'a self, command_line: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>>;
+    /// 同 exec，但把 `input` 写进命令的 stdin、写完即 EOF（写回编辑过的文本：内容已经整份
+    /// 在内存里，用不着流式通道）
+    fn exec_with_input<'a>(&'a self, command_line: &'a str, input: &'a [u8]) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>>;
 }
 
 impl RemoteHost for SshLink {
     fn exec_stream<'a>(&'a self, command_line: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
         // 不要 pty：下载 / 上传要的是原样的字节流，pty 会把 \n 改成 \r\n、把 stderr 并进来
         Box::pin(SshLink::exec_stream(self, command_line, false))
+    }
+
+    fn exec_with_input<'a>(&'a self, command_line: &'a str, input: &'a [u8]) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>> {
+        Box::pin(SshLink::exec_with_input(self, command_line, input))
     }
 }
 
@@ -1056,6 +1144,83 @@ pub async fn read_workspace_file(host: &FileHost<'_>, root: &str, rel: &str) -> 
     let cap = if image_mime_of(name).is_some() { 0 } else { WORKSPACE_FILE_CAP };
     let (name, read) = read_workspace_bytes(host, root, rel, cap).await?;
     Ok(classify(&name, read.size, &read.bytes))
+}
+
+// ---------------- 写回文本（运行时） ----------------
+
+/// 把查看窗口里编辑过的内容写回工作目录里的一个文件，返回新的内容版本。
+///
+/// `base` 是打开时拿到的内容版本（[`content_version`]）：给了就先读一遍现在的内容比对，
+/// 对不上报 [`FileError::Changed`] / [`FileError::Gone`]（路由回 409，前端问过用户再不带
+/// `base` 重发 = 覆盖）。比对与写入之间隔着一次往返，不是原子的比较并交换——它挡的是
+/// "窗口开着的这几分钟里别人改了文件"，不是同一毫秒里的并发写。
+///
+/// 写法见 [`save_command`]：先收满、再原地覆盖，保住权限位 / 属主 / 链接。
+pub async fn save_workspace_file(
+    host: &FileHost<'_>,
+    root: &str,
+    rel: &str,
+    bytes: &[u8],
+    base: Option<&str>,
+) -> Result<String, FileError> {
+    let kind = host.kind();
+    if rel_segments(Some(rel))?.is_empty() {
+        return Err(FileError::InvalidPath);
+    }
+    let file = resolve_inside(kind, root, Some(rel))?;
+    if let Some(base) = base {
+        let read = match read_workspace_bytes(host, root, rel, WORKSPACE_FILE_CAP).await {
+            Ok((_, read)) => read,
+            Err(FileError::NotFound) => return Err(FileError::Gone),
+            Err(e) => return Err(e),
+        };
+        // 长过查看上限的读回来是截断的，哈希必然对不上——打开时它还在上限以内，那就是被改过了
+        if read.size != read.bytes.len() as u64 || content_version(&read.bytes) != base {
+            return Err(FileError::Changed);
+        }
+    }
+    let version = content_version(bytes);
+    let FileHost::Remote { remote, .. } = *host else {
+        let bytes = bytes.to_vec();
+        blocking(move || save_local(&file, &bytes)).await?;
+        return Ok(version);
+    };
+    let parent = dirname_of(kind, &file);
+    let cmd = save_command(kind, &file, &parent, bytes.len() as u64);
+    let input = if kind == HostKind::Windows {
+        // Windows 的 OpenSSH 按代码页改写通道上的字节，与上传同样改走 base64 行
+        let mut enc = crate::transfer::Base64LineEncoder::new();
+        let mut out = enc.feed(bytes);
+        out.extend(enc.finish());
+        out
+    } else {
+        bytes.to_vec()
+    };
+    let res = tokio::time::timeout(SAVE_TIMEOUT, remote.exec_with_input(&cmd, &input))
+        .await
+        .map_err(|_| FileError::Other("写入超时".to_string()))?
+        .map_err(|e| FileError::Other(format!("SSH 连接失败：{e:#}")))?;
+    if !res.ok() {
+        if first_line(js_trim(&res.stdout)) == "ESHORT" {
+            return Err(FileError::ShortWrite);
+        }
+        return Err(remote_failure(&res, "写入失败"));
+    }
+    Ok(version)
+}
+
+/// 本机：原地覆盖（理由同 [`save_command`]）。内容整份在内存里，一次 write_all，用不着临时文件
+fn save_local(file: &str, bytes: &[u8]) -> Result<(), FileError> {
+    if std::fs::metadata(file).is_ok_and(|m| m.is_dir()) {
+        return Err(FileError::IsDir);
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(file)
+        .map_err(|e| local_error(&e, format!("写入失败：{e}")))?;
+    f.write_all(bytes).map_err(|e| local_error(&e, format!("写入失败：{e}")))
 }
 
 // ---------------- 改目录（运行时） ----------------
@@ -1526,6 +1691,16 @@ mod tests {
         let cut = classify("big.log", 999_999, b"head");
         assert!(matches!(cut, FilePreview::Text { truncated: true, .. }));
 
+        // 能原样写回的文本才带版本：截断的、不是合法 UTF-8 的（显示的是替换过 U+FFFD 的）都没有
+        assert!(matches!(text, FilePreview::Text { version: Some(ref v), .. } if *v == content_version(b"hello")));
+        assert!(matches!(cut, FilePreview::Text { version: None, .. }));
+        let gbk = classify("gbk.txt", 4, &[0xc4, 0xe3, 0xba, 0xc3]);
+        assert!(matches!(gbk, FilePreview::Text { version: None, truncated: false, .. }));
+        assert_eq!(
+            content_version(b"hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+
         // 超过原始字节上限的图片客户端取不到，只报大小
         let huge = classify("big.png", 99_000_000, &[]);
         assert!(matches!(huge, FilePreview::TooLarge { .. }));
@@ -1548,6 +1723,23 @@ mod tests {
         // 只有 image/* 才走图片预览；html / svg 的区分就在这里
         assert_eq!(image_mime_of("logo.svg"), Some("image/svg+xml"));
         assert_eq!(image_mime_of("index.html"), None);
+    }
+
+    /// 写回：先收进临时文件、比字节数，再原地覆盖目标（不改名：保住权限位与链接）
+    #[test]
+    fn save_command_buffers_then_overwrites_in_place() {
+        let posix = save_command(POSIX, "/repo/run.sh", "/repo", 12);
+        assert!(posix.contains(r#"t=$(mktemp "${TMPDIR:-/tmp}/falcon-save.XXXXXX")"#));
+        assert!(posix.contains(r#"if [ "$n" -ne 12 ]; then rm -f "$t"; printf '%s\n' ESHORT"#));
+        assert!(posix.contains(r#"cat "$t" > "$f""#));
+        assert!(!posix.contains("mv "), "改名会换掉 inode");
+
+        let script = decode(&save_command(WINDOWS, "C:\\repo\\a.ts", "C:\\repo", 7));
+        assert!(script.contains("$f = 'C:\\repo\\a.ts'"));
+        assert!(script.contains("FromBase64String"));
+        assert!(script.contains("if ($ms.Length -ne 7) { Write-Output 'ESHORT'; exit 1 }"));
+        assert!(script.contains("[IO.FileMode]::Truncate"));
+        assert!(!script.contains("Move-Item"));
     }
 
     /// readCommand cap 0 是合法的空读：只取大小
@@ -1755,6 +1947,25 @@ pub(crate) mod runtime_tests {
         fn exec_stream<'a>(&'a self, _: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
             Box::pin(async { anyhow::bail!("测试里没有 SSH 通道") })
         }
+
+        fn exec_with_input<'a>(&'a self, command_line: &'a str, input: &'a [u8]) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>> {
+            Box::pin(async move {
+                use std::process::Stdio;
+                use tokio::io::AsyncWriteExt as _;
+                let mut cmd = crate::exec::shell_command(command_line);
+                cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+                let mut child = cmd.spawn()?;
+                let mut stdin = child.stdin.take().expect("stdin 是 piped");
+                stdin.write_all(input).await?;
+                drop(stdin);
+                let out = child.wait_with_output().await?;
+                Ok(ExecResult {
+                    code: out.status.code(),
+                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                })
+            })
+        }
     }
 
     /// 链路坏掉的远端：exec 本身起不来
@@ -1829,7 +2040,12 @@ pub(crate) mod runtime_tests {
         for host in [LOCAL, REMOTE] {
             assert_eq!(
                 read_workspace_file(&host, &root, "t.txt").await.unwrap(),
-                FilePreview::Text { text: "你好\n".into(), size: 7, truncated: false }
+                FilePreview::Text {
+                    text: "你好\n".into(),
+                    size: 7,
+                    truncated: false,
+                    version: Some(content_version("你好\n".as_bytes()))
+                }
             );
             assert_eq!(read_workspace_file(&host, &root, "bin.dat").await.unwrap(), FilePreview::Binary { size: 4 });
             assert_eq!(
@@ -1845,6 +2061,57 @@ pub(crate) mod runtime_tests {
         std::fs::create_dir(Path::new(&root).join("d")).unwrap();
         assert_eq!(read_workspace_file(&LOCAL, &root, "d").await.unwrap_err(), FileError::IsDir);
         assert_eq!(read_workspace_file(&REMOTE, &root, "d").await.unwrap_err(), FileError::IsDir);
+    }
+
+    #[tokio::test]
+    async fn save_local_and_remote() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for host in [LOCAL, REMOTE] {
+            let (_dir, root) = tmp();
+            let at = |rel: &str| Path::new(&root).join(rel);
+            write(&root, "run.sh", "echo 1\n");
+            std::fs::set_permissions(at("run.sh"), std::fs::Permissions::from_mode(0o751)).unwrap();
+            let FilePreview::Text { version: Some(v1), .. } = read_workspace_file(&host, &root, "run.sh").await.unwrap() else {
+                panic!("能编辑的文本要带版本");
+            };
+            let v2 = save_workspace_file(&host, &root, "run.sh", b"echo 2\n", Some(&v1)).await.unwrap();
+            assert_eq!(v2, content_version(b"echo 2\n"));
+            assert_eq!(std::fs::read_to_string(at("run.sh")).unwrap(), "echo 2\n");
+            // 原地覆盖：脚本的 +x 还在
+            assert_eq!(std::fs::metadata(at("run.sh")).unwrap().permissions().mode() & 0o777, 0o751);
+
+            // 拿着打开时的旧版本再存：文件已经变了，不写
+            let err = save_workspace_file(&host, &root, "run.sh", b"x", Some(&v1)).await.unwrap_err();
+            assert_eq!(err, FileError::Changed);
+            assert_eq!(std::fs::read_to_string(at("run.sh")).unwrap(), "echo 2\n");
+            // 不带版本 = 覆盖；清空也是一种内容
+            save_workspace_file(&host, &root, "run.sh", b"", None).await.unwrap();
+            assert_eq!(std::fs::read(at("run.sh")).unwrap(), b"");
+
+            // 符号链接：写进它指向的文件，链接还是链接
+            write(&root, "real.txt", "a");
+            std::os::unix::fs::symlink("real.txt", at("link.txt")).unwrap();
+            let body = "中文\r\n".as_bytes();
+            save_workspace_file(&host, &root, "link.txt", body, Some(&content_version(b"a"))).await.unwrap();
+            assert_eq!(std::fs::read(at("real.txt")).unwrap(), body);
+            assert!(std::fs::symlink_metadata(at("link.txt")).unwrap().file_type().is_symlink());
+
+            // 带着版本却找不到文件；不带版本则把它写回来
+            let err = save_workspace_file(&host, &root, "gone.txt", b"x", Some(&v1)).await.unwrap_err();
+            assert_eq!(err, FileError::Gone);
+            save_workspace_file(&host, &root, "gone.txt", b"x", None).await.unwrap();
+            assert_eq!(std::fs::read(at("gone.txt")).unwrap(), b"x");
+
+            let err = save_workspace_file(&host, &root, "no/such.txt", b"x", None).await.unwrap_err();
+            assert_eq!(err, FileError::NotFound);
+            std::fs::create_dir(at("d")).unwrap();
+            assert_eq!(save_workspace_file(&host, &root, "d", b"x", None).await.unwrap_err(), FileError::IsDir);
+            assert_eq!(save_workspace_file(&host, &root, "../x", b"x", None).await.unwrap_err(), FileError::InvalidPath);
+            assert_eq!(save_workspace_file(&host, &root, "", b"x", None).await.unwrap_err(), FileError::InvalidPath);
+        }
+        let host = FileHost::Remote { kind: HostKind::Posix, remote: &DeadRemote };
+        let err = save_workspace_file(&host, "/r", "a", b"x", None).await.unwrap_err();
+        assert_eq!(err.to_string(), "SSH 连接失败：连接被拒绝");
     }
 
     #[tokio::test]
@@ -1900,6 +2167,10 @@ pub(crate) mod runtime_tests {
 
     impl RemoteHost for DeadRemote {
         fn exec_stream<'a>(&'a self, _: &'a str) -> LocalBoxFuture<'a, anyhow::Result<ExecChannel>> {
+            Box::pin(async { anyhow::bail!("连接被拒绝") })
+        }
+
+        fn exec_with_input<'a>(&'a self, _: &'a str, _: &'a [u8]) -> LocalBoxFuture<'a, anyhow::Result<ExecResult>> {
             Box::pin(async { anyhow::bail!("连接被拒绝") })
         }
     }

@@ -60,6 +60,50 @@ pub fn open_server_window(profile: ServerProfile, cx: &mut App) {
     }
 }
 
+/// ⌘Q / 菜单里的退出。哪扇窗口的文件窗口里还有没存的修改，就把它提到前面问一句（会话都在
+/// 服务端，退出本身不丢东西，丢的只有编辑器里这一份）。Dock 上的「退出」与关机走系统那条路，拦不住。
+///
+/// 推迟到这一轮分派之后再查：按键 / 菜单的动作是在窗口的 update 里分派的，那扇窗口这时被借出去了，
+/// 读它的根视图会失败——当场查就把正有修改的那扇漏掉，直接退了
+pub fn quit(cx: &mut App) {
+    cx.defer(quit_now);
+}
+
+fn quit_now(cx: &mut App) {
+    let dirty = cx.windows().into_iter().find_map(|handle| {
+        let root = handle.downcast::<Root>()?;
+        let view = root.read(cx).ok()?.view().clone().downcast::<ServerWindow>().ok()?;
+        let name = view.read(cx).ws.read(cx).dirty_file_name()?;
+        Some((handle, name))
+    });
+    let Some((handle, name)) = dirty else {
+        cx.quit();
+        return;
+    };
+    // 用 AnyWindowHandle 进窗口：WindowHandle<Root> 的 update 会把 Root 借走，开对话框又要读它
+    handle.update(cx, |_, window, cx| {
+        window.activate_window();
+        dialogs::confirm(
+            unsaved_opts(&name, t!("native.files.quitAnyway").to_string()),
+            |_, cx| cx.quit(),
+            window,
+            cx,
+        );
+    })
+    .ok();
+}
+
+fn unsaved_opts(name: &str, confirm_label: String) -> dialogs::ConfirmOpts {
+    dialogs::ConfirmOpts {
+        title: t!("files.discardTitle").to_string(),
+        body: t!("files.discardBody", name = name).to_string(),
+        list: Vec::new(),
+        footnote: None,
+        confirm_label,
+        danger: true,
+    }
+}
+
 fn window_title(profile: &ServerProfile, cx: &App) -> String {
     if profile.is_local() {
         "Falcon".to_string()
@@ -141,6 +185,24 @@ impl ServerWindow {
         ws.update(cx, |w, _| {
             w.window_active = active;
             w.window_visible = visible;
+        });
+        // 关窗口（红灯 / Alt+F4）时文件窗口里还有没存的修改：先问。确认了才真关
+        let ws_weak = ws.downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(name) = ws_weak.upgrade().and_then(|ws| ws.read(cx).dirty_file_name()) else {
+                return true;
+            };
+            let ws_weak = ws_weak.clone();
+            dialogs::confirm(
+                unsaved_opts(&name, t!("native.files.closeAnyway").to_string()),
+                move |window, cx| {
+                    ws_weak.update(cx, |w, _| w.set_file_dirty(false)).ok();
+                    window.remove_window();
+                },
+                window,
+                cx,
+            );
+            false
         });
 
         // 本机服务先确认起来了再初始化（launchd 拉起服务要时间）；远处的直接连。

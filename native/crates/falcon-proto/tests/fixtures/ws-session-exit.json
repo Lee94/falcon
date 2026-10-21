@@ -4,6 +4,12 @@
     "state": "active"
   },
   {
+    "type": "size",
+    "cols": 100,
+    "rows": 30,
+    "owner": true
+  },
+  {
     "type": "state",
     "state": "dead",
     "deadReason": "exited"

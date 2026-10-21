@@ -1,13 +1,13 @@
 {
-  "id": "a1ce4539-64a8-47a7-87ec-795608f7d1bc",
+  "id": "d2eecf0a-bd76-4660-bb00-e7b517c5f9df",
   "name": "feat/fixture",
   "type": "local",
   "workingDir": "/private/tmp/fal-fx-repo-feat-fixture",
   "worktree": {
-    "sourceProjectId": "bdcae325-9b23-43f0-b1d2-97a1a0c24a84",
+    "sourceProjectId": "0988cb7c-bb33-4b29-8769-6485d1da1b5b",
     "branch": "feat/fixture",
     "repoDir": "/private/tmp/fal-fx-repo",
     "createdByFalcon": true
   },
-  "createdAt": 1791898279598
+  "createdAt": 1792463500807
 }
