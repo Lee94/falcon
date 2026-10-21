@@ -7,6 +7,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use falcon_client::MoveProjectInput;
 use falcon_core::layout::DropSpot;
 use falcon_core::pane_key::{self, PaneItem};
 use falcon_proto::{GitFileChange, SessionAgent, SessionState};
@@ -388,6 +389,31 @@ impl Workspace {
     pub fn toggle_show_archived(&mut self, cx: &mut Context<Self>) {
         self.state.toggle_show_archived();
         self.commit(false, cx);
+    }
+
+    /// 侧栏拖拽排序：先在本地挪（松手就看得到），再落到服务端，服务端回的整份列表覆盖本地那份。
+    /// 失败就提示并重新拉一次，乐观挪过的作废。挪的规则与服务端是同一个函数（`move_in_order`）
+    pub fn move_project(&mut self, id: &str, target: &str, after: bool, cx: &mut Context<Self>) {
+        let Some(order) = falcon_core::project_tree::move_in_order(&self.projects, |p| p.id.as_str(), id, target, after)
+        else {
+            return;
+        };
+        self.projects = order;
+        cx.notify();
+        let request = self.client.move_project(id, &MoveProjectInput { target: target.to_string(), after });
+        cx.spawn(async move |this, cx| {
+            let result = request.await;
+            this.update(cx, |this, cx| match result {
+                Ok(projects) => this.set_projects(projects, cx),
+                Err(err) => {
+                    this.handle_error(&err, cx);
+                    this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
+                    this.refresh_projects(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn set_multi_repo(&mut self, project_id: &str, dir: &str, cx: &mut Context<Self>) {

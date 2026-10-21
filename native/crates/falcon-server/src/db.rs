@@ -433,6 +433,9 @@ impl Db {
             add_column(&conn, "projects", "multi_repos", "TEXT")?;
             // 源项目的派生基点。空 = HEAD。不是 worktree 四列那种删除护栏，用户可改。
             add_column(&conn, "projects", "default_worktree_branch", "TEXT")?;
+            // 侧栏的拖拽排序（全局一条，侧栏按服务器分组时保留相对顺序）。空 = 没排过，按创建时间
+            // 排在排过的后面——新建的项目自然落在末尾；挪一次就把所有行重编成 0..n
+            add_column(&conn, "projects", "sort_order", "INTEGER")?;
 
             // 中转（端口转发 + 公网发布）挂在机器上，不挂项目（ADR 0016）：
             // host_forwards.host_id 是已保存的 SSH Host，host_shares.host_id 为 null 表示后端本机。
@@ -754,8 +757,33 @@ impl Db {
         }
     }
 
+    /// 侧栏照这个顺序摆（见 `sort_order` 列的注释）。created_at 撞了（批量派生同一毫秒）再按
+    /// rowid，免得两次列出来顺序不一样
     pub fn list_projects(&self) -> Vec<ProjectRow> {
-        self.query_all("SELECT * FROM projects ORDER BY created_at ASC", [], project_from_row)
+        self.query_all(
+            "SELECT * FROM projects ORDER BY sort_order IS NULL, sort_order ASC, created_at ASC, rowid ASC",
+            [],
+            project_from_row,
+        )
+    }
+
+    /// 拖拽排序落库：按 `ids` 的先后把 sort_order 重编成 0..n。一个事务里写完，别让别的请求
+    /// 读到排了一半的顺序。`ids` 是调用方刚列出来的全量，漏掉的只会是读写之间别处新建的那条——
+    /// 它的 sort_order 是空，照样排在末尾
+    pub fn set_project_order(&self, ids: &[String]) {
+        let mut conn = self.lock();
+        let result = conn.transaction().and_then(|tx| {
+            {
+                let mut stmt = tx.prepare_cached("UPDATE projects SET sort_order = ? WHERE id = ?")?;
+                for (i, id) in ids.iter().enumerate() {
+                    stmt.execute(params![i as i64, id])?;
+                }
+            }
+            tx.commit()
+        });
+        if let Err(e) = result {
+            log::error!("项目排序写入失败：{e}");
+        }
     }
 
     pub fn get_project(&self, id: &str) -> Option<ProjectRow> {
@@ -1441,6 +1469,20 @@ mod tests {
         let id = db.instance_id();
         assert_eq!(id.len(), 36);
         assert_eq!(db.instance_id(), id);
+    }
+
+    #[test]
+    fn project_order_falls_back_to_creation_time() {
+        let (_d, db) = tmp_db();
+        for (id, at) in [("a", 3), ("b", 1), ("c", 2)] {
+            db.insert_project(&ProjectRow { id: id.into(), created_at: at, ..project_row() });
+        }
+        let ids = |db: &Db| db.list_projects().into_iter().map(|p| p.id).collect::<Vec<_>>();
+        assert_eq!(ids(&db), ["b", "c", "a"]);
+        db.set_project_order(&["a".into(), "b".into(), "c".into()]);
+        // 排过之后新建的（sort_order 为空）落在末尾，哪怕创建时间更早
+        db.insert_project(&ProjectRow { id: "d".into(), created_at: 0, ..project_row() });
+        assert_eq!(ids(&db), ["a", "b", "c", "d"]);
     }
 
     #[test]

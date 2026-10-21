@@ -23,7 +23,7 @@ use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Context, CursorStyle, Div, ElementId, Entity,
-    EventEmitter, FontWeight, IntoElement, Render, ScrollHandle, SharedString, Stateful, WeakEntity,
+    EventEmitter, FontWeight, IntoElement, ScrollHandle, SharedString, Stateful, WeakEntity,
     Window, div,
 };
 use rust_i18n::t;
@@ -31,7 +31,7 @@ use rust_i18n::t;
 use super::MeeglePanel;
 use super::widgets::{icon_button, tiny_button};
 use crate::menus::{MenuItemSpec, to_popup};
-use crate::theme::{Ui, radius};
+use crate::theme::Ui;
 use crate::ui::icon;
 use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
@@ -167,39 +167,13 @@ fn copy_context(ctx: &Ctx, space_key: &str, id: &str, cx: &mut App) {
 // ---------------- 拖拽 ----------------
 // React 版的 meegleDrag 走私有 MIME；这里是 GPUI 的类型化载荷
 
-/// 拖动时跟着指针的小标签。落点只认 [`MeegleWorkItemDragPayload`] 这个类型，标签只是给人看的
-pub(super) struct DragPreview {
-    label: SharedString,
-}
-
-impl Render for DragPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ui = Ui::global(cx);
-        div()
-            .max_w(zpx(260.))
-            .px_2()
-            .py_1()
-            .rounded(radius::SM)
-            .bg(ui.popover)
-            .text_color(ui.popover_foreground)
-            .border_1()
-            .border_color(ui.border)
-            .shadow_md()
-            .text_size(zpx(12.))
-            .truncate()
-            .child(self.label.clone())
-    }
-}
-
-/// 标识符合法才可拖（它们之后会原样进 CLI 的 argv），拖出去的是 `MeegleWorkItemDragPayload`
+/// 标识符合法才可拖（它们之后会原样进 CLI 的 argv），拖出去的是 `MeegleWorkItemDragPayload`；
+/// 跟着指针的是 [`crate::ui::DragLabel`]，落点只认载荷的类型
 pub(super) fn draggable<E: StatefulInteractiveElement>(el: E, space_key: &str, id: &str, label: String) -> E {
     match MeegleWorkItemDragPayload::new(id, space_key) {
         Some(payload) => {
             let label: SharedString = label.into();
-            el.on_drag(payload, move |_, _, _, cx| {
-                let label = label.clone();
-                cx.new(|_| DragPreview { label })
-            })
+            el.on_drag(payload, move |_, _, _, cx| crate::ui::DragLabel::new(label.clone(), cx))
         }
         None => el,
     }

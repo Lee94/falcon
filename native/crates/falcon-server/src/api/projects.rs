@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/projects", get(list).post(create))
         .route("/api/projects/{id}", axum::routing::put(update).delete(remove))
+        .route("/api/projects/{id}/move", axum::routing::post(move_project))
 }
 
 /// 成员仓库清单的校验 + 归一化。Ok(None) 表示请求里没带（不是多仓库容器 /
@@ -297,6 +298,35 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     Ok(Json(Db::to_project(&row)))
 }
 
+/// `POST /api/projects/:id/move { target, after }`：侧栏拖拽排序，把它挪到 target 的前面 / 后面
+/// （`after` 按 JS 真值取）。回的是挪完的整份列表，客户端拿它覆盖乐观更新的那份。
+///
+/// 只认"挪到谁旁边"而不收整份顺序：两个客户端各自拿着旧列表排，后到的那次不会把先到的那次
+/// 改过的别的项目又挪回去。跨服务器分组挪不挡：组是界面按类型 / 主机分的，全局顺序里挨着谁
+/// 都不改变项目属于哪一组，只是组内看不出变化
+async fn move_project(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Vec<Project>>> {
+    let input = &body.0;
+    let target = str_field(input, "target").unwrap_or_default();
+    let rows = state.db.list_projects();
+    if !rows.iter().any(|p| p.id == id) {
+        return Err(ApiError::not_found("项目不存在"));
+    }
+    if !rows.iter().any(|p| p.id == target) {
+        return Err(ApiError::bad_request("目标项目不存在"));
+    }
+    let ids: Vec<String> = rows.iter().map(|p| p.id.clone()).collect();
+    let after = truthy(field(input, "after"));
+    let rows = match falcon_core::project_tree::move_in_order(&ids, String::as_str, &id, target, after) {
+        Some(order) => {
+            state.db.set_project_order(&order);
+            state.db.list_projects()
+        }
+        // 挪到自己旁边 / 本来就挨着：什么都不写，照样回整份列表
+        None => rows,
+    };
+    Ok(Json(rows.iter().map(Db::to_project).collect()))
+}
+
 #[derive(serde::Deserialize)]
 struct DeleteQuery {
     force: Option<String>,
@@ -382,4 +412,42 @@ async fn remove(
         .await;
     let warnings = res.map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(DeleteProjectResult { ok: true, warnings: (!warnings.is_empty()).then_some(warnings) }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{TestApp, json_of};
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
+
+    fn ids(body: &Value) -> Vec<&str> {
+        body.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect()
+    }
+
+    #[tokio::test]
+    async fn move_project_reorders_and_returns_the_list() {
+        let app = TestApp::new();
+        for id in ["a", "b", "c"] {
+            app.local_project(id);
+        }
+        let mv = |id: &'static str, body: Value| {
+            let app = &app;
+            async move { json_of(app.post_json(&format!("/api/projects/{id}/move"), body).await).await }
+        };
+        let (status, body) = mv("c", json!({ "target": "a" })).await;
+        assert_eq!((status, ids(&body)), (StatusCode::OK, vec!["c", "a", "b"]));
+        let (status, body) = mv("c", json!({ "target": "b", "after": true })).await;
+        assert_eq!((status, ids(&body)), (StatusCode::OK, vec!["a", "b", "c"]));
+        // 列表接口照同一个顺序
+        let (_, body) = json_of(app.get("/api/projects").await).await;
+        assert_eq!(ids(&body), ["a", "b", "c"]);
+        // 本来就挨着：原样回
+        let (status, body) = mv("a", json!({ "target": "b" })).await;
+        assert_eq!((status, ids(&body)), (StatusCode::OK, vec!["a", "b", "c"]));
+
+        let (status, body) = mv("x", json!({ "target": "a" })).await;
+        assert_eq!((status, body), (StatusCode::NOT_FOUND, json!({ "error": "项目不存在" })));
+        let (status, body) = mv("a", json!({})).await;
+        assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({ "error": "目标项目不存在" })));
+    }
 }

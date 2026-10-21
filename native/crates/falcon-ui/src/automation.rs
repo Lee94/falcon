@@ -22,7 +22,8 @@
 //! | `mods:[<修饰键>]` | 修饰键变成这样（指针不动；空 = 全松开） |
 //! | `link:<x>,<y>` | 打印活动终端里该点的链接（不打开；没有链接算步骤失败） |
 //! | `scroll:<x>,<y>,<dx>,<dy>` | 在该点滚一次像素滚轮（dy 为负往下翻） |
-//! | `drag:<x1>,<y1>,<x2>,<y2>` | 左键按住从 1 拖到 2（中间插 8 个移动事件） |
+//! | `drag:<x1>,<y1>,<x2>,<y2>[,hold]` | 左键按住从 1 拖到 2（中间插 8 个移动事件）；带 `hold` 时停在 2 不松手（截拖动中的落点提示） |
+//! | `release:<x>,<y>` | 在该点松开左键（接 `drag:…,hold`） |
 //! | `frames:<ms>[:refresh]` | 按 60Hz 手动画这么久（锁屏时模拟显示链路，压测要算上渲染开销），打印 p50 / p95 / 最慢；带 `:refresh` 时每帧无视视图缓存 |
 //! | `toast:<文本>` | 弹一条通知（验证通知层与对话框的上下关系） |
 //! | `snap:<路径.png>` | 截图（Metal 回读，锁屏也能拿到） |
@@ -279,6 +280,7 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
             if v.len() != 4 {
                 return Err("drag 要 x1,y1,x2,y2".into());
             }
+            let hold = arg.split(',').nth(4).is_some_and(|x| x.trim() == "hold");
             let (a, b) = (Point::new(px(v[0]), px(v[1])), Point::new(px(v[2]), px(v[3])));
             let m = Modifiers::default();
             let _ = window.update(cx, |_, window, cx| {
@@ -299,9 +301,20 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                 });
                 cx.background_executor().timer(Duration::from_millis(16)).await;
             }
+            if !hold {
+                let _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: b, modifiers: m, click_count: 1 }),
+                        cx,
+                    );
+                });
+            }
+        }
+        "release" => {
+            let p = point(arg).ok_or("release 要 x,y")?;
             let _ = window.update(cx, |_, window, cx| {
                 window.dispatch_event(
-                    PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: b, modifiers: m, click_count: 1 }),
+                    PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: p, modifiers: Modifiers::default(), click_count: 1 }),
                     cx,
                 );
             });

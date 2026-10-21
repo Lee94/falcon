@@ -46,6 +46,13 @@ pub struct HostAuthorizationPatch {
     pub authorized: Option<bool>,
 }
 
+/// `POST /api/projects/:id/move` 的请求体：挪到 `target` 的前面（`after = false`）或后面
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct MoveProjectInput {
+    pub target: String,
+    pub after: bool,
+}
+
 impl FalconClient {
     pub fn list_projects(&self) -> impl Future<Output = ApiResult<Vec<Project>>> + MaybeSend + 'static {
         self.get("/api/projects".to_owned())
@@ -62,6 +69,15 @@ impl FalconClient {
         input: &ProjectInput,
     ) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
         self.json(Method::PUT, format!("/api/projects/{}", seg(id)), json_body(input))
+    }
+
+    /// 侧栏拖拽排序。回的是挪完的整份列表（与 [`Self::list_projects`] 同一个顺序）；目标不在是 400
+    pub fn move_project(
+        &self,
+        id: &str,
+        input: &MoveProjectInput,
+    ) -> impl Future<Output = ApiResult<Vec<Project>>> + MaybeSend + 'static {
+        self.json(Method::POST, format!("/api/projects/{}/move", seg(id)), json_body(input))
     }
 
     /// `DELETE /api/projects/:id?force=<bool>`，连坐它的附属项目。

@@ -8,8 +8,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Div, ElementId, Hsla, IntoElement, Pixels, SharedString, Stateful, Transformation,
-    Window, div, hsla, percentage,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Hsla, IntoElement, Pixels, Render, SharedString,
+    Stateful, Transformation, Window, div, hsla, percentage,
 };
 
 use crate::theme::{Ui, radius};
@@ -32,6 +32,36 @@ pub fn sunken(cx: &App) -> Div {
 
 pub fn icon(name: IconName) -> Icon {
     Icon::new(name)
+}
+
+/// 拖动时跟着指针的小标签（飞书工作项、侧栏的项目）。落点只认载荷的类型，标签只是给人看的
+pub struct DragLabel {
+    label: SharedString,
+}
+
+impl DragLabel {
+    pub fn new(label: SharedString, cx: &mut App) -> Entity<Self> {
+        cx.new(|_| DragLabel { label })
+    }
+}
+
+impl Render for DragLabel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = Ui::global(cx);
+        div()
+            .max_w(zpx(260.))
+            .px_2()
+            .py_1()
+            .rounded(radius::SM)
+            .bg(ui.popover)
+            .text_color(ui.popover_foreground)
+            .border_1()
+            .border_color(ui.border)
+            .shadow_md()
+            .text_size(zpx(12.))
+            .truncate()
+            .child(self.label.clone())
+    }
 }
 
 /// 小号图标按钮：hover 灰、按下 / 选中用 tint（"当前选中"用 tint，hover 用灰）

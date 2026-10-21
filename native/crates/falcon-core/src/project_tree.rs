@@ -170,12 +170,81 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
     servers
 }
 
+/// 侧栏拖拽排序：把 `id` 挪到 `target` 的前面（`after = false`）或后面，其余的相对顺序不动。
+///
+/// 顺序是全局一条（服务端 `projects.sort_order`），侧栏按服务器分组时保留相对顺序，所以在
+/// 全局列表里挪到 target 旁边，组内看就是挪到了 target 旁边；附属项目挂在源项目下面、不看全局
+/// 位置，跟着走不用管。服务端落库与客户端的乐观更新都走这一个函数，两边挪出来的才一样。
+///
+/// 两个都得在、且不是同一个，否则 None；挪完和原来一样（本来就挨着）也是 None——调用方据此
+/// 省掉一次请求
+pub fn move_in_order<T: Clone>(items: &[T], key: impl Fn(&T) -> &str, id: &str, target: &str, after: bool) -> Option<Vec<T>> {
+    if id == target {
+        return None;
+    }
+    let from = items.iter().position(|x| key(x) == id)?;
+    let mut out = items.to_vec();
+    let moved = out.remove(from);
+    let at = out.iter().position(|x| key(x) == target)? + usize::from(after);
+    out.insert(at, moved);
+    let unchanged = out.iter().zip(items).all(|(a, b)| key(a) == key(b));
+    (!unchanged).then_some(out)
+}
+
+/// 侧栏拖拽的落点：组里第 `from` 个放到第 `at` 个的前面 / 后面等于没动（放到自己身上、紧挨着的
+/// 上一个后面、紧挨着的下一个前面）。这些落点不画提示线、也不接——与 [`move_in_order`] 回 None
+/// 的情形对得上，落点那边只有组内下标，不用再拿整份列表算一遍
+pub fn lands_in_place(from: usize, at: usize, after: bool) -> bool {
+    from == at || if after { from == at + 1 } else { from + 1 == at }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn p(json: &str) -> Project {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn move_in_order_places_beside_target() {
+        let ids = ["a", "b", "c", "d"];
+        let mv = |id, target, after| move_in_order(&ids, |s| s, id, target, after);
+        assert_eq!(mv("d", "a", false).as_deref(), Some(&["d", "a", "b", "c"][..]));
+        assert_eq!(mv("a", "c", true).as_deref(), Some(&["b", "c", "a", "d"][..]));
+        assert_eq!(mv("a", "c", false).as_deref(), Some(&["b", "a", "c", "d"][..]));
+        assert_eq!(mv("c", "a", true).as_deref(), Some(&["a", "c", "b", "d"][..]));
+        // 本来就挨着：放到下一个的前面 / 上一个的后面都是原样
+        assert_eq!(mv("a", "b", false), None);
+        assert_eq!(mv("b", "a", true), None);
+        assert_eq!(mv("a", "a", true), None);
+        assert_eq!(mv("x", "a", true), None);
+        assert_eq!(mv("a", "x", true), None);
+
+        // 落点那边的判定与 move_in_order 是否回 None 逐一对得上
+        for from in 0..ids.len() {
+            for at in 0..ids.len() {
+                for after in [false, true] {
+                    assert_eq!(lands_in_place(from, at, after), mv(ids[from], ids[at], after).is_none(), "{from} → {at} {after}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn moved_folder_keeps_its_worktrees_in_the_group() {
+        let projects = vec![
+            p(r#"{"id":"s1","name":"s1","type":"local","createdAt":0}"#),
+            p(r#"{"id":"w1","name":"w1","type":"local","createdAt":0,
+                  "worktree":{"sourceProjectId":"s1","branch":"x","repoDir":"/r","createdByFalcon":true}}"#),
+            p(r#"{"id":"h","name":"h","type":"ssh","hostId":"h1","createdAt":0}"#),
+            p(r#"{"id":"s2","name":"s2","type":"local","createdAt":0}"#),
+        ];
+        let moved = move_in_order(&projects, |p| p.id.as_str(), "s2", "s1", false).unwrap();
+        let local = &group_servers(&moved, &[], "本机", false)[0];
+        let ids: Vec<&str> = local.folders.iter().map(|f| f.project.id.as_str()).collect();
+        assert_eq!(ids, ["s2", "s1"]);
+        assert_eq!(local.folders[1].worktrees[0].id, "w1");
     }
 
     #[test]

@@ -50,7 +50,7 @@ mod ws;
 
 pub use api::files::{RawBytes, raw_url};
 pub use api::git::{GitFileRef, GitLogQuery, GitSyncAction};
-pub use api::projects::{DeriveInput, HostAuthorizationPatch};
+pub use api::projects::{DeriveInput, HostAuthorizationPatch, MoveProjectInput};
 pub use api::system::ProbeTarget;
 pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};

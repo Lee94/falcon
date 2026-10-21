@@ -3,11 +3,14 @@
 //! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
 //! - 会话行默认收起：一个检出能挂五六个终端，全摊开就占满侧栏；检出行尾巴上摆计数徽标 +
-//!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）。
+//!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）；
+//! - 源项目（文件夹行）可以拖着在同一台机器的组里排序，顺序存在服务端，各个客户端看到的一样。
 
 use falcon_core::meegle_drag::MeegleWorkItemDragPayload;
 use falcon_core::program_status::{RowReading, RowStatus};
-use falcon_core::project_tree::{FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers};
+use falcon_core::project_tree::{
+    FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers, lands_in_place,
+};
 use falcon_proto::{Project, SessionState, SessionWithProject};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -15,14 +18,14 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::{Sizable, tooltip::Tooltip};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, IntoElement, Pixels, Render, SharedString, Window, div,
+    AnyElement, App, Context, Entity, FontWeight, IntoElement, Pixels, Render, SharedString, Window, div, relative,
 };
 use rust_i18n::t;
 
 use crate::labels::{age_text, local_word, session_label};
 use crate::menus::{self, to_popup};
 use crate::theme::{Ui, radius};
-use crate::ui::{Mark, host_bar, icon, needs_you_mark, spinner, status_mark};
+use crate::ui::{DragLabel, Mark, host_bar, icon, needs_you_mark, spinner, status_mark};
 use crate::workspace::{ActiveView, PendingSession, ProjectChanges, ToastKind, Workspace};
 use crate::zoom::zpx;
 
@@ -34,6 +37,16 @@ const ROW_GAP: f32 = 2.;
 
 fn indent(depth: usize) -> Pixels {
     zpx(4. + depth as f32 * 12.)
+}
+
+/// 侧栏里拖着的源项目。只在同一个服务器分组里挪：项目属于哪台机器是定死的，拖到别的组里放下
+/// 也只是全局顺序里换了个邻居、组内看不出变化，不如不接。`index` 是它在组里的位置，落点据此
+/// 认出"放回原处"（[`lands_in_place`]）
+#[derive(Clone)]
+struct ProjectDrag {
+    id: String,
+    group: String,
+    index: usize,
 }
 
 pub struct Sidebar {
@@ -234,17 +247,22 @@ impl Sidebar {
                         .child(t!("sidebar.emptyServer").to_string()),
                 );
             } else {
-                for folder in server.folders {
-                    node = node.child(self.folder_node(folder, cx));
+                let group = server.key.clone();
+                for (index, folder) in server.folders.into_iter().enumerate() {
+                    node = node.child(self.folder_node(folder, &group, index, cx));
                 }
             }
         }
         node.into_any_element()
     }
 
-    fn folder_node(&self, folder: FolderGroup, cx: &mut Context<Self>) -> AnyElement {
+    /// `group` / `index`：所在服务器分组的键与组内下标，拖拽排序用
+    fn folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.ws.read(cx);
         let project = folder.project.clone();
+        // 只有源项目能拖、能当落点。孤儿附属项目（源项目被藏起来了）也占一个文件夹位，但它们
+        // 永远排在组的末尾（`group_servers`），挪了也没用
+        let sortable = project.worktree.is_none();
         let open = ws.state.collapsed.get(&folder_key(&project.id)).copied() != Some(true);
         let head = ws.heads.get(&project.id).cloned();
         let member_names: Vec<String> = project
@@ -283,9 +301,10 @@ impl Sidebar {
             on_new: None,
             trailing: None,
             meegle_drop: project.worktree.is_none().then(|| (self.ws.clone(), project.id.clone())),
+            drag: sortable.then(|| ProjectDrag { id: project.id.clone(), group: group.to_string(), index }),
         }, cx);
 
-        let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
+        let mut node = div().relative().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if open {
             let label = if project.multi.is_some() {
                 t!("multi.repoCount", n = member_names.len()).to_string()
@@ -306,6 +325,11 @@ impl Sidebar {
                     selected.as_deref() == Some(wt.id.as_str()),
                     cx,
                 ));
+            }
+        }
+        if sortable {
+            for after in [false, true] {
+                node = node.child(drop_zone(&self.ws, &project.id, group, index, after, cx));
             }
         }
         node.into_any_element()
@@ -410,6 +434,7 @@ impl Sidebar {
             on_new: archived_at.is_none().then_some(new_items),
             trailing: badge,
             meegle_drop: None,
+            drag: None,
         }, cx);
 
         let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
@@ -676,6 +701,8 @@ struct TreeRowOpts {
     trailing: Option<AnyElement>,
     /// 源项目行：接住从飞书项目面板拖来的工作项，以它的 Key 预填派生表单
     meegle_drop: Option<(Entity<Workspace>, String)>,
+    /// 源项目行：可拖着排序（落点是 [`drop_zone`]，盖在整个文件夹节点上）
+    drag: Option<ProjectDrag>,
 }
 
 fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
@@ -704,6 +731,11 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
     };
     if let Some(select) = o.on_select {
         row = row.cursor_pointer().on_click(move |_, _, cx| select(cx));
+    }
+    if let Some(drag) = o.drag {
+        // 按下挪过几像素才算拖，点一下照旧是选中
+        let label: SharedString = o.label.clone().into();
+        row = row.on_drag(drag, move |_, _, _, cx| DragLabel::new(label.clone(), cx));
     }
     row = match (o.expanded, o.on_toggle) {
         (Some(expanded), Some(toggle)) => row.child(chevron(format!("{}-toggle", o.id), expanded, cx, toggle)),
@@ -771,6 +803,40 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
         Some(items) => row.context_menu(move |menu, _, _| to_popup(menu, items.clone())).into_any_element(),
         None => row.into_any_element(),
     }
+}
+
+/// 拖项目排序的落点：盖在整个文件夹节点（连同摊开的检出 / 会话行）上的上下两半，上半 = 放到它
+/// 前面、下半 = 放到它后面，压着的那半在自己那条边上画一道线。按节点分而不是按行分：摊开的文件夹，
+/// "放到它后面"的线得画在它最后一行下面，画在文件夹行下面像是要塞进它里面。
+///
+/// 两半各往外探出一道行缝，线就正好落在缝里、不压着相邻行的高亮；相邻两个节点探进同一道缝的两半
+/// 语义相同（A 的后面 = B 的前面），同时亮也是同一个位置。落点层没有点击监听、hitbox 不是 opaque
+/// 的，底下的行照常点击、悬停、接飞书工作项（落下只认 [`ProjectDrag`] 这个类型）
+fn drop_zone(ws: &Entity<Workspace>, target: &str, group: &str, index: usize, after: bool, cx: &App) -> AnyElement {
+    let line = Ui::global(cx).tint_strong;
+    let (ws, target, group) = (ws.clone(), target.to_string(), group.to_string());
+    // 拖着别的组的项目、或放下去等于没动：不画线也不接。can_drop 为假时 GPUI 连 drag_over 的样式
+    // 都不套
+    let zone = div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .can_drop(move |dragged, _, _| {
+            dragged
+                .downcast_ref::<ProjectDrag>()
+                .is_some_and(|d| d.group == group && !lands_in_place(d.index, index, after))
+        })
+        .on_drop(move |d: &ProjectDrag, _, cx| ws.update(cx, |w, cx| w.move_project(&d.id, &target, after, cx)));
+    let zone = if after {
+        zone.top(relative(0.5))
+            .bottom(-zpx(ROW_GAP))
+            .drag_over::<ProjectDrag>(move |s, _, _, _| s.border_b(zpx(ROW_GAP)).border_color(line))
+    } else {
+        zone.top(-zpx(ROW_GAP))
+            .bottom(relative(0.5))
+            .drag_over::<ProjectDrag>(move |s, _, _, _| s.border_t(zpx(ROW_GAP)).border_color(line))
+    };
+    zone.into_any_element()
 }
 
 /// 飞书项目工作项拖到源项目上（React 版 `Sidebar.tsx` 的 `openWorktreeFromMeegle`）：取详情
