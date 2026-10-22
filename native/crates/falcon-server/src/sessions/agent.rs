@@ -1,4 +1,4 @@
-//! Agent 会话：把会话的"开场命令"从 shell 换成 claude / codex / grok 这类 CLI（ADR 0013）。
+//! Agent 会话：把会话的"开场命令"从 shell 换成 claude / codex / grok / devin 这类 CLI（ADR 0013）。
 //! 移植自 `packages/server/src/sessions/agent.ts`。
 //!
 //! 实现上给会话守护进程 / PTY 的仍然是一个 shell——只不过这个 shell 是我们写在宿主机上的
@@ -28,7 +28,8 @@ pub use falcon_proto::{SESSION_AGENTS, SessionAgent};
 use crate::git::path::join_path;
 use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
-/// CLI 的可执行名。三个都是 npm 全局包，装完就在 PATH 上。
+/// CLI 的可执行名。装完都在 PATH 上：claude / codex / grok 是 npm 全局包，devin 是自己的
+/// 安装脚本 / brew cask / Windows 安装器。
 ///
 /// `Unknown` 是 falcon-proto 给反序列化留的兜底，服务端收请求时已用 `SessionAgent::from_wire`
 /// 挡掉（`api/sessions.rs`），到不了这里；真到了也只是生成一个"找不到 unknown、落回 shell"的脚本，无害。
@@ -37,6 +38,7 @@ pub fn agent_bin(agent: SessionAgent) -> &'static str {
         SessionAgent::Claude => "claude",
         SessionAgent::Codex => "codex",
         SessionAgent::Grok => "grok",
+        SessionAgent::Devin => "devin",
         SessionAgent::Unknown => "unknown",
     }
 }
@@ -48,7 +50,8 @@ pub const AGENT_RESUME_ENV: &str = "FALCON_AGENT_RESUME";
 /// 这个 CLI 能不能由我们指定对话 id、事后按 id 接着聊。claude 与 grok 都有
 /// `--session-id <uuid>`（新对话用这个 id）和 `--resume <uuid>`；按 id 找不到对话时两个都是
 /// 退出码 1（2026-10 实测 claude 2.1.306、grok 1.0.62），脚本靠它退回「新开、钉同一个 id」。
-/// codex 只有 `codex resume <id>`，开场没法指定 id，算不支持：重开时退成普通 shell。
+/// codex 只有 `codex resume <id>`、devin 只有 `devin -r <id>`，开场都没法指定 id，算不支持：
+/// 重开时退成普通 shell。
 pub fn resumable(agent: SessionAgent) -> bool {
     matches!(agent, SessionAgent::Claude | SessionAgent::Grok)
 }
@@ -226,7 +229,7 @@ mod tests {
     use super::*;
     use base64::Engine as _;
 
-    const AGENTS: [SessionAgent; 3] = [SessionAgent::Claude, SessionAgent::Codex, SessionAgent::Grok];
+    const AGENTS: [SessionAgent; 4] = [SessionAgent::Claude, SessionAgent::Codex, SessionAgent::Grok, SessionAgent::Devin];
 
     // ---- launcherBody（POSIX） ----
 
@@ -339,21 +342,22 @@ mod tests {
 
     // ---- agentBin ----
 
-    /// 三个 CLI 的可执行名
+    /// 各家 CLI 的可执行名
     #[test]
-    fn agent_bin_names_of_the_three_clis() {
+    fn agent_bin_names_of_the_clis() {
         assert_eq!(agent_bin(SessionAgent::Claude), "claude");
         assert_eq!(agent_bin(SessionAgent::Codex), "codex");
         assert_eq!(agent_bin(SessionAgent::Grok), "grok");
+        assert_eq!(agent_bin(SessionAgent::Devin), "devin");
     }
 
     // ---- 以下不在 agent.test.ts 里 ----
 
-    /// 只有 claude / grok 能续接；codex 与认不出的都不行
+    /// 只有 claude / grok 能续接；codex / devin 与认不出的都不行
     #[test]
     fn extra_only_claude_and_grok_are_resumable() {
         assert!(resumable(SessionAgent::Claude) && resumable(SessionAgent::Grok));
-        assert!(!resumable(SessionAgent::Codex) && !resumable(SessionAgent::Unknown));
+        assert!(!resumable(SessionAgent::Codex) && !resumable(SessionAgent::Devin) && !resumable(SessionAgent::Unknown));
     }
 
     /// 对话 id 就是会话 id；重开多一个 resume；不能续接的 CLI、不像 UUID 的会话 id 都不给

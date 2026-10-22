@@ -72,7 +72,7 @@ pub struct SessionRow {
     /// 上次 Viewer 量到的格子；None = 从未量过，接回时不能当 80×24 用
     pub cols: Option<i64>,
     pub rows: Option<i64>,
-    /// 开场跑的 CLI（claude / codex / grok）；None = 普通 shell
+    /// 开场跑的 CLI（claude / codex / grok / devin）；None = 普通 shell
     pub agent: Option<String>,
 }
 
