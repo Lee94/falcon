@@ -37,7 +37,8 @@ wire_enum! {
         BackendRestart => "backend-restart",
         /// 非持久的 SSH 会话，SSH 链路断了（持久会话此时是 unverified，不会死）
         LinkLost => "link-lost",
-        /// 接回时发现宿主机上的会话已经不存在（守护进程不在了，或是升级前 Zellij 建的会话）
+        /// 宿主机上的会话已经不存在（守护进程不在了，或是升级前 Zellij 建的会话），而且原地
+        /// 重开也失败了。重开得成的会话不会落到这里（ADR 0024）
         SessionGone => "session-gone",
     }
 }

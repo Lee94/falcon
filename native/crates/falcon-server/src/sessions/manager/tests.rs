@@ -467,14 +467,16 @@ fn durable_session_survives_a_backend_restart() {
     });
 }
 
+/// 宿主机上没有这个会话的任何痕迹（升级前 Zellij 建的、宿主机重启过、holder 被杀）：接回判 Gone
+/// 之后原地重开，会话 id 不变、回到 active，不再留一条 dead(session-gone)。codex 开场的会话
+/// 续接不了，退成普通 shell
 #[test]
-fn zellij_era_rows_end_up_session_gone() {
+fn gone_rows_are_revived_in_place() {
     if !sessiond_available() {
         return;
     }
     run(async {
         let h = durable_harness("c").await;
-        // 升级前 Zellij 建的会话：库里有行，宿主机上没有任何守护进程的痕迹
         let row = SessionRow {
             id: "0a1b2c3d-0000-4000-8000-00000000beef".into(),
             project_id: h.project.id.clone(),
@@ -483,13 +485,85 @@ fn zellij_era_rows_end_up_session_gone() {
             durable: 1,
             created_at: now_ms(),
             last_active_at: now_ms(),
+            agent: Some("codex".into()),
             ..Default::default()
         };
         h.db.insert_session(&row);
-        let res = h.mgr.ensure_attached(&row.id, true).await;
-        assert_eq!(res.err(), Some(SessionError::Gone));
-        let after = h.db.get_session(&row.id).unwrap();
-        assert_eq!((after.state.as_str(), after.dead_reason.as_deref()), ("dead", Some("session-gone")));
+        let after = h.mgr.ensure_attached(&row.id, true).await.unwrap();
+        assert_eq!((after.state.as_str(), after.dead_reason.as_deref(), after.agent.as_deref()), ("active", None, None));
+        let d = h.mgr.local.peek().and_then(|l| l.deployed).unwrap();
+        let list = crate::sessions::local::local_list_sessions(&d).await.unwrap();
+        assert!(list.iter().any(|e| e.session_id == row.id && e.alive), "{list:?}");
+
+        let mut a = Peer::new();
+        h.mgr.add_viewer(&row.id, a.viewer.clone());
+        h.mgr.resize(&row.id, a.id(), 80, 24);
+        a.wait("提示符", has_output("$")).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        h.mgr.input(&row.id, a.id(), "echo re$((1+1))vived\n");
+        a.wait("能用", has_output("re2vived")).await;
+        kill_all(&h).await;
+    });
+}
+
+/// holder 在有人看着的时候被强杀：会话先待接回，接回判 Gone 后原地重开，claude 接着原来那段
+/// 对话——开场带 `--session-id <会话 id>`，重开带 `--resume <会话 id>`。claude 与登录 shell
+/// 都是假的（真的 `sh -l` 会读真实家目录的 profile，可能找到真 claude）：假 shell 收到 `-c`
+/// 就用 sh 跑那段，落回 shell 时起一个普通 sh；假 claude 只把参数记进日志
+#[test]
+fn killed_holder_is_revived_and_resumes_the_agent_conversation() {
+    if !sessiond_available() {
+        return;
+    }
+    run(async {
+        use std::os::unix::fs::PermissionsExt;
+        let h = durable_harness("e").await;
+        let exe = |path: &std::path::Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let bin = h.dir.path().join("fake-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = h.dir.path().join("claude.log");
+        exe(&bin.join("claude"), &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()));
+        let shell = h.dir.path().join("login-sh");
+        exe(&shell, "#!/bin/sh\nif [ \"$3\" = -c ]; then exec /bin/sh -c \"$4\"; fi\nexec /bin/sh\n");
+        let mut env = test_env();
+        env[0].1 = format!("{}:{}", bin.display(), env[0].1);
+        h.mgr.local.set_base_env(env);
+        let project = ProjectRow { id: "p2".into(), shell: Some(shell.to_string_lossy().into_owned()), ..h.project.clone() };
+        h.db.insert_project(&project);
+
+        let s = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(SessionAgent::Claude)).await.unwrap();
+        assert!(s.durable, "{s:?}");
+        let mut a = Peer::new();
+        h.mgr.add_viewer(&s.id, a.viewer.clone());
+        h.mgr.resize(&s.id, a.id(), 80, 24);
+        a.wait("提示符", has_output("$")).await;
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("--session-id {}\n", s.id));
+
+        let d = h.mgr.local.peek().and_then(|l| l.deployed).unwrap();
+        let holder = |list: Vec<falcon_proto::sessiond::ListEntry>| {
+            list.into_iter().find(|e| e.session_id == s.id && e.alive).map(|e| e.pid)
+        };
+        let old = holder(crate::sessions::local::local_list_sessions(&d).await.unwrap()).unwrap();
+        unsafe { libc::kill(old as libc::pid_t, libc::SIGKILL) };
+
+        a.seen.clear();
+        a.wait("待接回", has_state("unverified")).await;
+        a.wait("重开后 active", has_state("active")).await;
+        a.wait("新的提示符", has_output("$")).await;
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("--session-id {id}\n--resume {id}\n", id = s.id));
+        let row = h.db.get_session(&s.id).unwrap();
+        assert_eq!((row.state.as_str(), row.agent.as_deref()), ("active", Some("claude")));
+        let new = holder(crate::sessions::local::local_list_sessions(&d).await.unwrap()).unwrap();
+        assert_ne!(old, new);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        h.mgr.input(&s.id, a.id(), "echo re$((1+1))vived\n");
+        a.wait("还能用", has_output("re2vived")).await;
+        h.mgr.terminate(&s.id, true).await;
+        kill_all(&h).await;
     });
 }
 

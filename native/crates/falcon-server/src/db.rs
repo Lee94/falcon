@@ -1271,6 +1271,11 @@ impl Db {
         );
     }
 
+    /// 原地重开时不能续接的 agent 会话退成普通 shell（manager 的 revive）
+    pub fn update_session_agent(&self, id: &str, agent: Option<&str>) {
+        self.exec("UPDATE sessions SET agent = ? WHERE id = ?", params![agent, id]);
+    }
+
     pub fn rename_session(&self, id: &str, name: &str) {
         self.exec("UPDATE sessions SET name = ? WHERE id = ?", [name, id]);
     }

@@ -96,6 +96,9 @@ pub struct AttachOptions {
     pub askpass_bin: Option<String>,
     /// 建会话的 falcon 实例 id（孤儿清理只动自己的）
     pub owner: String,
+    /// 叠加进会话环境的变量：agent 会话交给启动脚本的对话 id 与是否续接（agent::launch_env）。
+    /// 接回时用不上（会话早就起着了）
+    pub env: Vec<(String, String)>,
 }
 
 /// 部署失败原因与"非持久原因"共用同一套字面量（前者是后者的子集）
@@ -499,6 +502,7 @@ impl SshLink {
                 env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
             }
             env.push(("FALCON_SESSIOND_ID".into(), sid.clone()));
+            env.extend(opts.env.iter().cloned());
             // SSH：在 holder 自己的环境（登录 shell 给的）上叠加，不清空
             spawn_spec(opts, vec![shell], env, false)
         });
@@ -518,6 +522,7 @@ impl SshLink {
         if opts.askpass_bin.is_some() {
             term_env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
         }
+        term_env.extend(opts.env.iter().cloned());
 
         let cmd = if kind == HostKind::Windows {
             // 一律走 exec + env，不能用 shell 请求——塞不进 COLORFGBG / COLORTERM

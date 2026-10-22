@@ -144,6 +144,17 @@ pub struct DurableState {
 /// 孤儿清理的宽限：建会话时 holder 先起来、会话行后落库，刚起来的 holder 在库里还查不到
 const ORPHAN_GRACE_MS: i64 = 3600 * 1000;
 
+/// attach_backend 的三种开法
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachMode {
+    /// 新建：在宿主机上起一个新会话
+    Create,
+    /// 接回：只连已经在跑的那个，不隐式新建
+    Reattach,
+    /// 原地重开：宿主机上的会话确实没了，用同一个会话 id 再起一个（revive）
+    Revive,
+}
+
 /// 会话操作的失败。Clone 是因为接回是单飞的（多个等待者共享同一个结果）
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SessionError {
@@ -1012,7 +1023,7 @@ impl SessionManager {
         });
         self.entries.borrow_mut().insert(id.clone(), entry.clone());
 
-        match self.attach_backend(&entry, project, &row, false).await {
+        match self.attach_backend(&entry, project, &row, AttachMode::Create).await {
             Ok(()) => {}
             Err(e) if prep.durable => {
                 // 守护进程拉不起来（Windows 的 Job 不让脱离、WMI 也被禁了……）：按 ADR 0001 退成
@@ -1031,7 +1042,7 @@ impl SessionManager {
                     hint,
                 });
                 self.entries.borrow_mut().insert(id.clone(), entry.clone());
-                if let Err(e) = self.attach_backend(&entry, project, &row, false).await {
+                if let Err(e) = self.attach_backend(&entry, project, &row, AttachMode::Create).await {
                     self.entries.borrow_mut().remove(&id);
                     return Err(e);
                 }
@@ -1118,8 +1129,9 @@ impl SessionManager {
         entry: &Rc<LiveEntry>,
         project: &ProjectRow,
         row: &SessionRow,
-        reattach: bool,
+        mode: AttachMode,
     ) -> Result<(), SessionError> {
+        let reattach = mode == AttachMode::Reattach;
         if entry.s.borrow().shell.is_some() {
             let (user, home, integrated) = self.machine_identity(project).await;
             if let Some(t) = entry.s.borrow_mut().shell.as_mut() {
@@ -1209,6 +1221,12 @@ impl SessionManager {
             background: hint.background.clone(),
             askpass_bin,
             owner: self.db.instance_id(),
+            env: if reattach {
+                Vec::new()
+            } else {
+                let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
+                super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive)
+            },
         };
 
         let backend: Rc<dyn Backend> = if entry.durable {
@@ -1376,8 +1394,52 @@ impl SessionManager {
         }
     }
 
+    /// 宿主机上的会话确实没了（接回时 Gone：holder 被杀、宿主机重启过）：用同一个会话 id
+    /// 原地重开。窗口、排布、对话终端记着的都是这个 id，重开之后它们照旧指着它，侧栏上也不会
+    /// 留下一条要手动清的 dead。claude / grok 开场的会话接着原来那段对话（启动脚本按会话 id
+    /// `--resume`，见 agent.rs），其余 agent 会话退成普通 shell——开一个全新的 codex 不是
+    /// 「恢复」，还不如给个 shell 让人自己决定。之前的屏幕与回滚随 holder 一起没了，回不来。
+    ///
+    /// 只认 Gone。Exited 是 shell 自己退了（exit / Ctrl-D），那是用户的意思，照旧 dead。
+    /// 判 Gone 万一判错了也不会起出第二个：spawn 先看同名 holder 活着没有，活着就直接接上它
+    /// （falcon-sessiond 的 spawn.rs）。重开不成（守护进程拉不起来之类）才跟以前一样
+    /// dead(session-gone)。
+    async fn revive(&self, entry: &Rc<LiveEntry>, project: &ProjectRow, row: &SessionRow) -> Result<(), SessionError> {
+        let mut row = row.clone();
+        let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
+        if row.agent.is_some() && !agent.is_some_and(super::agent::resumable) {
+            row.agent = None;
+            self.db.update_session_agent(&row.id, None);
+        }
+        // 旧 holder 上的东西都不作数了：程序状态、自动标题，以及替 agent 等着的那条命令
+        //（丢掉 waiter 即告诉它「对话终端在命令跑完之前断开了」）
+        {
+            let mut s = entry.s.borrow_mut();
+            s.program_status.clear();
+            s.shell_waiter = None;
+        }
+        self.clear_title(entry);
+        self.broadcast(entry, &ServerMessage::ProgramStatus { records: Vec::new() });
+        self.broadcast(entry, &ServerMessage::Title { title: None });
+        match self.attach_backend(entry, project, &row, AttachMode::Revive).await {
+            Ok(()) => {
+                // 留下 agent 的就是能续接的那几种
+                let how = if row.agent.is_some() { "，接着原来的对话" } else { "" };
+                log::info!("会话 {} 在宿主机上没了，已原地重开{how}", row.id);
+                self.mark_active(entry, true);
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("会话 {} 在宿主机上没了，原地重开也失败（{e}），记 dead", row.id);
+                self.mark_dead(entry, DeadReason::SessionGone);
+                Err(SessionError::Gone)
+            }
+        }
+    }
+
     /// 确保会话有活的 backend。
-    /// unverified 的持久会话在此被验证并恢复为 active；宿主机上的会话不在了 / 已经结束则标记 dead。
+    /// unverified 的持久会话在此被验证并恢复为 active；宿主机上的会话已经结束则标记 dead，
+    /// 不在了则原地重开（revive）。
     ///
     /// force：用户点了「接回」，或后台自动接回时没有 Viewer 在量格子。
     /// 必须马上 attach 并把 DB 写成 active，不能卡在 unverified。
@@ -1421,16 +1483,16 @@ impl SessionManager {
                     let res = async {
                         let project = owner_row(&me.db, &row.project_id)
                             .ok_or_else(|| SessionError::NotFound("项目不存在".into()))?;
-                        match me.attach_backend(&e, &project, &row, true).await {
+                        match me.attach_backend(&e, &project, &row, AttachMode::Reattach).await {
                             Ok(()) => {
                                 me.mark_active(&e, true);
                                 Ok(())
                             }
+                            // 宿主机上的会话没了：原地重开，重开不成才 dead(session-gone)
+                            Err(SessionError::Gone) => me.revive(&e, &project, &row).await,
                             Err(err) => {
-                                match err {
-                                    SessionError::Gone => me.mark_dead(&e, DeadReason::SessionGone),
-                                    SessionError::Exited => me.mark_dead(&e, DeadReason::Exited),
-                                    _ => {}
+                                if err == SessionError::Exited {
+                                    me.mark_dead(&e, DeadReason::Exited);
                                 }
                                 Err(err)
                             }
@@ -2055,17 +2117,18 @@ impl SessionManager {
             self.mark_dead(&entry, DeadReason::Exited);
             return;
         }
+        // holder 不在了（被杀、宿主机重启）也走待接回：自动接回那条路会再判一次 Gone，然后在
+        // ensure_attached 的单飞里原地重开（revive），与后端重启后的接回是同一条路，不另起一份
         if project.as_ref().is_some_and(|p| p.project_type == "local") {
             match entry.deployed().map(|d| local_session_state(&d, session_id)) {
                 Some(LocalSessionState::Exited) => self.mark_dead(&entry, DeadReason::Exited),
-                Some(LocalSessionState::Alive) => self.mark_unverified(&entry),
-                _ => self.mark_dead(&entry, DeadReason::SessionGone),
+                _ => self.mark_unverified(&entry),
             }
             return;
         }
-        // SSH：bridge 的退出码说了算；没有退出码（链路断了、bridge 被杀）就等重连再看
+        // SSH：bridge 的退出码说了算；没有退出码（链路断了、bridge 被杀）就等重连再看。
+        // 退出码 3（会话不在了）同样待接回，重连后接回判 Gone、原地重开
         match bridge_exit.flatten().map(|c| c as i32) {
-            Some(falcon_proto::sessiond::BRIDGE_EXIT_GONE) => self.mark_dead(&entry, DeadReason::SessionGone),
             Some(falcon_proto::sessiond::BRIDGE_EXIT_EXITED) => self.mark_dead(&entry, DeadReason::Exited),
             _ => self.mark_unverified(&entry),
         }

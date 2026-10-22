@@ -15,6 +15,10 @@
 //! CLI 不在 PATH 上不算错误：提示一句然后照常落回 shell——把会话开起来比报错有用，
 //! 用户可以就地 `npm i -g` 装完再开一个。
 //!
+//! 能接着上次对话的 CLI（claude / grok，见 [`resumable`]）开场时钉死对话 id
+//! （`--session-id`），宿主机上的会话没了、原地重开时用它 `--resume`（manager 的 revive）。
+//! 对话 id 与模式经环境变量交给脚本（[`launch_env`]），脚本本身仍是每个 agent 一份。
+//!
 //! 留到 S3 的函数：`writeLocalLauncher`（写本机文件系统、chmod）。
 
 use std::path::{Path, PathBuf};
@@ -35,6 +39,39 @@ pub fn agent_bin(agent: SessionAgent) -> &'static str {
         SessionAgent::Grok => "grok",
         SessionAgent::Unknown => "unknown",
     }
+}
+
+/// 脚本从这两个环境变量知道要不要钉对话 id、是不是接着上次的对话（[`launch_env`]）
+pub const AGENT_SESSION_ENV: &str = "FALCON_AGENT_SESSION";
+pub const AGENT_RESUME_ENV: &str = "FALCON_AGENT_RESUME";
+
+/// 这个 CLI 能不能由我们指定对话 id、事后按 id 接着聊。claude 与 grok 都有
+/// `--session-id <uuid>`（新对话用这个 id）和 `--resume <uuid>`；按 id 找不到对话时两个都是
+/// 退出码 1（2026-10 实测 claude 2.1.306、grok 1.0.62），脚本靠它退回「新开、钉同一个 id」。
+/// codex 只有 `codex resume <id>`，开场没法指定 id，算不支持：重开时退成普通 shell。
+pub fn resumable(agent: SessionAgent) -> bool {
+    matches!(agent, SessionAgent::Claude | SessionAgent::Grok)
+}
+
+/// 交给启动脚本的环境变量。对话 id 直接用 falcon 的会话 id——它本来就是 UUID v4，一个
+/// 会话一段对话，不必另外存一列；重开时会话 id 不变，id 也就对得上。
+///
+/// 不是 UUID 形状的会话 id（测试里手写的、上古数据）不钉：claude / grok 只认 UUID，钉了反而起不来。
+/// resume：宿主机上的会话没了、原地重开（manager 的 revive）。
+pub fn launch_env(agent: Option<SessionAgent>, session_id: &str, resume: bool) -> Vec<(String, String)> {
+    if !agent.is_some_and(resumable) || !is_uuid(session_id) {
+        return Vec::new();
+    }
+    let mut env = vec![(AGENT_SESSION_ENV.to_string(), session_id.to_string())];
+    if resume {
+        env.push((AGENT_RESUME_ENV.to_string(), "1".to_string()));
+    }
+    env
+}
+
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() })
 }
 
 /// 启动脚本文件名。同一个 agent 在同一台宿主机上只有一份，内容幂等覆盖。
@@ -82,12 +119,31 @@ pub fn write_local_launcher(data_dir: &Path, agent: SessionAgent, shell: &str) -
 ///   「新建 Claude 会话变成一句找不到、再落回普通 shell」。
 ///
 /// CLI 退出后 exec 的那个也带 `-i -l`，不靠「有 TTY 就算交互」这层默认。
+///
+/// 能续接的 CLI 多三个分支（[`launch_env`] 给的变量）：没钉 id 就照旧；钉了 id 新开用
+/// `--session-id`；重开先 `--resume`，失败（这段对话从没落过盘——开了没说话；或者是加这个
+/// 功能之前开的会话）再按同一个 id 新开。展开都写成带引号的整词、分支用 if 而不是
+/// `${X:+…}`：这段是交给用户登录 shell 跑的，zsh 默认不分词，`${X:+--a "$X"}` 会粘成一个参数。
+/// 两个变量在落回 shell 前 unset，不留在用户之后的 shell 里。
 fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
     let bin = agent_bin(agent);
+    let (run, unset) = if resumable(agent) {
+        (
+            format!(
+                "if [ -z \"${AGENT_SESSION_ENV}\" ]; then {bin}; \
+                 elif [ -n \"${AGENT_RESUME_ENV}\" ]; then \
+                 {bin} --resume \"${AGENT_SESSION_ENV}\" || {bin} --session-id \"${AGENT_SESSION_ENV}\"; \
+                 else {bin} --session-id \"${AGENT_SESSION_ENV}\"; fi"
+            ),
+            format!("unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV}; "),
+        )
+    } else {
+        (bin.to_string(), String::new())
+    };
     let inner = format!(
-        "if command -v {bin} >/dev/null 2>&1; then {bin}; \
+        "if command -v {bin} >/dev/null 2>&1; then {run}; \
          else printf '%s\\n' {} >&2; fi; \
-         exec {} -i -l",
+         {unset}exec {} -i -l",
         quote_posix(&format!("falcon: PATH 里找不到 {bin}，先装好它再开这种会话。")),
         quote_posix(shell),
     );
@@ -102,21 +158,37 @@ fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
 
 /// Windows 启动脚本（.cmd）。提示语只用 ASCII：cmd 按 OEM 代码页读脚本文件，
 /// 中文在默认 936 / 437 下必乱码。
+///
+/// 续接的分支同 POSIX。块里的 `%VAR%` 在整条 if 解析时展开——变量在脚本起来之前就设好了，
+/// 没问题；`if errorlevel 1` 是执行到那一行才判，所以「--resume 失败再新开」能写在块里。
 fn windows_launcher_body(agent: SessionAgent, shell: &str) -> String {
     let bin = agent_bin(agent);
-    [
+    let mut lines = vec![
         "@echo off".to_string(),
         format!("rem falcon: session that opens with {bin}; falls back to the shell on exit"),
         format!("where {bin} >nul 2>&1"),
         "if errorlevel 1 (".to_string(),
         format!("  echo falcon: {bin} was not found on PATH; install it first."),
-        ") else (".to_string(),
-        format!("  call {bin}"),
-        ")".to_string(),
-        format!("\"{shell}\""),
-        String::new(),
-    ]
-    .join("\r\n")
+    ];
+    if resumable(agent) {
+        let id = format!("%{AGENT_SESSION_ENV}%");
+        lines.extend([
+            format!(") else if not defined {AGENT_SESSION_ENV} ("),
+            format!("  call {bin}"),
+            format!(") else if defined {AGENT_RESUME_ENV} ("),
+            format!("  call {bin} --resume {id}"),
+            format!("  if errorlevel 1 call {bin} --session-id {id}"),
+            ") else (".to_string(),
+            format!("  call {bin} --session-id {id}"),
+            ")".to_string(),
+            format!("set {AGENT_SESSION_ENV}="),
+            format!("set {AGENT_RESUME_ENV}="),
+        ]);
+    } else {
+        lines.extend([") else (".to_string(), format!("  call {bin}"), ")".to_string()]);
+    }
+    lines.extend([format!("\"{shell}\""), String::new()]);
+    lines.join("\r\n")
 }
 
 pub fn launcher_body(agent: SessionAgent, kind: HostKind, shell: &str) -> String {
@@ -277,22 +349,58 @@ mod tests {
 
     // ---- 以下不在 agent.test.ts 里 ----
 
-    /// 逐字节对照 TS 产出：宿主机上已有的脚本是这份内容，幂等覆盖不该改出差异
+    /// 只有 claude / grok 能续接；codex 与认不出的都不行
+    #[test]
+    fn extra_only_claude_and_grok_are_resumable() {
+        assert!(resumable(SessionAgent::Claude) && resumable(SessionAgent::Grok));
+        assert!(!resumable(SessionAgent::Codex) && !resumable(SessionAgent::Unknown));
+    }
+
+    /// 对话 id 就是会话 id；重开多一个 resume；不能续接的 CLI、不像 UUID 的会话 id 都不给
+    #[test]
+    fn extra_launch_env_pins_the_session_id_and_marks_resume() {
+        const ID: &str = "0a1b2c3d-0000-4000-8000-00000000beef";
+        let env = |a, id: &str, r| launch_env(a, id, r);
+        assert_eq!(env(Some(SessionAgent::Claude), ID, false), vec![(AGENT_SESSION_ENV.into(), ID.into())]);
+        assert_eq!(
+            env(Some(SessionAgent::Grok), ID, true),
+            vec![(AGENT_SESSION_ENV.into(), ID.into()), (AGENT_RESUME_ENV.into(), "1".into())]
+        );
+        assert!(env(Some(SessionAgent::Codex), ID, true).is_empty());
+        assert!(env(None, ID, true).is_empty());
+        assert!(env(Some(SessionAgent::Claude), "s", true).is_empty());
+        assert!(env(Some(SessionAgent::Claude), "0a1b2c3d-0000-4000-8000-00000000beeg", false).is_empty());
+    }
+
+    /// Windows 的续接分支：先 --resume，失败再按同一个 id 新开；落回 shell 前清掉变量
+    #[test]
+    fn extra_windows_body_resumes_then_falls_back_to_a_pinned_new_conversation() {
+        let body = windows_body();
+        assert!(body.contains("\r\n) else if defined FALCON_AGENT_RESUME (\r\n  call claude --resume %FALCON_AGENT_SESSION%\r\n"));
+        assert!(body.contains("  if errorlevel 1 call claude --session-id %FALCON_AGENT_SESSION%\r\n"));
+        assert!(body.contains("set FALCON_AGENT_SESSION=\r\nset FALCON_AGENT_RESUME=\r\n\"C:"));
+        // 不能续接的没有这些
+        let codex = launcher_body(SessionAgent::Codex, HostKind::Windows, "powershell.exe");
+        assert!(!codex.contains("FALCON_AGENT"));
+    }
+
+    /// 逐字节对照 TS 产出：宿主机上已有的脚本是这份内容，幂等覆盖不该改出差异。
+    /// 只剩不能续接的 CLI 还是 TS 那份；claude / grok 的多了续接分支（见下一条）
     #[test]
     fn extra_bodies_match_ts_byte_for_byte() {
         assert_eq!(
-            launcher_body(SessionAgent::Claude, HostKind::Posix, "/bin/zsh"),
+            launcher_body(SessionAgent::Codex, HostKind::Posix, "/bin/zsh"),
             "#!/bin/sh\n\
-             # falcon: 以 claude 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。\n\
-             exec '/bin/zsh' -i -l -c 'if command -v claude >/dev/null 2>&1; then claude; \
-             else printf '\\''%s\\n'\\'' '\\''falcon: PATH 里找不到 claude，先装好它再开这种会话。'\\'' >&2; fi; \
+             # falcon: 以 codex 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。\n\
+             exec '/bin/zsh' -i -l -c 'if command -v codex >/dev/null 2>&1; then codex; \
+             else printf '\\''%s\\n'\\'' '\\''falcon: PATH 里找不到 codex，先装好它再开这种会话。'\\'' >&2; fi; \
              exec '\\''/bin/zsh'\\'' -i -l'\n"
         );
         assert_eq!(
-            windows_body(),
-            "@echo off\r\nrem falcon: session that opens with claude; falls back to the shell on exit\r\n\
-             where claude >nul 2>&1\r\nif errorlevel 1 (\r\n  echo falcon: claude was not found on PATH; install it first.\r\n\
-             ) else (\r\n  call claude\r\n)\r\n\"C:\\Windows\\System32\\powershell.exe\"\r\n"
+            launcher_body(SessionAgent::Codex, HostKind::Windows, "C:\\Windows\\System32\\powershell.exe"),
+            "@echo off\r\nrem falcon: session that opens with codex; falls back to the shell on exit\r\n\
+             where codex >nul 2>&1\r\nif errorlevel 1 (\r\n  echo falcon: codex was not found on PATH; install it first.\r\n\
+             ) else (\r\n  call codex\r\n)\r\n\"C:\\Windows\\System32\\powershell.exe\"\r\n"
         );
         assert_eq!(local_launcher_dir(Path::new("/data")), PathBuf::from("/data/agents"));
     }
@@ -328,5 +436,64 @@ mod tests {
         let run = Command::new("sh").arg(&file).env("PATH", "/usr/bin:/bin").output().unwrap();
         let stdout = String::from_utf8(run.stdout).unwrap();
         assert!(stdout.starts_with("shell:-i -l -c if command -v unknown "), "{stdout}");
+    }
+
+    /// 真跑能续接的那份脚本：钉了 id 新开带 --session-id、重开先 --resume、对话不在再按同一个
+    /// id 新开、没钉 id 照旧；落回 shell 时两个变量都已清掉。claude 与 shell 都是假的：假 claude
+    /// 把参数记进日志，--resume 成不成由 FAKE_RESUME_OK 定；假 shell 收到 `-i -l -c` 就交给 sh
+    /// 跑那一段，收到 `-i -l`（落回 shell）就把那两个变量记下来
+    #[cfg(unix)]
+    #[test]
+    fn extra_resumable_launcher_pins_then_resumes_the_conversation() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        const ID: &str = "0a1b2c3d-0000-4000-8000-00000000beef";
+        let tmp = tempfile::Builder::new().prefix("falcon-agent-").tempdir().unwrap();
+        let exe = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        exe(
+            &bin.join("claude"),
+            "#!/bin/sh\necho \"claude $*\" >> \"$FAKE_LOG\"\n\
+             if [ \"$1\" = --resume ] && [ -z \"$FAKE_RESUME_OK\" ]; then exit 1; fi\n",
+        );
+        let shell = tmp.path().join("fake sh");
+        exe(
+            &shell,
+            "#!/bin/sh\nif [ \"$3\" = -c ]; then exec /bin/sh -c \"$4\"; fi\n\
+             echo \"shell $* ${FALCON_AGENT_SESSION-unset} ${FALCON_AGENT_RESUME-unset}\" >> \"$FAKE_LOG\"\n",
+        );
+        let script = write_local_launcher(tmp.path(), SessionAgent::Claude, shell.to_str().unwrap()).unwrap();
+        let log = tmp.path().join("log");
+
+        let run = |env: &[(&str, &str)]| {
+            let _ = std::fs::remove_file(&log);
+            let status = Command::new("/bin/sh")
+                .arg(&script)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("FAKE_LOG", &log)
+                .envs(env.iter().copied())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            std::fs::read_to_string(&log).unwrap()
+        };
+        let back = "shell -i -l unset unset\n";
+
+        assert_eq!(run(&[]), format!("claude \n{back}"));
+        assert_eq!(run(&[(AGENT_SESSION_ENV, ID)]), format!("claude --session-id {ID}\n{back}"));
+        assert_eq!(
+            run(&[(AGENT_SESSION_ENV, ID), (AGENT_RESUME_ENV, "1"), ("FAKE_RESUME_OK", "1")]),
+            format!("claude --resume {ID}\n{back}")
+        );
+        assert_eq!(
+            run(&[(AGENT_SESSION_ENV, ID), (AGENT_RESUME_ENV, "1")]),
+            format!("claude --resume {ID}\nclaude --session-id {ID}\n{back}")
+        );
     }
 }

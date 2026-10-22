@@ -26,4 +26,8 @@
 - **会话默认名跟着 agent 走**（`Claude 2` / `Grok 3` / `Terminal 1`），前端仍可传 `name` 覆盖。
 - **认不出的 `agent` 一律当普通终端**：宁可开出一个 shell，也不要 400 掉一个新会话。
 - **前端三处共用一份菜单**（`useActions.newSessionItems`）：侧栏 checkout 行的 ＋、命令面板、窗口标题栏右键的「在右侧新建终端」。侧栏的会话行按 `session.agent` 换图标（Bot / SquareTerminal）。
-- **未验证**：Windows 远端的脚本写入只有单测，没有真机跑过。POSIX SSH 远端验过：`zsh -l -c` 找不到 `~/.local/bin/claude`（PATH 在 `.zshrc`），改 `-i -l -c` 后 `command -v claude` 与 `claude --version` 都成功。
+- **未验证**：Windows 远端的脚本写入只有单测，没有真机跑过。
+
+## 后记（2026-10-21）
+
+能续接的 CLI（claude / grok）开场时由 falcon 钉对话 id（就是会话 id），宿主机上的会话没了、原地重开时脚本用它 `--resume`。id 与模式经环境变量交给脚本，脚本仍是每个 agent 一份。见 ADR 0024。POSIX SSH 远端验过：`zsh -l -c` 找不到 `~/.local/bin/claude`（PATH 在 `.zshrc`），改 `-i -l -c` 后 `command -v claude` 与 `claude --version` 都成功。

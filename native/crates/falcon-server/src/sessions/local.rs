@@ -283,6 +283,7 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
         prepend_path(&mut env, bin);
         merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
     }
+    merge_env(&mut env, opts.env.iter().cloned());
 
     let pair = native_pty_system().openpty(PtySize { rows: opts.rows, cols: opts.cols, pixel_width: 0, pixel_height: 0 })?;
     let mut cmd = CommandBuilder::new(&program);
@@ -449,6 +450,7 @@ pub async fn open_local_sessiond(
             merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
         }
         merge_env(&mut env, [("FALCON_SESSIOND_ID", sid.as_str())]);
+        merge_env(&mut env, opts.env.iter().cloned());
         let shell = opts.shell.clone().unwrap_or_else(default_local_shell);
         // 本机：服务端已经解析好整份登录环境，子进程只拿这一份
         let spec = spawn_spec(opts, vec![shell], env, true);

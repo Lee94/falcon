@@ -316,8 +316,9 @@ fn upgrade_vt(&self, _binary: &str) {}
 - **接回**：不再有 `captured_history`。连上 holder 即视为存活，`mark_active(replay=true)` 之后所有 Viewer 搭一班 Sync。接回时 entry 还没有部署信息（后端重启后重建的 entry）就重新 prepare：**失败一律返回可重试的错误、会话留在 unverified**，不论原因——部署失败只说明这一次没把守护进程放好、握上手，说明不了宿主机上的会话没了，`SessionGone` 只认宿主机给的证据（下面的退出判定）。缓存在链路上的部署失败放凉（60 秒）之后，下一次接回会重推；本机的每次都重来。（原先把"稳定的环境事实"当成"这台机器上不可能有会话"直接记 `SessionGone`：2026-10-14 升级后重启，同一台机器上两个项目同时重推、踩了同一个 `.partial`，`chmod: cannot access` 被认成目录写不了，两个活着的会话被判没了，之后还会被孤儿清理杀掉。）接回时如果 VT 进程的 ghostty 与这次部署的不同，发 `UpgradeVt`（2.3）。
 - **退出判定**（替换 Zellij 的 `has_session`）：
   - 收到过 `Exit` → `dead(exited)`；
-  - 本机连接断开：有 `<sid>.exit` → `dead(exited)`；meta 里的 pid 还活着 → `unverified`（自动接回）；否则 `dead(session-gone)`；
-  - SSH：bridge 退出码 3 → `dead(session-gone)`，5 → `dead(exited)`，其余（链路断了、bridge 被杀）→ `unverified`。
+  - 本机连接断开：有 `<sid>.exit` → `dead(exited)`；其余 → `unverified`（自动接回）；
+  - SSH：bridge 退出码 5 → `dead(exited)`，其余（3 = 会话不在了、链路断了、bridge 被杀）→ `unverified`。
+  - 会话不在了（本机 meta 里的 pid 已经不在、SSH 的退出码 3）在接回时判成 Gone，原地重开（ADR 0024），重开不成才 `dead(session-gone)`。以前连接一断、当场就记 dead。
   - 接回时连不上同理：本机看文件（`local_session_state`），SSH 看 bridge 的退出码（`ConnectError::{Gone, Exited, Unavailable}`）。
 - **终止**：`backend.terminate()` 发 `Terminate`；要等（删 worktree 前）时最多 3 秒等 `Exit`。连不上 holder 时 exec `falcon-sessiond kill`。
 - **标题 / 前台**：走 `backend.foreground()`。
@@ -447,7 +448,7 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 
 用户明确不需要旧会话的兼容（2026-10-13），并要求**无论 Windows 验证与否都删掉 Zellij**。所以没有并存期，一个版本里整体换掉；Windows 上验证不过的子路径标非持久（不再有 Zellij 可退）。
 
-- **升级后的旧会话**：库里的旧行（Zellij 建的）照常走接回，找不到 `<sid>.json` 与 `.exit`（本机）或 bridge 以退出码 3 结束（SSH），落到 `dead(session-gone)`，由用户在界面上关掉。不写专门的迁移代码（有用例：库里有一行 Zellij 时代的持久会话，接回后是 `dead(session-gone)`）。
+- **升级后的旧会话**：库里的旧行（Zellij 建的）照常走接回，找不到 `<sid>.json` 与 `.exit`（本机）或 bridge 以退出码 3 结束（SSH），落到 `dead(session-gone)`，由用户在界面上关掉。不写专门的迁移代码（有用例：库里有一行 Zellij 时代的持久会话，接回后是 `dead(session-gone)`）。ADR 0024 之后这种行接回时原地重开成一个新会话，用例也跟着改了（`gone_rows_are_revived_in_place`）。
 - **宿主机上的 Zellij 残留不清理**：旧会话里的程序还活着，`<root>/bin/` 下的 zellij 二进制与配置目录都留着，用户想救可以自己 `zellij attach mj-<16hex>`，用完自己结束。
 - **发版说明**写明：升级会结束全部会话（进程还在宿主机上）；原生客户端要与服务端同时升级（7 的版本错配）；降级的后果（见下）。
 - **降级到旧版 falcon**：守护进程会话被当成 Zellij 会话去接回并失败，显示为 `dead(session-gone)`。进程仍在宿主机上，可以用 `falcon-sessiond attach` 自救。
