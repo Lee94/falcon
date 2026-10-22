@@ -1,7 +1,7 @@
 //! 文件面板（ADR 0009）、文件查看与原始字节路由（ADR 0007）。
 //!
-//! 这里的 `path` 一律是**工作目录相对**、`/` 分隔的路径——Windows 远端也一样。
-//! 拼宿主机绝对路径另走 falcon-core 移植的 `lib/filePath.ts`，不用 `std::path`。
+//! `path` 支持工作目录相对路径和宿主机绝对路径；文件面板用绝对路径，Quick Open 沿用相对路径。
+//! Windows 对外同样用 `/` 分隔。宿主机路径运算另走 falcon-core 的 file_path，不用 `std::path`。
 
 use std::future::Future;
 
@@ -40,7 +40,7 @@ pub fn raw_url(raw_base: &str, path: &str) -> String {
 }
 
 impl FalconClient {
-    /// `GET /api/projects/:id/files`：工作目录里的一层，`path` 缺省为工作目录本身。
+    /// `GET /api/projects/:id/files`：宿主机目录里的一层，`path` 缺省为项目工作目录。
     /// 与 git 无关——未跟踪、被 ignore 的文件同样在里面。读失败是 400。
     pub fn list_files(
         &self,

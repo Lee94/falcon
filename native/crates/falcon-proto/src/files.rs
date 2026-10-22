@@ -1,9 +1,9 @@
 //! 项目工作目录里的文件：文件面板（ADR 0009）、查看与原始字节路由（ADR 0007）、
 //! 下载 / 上传（ADR 0008）。
 //!
-//! 这里的 `path` 一律是**工作目录相对**、以 `/` 分隔的路径——Windows 远端也是
-//! 这样，平台分隔符只在后端拼绝对路径时才出现。客户端拼宿主机绝对路径另走
-//! `falcon-core` 移植的 `lib/filePath.ts`，不用 `std::path`。
+//! 登录态文件 API 的 `path` 可用工作目录相对路径，或宿主机绝对路径；响应沿用请求的
+//! 路径身份，Windows 绝对路径对外统一 `/`。Quick Open 索引仍只有项目相对路径。
+//! raw 路由始终只收 token 范围内的相对路径，不能拿绝对路径切换根（ADR 0007）。
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +19,8 @@ wire_enum! {
 
 /// 项目工作目录里的一项。
 ///
-/// `path` 是工作目录相对的 `/` 路径，前端拿它当列表 key 与展开状态的键，
-/// 不需要知道宿主机是什么平台。
+/// `path` 沿用列表请求的相对 / 绝对身份，始终以 `/` 分隔（POSIX 文件名中的反斜杠保留）。
+/// 前端拿它当列表 key 与展开状态的键。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceEntry {
@@ -39,7 +39,7 @@ pub struct WorkspaceEntry {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceListing {
-    /// 工作目录相对路径；`""` 是工作目录本身
+    /// 请求为相对路径时 `""` 是工作目录本身；绝对请求返回宿主机绝对路径
     pub path: String,
     pub entries: Vec<WorkspaceEntry>,
     /// 条目数超过 WORKSPACE_LIST_CAP，只给了前面一批（node_modules 这种）
@@ -122,6 +122,10 @@ pub enum FilePreview {
 pub struct WorkspaceFile {
     pub preview: FilePreview,
     pub raw_base: String,
+    /// 绝对路径查看时给出 token 范围内的相对文件路径；原相对请求省略此字段。
+    /// 预览地址按 `raw_path.as_deref().unwrap_or(request_path)` 逐段编码拼到 raw_base 后。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_path: Option<String>,
 }
 
 /// 保存一个文本文件（`PUT /api/projects/:id/file`）的请求体上限。编辑器只打开

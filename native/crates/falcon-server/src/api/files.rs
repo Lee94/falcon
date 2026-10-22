@@ -30,13 +30,16 @@ use super::auth_routes::LenientJson;
 use super::body::{Media, body_too_large, drain_body, drain_in_background, media_of, query_param, unsupported_media_type};
 use super::error::{ApiError, ApiResult};
 use super::{AppState, encode_uri_component};
-use crate::db::ProjectRow;
+use crate::auth::RawScope;
+use crate::db::{Db, ProjectRow};
 use crate::engine::Engine;
 use crate::files::{
     FileError, FileHost, cap_file_index, index_workspace, list_workspace, mime_of, mkdir_workspace,
     read_workspace_bytes, read_workspace_file, remove_workspace, rename_workspace, save_workspace_file,
+    rel_segments, resolve_inside,
 };
 use crate::git::error::worktree_failure_text;
+use crate::git::path::{dirname_of, is_absolute, is_ancestor, normalize_sep, same_path};
 use crate::git::repo::{RunOpts, list_repo_files};
 use crate::sessions::local::local_kind;
 use crate::sessions::ssh::SshLink;
@@ -76,6 +79,8 @@ struct Located {
     kind: HostKind,
     link: Option<Rc<SshLink>>,
     root: String,
+    /// 相对配置目录的锚点：本机进程 cwd，或 SSH 登录 home。不是请求可选的 root。
+    base: String,
 }
 
 impl Located {
@@ -94,24 +99,246 @@ impl Located {
 /// 和会话启动时的行为一致。多仓库容器留空则以虚拟项目目录为根（会话 cwd
 /// 同款语义，见 manager.ensure_virtual_dir）：首次打开文件面板会顺手把目录建出来。
 async fn file_host_for(engine: &Rc<Engine>, row: &ProjectRow) -> Result<Located, String> {
+    file_host_for_paths(engine, row, &[]).await
+}
+
+async fn file_host_for_paths(engine: &Rc<Engine>, row: &ProjectRow, paths: &[&str]) -> Result<Located, String> {
     let container = row.multi_repos.is_some() && row.source_project_id.is_none();
     let working_dir = row.working_dir.clone().filter(|d| !d.is_empty());
     if row.project_type == "local" {
+        let kind = local_kind();
+        let absolute_root = absolute_request_root(kind, paths).map_err(|e| e.to_string())?;
         let root = match working_dir {
             Some(dir) => dir,
+            None if absolute_root.is_some() => absolute_root.unwrap(),
             None if container => engine.sessions.ensure_virtual_dir(row, false).await.map_err(|e| e.to_string())?,
             None => return Err(worktree_failure_text(WorktreeFailure::NoWorkingDir).to_string()),
         };
-        return Ok(Located { kind: local_kind(), link: None, root });
+        let base = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+        let root = configured_root(kind, &base, &root).map_err(|e| e.to_string())?;
+        return Ok(Located { kind, link: None, root, base });
     }
     let link = engine.sessions.get_link(row);
     let facts = link.host_facts().await.map_err(|e| e.to_string())?;
+    let absolute_root = absolute_request_root(facts.kind, paths).map_err(|e| e.to_string())?;
     let root = match working_dir {
         Some(dir) => dir,
+        None if absolute_root.is_some() => absolute_root.unwrap(),
         None if container => engine.sessions.ensure_virtual_dir(row, false).await.map_err(|e| e.to_string())?,
         None => facts.home.clone(),
     };
-    Ok(Located { kind: facts.kind, link: Some(link), root })
+    let base = facts.home.clone();
+    let root = configured_root(facts.kind, &base, &root).map_err(|e| e.to_string())?;
+    Ok(Located { kind: facts.kind, link: Some(link), root, base })
+}
+
+// ---------------- 登录态的路径身份 / raw 的不可变范围 ----------------
+
+/// 只在登录态 API 做重定位：底层仍接收 root + 相对路径，resolve_inside 的边界不变。
+/// 不用 std::path，因为后端与宿主机可能不是同一种系统。
+#[derive(Debug)]
+struct FilePath {
+    root: String,
+    rel: String,
+    absolute: bool,
+}
+
+fn outward(kind: HostKind, path: &str) -> String {
+    if kind == HostKind::Windows { path.replace('\\', "/") } else { path.to_string() }
+}
+
+/// 绝对路径拆成文件系统根 + 相对段。UNC 的根是 server/share，不是 server；拒绝设备
+/// 命名空间、盘符相对路径、`.` / `..` 与 Win32 会静默折叠的尾点 / 空格，避免保护根别名。
+fn absolute_parts(kind: HostKind, path: &str) -> Result<Option<(String, String)>, FileError> {
+    let path = outward(kind, &normalize_sep(kind, path));
+    let (root, tail) = if kind == HostKind::Windows {
+        if let Some(tail) = path.strip_prefix("//") {
+            let mut parts = tail.split('/').filter(|s| !s.is_empty());
+            let server = parts.next().ok_or(FileError::InvalidPath)?;
+            let share = parts.next().ok_or(FileError::InvalidPath)?;
+            for part in [server, share] {
+                windows_segment(part)?;
+            }
+            (format!("//{server}/{share}"), parts.collect::<Vec<_>>().join("/"))
+        } else if is_absolute(kind, &path) {
+            (path[..3].to_string(), path[3..].to_string())
+        } else {
+            if path.starts_with('/') || path.contains(':') {
+                return Err(FileError::InvalidPath);
+            }
+            return Ok(None);
+        }
+    } else if path.starts_with('/') {
+        ("/".to_string(), path.trim_start_matches('/').to_string())
+    } else {
+        return Ok(None);
+    };
+    let segs = rel_segments(Some(&tail))?;
+    if kind == HostKind::Windows {
+        for seg in &segs {
+            windows_segment(seg)?;
+        }
+    }
+    Ok(Some((root, segs.join("/"))))
+}
+
+fn absolute_request_root(kind: HostKind, paths: &[&str]) -> Result<Option<String>, FileError> {
+    let mut root = None;
+    for path in paths {
+        match absolute_parts(kind, path) {
+            Ok(Some((fs_root, _))) => { root.get_or_insert(fs_root); },
+            // 无效项留给各路由报错；remove 要逐项 errors，不能提前让整批失败。
+            Err(_) => {},
+            Ok(None) => return Ok(None),
+        }
+    }
+    Ok(root)
+}
+
+fn windows_segment(seg: &str) -> Result<(), FileError> {
+    crate::files::validate_entry_name(HostKind::Windows, seg)?;
+    if seg.ends_with(['.', ' ']) {
+        return Err(FileError::InvalidPath);
+    }
+    Ok(())
+}
+
+impl FilePath {
+    fn new(loc: &Located, path: Option<&str>) -> Result<Self, FileError> {
+        let path = path.unwrap_or("");
+        if let Some((root, rel)) = absolute_parts(loc.kind, path)? {
+            return Ok(Self { root, rel, absolute: true });
+        }
+        let path = outward(loc.kind, path);
+        let segs = rel_segments(Some(&path))?;
+        if loc.kind == HostKind::Windows {
+            for seg in &segs {
+                windows_segment(seg)?;
+            }
+        }
+        Ok(Self { root: loc.root.clone(), rel: segs.join("/"), absolute: false })
+    }
+
+    fn full(&self, kind: HostKind) -> Result<String, FileError> {
+        resolve_inside(kind, &self.root, Some(&self.rel))
+    }
+
+    fn response(&self, kind: HostKind, rel: &str) -> String {
+        if !self.absolute {
+            return rel.to_string();
+        }
+        // rel 由底层产生，不再当请求解析。列表里可能有含控制字符的真实文件名，不能
+        // 为了拼响应再 resolve（它会拒绝这种名字）；文件操作仍在下一次请求时校验。
+        let root = outward(kind, &self.root);
+        if rel.is_empty() { root } else { format!("{}/{rel}", root.trim_end_matches('/')) }
+    }
+}
+
+/// 配置里的相对目录按原执行环境的 cwd 解释，不相对工作目录再拼一次。配置允许常见的
+/// `./repo` / `../repo`；先词法折叠后固定为绝对路径，请求路径本身仍拒绝这些段。
+fn configured_root(kind: HostKind, base: &str, path: &str) -> Result<String, FileError> {
+    let path = outward(kind, path);
+    let full = if is_absolute(kind, &path) { path } else { format!("{}/{path}", outward(kind, base).trim_end_matches('/')) };
+    let floor = if kind == HostKind::Windows {
+        if full.starts_with("//") { 2 } else { 1 }
+    } else { 0 };
+    let mut parts = Vec::new();
+    for part in full.split('/').filter(|p| !p.is_empty()) {
+        if parts.len() < floor {
+            if part == "." || part == ".." { return Err(FileError::InvalidPath); }
+            parts.push(part);
+            continue;
+        }
+        match part {
+            "." => {},
+            ".." => {
+                if parts.len() <= floor { return Err(FileError::InvalidPath); }
+                parts.pop();
+            },
+            _ => parts.push(part),
+        }
+    }
+    let prefix = if kind == HostKind::Windows {
+        if full.starts_with("//") { "//" } else { "" }
+    } else { "/" };
+    let mut full = format!("{prefix}{}", parts.join("/"));
+    if kind == HostKind::Windows && full.len() == 2 && full.as_bytes()[1] == b':' {
+        full.push('/');
+    }
+    let (root, rel) = absolute_parts(kind, &full)?.ok_or(FileError::InvalidPath)?;
+    resolve_inside(kind, &root, Some(&rel))
+}
+
+fn project_roots(row: &ProjectRow, loc: &Located) -> Vec<String> {
+    let mut roots = vec![loc.root.clone()];
+    roots.extend(row.working_dir.iter().filter(|r| !r.is_empty()).cloned());
+    if let Some(members) = Db::parse_multi_repos(row.multi_repos.as_deref()) {
+        roots.extend(members.into_iter().map(|m| m.dir));
+    }
+    roots
+}
+
+fn normalized_project_roots(row: &ProjectRow, loc: &Located) -> Result<Vec<String>, FileError> {
+    project_roots(row, loc).into_iter().map(|root| configured_root(loc.kind, &loc.base, &root)).collect()
+}
+
+/// 重定位到 / 之后，底层只会保护 /。这里独立保护项目与成员根（以及包含它们的祖先），
+/// 否则在父目录点一次删除就能绕开原来的工作目录护栏。改名的目标也不能覆盖保护根。
+fn protect_roots(row: &ProjectRow, loc: &Located, path: &FilePath) -> Result<(), FileError> {
+    let full = path.full(loc.kind)?;
+    if absolute_parts(loc.kind, &full)?.is_some_and(|(_, rel)| rel.is_empty()) {
+        return Err(FileError::RemoveRoot);
+    }
+    for root in normalized_project_roots(row, loc)? {
+        if same_path(loc.kind, &full, &root) || is_ancestor(loc.kind, &full, &root) {
+            return Err(FileError::RemoveRoot);
+        }
+    }
+    Ok(())
+}
+
+/// 项目 id 之外再绑定实际连接端点，编辑项目换机器后旧 token 不能读新机器上的同名路径。
+fn host_identity(row: &ProjectRow) -> String {
+    if row.project_type == "local" {
+        return "local".to_string();
+    }
+    serde_json::json!([row.host_id, row.ssh_host, row.ssh_port.unwrap_or(22), row.ssh_username]).to_string()
+}
+
+fn preview_scope(row: &ProjectRow, loc: &Located, path: &FilePath) -> Result<(RawScope, String), FileError> {
+    let full = path.full(loc.kind)?;
+    // 项目内优先选最窄的工作目录 / 成员根；项目外只给文件所在目录。
+    let mut roots = normalized_project_roots(row, loc)?;
+    roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    let root = roots.into_iter().find(|r| {
+        absolute_parts(loc.kind, r).ok().flatten().is_some_and(|(_, rel)| !rel.is_empty())
+            && is_ancestor(loc.kind, r, &full)
+    }).unwrap_or_else(|| dirname_of(loc.kind, &full));
+    let root = FilePath::new(loc, Some(&root))?.full(loc.kind)?;
+    let full_parts = absolute_parts(loc.kind, &full)?.ok_or(FileError::InvalidPath)?;
+    let root_parts = absolute_parts(loc.kind, &root)?.ok_or(FileError::InvalidPath)?;
+    let n = rel_segments(Some(&root_parts.1))?.len();
+    let rel = rel_segments(Some(&full_parts.1))?[n..].join("/");
+    let only_file = root_parts.1.is_empty().then(|| rel.clone());
+    Ok((RawScope::Directory { kind: loc.kind, host: host_identity(row), root, only_file }, rel))
+}
+
+/// raw 后缀永远是相对路径。底层为兼容旧 API 会忽略前导 /；这里不能把绝对路径降格
+/// 成相对路径，尤其不能让 C:/... / UNC 偷换 token 的根。
+fn raw_relative(kind: HostKind, rel: &str) -> Result<String, FileError> {
+    let normalized = outward(kind, rel);
+    if normalized.starts_with('/') || is_absolute(kind, rel)
+        || (kind == HostKind::Windows && normalized.contains(':'))
+    {
+        return Err(FileError::InvalidPath);
+    }
+    let segs = rel_segments(Some(&normalized))?;
+    if kind == HostKind::Windows {
+        for seg in &segs {
+            windows_segment(seg)?;
+        }
+    }
+    Ok(segs.join("/"))
 }
 
 // ---------------- 列目录 / 索引 / 查看 ----------------
@@ -126,8 +353,14 @@ async fn list(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            list_workspace(&loc.host(), &loc.root, p.as_deref()).await.map_err(|e| e.to_string())
+            let loc = file_host_for_paths(&engine, &row, &[p.as_deref().unwrap_or("")]).await?;
+            let path = FilePath::new(&loc, p.as_deref()).map_err(|e| e.to_string())?;
+            let mut out = list_workspace(&loc.host(), &path.root, Some(&path.rel)).await.map_err(|e| e.to_string())?;
+            out.path = path.response(loc.kind, &out.path);
+            for entry in &mut out.entries {
+                entry.path = path.response(loc.kind, &entry.path);
+            }
+            Ok::<_, String>(out)
         })
         .await?;
     res.map(Json).map_err(ApiError::bad_request)
@@ -174,12 +407,22 @@ async fn file(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            read_workspace_file(&loc.host(), &loc.root, &p).await.map_err(|e| e.to_string())
+            let loc = file_host_for_paths(&engine, &row, &[&p]).await?;
+            let path = FilePath::new(&loc, Some(&p)).map_err(|e| e.to_string())?;
+            let preview = read_workspace_file(&loc.host(), &path.root, &path.rel).await.map_err(|e| e.to_string())?;
+            let scoped = if path.absolute { Some(preview_scope(&row, &loc, &path).map_err(|e| e.to_string())?) } else { None };
+            Ok::<_, String>((preview, scoped))
         })
         .await?;
-    let preview = res.map_err(ApiError::bad_request)?;
-    Ok(Json(WorkspaceFile { preview, raw_base: raw_base_for(&state, &id) }))
+    let (preview, scoped) = res.map_err(ApiError::bad_request)?;
+    let (raw_base, raw_path) = match scoped {
+        Some((scope, rel)) => (
+            format!("/api/projects/{}/raw/{}/", encode_uri_component(&id), state.auth.raw_token_for_scope(&id, scope)),
+            Some(rel),
+        ),
+        None => (raw_base_for(&state, &id), None),
+    };
+    Ok(Json(WorkspaceFile { preview, raw_base, raw_path }))
 }
 
 /// 把查看窗口里编辑过的文本写回去（Node 版的查看窗口只读，没有这条）。
@@ -218,11 +461,12 @@ async fn save(
     state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await.map_err(ApiError::bad_request)?;
-            let version = save_workspace_file(&loc.host(), &loc.root, &p, &bytes, base.as_deref())
+            let loc = file_host_for_paths(&engine, &row, &[&p]).await.map_err(ApiError::bad_request)?;
+            let path = FilePath::new(&loc, Some(&p)).map_err(save_error)?;
+            let version = save_workspace_file(&loc.host(), &path.root, &path.rel, &bytes, base.as_deref())
                 .await
                 .map_err(save_error)?;
-            Ok(Json(SaveFileResult { path: p.clone(), size: bytes.len() as u64, version }))
+            Ok(Json(SaveFileResult { path: path.response(loc.kind, &path.rel), size: bytes.len() as u64, version }))
         })
         .await?
 }
@@ -271,21 +515,48 @@ async fn raw_empty(
 /// 其它接口；nosniff 防止把 octet-stream 猜成脚本。no-store 是因为用户改完文件
 /// 按刷新就想看到新的，这里不发 ETag。
 async fn raw_core(state: AppState, id: String, token: String, rel: String, headers: HeaderMap) -> ApiResult<Response> {
-    if !state.authenticated(&headers) && !state.auth.raw_token_valid(Some(&token), &id) {
+    // 有效的目录 token 即使同时带着登录 cookie 也必须按绑定范围读，不能被 cookie
+    // 升成项目根。保留旧行为：无有效 token 但已登录时，仅能按旧项目根读取。
+    let scope = state.auth.raw_scope(Some(&token), &id);
+    if scope.is_none() && !state.authenticated(&headers) {
         return Err(ApiError::unauthorized());
     }
+    let scope = scope.unwrap_or(RawScope::Project);
     let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    if let RawScope::Directory { host, .. } = &scope {
+        if *host != host_identity(&row) {
+            return Err(ApiError::unauthorized());
+        }
+    }
     if rel.is_empty() {
         return Err(ApiError::bad_request("缺少文件路径"));
     }
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            read_workspace_bytes(&loc.host(), &loc.root, &rel, WORKSPACE_RAW_CAP).await.map_err(|e| e.to_string())
+            let roots = match &scope { RawScope::Project => Vec::new(), RawScope::Directory { root, .. } => vec![root.as_str()] };
+            let loc = file_host_for_paths(&engine, &row, &roots).await.map_err(ApiError::bad_request)?;
+            let rel = raw_relative(loc.kind, &rel).map_err(|e| ApiError::bad_request(e.to_string()))?;
+            let root = match scope {
+                RawScope::Project => loc.root.clone(),
+                RawScope::Directory { kind, host, root, only_file } => {
+                    if kind != loc.kind || host != host_identity(&row) {
+                        return Err(ApiError::unauthorized());
+                    }
+                    if let Some(file) = only_file {
+                        // 精确文件授权不接受额外的路径段或别名。
+                        if rel != file {
+                            return Err(ApiError::unauthorized());
+                        }
+                    }
+                    root
+                }
+            };
+            read_workspace_bytes(&loc.host(), &root, &rel, WORKSPACE_RAW_CAP).await
+                .map_err(|e| not_found_or_bad_request(e.to_string()))
         })
         .await?;
-    let (name, read) = res.map_err(not_found_or_bad_request)?;
+    let (name, read) = res?;
     if read.size > read.bytes.len() as u64 {
         // 截断的字节对浏览器没有意义（半张图、半个脚本），如实拒绝
         return Err(ApiError::new(
@@ -337,8 +608,9 @@ async fn download(State(state): State<AppState>, Path(id): Path<String>, uri: Ur
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            open_download(&loc.host(), &loc.root, &p).await
+            let loc = file_host_for_paths(&engine, &row, &[&p]).await?;
+            let path = FilePath::new(&loc, Some(&p)).map_err(|e| e.to_string())?;
+            open_download(&loc.host(), &path.root, &path.rel).await
         })
         .await?;
     let src = res.map_err(not_found_or_bad_request)?;
@@ -413,17 +685,22 @@ async fn upload_core(
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            prepare_upload(&loc.host(), &loc.root, dir.as_deref(), &name, size, overwrite).await
+            let loc = file_host_for_paths(&engine, &row, &[dir.as_deref().unwrap_or("")]).await?;
+            let path = FilePath::new(&loc, dir.as_deref()).map_err(|e| e.to_string())?;
+            let sink = prepare_upload(&loc.host(), &path.root, Some(&path.rel), &name, size, overwrite).await?;
+            Ok::<_, String>((sink, path, loc.kind))
         })
         .await?;
-    let sink = res.map_err(conflict_or_bad_request)?;
-    if media != Media::OctetStream {
+    let (sink, path, kind) = res.map_err(conflict_or_bad_request)?;
+    let mut out = if media != Media::OctetStream {
         // 空请求体（size 0）却不是 octet-stream：Node 版换成一个空流，这里同样不读它
         let mut empty = futures::stream::empty::<Result<bytes::Bytes, std::io::Error>>();
-        return receive_upload(sink, size, overwrite, &mut empty).await.map_err(conflict_or_bad_request);
-    }
-    receive_upload(sink, size, overwrite, body).await.map_err(conflict_or_bad_request)
+        receive_upload(sink, size, overwrite, &mut empty).await
+    } else {
+        receive_upload(sink, size, overwrite, body).await
+    }.map_err(conflict_or_bad_request)?;
+    out.path = path.response(kind, &out.path);
+    Ok(out)
 }
 
 // ---------------- mkdir / rename / remove（ADR 0009） ----------------
@@ -447,8 +724,11 @@ async fn mkdir(
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            mkdir_workspace(&loc.host(), &loc.root, &p, recursive).await.map_err(|e| e.to_string())
+            let loc = file_host_for_paths(&engine, &row, &[&p]).await?;
+            let path = FilePath::new(&loc, Some(&p)).map_err(|e| e.to_string())?;
+            let mut out = mkdir_workspace(&loc.host(), &path.root, &path.rel, recursive).await.map_err(|e| e.to_string())?;
+            out.path = path.response(loc.kind, &out.path);
+            Ok::<_, String>(out)
         })
         .await?;
     res.map(Json).map_err(conflict_or_bad_request)
@@ -466,8 +746,18 @@ async fn rename(
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            rename_workspace(&loc.host(), &loc.root, &p, &name).await.map_err(|e| e.to_string())
+            let loc = file_host_for_paths(&engine, &row, &[&p]).await?;
+            let path = FilePath::new(&loc, Some(&p)).map_err(|e| e.to_string())?;
+            protect_roots(&row, &loc, &path).map_err(|e| e.to_string())?;
+            if loc.kind == HostKind::Windows {
+                windows_segment(&name).map_err(|e| e.to_string())?;
+            }
+            let target = crate::files::rename_target(loc.kind, &path.root, &path.rel, &name).map_err(|e| e.to_string())?;
+            let dest = FilePath { root: path.root.clone(), rel: target.path, absolute: path.absolute };
+            protect_roots(&row, &loc, &dest).map_err(|e| e.to_string())?;
+            let mut out = rename_workspace(&loc.host(), &path.root, &path.rel, &name).await.map_err(|e| e.to_string())?;
+            out.path = path.response(loc.kind, &out.path);
+            Ok::<_, String>(out)
         })
         .await?;
     res.map(Json).map_err(conflict_or_bad_request)
@@ -490,8 +780,44 @@ async fn remove(
     let res = state
         .engine
         .call(move |engine| async move {
-            let loc = file_host_for(&engine, &row).await?;
-            Ok::<_, String>(remove_workspace(&loc.host(), &loc.root, &paths).await)
+            let refs: Vec<_> = paths.iter().map(String::as_str).collect();
+            let loc = file_host_for_paths(&engine, &row, &refs).await?;
+            let mut out = FileRemoveResult { removed: Vec::new(), errors: Vec::new() };
+            let mut targets = Vec::new();
+            for original in paths {
+                if original.is_empty() { continue; }
+                let path = match FilePath::new(&loc, Some(&original)) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        out.errors.push(falcon_proto::FileRemoveError { path: original, error: e.to_string() });
+                        continue;
+                    }
+                };
+                if let Err(e) = protect_roots(&row, &loc, &path) {
+                    out.errors.push(falcon_proto::FileRemoveError {
+                        path: path.response(loc.kind, &path.rel), error: e.to_string(),
+                    });
+                    continue;
+                }
+                let full = path.full(loc.kind).map_err(|e| e.to_string())?;
+                targets.push((path, full));
+            }
+            targets.sort_by(|a, b| a.1.encode_utf16().cmp(b.1.encode_utf16()));
+            let mut accepted: Vec<String> = Vec::new();
+            for (path, full) in &targets {
+                if accepted.iter().any(|p| same_path(loc.kind, p, full))
+                    || targets.iter().any(|(_, other)| is_ancestor(loc.kind, other, full))
+                {
+                    continue;
+                }
+                accepted.push(full.clone());
+                let result = remove_workspace(&loc.host(), &path.root, &[&path.rel]).await;
+                out.removed.extend(result.removed.into_iter().map(|p| path.response(loc.kind, &p)));
+                out.errors.extend(result.errors.into_iter().map(|e| falcon_proto::FileRemoveError {
+                    path: path.response(loc.kind, &e.path), error: e.error,
+                }));
+            }
+            Ok::<_, String>(out)
         })
         .await?;
     res.map(Json).map_err(ApiError::bad_request)
@@ -505,6 +831,265 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use serde_json::json;
+
+    use super::{FilePath, Located, RawScope, absolute_parts, preview_scope, protect_roots, raw_relative};
+    use crate::host::HostKind;
+
+    async fn signed(app: &TestApp, login: &str, mut req: Request<Body>) -> axum::response::Response {
+        req.headers_mut().insert("cookie", format!("falcon_token={login}").parse().unwrap());
+        app.send(req).await
+    }
+
+    fn get_request(uri: &str) -> Request<Body> {
+        Request::get(uri).body(Body::empty()).unwrap()
+    }
+
+    fn json_request(uri: &str, value: serde_json::Value) -> Request<Body> {
+        Request::post(uri).header("content-type", "application/json").body(Body::from(value.to_string())).unwrap()
+    }
+
+    fn temp_sql(app: &TestApp, sql: &str, params: impl rusqlite::Params) {
+        rusqlite::Connection::open(app.data_dir.join("falcon.db")).unwrap().execute(sql, params).unwrap();
+    }
+
+    fn path_query(op: &str, path: &std::path::Path) -> String {
+        format!("/api/projects/p1/{op}?path={}", super::encode_uri_component(&path.to_string_lossy()))
+    }
+
+    #[tokio::test]
+    async fn absolute_paths_outside_project_use_login_for_all_file_operations() {
+        let app = TestApp::new();
+        let wd = app.local_project("p1");
+        let outside = app.root.join("outside space");
+        write(&outside.join("a.txt"), "original");
+        assert!(app.state.auth.set_password("secret1", None));
+        let login = app.state.auth.login("secret1").unwrap();
+        let oct = Some("application/octet-stream");
+        for op in ["files", "file", "download"] {
+            let path = if op == "files" { outside.clone() } else { outside.join("a.txt") };
+            assert_eq!(app.get(&path_query(op, &path)).await.status(), StatusCode::UNAUTHORIZED);
+        }
+        for op in ["mkdir", "rename", "remove"] {
+            let req = json_request(&format!("/api/projects/p1/{op}"), json!({"path": outside, "name":"x", "paths":[outside]}));
+            assert_eq!(app.send(req).await.status(), StatusCode::UNAUTHORIZED);
+        }
+        for op in ["file", "upload"] {
+            let uri = format!("{}&name=new", path_query(op, &outside.join("a.txt")));
+            assert_eq!(app.send(put(&uri, oct, "x", Some(1))).await.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let (_, list) = json_of(signed(&app, &login, get_request(&path_query("files", &outside))).await).await;
+        assert_eq!(list["path"], outside.to_string_lossy().as_ref());
+        assert_eq!(list["entries"][0]["path"], outside.join("a.txt").to_string_lossy().as_ref());
+        let (status, file) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("a.txt")))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(file["preview"]["text"], "original");
+        assert_eq!(file["rawPath"], "a.txt");
+        let version = file["preview"]["version"].as_str().unwrap();
+        let uri = format!("{}&base={version}", path_query("file", &outside.join("a.txt")));
+        let (status, saved) = json_of(signed(&app, &login, put(&uri, oct, "changed", Some(7))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["path"], outside.join("a.txt").to_string_lossy().as_ref());
+        assert_eq!(std::fs::read(outside.join("a.txt")).unwrap(), b"changed");
+        assert_eq!(signed(&app, &login, put(&uri, oct, "stale", Some(5))).await.status(), StatusCode::CONFLICT);
+        let downloaded = signed(&app, &login, get_request(&path_query("download", &outside.join("a.txt")))).await;
+        assert_eq!(downloaded.status(), StatusCode::OK);
+        assert_eq!(body_bytes(downloaded).await, b"changed");
+
+        let upload = format!("{}&name=new.txt", path_query("upload", &outside));
+        let (status, uploaded) = json_of(signed(&app, &login, put(&upload, oct, "upload", Some(6))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(uploaded["path"], outside.join("new.txt").to_string_lossy().as_ref());
+        assert_eq!(std::fs::read(outside.join("new.txt")).unwrap(), b"upload");
+        let empty = format!("{}&name=empty", path_query("upload", &outside));
+        assert_eq!(signed(&app, &login, put(&empty, None, Body::empty(), Some(0))).await.status(), StatusCode::OK);
+
+        let dir = outside.join("new/nested");
+        let (status, made) = json_of(signed(&app, &login, json_request("/api/projects/p1/mkdir", json!({"path":dir,"recursive":true}))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(made["path"], dir.to_string_lossy().as_ref());
+        let (status, renamed) = json_of(signed(&app, &login, json_request("/api/projects/p1/rename", json!({"path":outside.join("new.txt"),"name":"renamed.txt"}))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["path"], outside.join("renamed.txt").to_string_lossy().as_ref());
+        let (status, removed) = json_of(signed(&app, &login, json_request("/api/projects/p1/remove", json!({"paths":[outside.join("new"),dir,outside.join("renamed.txt"),outside.join("missing")]}))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(removed["removed"], json!([outside.join("new"), outside.join("renamed.txt")]));
+        assert_eq!(removed["errors"][0]["path"], outside.join("missing").to_string_lossy().as_ref());
+        assert!(!outside.join("new").exists() && !outside.join("renamed.txt").exists());
+        assert!(wd.is_dir());
+        write(&outside.join("valid"), "ok");
+        let (status, partial) = json_of(signed(&app, &login, json_request("/api/projects/p1/remove", json!({"paths":[outside.join("valid"),format!("{}/../invalid", outside.display()),"/"]}))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(partial["removed"], json!([outside.join("valid")]));
+        assert_eq!(partial["errors"].as_array().unwrap().len(), 2);
+        assert_eq!(partial["errors"][1]["path"], "/");
+
+        // 绝对目录浏览不改变 Quick Open 的项目范围，连 ?path= 也不能切换索引根。
+        write(&wd.join("inside.txt"), "in");
+        let (status, index) = json_of(signed(&app, &login, get_request(&path_query("files/index", &outside))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(index["paths"], json!(["inside.txt"]));
+        let (_, relative) = json_of(signed(&app, &login, get_request("/api/projects/p1/file?path=inside.txt")).await).await;
+        assert!(relative.get("rawPath").is_none());
+    }
+
+    #[tokio::test]
+    async fn absolute_multi_members_keep_identity_and_never_delete_roots() {
+        let app = TestApp::new();
+        let a = app.root.join("member-a");
+        let b = app.root.join("member-b");
+        write(&a.join("same.txt"), "a");
+        write(&b.join("same.txt"), "b");
+        let wd = app.local_project("p1");
+        temp_sql(&app, "UPDATE projects SET multi_repos = ? WHERE id = ?", [json!([{"dir":a},{"dir":b}]).to_string(), "p1".into()]);
+        for (dir, text) in [(&a, "a"), (&b, "b")] {
+            let (status, list) = json_of(app.get(&path_query("files", dir)).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(list["entries"][0]["path"], dir.join("same.txt").to_string_lossy().as_ref());
+            let (status, file) = json_of(app.get(&path_query("file", &dir.join("same.txt"))).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(file["preview"]["text"], text);
+            assert_eq!(file["rawPath"], "same.txt");
+            let base = file["rawBase"].as_str().unwrap();
+            assert_eq!(body_bytes(app.get(&format!("{base}same.txt")).await).await, text.as_bytes());
+        }
+        for root in [&a, &b, &wd, &app.root] {
+            let (status, _) = json_of(app.post_json("/api/projects/p1/rename", json!({"path":root,"name":"do-not-rename"})).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, body) = json_of(app.post_json("/api/projects/p1/remove", json!({"paths":[root]})).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body["removed"].as_array().unwrap().is_empty());
+            assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+            assert!(root.is_dir());
+        }
+        // 相对路径指到嵌在工作目录里的成员根，也受同一保护。
+        let nested = wd.join("nested");
+        write(&nested.join("keep"), "k");
+        temp_sql(&app, "UPDATE projects SET multi_repos = ? WHERE id = ?", [json!([{"dir":nested}]).to_string(), "p1".into()]);
+        assert_eq!(app.post_json("/api/projects/p1/rename", json!({"path":"nested","name":"renamed"})).await.status(), StatusCode::BAD_REQUEST);
+        let (_, body) = json_of(app.post_json("/api/projects/p1/remove", json!({"paths":["nested"]})).await).await;
+        assert!(body["removed"].as_array().unwrap().is_empty() && nested.is_dir());
+    }
+
+    #[tokio::test]
+    async fn absolute_raw_tokens_bind_directory_project_host_and_lifetime() {
+        let app = TestApp::new();
+        let wd = app.local_project("p1");
+        app.local_project("p2");
+        let outside = app.root.join("outside/docs");
+        write(&outside.join("index.html"), "<link href='style.css'>");
+        write(&outside.join("style.css"), "x{}");
+        write(&app.root.join("outside/secret.txt"), "secret");
+        write(&wd.join("inside.txt"), "inside");
+        assert!(app.state.auth.set_password("secret1", None));
+        let login = app.state.auth.login("secret1").unwrap();
+        let (status, file) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("index.html")))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let base = file["rawBase"].as_str().unwrap();
+        assert_eq!(file["rawPath"], "index.html");
+        let token = base.trim_end_matches('/').rsplit('/').next().unwrap();
+        let res = app.get(&format!("{base}style.css")).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(header(&res, "referrer-policy"), "no-referrer");
+        assert_eq!(header(&res, "cache-control"), "no-store");
+        assert_eq!(header(&res, "x-content-type-options"), "nosniff");
+        assert!(header(&res, "content-security-policy").starts_with("sandbox "));
+        assert_eq!(body_bytes(res).await, b"x{}");
+        for rel in ["..%2Fsecret.txt", "%2Fsecret.txt", "sub%2F..%2Fsecret.txt"] {
+            assert_eq!(app.get(&format!("{base}{rel}")).await.status(), StatusCode::BAD_REQUEST);
+        }
+        // 改请求中的 query / project 都不能改根。
+        assert_eq!(app.get(&format!("{base}secret.txt?path={}", super::encode_uri_component(&app.root.to_string_lossy()))).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(app.get(&format!("/api/projects/p2/raw/{token}/style.css")).await.status(), StatusCode::UNAUTHORIZED);
+        let (_, old) = json_of(signed(&app, &login, get_request("/api/projects/p1/file?path=inside.txt")).await).await;
+        let project_base = old["rawBase"].as_str().unwrap();
+        assert_ne!(base, project_base);
+        assert_eq!(app.get(&format!("{project_base}style.css")).await.status(), StatusCode::NOT_FOUND);
+        // 同时带 cookie 也按目录范围，而不是回退项目根。
+        assert_eq!(signed(&app, &login, get_request(&format!("{base}inside.txt"))).await.status(), StatusCode::NOT_FOUND);
+        let big = std::fs::File::create(outside.join("big.bin")).unwrap();
+        big.set_len(falcon_proto::WORKSPACE_RAW_CAP + 1).unwrap();
+        assert_eq!(app.get(&format!("{base}big.bin")).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        // 换 cwd 不会把已签发的范围挪走；换宿主机则拒绝（在连接 SSH 前拒绝，不碰真实机器）。
+        let mut row = app.state.db.get_project("p1").unwrap();
+        row.working_dir = Some(app.root.to_string_lossy().into_owned());
+        app.state.db.update_project(&row);
+        assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::OK);
+        temp_sql(&app, "UPDATE projects SET type = ? WHERE id = ?", ["ssh", "p1"]);
+        assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::UNAUTHORIZED);
+        temp_sql(&app, "UPDATE projects SET type = ? WHERE id = ?", ["local", "p1"]);
+        app.state.auth.expire_raw_for_test(token);
+        assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::UNAUTHORIZED);
+        let (_, next) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("index.html")))).await).await;
+        let next_base = next["rawBase"].as_str().unwrap();
+        let logout = signed(&app, &login, json_request("/api/auth/logout", json!({}))).await;
+        assert_eq!(logout.status(), StatusCode::OK);
+        assert_eq!(app.get(&format!("{next_base}index.html")).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.get(&format!("{project_base}inside.txt")).await.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn windows_unc_and_posix_path_mapping_and_root_guards() {
+        use HostKind::{Posix, Windows};
+        for (kind, input, root, rel, response) in [
+            (Posix, "/foo/bar", "/", "foo/bar", "/foo/bar"),
+            (Posix, "/foo\\bar", "/", "foo\\bar", "/foo\\bar"),
+            (Windows, "C:/foo/bar", "C:/", "foo/bar", "C:/foo/bar"),
+            (Windows, r"C:\foo\bar", "C:/", "foo/bar", "C:/foo/bar"),
+            (Windows, r"\\server\share\foo\bar", "//server/share", "foo/bar", "//server/share/foo/bar"),
+            (Windows, "//server/share", "//server/share", "", "//server/share"),
+            (Windows, "D:/", "D:/", "", "D:/"),
+        ] {
+            let loc = Located { kind, link: None, root: if kind == Windows { "C:/project".into() } else { "/project".into() }, base: if kind == Windows { "C:/home".into() } else { "/home".into() } };
+            let path = FilePath::new(&loc, Some(input)).unwrap();
+            assert!(path.absolute);
+            assert_eq!((&path.root[..], &path.rel[..]), (root, rel));
+            assert_eq!(path.response(kind, &path.rel), response);
+        }
+        for path in [r"C:foo", r"\foo", r"C:\foo\..\project", "C:/foo/../project", "//server", r"\\?\C:\foo", "C:/project.", "C:/project /child", "C:/foo:stream"] {
+            assert!(absolute_parts(Windows, path).is_err(), "{path}");
+        }
+        assert!(absolute_parts(Posix, "/foo/../project").is_err());
+        for path in ["//host/share/../other", "C:/../other", "//host/../share"] {
+            assert!(super::configured_root(Windows, "C:/home", path).is_err(), "{path}");
+        }
+        assert_eq!(super::configured_root(Windows, "//host/share/home", "../repo").unwrap(), r"\\host\share\repo");
+        let row = crate::db::ProjectRow { working_dir: Some(r"C:\project".into()), multi_repos: Some(r#"[{"dir":"D:/member"},{"dir":"//server/share/member"}]"#.into()), ..Default::default() };
+        let loc = Located { kind: Windows, link: None, root: r"C:\project".into(), base: "C:/home".into() };
+        for root in ["C:/", "D:/", "//server/share", r"c:\PROJECT\", "D:/member", "//SERVER/SHARE/member"] {
+            let path = FilePath::new(&loc, Some(root)).unwrap();
+            assert!(protect_roots(&row, &loc, &path).is_err(), "{root}");
+        }
+        assert!(protect_roots(&row, &loc, &FilePath::new(&loc, Some("D:/other")).unwrap()).is_ok());
+        let relative_row = crate::db::ProjectRow { working_dir: Some("repo".into()), multi_repos: Some(r#"[{"dir":"../member"}]"#.into()), ..Default::default() };
+        let relative_loc = Located { kind: Windows, link: None, root: "C:/home/repo".into(), base: "C:/home".into() };
+        assert!(protect_roots(&relative_row, &relative_loc, &FilePath::new(&relative_loc, Some("C:/member")).unwrap()).is_err());
+        assert!(protect_roots(&relative_row, &relative_loc, &FilePath::new(&relative_loc, Some("C:/home/repo/child")).unwrap()).is_ok());
+        for path in ["C:/a", r"C:\a", "//server/share/a", r"..\a", "/a", "dir./a", "dir /a"] {
+            assert!(raw_relative(Windows, path).is_err(), "{path}");
+        }
+        for (kind, full) in [(Posix, "/a.html"), (Windows, "C:/a.html"), (Windows, "//server/share/a.html")] {
+            let loc = Located { kind, link: None, root: if kind == Posix { "/project".into() } else { "C:/project".into() }, base: if kind == Posix { "/home".into() } else { "C:/home".into() } };
+            let row = crate::db::ProjectRow { project_type: "local".into(), ..Default::default() };
+            let (scope, rel) = preview_scope(&row, &loc, &FilePath::new(&loc, Some(full)).unwrap()).unwrap();
+            assert_eq!(rel, "a.html");
+            assert!(matches!(scope, RawScope::Directory { only_file: Some(file), .. } if file == "a.html"));
+        }
+    }
+
+    #[tokio::test]
+    async fn absolute_no_working_dir_does_not_require_virtual_directory() {
+        let app = TestApp::new();
+        let dir = app.root.join("member");
+        write(&dir.join("x"), "x");
+        app.state.db.insert_project(&crate::db::ProjectRow { id:"p1".into(), name:"p1".into(), project_type:"local".into(), multi_repos:Some(json!([{"dir":dir}]).to_string()), ..Default::default() });
+        let (status, file) = json_of(app.get(&path_query("file", &dir.join("x"))).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(file["rawPath"], "x");
+        assert_eq!(app.get(&path_query("files", &dir)).await.status(), StatusCode::OK);
+        assert!(!app.data_dir.join("projects/p1").exists());
+    }
 
     #[tokio::test]
     async fn list_and_unknown_project() {
@@ -875,7 +1460,7 @@ mod tests {
         let (status, body) = json_of(app.post_json(&url("remove"), json!({ "paths": ["a", 1] })).await).await;
         assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({ "error": "路径不合法" })));
         let (status, body) = json_of(app.post_json(&url("remove"), json!({ "paths": ["/"] })).await).await;
-        assert_eq!((status, body), (StatusCode::OK, json!({ "removed": [], "errors": [] })));
+        assert_eq!((status, body), (StatusCode::OK, json!({ "removed": [], "errors": [{"path":"/","error":"不能删除工作目录本身"}] })));
         assert!(wd.is_dir());
     }
 }

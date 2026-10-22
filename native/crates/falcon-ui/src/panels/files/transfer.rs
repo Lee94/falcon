@@ -7,7 +7,7 @@
 //! - **进度走通知**：面板本身不摆进度条——上传是偶发动作，常驻的进度区大多数时候是空的。
 //!   通知就地更新文字，不重推：同 id 重推会重播入场动画、还会挪到队尾，进度一跳一闪。
 //! - **本机路径用 `std::path` 没问题**：这里的 `PathBuf` 都是**这台电脑**上用户选的文件；
-//!   宿主机上的路径一律是工作目录相对的 `/` 串，拼接走 falcon-core 的 file_path。
+//!   宿主机上的路径可以是项目相对或绝对的 `/` 串，拼接不能用这台电脑的 `std::path`。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -274,7 +274,7 @@ fn join_rel(dir: &str, name: &str) -> String {
     match (dir.is_empty(), name.is_empty()) {
         (true, _) => name.to_string(),
         (_, true) => dir.to_string(),
-        _ => format!("{dir}/{name}"),
+        _ => format!("{}/{name}", dir.trim_end_matches('/')),
     }
 }
 
@@ -566,6 +566,8 @@ mod tests {
         assert_eq!(join_rel("", "a"), "a");
         assert_eq!(join_rel("src", ""), "src");
         assert_eq!(join_rel("src", "lib"), "src/lib");
+        assert_eq!(join_rel("/", "lib"), "/lib");
+        assert_eq!(join_rel("C:/", "lib"), "C:/lib");
     }
 
     #[test]

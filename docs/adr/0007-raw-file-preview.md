@@ -41,4 +41,15 @@ MIME 表是手写的几十个扩展名（`files.ts`），不引 mime-db：web �
 
 - iframe 底色写死白色（`HtmlPane`），是 CLAUDE.md"界面色只准用语义 token"的例外：那是浏览器的画布默认色而不是界面色，没设背景的 HTML 在浏览器里就是白底黑字，跟着本站深色主题走会变成黑底黑字。
 - 远端项目的每个子资源都是一次 SSH exec + base64 回传，几十个资源的页面首屏会慢。真到那一步再考虑在 `readWorkspaceBytes` 上加一层短暂缓存，眼下没有证据需要。
-- 令牌在 URL 里，会进浏览器历史与服务端访问日志。它能做的只有读这个项目的文件，且 6 小时后作废；接受。
+- 令牌在 URL 里，会进浏览器历史与服务端访问日志。它能做的只有读绑定范围内的文件，且 6 小时后作废；接受。
+
+## 后记：绝对路径查看不扩大原 project token
+
+登录态文件面板允许浏览宿主机上的绝对路径（ADR 0009 后记），但**不能把 raw 根跟着请求改成 `/` / 盘符根**。HTML 在 opaque origin 里能拿到 URL 的 token；登录用户有整机 shell 权限，不代表一份不可信 HTML 也应有整机读取权。
+
+- 相对 `GET /file` 仍用原 `raw_token(project_id)`，`rawPath` 不出现，旧 token 的范围与相对路径协议不变。
+- 绝对 `GET /file` 另签 `project + HostKind + 宿主身份 + 固定目录根` 的 token。文件位于工作目录 / multi 成员根内时选最窄的包含根，否则只选文件父目录。父目录已经是 POSIX `/`、盘符根或 UNC share 根时，仅授权该文件，不授权根里的其它文件。
+- 完整范围相同才复用 token；不同目录、不同 kind / 宿主机分别签发，绝不修改旧 token 的根。项目换 cwd 不会挪动已签发的绝对范围；项目换 local / SSH、端点或用户后，旧范围 token 拒绝读取新宿主机。
+- 响应增加可选 `rawPath`：它是范围内的相对文件路径。客户端用 `raw_url(rawBase, rawPath.unwrap_or(request_path))` 拼地址；文件本身在列表 / 保存里的身份仍是绝对路径，不用 rawPath 替换。
+- raw handler 只读取 token 内保存的根，URL 后缀仍走 `resolve_inside` 的相对路径护栏；绝对后缀、`.` / `..` 拒绝，query 不能换根。有效范围 token 即使同时带登录 cookie 也不放宽。原来的已登录用户直接访问项目 raw 地址仍兼容，但只按项目根读。
+- 两类 token 都是 6 小时寿命、半寿命换新、logout 全部撤销。CSP sandbox、nosniff、no-store、no-referrer 与 16MB 超限 413 不变。底层仍是原有的词法路径边界与符号链接语义，没有把 raw 改成整机文件 API。

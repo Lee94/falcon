@@ -152,7 +152,26 @@ impl FileView {
             self.load(cx);
             return;
         }
-        // 预览（原始字节地址）挂在旧路径上，重建；编辑器留着
+        // 预览凭据可能只授权旧文件（文件位于盘符根时），不能仅改 URL 的末段。重取 raw 元数据，
+        // 不替换 preview / 编辑器 / 内容版本，没存的修改和保存冲突判定都留着。
+        let path = self.path.clone();
+        let generation = self.generation;
+        let fut = self.ws.read(cx).client.read_file(&self.project_id, &path);
+        cx.spawn(async move |this, cx| {
+            let result = fut.await;
+            this.update(cx, |this, cx| {
+                if this.path != path || this.generation != generation {
+                    return;
+                }
+                if let (Ok(next), Some(current)) = (result, this.result.as_mut()) {
+                    current.raw_base = next.raw_base;
+                    current.raw_path = next.raw_path;
+                    this.body = Body::None;
+                    this.body_dirty = true;
+                    cx.notify();
+                }
+            }).ok();
+        }).detach();
         self.body = Body::None;
         self.body_dirty = true;
         cx.notify();
@@ -327,7 +346,7 @@ impl FileView {
 
     fn raw_absolute(&self, cx: &App) -> Option<String> {
         let result = self.result.as_ref()?;
-        Some(format!("{}{}", self.ws.read(cx).client.base_url().trim_end_matches('/'), raw_url(&result.raw_base, &self.path)))
+        Some(format!("{}{}", self.ws.read(cx).client.base_url().trim_end_matches('/'), raw_url(&result.raw_base, result.raw_path.as_deref().unwrap_or(&self.path))))
     }
 
     fn build_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -337,7 +356,7 @@ impl FileView {
         let previewing = self.previewing();
         self.body = match &result.preview {
             FilePreview::Image { .. } => {
-                let (url, path) = (raw_url(&result.raw_base, &self.path), self.path.clone());
+                let (url, path) = (raw_url(&result.raw_base, result.raw_path.as_deref().unwrap_or(&self.path)), self.path.clone());
                 Body::Image(cx.new(|cx| ImagePane::new(client, url, path, cx)))
             }
             // 空文件的预览没什么可看的（body() 里说"这是一个空文件"）；源码视图照样给编辑器，好往里写
@@ -348,9 +367,11 @@ impl FileView {
                 Body::Html(cx.new(|cx| HtmlPane::new(url, prefix, window, cx)))
             }
             FilePreview::Text { text, .. } if previewing && is_markdown(&self.path) => {
-                let dir = dir_of(&self.path).to_string();
+                let dir = dir_of(result.raw_path.as_deref().unwrap_or(&self.path)).to_string();
                 let raw_base = result.raw_base.clone();
-                let on_link = markdown::link_handler(&self.ws, self.project_id.clone(), dir.clone());
+                // 图片相对 raw 令牌的目录解析，点击链接仍用宿主机路径打开，不能把不同成员的
+                // README.md 都变成同一个项目相对路径。
+                let on_link = markdown::link_handler(&self.ws, self.project_id.clone(), dir_of(&self.path).to_string());
                 // 编辑过的照着编辑器里的渲染：改完切过来看效果，不必先存
                 let text = match &self.code {
                     Some(code) => code.read(cx).text(cx),
@@ -574,7 +595,12 @@ fn is_html(path: &str) -> bool {
 }
 
 fn dir_of(path: &str) -> &str {
-    path.rfind('/').map_or("", |i| &path[..i])
+    match path.rfind('/') {
+        Some(0) => "/",
+        Some(2) if path.as_bytes().get(1) == Some(&b':') => &path[..3],
+        Some(i) => &path[..i],
+        None => "",
+    }
 }
 
 fn file_name(path: &str) -> &str {
@@ -617,6 +643,8 @@ mod tests {
         assert!(!is_html("a.html.txt"));
         assert_eq!(dir_of("a/b/c.md"), "a/b");
         assert_eq!(dir_of("c.md"), "");
+        assert_eq!(dir_of("/c.md"), "/");
+        assert_eq!(dir_of("C:/c.md"), "C:/");
         assert_eq!(file_name("a/b/c.md"), "c.md");
         assert_eq!(file_name("c.md"), "c.md");
     }

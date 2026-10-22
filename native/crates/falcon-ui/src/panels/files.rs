@@ -1,4 +1,4 @@
-//! 右侧「文件」面板：项目工作目录的目录浏览器（旧 React 版的 components/FilesPanel.tsx，ADR 0009），
+//! 右侧「文件」面板：从项目目录出发的宿主机目录浏览器（旧 React 版的 components/FilesPanel.tsx，ADR 0009），
 //! 附带下载 / 上传（ADR 0008）。
 //!
 //! 与「修改」面板的分工：那边列的是 git 眼里"这次动了什么"，这边列的是磁盘上真正有什么——
@@ -18,12 +18,13 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use falcon_core::file_path::{format_size, is_hidden_name, join_host_path, parent_rel, parse_nav_path};
+use falcon_core::file_path::{format_size, is_hidden_name, join_host_path, parent_nav_path, parse_nav_path, project_nav_root};
 use falcon_proto::{WorkspaceEntry, WorkspaceEntryKind};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
@@ -96,7 +97,9 @@ pub struct FilesPanel {
     ws: Entity<Workspace>,
     project_id: Option<String>,
     working_dir: Option<String>,
-    /// 当前目录（工作目录相对，`""` 是工作目录本身）
+    /// 多文件夹项目的成员入口；只管文件导航，不跟 Git 面板的成员选择互相改动。
+    roots: Vec<String>,
+    /// 当前目录：优先宿主机绝对路径；旧相对请求仍兼容，`""` 是项目缺省目录。
     cwd: String,
     show_hidden: bool,
     sort: (SortKey, SortDir),
@@ -132,6 +135,7 @@ impl FilesPanel {
             ws,
             project_id: None,
             working_dir: None,
+            roots: Vec::new(),
             cwd: String::new(),
             show_hidden: false,
             sort: (SortKey::Name, SortDir::Asc),
@@ -156,38 +160,73 @@ impl FilesPanel {
 
     /// 跟着工作区的"焦点项目"走（侧栏选中的项目优先，否则当前窗口所属项目）
     fn sync_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (pid, wd) = {
+        let (pid, wd, roots, initial) = {
             let ws = self.ws.read(cx);
             let pid = ws.focus_project_id();
-            let wd = pid.as_deref().and_then(|p| ws.project(p)).and_then(|p| p.working_dir.clone());
-            (pid, wd)
+            let project = pid.as_deref().and_then(|p| ws.project(p));
+            let wd = project.and_then(|p| p.working_dir.clone());
+            let roots = project.and_then(|p| p.multi.as_ref()).map(|m| m.repos.iter().map(|r| r.dir.clone()).collect()).unwrap_or_default();
+            let initial = project.and_then(project_nav_root).and_then(|p| parse_nav_path(&p, None)).unwrap_or_default();
+            (pid, wd, roots, initial)
         };
-        if pid != self.project_id {
+        if pid != self.project_id || wd != self.working_dir || roots != self.roots {
             self.project_id = pid;
             self.working_dir = wd;
-            self.cwd.clear();
+            self.roots = roots;
+            self.cwd = initial;
             self.selected.clear();
             self.draft = None;
             self.last_clicked = None;
             self.listing = Listing { loading: self.project_id.is_some(), ..Default::default() };
             self.invalidate_rows();
             self.scroll = UniformListScrollHandle::new();
-            self.reload(cx);
-            self.reset_path_input(window, cx);
-        } else if wd != self.working_dir {
-            self.working_dir = wd;
+            if self.project_id.is_some() && !self.cwd.starts_with('/') && self.cwd.as_bytes().get(1) != Some(&b':') {
+                self.resolve_initial_dir(window, cx);
+            } else {
+                self.reload(cx);
+            }
             self.reset_path_input(window, cx);
         }
         cx.notify();
     }
 
+    /// 没配 cwd 的 SSH 项目从登录目录开始。先拿到真实路径，返回上层才不会停在项目的
+    /// 相对路径根；multi 没配 cwd 也优先走成员入口，不打开会话用的虚拟目录。
+    fn resolve_initial_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        let remote = self.ws.read(cx).project(&pid).is_some_and(|p| p.project_type == falcon_proto::ProjectType::Ssh);
+        let target = if remote { falcon_client::ProbeTarget::Project(pid) } else { falcon_client::ProbeTarget::Backend };
+        self.generation += 1;
+        let generation = self.generation;
+        let initial = self.cwd.clone();
+        let fut = self.ws.read(cx).client.list_dir((!initial.is_empty()).then_some(initial.as_str()), &target);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = fut.await;
+            this.update_in(cx, |this, window, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(home) => this.go_to(parse_nav_path(&home.path, None).unwrap_or(home.path), window, cx),
+                    Err(err) => {
+                        this.ws.update(cx, |w, cx| w.handle_error(&err, cx));
+                        this.listing = Listing { error: Some(err.to_string()), ..Default::default() };
+                        this.invalidate_rows();
+                        cx.notify();
+                    }
+                }
+            }).ok();
+        }).detach();
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
+        // 切到没有项目也要作废在途响应，不能让上一个项目的文件重新冒出来。
+        self.generation += 1;
         let Some(pid) = self.project_id.clone() else {
             self.listing = Listing::default();
             self.invalidate_rows();
             return;
         };
-        self.generation += 1;
         let generation = self.generation;
         // 旧条目留着：刷新时列表不闪空
         self.listing.loading = true;
@@ -245,19 +284,28 @@ impl FilesPanel {
         self.draft = None;
         self.last_clicked = None;
         self.scroll = UniformListScrollHandle::new();
-        self.reload(cx);
+        if !self.cwd.starts_with('/') && self.cwd.as_bytes().get(1) != Some(&b':') {
+            self.resolve_initial_dir(window, cx);
+        } else {
+            self.reload(cx);
+        }
         self.reset_path_input(window, cx);
     }
 
-    /// 路径栏回车 / 失焦：越界的输入立刻弹回去，而不是先跳再吃一个 400（ADR 0009 决定一）
+    /// 路径栏回车 / 失焦：绝对路径可以离开项目，相对路径从当前目录解析，不改项目 cwd。
     fn commit_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project_id.is_none() {
             return;
         }
         let draft = self.path_input.read(cx).value().to_string();
-        match parse_nav_path(&draft, self.working_dir.as_deref()) {
+        if draft.trim().is_empty() {
+            self.reset_path_input(window, cx);
+            return;
+        }
+        let current = self.host_path();
+        match parse_nav_path(&draft, Some(&current)) {
             None => {
-                self.ws.update(cx, |w, cx| w.toast(ToastKind::Danger, t!("files.pathOutside").to_string(), None, cx));
+                self.ws.update(cx, |w, cx| w.toast(ToastKind::Danger, t!("files.pathInvalid").to_string(), None, cx));
                 self.reset_path_input(window, cx);
             }
             Some(next) if next == self.cwd => self.reset_path_input(window, cx),
@@ -579,7 +627,7 @@ impl FilesPanel {
         match &draft.kind {
             DraftKind::Mkdir => {
                 draft.busy = true;
-                let path = if self.cwd.is_empty() { name.clone() } else { format!("{}/{name}", self.cwd) };
+                let path = if self.cwd.is_empty() { name.clone() } else { format!("{}/{name}", self.cwd.trim_end_matches('/')) };
                 let fut = client.mkdir(&pid, &path, false);
                 cx.spawn(async move |this, cx| {
                     let result = fut.await;
@@ -627,10 +675,13 @@ impl FilesPanel {
                         match result {
                             Ok(res) => {
                                 // 改名后让查看窗口跟到新路径上（就地换内容，不会多开一扇；没存的修改跟过去）
-                                let follow = ws.read(cx).file_tab().is_some_and(|f| f.project_id == pid && f.path == path);
+                                // Quick Open 仍可能以项目相对路径打开了同一个文件，比较前先展开宿主机路径。
+                                let opened = ws.read(cx).file_tab().filter(|f| {
+                                    f.project_id == pid && join_host_path(this.working_dir.as_deref(), &f.path) == join_host_path(this.working_dir.as_deref(), &path)
+                                }).map(|f| f.path.clone());
                                 ws.update(cx, |w, cx| {
-                                    if follow {
-                                        w.follow_file_rename(&pid, &path, &res.path, cx);
+                                    if let Some(opened) = &opened {
+                                        w.follow_file_rename(&pid, opened, &res.path, cx);
                                     }
                                     w.toast(ToastKind::Success, t!("files.renamed", name = name).to_string(), None, cx);
                                 });
@@ -718,7 +769,7 @@ impl FilesPanel {
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
         let ui = Ui::global(cx).clone();
         let has_project = self.project_id.is_some();
-        let parent = parent_rel(&self.cwd);
+        let parent = parent_nav_path(&self.host_path());
         let selected_files: Vec<String> = self
             .visible()
             .iter()
@@ -778,6 +829,41 @@ impl FilesPanel {
         bar.child(
             tool_button("files-delete", IconName::Trash, t!("files.delete"), !has_project || selected_all.is_empty(), false, true, false, &ui)
                 .on_click(cx.listener(move |this, _, window, cx| this.remove_paths(selected_all.clone(), window, cx))),
+        )
+    }
+
+    /// 成员路径是快捷入口而不是新的边界：选完仍能往上走到其他目录。
+    fn root_select(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.roots.is_empty() {
+            return None;
+        }
+        let roots = self.roots.clone();
+        let current = self.cwd.clone();
+        let this = cx.weak_entity();
+        Some(
+            Button::new("files-roots")
+                .outline()
+                .xsmall()
+                .label(t!("files.projectFolders").to_string())
+                .dropdown_caret(true)
+                .w_full()
+                .mb(zpx(6.))
+                .dropdown_menu(move |mut menu, _, _| {
+                    for root in &roots {
+                        let (this, root) = (this.clone(), root.clone());
+                        let checked = parse_nav_path(&root, None).as_deref() == Some(current.as_str());
+                        // 不同成员可能同 basename，菜单显示完整路径才能分清。
+                        menu = menu.item(PopupMenuItem::new(root.clone()).checked(checked).on_click(move |_, window, cx| {
+                            this.update(cx, |p, cx| {
+                                if let Some(path) = parse_nav_path(&root, None) {
+                                    p.go_to(path, window, cx);
+                                }
+                            }).ok();
+                        }));
+                    }
+                    menu
+                })
+                .into_any_element(),
         )
     }
 
@@ -853,7 +939,7 @@ impl FilesPanel {
         let opened = {
             let ws = self.ws.read(cx);
             match &ws.state.active {
-                ActiveView::File { project_id, path } if Some(project_id) == self.project_id.as_ref() => Some(path.clone()),
+                ActiveView::File { project_id, path } if Some(project_id) == self.project_id.as_ref() => Some(join_host_path(self.working_dir.as_deref(), path)),
                 _ => None,
             }
         };
@@ -890,7 +976,7 @@ impl FilesPanel {
             }
             let Some(entry) = visible.get(ix - offset).cloned() else { continue };
             let on = self.selected.contains(&entry.path);
-            let is_open = opened.as_deref() == Some(entry.path.as_str());
+            let is_open = opened.as_deref() == Some(join_host_path(self.working_dir.as_deref(), &entry.path).as_str());
             let renaming = matches!(self.draft.as_ref().map(|d| &d.kind), Some(DraftKind::Rename { path }) if *path == entry.path);
             let is_dir = entry.kind == WorkspaceEntryKind::Dir;
             let icon_name = if is_dir { IconName::Folder } else { icon_for(&entry.name) };
@@ -1054,6 +1140,7 @@ impl Render for FilesPanel {
             .py(zpx(6.))
             .border_b_1()
             .border_color(ui.border)
+            .children(self.root_select(cx))
             .child(
                 div()
                     .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
@@ -1246,9 +1333,18 @@ fn unique_name(base: &str, taken: &HashSet<String>) -> String {
 /// 删掉的文件如果正开着（或它在被删的目录里），把那扇查看窗口收起来。不再问"有没存的修改"：
 /// 文件已经没了，删之前也确认过
 fn close_matching_file(ws: &Entity<Workspace>, project_id: &str, removed: &[String], cx: &mut App) {
-    let hit = ws.read(cx).file_tab().is_some_and(|f| {
-        f.project_id == project_id && removed.iter().any(|p| f.path == *p || f.path.starts_with(&format!("{p}/")))
-    });
+    let hit = {
+        let workspace = ws.read(cx);
+        let root = workspace.project(project_id).and_then(|p| p.working_dir.as_deref());
+        workspace.file_tab().is_some_and(|f| {
+            let path = join_host_path(root, &f.path);
+            f.project_id == project_id && removed.iter().any(|p| {
+                let removed = join_host_path(root, p);
+                let sep = if removed.as_bytes().get(1) == Some(&b':') || removed.starts_with("\\\\") { "\\" } else { "/" };
+                path == removed || path.starts_with(&format!("{removed}{sep}"))
+            })
+        })
+    };
     if hit {
         ws.update(cx, |w, cx| w.close_file_now(cx));
     }

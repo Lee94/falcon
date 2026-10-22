@@ -3,77 +3,132 @@
 //!
 //! **不能用 `std::path`**：宿主机可能是 Linux，客户端将来在 Windows 上（同 server 的
 //! `git/path.ts` 不用 `node:path` 的理由）。客户端不知道宿主机是 POSIX 还是 Windows，
-//! 只能从 workingDir 的样子猜分隔符（含反斜杠或盘符 → Windows）。相对路径在协议里一律 `/`。
+//! 只能从当前宿主机路径的样子猜分隔符（盘符或 UNC → Windows）。协议里统一 `/`，POSIX
+//! 文件名中的反斜杠保留。导航只是改当前浏览位置，不改项目的终端初始 cwd。
 
 use std::collections::BTreeSet;
 
 use crate::js::{js_to_fixed, js_trim};
 
-/// 工作目录相对路径 → 宿主机上显示用的绝对路径
+/// 工作目录相对路径 → 宿主机上显示用的绝对路径；导航到项目外后绝对路径原样保留。
 pub fn join_host_path(root: Option<&str>, rel: &str) -> String {
+    if is_absolute_input(rel, false) || is_absolute_input(rel, true) {
+        return if is_windows_root(Some(rel)) { rel.replace('/', "\\") } else { rel.into() };
+    }
     let Some(root) = root.filter(|r| !r.is_empty()) else {
         return if rel.is_empty() { "/".into() } else { rel.into() };
     };
     let sep = host_sep(root);
     let base = trim_trailing_seps(root);
     if rel.is_empty() {
-        return base.to_string();
+        return if base.is_empty() {
+            sep.into()
+        } else if has_drive_prefix(root) && base.ends_with(':') {
+            format!("{base}{sep}")
+        } else {
+            base.into()
+        };
     }
     format!("{base}{sep}{}", rel.replace('/', sep))
 }
 
-/// 路径栏里用户敲进去的字符串 → 工作目录相对路径。
+/// 路径栏输入 → 文件 API 的路径：有当前宿主机目录时返回绝对路径，不再以项目为边界。
 ///
-/// - 空 / 只有分隔符 → 工作目录本身（`""`）
-/// - 以 workingDir 为前缀的绝对路径 → 去掉前缀
-/// - 看起来像相对路径 → 原样（分隔符收成 `/`）
-/// - 绝对路径但不在工作目录里、或含 `..` → `None`（拒绝越界）
-pub fn parse_nav_path(input: &str, root: Option<&str>) -> Option<String> {
-    let trimmed = js_trim(input);
-    if trimmed.is_empty() || trimmed == "/" || trimmed == "\\" {
-        return Some(String::new());
-    }
-    let root = root.filter(|r| !r.is_empty());
-    let windows = is_windows_root(root);
-    let swapped = if windows { trimmed.replace('/', "\\") } else { trimmed.replace('\\', "/") };
-    let normalized = trim_trailing_seps(&swapped);
-
-    if let Some(root) = root {
-        let base = trim_trailing_seps(root);
-        let base_cmp = if windows { base.to_lowercase() } else { base.to_string() };
-        let path_cmp = if windows { normalized.to_lowercase() } else { normalized.to_string() };
-        if path_cmp == base_cmp {
-            return Some(String::new());
-        }
-        let prefix = format!("{base_cmp}{}", if windows { "\\" } else { "/" });
-        if path_cmp.starts_with(&prefix) {
-            // TS 按 base 的长度切原串；小写化不改变 ASCII 之外的长度时两边一致，
-            // 改变时（极少见的大小写映射）用码元数对齐原串
-            let rest = slice_after_units(normalized, utf16_units(base) + 1);
-            return to_rel(rest, windows);
-        }
-        // 绝对路径但不在工作目录里
-        if is_absolute_input(normalized, windows) {
-            return None;
-        }
-    } else if is_absolute_input(normalized, false) || is_absolute_input(normalized, true) {
-        // 没有 workingDir 可对照时，把开头的 / 当成工作目录根（`/src` → src）
-        if let Some(rest) = normalized.strip_prefix('/') {
-            return to_rel(rest, false);
-        }
-        if has_drive_prefix(normalized) {
-            return None;
-        }
-    }
-
-    to_rel(normalized.trim_start_matches(['\\', '/']), windows)
-}
-
-pub fn parent_rel(rel: &str) -> Option<String> {
-    if rel.is_empty() {
+/// 相对输入以当前目录为基准，允许 `.` / `..`；文件系统根（含盘符根、UNC 共享根）不能再
+/// 往上。没有工作目录可对照时，普通相对路径照常交给后端以登录目录解析。
+pub fn parse_nav_path(input: &str, current: Option<&str>) -> Option<String> {
+    let input = js_trim(input);
+    if input.chars().any(char::is_control) {
         return None;
     }
-    Some(rel_dir(rel))
+    if input.is_empty() {
+        return Some(String::new());
+    }
+    let windows = is_windows_root(current) || has_drive_prefix(input) || input.starts_with("\\\\") || input.starts_with("//")
+        || (current.is_none() && is_windows_root(Some(input)));
+    let input = if windows { input.replace('\\', "/") } else { input.into() };
+    let current = current.filter(|r| !r.is_empty()).map(|r| if windows { r.replace('\\', "/") } else { r.into() });
+    // C:foo 依赖宿主进程的每盘当前目录，导航栏没这份状态，不把它拼成当前目录里的文件名。
+    if windows && input.as_bytes().get(1) == Some(&b':') && !has_drive_prefix(&input) {
+        return None;
+    }
+    let path = if input.starts_with('/') || has_drive_prefix(&input) {
+        // Windows 上的 /foo 是当前盘符下的根路径，不把它误当 POSIX 路径。
+        if windows && input.starts_with('/') && !input.starts_with("//") {
+            let base = current.as_deref()?;
+            let root = host_root(base)?;
+            format!("{}{input}", root.trim_end_matches('/'))
+        } else {
+            input
+        }
+    } else if let Some(base) = &current {
+        format!("{}/{input}", base.trim_end_matches('/'))
+    } else {
+        input
+    };
+    normalize_nav_path(&path)
+}
+
+/// 当前导航位置的上层；工作目录不再是边界，只有文件系统根没有上层。
+pub fn parent_nav_path(path: &str) -> Option<String> {
+    let normalized = if is_windows_root(Some(path)) { path.replace('\\', "/") } else { path.into() };
+    let path = normalize_nav_path(&normalized)?;
+    let root = host_root(&path).unwrap_or("");
+    if path == root || path.is_empty() {
+        return None;
+    }
+    let parent = path.rfind('/').map(|i| &path[..i]).unwrap_or("");
+    Some(if parent.len() < root.len() { root.into() } else { parent.into() })
+}
+
+/// 多文件夹项目没有必需的 working_dir：先打开首个成员，不误列后端的启动目录。
+pub fn project_nav_root(project: &falcon_proto::Project) -> Option<String> {
+    project
+        .multi
+        .as_ref()
+        .and_then(|m| m.repos.first())
+        .map(|m| m.dir.clone())
+        .or_else(|| project.working_dir.clone())
+}
+
+fn host_root(path: &str) -> Option<&str> {
+    if has_drive_prefix(path) {
+        return Some(&path[..3]);
+    }
+    if let Some(unc) = path.strip_prefix("//") {
+        let server = unc.find('/')?;
+        let share_end = unc[server + 1..].find('/').map_or(path.len(), |i| 2 + server + 1 + i);
+        return Some(&path[..share_end]);
+    }
+    path.starts_with('/').then_some("/")
+}
+
+fn normalize_nav_path(path: &str) -> Option<String> {
+    let root = host_root(path).unwrap_or("");
+    if path.starts_with("//")
+        && (root.is_empty() || root.ends_with('/') || root.split('/').skip(2).any(|p| p == "." || p == ".."))
+    {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path[root.len()..].split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last() == Some(&"..") => parts.push(part),
+            ".." if !parts.is_empty() => { parts.pop(); }
+            ".." if root.is_empty() => parts.push(part),
+            ".." => {}
+            _ => parts.push(part),
+        }
+    }
+    let tail = parts.join("/");
+    Some(if tail.is_empty() {
+        root.into()
+    } else if root.is_empty() || root.ends_with('/') {
+        format!("{root}{tail}")
+    } else {
+        format!("{root}/{tail}")
+    })
 }
 
 pub fn rel_dir(rel: &str) -> String {
@@ -93,7 +148,7 @@ pub fn deepest_upload_dirs<S: AsRef<str>>(cwd: &str, relative_paths: &[S]) -> Ve
         segs.pop();
         let mut acc = cwd.to_string();
         for s in segs {
-            acc = if acc.is_empty() { s.to_string() } else { format!("{acc}/{s}") };
+            acc = if acc.is_empty() { s.to_string() } else { format!("{}/{s}", acc.trim_end_matches('/')) };
             dirs.insert(acc.clone());
         }
     }
@@ -174,7 +229,7 @@ fn has_drive_prefix(s: &str) -> bool {
 
 fn is_windows_root(root: Option<&str>) -> bool {
     let Some(root) = root.filter(|r| !r.is_empty()) else { return false };
-    has_drive_prefix(root) || (root.contains('\\') && !root.contains('/'))
+    has_drive_prefix(root) || root.starts_with("//") || (root.contains('\\') && !root.contains('/'))
 }
 
 fn is_absolute_input(path: &str, windows: bool) -> bool {
@@ -189,34 +244,6 @@ fn trim_trailing_seps(s: &str) -> &str {
     s.trim_end_matches(['\\', '/'])
 }
 
-fn to_rel(path: &str, windows: bool) -> Option<String> {
-    let segs: Vec<&str> = if windows {
-        path.split(['\\', '/']).filter(|s| !s.is_empty()).collect()
-    } else {
-        path.split('/').filter(|s| !s.is_empty()).collect()
-    };
-    if segs.iter().any(|s| *s == "." || *s == "..") {
-        return None;
-    }
-    Some(segs.join("/"))
-}
-
-fn utf16_units(s: &str) -> usize {
-    s.chars().map(char::len_utf16).sum()
-}
-
-/// `s.slice(n)`，n 按 UTF-16 码元计
-fn slice_after_units(s: &str, n: usize) -> &str {
-    let mut units = 0;
-    for (i, c) in s.char_indices() {
-        if units >= n {
-            return &s[i..];
-        }
-        units += c.len_utf16();
-    }
-    ""
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,37 +255,69 @@ mod tests {
         assert_eq!(join_host_path(Some("C:\\code\\repo"), "src/a.ts"), "C:\\code\\repo\\src\\a.ts");
         assert_eq!(join_host_path(None, "src"), "src");
         assert_eq!(join_host_path(None, ""), "/");
+        assert_eq!(join_host_path(Some("/repo"), "/elsewhere/a"), "/elsewhere/a");
+        assert_eq!(join_host_path(Some("C:\\repo"), "D:/elsewhere/a"), "D:\\elsewhere\\a");
+        assert_eq!(join_host_path(Some("/"), ""), "/");
+        assert_eq!(join_host_path(Some("C:\\"), ""), "C:\\");
     }
 
     #[test]
-    fn parse_nav_path_strips_the_working_dir_and_refuses_escapes() {
-        let root = Some("/home/u/repo");
-        assert_eq!(parse_nav_path("/home/u/repo", root).as_deref(), Some(""));
-        assert_eq!(parse_nav_path("/home/u/repo/", root).as_deref(), Some(""));
-        assert_eq!(parse_nav_path("/home/u/repo/src", root).as_deref(), Some("src"));
-        assert_eq!(parse_nav_path("/home/u/repo/src/a.ts", root).as_deref(), Some("src/a.ts"));
-        assert_eq!(parse_nav_path("src/foo", root).as_deref(), Some("src/foo"));
-        assert_eq!(parse_nav_path("/etc", root), None);
-        assert_eq!(parse_nav_path("../x", root), None);
-        assert_eq!(parse_nav_path("src/../etc", root), None);
-        // 没有 workingDir 时，开头的 / 当成工作目录根
-        assert_eq!(parse_nav_path("/src/a", None).as_deref(), Some("src/a"));
+    fn multi_project_starts_at_first_member_without_a_working_directory() {
+        let mut project: falcon_proto::Project = serde_json::from_value(serde_json::json!({
+            "id": "multi", "name": "multi", "type": "local", "createdAt": 0,
+            "multi": { "repos": [{"dir": "/code/web"}, {"dir": "/elsewhere/api"}] }
+        })).unwrap();
+        assert_eq!(project_nav_root(&project).as_deref(), Some("/code/web"));
+        project.working_dir = Some("/code".into());
+        assert_eq!(project_nav_root(&project).as_deref(), Some("/code/web"));
+        project.multi = None;
+        assert_eq!(project_nav_root(&project).as_deref(), Some("/code"));
+    }
+
+    #[test]
+    fn parse_nav_path_can_leave_the_project_and_resolves_from_current_directory() {
+        let current = Some("/home/u/repo");
+        assert_eq!(parse_nav_path("/home/u/repo/", current).as_deref(), Some("/home/u/repo"));
+        assert_eq!(parse_nav_path("src/foo", current).as_deref(), Some("/home/u/repo/src/foo"));
+        assert_eq!(parse_nav_path("/etc", current).as_deref(), Some("/etc"));
+        assert_eq!(parse_nav_path("../x", current).as_deref(), Some("/home/u/x"));
+        assert_eq!(parse_nav_path("src/../etc", current).as_deref(), Some("/home/u/repo/etc"));
+        assert_eq!(parse_nav_path("/", current).as_deref(), Some("/"));
+        assert_eq!(parse_nav_path("../../../../x", current).as_deref(), Some("/x"));
+        assert_eq!(parse_nav_path("/src/a", None).as_deref(), Some("/src/a"));
         assert_eq!(parse_nav_path("src", None).as_deref(), Some("src"));
+        assert_eq!(parse_nav_path("a\0b", current), None);
+        assert_eq!(parse_nav_path("dir\\name", current).as_deref(), Some("/home/u/repo/dir\\name"));
     }
 
     #[test]
-    fn parse_nav_path_is_case_insensitive_on_windows() {
-        let root = Some("C:\\code\\repo");
-        assert_eq!(parse_nav_path("c:\\code\\repo\\src", root).as_deref(), Some("src"));
-        assert_eq!(parse_nav_path("C:/code/repo/src", root).as_deref(), Some("src"));
-        assert_eq!(parse_nav_path("D:\\other", root), None);
+    fn windows_navigation_supports_other_drives_and_unc_roots() {
+        let current = Some("C:\\code\\repo");
+        assert_eq!(parse_nav_path("c:\\code\\repo\\src", current).as_deref(), Some("c:/code/repo/src"));
+        assert_eq!(parse_nav_path("..", current).as_deref(), Some("C:/code"));
+        assert_eq!(parse_nav_path("D:\\other", current).as_deref(), Some("D:/other"));
+        assert_eq!(parse_nav_path("C:other", current), None);
+        assert_eq!(parse_nav_path("/", current).as_deref(), Some("C:/"));
+        assert_eq!(parse_nav_path("..", Some("C:\\")).as_deref(), Some("C:/"));
+        assert_eq!(parse_nav_path("..", Some("\\\\host\\share\\folder")).as_deref(), Some("//host/share"));
+        assert_eq!(parse_nav_path("..", Some("\\\\host\\share")).as_deref(), Some("//host/share"));
+        assert_eq!(parse_nav_path("next\\folder", Some("//host/share")).as_deref(), Some("//host/share/next/folder"));
+        assert_eq!(parse_nav_path("//host/", None), None);
     }
 
     #[test]
-    fn parent_rel_dir_and_hidden() {
-        assert_eq!(parent_rel(""), None);
-        assert_eq!(parent_rel("src").as_deref(), Some(""));
-        assert_eq!(parent_rel("src/a.ts").as_deref(), Some("src"));
+    fn parent_nav_dir_and_hidden() {
+        assert_eq!(parent_nav_path(""), None);
+        assert_eq!(parent_nav_path("src").as_deref(), Some(""));
+        assert_eq!(parent_nav_path("src/a.ts").as_deref(), Some("src"));
+        assert_eq!(parent_nav_path("/home/u/repo").as_deref(), Some("/home/u"));
+        assert_eq!(parent_nav_path("/home").as_deref(), Some("/"));
+        assert_eq!(parent_nav_path("/tmp/a\\b/dir").as_deref(), Some("/tmp/a\\b"));
+        assert_eq!(parent_nav_path("/"), None);
+        assert_eq!(parent_nav_path("C:/code").as_deref(), Some("C:/"));
+        assert_eq!(parent_nav_path("C:/"), None);
+        assert_eq!(parent_nav_path("//host/share/dir").as_deref(), Some("//host/share"));
+        assert_eq!(parent_nav_path("//host/share"), None);
         assert_eq!(rel_dir("src/a.ts"), "src");
         assert_eq!(rel_dir("a.ts"), "");
         assert!(is_hidden_name(".env"));
@@ -270,6 +329,8 @@ mod tests {
         assert_eq!(deepest_upload_dirs("", &["src/a.ts", "src/lib/b.ts", "README.md"]), ["src/lib"]);
         assert_eq!(deepest_upload_dirs("pkg", &["foo/a.ts", "foo/bar/b.ts"]), ["pkg/foo/bar"]);
         assert!(deepest_upload_dirs("pkg", &["a.ts"]).is_empty());
+        assert_eq!(deepest_upload_dirs("/", &["pkg/a.rs"]), ["/pkg"]);
+        assert_eq!(deepest_upload_dirs("C:/", &["pkg/a.rs"]), ["C:/pkg"]);
     }
 
     #[test]
