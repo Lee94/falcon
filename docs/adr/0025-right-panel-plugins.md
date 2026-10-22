@@ -1,6 +1,6 @@
 # 右侧栏插件：后端跑命令、客户端画声明式面板，内置第一个是系统监控
 
-右侧栏的四格（文件 / 修改 / 历史 / 飞书项目）都是写死在客户端里的。想在旁边多放一块"自己关心的东西"——这台机器的负载、某个服务的状态、项目里的 TODO、CI 跑到哪了——只能改 falcon 的源码。现在右侧栏的内置四格之后可以挂**插件**：一个插件一格，面板内容由插件给，falcon 只负责跑它、画它。内置了两个：「系统监控」与「Docker」。
+右侧栏的四格（文件 / 修改 / 历史 / 飞书项目）都是写死在客户端里的。想在旁边多放一块"自己关心的东西"——这台机器的负载、某个服务的状态、项目里的 TODO、CI 跑到哪了——只能改 falcon 的源码。现在右侧栏的内置四格之后可以挂**插件**：一个插件一格，面板内容由插件给，falcon 只负责跑它、画它。内置了三个：「系统监控」「Docker」与「Agent 用量」。
 
 插件作者手册（协议全文、环境变量、例子）在 [`docs/plugins.md`](../plugins.md)，例子在 `docs/plugins/examples/`。
 
@@ -79,6 +79,14 @@ Docker 插件（决定七）要"管"东西，又补了三样，都还是这两�
 - **占用不在画面板的路上采**：`docker stats --no-stream` 要等守护进程攒两次采样，实测稳定 2 秒。画列表 / 详情时在旁边起一次，结果留给下一次画（列表三秒一画，数字最多晚一轮）；第一次没有数时写"采样中"、1.5 秒后再画。没人看就不画，也就不采。
 - **日志合流**：容器的 stdout 与 stderr 是两条流（经 SSH 也是），`docker logs -t` 带上时间戳，按时间戳合回先后再去掉；docker 的纳秒时间会省掉尾部的 0，排序前补齐。终端控制序列（颜色）去掉。
 - **动作的结果**：动作回的是做完之后重画的面板 + 一条 toast；失败时 docker 的原话放进 toast（"container is running: stop the container before removing" 比转述清楚）。删除只给停着的容器，不带 `-f`；清理镜像只清悬空的（`image prune` 不带 `-a`），删除与清理都先确认。动作的 value（容器 id、镜像引用）在服务端过白名单才进 argv，`-f` 一类的东西进不来。
+
+## 决定八：Agent 用量也是内置插件，增量读本机各 Coding Agent 的落盘会话
+
+第三个内置插件（`plugins/tokens/`，id `tokens`）：只读本机已落盘的会话记录，统计 Claude Code（`~/.claude/projects/`）、Codex（`~/.codex/state_*.sqlite` 与 `sessions/`）、Grok CLI（`~/.grok/sessions/`）、Devin CLI（`~/.local/share/devin/`）与 OpenCode（`~/.local/share/opencode/opencode.db`）的 Token 用量、每日走势、按 Agent / 模型分布与高消耗会话排行，点进单段会话可看详情与复制会话 ID / 工作目录。
+
+- **统一输入 Token 口径**：Claude / Devin / OpenCode 的 `input_tokens` 是未命中缓存的新输入，`cache_read` 与 `cache_write` 单独算；而 Codex / Grok 的 `input_tokens` 已经包含了缓存命中部分。解析时统一拆成 `input`（非缓存输入）+ `cache_read` + `cache_write` + `output`，保证各家的 `total` 都等于四项之和，缓存命中率统一按 `cache_read / (input + cache_read + cache_write)` 算。
+- **流式与重复节点去重**：Claude Code 流式写盘时同一个 `message.id` 写多行，按 `message.id` 留最后一条并合入 `<session>/subagents/*.jsonl`；Devin 的 `message_nodes` 对同一 `request_id` 写文本与工具调用多条节点，按 `request_id` 去重。
+- **按文件 `(mtime_ns, len)` 增量缓存**：JSONL 会话文件攒久了有几百 MB，未变的文件直接复用上次解析出的 `SessionRecord`，3 秒内的重画请求直接共用整份扫描结果。
 
 ## 已知的不足
 

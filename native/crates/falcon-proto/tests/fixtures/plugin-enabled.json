@@ -24,6 +24,17 @@
       "error": null
     },
     {
+      "id": "tokens",
+      "name": "Agent 用量",
+      "description": "本机 Coding Agent（Claude Code、Codex、Grok、Devin、OpenCode）的 Token 用量、每日走势与会话明细",
+      "icon": "coins",
+      "kind": "builtin",
+      "scope": "project",
+      "refresh": 15,
+      "enabled": true,
+      "error": null
+    },
+    {
       "id": "fixture",
       "name": "Fixture",
       "icon": "puzzle",

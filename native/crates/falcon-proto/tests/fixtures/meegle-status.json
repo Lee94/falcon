@@ -4,7 +4,7 @@
   "version": "1.0.23",
   "authenticated": true,
   "host": "project.feishu.cn",
-  "expiresInMinutes": 119,
+  "expiresInMinutes": 72,
   "user": {
     "key": "user_redacted",
     "name": "已脱敏",

@@ -56,15 +56,18 @@ impl TestApp {
             "meegle-not-used-in-tests".into(),
             Arc::new(|| Box::pin(async { Arc::new(Vec::new()) })),
         );
-        // 插件进程同样不跑 login shell：基底环境只给一条 PATH——测试自己的 bin 在前，再是系统的
+        // 插件进程同样不跑 login shell：基底环境只给一条 PATH——测试自己的 bin 在前，再是系统的；
+        // HOME 指到测试自己的 root，避免内置插件（如 tokens）扫用户真实的家目录
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let path = format!("{}:/usr/bin:/bin", bin.display());
+        let home = root.to_string_lossy().into_owned();
         let plugins = crate::plugins::PluginHost::new(
             &data_dir,
             Arc::new(move || {
                 let path = path.clone();
-                Box::pin(async move { Arc::new(vec![("PATH".to_string(), path)]) })
+                let home = home.clone();
+                Box::pin(async move { Arc::new(vec![("PATH".to_string(), path), ("HOME".to_string(), home)]) })
             }),
         );
         let state = AppState::new(config, db, secrets, askpass, engine, meegle, plugins);

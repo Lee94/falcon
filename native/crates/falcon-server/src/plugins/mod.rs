@@ -20,6 +20,7 @@ pub mod machine;
 pub mod manifest;
 pub mod runner;
 pub mod sysmon;
+pub mod tokens;
 pub mod view;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -76,6 +77,7 @@ struct Inner {
     base_env: BaseEnvFn,
     sysmon: sysmon::Sysmon,
     docker: docker::Docker,
+    tokens: tokens::Tokens,
     /// 在跑的画面板请求（见模块注释），跑完自己摘掉
     inflight: Mutex<HashMap<String, RunFuture>>,
 }
@@ -108,7 +110,11 @@ impl Found {
 
 /// 内置插件，按右侧栏上的先后
 fn builtin_infos(disabled: &HashSet<String>) -> Vec<PluginInfo> {
-    vec![sysmon::info(!disabled.contains(sysmon::ID)), docker::info(!disabled.contains(docker::ID))]
+    vec![
+        sysmon::info(!disabled.contains(sysmon::ID)),
+        docker::info(!disabled.contains(docker::ID)),
+        tokens::info(!disabled.contains(tokens::ID)),
+    ]
 }
 
 /// 停用了哪些（读坏了当作一个都没停）
@@ -215,6 +221,7 @@ impl PluginHost {
             inner: Arc::new(Inner {
                 dir: data_dir.join("plugins"),
                 docker: docker::Docker::new(base_env.clone(), data.join(docker::ID)),
+                tokens: tokens::Tokens::new(base_env.clone()),
                 data,
                 base_env,
                 sysmon: sysmon::Sysmon::default(),
@@ -299,6 +306,7 @@ impl PluginHost {
             Found::Builtin(info) => {
                 let view = match info.id.as_str() {
                     docker::ID => self.inner.docker.render(db, engine, &input).await,
+                    tokens::ID => self.inner.tokens.render(db, &input).await,
                     _ => self.inner.sysmon.render(db, engine, &input).await,
                 };
                 Ok(view::sanitize(view))
@@ -450,15 +458,15 @@ mod tests {
         let list = h.scan(&HashSet::from(["zeta".to_string()]));
         assert_eq!(list.dir, tmp.path().join("plugins").to_string_lossy());
         let ids: Vec<_> = list.plugins.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["sysmon", "docker", "Bad Name", "alpha", "empty", "sysmon", "zeta"]);
+        assert_eq!(ids, vec!["sysmon", "docker", "tokens", "Bad Name", "alpha", "empty", "sysmon", "zeta"]);
         let by = |i: usize| &list.plugins[i];
-        assert_eq!((by(0).kind, by(1).kind), (PluginKind::Builtin, PluginKind::Builtin));
-        assert!(by(0).enabled && by(1).enabled);
-        assert!(by(2).error.as_deref().unwrap().contains("目录名"));
-        assert!(by(3).error.as_deref().unwrap().contains("不是合法的 JSON"));
-        assert!(by(4).error.as_deref().unwrap().contains("没有 plugin.json"));
-        assert!(by(5).error.as_deref().unwrap().contains("内置插件重名"));
-        let z = by(6);
+        assert_eq!((by(0).kind, by(1).kind, by(2).kind), (PluginKind::Builtin, PluginKind::Builtin, PluginKind::Builtin));
+        assert!(by(0).enabled && by(1).enabled && by(2).enabled);
+        assert!(by(3).error.as_deref().unwrap().contains("目录名"));
+        assert!(by(4).error.as_deref().unwrap().contains("不是合法的 JSON"));
+        assert!(by(5).error.as_deref().unwrap().contains("没有 plugin.json"));
+        assert!(by(6).error.as_deref().unwrap().contains("内置插件重名"));
+        let z = by(7);
         assert_eq!((z.name.as_str(), z.icon.as_str(), z.refresh, z.enabled, z.error.as_deref()), ("Z", "box", Some(5.0), false, None));
     }
 

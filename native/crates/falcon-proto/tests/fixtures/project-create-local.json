@@ -1,8 +1,8 @@
 {
-  "id": "0988cb7c-bb33-4b29-8769-6485d1da1b5b",
+  "id": "d883b8ae-9291-44c9-8c12-b613ca98ab66",
   "name": "fixture",
   "type": "local",
   "workingDir": "/private/tmp/fal-fx-repo",
   "defaultWorktreeBranch": "main",
-  "createdAt": 1792463499880
+  "createdAt": 1792690994545
 }

@@ -17,7 +17,7 @@
           "label": "本机"
         },
         {
-          "value": "host:a968dbc8-839d-4cf8-8363-ba918f48ea1a",
+          "value": "host:31783d63-e6d0-41bd-ba92-e2394f662593",
           "label": "fixture-host-renamed"
         }
       ]
@@ -27,35 +27,36 @@
       "items": [
         {
           "label": "CPU",
-          "value": "10%",
+          "value": "62%",
           "detail": "10 核"
         },
         {
           "label": "内存",
-          "value": "89%",
-          "detail": "14.3 GB / 16.0 GB",
-          "tone": "warning"
+          "value": "92%",
+          "detail": "14.7 GB / 16.0 GB",
+          "tone": "danger"
         },
         {
           "label": "负载",
-          "value": "2.27",
-          "detail": "2.60 · 3.09"
+          "value": "17.60",
+          "detail": "23.28 · 20.66",
+          "tone": "danger"
         },
         {
           "label": "磁盘",
-          "value": "73%",
-          "detail": "62.1 GB 可用"
+          "value": "74%",
+          "detail": "59.8 GB 可用"
         }
       ]
     },
     {
       "type": "chart",
       "label": "CPU",
-      "text": "10% · 10 核",
+      "text": "62% · 10 核",
       "series": [
         {
           "values": [
-            10.23166561126709
+            61.93548583984375
           ],
           "tone": "accent"
         }
@@ -66,11 +67,11 @@
     {
       "type": "chart",
       "label": "内存",
-      "text": "14.3 GB / 16.0 GB",
+      "text": "14.7 GB / 16.0 GB",
       "series": [
         {
           "values": [
-            89.39828872680664
+            91.6849136352539
           ],
           "tone": "accent"
         }
@@ -81,27 +82,27 @@
     {
       "type": "meter",
       "label": "交换",
-      "value": 7204700160,
-      "max": 8589934592,
-      "text": "6.71 GB / 8.00 GB",
-      "tone": "warning"
+      "value": 5875499008,
+      "max": 6442450944,
+      "text": "5.47 GB / 6.00 GB",
+      "tone": "danger"
     },
     {
       "type": "chart",
       "label": "网络",
-      "text": "↓ 2.33 KB/s  ↑ 2.33 KB/s",
+      "text": "↓ 1.62 MB/s  ↑ 965 KB/s",
       "series": [
         {
           "name": "下行",
           "values": [
-            2382.6240625252676
+            1701960.3442336144
           ],
           "tone": "accent"
         },
         {
           "name": "上行",
           "values": [
-            2382.6240625252676
+            988128.4328657296
           ],
           "tone": "success"
         }
@@ -115,16 +116,16 @@
     {
       "type": "meter",
       "label": "/",
-      "value": 178434786085,
+      "value": 180847166821,
       "max": 245107195904,
-      "text": "166 GB / 228 GB"
+      "text": "168 GB / 228 GB"
     },
     {
       "type": "meter",
       "label": "/Volumes/faye",
-      "value": 335041382505,
+      "value": 360490254606,
       "max": 2000276230144,
-      "text": "312 GB / 1.82 TB"
+      "text": "336 GB / 1.82 TB"
     },
     {
       "type": "heading",

@@ -135,6 +135,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokens_plugin_renders_local_coding_agents() {
+        let app = TestApp::new();
+        let wd = app.local_project("p1");
+        let claude_dir = app.root.join(".claude/projects/demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("s1.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"ai-title","aiTitle":"重构插件模块"}}"#,
+                    "\n",
+                    r#"{{"type":"assistant","cwd":"{}","timestamp":"2026-10-23T08:00:00Z","message":{{"id":"m1","model":"claude-opus-5-5","usage":{{"input_tokens":500,"cache_read_input_tokens":2000,"cache_creation_input_tokens":300,"output_tokens":400}}}}}}"#,
+                    "\n"
+                ),
+                wd.display()
+            ),
+        )
+        .unwrap();
+
+        let (status, v) = json_of(
+            app.post_json("/api/plugins/tokens/render", json!({ "projectId": "p1", "params": { "range": "all" } }))
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert!(v["title"].as_str().unwrap().contains("1 段会话"));
+        let blocks = v["blocks"].as_array().unwrap();
+        assert!(blocks.iter().any(|b| b["type"] == "stats"));
+        assert!(blocks.iter().any(|b| b["type"] == "chart"));
+        assert!(blocks.iter().any(|b| b["type"] == "table"));
+        assert!(blocks.iter().any(|b| b["type"] == "list"));
+
+        // 进入单段会话详情
+        let (status, detail) = json_of(
+            app.post_json("/api/plugins/tokens/render", json!({ "params": { "session": "claude:s1" } }))
+                .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert!(detail["title"].as_str().unwrap().contains("3.20K"));
+    }
+
+    #[tokio::test]
     async fn unknown_plugins_and_bad_input() {
         let app = TestApp::new();
         assert_eq!(app.post_json("/api/plugins/nope/render", json!({})).await.status(), StatusCode::NOT_FOUND);

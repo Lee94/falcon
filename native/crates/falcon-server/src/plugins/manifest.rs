@@ -11,7 +11,7 @@ use falcon_proto::{PLUGIN_API, PluginScope};
 use serde_json::Value;
 
 /// 内置插件占用的 id：同名目录不当命令插件读（设置页里报"与内置插件重名"）
-pub const BUILTIN_IDS: &[&str] = &[super::sysmon::ID, super::docker::ID];
+pub const BUILTIN_IDS: &[&str] = &[super::sysmon::ID, super::docker::ID, super::tokens::ID];
 
 /// 插件进程的缺省时限与上限。面板是开着就重画的，一次比十秒还慢的插件该自己缓存
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
