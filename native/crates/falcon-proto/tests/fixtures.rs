@@ -147,6 +147,13 @@ fn table() -> Vec<(&'static str, Check)> {
         "meegle-pin-rename" => MeeglePin,
         "meegle-pins" => Vec<MeeglePin>,
         "meegle-pin-delete" => OkResponse,
+        // 右侧栏插件（ADR 0025）
+        "plugins" => PluginList,
+        "plugin-render-sysmon" => PluginView,
+        "plugin-render-command" => PluginView,
+        "plugin-action" => PluginView,
+        "plugin-enabled" => PluginList,
+        "error-plugin-disabled" => ApiError,
         // 错误体
         "error-bad-request" => ApiError,
         "error-conflict" => ApiError,

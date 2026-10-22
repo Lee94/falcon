@@ -23,6 +23,8 @@ pub struct TestApp {
     pub data_dir: PathBuf,
     /// 测试用的工作目录根（项目都建在这下面）
     pub root: PathBuf,
+    /// 插件进程 PATH 的第一段：测试往这里放假的外部命令（比如 Docker 插件要的 `docker`）
+    pub bin: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -54,9 +56,20 @@ impl TestApp {
             "meegle-not-used-in-tests".into(),
             Arc::new(|| Box::pin(async { Arc::new(Vec::new()) })),
         );
-        let state = AppState::new(config, db, secrets, askpass, engine, meegle);
+        // 插件进程同样不跑 login shell：基底环境只给一条 PATH——测试自己的 bin 在前，再是系统的
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let plugins = crate::plugins::PluginHost::new(
+            &data_dir,
+            Arc::new(move || {
+                let path = path.clone();
+                Box::pin(async move { Arc::new(vec![("PATH".to_string(), path)]) })
+            }),
+        );
+        let state = AppState::new(config, db, secrets, askpass, engine, meegle, plugins);
         let router = super::app(state.clone());
-        TestApp { state, router, data_dir, root, _dir: dir }
+        TestApp { state, router, data_dir, root, bin, _dir: dir }
     }
 
     /// 建一个本地项目，工作目录是 `root/<name>`
@@ -85,6 +98,13 @@ impl TestApp {
     pub async fn post_json(&self, uri: &str, body: Value) -> Response<Body> {
         self.send(
             Request::post(uri).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap(),
+        )
+        .await
+    }
+
+    pub async fn put_json(&self, uri: &str, body: Value) -> Response<Body> {
+        self.send(
+            Request::put(uri).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap(),
         )
         .await
     }

@@ -12,6 +12,7 @@
 pub mod actions;
 pub mod app_icon;
 pub mod persist;
+pub mod plugins;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -25,7 +26,7 @@ pub use falcon_core::workspace::{
     ActiveView, DiffCommit, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
     WorkspaceState, is_pending_id,
 };
-use falcon_proto::{AppIconState, AuthStatus, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
+use falcon_proto::{AppIconState, AuthStatus, PluginList, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
 use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::profiles::ServerProfile;
@@ -132,6 +133,9 @@ pub struct Workspace {
     /// 换 / 传 / 删应用图标的请求在路上
     pub app_icon_busy: bool,
 
+    /// 右侧栏插件（ADR 0025）：这台服务端装了哪些；None = 还没取到
+    pub plugins: Option<PluginList>,
+
     /// AI 助手面板（assistant/mod.rs）：第一次打开时建，之后常驻——收起不卸载，各段对话的 WS 一直连着
     pub assistant: Option<Entity<crate::assistant::AssistantPanel>>,
     /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
@@ -197,6 +201,7 @@ impl Workspace {
             app_icon: None,
             custom_icon: None,
             app_icon_busy: false,
+            plugins: None,
             assistant: None,
             terminals: HashMap::new(),
             program_alerts: Default::default(),
@@ -402,6 +407,7 @@ impl Workspace {
                 }
                 this.refresh_changes(cx);
                 this.load_app_icon(cx);
+                this.refresh_plugins(cx);
                 cx.notify();
             })
             .ok();

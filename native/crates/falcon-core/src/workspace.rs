@@ -48,15 +48,23 @@ pub enum ActiveView {
 }
 
 /// 右侧栏打开的是哪一格。加面板时在这里加一个值，持久化形状不用改。
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "lowercase")]
+///
+/// 落盘是一个字符串（沿用 React 版 RightPanelId 的字面量）：内置面板是 `git` / `files` 这样的名字，
+/// 插件是 `plugin:<id>`（ADR 0025）。插件可能已经被删 / 停用了——读回来照样是它，由右侧栏在插件
+/// 列表拉回来之后说"没有这个插件"，而不是在这里退回默认：列表还没拉回来时谁也不知道它在不在。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum RightPanelId {
     #[default]
     Git,
     Changes,
     Files,
     Meegle,
+    /// 右侧栏插件（`/api/plugins`），带插件 id
+    Plugin(String),
 }
+
+/// 插件面板在持久化里的前缀
+pub const PLUGIN_PANEL_PREFIX: &str = "plugin:";
 
 impl RightPanelId {
     /// 持久化的布局可能来自旧版本，认不出的面板名一律退回默认（由调用方处理 `None`）
@@ -67,8 +75,40 @@ impl RightPanelId {
             // 旧版本的 "forward"（转发面板）已挪进设置的「中转」页（ADR 0016），落到默认
             "files" => RightPanelId::Files,
             "meegle" => RightPanelId::Meegle,
-            _ => return None,
+            _ => {
+                let id = s.strip_prefix(PLUGIN_PANEL_PREFIX).filter(|id| !id.is_empty())?;
+                RightPanelId::Plugin(id.to_string())
+            }
         })
+    }
+
+    /// 持久化里的字面量，也是元素 id 的后缀
+    pub fn as_wire(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            RightPanelId::Git => "git".into(),
+            RightPanelId::Changes => "changes".into(),
+            RightPanelId::Files => "files".into(),
+            RightPanelId::Meegle => "meegle".into(),
+            RightPanelId::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
+        }
+    }
+
+    /// 是这个插件的面板
+    pub fn is_plugin(&self, id: &str) -> bool {
+        matches!(self, RightPanelId::Plugin(p) if p == id)
+    }
+}
+
+impl Serialize for RightPanelId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.as_wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for RightPanelId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        RightPanelId::from_wire(&s).ok_or_else(|| serde::de::Error::custom(format!("认不出的右侧面板：{s}")))
     }
 }
 
@@ -451,7 +491,7 @@ impl WorkspaceState {
             right_width: ws.right_width,
             right_open: ws.right_open,
             term_zoomed: ws.term_zoomed,
-            right_panel: ws.right_panel,
+            right_panel: ws.right_panel.clone(),
             collapsed: ws.collapsed.clone(),
             sessions_open: ws.sessions_open.clone(),
             show_archived: ws.show_archived,
@@ -488,7 +528,7 @@ impl WorkspaceState {
             active,
             sidebar_open: self.sidebar_open,
             right_open: self.right_open,
-            right_panel: self.right_panel,
+            right_panel: self.right_panel.clone(),
             collapsed: self.collapsed.clone(),
             sessions_open: self.sessions_open.clone(),
             selected_project_id: self.selected_project_id.clone(),
@@ -1192,6 +1232,25 @@ mod tests {
         assert_eq!(load_workspace(Some(r#"{"rightPanel":"nope"}"#)).right_panel, RightPanelId::Git);
         // 转发面板挪进了设置（ADR 0016）：旧布局里存的 "forward" 退回默认
         assert_eq!(load_workspace(Some(r#"{"rightPanel":"forward"}"#)).right_panel, RightPanelId::Git);
+        // 插件面板（ADR 0025）：带 id 原样读回；光有前缀不算
+        assert_eq!(
+            load_workspace(Some(r#"{"rightPanel":"plugin:sysmon"}"#)).right_panel,
+            RightPanelId::Plugin("sysmon".into())
+        );
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"plugin:"}"#)).right_panel, RightPanelId::Git);
+    }
+
+    #[test]
+    fn right_panel_wire_round_trip() {
+        for p in [RightPanelId::Git, RightPanelId::Meegle, RightPanelId::Plugin("hello-2".into())] {
+            let json = serde_json::to_string(&p).unwrap();
+            assert_eq!(serde_json::from_str::<RightPanelId>(&json).unwrap(), p);
+        }
+        assert_eq!(serde_json::to_string(&RightPanelId::Plugin("x".into())).unwrap(), r#""plugin:x""#);
+        assert_eq!(serde_json::to_string(&RightPanelId::Files).unwrap(), r#""files""#);
+        assert!(serde_json::from_str::<RightPanelId>(r#""nope""#).is_err());
+        assert!(RightPanelId::Plugin("a".into()).is_plugin("a"));
+        assert!(!RightPanelId::Files.is_plugin("a"));
     }
 
     #[test]
@@ -1511,6 +1570,12 @@ mod tests {
         ws.toggle_right_panel(RightPanelId::Files);
         assert!(ws.right_open && ws.right_panel == RightPanelId::Files);
         ws.toggle_right_panel(RightPanelId::Files);
+        assert!(!ws.right_open);
+        // 插件按 id 区分：另一个插件是"切过去"，同一个是"关掉"
+        ws.toggle_right_panel(RightPanelId::Plugin("a".into()));
+        ws.toggle_right_panel(RightPanelId::Plugin("b".into()));
+        assert!(ws.right_open && ws.right_panel.is_plugin("b"));
+        ws.toggle_right_panel(RightPanelId::Plugin("b".into()));
         assert!(!ws.right_open);
         ws.set_sidebar_auto_hidden(true);
         assert!(!ws.sidebar_visible());

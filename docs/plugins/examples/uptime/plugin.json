@@ -1,0 +1,8 @@
+{
+  "name": "运行时间",
+  "description": "最省事的插件：一条命令，输出原样贴进面板",
+  "icon": "clock",
+  "command": "uptime",
+  "output": "text",
+  "refresh": 30
+}

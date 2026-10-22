@@ -1,0 +1,77 @@
+{
+  "title": "fixture",
+  "blocks": [
+    {
+      "type": "select",
+      "param": "mode",
+      "value": "b",
+      "options": [
+        {
+          "value": "a",
+          "label": "A"
+        },
+        {
+          "value": "b",
+          "label": "B"
+        }
+      ]
+    },
+    {
+      "type": "stats",
+      "items": [
+        {
+          "label": "n",
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "type": "list",
+      "items": [
+        {
+          "title": "x",
+          "badge": "1",
+          "action": {
+            "kind": "openUrl",
+            "url": "https://example.com/"
+          }
+        },
+        {
+          "title": "y",
+          "tone": "success",
+          "action": {
+            "kind": "setParam",
+            "param": "item",
+            "value": "y"
+          },
+          "menu": [
+            {
+              "label": "rm",
+              "action": {
+                "kind": "invoke",
+                "id": "rm",
+                "value": "y",
+                "confirm": "sure?"
+              },
+              "tone": "danger"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "actions",
+      "items": [
+        {
+          "label": "go",
+          "action": {
+            "kind": "invoke",
+            "id": "go",
+            "value": "1"
+          },
+          "tone": "accent"
+        }
+      ]
+    }
+  ]
+}

@@ -88,6 +88,8 @@ pub mod meegle_drill;
 pub mod meegle_groups;
 /// 对应 React 版的 lib/meegleKey.ts：工作项显示编号
 pub mod meegle_key;
+/// 右侧栏插件面板的重画时机、参数与图形几何（ADR 0025）
+pub mod plugin;
 /// 对应 React 版的 store.ts 里的纯逻辑：falcon.workspace 的形状与清洗、selector、状态迁移
 pub mod workspace;
 

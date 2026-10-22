@@ -1,0 +1,9 @@
+{
+  "api": 1,
+  "name": "TODO",
+  "description": "当前项目里的 TODO / FIXME / HACK（git grep，只看本地项目）",
+  "icon": "list-checks",
+  "command": ["python3", "run.py"],
+  "scope": "project",
+  "refresh": 30
+}

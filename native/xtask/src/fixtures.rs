@@ -492,6 +492,22 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     out.save("meegle-pins", &api.get("/api/meegle/pins")?)?;
     out.save("meegle-pin-delete", &api.bare("DELETE", &format!("/api/meegle/pins/{pin_id}"))?)?;
 
+    // ---- 右侧栏插件（ADR 0025）：内置的系统监控 + 数据目录里那个输出确定的命令插件 ----
+    out.save("plugins", &api.get("/api/plugins")?)?;
+    let mut sysmon = api.call("POST", "/api/plugins/sysmon/render", json!({ "params": { "machine": "local" } }))?;
+    redact_sysmon(&mut sysmon);
+    out.save("plugin-render-sysmon", &sysmon)?;
+    out.save(
+        "plugin-render-command",
+        &api.call("POST", "/api/plugins/fixture/render", json!({ "projectId": local_id, "params": { "mode": "b" } }))?,
+    )?;
+    out.save("plugin-action", &api.call("POST", "/api/plugins/fixture/action", json!({ "action": "go", "value": "1" }))?)?;
+    out.save("plugin-enabled", &api.call("PUT", "/api/plugins/fixture/enabled", json!({ "enabled": false }))?)?;
+    out.save(
+        "error-plugin-disabled",
+        &api.request("POST", "/api/plugins/fixture/render", Body::Json(json!({})), &[409])?.json,
+    )?;
+
     // ---- 错误体 ----
     out.save("error-not-found", &api.request("GET", "/api/projects/no-such-project/git", Body::None, &[404])?.json)?;
     out.save(
@@ -901,7 +917,51 @@ fn commit_at(date: &str, message: &str) -> Result<()> {
 /// 数据目录先建好（会话守护进程由服务端自己拷进 bin/）
 fn prepare_data_dir() -> Result<()> {
     fs::create_dir_all(Path::new(DATA).join("bin"))?;
+    // 右侧栏插件（ADR 0025）：一个输出确定的命令插件，画面板 / 点按钮两条路都走一遍
+    let plugin = Path::new(DATA).join("plugins/fixture");
+    fs::create_dir_all(&plugin)?;
+    fs::write(
+        plugin.join("plugin.json"),
+        r#"{"api":1,"name":"Fixture","icon":"puzzle","command":["./run.sh"],"scope":"project","refresh":5}"#,
+    )?;
+    let run = plugin.join("run.sh");
+    fs::write(&run, FIXTURE_PLUGIN)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o755))?;
+    }
     Ok(())
+}
+
+/// fixture 用的命令插件：画面板时用上 select / stats / list（含 setParam 的行与行菜单）/ actions，
+/// 点按钮回 notice + toast + 改写参数
+const FIXTURE_PLUGIN: &str = r#"#!/bin/sh
+cat >/dev/null
+if [ "$FALCON_PLUGIN_EVENT" = action ]; then
+  printf '{"blocks":[{"type":"notice","tone":"success","text":"%s=%s"}],"toast":{"tone":"success","title":"done"},"params":{"item":""}}' \
+    "$FALCON_PLUGIN_ACTION" "$FALCON_PLUGIN_VALUE"
+else
+  printf '{"title":"fixture","blocks":[{"type":"select","param":"mode","value":"%s","options":[{"value":"a","label":"A"},{"value":"b","label":"B"}]},{"type":"stats","items":[{"label":"n","value":1}]},{"type":"list","items":[{"title":"x","badge":"1","action":{"kind":"openUrl","url":"https://example.com/"}},{"title":"y","tone":"success","action":{"kind":"setParam","param":"item","value":"y"},"menu":[{"label":"rm","tone":"danger","action":{"kind":"invoke","id":"rm","value":"y","confirm":"sure?"}}]}]},{"type":"actions","items":[{"label":"go","tone":"accent","action":{"kind":"invoke","id":"go","value":"1"}}]}]}' \
+    "${FALCON_PARAM_MODE:-a}"
+fi
+"#;
+
+/// 系统监控的面板里有生成 fixture 那台机器的主机名与正在跑的程序：形状留着，内容换掉
+fn redact_sysmon(view: &mut Js) {
+    view.set("title", Js::str("本机（已脱敏） · macOS · 已运行 1 天 2 小时"));
+    let Js::Obj(fields) = view else { return };
+    let Some((_, Js::Arr(blocks))) = fields.iter_mut().find(|(k, _)| k == "blocks") else { return };
+    for b in blocks {
+        if matches!(b.get("type"), Some(Js::Str(t)) if t == "table") {
+            let width = match b.get("columns") {
+                Some(Js::Arr(c)) => c.len(),
+                _ => 0,
+            };
+            let row = Js::Arr((0..width).map(|i| Js::str(if i == 0 { "process" } else { "0" })).collect());
+            b.set("rows", Js::Arr(vec![row]));
+        }
+    }
 }
 
 fn start_server(bin: &Path, port: u16) -> Result<Child> {

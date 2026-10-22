@@ -54,6 +54,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-platform-verifier = "0.7"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# 内置插件「系统监控」的本机采样（ADR 0025）。与客户端经 GPUI 间接依赖的是同一版，
+# 不多拉一份；只开要用的几项（不要 component / user，也不要 multithread 的 rayon 线程池）
+sysinfo = { version = "0.31", default-features = false, features = ["system", "disk", "network"] }
 
 [dev-dependencies]
 tempfile = "3"

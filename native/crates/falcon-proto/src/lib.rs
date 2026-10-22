@@ -64,6 +64,8 @@ pub mod files;
 pub mod forward;
 pub mod git;
 pub mod meegle;
+/// 右侧栏插件：清单、面板文档、动作、给命令插件的请求（ADR 0025）
+pub mod plugin;
 pub mod program_status;
 pub mod project;
 pub mod session;
@@ -82,6 +84,7 @@ pub use files::*;
 pub use forward::*;
 pub use git::*;
 pub use meegle::*;
+pub use plugin::*;
 pub use program_status::*;
 pub use project::*;
 pub use session::*;

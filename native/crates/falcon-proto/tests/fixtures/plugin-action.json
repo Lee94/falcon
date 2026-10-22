@@ -1,0 +1,16 @@
+{
+  "blocks": [
+    {
+      "type": "notice",
+      "text": "go=1",
+      "tone": "success"
+    }
+  ],
+  "toast": {
+    "tone": "success",
+    "title": "done"
+  },
+  "params": {
+    "item": ""
+  }
+}

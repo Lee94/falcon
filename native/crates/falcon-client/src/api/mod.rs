@@ -16,6 +16,7 @@ pub(crate) mod forwards;
 pub(crate) mod git;
 pub(crate) mod hosts;
 pub(crate) mod meegle;
+pub(crate) mod plugins;
 pub(crate) mod projects;
 pub(crate) mod sessions;
 pub(crate) mod system;

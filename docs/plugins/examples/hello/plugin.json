@@ -1,0 +1,8 @@
+{
+  "api": 1,
+  "name": "计数器",
+  "description": "插件示例：选项参数、按钮动作、通知，状态存在 FALCON_PLUGIN_DATA 里",
+  "icon": "mouse-pointer-click",
+  "command": ["./run.sh"],
+  "scope": "project"
+}

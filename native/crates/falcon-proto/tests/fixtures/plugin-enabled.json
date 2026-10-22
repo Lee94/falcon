@@ -1,0 +1,38 @@
+{
+  "dir": "/private/tmp/fal-fx-data/plugins",
+  "plugins": [
+    {
+      "id": "sysmon",
+      "name": "系统监控",
+      "description": "CPU、内存、负载、网络、磁盘与占用最高的进程；看 falcon 后端本机或 Linux 远端主机",
+      "icon": "activity",
+      "kind": "builtin",
+      "scope": "project",
+      "refresh": 2,
+      "enabled": true,
+      "error": null
+    },
+    {
+      "id": "docker",
+      "name": "Docker",
+      "description": "容器的启停、日志与资源占用，镜像与磁盘清理；看 falcon 后端本机或 SSH 远端主机",
+      "icon": "container",
+      "kind": "builtin",
+      "scope": "project",
+      "refresh": 3,
+      "enabled": true,
+      "error": null
+    },
+    {
+      "id": "fixture",
+      "name": "Fixture",
+      "icon": "puzzle",
+      "kind": "command",
+      "scope": "project",
+      "refresh": 5,
+      "enabled": false,
+      "error": null,
+      "dir": "/private/tmp/fal-fx-data/plugins/fixture"
+    }
+  ]
+}

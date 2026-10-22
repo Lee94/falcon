@@ -1,6 +1,7 @@
 //! 设置（旧 React 版的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、
 //! 应用图标、终端字体 / 字号 / 行高 / 光标）、通知（程序跑完时的提示音）、账户（访问密码、记住的
-//! 密码、退出登录）、远端主机、中转（端口转发与公网发布，按机器管理，ADR 0016）、关于。
+//! 密码、退出登录）、远端主机、中转（端口转发与公网发布，按机器管理，ADR 0016）、插件（右侧栏插件的
+//! 开关与插件目录，ADR 0025）、关于。
 //!
 //! 设置是覆盖层，不是一页：几乎铺满窗口的对话框，左侧按模块切（顶上一个搜索框按名字 /
 //! 分组 / 关键字筛模块），右侧是当前模块的项，各自滚动。
@@ -14,6 +15,7 @@ mod app_icon;
 mod appearance;
 mod assistant;
 mod hosts;
+mod plugins;
 mod relays;
 mod widgets;
 
@@ -42,6 +44,8 @@ pub enum Tab {
     Relays,
     /// AI 助手：模型、API key、审批策略（docs/design/ai-assistant.md 2.3）
     Assistant,
+    /// 右侧栏插件（ADR 0025）
+    Plugins,
     About,
 }
 
@@ -52,8 +56,16 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 7] =
-        [Tab::Appearance, Tab::Notifications, Tab::Account, Tab::Assistant, Tab::About, Tab::Hosts, Tab::Relays];
+    const ALL: [Tab; 8] = [
+        Tab::Appearance,
+        Tab::Notifications,
+        Tab::Account,
+        Tab::Assistant,
+        Tab::Plugins,
+        Tab::About,
+        Tab::Hosts,
+        Tab::Relays,
+    ];
 
     fn id(self) -> &'static str {
         match self {
@@ -63,6 +75,7 @@ impl Tab {
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
             Tab::Assistant => "assistant",
+            Tab::Plugins => "plugins",
             Tab::About => "about",
         }
     }
@@ -82,12 +95,22 @@ impl Tab {
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
             Tab::Assistant => IconName::Sparkles,
+            Tab::Plugins => IconName::Puzzle,
             Tab::About => IconName::Info,
         }
     }
 
     fn label(self) -> String {
         t!(format!("settings.tab_{}", self.id())).to_string()
+    }
+
+    /// 按 id 找页（自动化脚本用）；空串是外观
+    #[cfg_attr(not(feature = "automation"), allow(dead_code))]
+    pub fn from_id(id: &str) -> Option<Self> {
+        if id.is_empty() {
+            return Some(Tab::Appearance);
+        }
+        Tab::ALL.into_iter().find(|t| t.id() == id)
     }
 }
 
@@ -147,6 +170,8 @@ impl SettingsView {
         })
         .detach();
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+        // 插件目录是用户手动改的：每次打开设置都重新扫一遍，插件页看到的就是现状
+        ws.update(cx, |w, cx| w.refresh_plugins(cx));
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
         let account = cx.new(|cx| account::AccountPane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
@@ -357,6 +382,7 @@ impl Render for SettingsView {
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),
             Tab::Assistant => self.assistant_pane(window, cx).into_any_element(),
+            Tab::Plugins => plugins::render(&self.ws, cx).into_any_element(),
             Tab::About => self.render_about(cx).into_any_element(),
         };
         let ui = Ui::global(cx).clone();

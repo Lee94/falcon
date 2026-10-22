@@ -900,6 +900,8 @@
     "openRelays": "中转设置",
     "toggleMeegleOn": "关闭飞书项目面板",
     "toggleMeegleOff": "打开飞书项目面板",
+    "togglePluginOn": "关闭%{name}面板",
+    "togglePluginOff": "打开%{name}面板",
     "goToFile": "转到文件",
     "overview": "打开会话总览",
     "zoomOn": "最大化当前终端",
@@ -950,6 +952,8 @@
     "tab_hosts_keys": "ssh 主机 远端 连接",
     "tab_relays": "中转",
     "tab_relays_keys": "中转 转发 端口 隧道 公网 发布 cloudflare tunnel",
+    "tab_plugins": "插件",
+    "tab_plugins_keys": "插件 扩展 plugin 系统监控 监控 cpu 内存 磁盘 网络 进程",
     "tab_about": "关于",
     "tab_about_keys": "版本 平台 安装 应用",
     "appearanceTitle": "外观",
@@ -1109,5 +1113,27 @@
       "plaintextBody": "%{url} 不是本机地址，也没有 TLS：访问密码与终端里的全部内容都会以明文经过网络。建议放在反向代理后面用 https:// 访问。",
       "plaintextConfirm": "仍然连接"
     }
+  },
+  "plugin": {
+    "refresh": "刷新",
+    "loading": "正在加载…",
+    "missing": "没有插件「%{id}」：它可能已经从插件目录里删掉了。",
+    "disabled": "这个插件已停用，可以在设置的「插件」页里重新启用。",
+    "broken": "这个插件的 plugin.json 有问题：",
+    "failed": "插件没画出来：",
+    "staleFailed": "这一次没画出来，下面是上一次的结果：",
+    "empty": "插件没有输出任何内容。",
+    "confirm": "确定",
+    "copied": "已复制",
+    "actionFailed": "插件操作失败",
+    "toggleFailed": "切换插件失败",
+    "kindBuiltin": "内置",
+    "kindCommand": "命令",
+    "settingsTitle": "插件",
+    "settingsHint": "右侧栏的插件。除了内置的系统监控，也可以写自己的：在 falcon 后端那台机器的插件目录里放一个文件夹，文件夹名就是插件 id，里面一份 plugin.json 写明要跑的程序，程序把面板内容以 JSON 打到标准输出。写法见仓库里的 docs/plugins.md。",
+    "dir": "插件目录",
+    "copyDir": "复制路径",
+    "rescan": "重新扫描",
+    "noCustom": "还没有自己的插件。把插件文件夹放进上面的插件目录，再点「重新扫描」。"
   }
 }

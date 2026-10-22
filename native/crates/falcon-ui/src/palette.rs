@@ -423,7 +423,21 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             meta: Some(chord(ch).to_string()),
             icon: ic,
             tone: None,
-            run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_right_panel(panel, cx))),
+            run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_right_panel(panel.clone(), cx))),
+        });
+    }
+    // 右侧栏上的插件（ADR 0025）：与内置面板同样一开一关
+    for p in ws.panel_plugins() {
+        let panel = RightPanelId::Plugin(p.id.clone());
+        let showing = ws.state.right_open && ws.state.right_panel == panel;
+        let w = ws_entity.clone();
+        actions.push(PickItem {
+            key: format!(">{} {} {} plugin", t!("palette.togglePluginOn", name = p.name), t!("palette.togglePluginOff", name = p.name), p.id),
+            label: if showing { t!("palette.togglePluginOn", name = p.name) } else { t!("palette.togglePluginOff", name = p.name) }.to_string(),
+            meta: None,
+            icon: crate::panels::plugin::plugin_icon(&p.icon),
+            tone: None,
+            run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_right_panel(panel.clone(), cx))),
         });
     }
     for (pref, key) in [

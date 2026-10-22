@@ -1,0 +1,158 @@
+{
+  "title": "本机（已脱敏） · macOS · 已运行 1 天 2 小时",
+  "refresh": 2,
+  "blocks": [
+    {
+      "type": "select",
+      "param": "machine",
+      "label": "机器",
+      "value": "local",
+      "options": [
+        {
+          "value": "auto",
+          "label": "跟随当前项目"
+        },
+        {
+          "value": "local",
+          "label": "本机"
+        },
+        {
+          "value": "host:a968dbc8-839d-4cf8-8363-ba918f48ea1a",
+          "label": "fixture-host-renamed"
+        }
+      ]
+    },
+    {
+      "type": "stats",
+      "items": [
+        {
+          "label": "CPU",
+          "value": "10%",
+          "detail": "10 核"
+        },
+        {
+          "label": "内存",
+          "value": "89%",
+          "detail": "14.3 GB / 16.0 GB",
+          "tone": "warning"
+        },
+        {
+          "label": "负载",
+          "value": "2.27",
+          "detail": "2.60 · 3.09"
+        },
+        {
+          "label": "磁盘",
+          "value": "73%",
+          "detail": "62.1 GB 可用"
+        }
+      ]
+    },
+    {
+      "type": "chart",
+      "label": "CPU",
+      "text": "10% · 10 核",
+      "series": [
+        {
+          "values": [
+            10.23166561126709
+          ],
+          "tone": "accent"
+        }
+      ],
+      "max": 100,
+      "slots": 90
+    },
+    {
+      "type": "chart",
+      "label": "内存",
+      "text": "14.3 GB / 16.0 GB",
+      "series": [
+        {
+          "values": [
+            89.39828872680664
+          ],
+          "tone": "accent"
+        }
+      ],
+      "max": 100,
+      "slots": 90
+    },
+    {
+      "type": "meter",
+      "label": "交换",
+      "value": 7204700160,
+      "max": 8589934592,
+      "text": "6.71 GB / 8.00 GB",
+      "tone": "warning"
+    },
+    {
+      "type": "chart",
+      "label": "网络",
+      "text": "↓ 2.33 KB/s  ↑ 2.33 KB/s",
+      "series": [
+        {
+          "name": "下行",
+          "values": [
+            2382.6240625252676
+          ],
+          "tone": "accent"
+        },
+        {
+          "name": "上行",
+          "values": [
+            2382.6240625252676
+          ],
+          "tone": "success"
+        }
+      ],
+      "slots": 90
+    },
+    {
+      "type": "heading",
+      "text": "磁盘"
+    },
+    {
+      "type": "meter",
+      "label": "/",
+      "value": 178434786085,
+      "max": 245107195904,
+      "text": "166 GB / 228 GB"
+    },
+    {
+      "type": "meter",
+      "label": "/Volumes/faye",
+      "value": 335041382505,
+      "max": 2000276230144,
+      "text": "312 GB / 1.82 TB"
+    },
+    {
+      "type": "heading",
+      "text": "进程",
+      "detail": "按 CPU"
+    },
+    {
+      "type": "table",
+      "columns": [
+        {
+          "title": "进程"
+        },
+        {
+          "title": "CPU",
+          "align": "right"
+        },
+        {
+          "title": "内存",
+          "align": "right"
+        }
+      ],
+      "rows": [
+        [
+          "process",
+          "0",
+          "0"
+        ]
+      ]
+    }
+  ]
+}

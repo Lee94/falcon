@@ -24,6 +24,8 @@ pub mod git;
 pub mod host;
 pub mod meegle;
 pub mod paste;
+/// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
+pub mod plugins;
 pub mod px0;
 pub mod ringbuffer;
 pub mod service;

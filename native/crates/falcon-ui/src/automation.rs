@@ -9,6 +9,8 @@
 //! | `select:<项目名>` | 在侧栏选中项目 |
 //! | `new-terminal[:claude]` | 在当前项目新建终端（可带 agent） |
 //! | `open:<路径>` | 在当前项目的文件窗口里打开一个文件（工作目录相对路径；有没存的修改时同样先问） |
+//! | `panel:<面板>` | 打开右侧栏的这一格（`files` / `changes` / `git` / `meegle` / `plugin:<插件 id>`）；已经开着就不动 |
+//! | `settings[:<页>]` | 打开设置，停在这一页（`plugins`、`relays`…；缺省外观） |
 //! | `assistant` | 打开 / 收起 AI 助手面板（同 ⌘J） |
 //! | `assistant-new:<机器>` | 在这台机器上开新对话（`local` 或 hostId） |
 //! | `assistant-expand` | 助手面板铺满主区 / 还原（同 ⤢） |
@@ -172,6 +174,19 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
             if !ok {
                 return Err("没有选中的项目".into());
             }
+        }
+        "panel" => {
+            let panel = crate::workspace::RightPanelId::from_wire(arg).ok_or_else(|| format!("认不出的面板：{arg}"))?;
+            cx.update(|cx| {
+                let st = &ws.read(cx).state;
+                if !(st.right_open && st.right_panel == panel) {
+                    ws.update(cx, |w, cx| w.toggle_right_panel(panel, cx));
+                }
+            });
+        }
+        "settings" => {
+            let tab = crate::dialogs::settings::Tab::from_id(arg).ok_or_else(|| format!("认不出的设置页：{arg}"))?;
+            let _ = window.update(cx, |_, window, cx| crate::dialogs::settings::open(ws, tab, window, cx));
         }
         "assistant" => {
             let _ = window.update(cx, |_, window, cx| crate::assistant::toggle(ws, window, cx));

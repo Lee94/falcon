@@ -60,7 +60,11 @@ fn main() -> anyhow::Result<()> {
     }
     // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
     let meegle = falcon_server::meegle::client::MeegleClient::for_server(&config.data_dir);
-    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle);
+    let plugins = falcon_server::plugins::PluginHost::new(
+        &config.data_dir,
+        falcon_server::sessions::local::local_base_env_fn(),
+    );
+    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle, plugins);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
