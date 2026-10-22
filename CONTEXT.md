@@ -75,7 +75,7 @@ _Avoid_: Window / Pane（窗口是前端视图，不是会话本身）、Tab（�
 _Avoid_: Tab、面板（面板是右侧栏那几格）
 
 **Agent 会话**:
-开场直接跑 claude / codex / grok 的终端会话（`sessions.agent`）。除了开场命令，与普通会话没有任何区别；CLI 退出后落回登录 shell，会话不结束。见 ADR 0013。
+开场直接跑 claude / codex / grok / devin 的终端会话（`sessions.agent`）。除了开场命令，与普通会话没有任何区别；CLI 退出后落回登录 shell，会话不结束。见 ADR 0013。
 _Avoid_: AI 会话、机器人（"agent" 就是这些 CLI 的自称）
 
 **自动标题**:
@@ -175,7 +175,7 @@ _Avoid_: 断开（与 Detach 混淆）
 _Avoid_: 懒惰验证（曾经是打开窗口才接，已经改成自动）
 
 **Revive（原地重开）**:
-接回时发现宿主机上的持久会话确实没了（holder 被杀、宿主机重启），用同一个会话 id 再起一个，回到 Active（ADR 0024）。claude / grok 开场的会话接着原来那段对话，其余的开一个新的登录 shell（codex 会话同时退成普通会话）。屏幕与回滚回不来。shell 自己退出（exited）不重开。
+接回时发现宿主机上的持久会话确实没了（holder 被杀、宿主机重启），用同一个会话 id 再起一个，回到 Active（ADR 0024）。claude / grok 开场的会话接着原来那段对话，其余的开一个新的登录 shell（codex / devin 会话同时退成普通会话）。屏幕与回滚回不来。shell 自己退出（exited）不重开。
 _Avoid_: 恢复（与 Reattach 混淆：接回的是还活着的会话，重开的是已经没了的）
 
 ### 存活性

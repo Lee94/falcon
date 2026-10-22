@@ -55,6 +55,7 @@ wire_enum! {
         Claude => "claude",
         Codex => "codex",
         Grok => "grok",
+        Devin => "devin",
     }
 }
 
@@ -157,7 +158,7 @@ pub struct CreateSessionRequest {
     /// 留空 = 不起名，UI 走自动标题（见 Session.name）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// 开场跑的 CLI（claude / codex / grok）；缺省是普通 shell。
+    /// 开场跑的 CLI（claude / codex / grok / devin）；缺省是普通 shell。
     /// 服务端认不出的一律当普通终端，不 400。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgent>,
@@ -178,7 +179,7 @@ mod tests {
     #[test]
     fn agents_match_ts() {
         let names: Vec<_> = SESSION_AGENTS.iter().map(|a| a.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "grok"]);
+        assert_eq!(names, ["claude", "codex", "grok", "devin"]);
         assert_eq!(SessionAgent::from_wire("codex"), Some(SessionAgent::Codex));
         assert_eq!(SessionAgent::from_wire("unknown"), None);
         assert_eq!(SessionAgent::from_wire("gemini"), None);

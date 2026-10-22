@@ -16,7 +16,7 @@ use crate::js::js_trim;
 /// 窗口标题栏右边紧跟着完整工作目录，什么都不显示才对；侧栏只有一个文本槽，
 /// 落到 [`shell_label`]。
 ///
-/// agent 兜底取 CLI 名小写（claude / codex / grok），与服务端给的程序身份同形：CLI 正跑着时
+/// agent 兜底取 CLI 名小写（claude / codex / grok / devin），与服务端给的程序身份同形：CLI 正跑着时
 /// 那边给的也是同一个词（Claude Code 自报 `claude-code`，服务端改写成 `claude`；macOS 上它的
 /// 进程名是版本号，不能指望前台命令），它退出回到 shell 也不会跳成另一种写法。
 pub fn session_title(session: &Session) -> Option<String> {

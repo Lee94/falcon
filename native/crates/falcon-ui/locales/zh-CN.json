@@ -676,7 +676,8 @@
     "terminal": "普通终端",
     "claude": "Claude Code",
     "codex": "Codex",
-    "grok": "Grok"
+    "grok": "Grok",
+    "devin": "Devin"
   },
   "session": {
     "state_active": "运行中",
