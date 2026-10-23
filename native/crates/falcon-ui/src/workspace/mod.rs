@@ -474,7 +474,7 @@ impl Workspace {
                     this.toast(ToastKind::Warning, rust_i18n::t!("settings.restart_failed").to_string(), Some(text), cx);
                     this.handle_error(&err, cx);
                 })
-                .ok();
+                .ok()
             }
         })
         .detach();
