@@ -114,6 +114,21 @@ impl Platform for Browser {
         dom::trigger_download(url)
     }
 
+    fn open_browser_popup(&self, url: &str) -> Result<(), String> {
+        let window = web_sys::window().ok_or_else(|| "浏览器窗口不可用".to_string())?;
+        // 不带 noopener 特性：它会让成功打开也返回 null，无法判断弹窗被拦截。
+        // 在导航到同源页面前同步切断 opener；目标网站只以远端视频出现。
+        let popup = window
+            .open_with_url_and_target_and_features("about:blank", "_blank", "popup,width=1280,height=840")
+            .map_err(|_| "无法打开远端浏览器窗口".to_string())?
+            .ok_or_else(|| "浏览器拦截了弹窗，请允许此站点打开弹窗后重试".to_string())?;
+        if popup.set_opener(&wasm_bindgen::JsValue::NULL).is_err() {
+            let _ = popup.close();
+            return Err("无法安全地打开远端浏览器窗口".into());
+        }
+        popup.location().replace(url).map_err(|_| "无法载入远端浏览器".to_string())
+    }
+
     // HTML 预览的 `<iframe sandbox>` 叠层在 C3 补（附录 B）；在那之前界面给"在浏览器中打开"
     fn html_view(
         &self,
