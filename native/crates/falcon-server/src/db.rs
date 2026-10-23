@@ -5,7 +5,8 @@
 //! - WAL + `synchronous = NORMAL`；
 //! - 迁移是幂等的 `CREATE TABLE IF NOT EXISTS` + 按 `PRAGMA table_info` 补列，没有版本号迁移表，
 //!   改表结构就往这套里加；
-//! - 没有 falcon.db 而有旧的 mojito.db 时接着用旧的。
+//! - 没有 falcon.db 而有旧的 mojito.db 时接着用旧的；两库并存时 falcon.db 优先，
+//!   除非它只是个没落过地的空迁移库（那会让真实库被无声盖过）。
 //!
 //! 连接放在一把锁里：Node 版是单线程同步调用，这里各个 handler 并发进来，排队即可
 //! （库里是个位数到几十行的配置数据，没有长事务）。语句缓存用 rusqlite 的 `prepare_cached`。
@@ -297,13 +298,59 @@ fn session_host_from_row(r: &Row) -> rusqlite::Result<SessionHostRow> {
 }
 
 /// 新库名 falcon.db；旧安装只有 mojito.db 时接着用，避免改名后打开空库。
+/// 两库并存时 falcon.db 优先——除非它从没写过用户数据：某次一闪而过的运行
+/// （含启动即退的崩溃循环）只 migrate 出空表就落下它，让它盖过真实的 mojito.db，
+/// 表现为密码、项目、会话「全不见了」。
 pub fn db_file(data_dir: &Path) -> PathBuf {
     let next = data_dir.join("falcon.db");
     let prev = data_dir.join("mojito.db");
     if !next.exists() && prev.exists() {
         return prev;
     }
+    if next.exists() && prev.exists() && !db_has_user_data(&next) {
+        return prev;
+    }
     next
+}
+
+/// `path` 指向的库里有没有真写过用户数据：任一张用户表有行，或 settings 里有非空的
+/// instance_id / password_hash。
+/// 读不了（打不开、文件根本不是数据库）按"有"处理——维持原选择，让上层照常报错，
+/// 不因为一个坏文件就偷偷换库；表不存在（没 migrate 过的空文件）不算错，继续看。
+fn db_has_user_data(path: &Path) -> bool {
+    const USER_TABLES: [&str; 9] = [
+        "projects",
+        "sessions",
+        "known_hosts",
+        "ssh_hosts",
+        "session_hosts",
+        "host_forwards",
+        "host_shares",
+        "meegle_pins",
+        "assistant_threads",
+    ];
+    let Ok(conn) = Connection::open(path) else { return true };
+    let no_table = |e: &rusqlite::Error| e.to_string().contains("no such table");
+    for table in USER_TABLES {
+        match conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get::<_, i64>(0)) {
+            Ok(n) => {
+                if n > 0 {
+                    return true;
+                }
+            }
+            Err(e) if no_table(&e) => {}
+            Err(_) => return true,
+        }
+    }
+    match conn.query_row(
+        "SELECT count(*) FROM settings WHERE key IN ('instance_id', 'password_hash') AND value != ''",
+        [],
+        |r| r.get::<_, i64>(0),
+    ) {
+        Ok(n) => n > 0,
+        Err(e) if no_table(&e) => false,
+        Err(_) => true,
+    }
 }
 
 pub struct Db {
@@ -1646,8 +1693,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mojito.db"), b"").unwrap();
         assert_eq!(db_file(dir.path()), dir.path().join("mojito.db"));
+        // falcon.db 只是个没落过地的空文件：不能盖过 mojito.db
         std::fs::write(dir.path().join("falcon.db"), b"").unwrap();
+        assert_eq!(db_file(dir.path()), dir.path().join("mojito.db"));
+        // 真用过的 falcon.db 才接管
+        let db = Db::with_connection(Connection::open(dir.path().join("falcon.db")).unwrap()).unwrap();
+        db.instance_id();
+        drop(db);
         assert_eq!(db_file(dir.path()), dir.path().join("falcon.db"));
+    }
+
+    #[test]
+    fn virgin_falcon_db_does_not_shadow_mojito_db() {
+        // 升级事故：一闪而过的运行只 migrate 出空表就落下 falcon.db，真实的 mojito.db
+        // （有密码、有项目）不能被它盖掉
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let prev = Connection::open(dir.path().join("mojito.db")).unwrap();
+            prev.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO settings VALUES ('instance_id', 'i-1'), ('password_hash', 'h');",
+            )
+            .unwrap();
+        }
+        Db::with_connection(Connection::open(dir.path().join("falcon.db")).unwrap()).unwrap();
+        assert_eq!(db_file(dir.path()), dir.path().join("mojito.db"));
     }
 
     /// 先让 Db 建好全套 schema，再用第二条原始连接补出旧版的两张表与数据，
