@@ -6,7 +6,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::Uri;
 use axum::routing::{get, post};
-use falcon_proto::{FsListing, FsValidateResult, ShellsInfo, SystemInfo};
+use falcon_proto::{FsListing, FsValidateResult, OkResponse, ShellsInfo, SystemInfo};
 use serde_json::Value;
 
 use super::auth_routes::LenientJson;
@@ -22,6 +22,7 @@ use crate::shells::{detect_shells, shells_from_probe, shells_probe};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/system", get(system))
+        .route("/api/system/restart", post(restart))
         .route("/api/fs/validate", post(fs_validate))
         .route("/api/fs/list", get(fs_list))
         .route("/api/shells", get(shells))
@@ -36,6 +37,25 @@ async fn system(State(state): State<AppState>) -> ApiResult<Json<SystemInfo>> {
         local_durable_reason: local.and_then(|l| l.reason),
         version: VERSION.into(),
     }))
+}
+
+/// `POST /api/system/restart`：重启服务端进程。
+///
+/// 受管（launchd KeepAlive / systemd Restart=always）干净退出由 init 拉起；不受管先派一个
+/// respawn 帮手等本进程死后以同一 argv 重开（判定与机制都在 crate::restart）。
+/// 先回 200 再通知主循环走退出路径——`serve` 一停这条响应就发不出去了。退出走与
+/// SIGTERM 同一条路：Engine::shutdown 会先收掉 cloudflared / px0 这些子进程。
+async fn restart(State(state): State<AppState>) -> ApiResult<Json<OkResponse>> {
+    if !crate::restart::supervised() {
+        crate::restart::spawn_respawn_helper()
+            .map_err(|e| ApiError::internal(format!("重启帮手起不来：{e}")))?;
+    }
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        shutdown.notify_one();
+    });
+    Ok(Json(OkResponse { ok: true }))
 }
 
 /// 后端本机上这个路径是不是一个能进的文件夹。相对路径按后端 cwd 解析（同 Node 的 statSync）。

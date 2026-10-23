@@ -129,14 +129,14 @@ pub fn open(ws: &Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App)
     let view = cx.new(|cx| SettingsView::new(ws.clone(), tab, window, cx));
     let search = view.read(cx).search.clone();
     window.open_dialog(cx, move |dialog, window, _| {
-        // React 版：w-[min(90rem,100vw-4rem)] h-[100vh-4rem]，上下各留 2rem
+        // 不再铺满窗口：上限 1024×680，小窗口上下左右至少留 32 边距，垂直居中
         let vp = window.viewport_size();
-        let w = (vp.width - zpx(64.)).min(zpx(1440.));
-        let h = vp.height - zpx(64.);
+        let w = (vp.width - zpx(64.)).min(zpx(1024.));
+        let h = (vp.height - zpx(64.)).min(zpx(680.));
         dialog
             .w(w)
             .h(h)
-            .margin_top(zpx(32.))
+            .margin_top((vp.height - h) * 0.5)
             .p_0()
             // 单行输入框里的回车会冒泡成对话框的"确定"：设置没有确定这回事（密码表单自己
             // 接 PressEnter），别让它把整个设置关掉
@@ -305,35 +305,69 @@ impl SettingsView {
             div().font_family(crate::fonts::BERKELEY).text_sm().text_color(ui.muted_foreground).child(text)
         };
         let dash = "—".to_string();
+        let ws = self.ws.clone();
+        let restart = Button::new("restart-server")
+            .outline()
+            .small()
+            .icon(IconName::RotateCw)
+            .label(t!("settings.restartServer").to_string())
+            .on_click(move |_, window, cx| {
+                let ws = ws.clone();
+                crate::dialogs::confirm(
+                    crate::dialogs::ConfirmOpts {
+                        title: t!("settings.restartConfirmTitle").to_string(),
+                        body: t!("settings.restartConfirmBody").to_string(),
+                        confirm_label: t!("settings.restartServer").to_string(),
+                        danger: true,
+                        ..Default::default()
+                    },
+                    move |_, cx| {
+                        ws.update(cx, |w, cx| w.restart_server(cx));
+                    },
+                    window,
+                    cx,
+                );
+            });
         // React 版这里是"安装应用"（PWA）一行，PWA 已删；换成客户端版本与服务端地址——
         // 原生客户端能连任意一台 falcon 服务端，"版本"指的是连着的那台服务端的
-        widgets::section(
-            t!("settings.aboutTitle").to_string(),
-            None,
-            widgets::rows(
-                vec![
-                    (
-                        t!("overview.version").to_string(),
-                        None,
-                        mono(w.system.as_ref().map(|s| format!("v{}", s.version)).unwrap_or_else(|| dash.clone())).into_any_element(),
-                    ),
-                    (
-                        t!("overview.platform").to_string(),
-                        None,
-                        mono(w.system.as_ref().map(|s| s.platform.clone()).unwrap_or_else(|| dash.clone())).into_any_element(),
-                    ),
-                    (t!("native.settings.serverUrl").to_string(), None, mono(w.profile.url.clone()).into_any_element()),
-                    (
-                        t!("native.settings.clientVersion").to_string(),
-                        None,
-                        mono(format!("v{}", env!("CARGO_PKG_VERSION"))).into_any_element(),
-                    ),
-                ],
-                false,
+        div()
+            .child(widgets::section(
+                t!("settings.aboutTitle").to_string(),
+                None,
+                widgets::rows(
+                    vec![
+                        (
+                            t!("overview.version").to_string(),
+                            None,
+                            mono(w.system.as_ref().map(|s| format!("v{}", s.version)).unwrap_or_else(|| dash.clone())).into_any_element(),
+                        ),
+                        (
+                            t!("overview.platform").to_string(),
+                            None,
+                            mono(w.system.as_ref().map(|s| s.platform.clone()).unwrap_or_else(|| dash.clone())).into_any_element(),
+                        ),
+                        (t!("native.settings.serverUrl").to_string(), None, mono(w.profile.url.clone()).into_any_element()),
+                        (
+                            t!("native.settings.clientVersion").to_string(),
+                            None,
+                            mono(format!("v{}", env!("CARGO_PKG_VERSION"))).into_any_element(),
+                        ),
+                    ],
+                    false,
+                    cx,
+                ),
                 cx,
-            ),
-            cx,
-        )
+            ))
+            .child(widgets::section(
+                t!("settings.serverTitle").to_string(),
+                Some(t!("settings.serverDescription").to_string()),
+                widgets::rows(
+                    vec![(t!("settings.restartServer").to_string(), Some(t!("settings.restartServerHint").to_string()), restart.into_any_element())],
+                    false,
+                    cx,
+                ),
+                cx,
+            ))
     }
 }
 

@@ -20,6 +20,11 @@ fn main() -> anyhow::Result<()> {
     if argv.first().map(String::as_str) == Some("service") {
         std::process::exit(falcon_server::service_cli::run_service_cli(&argv[1..]));
     }
+    // `falcon respawn <pid> -- <argv…>`：重启帮手（POST /api/system/restart 派的），等 pid
+    // 死后以 argv 重开一个。藏在同一个二进制里，不占 shell、不经 PATH
+    if argv.first().map(String::as_str) == Some("respawn") {
+        std::process::exit(falcon_server::restart::run_respawn_cli(&argv[1..]));
+    }
     let config = parse_args(&argv, |k| std::env::var(k).ok())?;
     let loopback = is_loopback(&config.host);
 
@@ -79,9 +84,11 @@ fn main() -> anyhow::Result<()> {
         // 不走 graceful shutdown：会话的 WS 连接不会自己断，等它们就永远退不出去。
         // 会话在 DB 中保持 active，下次启动由 recover_sessions_on_startup 归类
         let engine = state.engine.clone();
+        let shutdown = state.shutdown.clone();
         tokio::select! {
             res = axum::serve(listener, api::app(state)) => res?,
             () = shutdown_signal() => {}
+            () = shutdown.notified() => {}
         }
         // cloudflared / 本机 px0 是子进程，后端退出不会自动带走（见 Engine::shutdown）
         let stop = engine.call(|e| async move { e.shutdown().await });

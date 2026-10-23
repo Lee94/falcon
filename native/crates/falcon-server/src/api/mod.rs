@@ -70,6 +70,9 @@ pub struct Inner {
     pub meegle: MeegleClient,
     /// 右侧栏插件（命令插件只在后端本机起进程；系统监控看远端时才借引擎拿链路）
     pub plugins: PluginHost,
+    /// `POST /api/system/restart` 要的关停信号：主循环拿它走与 SIGTERM 同一条退出路径
+    /// （先 Engine::shutdown 收子进程再退出），launchd / systemd 或 respawn 帮手负责拉起
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 impl std::ops::Deref for AppState {
@@ -92,7 +95,19 @@ impl AppState {
     ) -> Self {
         let loopback = crate::config::is_loopback(&config.host);
         let auth = Auth::new(db.clone(), loopback);
-        AppState { inner: Arc::new(Inner { config, db, auth, secrets, askpass, engine, meegle, plugins }) }
+        AppState {
+            inner: Arc::new(Inner {
+                config,
+                db,
+                auth,
+                secrets,
+                askpass,
+                engine,
+                meegle,
+                plugins,
+                shutdown: Arc::new(tokio::sync::Notify::new()),
+            }),
+        }
     }
 
     /// 请求带来的登录 cookie 有没有效（不需要认证的部署恒为 true）
