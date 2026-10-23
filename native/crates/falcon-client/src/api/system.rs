@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use falcon_proto::{FsListing, FsValidateResult, ShellsInfo, SystemInfo};
+use falcon_proto::{FsListing, FsValidateResult, OkResponse, ShellsInfo, SystemInfo};
 use reqwest::Method;
 use serde::Serialize;
 
@@ -40,6 +40,12 @@ impl FalconClient {
     /// `GET /api/system`：服务端平台、版本、本地会话能否持久（`null` = 还没探测过）。
     pub fn system(&self) -> impl Future<Output = ApiResult<SystemInfo>> + MaybeSend + 'static {
         self.get("/api/system".to_owned())
+    }
+
+    /// `POST /api/system/restart`：重启服务端进程。受管实例退出后由 init 拉起，否则服务端
+    /// 自带帮手按同一 argv 重开；返回后连接就会断，靠自动重连 / 重登接回。
+    pub fn restart_server(&self) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
+        self.bare(Method::POST, "/api/system/restart".to_owned())
     }
 
     /// `POST /api/fs/validate`：后端本机上这个路径是不是一个能进的文件夹。

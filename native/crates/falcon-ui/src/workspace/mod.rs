@@ -458,6 +458,28 @@ impl Workspace {
         .detach();
     }
 
+    /// 重启连着的服务端：POST /api/system/restart 返回后它就会退出重起，连接走自动重连
+    /// （记住密码时自动重登）。失败统一交 handle_error——401 回登录页
+    pub fn restart_server(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| match client.restart_server().await {
+            Ok(_) => this
+                .update(cx, |this, cx| {
+                    this.toast(ToastKind::Info, rust_i18n::t!("settings.restart_started").to_string(), None, cx);
+                })
+                .ok(),
+            Err(err) => {
+                let text = err.to_string();
+                this.update(cx, |this, cx| {
+                    this.toast(ToastKind::Warning, rust_i18n::t!("settings.restart_failed").to_string(), Some(text), cx);
+                    this.handle_error(&err, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// REST 失败的统一出口：401 回登录页（React 版的 handleApiError）
     pub fn handle_error(&mut self, err: &falcon_client::ApiError, cx: &mut Context<Self>) {
         if err.is_unauthorized() && self.auth_phase == AuthPhase::Ready {
