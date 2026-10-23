@@ -111,6 +111,8 @@ pub struct Workspace {
     pub auth_phase: AuthPhase,
     pub auth: Option<AuthStatus>,
     pub system: Option<SystemInfo>,
+    /// /api/system/restart 正在途：挡连点，服务端那边也有幂等
+    pub restarting: bool,
     pub projects: Vec<Project>,
     pub hosts: Vec<SshHost>,
     pub sessions: Vec<SessionWithProject>,
@@ -188,6 +190,7 @@ impl Workspace {
             auth_phase: AuthPhase::Checking,
             auth: None,
             system: None,
+            restarting: false,
             projects: Vec::new(),
             hosts: Vec::new(),
             sessions: Vec::new(),
@@ -461,16 +464,22 @@ impl Workspace {
     /// 重启连着的服务端：POST /api/system/restart 返回后它就会退出重起，连接走自动重连
     /// （记住密码时自动重登）。失败统一交 handle_error——401 回登录页
     pub fn restart_server(&mut self, cx: &mut Context<Self>) {
+        if self.restarting {
+            return;
+        }
+        self.restarting = true;
         let client = self.client.clone();
         cx.spawn(async move |this, cx| match client.restart_server().await {
             Ok(_) => this
                 .update(cx, |this, cx| {
+                    this.restarting = false;
                     this.toast(ToastKind::Info, rust_i18n::t!("settings.restart_started").to_string(), None, cx);
                 })
                 .ok(),
             Err(err) => {
                 let text = err.to_string();
                 this.update(cx, |this, cx| {
+                    this.restarting = false;
                     this.toast(ToastKind::Warning, rust_i18n::t!("settings.restart_failed").to_string(), Some(text), cx);
                     this.handle_error(&err, cx);
                 })

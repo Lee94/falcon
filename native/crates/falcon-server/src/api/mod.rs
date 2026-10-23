@@ -32,6 +32,7 @@ pub mod worktrees;
 pub mod ws;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -73,6 +74,8 @@ pub struct Inner {
     /// `POST /api/system/restart` 要的关停信号：主循环拿它走与 SIGTERM 同一条退出路径
     /// （先 Engine::shutdown 收子进程再退出），launchd / systemd 或 respawn 帮手负责拉起
     pub shutdown: Arc<tokio::sync::Notify>,
+    /// 重启已在途的标记：第二个 /api/system/restart 直接吞掉，别让两个 respawn 帮手抢端口
+    pub restarting: AtomicBool,
 }
 
 impl std::ops::Deref for AppState {
@@ -106,6 +109,7 @@ impl AppState {
                 meegle,
                 plugins,
                 shutdown: Arc::new(tokio::sync::Notify::new()),
+                restarting: AtomicBool::new(false),
             }),
         }
     }
