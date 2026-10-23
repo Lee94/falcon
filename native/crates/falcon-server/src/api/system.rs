@@ -46,6 +46,10 @@ async fn system(State(state): State<AppState>) -> ApiResult<Json<SystemInfo>> {
 /// 先回 200 再通知主循环走退出路径——`serve` 一停这条响应就发不出去了。退出走与
 /// SIGTERM 同一条路：Engine::shutdown 会先收掉 cloudflared / px0 这些子进程。
 async fn restart(State(state): State<AppState>) -> ApiResult<Json<OkResponse>> {
+    // 幂等：连着点两下也只走一次重启，不然两个 respawn 帮手会同时去占同一个端口
+    if state.restarting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(Json(OkResponse { ok: true }));
+    }
     if !crate::restart::supervised() {
         crate::restart::spawn_respawn_helper()
             .map_err(|e| ApiError::internal(format!("重启帮手起不来：{e}")))?;
