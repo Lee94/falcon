@@ -1,8 +1,11 @@
-# 远端浏览器（Neko / WebRTC）
+# 远端浏览器
 
-侧边栏的地球按钮会打开一个独立窗口。Falcon 只反代 Neko 的页面、登录 cookie 与 WebRTC 信令；网页画面、音频与控制数据走 WebRTC，浏览器进程和网站请求都发生在目标主机上。
+侧边栏的地球按钮会打开一个独立窗口。两种目标形态：
 
-当前第一版面向 Linux Server。macOS / Windows 目标机保留同一入口，但需要另行部署等价的服务端；不要把它们当成已支持的目标。
+- **`neko`（默认）**：反代宿主机上的 Neko，画面/音频/控制走 WebRTC（不经 SSH 通道），适合有直连网络与 Docker 的机器。
+- **`chrome`**：Falcon 在宿主机上拉起 headless Chrome，用 CDP 反代（`Page.startScreencast` JPEG 帧 + `Input.dispatch*` 输入）。媒体全走已有 SSH/HTTP 通道，**不需要 WebRTC 端口、不需要 Docker、不需要 X11/Wayland**，headless 服务器和 Wayland 桌面通吃；代价是 ~10fps 无音频。宿主机没有 Chrome 时 Falcon 会自动下载 Chrome for Testing（~150MB）到 `~/.falcon/chrome/` 再拉起。
+
+下面第 1、3 节是 Neko 形态的部署与网络要求；Chrome 形态只需要把目标配成 `"type": "chrome"`（见第 2 节），并保证目标主机 POSIX（Windows 宿主机暂不支持）。
 
 ## 1. 在目标 Linux 主机部署 Neko
 
@@ -76,12 +79,25 @@ docker compose up -d
 
 规则：
 
-- `id`：小写字母或数字开头，可含 `-` / `_`，最长 48；它同时是 URL 与 Neko `server.path_prefix` 的最后一段。
+- `id`：小写字母或数字开头，可含 `-` / `_`，最长 48；它同时是 URL 与（Neko 形态下）`server.path_prefix` 的最后一段。
+- `type`：`"neko"`（缺省）或 `"chrome"`。Chrome 形态的 `port` 是它在本机的 CDP 调试端口（比如 `9222`），由 Falcon 独占使用。
 - `hostId`：已保存 SSH 主机的 id。SSH 项目必须绑定该主机；没绑定主机的旧项目不会静默落到本机。
 - 不带 `hostId` 的 target 表示 Falcon 服务端本机。
 - `port`：目标主机 `127.0.0.1` 上 Neko 的端口，不是公网地址。配置文件只允许选主机与端口，不能写任意 URL。
 - 每台主机只能有一个 target；SSH 项目找不到对应 target 会显示配置说明，不回退到本机。
 - 文件每次打开时读取，改完不用重启 Falcon。**一旦这个文件存在，就完全以它为准，不再补默认目标**。
+
+Chrome 目标示例：
+
+```json title="<Falcon 数据目录>/remote-browser.json"
+{
+  "targets": [
+    { "id": "dev-linux", "type": "chrome", "hostId": "<SSH Host id>", "port": 9222 }
+  ]
+}
+```
+
+Chrome 形态的排错页面会直接说明：宿主机缺 Chrome 时自动开始下载部署（页面每 10 秒自动刷新）；上次部署失败时在地址后加 `?deploy=1` 重试；缺系统库（裸机常见，如 `libnss3` / `libgbm1` / `libasound2`）会列出缺失的 .so，需在宿主机上安装后刷新。运行状态在宿主机 `$HOME/.falcon/chrome/`（deploy.log / chrome.log / profile）。
 
 ## 3. WebRTC 网络要求
 

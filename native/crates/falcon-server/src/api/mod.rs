@@ -24,6 +24,7 @@ pub mod plugins;
 pub mod projects;
 pub mod px0;
 pub mod remote_browser;
+pub mod remote_browser_chrome;
 pub mod relays;
 pub mod sessions;
 pub mod static_files;
