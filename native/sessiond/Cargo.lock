@@ -86,7 +86,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "falcon-proto"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
