@@ -23,8 +23,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
 use super::error::ApiError;
+use super::remote_browser_chrome as chrome;
 use super::{AppState, encode_uri_component};
 use crate::db::{Db, SshHostRow};
+use crate::exec::ExecResult;
+use crate::host::build_command_line;
+use crate::plugins::machine::{RemoteError, Target as MachineTarget, remote_exec};
+use falcon_proto::HostKind;
 
 const CONFIG_FILE: &str = "remote-browser.json";
 const CONFIG_LIMIT: u64 = 64 * 1024;
@@ -41,6 +46,8 @@ pub fn router() -> Router<AppState> {
         .route("/remote-browser", get(|| async { Redirect::to("/remote-browser/open") }))
         .route("/remote-browser/open", get(open))
         .route("/remote-browser/{target_id}", get(target_no_slash))
+        // `{*rest}` 不匹配空段："/remote-browser/<id>/" 要单独一条路由
+        .route("/remote-browser/{target_id}/", any(proxy))
         .route("/remote-browser/{target_id}/{*rest}", any(proxy))
 }
 
@@ -68,7 +75,8 @@ async fn open(State(state): State<AppState>, Query(query): Query<BTreeMap<String
     }
 }
 
-async fn proxy(State(state): State<AppState>, Path((target_id, _rest)): Path<(String, String)>, mut req: Request) -> Response {
+async fn proxy(State(state): State<AppState>, Path(params): Path<BTreeMap<String, String>>, mut req: Request) -> Response {
+    let target_id = params.get("target_id").cloned().unwrap_or_default();
     let upgrade = is_websocket_upgrade(req.headers());
     if let Some(res) = login_required(&state, req.headers(), upgrade) {
         return res;
@@ -90,7 +98,34 @@ async fn proxy(State(state): State<AppState>, Path((target_id, _rest)): Path<(St
         Err(issue) => return proxy_issue(req.headers(), upgrade, "远端浏览器不可用", &issue),
     };
     // 用原始 path_and_query：Path 提取器已经按路由拆过，百分号编码不能再拼一遍
-    let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+    let mut path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
+
+    if target.kind == TargetKind::Chrome {
+        let rest = req.uri().path().strip_prefix(&format!("{PREFIX}{}", target.id)).unwrap_or("/");
+        if rest == "/" || rest.is_empty() {
+            if req.uri().query().is_some_and(|q| q.contains("deploy=1")) {
+                return match kick_deploy(&state, &host, target.port).await {
+                    Ok(()) => chrome_page("正在部署", "部署已重新开始，页面每 10 秒自动刷新。", true),
+                    Err(issue) => proxy_issue(req.headers(), upgrade, "远端浏览器连不上", &issue),
+                };
+            }
+            return chrome_viewer();
+        }
+        let Some(cdp) = rest.strip_prefix("/cdp") else {
+            return ApiError::new(StatusCode::NOT_FOUND, "Chrome 目标只有 / 与 /cdp/*".to_string()).into_response();
+        };
+        // /json/new?about:blank 这类 CDP 端点靠 query 传参，剥前缀后得保住
+        path = match req.uri().query() {
+            Some(q) if cdp.is_empty() => format!("/?{q}"),
+            Some(q) => format!("{cdp}?{q}"),
+            None if cdp.is_empty() => "/".to_string(),
+            None => cdp.to_string(),
+        };
+        return match chrome_stream(&state, &target, host).await {
+            Ok(stream) => forward(req, stream, &target, path, downstream_upgrade).await,
+            Err(resp) => resp,
+        };
+    }
 
     let stream = match tokio::time::timeout(CONNECT_TIMEOUT, connect(&state, &target, host)).await {
         Ok(Ok(stream)) => stream,
@@ -98,6 +133,121 @@ async fn proxy(State(state): State<AppState>, Path((target_id, _rest)): Path<(St
         Err(_) => return proxy_issue(req.headers(), upgrade, "远端浏览器连不上", "连接超时"),
     };
     forward(req, stream, &target, path, downstream_upgrade).await
+}
+
+/// chrome 目标的连接：端口活着直接用；不活先跑 ensure（顺带把部署进度报出来），
+/// 缺 Chrome 就 kick 后台部署。Err 是已经渲染好的响应（页面或 API 错误）。
+async fn chrome_stream(state: &AppState, target: &BrowserTarget, host: Option<SshHostRow>) -> Result<RemoteStream, Response> {
+    if let Ok(Ok(stream)) = tokio::time::timeout(CONNECT_TIMEOUT, connect(state, target, host.clone())).await {
+        return Ok(stream);
+    }
+    let res = run_script(state, &host, chrome::ensure_script(target.port), CONNECT_TIMEOUT * 2)
+        .await
+        .map_err(|issue| issue_page("远端浏览器连不上", &issue))?;
+    match chrome::parse_ensure(res.code, &res.stdout, &res.stderr) {
+        chrome::Ensure::Up | chrome::Ensure::Started => {}
+        chrome::Ensure::Deploying(detail) => return Err(chrome_page("正在部署远端浏览器", &detail, true)),
+        chrome::Ensure::NoChrome => {
+            kick_deploy(state, &host, target.port).await.map_err(|issue| issue_page("远端浏览器连不上", &issue))?;
+            return Err(chrome_page("正在部署远端浏览器", "第一次使用要在宿主机上下载 Chrome（约 150MB），页面每 10 秒自动刷新。", true));
+        }
+        chrome::Ensure::DeployFailed(detail) => {
+            return Err(chrome_page("上次部署失败", &format!("{detail}\n\n在地址后加 ?deploy=1 可重新部署。"), false));
+        }
+        chrome::Ensure::NeedLibs(libs) => {
+            return Err(issue_page(
+                "宿主机缺系统库",
+                &format!("Chrome 起不来，缺：{libs}。在宿主机上安装对应包（Debian/Ubuntu：libnss3、libgbm1、libasound2 等）后刷新。"),
+            ));
+        }
+        chrome::Ensure::LaunchTimeout(log) => {
+            return Err(issue_page("Chrome 启动超时", &format!("调试端口 20 秒内没起来。宿主机日志尾部：{log}")));
+        }
+        chrome::Ensure::Unknown(code, out) => {
+            return Err(issue_page("远端浏览器探测失败", &format!("退出码 {code}：{out}")));
+        }
+    }
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect(state, target, host)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(issue)) => Err(issue_page("远端浏览器连不上", &issue)),
+        Err(_) => Err(issue_page("远端浏览器连不上", "连接超时")),
+    }
+}
+
+/// 在宿主机（SSH exec）或本机（sh -c）跑一段探测脚本；非零退出码是正常返回
+async fn run_script(state: &AppState, host: &Option<SshHostRow>, script: String, timeout: Duration) -> Result<ExecResult, String> {
+    match host {
+        Some(host) => {
+            let target = MachineTarget::Host(host.clone());
+            remote_exec(&state.engine, &target, timeout, move |facts| {
+                if facts.kind == HostKind::Windows {
+                    return Err(RemoteError::Unsupported("Windows 宿主机暂不支持 Chrome 目标".into()));
+                }
+                Ok(build_command_line(HostKind::Posix, &["sh", "-c", &script], &[] as &[(&str, &str)], &[]))
+            })
+            .await
+            .map_err(|e| match e {
+                RemoteError::Unsupported(m) | RemoteError::Failed(m) => m,
+            })
+        }
+        None => {
+            if cfg!(windows) {
+                return Err("Windows 本机暂不支持 Chrome 目标".into());
+            }
+            let out = tokio::time::timeout(timeout, tokio::process::Command::new("sh").arg("-c").arg(&script).output())
+                .await
+                .map_err(|_| "探测脚本超时".to_string())?
+                .map_err(|e| format!("探测脚本起不来：{e}"))?;
+            Ok(ExecResult {
+                code: out.status.code(),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+    }
+}
+
+async fn kick_deploy(state: &AppState, host: &Option<SshHostRow>, port: u16) -> Result<(), String> {
+    let res = run_script(state, host, chrome::kick_script(port), Duration::from_secs(30)).await?;
+    match res.stdout.trim() {
+        "KICKED" | "DEPLOYING" => Ok(()),
+        other => Err(format!("部署没起来：{other} {}", res.stderr.trim()).trim().to_string()),
+    }
+}
+
+const CHROME_PAGE: &str = include_str!("remote_browser_chrome_page.html");
+
+fn chrome_viewer() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        CHROME_PAGE,
+    )
+        .into_response()
+}
+
+/// 部署中的占位页：每 10 秒自动刷新，部署好了自然就进来了
+fn chrome_page(title: &str, message: &str, refresh: bool) -> Response {
+    let html = format!(
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">{refresh}<title>{title}</title>
+<style>body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#d6d9e0;font:14px/1.7 -apple-system,"PingFang SC",sans-serif}}main{{max-width:520px;padding:24px}}h1{{font-size:18px}}p{{color:#8b93a3;white-space:pre-wrap}}</style></head>
+<body><main><h1>{title}</h1><p>{message}</p></main></body></html>"#,
+        refresh = if refresh { r#"<meta http-equiv="refresh" content="10">"# } else { "" },
+        title = html_escape(title),
+        message = html_escape(message),
+    );
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 fn login_required(state: &AppState, headers: &HeaderMap, websocket: bool) -> Option<Response> {
@@ -158,10 +308,22 @@ struct ConfigFile {
     targets: Vec<BrowserTarget>,
 }
 
+/// 目标形态：`neko`（默认，反代宿主机上的 Neko，画面走 WebRTC）；
+/// `chrome`（Falcon 管的 headless Chrome，CDP 出 JPEG 帧，媒体走这条通道本身）
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TargetKind {
+    #[default]
+    Neko,
+    Chrome,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BrowserTarget {
     id: String,
+    #[serde(rename = "type", default)]
+    kind: TargetKind,
     #[serde(rename = "hostId")]
     host_id: Option<String>,
     port: u16,
@@ -196,7 +358,7 @@ async fn load_config(data_dir: &std::path::Path, db: &Db) -> Result<ConfigFile, 
 /// 这只是省掉映射文件，仍要求那台机器上已有 Neko 监听自己的 127.0.0.1。
 fn default_config(db: &Db) -> ConfigFile {
     let mut used = HashSet::from(["local".to_string()]);
-    let mut targets = vec![BrowserTarget { id: "local".into(), host_id: None, port: DEFAULT_PORT }];
+    let mut targets = vec![BrowserTarget { id: "local".into(), kind: TargetKind::Neko, host_id: None, port: DEFAULT_PORT }];
     for host in db.list_hosts().into_iter().filter(|h| h.project_count > 0) {
         let mut base = target_slug(&host.name);
         base.truncate(48);
@@ -207,7 +369,7 @@ fn default_config(db: &Db) -> ConfigFile {
             id = format!("{base}-{}", &digest[..8]);
             used.insert(id.clone());
         }
-        targets.push(BrowserTarget { id, host_id: Some(host.id), port: DEFAULT_PORT });
+        targets.push(BrowserTarget { id, kind: TargetKind::Neko, host_id: Some(host.id), port: DEFAULT_PORT });
     }
     ConfigFile { targets }
 }
@@ -565,7 +727,7 @@ mod tests {
     use std::io::Write as _;
 
     fn target(id: &str, host_id: Option<&str>, port: u16) -> BrowserTarget {
-        BrowserTarget { id: id.into(), host_id: host_id.map(Into::into), port }
+        BrowserTarget { id: id.into(), kind: TargetKind::Neko, host_id: host_id.map(Into::into), port }
     }
 
     #[test]
