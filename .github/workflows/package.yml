@@ -35,6 +35,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
+          # 失败的冷启动也留缓存，重跑不用从零编
+          cache-on-failure: true
 
       # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
       - name: Install Inno Setup
@@ -65,18 +67,31 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
 
+      # 打包一共写四个 target 目录：native/target（原生客户端）、target-wasm（浏览器版）、
+      # target-sessiond（守护进程的 5 个交叉目标）、target-server（带 embed 的服务端）。
+      # rust-cache 默认只管 <workspace>/target，其余三个连工具链缓存（zig / ghostty 静态库 /
+      # meegle CLI）一起补上；cache-on-failure 让失败的冷启动也留下缓存，重跑不用从零编
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
+          cache-on-failure: true
+          cache-directories: |
+            native/target-wasm
+            native/target-sessiond
+            native/target-server
+            native/.cache
 
-      - name: Install wasm-bindgen-cli
-        run: |
-          ver="$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/version = |"/, ""); print; exit}' native/Cargo.lock)"
-          cargo install wasm-bindgen-cli --version "$ver" --locked
+      # install-action 直接装 GitHub Releases 的预编译二进制（wasm-bindgen 自 0.2.100 起发
+      # aarch64-apple-darwin 包），省掉两次 cargo install 的源码编译；
+      # wasm-bindgen-cli 版本必须与 Cargo.lock 一致（build-web.sh 会查）
+      - name: Resolve wasm-bindgen-cli version
+        id: wb
+        run: echo "ver=$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/version = |"/, ""); print; exit}' native/Cargo.lock)" >> "$GITHUB_OUTPUT"
 
       # 守护进程的交叉编译用 cargo-zigbuild（Zig 本身由 xtask 按钉死的版本下载、校验）
-      - name: Install cargo-zigbuild
-        run: cargo install cargo-zigbuild --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@${{ steps.wb.outputs.ver }},cargo-zigbuild
 
       # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
       - name: Install librsvg
