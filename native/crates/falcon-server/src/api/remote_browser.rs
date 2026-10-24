@@ -46,8 +46,7 @@ pub fn router() -> Router<AppState> {
         .route("/remote-browser", get(|| async { Redirect::to("/remote-browser/open") }))
         .route("/remote-browser/open", get(open))
         .route("/remote-browser/{target_id}", get(target_no_slash))
-        // `{*rest}` 不匹配空段："/remote-browser/<id>/" 要单独一条路由
-        .route("/remote-browser/{target_id}/", any(proxy))
+        .route("/remote-browser/{target_id}/", any(proxy_index))
         .route("/remote-browser/{target_id}/{*rest}", any(proxy))
 }
 
@@ -75,8 +74,15 @@ async fn open(State(state): State<AppState>, Query(query): Query<BTreeMap<String
     }
 }
 
-async fn proxy(State(state): State<AppState>, Path(params): Path<BTreeMap<String, String>>, mut req: Request) -> Response {
-    let target_id = params.get("target_id").cloned().unwrap_or_default();
+async fn proxy_index(State(state): State<AppState>, Path(target_id): Path<String>, req: Request) -> Response {
+    proxy_request(state, target_id, req).await
+}
+
+async fn proxy(State(state): State<AppState>, Path((target_id, _rest)): Path<(String, String)>, req: Request) -> Response {
+    proxy_request(state, target_id, req).await
+}
+
+async fn proxy_request(state: AppState, target_id: String, mut req: Request) -> Response {
     let upgrade = is_websocket_upgrade(req.headers());
     if let Some(res) = login_required(&state, req.headers(), upgrade) {
         return res;
@@ -901,6 +907,31 @@ ok";
         assert!(!seen.contains("falcon_token"), "{seen}");
         assert!(!seen.contains("x-neko-secret"), "{seen}");
         assert!(!seen.contains("forwarded"), "{seen}");
+    }
+
+    #[tokio::test]
+    async fn target_root_with_trailing_slash_is_proxied() {
+        let app = TestApp::new();
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen = captured.clone();
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut buf = vec![0; 8192];
+            let n = socket.peek(&mut buf).unwrap();
+            seen.lock().unwrap().push_str(&String::from_utf8_lossy(&buf[..n]));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\n\r\nok").unwrap();
+        });
+        super::super::test_support::write(
+            &app.data_dir.join(CONFIG_FILE),
+            serde_json::to_vec(&json!({ "targets": [{ "id": "local", "port": port }] })).unwrap(),
+        );
+
+        let res = app.send(Request::get("/remote-browser/local/").body(Body::empty()).unwrap()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_bytes(res).await, b"ok");
+        assert!(captured.lock().unwrap().contains("GET /remote-browser/local/ HTTP/1.1"));
     }
 
     #[tokio::test]
