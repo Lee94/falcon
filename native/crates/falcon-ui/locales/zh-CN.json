@@ -1,4 +1,13 @@
 {
+  "remoteBrowser": {
+    "title": "远端浏览器",
+    "open": "在独立窗口打开远端浏览器",
+    "local": "本机（Falcon 服务端）",
+    "external": "在系统浏览器中打开",
+    "unavailable": "此构建没有内嵌网页视图，请使用系统浏览器连接。",
+    "failed": "无法打开远端浏览器",
+    "transport": "WebRTC · 远端运行"
+  },
   "login": {
     "title": "访问 Falcon",
     "password": "访问密码",

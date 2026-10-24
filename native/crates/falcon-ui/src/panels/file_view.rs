@@ -20,7 +20,7 @@
 //! （`rawBase + path`，URL 里带只能读这个项目文件的作用域令牌），不经 JSON。
 
 mod code;
-mod html;
+pub(crate) mod html;
 mod image;
 /// 设置里上传自定义应用图标也按扩展名认格式（app_icon.rs）
 pub(crate) use image::format_by_ext;

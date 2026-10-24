@@ -26,6 +26,7 @@ mod palette;
 mod panels;
 mod prefs;
 mod profiles;
+mod remote_browser;
 mod rightbar;
 mod sidebar;
 mod snapshot;

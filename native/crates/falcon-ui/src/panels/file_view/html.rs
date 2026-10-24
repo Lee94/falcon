@@ -114,9 +114,9 @@ impl Render for HtmlPane {
 }
 
 /// 占位元素：自己不画东西，只在每帧把网页视图摆到它的位置（与可视区相交的那一块）
-struct HtmlSurface {
-    view: Rc<dyn HtmlView>,
-    hidden: bool,
+pub(crate) struct HtmlSurface {
+    pub(crate) view: Rc<dyn HtmlView>,
+    pub(crate) hidden: bool,
 }
 
 impl IntoElement for HtmlSurface {
