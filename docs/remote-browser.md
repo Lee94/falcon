@@ -52,9 +52,11 @@ docker compose up -d
 
 如果网站登录态要跨容器重启保留，浏览器 profile volume 必须配置正确：Firefox 是上面的路径；Chromium / Chrome 通常是 `/home/neko/.config/<浏览器目录>`，以对应镜像文档为准。
 
-## 2. 配置 Falcon 目标
+## 2. Falcon 目标
 
-在 Falcon 服务端数据目录创建 `remote-browser.json`：
+不配置也能用默认值：只要 `remote-browser.json` 不存在，Falcon 会临时生成一个本机目标 `local`，以及每台绑定了项目的 SSH Host 各一个目标，端口都按 `18080`。SSH 目标 id 由主机名转成 URL 安全的小写形式（例如 `Dev Linux` → `dev-linux`；重名时会追加稳定短哈希）。**这只是省掉映射文件，不会替你安装或启动 Neko**；目标主机仍要已有 Neko 监听自己的 `127.0.0.1:18080`，并且 `server.path_prefix` 最后一段要与这个目标 id 一致。
+
+需要改端口、固定 id，或只允许部分主机时，在 Falcon 服务端数据目录创建 `remote-browser.json`：
 
 ```json title="<Falcon 数据目录>/remote-browser.json"
 {
@@ -79,7 +81,7 @@ docker compose up -d
 - 不带 `hostId` 的 target 表示 Falcon 服务端本机。
 - `port`：目标主机 `127.0.0.1` 上 Neko 的端口，不是公网地址。配置文件只允许选主机与端口，不能写任意 URL。
 - 每台主机只能有一个 target；SSH 项目找不到对应 target 会显示配置说明，不回退到本机。
-- 文件每次打开时读取，改完不用重启 Falcon。
+- 文件每次打开时读取，改完不用重启 Falcon。**一旦这个文件存在，就完全以它为准，不再补默认目标**。
 
 ## 3. WebRTC 网络要求
 

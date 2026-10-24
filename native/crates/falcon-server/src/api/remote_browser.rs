@@ -18,6 +18,7 @@ use axum::routing::{any, get};
 use hyper::StatusCode as HyperStatus;
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
+use sha2::Digest as _;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
@@ -27,6 +28,7 @@ use crate::db::{Db, SshHostRow};
 
 const CONFIG_FILE: &str = "remote-browser.json";
 const CONFIG_LIMIT: u64 = 64 * 1024;
+const DEFAULT_PORT: u16 = 18080;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Neko v3 的默认会话 cookie 名；部署文档固定配成这个值。它只在 /remote-browser/<id>/
 /// 这个路径下回放，Falcon 自己的 falcon_token 永不发给上游。
@@ -52,7 +54,7 @@ async fn open(State(state): State<AppState>, Query(query): Query<BTreeMap<String
         return res;
     }
     let project_id = query.get("project").map(String::as_str).unwrap_or("");
-    let config = match load_config(&state.config.data_dir).await {
+    let config = match load_config(&state.config.data_dir, &state.db).await {
         Ok(config) => config,
         Err(issue) => return issue_page("读取远端浏览器配置失败", &issue),
     };
@@ -76,7 +78,7 @@ async fn proxy(State(state): State<AppState>, Path((target_id, _rest)): Path<(St
     }
     let downstream_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
 
-    let config = match load_config(&state.config.data_dir).await {
+    let config = match load_config(&state.config.data_dir, &state.db).await {
         Ok(config) => config,
         Err(issue) => return proxy_issue(req.headers(), upgrade, "读取远端浏览器配置失败", &issue),
     };
@@ -174,15 +176,13 @@ impl BrowserTarget {
     }
 }
 
-async fn load_config(data_dir: &std::path::Path) -> Result<ConfigFile, String> {
+async fn load_config(data_dir: &std::path::Path, db: &Db) -> Result<ConfigFile, String> {
     let path = data_dir.join(CONFIG_FILE);
-    let meta = tokio::fs::metadata(&path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            format!("还没有配置。请在数据目录创建 {CONFIG_FILE}，并至少配置一个远端浏览器目标")
-        } else {
-            format!("读取 {CONFIG_FILE} 失败：{e}")
-        }
-    })?;
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default_config(db)),
+        Err(e) => return Err(format!("读取 {CONFIG_FILE} 失败：{e}")),
+    };
     if meta.len() > CONFIG_LIMIT {
         return Err(format!("{CONFIG_FILE} 超过 64 KB，不读取"));
     }
@@ -190,6 +190,39 @@ async fn load_config(data_dir: &std::path::Path) -> Result<ConfigFile, String> {
     let mut config: ConfigFile = serde_json::from_slice(&bytes).map_err(|e| format!("{CONFIG_FILE} 不是合法配置：{e}"))?;
     validate_config(&mut config)?;
     Ok(config)
+}
+
+/// 没有配置文件时的约定：本机与每台绑定了项目的 SSH Host 都按默认端口生成一个目标；
+/// 这只是省掉映射文件，仍要求那台机器上已有 Neko 监听自己的 127.0.0.1。
+fn default_config(db: &Db) -> ConfigFile {
+    let mut used = HashSet::from(["local".to_string()]);
+    let mut targets = vec![BrowserTarget { id: "local".into(), host_id: None, port: DEFAULT_PORT }];
+    for host in db.list_hosts().into_iter().filter(|h| h.project_count > 0) {
+        let mut base = target_slug(&host.name);
+        base.truncate(48);
+        let mut id = base.clone();
+        if !used.insert(id.clone()) {
+            let digest = hex::encode(sha2::Sha256::digest(host.id.as_bytes()));
+            base.truncate(39);
+            id = format!("{base}-{}", &digest[..8]);
+            used.insert(id.clone());
+        }
+        targets.push(BrowserTarget { id, host_id: Some(host.id), port: DEFAULT_PORT });
+    }
+    ConfigFile { targets }
+}
+
+fn target_slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-');
+    if out.is_empty() || out == "open" { "host".into() } else { out.into() }
 }
 
 fn valid_target_id(id: &str) -> bool {
@@ -575,6 +608,42 @@ mod tests {
         assert_eq!(resolve_for_open(&app.state.db, &config, "").unwrap().id, "local");
         let bound = ConfigFile { targets: vec![target("dev", Some("h1"), 8081)] };
         assert_eq!(resolve_for_open(&app.state.db, &bound, "p").unwrap().id, "dev");
+    }
+
+    #[tokio::test]
+    async fn missing_config_generates_default_target_for_ssh_host() {
+        let app = TestApp::new();
+        app.state.db.insert_host(&SshHostRow {
+            id: "h1".into(),
+            name: "Dev Linux".into(),
+            host: "h".into(),
+            port: 22,
+            username: "u".into(),
+            auth_method: "agent".into(),
+            created_at: 1,
+            ..Default::default()
+        });
+        app.state.db.insert_project(&ProjectRow {
+            id: "p".into(),
+            project_type: "ssh".into(),
+            host_id: Some("h1".into()),
+            created_at: 1,
+            ..Default::default()
+        });
+        app.state.auth.set_password("secret", None);
+        let login = app.post_json("/api/auth/login", json!({ "password": "secret" })).await;
+        let cookie = header(&login, "set-cookie").split(';').next().unwrap().to_string();
+
+        let res = app
+            .send(Request::get("/remote-browser/open?project=p").header(header::COOKIE, cookie).body(Body::empty()).unwrap())
+            .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(header(&res, "location"), "/remote-browser/dev-linux/?usr=Falcon&pwd=falcon");
+
+        let generated = load_config(&app.data_dir, &app.state.db).await.unwrap();
+        let target = generated.targets.iter().find(|t| t.host_id.as_deref() == Some("h1")).unwrap();
+        assert_eq!(target.id, "dev-linux");
+        assert_eq!(target.port, DEFAULT_PORT);
     }
 
     #[test]
