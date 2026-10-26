@@ -2,11 +2,13 @@
 
 use std::future::Future;
 
-use falcon_proto::{FsListing, FsValidateResult, OkResponse, ShellsInfo, SystemInfo};
+use falcon_proto::{
+    FsListing, FsValidateResult, MeshNetbirdConfig, MeshSetupKey, MeshStatus, MeshToggle, OkResponse, ShellsInfo, SystemInfo,
+};
 use reqwest::Method;
 use serde::Serialize;
 
-use super::Query;
+use super::{seg, Query};
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
 use crate::runtime::MaybeSend;
@@ -71,6 +73,36 @@ impl FalconClient {
 
     /// `GET /api/shells`：侦测宿主机上可用的 shell（项目表单的 shell 选择）。
     /// 探测命令失败不算错（至少有默认项），连不上远端才是 400。
+    /// `GET /api/mesh`：本机 Tailscale 与 NetBird 的现状。密钥不在响应里。
+    pub fn mesh_status(&self) -> impl Future<Output = ApiResult<MeshStatus>> + MaybeSend + 'static {
+        self.get("/api/mesh".to_owned())
+    }
+
+    /// `PUT /api/mesh/netbird/setup-key`：存 setup key。空串清掉。明文只在这次请求里，
+    /// 响应里没有它。正在跑的 sidecar 会被重新拉起。
+    pub fn set_netbird_setup_key(&self, key: &str) -> impl Future<Output = ApiResult<MeshStatus>> + MaybeSend + 'static {
+        self.json(
+            Method::PUT,
+            "/api/mesh/netbird/setup-key".to_owned(),
+            json_body(&MeshSetupKey { setup_key: Some(key.to_string()) }),
+        )
+    }
+
+    /// `PUT /api/mesh/netbird/config`：改 NetBird 的管理地址。空串清掉，用官方的。
+    /// 正在跑的 sidecar 要重新启用才吃到新地址。
+    pub fn set_netbird_url(&self, url: &str) -> impl Future<Output = ApiResult<MeshStatus>> + MaybeSend + 'static {
+        self.json(Method::PUT, "/api/mesh/netbird/config".to_owned(), json_body(&MeshNetbirdConfig { management_url: url.to_string() }))
+    }
+
+    /// `POST /api/mesh/:provider`：启用或停掉一种。`provider` 是 `tailscale` 或 `netbird`。
+    pub fn set_mesh(
+        &self,
+        provider: &str,
+        enabled: bool,
+    ) -> impl Future<Output = ApiResult<MeshStatus>> + MaybeSend + 'static {
+        self.json(Method::POST, format!("/api/mesh/{}", seg(provider)), json_body(&MeshToggle { enabled }))
+    }
+
     pub fn list_shells(&self, target: &ProbeTarget) -> impl Future<Output = ApiResult<ShellsInfo>> + MaybeSend + 'static {
         let q = target.query(Query::new()).finish();
         self.get(format!("/api/shells{q}"))

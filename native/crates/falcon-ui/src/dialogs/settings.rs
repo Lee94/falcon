@@ -15,6 +15,7 @@ mod app_icon;
 mod appearance;
 mod assistant;
 mod hosts;
+mod mesh;
 mod plugins;
 mod relays;
 mod widgets;
@@ -42,6 +43,8 @@ pub enum Tab {
     Account,
     Hosts,
     Relays,
+    /// 异地互联：本机的 tsnet / NetBird sidecar
+    Mesh,
     /// AI 助手：模型、API key、审批策略（docs/design/ai-assistant.md 2.3）
     Assistant,
     /// 右侧栏插件（ADR 0025）
@@ -56,7 +59,7 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 8] = [
+    const ALL: [Tab; 9] = [
         Tab::Appearance,
         Tab::Notifications,
         Tab::Account,
@@ -65,6 +68,7 @@ impl Tab {
         Tab::About,
         Tab::Hosts,
         Tab::Relays,
+        Tab::Mesh,
     ];
 
     fn id(self) -> &'static str {
@@ -74,6 +78,7 @@ impl Tab {
             Tab::Account => "account",
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
+            Tab::Mesh => "mesh",
             Tab::Assistant => "assistant",
             Tab::Plugins => "plugins",
             Tab::About => "about",
@@ -82,7 +87,7 @@ impl Tab {
 
     fn group(self) -> Group {
         match self {
-            Tab::Hosts | Tab::Relays => Group::Connection,
+            Tab::Hosts | Tab::Relays | Tab::Mesh => Group::Connection,
             _ => Group::General,
         }
     }
@@ -94,6 +99,7 @@ impl Tab {
             Tab::Account => IconName::Shield,
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
+            Tab::Mesh => IconName::Globe,
             Tab::Assistant => IconName::Sparkles,
             Tab::Plugins => IconName::Puzzle,
             Tab::About => IconName::Info,
@@ -156,6 +162,7 @@ struct SettingsView {
     hosts: Entity<hosts::HostsPane>,
     /// 只在停在中转页时存在（见模块注释）
     relays: Option<Entity<relays::RelaysPane>>,
+    mesh: Option<Entity<mesh::MeshPane>>,
     /// 切到时才建：建的时候要向服务端取一次设置
     assistant: Option<Entity<assistant::AssistantPane>>,
 }
@@ -175,7 +182,7 @@ impl SettingsView {
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
         let account = cx.new(|cx| account::AccountPane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
-        Self { ws, tab, search, appearance, account, hosts, relays: None, assistant: None }
+        Self { ws, tab, search, appearance, account, hosts, relays: None, mesh: None, assistant: None }
     }
 
     /// 按名字 / 分组名 / 关键字（`settings.tab_*_keys`）筛模块
@@ -399,6 +406,16 @@ impl SettingsView {
         self.relays = Some(pane.clone());
         pane
     }
+
+    fn mesh_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<mesh::MeshPane> {
+        if let Some(pane) = &self.mesh {
+            return pane.clone();
+        }
+        let ws = self.ws.clone();
+        let pane = cx.new(|cx| mesh::MeshPane::new(ws, window, cx));
+        self.mesh = Some(pane.clone());
+        pane
+    }
 }
 
 impl Render for SettingsView {
@@ -415,6 +432,7 @@ impl Render for SettingsView {
             Tab::Account => self.account.clone().into_any_element(),
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),
+            Tab::Mesh => self.mesh_pane(window, cx).into_any_element(),
             Tab::Assistant => self.assistant_pane(window, cx).into_any_element(),
             Tab::Plugins => plugins::render(&self.ws, cx).into_any_element(),
             Tab::About => self.render_about(cx).into_any_element(),

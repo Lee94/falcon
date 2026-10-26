@@ -35,7 +35,7 @@
 //! [`InstallFailure`]、[`InstallStage`]、[`ProgramState`]、[`ProgramBlockKind`]、[`WorktreeFailure`]、
 //! [`GitUnavailableReason`]、[`GitConflictKind`]、[`ForwardState`]、
 //! [`MeegleUnavailableReason`]、[`MeeglePinKind`]，以及可辨识联合
-//! [`FilePreview`]、[`ServerMessage`]、[`InstallServerMessage`]。各自的理由写在类型注释里。
+//! [`FilePreview`]、[`ServerMessage`]、[`InstallServerMessage`]、[`MeshState`]。各自的理由写在类型注释里。
 //!
 //! 刻意**不加**的：客户端写出去的值（请求体、[`ClientMessage`]、[`GitOpInput`]、
 //! [`MeegleTodoAction`]）；TS 注释明说不会再加值的结构性判别（[`ProjectType`]

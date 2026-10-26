@@ -10,7 +10,7 @@
 //!
 //! 浏览器版要 rustup 的 wasm32-unknown-unknown target 与同版本的 wasm-bindgen-cli（见 build-web.sh）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -41,6 +41,27 @@ pub fn run(args: &[String]) -> Result<()> {
         }
     }
     build(&target, skip_web).map(|_| ())
+}
+
+/// 编两个 sidecar 并 gzip 到 `dir`。go 不在 PATH 上就失败——发布包没了它，
+/// 装好的 falcon 打开网络页会显示「没有可用的程序」。
+fn build_mesh(dir: &Path) -> Result<()> {
+    println!("== 构建 mesh sidecar（native/mesh） ==");
+    std::fs::create_dir_all(dir)?;
+    for (pkg, name) in [("tsnet", "falcon-tsnet"), ("netbird", "falcon-netbird")] {
+        let bin = native().join("target-mesh").join(name);
+        std::fs::create_dir_all(bin.parent().unwrap())?;
+        let out = bin.clone();
+        let arg = format!("./{pkg}");
+        crate::util::run_env("go", &["build", "-o", &out.to_string_lossy(), &arg], Some(&native().join("mesh")), &[])
+        .with_context(|| format!("go build {pkg} 失败"))?;
+        let bytes = std::fs::read(&bin)?;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut gz, &bytes)?;
+        std::fs::write(dir.join(format!("{name}.gz")), gz.finish()?)?;
+        println!("{name}：{}（{:.1} MB）", bin.display(), bytes.len() as f64 / 1024.0 / 1024.0);
+    }
+    Ok(())
 }
 
 /// 构建并返回产物路径
@@ -75,7 +96,14 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
         std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
     }
 
-    // ---- 4. cargo ----
+    // ---- 4. 本平台的 mesh sidecar（tsnet / NetBird）。Go 编的，只编宿主平台这一份：
+    // 异地互联跑在 falcon 后端本机，不往远端推。交叉编服务端时没有对应的 Go 工具链，跳过。
+    let mesh_dir = native().join("target-mesh/embed");
+    if !cross {
+        build_mesh(&mesh_dir)?;
+    }
+
+    // ---- 5. cargo ----
     // 发布产物不带调试信息（工作区的 release profile 为原生客户端留着 debuginfo）。改 profile 会让
     // 依赖全部重编，所以单独一个 target 目录，不跟原生客户端的 release 缓存互相冲掉
     let target_dir = native().join("target-server");
@@ -85,7 +113,7 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
         "-p",
         "falcon-server",
         "--features",
-        "embed-web,embed-meegle,embed-sessiond",
+        "embed-web,embed-meegle,embed-sessiond,embed-mesh",
         "--config",
         "profile.release.debug=false",
         "--config",
@@ -106,6 +134,7 @@ pub fn build(target: &str, skip_web: bool) -> Result<PathBuf> {
             ("FALCON_EMBED_WEB_DIR", web_dist.as_os_str()),
             ("FALCON_EMBED_MEEGLE_BIN", meegle_bin.as_os_str()),
             ("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str()),
+            ("FALCON_EMBED_MESH_DIR", mesh_dir.as_os_str()),
             ("CARGO_TARGET_DIR", target_dir.as_os_str()),
         ],
     )?;

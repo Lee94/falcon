@@ -70,7 +70,8 @@ impl TestApp {
                 Box::pin(async move { Arc::new(vec![("PATH".to_string(), path), ("HOME".to_string(), home)]) })
             }),
         );
-        let state = AppState::new(config, db, secrets, askpass, engine, meegle, plugins);
+        let mesh = crate::mesh::MeshHost::new(&data_dir);
+        let state = AppState::new(config, db, secrets, askpass, engine, meegle, plugins, mesh);
         let router = super::app(state.clone());
         TestApp { state, router, data_dir, root, bin, _dir: dir }
     }

@@ -69,7 +69,9 @@ fn main() -> anyhow::Result<()> {
         &config.data_dir,
         falcon_server::sessions::local::local_base_env_fn(),
     );
-    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle, plugins);
+    let mesh = falcon_server::mesh::MeshHost::new(&config.data_dir);
+    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle, plugins, mesh);
+    falcon_server::api::mesh::load_stored(&state);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -85,12 +87,15 @@ fn main() -> anyhow::Result<()> {
         // 会话在 DB 中保持 active，下次启动由 recover_sessions_on_startup 归类
         let engine = state.engine.clone();
         let shutdown = state.shutdown.clone();
+        let mesh = state.mesh.clone();
         tokio::select! {
             res = axum::serve(listener, api::app(state)) => res?,
             () = shutdown_signal() => {}
             () = shutdown.notified() => {}
         }
-        // cloudflared / 本机 px0 是子进程，后端退出不会自动带走（见 Engine::shutdown）
+        // cloudflared / 本机 px0 是子进程，后端退出不会自动带走（见 Engine::shutdown）。
+        // mesh 的 sidecar 同样：先杀再走，别留一个还占着 tailnet 名额的进程。
+        mesh.shutdown();
         let stop = engine.call(|e| async move { e.shutdown().await });
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
         anyhow::Ok(())

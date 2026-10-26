@@ -19,6 +19,7 @@ pub mod git_routes;
 pub mod hosts;
 pub mod input;
 pub mod meegle;
+pub mod mesh;
 pub mod plugins;
 pub mod projects;
 pub mod px0;
@@ -71,6 +72,8 @@ pub struct Inner {
     pub meegle: MeegleClient,
     /// 右侧栏插件（命令插件只在后端本机起进程；系统监控看远端时才借引擎拿链路）
     pub plugins: PluginHost,
+    /// 异地互联的两个 sidecar（tsnet / NetBird）。只在后端本机起进程，不进引擎
+    pub mesh: crate::mesh::MeshHost,
     /// `POST /api/system/restart` 要的关停信号：主循环拿它走与 SIGTERM 同一条退出路径
     /// （先 Engine::shutdown 收子进程再退出），launchd / systemd 或 respawn 帮手负责拉起
     pub shutdown: Arc<tokio::sync::Notify>,
@@ -95,6 +98,7 @@ impl AppState {
         engine: EngineHandle,
         meegle: MeegleClient,
         plugins: PluginHost,
+        mesh: crate::mesh::MeshHost,
     ) -> Self {
         let loopback = crate::config::is_loopback(&config.host);
         let auth = Auth::new(db.clone(), loopback);
@@ -108,6 +112,7 @@ impl AppState {
                 engine,
                 meegle,
                 plugins,
+                mesh,
                 shutdown: Arc::new(tokio::sync::Notify::new()),
                 restarting: AtomicBool::new(false),
             }),
@@ -174,6 +179,7 @@ fn protected_router() -> Router<AppState> {
         .merge(meegle::router())
         .merge(plugins::router())
         .merge(px0::router())
+        .merge(mesh::router())
         // 没有对应路由的 /api/*：同 Node 版的 onRequest 钩子，没登录先 401，登录了才 404
         .route("/api/{*rest}", axum::routing::any(static_files::not_found))
 }

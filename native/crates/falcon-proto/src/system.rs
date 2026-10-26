@@ -95,6 +95,96 @@ pub struct ShellsInfo {
     pub shells: Vec<String>,
 }
 
+wire_enum! {
+    /// 一台 mesh 节点现在在干什么。sidecar 的 stdout 状态行与 `GET /api/mesh` 共用。
+    ///
+    /// `Unknown` 是老客户端碰到新服务端多出来的状态时的兜底，别让整页设置反序列化失败。
+    pub enum MeshState {
+        /// 没启用，sidecar 没起
+        Off => "off",
+        /// 正在连控制面，还没拿到地址
+        Starting => "starting",
+        /// 已入网，有地址
+        Online => "online",
+        /// 卡在第一次登录（tsnet 把登录 URL 打在 sidecar 的 stderr）
+        NeedsLogin => "needs-login",
+        /// sidecar 起不来，或控制面拒绝了
+        Error => "error",
+        /// 二进制不在（没编 native/mesh，也没设 FALCON_*_BIN）
+        Unavailable => "unavailable",
+        #[serde(other)]
+        Unknown => "unknown",
+    }
+}
+
+/// 一种 mesh 的现状。`GET /api/mesh` 里 Tailscale 与 NetBird 各一份。
+///
+/// 密钥不在这里：auth key / setup key 只活在服务端进程的环境变量里，界面只看到
+/// 有没有配（`configured`）。地址是入网之后才有的，没入网就是 null。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshProviderStatus {
+    pub state: MeshState,
+    /// 本机在网上的名字（falcon，或 MagicDNS / FQDN）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<String>,
+    /// MagicDNS 名或 NetBird FQDN。另一台 Falcon 把它填进 SSH Host 即可
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_name: Option<String>,
+    /// 启动时有没有拿到密钥。NetBird 的来源是设置里存的 setup key，或环境变量
+    /// `FALCON_NB_SETUP_KEY`（环境变量优先）。值本身从不下发。
+    pub configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `GET /api/mesh`：本机两种 mesh 的现状。两边互不影响，可以同时开着。
+///
+/// `netbird_management_url` 是设置里存的管理地址。空串 = 用 NetBird 官方的。
+/// 服务端环境变量 `FALCON_NB_MANAGEMENT_URL` 设了的话以它为准，这里的值只是记下的那份。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshStatus {
+    pub tailscale: MeshProviderStatus,
+    pub netbird: MeshProviderStatus,
+    /// 设置里存的 NetBird 管理地址；空串表示用官方默认
+    #[serde(default)]
+    pub netbird_management_url: String,
+    /// 这一次保存改了地址、并且 sidecar 正在跑，于是服务端把它停掉又拉起来了。
+    /// 只在 `PUT /api/mesh/netbird/config` 的响应里为 true，GET 永远是 false。
+    #[serde(default)]
+    pub restarted: bool,
+}
+
+/// `PUT /api/mesh/netbird/config`。空串清掉，改回官方管理地址。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshNetbirdConfig {
+    pub management_url: String,
+}
+
+/// `PUT /api/mesh/netbird/setup-key`。
+///
+/// `setup_key` 缺省 = 不改；空串 = 清掉。明文只在这一次请求里出现，响应里没有它，
+/// 之后只能看到 `configured`。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshSetupKey {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_key: Option<String>,
+}
+
+/// `POST /api/mesh/:provider` 的请求体。`enabled: false` 停掉 sidecar。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshToggle {
+    pub enabled: bool,
+}
+
 /// 4xx / 5xx 的响应体。`error` 是一句可以直接给用户看的话。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

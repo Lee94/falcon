@@ -23,6 +23,8 @@ pub mod fs;
 pub mod git;
 pub mod host;
 pub mod meegle;
+/// 异地互联：本机的 tsnet / NetBird sidecar（不进引擎线程）
+pub mod mesh;
 pub mod paste;
 /// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
 pub mod plugins;
