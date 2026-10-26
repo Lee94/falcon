@@ -170,23 +170,6 @@ pub trait Platform {
         window: &mut Window,
     ) -> Option<Result<Rc<dyn HtmlView>, String>>;
 
-    /// 独立窗口里的远端浏览器客户端。只加载 Falcon 的受鉴权入口，不直接加载目标网站；
-    /// 与文件预览分开，不能为了 WebRTC 放宽原始文件的沙箱。
-    fn remote_browser_view(
-        &self,
-        _url: &str,
-        _prefix: &str,
-        _open_external: Box<dyn Fn(String) + Send + Sync>,
-        _window: &mut Window,
-    ) -> Option<Result<Rc<dyn HtmlView>, String>> {
-        None
-    }
-
-    /// 浏览器版必须在点击的同步调用栈里打开弹窗，不能先请求服务端再 window.open。
-    fn open_browser_popup(&self, _url: &str) -> Result<(), String> {
-        Err("当前平台不支持浏览器弹窗".into())
-    }
-
     // ---------------- 交给别的应用 ----------------
 
     /// 把自定义协议的链接（`zed://`、`vscode://`，「用编辑器打开」）交给认领它的应用。

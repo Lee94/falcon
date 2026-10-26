@@ -39,33 +39,13 @@ impl HtmlView for WryView {
     }
 }
 
-/// `url` 是完整的原始字节地址，`prefix` 是这个项目的 raw 前缀（`基址 + rawBase`）
+/// `url` 是完整的原始字节地址，`prefix` 是这个项目的 raw 前缀（`基址 + rawBase`）。
+/// 无痕（非持久）数据存储：WebView 与 falcon-client 的 cookie 罐本来就不相通
 pub fn create(
     url: &str,
     prefix: &str,
     open_external: Box<dyn Fn(String) + Send + Sync>,
     window: &mut Window,
-) -> Result<Rc<dyn HtmlView>, String> {
-    create_with_session(url, prefix, open_external, window, true)
-}
-
-/// 远端浏览器不用无痕数据存储：里面的登录页持有 Falcon cookie，关掉窗口再开不该每次重新登录。
-/// 它加载的是 Falcon 自己的 `/remote-browser/` 入口，不是项目 HTML；导航边界仍然只放行这个前缀。
-pub fn create_remote_browser(
-    url: &str,
-    prefix: &str,
-    open_external: Box<dyn Fn(String) + Send + Sync>,
-    window: &mut Window,
-) -> Result<Rc<dyn HtmlView>, String> {
-    create_with_session(url, prefix, open_external, window, false)
-}
-
-fn create_with_session(
-    url: &str,
-    prefix: &str,
-    open_external: Box<dyn Fn(String) + Send + Sync>,
-    window: &mut Window,
-    incognito: bool,
 ) -> Result<Rc<dyn HtmlView>, String> {
     let open_external: Arc<dyn Fn(String) + Send + Sync> = Arc::from(open_external);
     let loaded = Rc::new(Cell::new(false));
@@ -73,7 +53,7 @@ fn create_with_session(
     let (open_nav, loaded_nav) = (open_external.clone(), loaded.clone());
     WebViewBuilder::new()
         .with_url(url)
-        .with_incognito(incognito)
+        .with_incognito(true)
         .with_devtools(false)
         .with_visible(false)
         // 画布默认色而不是界面色：没设背景的 HTML 在浏览器里就是白底黑字（ADR 0007 已知取舍）

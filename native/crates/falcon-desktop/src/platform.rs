@@ -169,17 +169,6 @@ impl Platform for Desktop {
         crate::app_link::open(url, cx)
     }
 
-    #[cfg(feature = "webview")]
-    fn remote_browser_view(
-        &self,
-        url: &str,
-        prefix: &str,
-        open_external: Box<dyn Fn(String) + Send + Sync>,
-        window: &mut Window,
-    ) -> Option<Result<Rc<dyn HtmlView>, String>> {
-        Some(crate::html_view::create_remote_browser(url, prefix, open_external, window))
-    }
-
     fn set_app_icon(&self, png: &[u8]) {
         crate::dock::set_icon(png);
     }

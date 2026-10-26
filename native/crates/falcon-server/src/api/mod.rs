@@ -6,7 +6,6 @@
 //! - 原始字节路由（rawToken）、应用图标的取图路由（publicAsset）、askpass helper 各自验身份，
 //!   不走登录 cookie——它们挂在 [`public_router`] 上；
 //! - `/px0/` 与 `/api/` 同一口径，没登录的浏览器导航送去 `/?next=` 登录；
-//! - `/remote-browser/` 也要登录 cookie，但独立窗口里先画自带的登录页（它不能进主窗口登录流程）；
 //! - 其余 `/api/*` 一律要登录 cookie，挂在 [`protected_router`] 上。
 
 pub mod app_icon;
@@ -23,8 +22,6 @@ pub mod meegle;
 pub mod plugins;
 pub mod projects;
 pub mod px0;
-pub mod remote_browser;
-pub mod remote_browser_chrome;
 pub mod relays;
 pub mod sessions;
 pub mod static_files;
@@ -141,7 +138,6 @@ pub fn app(state: AppState) -> Router {
         .merge(auth_routes::router())
         .merge(ws::router())
         .merge(assistant::ws_router())
-        .merge(remote_browser::router())
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)));
     router = match web_dist {

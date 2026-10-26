@@ -1,13 +1,4 @@
 {
-  "remoteBrowser": {
-    "title": "远端浏览器",
-    "open": "在独立窗口打开远端浏览器",
-    "local": "本机（Falcon 服务端）",
-    "external": "在系统浏览器中打开",
-    "unavailable": "此构建没有内嵌网页视图，请使用系统浏览器连接。",
-    "failed": "无法打开远端浏览器",
-    "transport": "WebRTC · 远端运行"
-  },
   "login": {
     "title": "访问 Falcon",
     "password": "访问密码",
@@ -985,6 +976,9 @@
     "termFontHint": "默认正文用内置的 Berkeley Mono TX-02。缺的拉丁 / 盒线字形回落到 IoskeleyMonoTerm Nerd Font Mono，中文用 Maple Mono NL NF CN，图标用 Symbols Nerd Font Mono。",
     "termCustomFont": "自定义字体",
     "termCustomFontPlaceholder": "例如 Sarasa Term SC",
+    "termFallbackFont": "回退字体",
+    "termFallbackFontHint": "可选，多个字体按回退顺序用英文逗号分隔。自定义回退排在图标字体之后、内置回退之前；留空使用内置回退链。",
+    "termFallbackFontPlaceholder": "例如 Sarasa Term SC, PingFang SC",
     "termFontSize": "字号",
     "termLineHeight": "行高",
     "termCursor": "光标",

@@ -90,11 +90,6 @@ impl Render for RightBar {
             let id = format!("rb-{}", panel.as_wire());
             bar = bar.child(bar_button(id, icon_name, tip, on, &ui).on_click(move |_, _, cx| toggle(&ws, panel.clone(), cx)));
         }
-        let ws = self.ws.clone();
-        bar = bar.child(
-            bar_button("rb-remote-browser".into(), IconName::Globe, t!("remoteBrowser.open").to_string().into(), false, &ui)
-                .on_click(move |_, _, cx| crate::remote_browser::open(&ws, cx)),
-        );
         if !plugins.is_empty() {
             bar = bar.child(div().w(zpx(14.)).h(zpx(1.)).my(zpx(4.)).bg(ui.border));
         }
