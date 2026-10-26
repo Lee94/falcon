@@ -165,6 +165,7 @@ fn address_of(st: &MeshProviderStatus) -> Option<String> {
 
 fn provider_block(
     pane: &Entity<MeshPane>,
+    ws: &Entity<Workspace>,
     netbird_url: &Entity<InputState>,
     setup_key: &Entity<InputState>,
     title: &str,
@@ -238,7 +239,9 @@ fn provider_block(
     ));
     if let Some(addr) = address_of(st) {
         let copy = addr.clone();
-        let ws = pane.read(cx).ws.clone();
+        // 此时 MeshPane 正在 render，不能再经 pane.read 借它；工作区由调用方传入。
+        // 这个分支只有入网拿到地址后才走，未配置时打开设置不会暴露重复借用。
+        let ws = ws.clone();
         let button = Button::new(gpui_kit::ElementId::Name(format!("mesh-copy-{provider}").into()))
             .outline()
             .small()
@@ -278,6 +281,7 @@ impl Render for MeshPane {
                 // Tailscale 先不露出来：sidecar 还在，设置里暂时只配 NetBird。
                 vec![provider_block(
                     &pane,
+                    &self.ws,
                     &self.netbird_url,
                     &self.setup_key,
                     &t!("mesh.netbird").to_string(),
