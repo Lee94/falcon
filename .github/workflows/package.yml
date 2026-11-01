@@ -93,9 +93,14 @@ jobs:
         with:
           tool: wasm-bindgen-cli@${{ steps.wb.outputs.ver }},cargo-zigbuild
 
-      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
+      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸；server.rs 用 go 编 mesh sidecar
       - name: Install librsvg
         run: brew install librsvg
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native/mesh/go.mod
+          cache-dependency-path: native/mesh/go.sum
 
       # 没有服务端产物时 pkg 会先走 server（构建浏览器版、从 npm 仓库取锁定版本的 meegle CLI、
       # 编 5 个目标的会话守护进程、cargo 编服务端）
