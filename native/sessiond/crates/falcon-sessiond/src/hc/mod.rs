@@ -136,11 +136,8 @@ mod unix_impl {
     }
 
     fn default_session_name(layout: &Layout) -> String {
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            let default_falcon = std::path::absolute(home.join(".falcon")).unwrap_or_else(|_| home.join(".falcon"));
-            if layout.root == default_falcon {
-                return "falcon".into();
-            }
+        if layout.is_default_home_root() {
+            return "falcon".into();
         }
         let h = falcon_proto::sessiond::short_hash(&layout.root.to_string_lossy());
         format!("falcon-{}", &h[..8])
@@ -292,7 +289,7 @@ mod unix_impl {
         resp.get("result").cloned()
     }
 
-    /// 在 `spawn` / `bridge` / `list` 时顺手确保默认 `~/.falcon` 下的 `hc` 网关已在后台运行。
+    /// 在 `spawn` / `bridge` / `list` 时顺手确保默认 `~/.falcon`（或 `~/.mojito`）下的 `hc` 网关已在后台运行。
     /// 可通过 `FALCON_NO_HC=1` 禁用；非默认根目录（如临时测试目录）除非设了 `FALCON_AUTOSTART_HC=1`
     /// 否则不自动拉起后台进程。
     pub fn maybe_autostart(layout: &Layout) {
@@ -303,16 +300,8 @@ mod unix_impl {
         }
         let force = std::env::var_os("FALCON_AUTOSTART_HC")
             .is_some_and(|v| matches!(v.to_str(), Some("1" | "true" | "yes")));
-        if !force {
-            let is_default = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .is_some_and(|h| {
-                    let def = std::path::absolute(h.join(".falcon")).unwrap_or_else(|_| h.join(".falcon"));
-                    layout.root == def
-                });
-            if !is_default {
-                return;
-            }
+        if !force && !layout.is_default_home_root() {
+            return;
         }
         let paths = resolve_paths(layout, None);
         if std::os::unix::net::UnixStream::connect(&paths.socket_path).is_ok() {
@@ -344,6 +333,7 @@ mod unix_impl {
     fn spawn_gateway_background(layout: &Layout, paths: &HcPaths) -> Result<()> {
         use std::os::unix::process::CommandExt as _;
         let exe = std::env::current_exe()?;
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         let log_file = layout.log_dir().join(format!("hc-{}.log", paths.session));
         let out_f = std::fs::OpenOptions::new()
             .create(true)

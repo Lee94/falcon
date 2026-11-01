@@ -276,6 +276,7 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let refreshed = row.clone();
     state.engine.send(move |engine| {
         let id = refreshed.id.clone();
+        engine.sessions.sync_project_labels(&id);
         if container {
             // 名字与成员都会进虚拟目录的清单（见 virtualdir.rs），编辑后作废缓存。
             // 刷新是 fire-and-forget：宿主离线不能挡编辑；正在跑的会话尽快看到新清单

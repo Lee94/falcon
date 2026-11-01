@@ -189,23 +189,25 @@ pub fn kill(layout: &Layout, sid: &str) -> Result<()> {
         }
         bail!("会话 5 秒内没有结束");
     }
-    // 连不上：按 meta 里的 pid 动手
+    // 连不上：按 meta 里的 pid 动手（shell_pid == 0 是 falcon-server 远端代理，绝不能对 pgid 0 发信号或杀 server）
     let Some(meta) = layout.read_meta(sid) else {
         if layout.read_exit(sid).is_some() {
             return Ok(());
         }
         bail!("没有会话 {sid}");
     };
-    crate::proc::kill_session(meta.shell_pid, false);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && crate::proc::alive(meta.shell_pid) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if crate::proc::alive(meta.shell_pid) {
-        crate::proc::kill_session(meta.shell_pid, true);
-    }
-    if crate::proc::is_sessiond(meta.pid) {
-        crate::proc::kill(meta.pid);
+    if meta.shell_pid != 0 {
+        crate::proc::kill_session(meta.shell_pid, false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && crate::proc::alive(meta.shell_pid) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if crate::proc::alive(meta.shell_pid) {
+            crate::proc::kill_session(meta.shell_pid, true);
+        }
+        if crate::proc::is_sessiond(meta.pid) {
+            crate::proc::kill(meta.pid);
+        }
     }
     let _ = std::fs::remove_file(layout.meta_path(sid));
     #[cfg(unix)]

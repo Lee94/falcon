@@ -5,6 +5,7 @@ pub mod auto_title;
 pub mod backend;
 pub mod forward;
 pub mod forward_spec;
+pub mod hc_proxy;
 pub mod local;
 pub mod login_env;
 pub mod machine;

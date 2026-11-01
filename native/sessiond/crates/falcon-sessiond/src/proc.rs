@@ -10,6 +10,16 @@ pub fn is_sessiond(pid: u32) -> bool {
     pid != 0 && imp::alive(pid) && name_of(pid).is_none_or(|n| n.starts_with("falcon-sessio"))
 }
 
+/// pid 还在，而且是 falcon-server（远端 SSH 会话在本地的代理进程）
+pub fn is_falcon_proxy(pid: u32) -> bool {
+    pid != 0
+        && imp::alive(pid)
+        && name_of(pid).is_none_or(|n| {
+            let l = n.to_ascii_lowercase();
+            l.starts_with("falcon")
+        })
+}
+
 pub fn alive(pid: u32) -> bool {
     pid != 0 && imp::alive(pid)
 }

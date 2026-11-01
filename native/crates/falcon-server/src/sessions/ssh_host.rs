@@ -138,7 +138,7 @@ impl SshLink {
         self.remote.borrow().probed.as_ref().map(|p| p.kind).unwrap_or(HostKind::Posix)
     }
 
-    fn probed_shell(&self) -> Option<String> {
+    pub(crate) fn probed_shell(&self) -> Option<String> {
         self.remote.borrow().probed.as_ref().map(|p| p.shell.clone())
     }
 

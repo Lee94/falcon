@@ -348,3 +348,64 @@ fn framed_attach_and_events_stream() {
         "attach 通道应收到实时 PTY 输出"
     );
 }
+
+#[test]
+fn symlinked_herdr_core_resolves_mojito_default_root() {
+    let home = std::env::temp_dir().join(format!("sdt-hc-mojito-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let mojito_bin = home.join(".mojito").join("bin");
+    let local_bin = home.join(".local").join("bin");
+    std::fs::create_dir_all(&mojito_bin).unwrap();
+    std::fs::create_dir_all(&local_bin).unwrap();
+
+    // 复制或硬链真实测试二进制到 ~/.mojito/bin/falcon-sessiond-0.1.0-test
+    let hashed_bin = mojito_bin.join("falcon-sessiond-0.1.0-test");
+    std::fs::copy(BIN, &hashed_bin).unwrap();
+
+    // 先在 ~/.local/bin/herdr-core 放一条坏软链，验证 ensure_bin_link 会修复它
+    let hc_link = local_bin.join("herdr-core");
+    std::os::unix::fs::symlink(home.join(".dead/falcon-sessiond"), &hc_link).unwrap();
+
+    // 初次用 hashed_bin 跑 `hc status --json`（不传 --root，靠 default_root 推导 ~/.mojito）
+    let out1 = Command::new(&hashed_bin)
+        .args(["hc", "status", "--json"])
+        .env("HOME", &home)
+        .env_remove("FALCON_SESSIOND_ROOT")
+        .env_remove("HC_SESSION")
+        .env_remove("HC_SOCKET")
+        .output()
+        .expect("执行 hashed_bin hc status");
+    assert!(
+        out1.status.success(),
+        "hashed_bin 失败: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let st1: Value = serde_json::from_slice(&out1.stdout).unwrap();
+    assert_eq!(st1["session"], "falcon", "~/.mojito 应识别为默认 session=falcon");
+    assert!(hc_link.exists(), "悬空的 ~/.local/bin/herdr-core 应当已被修复");
+
+    // 再经由 ~/.local/bin/herdr-core 软链直接调 `hc status --json`（不传 --root）
+    // macOS 上 current_exe() 返回软链路径 ~/.local/bin/herdr-core，canonicalize 后应落回 ~/.mojito
+    let out2 = Command::new(&hc_link)
+        .args(["hc", "status", "--json"])
+        .env("HOME", &home)
+        .env_remove("FALCON_SESSIOND_ROOT")
+        .env_remove("HC_SESSION")
+        .env_remove("HC_SOCKET")
+        .output()
+        .expect("经由 herdr-core 软链执行 hc status");
+    assert!(
+        out2.status.success(),
+        "herdr-core 软链调用失败: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let st2: Value = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(st2["session"], "falcon");
+    assert_eq!(st2["core_id"], st1["core_id"], "两次应命中同一个 ~/.mojito 根目录");
+    assert!(
+        !home.join(".local").join("sessiond").exists(),
+        "不应在 ~/.local 下误创建 sessiond 目录"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

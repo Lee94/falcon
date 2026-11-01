@@ -352,24 +352,31 @@ pub fn synthesize_labels(
         return out;
     }
     let project_id = out.get("falcon.project").cloned().unwrap_or_else(|| "standalone".into());
-    let project_name = out.get("falcon.project_name").cloned();
-    let session_name = out.get("falcon.session").cloned();
+    let project_name = out.get("falcon.project_name").cloned().filter(|s| !s.is_empty());
+    let host_name = out.get("falcon.host_name").cloned().filter(|s| !s.is_empty());
+    let session_name = out.get("falcon.session").cloned().filter(|s| !s.is_empty());
     out.entry("herdr.space".into())
         .or_insert_with(|| format!("falcon.{project_id}"));
     out.entry("herdr.tab".into())
         .or_insert_with(|| format!("falcon.{sid}"));
     if !out.contains_key("where") {
-        match (project_name, session_name) {
-            (Some(p), Some(s)) if !p.is_empty() && !s.is_empty() => {
+        let prefix = match (host_name, project_name) {
+            (Some(h), Some(p)) => Some(format!("{h} · {p}")),
+            (Some(h), None) => Some(h),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+        match (prefix, session_name) {
+            (Some(p), Some(s)) => {
                 out.insert("where".into(), format!("{p} / {s}"));
             }
-            (Some(p), _) if !p.is_empty() => {
+            (Some(p), None) => {
                 out.insert("where".into(), p);
             }
-            (_, Some(s)) if !s.is_empty() => {
+            (None, Some(s)) => {
                 out.insert("where".into(), s);
             }
-            _ => {}
+            (None, None) => {}
         }
     }
     out
@@ -868,5 +875,32 @@ pub async fn background_loop(gw: SharedGateway) {
                 let _ = tx.send(ClientMsg::Foreground { req: fg_req });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_labels_includes_remote_host_name() {
+        let mut raw = BTreeMap::new();
+        raw.insert("falcon.project".into(), "proj-1".into());
+        raw.insert("falcon.project_name".into(), "api".into());
+        raw.insert("falcon.session".into(), "deploy".into());
+        raw.insert("falcon.remote".into(), "true".into());
+        raw.insert("falcon.host_name".into(), "prod-eu".into());
+
+        let out = synthesize_labels("0123456789abcdef", &raw, true);
+        assert_eq!(out.get("where").map(String::as_str), Some("prod-eu · api / deploy"));
+        assert_eq!(out.get("herdr.space").map(String::as_str), Some("falcon.proj-1"));
+        assert_eq!(out.get("herdr.tab").map(String::as_str), Some("falcon.0123456789abcdef"));
+
+        let mut standalone_raw = BTreeMap::new();
+        standalone_raw.insert("falcon.project".into(), "standalone:host:h1".into());
+        standalone_raw.insert("falcon.standalone".into(), "true".into());
+        standalone_raw.insert("falcon.host_name".into(), "dev-box".into());
+        let out2 = synthesize_labels("fedcba9876543210", &standalone_raw, true);
+        assert_eq!(out2.get("where").map(String::as_str), Some("dev-box"));
     }
 }

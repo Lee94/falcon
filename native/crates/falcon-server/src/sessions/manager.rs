@@ -191,6 +191,8 @@ struct EntryState {
     /// 持久会话所用的守护进程，接回时要用
     deployed: Option<Deployed>,
     backend: Option<Rc<dyn Backend>>,
+    /// 远端 SSH 持久会话在本机 `<data_dir>/sessiond/` 下的 Unix socket 代理（供 Herdr 发现与挂接）
+    hc_proxy: Option<super::hc_proxy::HcProxyHandle>,
     /// 非持久会话的回放来源；持久会话的回放是守护进程给的快照，不用它
     buffer: RingBuffer,
     viewers: Vec<Rc<Viewer>>,
@@ -262,6 +264,7 @@ impl LiveEntry {
             s: RefCell::new(EntryState {
                 deployed: init.deployed,
                 backend: None,
+                hc_proxy: None,
                 buffer: RingBuffer::new(),
                 viewers: Vec::new(),
                 arbiter: ViewerArbiter::new(),
@@ -406,6 +409,8 @@ pub struct SessionManager {
     machine_run_locks: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
     /// 对话终端里用户敲完的命令交给谁（AI 助手的 hub）
     block_listener: RefCell<Option<Rc<dyn Fn(&str, CommandBlock)>>>,
+    /// `<data_dir>/sessiond/server-hc.sock` 监听任务（供 `falcon-sessiond` 把远端 `terminal.run` 委托给本服务）
+    hc_listener: RefCell<Option<AbortHandle>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -454,6 +459,7 @@ impl SessionManager {
                 machine_shell_locks: RefCell::default(),
                 machine_run_locks: RefCell::default(),
                 block_listener: RefCell::default(),
+                hc_listener: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -499,12 +505,41 @@ impl SessionManager {
     /// 以前要等用户打开 tab 或点「接回」才验证—— falcon 一重启侧栏就一片黄。
     /// 这里按库存尺寸自动接回（跟总览里点接回同一条路，见 term_size.rs）。
     pub fn resume_unverified(&self) {
+        self.ensure_hc_listener();
         for row in self.db.list_sessions() {
             if row.state != "unverified" || row.durable != 1 {
                 continue;
             }
             let entry = self.hydrate_entry(&row);
             self.kick_auto_reattach(&entry);
+        }
+    }
+
+    /// 确保 `<data_dir>/sessiond/server-hc.sock` 监听已启动（在 LocalSet 内按需调用，幂等）。
+    pub fn ensure_hc_listener(&self) {
+        let mut slot = self.hc_listener.borrow_mut();
+        if slot.is_none() {
+            *slot = super::hc_proxy::start_server_listener(self.me.clone(), self.data_dir.clone());
+        }
+    }
+
+    /// 同步单个会话在 `<data_dir>/sessiond/sessions/<sid>.labels.json` 中的标签（会话改名后调用）。
+    pub fn sync_session_labels(&self, session_id: &str) {
+        let Some(row) = self.db.get_session(session_id) else { return };
+        if row.durable != 1 || is_machine_owner(&row.project_id) {
+            return;
+        }
+        let Some(project) = owner_row(&self.db, &row.project_id) else { return };
+        super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, &project, &row);
+    }
+
+    /// 同步某项目下所有持久会话的 `<sid>.labels.json`（项目改名或更新后调用）。
+    pub fn sync_project_labels(&self, project_id: &str) {
+        let Some(project) = owner_row(&self.db, project_id) else { return };
+        for row in self.db.list_sessions_by_project(project_id) {
+            if row.durable == 1 {
+                super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, &project, &row);
+            }
         }
     }
 
@@ -1359,6 +1394,7 @@ impl SessionManager {
         };
 
         let backend: Rc<dyn Backend> = if entry.durable {
+            self.ensure_hc_listener();
             let (backend, welcome) = if project.project_type == "local" {
                 open_local_sessiond(&self.local, &opts, cb).await?
             } else {
@@ -1369,6 +1405,32 @@ impl SessionManager {
                 s.exit_seen = false;
                 s.bridge_exit = None;
                 s.sync_in_flight = false;
+            }
+            if !is_machine_owner(&row.project_id) {
+                if project.project_type == "local" {
+                    super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, project, row);
+                } else if let Some(d) = entry.deployed() {
+                    if let Some(old) = entry.s.borrow_mut().hc_proxy.take() {
+                        old.stop(false);
+                    }
+                    let proxy = super::hc_proxy::start_remote_proxy(
+                        &self.data_dir,
+                        &self.db,
+                        project,
+                        row,
+                        &welcome,
+                        opts.cwd.as_deref(),
+                        d,
+                        self.get_link(project),
+                    );
+                    entry.s.borrow_mut().hc_proxy = proxy;
+                    if self.local.peek().is_none() {
+                        let me = self.me();
+                        tokio::task::spawn_local(async move {
+                            let _ = me.local.prepare().await;
+                        });
+                    }
+                }
             }
             // 宿主机上的 VT 进程不是这份二进制里的 ghostty：热升级（设计文档 2.3），升级 ghostty
             // 不必等存量会话自然消亡。holder 会用二进制快照交接，解不了就用原始尾巴重建
@@ -1814,6 +1876,9 @@ impl SessionManager {
         }
 
         if let Some(e) = &entry {
+            if let Some(proxy) = e.s.borrow_mut().hc_proxy.take() {
+                proxy.stop(true);
+            }
             self.broadcast(e, &ServerMessage::State { state: SessionState::Dead, dead_reason: Some(DeadReason::Exited) });
             self.drop_output(e);
             self.entries.borrow_mut().remove(session_id);
@@ -2169,7 +2234,14 @@ impl SessionManager {
     }
 
     fn mark_dead(&self, entry: &LiveEntry, reason: DeadReason) {
-        entry.s.borrow_mut().backend = None;
+        let proxy = {
+            let mut s = entry.s.borrow_mut();
+            s.backend = None;
+            s.hc_proxy.take()
+        };
+        if let Some(proxy) = proxy {
+            proxy.stop(reason == DeadReason::Exited);
+        }
         // 先把还没广播的尾巴发出去（shell 的告别输出），再释放
         self.flush_output(entry);
         // dead 会话不可能再回放（add_viewer 对 dead 行早退），立刻释放 Scrollback
@@ -2188,7 +2260,14 @@ impl SessionManager {
     }
 
     fn mark_unverified(&self, entry: &Rc<LiveEntry>) {
-        entry.s.borrow_mut().backend = None;
+        let proxy = {
+            let mut s = entry.s.borrow_mut();
+            s.backend = None;
+            s.hc_proxy.take()
+        };
+        if let Some(proxy) = proxy {
+            proxy.stop(false);
+        }
         self.db.update_session_state(&entry.session_id, SessionState::Unverified, None);
         self.broadcast(entry, &ServerMessage::State { state: SessionState::Unverified, dead_reason: None });
         if !entry.terminating() {

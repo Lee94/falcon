@@ -833,12 +833,12 @@ async fn handle_terminal_run(gw: &SharedGateway, params: Value) -> Result<Value,
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let cwd = params
+    let explicit_cwd = params
         .get("cwd")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(String::from)
-        .or_else(|| std::env::var("HOME").ok());
+        .map(String::from);
+    let cwd = explicit_cwd.clone().or_else(|| std::env::var("HOME").ok());
     let keep = params.get("keep").and_then(Value::as_bool).unwrap_or(false);
     let wait = params.get("wait").and_then(Value::as_bool).unwrap_or(false);
     let timeout_secs = params.get("timeout").and_then(Value::as_f64).unwrap_or(180.0);
@@ -865,37 +865,64 @@ async fn handle_terminal_run(gw: &SharedGateway, params: Value) -> Result<Value,
         labels.insert("hc.name".into(), n.clone());
     }
 
-    let session_id = gen_uuid_v4();
-    let sid = falcon_proto::sessiond::sid_of(&session_id);
-    let spec = SpawnSpec {
-        session_id: session_id.clone(),
-        owner: format!("hc:{core_id}"),
-        argv: argv.clone(),
-        cwd: cwd.clone(),
-        env,
-        env_clear: false,
-        cols: 120,
-        rows: 36,
-        scrollback_lines: 10_000,
-        appearance: None,
-        labels: labels.clone(),
+    let wants_server_route = labels.contains_key("falcon.host")
+        || labels.contains_key("falcon.host_name")
+        || labels.get("falcon.remote").is_some_and(|v| v == "true")
+        || labels.contains_key("falcon.project")
+        || labels
+            .get("herdr.space")
+            .is_some_and(|s| s.starts_with("falcon."));
+    let server_sock = layout.base().join("server-hc.sock");
+    let delegated_sid = if wants_server_route && server_sock.exists() {
+        delegate_spawn_to_server(
+            &server_sock,
+            &argv,
+            explicit_cwd.as_deref(),
+            &env,
+            name.as_deref(),
+            &labels,
+        )
+        .await?
+    } else {
+        None
     };
 
-    let layout_c = layout.clone();
-    let sid_c = sid.clone();
-    let spec_c = spec.clone();
-    let spawned = tokio::task::spawn_blocking(move || spawn::spawn(&layout_c, &sid_c, &spec_c))
-        .await
-        .map_err(|e| RpcError::new(-32000, "spawn_failed", e.to_string(), None))?
-        .map_err(|e| RpcError::new(-32000, "spawn_failed", e.to_string(), None))?;
-    if !spawned.ok {
-        return Err(RpcError::new(
-            -32000,
-            "spawn_failed",
-            spawned.error.unwrap_or_else(|| "spawn failed".into()),
-            None,
-        ));
-    }
+    let sid = if let Some(sid) = delegated_sid {
+        sid
+    } else {
+        let session_id = gen_uuid_v4();
+        let sid = falcon_proto::sessiond::sid_of(&session_id);
+        let spec = SpawnSpec {
+            session_id: session_id.clone(),
+            owner: format!("hc:{core_id}"),
+            argv: argv.clone(),
+            cwd: cwd.clone(),
+            env,
+            env_clear: false,
+            cols: 120,
+            rows: 36,
+            scrollback_lines: 10_000,
+            appearance: None,
+            labels: labels.clone(),
+        };
+
+        let layout_c = layout.clone();
+        let sid_c = sid.clone();
+        let spec_c = spec.clone();
+        let spawned = tokio::task::spawn_blocking(move || spawn::spawn(&layout_c, &sid_c, &spec_c))
+            .await
+            .map_err(|e| RpcError::new(-32000, "spawn_failed", e.to_string(), None))?
+            .map_err(|e| RpcError::new(-32000, "spawn_failed", e.to_string(), None))?;
+        if !spawned.ok {
+            return Err(RpcError::new(
+                -32000,
+                "spawn_failed",
+                spawned.error.unwrap_or_else(|| "spawn failed".into()),
+                None,
+            ));
+        }
+        sid
+    };
 
     sync_directory(gw, true);
     let (address, mut pub_json) = {
@@ -947,6 +974,59 @@ async fn handle_terminal_run(gw: &SharedGateway, params: Value) -> Result<Value,
     }
 
     Ok(pub_json)
+}
+
+async fn delegate_spawn_to_server(
+    server_sock: &std::path::Path,
+    argv: &[String],
+    cwd: Option<&str>,
+    env: &[(String, String)],
+    name: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<Option<String>, RpcError> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+    let Ok(stream) = tokio::net::UnixStream::connect(server_sock).await else {
+        return Ok(None);
+    };
+    let (r, mut w) = stream.into_split();
+    let req = json!({
+        "action": "spawn",
+        "argv": argv,
+        "cwd": cwd,
+        "env": env,
+        "name": name,
+        "labels": labels,
+    });
+    let mut line = serde_json::to_vec(&req).unwrap_or_default();
+    line.push(b'\n');
+    if w.write_all(&line).await.is_err() || w.flush().await.is_err() {
+        return Ok(None);
+    }
+    let mut reader = BufReader::new(r);
+    let mut resp_line = String::new();
+    let read_res = tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut resp_line)).await;
+    let Ok(Ok(n)) = read_res else {
+        return Ok(None);
+    };
+    if n == 0 {
+        return Ok(None);
+    }
+    let Ok(resp) = serde_json::from_str::<Value>(resp_line.trim()) else {
+        return Ok(None);
+    };
+    if resp.get("handled").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    if resp.get("ok").and_then(Value::as_bool) == Some(true)
+        && let Some(sid) = resp.get("sid").and_then(Value::as_str).filter(|s| !s.is_empty())
+    {
+        return Ok(Some(sid.to_string()));
+    }
+    let err_msg = resp
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("remote spawn failed");
+    Err(RpcError::new(-32000, "spawn_failed", err_msg, None))
 }
 
 /// `terminal.put`：支持两种调用形态：

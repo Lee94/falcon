@@ -204,3 +204,18 @@
    - 若是则归入该项目，否则归入该机器的 `standalone:local` 或 `standalone:host:<hostId>`；
    - 调用 `db.create_session` 入库并加入 `SessionManager` 内存表，前端通过 WebSocket 实时看到新会话。
 3. 孤儿清理（`manager.rs::orphans`）仍只清理 `entry.owner == instance_id` 的会话，绝不误杀 `hc:*` 会话。
+
+---
+
+## 5. 远端 SSH 会话本机代理（`sessions/hc_proxy.rs`）
+
+当 Herdr 连向运行 `falcon-server` 的机器时，除了本机 holder 会话外，`falcon-server` 还将自己所管理的全部远端 SSH 持久会话投影到本机 `<data_dir>/sessiond/` 下：
+
+1. **代理生命周期（`start_remote_proxy` / `HcProxyHandle`）**：
+   - `SessionManager::attach_backend` 成功连上远端 SSH 持久会话后，在本机创建 `<data_dir>/sessiond/run/<sid>.sock`（`0600`）、`<sid>.labels.json`（含 `falcon.remote = "true"`、`falcon.host`、`falcon.host_name`）和 `<sid>.json`（`pid` 为 `falcon-server` 进程号，`shell_pid = 0`）。
+   - `falcon-sessiond` 的 `Layout::holder_alive` 与 `entries` 对 `shell_pid == 0` 的条目检查 `proc::is_falcon_proxy(meta.pid)` 及 socket 文件是否存在；`attach::kill` 在握手失败回退时跳过 `shell_pid == 0`，绝不向 `pgid 0` 或 `falcon-server` 发信号。
+   - 每次本机 `falcon-sessiond` 连入 `<sid>.sock`，`falcon-server` 在该项目的 `SshLink` 上打开一条 `falcon-sessiond bridge --sid <sid>` 通道，等待 `FALCONBR\n` 前导后双向转发。
+   - 会话正常退出（`mark_dead(Exited)` / `terminate`）时停掉代理、删 `<sid>.sock` 与 `<sid>.json` 并写 `<sid>.exit`；SSH 断链（`mark_unverified`）时仅移除代理文件，待重连后恢复。
+2. **远端 `terminal.run` 委托（`server-hc.sock`）**：
+   - `falcon-server` 监听 `<data_dir>/sessiond/server-hc.sock`。
+   - 当 `falcon-sessiond` 收到带 `falcon.host`、`falcon.host_name`、`falcon.remote == "true"`、`falcon.project` 或 `herdr.space = falcon.*` 标签的 `terminal.run` 时，先经 `server-hc.sock` 请求 `falcon-server` 解析目标 SSH 项目或主机并调用 `SessionManager::create_session`；若目标不是远端项目则回退本机 `spawn::spawn`。

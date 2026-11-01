@@ -201,6 +201,7 @@ async fn rename(State(state): State<AppState>, Path(id): Path<String>, body: Len
     }
     // 空串是合法的：清掉名字就回到自动标题，这是"取消重命名"的唯一出口
     state.db.rename_session(&id, js::trim(name));
+    state.engine.send(move |engine| engine.sessions.sync_session_labels(&id));
     Ok(ok())
 }
 

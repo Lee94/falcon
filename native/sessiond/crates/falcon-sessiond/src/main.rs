@@ -65,6 +65,7 @@ fn default_root() -> Option<PathBuf> {
         return Some(PathBuf::from(r));
     }
     let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let bin = exe.parent()?;
     (bin.file_name()? == "bin").then(|| bin.parent().map(PathBuf::from)).flatten()
 }

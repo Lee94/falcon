@@ -64,6 +64,16 @@
 - **侧栏直接一层展开**：在每台机器的分组下画一行「无项目」（不套多余的 `文件夹 → 分支` 两层，因为它没有 Git 分支），带 `+` 按钮可直接新建终端或 Agent 会话。
 - **自动收养外部会话**：从 `hc` / `herdr-app` 经 `terminal.run` 新建的 holder 会话，`owner` 记为 `hc:<core-id>`（避免被 `falcon-server` 的孤儿清理误杀）。`falcon-server` 在列出会话时发现尚未入库的 `hc:*` 会话，若其标签带有效的 `falcon.project` 则归入该项目，否则自动收养进该机器的 `standalone:*`「无项目」分组，两边实时互通。
 
+## 决定六：远端 SSH 会话自动在本机 `<data_dir>/sessiond/` 下做 Unix Socket 代理
+
+当用户的 `herdr-app` 或 `hc` 只连接了运行 `falcon-server` 的这台机器（例如 `hc machine add falcon`），用户希望无需把 `falcon-server` 管理的每台 SSH 服务器再逐一配进 `hc machine`，就能在 Herdr 里直接看到、挂接乃至在这些远端 SSH 主机上新建会话。
+
+做法是在 `falcon-server`（Unix 平台）挂接远端 SSH 持久会话时，在本机 `<data_dir>/sessiond/` 下为该会话投影一个本地代理：
+
+- **本地代理 Socket 与元数据**：`falcon-server` 绑定 `<data_dir>/sessiond/run/<sid>.sock`，写出 `<sid>.json`（`pid = falcon-server pid`，`shell_pid = 0` 标识为远端代理）与 `<sid>.labels.json`（含 `falcon.remote = "true"`、`falcon.host`、`falcon.host_name`）。本机的 `falcon-sessiond hc serve` 扫描目录时天然发现它，把 `where` 合成为 `<host_name> · <project_name> / <session_name>`。
+- **按需桥接**：当 `falcon-sessiond` 连上本地 `<sid>.sock`（无论是后台状态监控还是 `terminal.attach`），`falcon-server` 在已有的 SSH 连接上开一条运行远端 `falcon-sessiond bridge --sid <sid>` 的通道，剥掉 `FALCONBR\n` 前导后在本地 UnixStream 与远端 SSH Channel 之间双向透传字节。
+- **远端新建会话委托（`server-hc.sock`）**：`falcon-server` 监听 `<data_dir>/sessiond/server-hc.sock`。当 `hc` 调 `terminal.run` 并通过标签指定了远端主机或项目（`falcon.host`、`falcon.host_name`、`falcon.project`、`herdr.space = falcon.<id>`）时，本机 `falcon-sessiond` 将创建请求委托给 `server-hc.sock`，由 `SessionManager::create_session` 在目标 SSH 主机上拉起持久会话并同步建立本地代理。
+
 ## 已知的不足
 
 - **只支持 macOS 与 Linux 宿主机**：Windows 宿主机上 ConPTY 吞掉 OSC 7501，`falcon-sessiond hc` 在 Windows 上直接报不支持。

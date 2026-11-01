@@ -99,6 +99,38 @@ impl Layout {
         Ok(())
     }
 
+    /// 当前根目录是否为用户的默认数据目录（`~/.falcon` 或从 Mojito 升级保留的 `~/.mojito`）
+    pub fn is_default_home_root(&self) -> bool {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return false;
+        };
+        self.is_default_home_root_for(&home)
+    }
+
+    pub(crate) fn is_default_home_root_for(&self, home: &Path) -> bool {
+        let self_canon = std::fs::canonicalize(&self.root).ok();
+        let home_canon = std::fs::canonicalize(home).ok();
+        for dir in [".falcon", ".mojito"] {
+            let candidate = home.join(dir);
+            let abs = std::path::absolute(&candidate).unwrap_or_else(|_| candidate.clone());
+            if self.root == abs {
+                return true;
+            }
+            if let Some(hc) = &home_canon {
+                let hc_cand = hc.join(dir);
+                if self.root == hc_cand || self_canon.as_ref() == Some(&hc_cand) {
+                    return true;
+                }
+            }
+            if let (Some(a), Ok(b)) = (&self_canon, std::fs::canonicalize(&candidate))
+                && a == &b
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// 维护 `<root>/bin/falcon-sessiond` 固定符号链接，指向当前正在跑的带哈希二进制。
     /// 外部工具（`hc machine add --via '~/.falcon/bin/falcon-sessiond hc connect --'`）
     /// 用这个固定路径，升级 falcon 后不必改 machine 配置。
@@ -106,32 +138,43 @@ impl Layout {
         #[cfg(unix)]
         {
             let Ok(exe) = std::env::current_exe() else { return };
-            let Some(name) = exe.file_name().and_then(|n| n.to_str()) else { return };
-            if !name.starts_with("falcon-sessiond-") {
-                return;
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            self.ensure_bin_link_with(&exe, home.as_deref());
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn ensure_bin_link_with(&self, exe: &Path, home: Option<&Path>) {
+        let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+        let Some(name) = exe.file_name().and_then(|n| n.to_str()) else { return };
+        if !name.starts_with("falcon-sessiond-") {
+            return;
+        }
+        let bin_dir = self.root.join("bin");
+        let canon_bin_dir = std::fs::canonicalize(&bin_dir).unwrap_or_else(|_| bin_dir.clone());
+        if exe.parent() != Some(bin_dir.as_path()) && exe.parent() != Some(canon_bin_dir.as_path()) {
+            return;
+        }
+        let link = bin_dir.join("falcon-sessiond");
+        let tmp = bin_dir.join(format!(".falcon-sessiond.link.{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        if std::os::unix::fs::symlink(name, &tmp).is_ok() {
+            let _ = std::fs::rename(&tmp, &link);
+        }
+        // 若这台机器尚未安装原生 herdr-core，则在 ~/.local/bin/herdr-core 放一条指向
+        // <root>/bin/falcon-sessiond 的软链，使远端 `hc machine add user@<ip>` 无需
+        // 额外参数也能直接连上本机的 falcon hc 网关。已有有效文件或软链时绝不覆盖；
+        // 若旧软链已失效（如迁移目录后悬空），则移除后重建。
+        if let Some(home) = home
+            && self.is_default_home_root_for(home)
+        {
+            let local_bin = home.join(".local").join("bin");
+            let hc_bin = local_bin.join("herdr-core");
+            if std::fs::symlink_metadata(&hc_bin).is_ok() && !hc_bin.exists() {
+                let _ = std::fs::remove_file(&hc_bin);
             }
-            let bin_dir = self.root.join("bin");
-            if exe.parent() != Some(bin_dir.as_path()) {
-                return;
-            }
-            let link = bin_dir.join("falcon-sessiond");
-            let tmp = bin_dir.join(format!(".falcon-sessiond.link.{}", std::process::id()));
-            let _ = std::fs::remove_file(&tmp);
-            if std::os::unix::fs::symlink(name, &tmp).is_ok() {
-                let _ = std::fs::rename(&tmp, &link);
-            }
-            // 若这台机器尚未安装原生 herdr-core，则在 ~/.local/bin/herdr-core 放一条指向
-            // ~/.falcon/bin/falcon-sessiond 的软链，使远端 `hc machine add user@<ip>` 无需
-            // 额外参数也能直接连上本机的 falcon hc 网关。已有文件或软链时绝不覆盖。
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                let default_falcon = std::path::absolute(home.join(".falcon")).unwrap_or_else(|_| home.join(".falcon"));
-                if self.root == default_falcon {
-                    let local_bin = home.join(".local").join("bin");
-                    let hc_bin = local_bin.join("herdr-core");
-                    if std::fs::symlink_metadata(&hc_bin).is_err() && std::fs::create_dir_all(&local_bin).is_ok() {
-                        let _ = std::os::unix::fs::symlink(&link, &hc_bin);
-                    }
-                }
+            if std::fs::symlink_metadata(&hc_bin).is_err() && std::fs::create_dir_all(&local_bin).is_ok() {
+                let _ = std::os::unix::fs::symlink(&link, &hc_bin);
             }
         }
     }
@@ -212,10 +255,24 @@ impl Layout {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// 会话的 holder 还活着（pid 在、而且确实是 falcon-sessiond，不是被复用的 pid）
+    /// 会话的 holder 还活着（pid 在、而且确实是 falcon-sessiond 或 falcon-server 远端代理，不是被复用的 pid）
     pub fn holder_alive(&self, sid: &str) -> Option<SessionMeta> {
         let meta = self.read_meta(sid)?;
-        proc::is_sessiond(meta.pid).then_some(meta)
+        let alive = if meta.shell_pid == 0 {
+            proc::is_falcon_proxy(meta.pid) && {
+                #[cfg(unix)]
+                {
+                    Path::new(&meta.endpoint).exists()
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            }
+        } else {
+            proc::is_sessiond(meta.pid)
+        };
+        alive.then_some(meta)
     }
 }
 
@@ -268,7 +325,26 @@ pub fn entries(layout: &Layout) -> Vec<ListEntry> {
         match ext {
             "json" => {
                 let Some(meta) = layout.read_meta(sid) else { continue };
-                let alive = proc::is_sessiond(meta.pid);
+                let alive = if meta.shell_pid == 0 {
+                    proc::is_falcon_proxy(meta.pid) && {
+                        #[cfg(unix)]
+                        {
+                            Path::new(&meta.endpoint).exists()
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            true
+                        }
+                    }
+                } else {
+                    proc::is_sessiond(meta.pid)
+                };
+                if meta.shell_pid == 0 && !alive && !layout.exit_path(sid).is_file() {
+                    let _ = std::fs::remove_file(e.path());
+                    #[cfg(unix)]
+                    let _ = std::fs::remove_file(&meta.endpoint);
+                    continue;
+                }
                 out.push(ListEntry {
                     sid: sid.into(),
                     session_id: meta.session_id,
@@ -381,5 +457,68 @@ mod tests {
         assert_eq!(l.take_spec("0123456789abcdef").unwrap(), spec);
         assert!(l.take_spec("0123456789abcdef").is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn default_home_root_supports_falcon_and_mojito() {
+        let home = std::env::temp_dir().join(format!("sd-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        let falcon_layout = Layout::new(home.join(".falcon"));
+        let mojito_layout = Layout::new(home.join(".mojito"));
+        let custom_layout = Layout::new(home.join(".custom"));
+
+        assert!(falcon_layout.is_default_home_root_for(&home));
+        assert!(mojito_layout.is_default_home_root_for(&home));
+        assert!(!custom_layout.is_default_home_root_for(&home));
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_bin_link_resolves_symlink_and_replaces_dangling_hc_link() {
+        let home = std::env::temp_dir().join(format!("sd-binlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mojito_root = home.join(".mojito");
+        let bin_dir = mojito_root.join("bin");
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&local_bin).unwrap();
+
+        let real_bin = bin_dir.join("falcon-sessiond-0.1.0-deadbeef");
+        std::fs::write(&real_bin, b"#!/bin/sh\n").unwrap();
+
+        // 先放一条悬空的 ~/.local/bin/herdr-core 软链（模拟旧目录已删）
+        let hc_bin = local_bin.join("herdr-core");
+        std::os::unix::fs::symlink(home.join(".nonexistent/bin/falcon-sessiond"), &hc_bin).unwrap();
+        assert!(std::fs::symlink_metadata(&hc_bin).is_ok());
+        assert!(!hc_bin.exists());
+
+        let layout = Layout::new(mojito_root.clone());
+        layout.ensure_bin_link_with(&real_bin, Some(&home));
+
+        // 悬空软链应当被替换为指向 ~/.mojito/bin/falcon-sessiond 的有效软链
+        assert!(hc_bin.exists());
+        assert_eq!(
+            std::fs::canonicalize(&hc_bin).unwrap(),
+            std::fs::canonicalize(&real_bin).unwrap()
+        );
+
+        // 再通过 ~/.local/bin/herdr-core 软链作为 current_exe 调用一次（模拟 macOS current_exe 未解软链）
+        let real_bin_v2 = bin_dir.join("falcon-sessiond-0.2.0-cafebabe");
+        std::fs::write(&real_bin_v2, b"#!/bin/sh\n").unwrap();
+        let stable_link = bin_dir.join("falcon-sessiond");
+        let _ = std::fs::remove_file(&stable_link);
+        std::os::unix::fs::symlink("falcon-sessiond-0.2.0-cafebabe", &stable_link).unwrap();
+
+        layout.ensure_bin_link_with(&hc_bin, Some(&home));
+        assert_eq!(
+            std::fs::canonicalize(&hc_bin).unwrap(),
+            std::fs::canonicalize(&real_bin_v2).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
