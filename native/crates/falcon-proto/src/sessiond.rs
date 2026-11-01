@@ -17,6 +17,8 @@
 //! 补发出去。于是在这条连接上，`Synced` 之前的输出都 `< N`、之后的都 `≥ N`，接收方不用拼接：
 //! 回放 = 快照 + continuation（解析器停在半截序列时要补的那几个字节），此后照常接输出。
 
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +82,8 @@ pub mod kind {
     pub const PING: u8 = 0x0a;
     /// 让 holder 把 VT 进程换成另一个二进制（热升级 ghostty，设计文档 2.3）
     pub const UPGRADE_VT: u8 = 0x0b;
+    /// 查询当前终端模式位（bracketed paste、DECCKM、备用屏、鼠标上报）
+    pub const MODES: u8 = 0x0c;
 
     pub const WELCOME: u8 = 0x41;
     pub const OUTPUT: u8 = 0x42;
@@ -92,6 +96,7 @@ pub mod kind {
     pub const PONG: u8 = 0x49;
     pub const ERROR: u8 = 0x4a;
     pub const UPGRADED: u8 = 0x4b;
+    pub const MODES_ARE: u8 = 0x4c;
 }
 
 /// 单帧载荷的上限。超限即视为对端坏了、断开连接——宁可断开重连，也不能让一个畸形的
@@ -197,8 +202,9 @@ pub fn read_frame(r: &mut impl std::io::Read) -> std::io::Result<Option<(u8, Vec
 // ---------------------------------------------------------------- 消息
 
 wire_open_str! {
-    /// 连上 holder 的是谁。`attach` 是人手的逃生通道，`server` 是 falcon-server
-    pub enum Role { Server => "server", Attach => "attach" }
+    /// 连上 holder 的是谁。`attach` 是人手的逃生通道或 hc viewer，`server` 是 falcon-server，
+    /// `hc` 是 herdr-core 兼容网关的后台监控连接（不收实时 Output 帧）
+    pub enum Role { Server => "server", Attach => "attach", Hc => "hc" }
 }
 
 /// 输出 `Synced` / `Exported` 的格式
@@ -291,8 +297,28 @@ pub enum Event {
     /// OSC 133：A 提示符开始、B 输入开始、C 命令开始输出、D 命令结束
     #[serde(rename_all = "camelCase")]
     Prompt { kind: String, #[serde(default, skip_serializing_if = "Option::is_none")] exit_code: Option<i32> },
+    /// 生效的 PTY 尺寸发生了变化（ADR 0026）
+    Size { cols: u16, rows: u16 },
     #[serde(other)]
     Unknown,
+}
+
+/// holder 跟踪到的终端模式位与静默时长（`Modes` 查询的响应）
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ModesAre {
+    pub req: u32,
+    #[serde(default)]
+    pub bracketed_paste: bool,
+    #[serde(default)]
+    pub app_cursor: bool,
+    #[serde(default)]
+    pub alt_screen: bool,
+    #[serde(default)]
+    pub mouse_tracking: bool,
+    /// 距离最后一次 PTY 输出过去了多少毫秒（供 `hc send` 判断 3 秒静默）
+    #[serde(default)]
+    pub quiet_ms: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -320,6 +346,8 @@ pub enum ClientMsg {
     Ping,
     /// 新 VT 二进制的绝对路径（宿主机上的）
     UpgradeVt { req: u32, binary: String },
+    /// 查询当前终端模式位
+    Modes { req: u32 },
     Unknown(u8),
 }
 
@@ -333,12 +361,19 @@ pub enum HolderMsg {
     Synced { req: u32, offset: u64, snapshot: Vec<u8>, continuation: Vec<u8> },
     Exported { req: u32, bytes: Vec<u8> },
     Status { records: Vec<ProgramStatusRecord> },
-    ForegroundIs { req: u32, name: Option<String> },
+    ForegroundIs {
+        req: u32,
+        name: Option<String>,
+        pid: Option<u32>,
+        argv: Option<Vec<String>>,
+        cwd: Option<String>,
+    },
     Event(Event),
     Exit(ExitStatus),
     Pong,
     Error { message: String },
     Upgraded { req: u32, ok: bool, message: String },
+    ModesAre(ModesAre),
     Unknown(u8),
 }
 
@@ -374,6 +409,12 @@ struct ForegroundJson {
     req: u32,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -417,6 +458,7 @@ impl ClientMsg {
             ClientMsg::UpgradeVt { req, binary } => {
                 encode_frame(kind::UPGRADE_VT, &json(&UpgradeJson { req: *req, binary: binary.clone() }))
             }
+            ClientMsg::Modes { req } => encode_frame(kind::MODES, &json(&ReqJson { req: *req })),
             ClientMsg::Unknown(k) => encode_frame(*k, &[]),
         }
     }
@@ -440,6 +482,7 @@ impl ClientMsg {
                 let u: UpgradeJson = parse(&p)?;
                 ClientMsg::UpgradeVt { req: u.req, binary: u.binary }
             }
+            kind::MODES => ClientMsg::Modes { req: parse::<ReqJson>(&p)?.req },
             other => ClientMsg::Unknown(other),
         })
     }
@@ -471,9 +514,16 @@ impl HolderMsg {
                 encode_frame(kind::EXPORTED, &p)
             }
             HolderMsg::Status { records } => encode_frame(kind::STATUS, &json(&RecordsJson { records: records.clone() })),
-            HolderMsg::ForegroundIs { req, name } => {
-                encode_frame(kind::FOREGROUND_IS, &json(&ForegroundJson { req: *req, name: name.clone() }))
-            }
+            HolderMsg::ForegroundIs { req, name, pid, argv, cwd } => encode_frame(
+                kind::FOREGROUND_IS,
+                &json(&ForegroundJson {
+                    req: *req,
+                    name: name.clone(),
+                    pid: *pid,
+                    argv: argv.clone(),
+                    cwd: cwd.clone(),
+                }),
+            ),
             HolderMsg::Event(e) => encode_frame(kind::EVENT, &json(e)),
             HolderMsg::Exit(s) => encode_frame(kind::EXIT, &json(s)),
             HolderMsg::Pong => encode_frame(kind::PONG, b"{}"),
@@ -481,6 +531,7 @@ impl HolderMsg {
             HolderMsg::Upgraded { req, ok, message } => {
                 encode_frame(kind::UPGRADED, &json(&UpgradedJson { req: *req, ok: *ok, message: message.clone() }))
             }
+            HolderMsg::ModesAre(m) => encode_frame(kind::MODES_ARE, &json(m)),
             HolderMsg::Unknown(k) => encode_frame(*k, &[]),
         }
     }
@@ -507,7 +558,7 @@ impl HolderMsg {
             kind::STATUS => HolderMsg::Status { records: parse::<RecordsJson>(&p)?.records },
             kind::FOREGROUND_IS => {
                 let f: ForegroundJson = parse(&p)?;
-                HolderMsg::ForegroundIs { req: f.req, name: f.name }
+                HolderMsg::ForegroundIs { req: f.req, name: f.name, pid: f.pid, argv: f.argv, cwd: f.cwd }
             }
             kind::EVENT => HolderMsg::Event(parse(&p)?),
             kind::EXIT => HolderMsg::Exit(parse(&p)?),
@@ -517,6 +568,7 @@ impl HolderMsg {
                 let u: UpgradedJson = parse(&p)?;
                 HolderMsg::Upgraded { req: u.req, ok: u.ok, message: u.message }
             }
+            kind::MODES_ARE => HolderMsg::ModesAre(parse(&p)?),
             other => HolderMsg::Unknown(other),
         })
     }
@@ -557,6 +609,9 @@ pub struct SpawnSpec {
     pub owner: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<Appearance>,
+    /// 会话的初始标签（落盘到 `sessions/<sid>.labels.json`，供 herdr-core 网关与收养逻辑读取）
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 fn default_scrollback() -> u32 {
@@ -594,7 +649,7 @@ pub const SESSIOND_DIR: &str = "sessiond";
 pub const SOCKET_PATH_MAX: usize = 100;
 
 /// FNV-1a 64：只用来给根目录起一个短名字，区分同一用户下的多个 falcon 根，不需要抗碰撞
-fn short_hash(s: &str) -> String {
+pub fn short_hash(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= u64::from(b);
@@ -689,6 +744,12 @@ pub struct ListEntry {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exited: Option<ExitRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// `spawn` 的 stdout
@@ -734,7 +795,21 @@ mod tests {
             HolderMsg::Exported { req: 3, bytes: vec![] },
             HolderMsg::Event(Event::VtRestarted { at_offset: 5 }),
             HolderMsg::Exit(ExitStatus { code: Some(0), signal: None }),
-            HolderMsg::ForegroundIs { req: 1, name: Some("vim".into()) },
+            HolderMsg::ForegroundIs {
+                req: 1,
+                name: Some("vim".into()),
+                pid: Some(123),
+                argv: Some(vec!["vim".into(), "a.rs".into()]),
+                cwd: Some("/tmp".into()),
+            },
+            HolderMsg::ModesAre(ModesAre {
+                req: 5,
+                bracketed_paste: true,
+                app_cursor: false,
+                alt_screen: true,
+                mouse_tracking: false,
+                quiet_ms: 4200,
+            }),
         ];
         let bytes: Vec<u8> = msgs.iter().flat_map(HolderMsg::encode).collect();
         let mut dec = FrameDecoder::new();
@@ -760,6 +835,7 @@ mod tests {
             ClientMsg::StatusSeen { ids: vec!["a".into()] },
             ClientMsg::Terminate,
             ClientMsg::UpgradeVt { req: 4, binary: "/x/falcon-sessiond".into() },
+            ClientMsg::Modes { req: 7 },
         ];
         let mut bytes: Vec<u8> = msgs.iter().flat_map(ClientMsg::encode).collect();
         // 新版本才有的帧：旧端按长度跳过
@@ -811,6 +887,7 @@ mod tests {
             scrollback_lines: 10_000,
             owner: "inst".into(),
             appearance: None,
+            labels: BTreeMap::from([("falcon.project".into(), "p1".into())]),
         };
         let s = spec.encode();
         assert!(s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "{s}");

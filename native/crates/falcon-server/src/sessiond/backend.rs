@@ -387,7 +387,7 @@ pub async fn connect(transport: Transport, cb: BackendCallbacks) -> Result<(Rc<S
                         (cb.on_event)(BackendEvent::Synced(replay_text(&snapshot, &continuation, utf8.pending())));
                     }
                     HolderMsg::Status { records } => (cb.on_event)(BackendEvent::ProgramStatus(records)),
-                    HolderMsg::ForegroundIs { req, name } => {
+                    HolderMsg::ForegroundIs { req, name, .. } => {
                         if let Some(tx) = waiters.borrow_mut().remove(&req) {
                             let _ = tx.send(name);
                         }

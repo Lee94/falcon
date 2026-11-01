@@ -723,10 +723,12 @@ impl WorkspaceState {
     }
 
     /// 服务端的项目列表变了之后的收敛（React 版 `refreshProjects` 里的 `set`）：被存档的项目
-    /// 不能保持选中——它已从侧栏消失，主区不能停在一个看不见的项目上。
+    /// 不能保持选中——它已从侧栏消失，主区不能停在一个看不见的项目上。无项目分组（`standalone:*`）
+    /// 不在 `projects` 表里，照常保留。
     pub fn apply_projects(&mut self, projects: &[Project]) {
         let still = self.selected_project_id.as_ref().is_some_and(|sel| {
-            projects.iter().any(|p| &p.id == sel && p.worktree.as_ref().and_then(|w| w.archived_at).is_none_or(|t| t == 0))
+            falcon_proto::is_standalone_project_id(sel)
+                || projects.iter().any(|p| &p.id == sel && p.worktree.as_ref().and_then(|w| w.archived_at).is_none_or(|t| t == 0))
         });
         if !still {
             self.selected_project_id = None;
@@ -887,7 +889,7 @@ impl WorkspaceState {
     /// 补进来；焦点留在它名下的当前终端，否则最新的 pending，否则最近活跃的会话，
     /// 都没有就是项目空页。项目不存在时什么也不做。此后落盘。
     pub fn select_project(&mut self, project_id: &str, projects: &[Project], sessions: &[SessionWithProject]) {
-        if !projects.iter().any(|p| p.id == project_id) {
+        if !falcon_proto::is_standalone_project_id(project_id) && !projects.iter().any(|p| p.id == project_id) {
             return;
         }
         let mut extra: Vec<&SessionWithProject> =
@@ -1359,6 +1361,11 @@ mod tests {
         assert_eq!(pane_keys(&ws.layout_columns(&sessions)), ["t:c"]);
         ws.select_project("missing", &projects, &sessions);
         assert_eq!(ws.selected_project_id.as_deref(), Some("q"));
+        // 无项目分组不在 projects 表里，但可被选中并在 apply_projects 时保留
+        ws.select_project("standalone:local", &projects, &sessions);
+        assert_eq!(ws.selected_project_id.as_deref(), Some("standalone:local"));
+        ws.apply_projects(&projects);
+        assert_eq!(ws.selected_project_id.as_deref(), Some("standalone:local"));
         let before = ws.clone();
         ws.select_project("r", &[project("r")], &sessions);
         assert_eq!(ws.active, ActiveView::Project);

@@ -90,6 +90,34 @@ impl TermModeTracker {
         self.mouse_enc
     }
 
+    /// 是否开启了应用光标键模式（DECCKM，`?1h`）
+    pub fn app_cursor(&self) -> bool {
+        self.get_bool(1)
+    }
+
+    /// 是否开启了 bracketed paste（`?2004h`）
+    pub fn bracketed_paste(&self) -> bool {
+        self.get_bool(2004)
+    }
+
+    /// 是否处于备用屏（`?47h` / `?1047h` / `?1049h`）
+    pub fn alt_screen(&self) -> bool {
+        self.alt_screen != 0
+    }
+
+    /// 是否开启了任意鼠标上报模式（`?9` / `?1000` / `?1002` / `?1003`）
+    pub fn mouse_tracking(&self) -> bool {
+        self.mouse_proto != 0
+    }
+
+    fn get_bool(&self, mode: u16) -> bool {
+        BOOL_MODE_DEFAULTS
+            .iter()
+            .position(|(m, _)| *m == mode)
+            .map(|i| self.bools[i])
+            .unwrap_or(false)
+    }
+
     /// 喂入一段 PTY 输出。序列可以在任意字节处被 chunk 边界切开，状态机跨调用续接。
     /// 热路径：文本段用 memchr 式整段跳过，不逐字节走状态机。
     pub fn track(&mut self, data: &[u8]) {

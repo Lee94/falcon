@@ -278,7 +278,7 @@ pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option
 
 pub fn session_menu_items(ws: &Entity<Workspace>, session: &SessionWithProject, cx: &App) -> Vec<MenuItemSpec> {
     let w = ws.read(cx);
-    let project = w.project(&session.project_id).cloned();
+    let project = w.owner_project(&session.project_id);
     let mut items = Vec::new();
     let id = session.id.clone();
     if session.state == SessionState::Unverified {

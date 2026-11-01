@@ -232,7 +232,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
     let ui = Ui::global(cx).clone();
     let ws = ws_entity.read(cx);
     let local = crate::labels::local_word();
-    let host_label = |pid: &str| falcon_core::host_color::host_label(ws.project(pid), &local);
+    let host_label = |pid: &str| falcon_core::host_color::host_label(ws.owner_project(pid).as_ref(), &local);
 
     let session_items: Vec<PickItem> = ws
         .sessions

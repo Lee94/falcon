@@ -232,6 +232,26 @@ pub struct DeleteProjectResult {
     pub warnings: Option<Vec<String>>,
 }
 
+/// 本机「无项目」虚拟分组 ID（ADR 0026）：归属到这台机器但未绑定具体项目目录的会话。
+pub const STANDALONE_LOCAL: &str = "standalone:local";
+/// 远端 SSH 主机「无项目」虚拟分组 ID 前缀：`standalone:host:<hostId>`。
+pub const STANDALONE_HOST_PREFIX: &str = "standalone:host:";
+
+/// 是否为「无项目」虚拟分组 ID（`standalone:local` 或 `standalone:host:<hostId>`）。
+pub fn is_standalone_project_id(id: &str) -> bool {
+    id == STANDALONE_LOCAL || id.starts_with(STANDALONE_HOST_PREFIX)
+}
+
+/// 从 `standalone:host:<hostId>` 中取出 `<hostId>`。
+pub fn standalone_host_id(id: &str) -> Option<&str> {
+    id.strip_prefix(STANDALONE_HOST_PREFIX).filter(|s| !s.is_empty())
+}
+
+/// 拼出某台远端主机的「无项目」分组 ID。
+pub fn standalone_for_host(host_id: &str) -> String {
+    format!("{STANDALONE_HOST_PREFIX}{host_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

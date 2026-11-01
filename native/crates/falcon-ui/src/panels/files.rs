@@ -163,10 +163,10 @@ impl FilesPanel {
         let (pid, wd, roots, initial) = {
             let ws = self.ws.read(cx);
             let pid = ws.focus_project_id();
-            let project = pid.as_deref().and_then(|p| ws.project(p));
-            let wd = project.and_then(|p| p.working_dir.clone());
-            let roots = project.and_then(|p| p.multi.as_ref()).map(|m| m.repos.iter().map(|r| r.dir.clone()).collect()).unwrap_or_default();
-            let initial = project.and_then(project_nav_root).and_then(|p| parse_nav_path(&p, None)).unwrap_or_default();
+            let project = pid.as_deref().and_then(|p| ws.owner_project(p));
+            let wd = project.as_ref().and_then(|p| p.working_dir.clone());
+            let roots = project.as_ref().and_then(|p| p.multi.as_ref()).map(|m| m.repos.iter().map(|r| r.dir.clone()).collect()).unwrap_or_default();
+            let initial = project.as_ref().and_then(project_nav_root).and_then(|p| parse_nav_path(&p, None)).unwrap_or_default();
             (pid, wd, roots, initial)
         };
         if pid != self.project_id || wd != self.working_dir || roots != self.roots {
@@ -194,7 +194,7 @@ impl FilesPanel {
     /// 相对路径根；multi 没配 cwd 也优先走成员入口，不打开会话用的虚拟目录。
     fn resolve_initial_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pid) = self.project_id.clone() else { return };
-        let remote = self.ws.read(cx).project(&pid).is_some_and(|p| p.project_type == falcon_proto::ProjectType::Ssh);
+        let remote = self.ws.read(cx).owner_project(&pid).is_some_and(|p| p.project_type == falcon_proto::ProjectType::Ssh);
         let target = if remote { falcon_client::ProbeTarget::Project(pid) } else { falcon_client::ProbeTarget::Backend };
         self.generation += 1;
         let generation = self.generation;

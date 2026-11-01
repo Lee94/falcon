@@ -402,7 +402,7 @@ impl Workspace {
                 }
                 // 选中的项目还在就重新选一次（把它的会话补进 tabs），不在了就回总览
                 if let Some(sel) = this.state.selected_project_id.clone() {
-                    if this.projects.iter().any(|p| p.id == sel) {
+                    if this.owner_project(&sel).is_some() {
                         this.select_project(&sel, cx);
                     } else {
                         this.state.selected_project_id = None;
@@ -865,6 +865,51 @@ impl Workspace {
 
     pub fn project(&self, id: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == id)
+    }
+
+    /// 按 owner id 解析项目元数据：真实项目直接克隆返回；`standalone:local` 与
+    /// `standalone:host:<id>` 合成一条不带 `working_dir` 的虚拟 `Project`，使标题栏连接串、
+    /// 主机身份色、SSH 守护进程安装引导、文件面板等逻辑无需分支即可复用。
+    pub fn owner_project(&self, id: &str) -> Option<Project> {
+        if id == falcon_proto::STANDALONE_LOCAL {
+            return Some(Project {
+                id: id.to_string(),
+                name: rust_i18n::t!("sidebar.standalone").to_string(),
+                project_type: falcon_proto::ProjectType::Local,
+                working_dir: None,
+                shell: None,
+                ssh: None,
+                host_id: None,
+                worktree: None,
+                default_worktree_branch: None,
+                multi: None,
+                created_at: 0,
+            });
+        }
+        if let Some(hid) = falcon_proto::standalone_host_id(id) {
+            let host = self.hosts.iter().find(|h| h.id == hid)?;
+            return Some(Project {
+                id: id.to_string(),
+                name: rust_i18n::t!("sidebar.standalone").to_string(),
+                project_type: falcon_proto::ProjectType::Ssh,
+                working_dir: None,
+                shell: None,
+                ssh: Some(falcon_proto::SshConfig {
+                    host: host.host.clone(),
+                    port: host.port,
+                    username: host.username.clone(),
+                    auth_method: host.auth_method,
+                    key_path: host.key_path.clone(),
+                    has_secret: host.has_secret,
+                }),
+                host_id: Some(host.id.clone()),
+                worktree: None,
+                default_worktree_branch: None,
+                multi: None,
+                created_at: host.created_at,
+            });
+        }
+        self.project(id).cloned()
     }
 
     pub fn session(&self, id: &str) -> Option<&SessionWithProject> {

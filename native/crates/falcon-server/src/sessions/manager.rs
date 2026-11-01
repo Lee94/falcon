@@ -625,6 +625,7 @@ impl SessionManager {
             tokio::task::spawn_local(async move {
                 let Some(d) = me.local.peek().and_then(|l| l.deployed) else { return };
                 let Some(list) = local_list_sessions(&d).await else { return };
+                me.adopt_hc_entries(&list, falcon_proto::STANDALONE_LOCAL);
                 let orphans = me.orphans(list);
                 if !orphans.is_empty() {
                     log::info!("清理本机的孤儿会话：{orphans:?}");
@@ -635,18 +636,128 @@ impl SessionManager {
     }
 
     fn sweep_remote_orphans_once(&self, link: &Rc<SshLink>, deployed: Deployed) {
-        let key = host_key(&link.project());
+        let proj = link.project();
+        let key = host_key(&proj);
         if self.swept.borrow_mut().insert(key.clone()) {
             let me = self.me();
             let link = link.clone();
+            let default_standalone = proj
+                .host_id
+                .as_deref()
+                .or_else(|| falcon_proto::standalone_host_id(&proj.id))
+                .map(falcon_proto::standalone_for_host);
             tokio::task::spawn_local(async move {
                 let Some(list) = link.list_sessions(&deployed).await else { return };
+                if let Some(standalone_id) = &default_standalone {
+                    me.adopt_hc_entries(&list, standalone_id);
+                }
                 let orphans = me.orphans(list);
                 if !orphans.is_empty() {
                     log::info!("清理 {key} 上的孤儿会话：{orphans:?}");
                     link.kill_sessions(&deployed, &orphans).await;
                 }
             });
+        }
+    }
+
+    /// 收养由 `hc` / `herdr-app` 在宿主机上直接创建的持久会话（`owner` 以 `"hc:"` 开头）：
+    /// - 若带了合法的 `falcon.project` 标签且该项目存在，则归入该项目；
+    /// - 否则归入该机器的「无项目」虚拟分组（`standalone:local` 或 `standalone:host:<hostId>`）。
+    pub fn adopt_hc_entries(&self, entries: &[falcon_proto::sessiond::ListEntry], default_standalone_id: &str) {
+        if owner_row(&self.db, default_standalone_id).is_none() {
+            return;
+        }
+        for e in entries {
+            if !e.alive || !e.owner.starts_with("hc:") || e.session_id.is_empty() {
+                continue;
+            }
+            if self.db.get_session(&e.session_id).is_some() {
+                continue;
+            }
+            let project_id = e
+                .labels
+                .get("falcon.project")
+                .filter(|pid| owner_row(&self.db, pid).is_some())
+                .cloned()
+                .unwrap_or_else(|| default_standalone_id.to_string());
+            let name = e
+                .labels
+                .get("hc.name")
+                .or_else(|| e.labels.get("falcon.session"))
+                .cloned()
+                .or_else(|| {
+                    e.argv
+                        .first()
+                        .and_then(|s| s.rsplit(['/', '\\']).next())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| "Terminal".into());
+            let created_at = if e.created_at > 0 { e.created_at } else { now_ms() };
+            let row = SessionRow {
+                id: e.session_id.clone(),
+                project_id,
+                name,
+                state: "unverified".into(),
+                durable: 1,
+                dead_reason: None,
+                non_durable_reason: None,
+                created_at,
+                last_active_at: created_at,
+                cols: None,
+                rows: None,
+                agent: None,
+            };
+            self.db.insert_session(&row);
+            let entry = self.hydrate_entry(&row);
+            self.kick_auto_reattach(&entry);
+        }
+    }
+
+    /// 同步扫描本机 `<data_dir>/sessiond/sessions/` 下由 `hc` 新建的存活会话并收养入库。
+    /// 供 `GET /api/sessions` 调用，使本机 `hc run` 出来的会话无需重启即可出现在侧栏「无项目」下。
+    pub fn adopt_local_hc_sessions(&self) {
+        let sessions_dir = self.data_dir.join(falcon_proto::sessiond::SESSIOND_DIR).join("sessions");
+        let Ok(rd) = std::fs::read_dir(&sessions_dir) else { return };
+        let mut found = Vec::new();
+        for item in rd.flatten() {
+            let path = item.path();
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(sid) = fname.strip_suffix(".json") else { continue };
+            if !falcon_proto::sessiond::valid_sid(sid) {
+                continue;
+            }
+            if sessions_dir.join(format!("{sid}.exit")).exists() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(meta) = serde_json::from_slice::<falcon_proto::sessiond::SessionMeta>(&bytes) else { continue };
+            if !meta.owner.starts_with("hc:") || meta.session_id.is_empty() {
+                continue;
+            }
+            if self.db.get_session(&meta.session_id).is_some() {
+                continue;
+            }
+            let labels: std::collections::BTreeMap<String, String> = std::fs::read(sessions_dir.join(format!("{sid}.labels.json")))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            found.push(falcon_proto::sessiond::ListEntry {
+                sid: meta.sid,
+                session_id: meta.session_id,
+                pid: meta.pid,
+                version: meta.version,
+                owner: meta.owner,
+                created_at: meta.created_at,
+                alive: true,
+                exited: None,
+                cwd: meta.cwd,
+                argv: meta.argv,
+                labels,
+            });
+        }
+        if !found.is_empty() {
+            self.adopt_hc_entries(&found, falcon_proto::STANDALONE_LOCAL);
         }
     }
 
@@ -974,7 +1085,7 @@ impl SessionManager {
         *self.block_listener.borrow_mut() = Some(f);
     }
 
-    /// 主机删掉了：它上面的对话终端跟着终止，链路拆掉（主机的行没了，断线重连也找不到它）
+    /// 主机删掉了：它上面的对话终端与「无项目」独立会话跟着终止，链路拆掉（主机的行没了，断线重连也找不到它）
     pub async fn forget_machine(&self, machine: &Machine) {
         let owner = machine.owner_id();
         for row in self.db.list_sessions_by_project(&owner) {
@@ -982,6 +1093,13 @@ impl SessionManager {
         }
         self.dispose_link(&owner);
         self.machine_shell_locks.borrow_mut().remove(&owner);
+        if let Machine::Host(host_id) = machine {
+            let standalone = falcon_proto::standalone_for_host(host_id);
+            for row in self.db.list_sessions_by_project(&standalone) {
+                self.terminate(&row.id, false).await;
+            }
+            self.dispose_link(&standalone);
+        }
     }
 
     // ---------- 会话生命周期 ----------
@@ -1206,6 +1324,16 @@ impl SessionManager {
 
         let size = fallback_term_size(entry.size());
         let hint = entry.color_hint();
+        let mut labels = std::collections::BTreeMap::new();
+        if !reattach && !is_machine_owner(&row.project_id) {
+            labels.insert("falcon.project".into(), project.id.clone());
+            labels.insert("falcon.project_name".into(), project.name.clone());
+            labels.insert("falcon.session".into(), row.name.clone());
+            labels.insert("falcon.session_id".into(), row.id.clone());
+            if falcon_proto::is_standalone_project_id(&project.id) {
+                labels.insert("falcon.standalone".into(), "true".into());
+            }
+        }
         let opts = AttachOptions {
             session_id: entry.session_id.clone(),
             cwd,
@@ -1227,6 +1355,7 @@ impl SessionManager {
                 let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
                 super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive)
             },
+            labels,
         };
 
         let backend: Rc<dyn Backend> = if entry.durable {

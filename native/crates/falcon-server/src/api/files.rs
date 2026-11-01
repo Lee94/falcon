@@ -72,6 +72,13 @@ fn project_not_found() -> ApiError {
     ApiError::not_found("项目不存在")
 }
 
+fn resolve_file_project(db: &Db, id: &str) -> Result<ProjectRow, ApiError> {
+    if crate::sessions::machine::is_machine_owner(id) {
+        return Err(project_not_found());
+    }
+    crate::sessions::machine::owner_row(db, id).ok_or_else(project_not_found)
+}
+
 // ---------------- fileHostFor ----------------
 
 /// 文件操作的执行环境与工作目录根（TS 的 `fileHostFor` 的结果）
@@ -349,7 +356,7 @@ fn raw_relative(kind: HostKind, rel: &str) -> Result<String, FileError> {
 /// 并且该向用户如实转述的事实。
 async fn list(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -> ApiResult<Json<WorkspaceListing>> {
     let p = query_param(&uri, "path");
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let res = state
         .engine
         .call(move |engine| async move {
@@ -369,7 +376,7 @@ async fn list(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -
 /// Quick Open 的文件路径清单。git 仓库走 ls-files（尊重 gitignore），
 /// 否则遍历工作目录并跳过 node_modules 之类。失败回 400，与列目录同一套。
 async fn index(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<WorkspaceIndex>> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let res = state
         .engine
         .call(move |engine| async move {
@@ -400,7 +407,7 @@ fn raw_base_for(state: &AppState, project_id: &str) -> String {
 /// 读一个文件供查看 tab 渲染。二进制 / 超大文件也回 200，形状里写清是什么。
 /// 顺带给出这个项目的原始字节前缀（含新鲜令牌），图片与 HTML 预览拼它用。
 async fn file(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -> ApiResult<Json<WorkspaceFile>> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(p) = query_param(&uri, "path").filter(|p| !p.is_empty()) else {
         return Err(ApiError::bad_request("缺少文件路径"));
     };
@@ -453,7 +460,7 @@ async fn save(
         }
     }
     let bytes = axum::body::to_bytes(body, WORKSPACE_SAVE_CAP as usize).await.map_err(|_| body_too_large())?;
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(p) = query_param(&uri, "path").filter(|p| !p.is_empty()) else {
         return Err(ApiError::bad_request("缺少文件路径"));
     };
@@ -522,7 +529,7 @@ async fn raw_core(state: AppState, id: String, token: String, rel: String, heade
         return Err(ApiError::unauthorized());
     }
     let scope = scope.unwrap_or(RawScope::Project);
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     if let RawScope::Directory { host, .. } = &scope {
         if *host != host_identity(&row) {
             return Err(ApiError::unauthorized());
@@ -601,7 +608,7 @@ fn conflict_or_bad_request(message: String) -> ApiError {
 /// Content-Type 一律 octet-stream + attachment：这是"存到本地"，不是"在浏览器里
 /// 看"，浏览器按文件名后缀自己认类型。
 async fn download(State(state): State<AppState>, Path(id): Path<String>, uri: Uri) -> ApiResult<Response> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(p) = query_param(&uri, "path").filter(|p| !p.is_empty()) else {
         return Err(ApiError::bad_request("缺少文件路径"));
     };
@@ -666,7 +673,7 @@ async fn upload_core(
     if media == Media::Unsupported {
         return Err(unsupported_media_type());
     }
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(name) = query_param(&uri, "name").filter(|n| !n.is_empty()) else {
         return Err(ApiError::bad_request("缺少文件名"));
     };
@@ -718,7 +725,7 @@ async fn mkdir(
     Path(id): Path<String>,
     body: LenientJson,
 ) -> ApiResult<Json<FileOpResult>> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(p) = non_empty_str(&body, "path") else { return Err(ApiError::bad_request("缺少路径")) };
     let recursive = body.0.get("recursive") == Some(&Value::Bool(true));
     let res = state
@@ -740,7 +747,7 @@ async fn rename(
     Path(id): Path<String>,
     body: LenientJson,
 ) -> ApiResult<Json<FileOpResult>> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(p) = non_empty_str(&body, "path") else { return Err(ApiError::bad_request("缺少路径")) };
     let Some(name) = non_empty_str(&body, "name") else { return Err(ApiError::bad_request("缺少文件名")) };
     let res = state
@@ -770,7 +777,7 @@ async fn remove(
     Path(id): Path<String>,
     body: LenientJson,
 ) -> ApiResult<Json<FileRemoveResult>> {
-    let row = state.db.get_project(&id).ok_or_else(project_not_found)?;
+    let row = resolve_file_project(&state.db, &id)?;
     let Some(Value::Array(items)) = body.0.get("paths").filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) else {
         return Err(ApiError::bad_request("缺少路径"));
     };

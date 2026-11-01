@@ -13,6 +13,8 @@
 //! 主机链路的 key（`host_links`），这里的链路是项目链路那一套（`links`，断线重连并接回会话），
 //! 两套语义不同，不共用一条连接。
 
+use falcon_proto::{STANDALONE_LOCAL, standalone_host_id};
+
 use crate::db::{Db, ProjectRow};
 use crate::sessions::manager::host_as_project;
 
@@ -85,6 +87,21 @@ fn local_home() -> String {
 /// owner 一律走这里，别直接 `db.get_project`——那样机器上的会话会被当成「项目不存在」。
 /// 主机删掉了给 None，与项目被删同一个口径
 pub fn owner_row(db: &Db, owner_id: &str) -> Option<ProjectRow> {
+    if owner_id == STANDALONE_LOCAL {
+        return Some(ProjectRow {
+            id: STANDALONE_LOCAL.into(),
+            name: "无项目".into(),
+            ..local_machine_project(&local_home())
+        });
+    }
+    if let Some(host_id) = standalone_host_id(owner_id) {
+        return db.get_host(host_id).map(|host| ProjectRow {
+            id: owner_id.to_string(),
+            name: "无项目".into(),
+            host_id: Some(host_id.to_string()),
+            ..host_as_project(&host)
+        });
+    }
     match Machine::from_owner_id(owner_id) {
         None => db.get_project(owner_id),
         Some(Machine::Local) => Some(local_machine_project(&local_home())),

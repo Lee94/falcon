@@ -101,7 +101,7 @@ fn open_view(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(project) = ws.read(cx).project(&pid).cloned() else { return };
+    let Some(project) = ws.read(cx).owner_project(&pid) else { return };
     let host = project.ssh.as_ref().map(|s| s.host.clone()).unwrap_or(project.name.clone());
     let view = cx.new(|cx| InstallView::new(ws, pid, host, then_create, status, window, cx));
     let v = view.clone();

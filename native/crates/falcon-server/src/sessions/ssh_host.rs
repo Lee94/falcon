@@ -99,6 +99,8 @@ pub struct AttachOptions {
     /// 叠加进会话环境的变量：agent 会话交给启动脚本的对话 id 与是否续接（agent::launch_env）。
     /// 接回时用不上（会话早就起着了）
     pub env: Vec<(String, String)>,
+    /// 会话初始标签（落盘到 `sessions/<sid>.labels.json`，供 herdr-core 网关展示）
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// 部署失败原因与"非持久原因"共用同一套字面量（前者是后者的子集）
@@ -127,6 +129,7 @@ pub fn spawn_spec(opts: &AttachOptions, argv: Vec<String>, env: Vec<(String, Str
             background: opts.background.clone(),
             cursor: None,
         }),
+        labels: opts.labels.clone(),
     }
 }
 

@@ -58,6 +58,7 @@ fn spec(argv: &[&str]) -> SpawnSpec {
         scrollback_lines: 1000,
         owner: "test".into(),
         appearance: None,
+        labels: Default::default(),
     }
 }
 

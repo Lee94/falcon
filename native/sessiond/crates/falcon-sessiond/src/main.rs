@@ -21,6 +21,7 @@ mod bridge;
 #[cfg(test)]
 mod corpus_tests;
 mod fg;
+mod hc;
 mod holder;
 mod ipc;
 mod layout;
@@ -44,7 +45,9 @@ const USAGE: &str = "falcon-sessiond —— falcon 的会话守护进程
   falcon-sessiond attach <会话> [--force]      接上一个会话（Ctrl+\\ 断开，会话照常运行）
   falcon-sessiond list [--json]                列出会话
   falcon-sessiond kill <会话>...               结束会话
+  falcon-sessiond label <会话> [k=v | k- ...]  查看或修改会话标签
   falcon-sessiond history <会话> [--vt|--plain|--html]   导出会话历史
+  falcon-sessiond hc <serve|connect|status>    herdr-core (hc) 兼容网关
   falcon-sessiond version [--json]
 
   <会话> 是 16 位的会话短 id（list 里的 SID）。
@@ -129,7 +132,13 @@ impl Args {
 }
 
 fn main() {
+    let argv0 = std::env::args().next().unwrap_or_default();
+    let invoked_as_hc = argv0.ends_with("/herdr-core") || argv0 == "herdr-core";
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if invoked_as_hc && matches!(argv.first().map(String::as_str), Some("--version" | "-V")) {
+        println!("herdr-core 0.1.16");
+        std::process::exit(0);
+    }
     if argv.is_empty() || matches!(argv[0].as_str(), "-h" | "--help" | "help") {
         println!("{USAGE}");
         std::process::exit(if argv.is_empty() { 2 } else { 0 });
@@ -150,6 +159,9 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
         "version" => {
             let json = a.flag("--json");
             a.done()?;
+            if let Some(root) = default_root() {
+                hc::maybe_autostart(&Layout::new(root));
+            }
             let info = VersionInfo {
                 version: FALCON_VERSION.into(),
                 proto_min: PROTO_MIN,
@@ -185,6 +197,7 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
             let spec = SpawnSpec::decode(&a.value("--spec")?.context("缺 --spec")?)?;
             a.done()?;
             let res = spawn::spawn(&layout, &sid, &spec);
+            hc::maybe_autostart(&layout);
             let out = match res {
                 Ok(r) => r,
                 Err(e) => falcon_proto::sessiond::SpawnResult { ok: false, pid: 0, existing: false, error: Some(format!("{e:#}")) },
@@ -197,6 +210,7 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
             let sid = a.sid()?;
             let create = a.value("--create")?.map(|s| SpawnSpec::decode(&s)).transpose()?;
             a.done()?;
+            hc::maybe_autostart(&layout);
             Ok(bridge::run(&layout, &sid, create.as_ref()))
         }
         "attach" => {
@@ -210,6 +224,7 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
             let json = a.flag("--json");
             let layout = a.root()?;
             a.done()?;
+            hc::maybe_autostart(&layout);
             layout::list(&layout, json)?;
             Ok(0)
         }
@@ -245,6 +260,38 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
             a.done()?;
             attach::history(&layout, &sid, format)?;
             Ok(0)
+        }
+        "label" => {
+            let json = a.flag("--json");
+            let layout = a.root()?;
+            let sid = a.positional_sid()?;
+            let ops = std::mem::take(&mut a.rest);
+            let labels = if ops.is_empty() {
+                layout.read_labels(&sid)
+            } else {
+                layout.update_labels(&sid, &ops)?
+            };
+            if json {
+                println!("{}", serde_json::to_string(&labels)?);
+            } else {
+                for (k, v) in &labels {
+                    println!("{k}={v}");
+                }
+            }
+            Ok(0)
+        }
+        "connect" => {
+            let layout = a.root()?;
+            hc::run(&layout, "connect", a.rest)
+        }
+        "hc" => {
+            let sub = if a.rest.first().is_none_or(|s| s.starts_with('-')) {
+                "serve".to_string()
+            } else {
+                a.rest.remove(0)
+            };
+            let layout = a.root()?;
+            hc::run(&layout, &sub, a.rest)
         }
         other => bail!("未知子命令：{other}\n\n{USAGE}"),
     }

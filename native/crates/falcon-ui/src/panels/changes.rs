@@ -123,10 +123,13 @@ impl ChangesPanel {
     fn sync(&mut self, cx: &mut Context<Self>) {
         let ws = self.ws.read(cx);
         let visible = ws.ready() && ws.state.right_open && ws.state.right_panel == RightPanelId::Changes;
-        let target = ws.focus_project_id().map(|pid| {
-            let repo = falcon_core::workspace::select_multi_repo_dir(&ws.state.multi_repo, ws.project(&pid));
-            (pid, repo)
-        });
+        let target = ws
+            .focus_project_id()
+            .filter(|pid| !falcon_proto::is_standalone_project_id(pid))
+            .map(|pid| {
+                let repo = falcon_core::workspace::select_multi_repo_dir(&ws.state.multi_repo, ws.project(&pid));
+                (pid, repo)
+            });
         let changed = target != self.target;
         if changed {
             self.target = target;

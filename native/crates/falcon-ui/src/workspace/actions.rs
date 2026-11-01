@@ -426,7 +426,7 @@ impl Workspace {
     /// 新建终端。SSH 项目首次用时先走授权 + 部署会话守护进程（版本对不上时也走一遍部署，看得见
     /// 进度）；已拒绝过的主机不再打扰，直接建非持久会话
     pub fn new_terminal(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<String>, cx: &mut Context<Self>) {
-        let Some(project) = self.project(project_id).cloned() else {
+        let Some(project) = self.owner_project(project_id) else {
             return;
         };
         if project.project_type == falcon_proto::ProjectType::Ssh {

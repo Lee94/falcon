@@ -965,7 +965,7 @@ impl Canvas {
             PaneItem::File { project_id, .. } => Some(project_id.clone()),
             PaneItem::Diff { .. } => ws.state.diff_tab.as_ref().map(|d| d.project_id.clone()),
         };
-        let project = project_id.as_deref().and_then(|p| ws.project(p)).cloned();
+        let project = project_id.as_deref().and_then(|p| ws.owner_project(p));
 
         let label = pane_label(ws, key);
 
@@ -1220,7 +1220,7 @@ impl Canvas {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
         let entry = ws.state.pending.iter().find(|p| p.id == id).cloned();
-        let project = entry.as_ref().and_then(|e| ws.project(&e.project_id)).cloned();
+        let project = entry.as_ref().and_then(|e| ws.owner_project(&e.project_id));
         let conn = falcon_core::host_color::conn_label(project.as_ref(), ws.system.as_ref(), &crate::labels::local_word());
         let error = entry.as_ref().and_then(|e| e.error.clone());
         let (w_cancel, w_retry) = (self.ws.clone(), self.ws.clone());

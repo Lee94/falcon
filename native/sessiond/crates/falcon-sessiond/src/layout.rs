@@ -10,9 +10,10 @@
 //!
 //! 目录 0700：socket 的权限之外再挡一道，别的用户连目录都进不去。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use falcon_proto::sessiond::{ExitRecord, ListEntry, SESSIOND_DIR, SessionMeta, SpawnSpec};
 
 use crate::proc;
@@ -48,12 +49,24 @@ impl Layout {
         self.base().join("log")
     }
 
+    pub fn hc_dir(&self) -> PathBuf {
+        self.base().join("hc")
+    }
+
     pub fn meta_path(&self, sid: &str) -> PathBuf {
         self.sessions_dir().join(format!("{sid}.json"))
     }
 
     pub fn exit_path(&self, sid: &str) -> PathBuf {
         self.sessions_dir().join(format!("{sid}.exit"))
+    }
+
+    pub fn labels_path(&self, sid: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{sid}.labels.json"))
+    }
+
+    pub fn screen_path(&self, sid: &str) -> PathBuf {
+        self.sessions_dir().join(format!("{sid}.screen.txt"))
     }
 
     pub fn spec_path(&self, sid: &str) -> PathBuf {
@@ -78,11 +91,97 @@ impl Layout {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        for d in [self.base(), self.sessions_dir(), self.run_dir(), self.log_dir()] {
+        for d in [self.base(), self.sessions_dir(), self.run_dir(), self.log_dir(), self.hc_dir()] {
             std::fs::create_dir_all(&d).with_context(|| format!("建不了目录 {}", d.display()))?;
             private_dir(&d)?;
         }
+        self.ensure_bin_link();
         Ok(())
+    }
+
+    /// 维护 `<root>/bin/falcon-sessiond` 固定符号链接，指向当前正在跑的带哈希二进制。
+    /// 外部工具（`hc machine add --via '~/.falcon/bin/falcon-sessiond hc connect --'`）
+    /// 用这个固定路径，升级 falcon 后不必改 machine 配置。
+    pub fn ensure_bin_link(&self) {
+        #[cfg(unix)]
+        {
+            let Ok(exe) = std::env::current_exe() else { return };
+            let Some(name) = exe.file_name().and_then(|n| n.to_str()) else { return };
+            if !name.starts_with("falcon-sessiond-") {
+                return;
+            }
+            let bin_dir = self.root.join("bin");
+            if exe.parent() != Some(bin_dir.as_path()) {
+                return;
+            }
+            let link = bin_dir.join("falcon-sessiond");
+            let tmp = bin_dir.join(format!(".falcon-sessiond.link.{}", std::process::id()));
+            let _ = std::fs::remove_file(&tmp);
+            if std::os::unix::fs::symlink(name, &tmp).is_ok() {
+                let _ = std::fs::rename(&tmp, &link);
+            }
+            // 若这台机器尚未安装原生 herdr-core，则在 ~/.local/bin/herdr-core 放一条指向
+            // ~/.falcon/bin/falcon-sessiond 的软链，使远端 `hc machine add user@<ip>` 无需
+            // 额外参数也能直接连上本机的 falcon hc 网关。已有文件或软链时绝不覆盖。
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                let default_falcon = std::path::absolute(home.join(".falcon")).unwrap_or_else(|_| home.join(".falcon"));
+                if self.root == default_falcon {
+                    let local_bin = home.join(".local").join("bin");
+                    let hc_bin = local_bin.join("herdr-core");
+                    if std::fs::symlink_metadata(&hc_bin).is_err() && std::fs::create_dir_all(&local_bin).is_ok() {
+                        let _ = std::os::unix::fs::symlink(&link, &hc_bin);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn read_labels(&self, sid: &str) -> BTreeMap<String, String> {
+        std::fs::read(self.labels_path(sid))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn write_labels(&self, sid: &str, labels: &BTreeMap<String, String>) -> Result<()> {
+        if labels.is_empty() {
+            let _ = std::fs::remove_file(self.labels_path(sid));
+            return Ok(());
+        }
+        write_atomic(&self.labels_path(sid), &serde_json::to_vec(labels)?)
+    }
+
+    /// 按 `k=v`（设置）与 `k-`（删除）更新会话标签
+    pub fn update_labels(&self, sid: &str, ops: &[String]) -> Result<BTreeMap<String, String>> {
+        let mut labels = self.read_labels(sid);
+        for op in ops {
+            if let Some((k, v)) = op.split_once('=') {
+                if k.is_empty() {
+                    bail!("标签键不能为空：{op}");
+                }
+                labels.insert(k.to_string(), v.to_string());
+            } else if let Some(k) = op.strip_suffix('-') {
+                if k.is_empty() {
+                    bail!("标签键不能为空：{op}");
+                }
+                labels.remove(k);
+            } else {
+                bail!("标签操作格式应为 k=v 或 k-：{op}");
+            }
+        }
+        self.write_labels(sid, &labels)?;
+        Ok(labels)
+    }
+
+    pub fn read_screen(&self, sid: &str) -> Option<String> {
+        std::fs::read_to_string(self.screen_path(sid)).ok()
+    }
+
+    pub fn write_screen(&self, sid: &str, text: &str) -> Result<()> {
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(1000);
+        let tail = lines[start..].join("\n");
+        write_atomic(&self.screen_path(sid), tail.as_bytes())
     }
 
     pub fn read_meta(&self, sid: &str) -> Option<SessionMeta> {
@@ -179,12 +278,17 @@ pub fn entries(layout: &Layout) -> Vec<ListEntry> {
                     created_at: meta.created_at,
                     version: meta.version,
                     exited: layout.read_exit(sid),
+                    cwd: meta.cwd,
+                    argv: meta.argv,
+                    labels: layout.read_labels(sid),
                 });
             }
             "exit" => {
                 let Some(rec) = layout.read_exit(sid) else { continue };
                 if now - rec.at > EXIT_KEEP_MS {
                     let _ = std::fs::remove_file(e.path());
+                    let _ = std::fs::remove_file(layout.labels_path(sid));
+                    let _ = std::fs::remove_file(layout.screen_path(sid));
                     continue;
                 }
                 if layout.meta_path(sid).is_file() {
@@ -199,6 +303,9 @@ pub fn entries(layout: &Layout) -> Vec<ListEntry> {
                     created_at: 0,
                     version: String::new(),
                     exited: Some(rec),
+                    cwd: None,
+                    argv: Vec::new(),
+                    labels: layout.read_labels(sid),
                 });
             }
             _ => {}

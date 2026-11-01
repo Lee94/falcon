@@ -89,9 +89,19 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
+        let has_local_standalone = ws
+            .sessions
+            .iter()
+            .any(|s| s.project_id == falcon_proto::STANDALONE_LOCAL)
+            || ws
+                .state
+                .pending
+                .iter()
+                .any(|p| p.project_id == falcon_proto::STANDALONE_LOCAL)
+            || ws.state.selected_project_id.as_deref() == Some(falcon_proto::STANDALONE_LOCAL);
         let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived)
             .into_iter()
-            .filter(|s| s.kind != ServerKind::Local || !s.folders.is_empty() || ws.hosts.is_empty())
+            .filter(|s| s.kind != ServerKind::Local || !s.folders.is_empty() || ws.hosts.is_empty() || has_local_standalone)
             .collect();
         let empty = ws.projects.is_empty() && ws.hosts.is_empty();
 
@@ -236,21 +246,114 @@ impl Sidebar {
 
         let mut node = div().mb(zpx(ROW_GAP)).flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expanded {
+            if let Some(standalone_id) = &server.standalone_id {
+                node = node.child(self.standalone_node(standalone_id, cx));
+            }
             if server.folders.is_empty() {
-                node = node.child(
-                    div()
-                        .py_1()
-                        .pr_2()
-                        .pl(zpx(34.))
-                        .text_size(zpx(11.))
-                        .text_color(ui.muted_foreground)
-                        .child(t!("sidebar.emptyServer").to_string()),
-                );
+                if server.standalone_id.is_none() {
+                    node = node.child(
+                        div()
+                            .py_1()
+                            .pr_2()
+                            .pl(zpx(34.))
+                            .text_size(zpx(11.))
+                            .text_color(ui.muted_foreground)
+                            .child(t!("sidebar.emptyServer").to_string()),
+                    );
+                }
             } else {
                 let group = server.key.clone();
                 for (index, folder) in server.folders.into_iter().enumerate() {
                     node = node.child(self.folder_node(folder, &group, index, cx));
                 }
+            }
+        }
+        node.into_any_element()
+    }
+
+    /// 无项目的独立会话分组行（每台机器顶上一条）：不绑目录，支持直接点 ＋ 新建终端，并接回
+    /// 从外部（`hc` / `herdr-app`）创建的无项目会话
+    fn standalone_node(&self, standalone_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.ws.read(cx);
+        let selected = ws.state.selected_project_id.as_deref() == Some(standalone_id);
+        let mine: Vec<&SessionWithProject> = ws.sessions.iter().filter(|s| s.project_id == standalone_id).collect();
+        let mine_pending: Vec<&PendingSession> = ws.state.pending.iter().filter(|p| p.project_id == standalone_id).collect();
+        let sessions_open = ws.state.sessions_open.get(standalone_id).copied().unwrap_or(false);
+        let count = mine.len() + mine_pending.len();
+        let expandable = count > 0;
+        let worst = worst_state(&mine, &mine_pending);
+        let blocked = mine
+            .iter()
+            .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
+
+        let pid = standalone_id.to_string();
+        let (ws1, ws2, ws3, ws4) = (self.ws.clone(), self.ws.clone(), self.ws.clone(), self.ws.clone());
+        let pid_toggle = pid.clone();
+        let pid_badge = pid.clone();
+        let pid_select = pid.clone();
+        let pid_filter = pid.clone();
+        let new_items = menus::new_session_items(&self.ws, standalone_id, None);
+        let mut ctx_items = new_items.clone();
+        ctx_items.push(
+            menus::MenuItemSpec::new(t!("project.filterInOverview").to_string(), move |_, cx| {
+                ws4.update(cx, |w, cx| {
+                    w.overview_project = Some(pid_filter.clone());
+                    w.selected.clear();
+                    w.show_overview(cx);
+                })
+            })
+            .sep(),
+        );
+        let badge = expandable.then(|| {
+            session_count_badge(
+                format!("badge-{pid_badge}"),
+                count,
+                worst,
+                blocked && !sessions_open,
+                sessions_open,
+                move |cx| ws2.update(cx, |w, cx| w.toggle_sessions(&pid_badge, cx)),
+                cx,
+            )
+        });
+        let row = tree_row(
+            TreeRowOpts {
+                id: format!("std-{pid}"),
+                depth: 1,
+                expanded: expandable.then_some(sessions_open),
+                icon: IconName::SquareTerminal,
+                label: t!("sidebar.standalone").to_string(),
+                meta: None,
+                changes: None,
+                title: t!("sidebar.standaloneHint").to_string(),
+                muted: false,
+                selected,
+                on_toggle: expandable.then(|| -> Box<dyn Fn(&mut App)> {
+                    Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
+                }),
+                on_select: Some(Box::new(move |cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))),
+                menu: None,
+                context: Some(ctx_items),
+                on_new: Some(new_items),
+                trailing: badge,
+                meegle_drop: None,
+                drag: None,
+            },
+            cx,
+        );
+
+        let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
+        if expandable && sessions_open {
+            let active = match &ws.state.active {
+                ActiveView::Terminal { session_id: id } => Some(id.clone()),
+                _ => None,
+            };
+            let rows: Vec<AnyElement> = mine
+                .iter()
+                .map(|s| self.session_row(s, 2, active.as_deref() == Some(s.id.as_str()), cx))
+                .collect();
+            node = node.children(rows);
+            for p in mine_pending {
+                node = node.child(pending_row(p, 2, cx));
             }
         }
         node.into_any_element()

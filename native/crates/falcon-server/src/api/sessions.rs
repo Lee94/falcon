@@ -58,10 +58,14 @@ fn ssh_host_key(project: &crate::db::ProjectRow) -> (String, u16, String) {
     )
 }
 
+fn resolve_session_owner(db: &Db, id: &str) -> Option<crate::db::ProjectRow> {
+    (!is_machine_owner(id)).then(|| owner_row(db, id)).flatten()
+}
+
 /// 授权按主机记（host+port+username），不按项目：
 /// 同一台机器上的第二个项目不该再问一遍，二进制本来就已经在那里了。
 async fn host_status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<HostInstallStatus>> {
-    let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let project = resolve_session_owner(&state.db, &id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     if project.project_type != "ssh" {
         return Err(ApiError::bad_request("仅 SSH 项目有宿主机状态"));
     }
@@ -76,7 +80,7 @@ async fn host_status(State(state): State<AppState>, Path(id): Path<String>) -> A
 }
 
 async fn host_update(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Value>> {
-    let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let project = resolve_session_owner(&state.db, &id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     if project.project_type != "ssh" {
         return Err(ApiError::bad_request("仅 SSH 项目有宿主机状态"));
     }
@@ -96,6 +100,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
     let out = state
         .engine
         .call(|engine| async move {
+            engine.sessions.adopt_local_hc_sessions();
             let db = engine.db.clone();
             let projects: std::collections::HashMap<_, _> =
                 db.list_projects().into_iter().map(|p| (p.id.clone(), p)).collect();
@@ -110,12 +115,26 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                     session.title = engine.sessions.title_of(&row.id);
                     // 程序状态同理：守护进程推来的，没人在看的会话也靠它在列表上显示
                     session.program_status = engine.sessions.program_status_of(&row.id);
+                    let (project_name, project_type) = if falcon_proto::is_standalone_project_id(&row.project_id) {
+                        (
+                            "无项目".into(),
+                            if row.project_id == falcon_proto::STANDALONE_LOCAL {
+                                ProjectType::Local
+                            } else {
+                                ProjectType::Ssh
+                            },
+                        )
+                    } else {
+                        (
+                            p.map(|p| p.name.clone()).unwrap_or_else(|| "?".into()),
+                            p.and_then(|p| ProjectType::from_wire(&p.project_type))
+                                .unwrap_or(ProjectType::Local),
+                        )
+                    };
                     SessionWithProject {
                         session,
-                        project_name: p.map(|p| p.name.clone()).unwrap_or_else(|| "?".into()),
-                        project_type: p
-                            .and_then(|p| ProjectType::from_wire(&p.project_type))
-                            .unwrap_or(ProjectType::Local),
+                        project_name,
+                        project_type,
                     }
                 })
                 .collect::<Vec<_>>()
@@ -125,7 +144,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
 }
 
 async fn create(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Session>> {
-    let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    let project = resolve_session_owner(&state.db, &id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     // 存档的项目到期会连目录一起删掉，不能再往里开终端
     if project.worktree_archived_at.is_some() {
         return Err(ApiError::conflict("项目已存档，请先恢复再新建终端"));

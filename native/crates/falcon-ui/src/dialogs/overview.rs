@@ -126,7 +126,7 @@ impl SessionOverview {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let w = self.ws.read(cx);
-        let project = w.overview_project.as_deref().and_then(|id| w.project(id)).map(|p| p.name.clone());
+        let project = w.overview_project.as_deref().and_then(|id| w.owner_project(id)).map(|p| p.name);
         let mut badge = match w.overview_filter {
             None => t!("overview.filterAll").to_string(),
             Some(state) => state_label(state),
@@ -232,7 +232,7 @@ impl SessionOverview {
         let ui = Ui::global(cx).clone();
         let w = self.ws.read(cx);
         let label = session_label(session, &w.projects);
-        let host = falcon_core::host_color::host_label(w.project(&session.project_id), &local_word());
+        let host = falcon_core::host_color::host_label(w.owner_project(&session.project_id).as_ref(), &local_word());
         let dead = session.state == SessionState::Dead;
         let id = session.id.clone();
         let items = menus::session_menu_items(&self.ws, session, cx);

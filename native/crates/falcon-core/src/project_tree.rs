@@ -50,6 +50,8 @@ pub struct ServerGroup {
     /// 身份色条；React 版是 CSS 字符串，这里是结构化的（见 [`crate::host_color`]）
     pub bar: Option<HostBar>,
     pub host: Option<SshHost>,
+    /// 无项目的独立会话分组 id（`standalone:local` / `standalone:host:<id>`）；存量 SSH 组没有
+    pub standalone_id: Option<String>,
     pub folders: Vec<FolderGroup>,
 }
 
@@ -132,6 +134,7 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
         conn: None,
         bar: None,
         host: None,
+        standalone_id: Some(falcon_proto::STANDALONE_LOCAL.to_string()),
         folders: folders_of(&|p| p.project_type == ProjectType::Local),
     }];
 
@@ -143,6 +146,7 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
             conn: Some(ssh_conn(host)),
             bar: Some(host_bar_from_ssh(host)),
             host: Some(host.clone()),
+            standalone_id: Some(falcon_proto::standalone_for_host(&host.id)),
             folders: folders_of(&|p| p.project_type == ProjectType::Ssh && p.host_id.as_deref() == Some(host.id.as_str())),
         });
     }
@@ -163,6 +167,7 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
             conn: Some(conn.clone()),
             bar: ssh_bar(Some(p)),
             host: None,
+            standalone_id: None,
             folders: folders_of(&|x| x.project_type == ProjectType::Ssh && truthy(&x.host_id).is_none() && legacy_conn(x) == conn),
         });
     }
@@ -278,6 +283,11 @@ mod tests {
         assert_eq!(servers[4].bar, Some(HostBar::Neutral));
         assert_eq!(servers[1].conn.as_deref(), Some("root@10.0.0.2:22"));
         assert!(matches!(servers[1].bar, Some(HostBar::Hue(_))));
+        assert_eq!(servers[0].standalone_id.as_deref(), Some("standalone:local"));
+        assert_eq!(servers[1].standalone_id.as_deref(), Some("standalone:host:h1"));
+        assert_eq!(servers[2].standalone_id.as_deref(), Some("standalone:host:h2"));
+        assert_eq!(servers[3].standalone_id, None);
+        assert_eq!(servers[4].standalone_id, None);
     }
 
     #[test]
