@@ -389,19 +389,6 @@ pub(crate) mod js {
         i == b.len()
     }
 
-    /// `encodeURIComponent`：只放过 `A-Z a-z 0-9 - _ . ! ~ * ' ( )`，其余按 UTF-8 百分号编码（大写十六进制）
-    pub(crate) fn encode_uri_component(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        for b in s.bytes() {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') {
-                out.push(b as char);
-            } else {
-                out.push_str(&format!("%{b:02X}"));
-            }
-        }
-        out
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -422,11 +409,6 @@ pub(crate) mod js {
             assert!(string_to_number("22px").is_nan());
             assert!(string_to_number("inf").is_nan());
             assert_eq!(string_to_number("-Infinity"), f64::NEG_INFINITY);
-        }
-
-        #[test]
-        fn encode_uri_component_keeps_the_unreserved_set() {
-            assert_eq!(encode_uri_component("a b/中!"), "a%20b%2F%E4%B8%AD!");
         }
     }
 }

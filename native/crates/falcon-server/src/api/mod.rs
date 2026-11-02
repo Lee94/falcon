@@ -1,12 +1,11 @@
-//! HTTP 面：axum 路由、鉴权、错误形状、静态资源。对应 `packages/server/src/routes.ts` 与
+//! HTTP 面：axum 路由、鉴权、错误形状。对应 `packages/server/src/routes.ts` 与
 //! `index.ts` 的 Fastify 部分。路由路径、请求 / 响应体、状态码都照 Node 版（决定一：协议不变）。
 //!
 //! 鉴权与 Node 版同一口径（routes.ts 的 onRequest 钩子）：
 //! - `/api/auth/*` 不鉴权；
 //! - 原始字节路由（rawToken）、应用图标的取图路由（publicAsset）、askpass helper 各自验身份，
 //!   不走登录 cookie——它们挂在 [`public_router`] 上；
-//! - `/px0/` 与 `/api/` 同一口径，没登录的浏览器导航送去 `/?next=` 登录；
-//! - 其余 `/api/*` 一律要登录 cookie，挂在 [`protected_router`] 上。
+//! - 其余 `/api/*` 与 `/px0/*` 一律要登录 cookie，挂在 [`protected_router`] 上。
 
 pub mod app_icon;
 pub mod askpass;
@@ -25,7 +24,6 @@ pub mod projects;
 pub mod px0;
 pub mod relays;
 pub mod sessions;
-pub mod static_files;
 pub mod system;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -35,12 +33,14 @@ pub mod ws;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use axum::Json;
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::header::{ACCEPT, COOKIE};
-use axum::http::{HeaderMap, Method};
+use axum::http::header::COOKIE;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
 
 use crate::askpass::hub::AskpassHub;
 use crate::auth::{Auth, COOKIE_NAME};
@@ -136,24 +136,20 @@ pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     })
 }
 
-/// 整个应用。`web_dist` 存在时托管前端产物（浏览器版的宿主页、wasm、字体、图标）
+/// 整个应用
 pub fn app(state: AppState) -> Router {
-    let web_dist = static_files::web_dist();
-    let mut router = Router::new()
+    Router::new()
         .merge(auth_routes::router())
         .merge(ws::router())
         .merge(assistant::ws_router())
         .merge(public_router())
-        .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)));
-    router = match web_dist {
-        Some(dir) => router.fallback_service(static_files::service(dir)),
-        None if static_files::embedded::available() => router.fallback(static_files::embedded_service),
-        None => {
-            log::warn!("web 静态资源目录不存在，未托管 UI（FALCON_WEB_DIST 指了不存在的目录？）");
-            router.fallback(static_files::not_found)
-        }
-    };
-    router.with_state(state)
+        .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)))
+        .fallback(not_found)
+        .with_state(state)
+}
+
+pub async fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "Not Found" }))).into_response()
 }
 
 /// 不走登录 cookie、各自验身份的路由：原始字节（作用域令牌）、应用图标的取图路由
@@ -181,24 +177,13 @@ fn protected_router() -> Router<AppState> {
         .merge(px0::router())
         .merge(mesh::router())
         // 没有对应路由的 /api/*：同 Node 版的 onRequest 钩子，没登录先 401，登录了才 404
-        .route("/api/{*rest}", axum::routing::any(static_files::not_found))
+        .route("/api/{*rest}", axum::routing::any(not_found))
 }
 
 /// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
 async fn require_login(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if state.authenticated(req.headers()) {
         return next.run(req).await;
-    }
-    let path = req.uri().path();
-    if path.starts_with("/px0/") {
-        // 浏览器导航过来的（原生客户端把入口交给系统浏览器时，那边多半没登录过）：
-        // 送去首页登录，带上原地址，登录成功后回来（浏览器版的 `Platform::redirect_after_login`，
-        // 只认 `/px0/` 开头的同源路径，规则在 falcon-core 的 `px0::login_next`）
-        let html = req.headers().get(ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
-        if req.method() == Method::GET && html {
-            let full = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or(path);
-            return Redirect::to(&format!("/?next={}", encode_uri_component(full))).into_response();
-        }
     }
     ApiError::unauthorized().into_response()
 }

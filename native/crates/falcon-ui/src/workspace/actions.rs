@@ -126,12 +126,9 @@ impl Workspace {
         self.commit(true, cx);
     }
 
-    /// FileView 报来的脏标记；浏览器版顺手挂上 / 摘掉关标签页前的那一问
+    /// FileView 报来的脏标记
     pub fn set_file_dirty(&mut self, dirty: bool) {
-        if self.file_dirty != dirty {
-            self.file_dirty = dirty;
-            self.platform.set_unsaved_changes(dirty);
-        }
+        self.file_dirty = dirty;
     }
 
     /// 文件窗口里有没存的修改时，那个文件的名字（确认框里用）

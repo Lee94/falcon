@@ -9,12 +9,10 @@
 //! 最短往返表示），同一个 rsvg-convert 画出来的 PNG 因此也相同。
 //!
 //! 出的文件：
-//! - `native/web/icons/<id>/icon-{192,512}.png`       圆角方块：浏览器版的标签页图标（192）、Windows exe 的图标（512）
-//! - `native/crates/falcon-ui/assets/app-icons/<id>.png`   原生客户端运行时的 Dock 图标（macOS 版式）
+//! - `native/crates/falcon-desktop/assets/icon-512.png`   圆角方块：Windows exe 的默认图标（512）
+//! - `native/crates/falcon-ui/assets/app-icons/<id>.png`  原生客户端运行时的 Dock 图标（macOS 版式）
 //!
-//! 标签页图标用 PNG 不用 SVG：默认图标是栅格插画，塞进 SVG 就是一个 1MB 多的 favicon。
-//! 安装包的 AppIcon.icns 由 `cargo xtask pkg` 直接从这里现画，不在这里出。PWA 用的 maskable
-//! 与 iOS 主屏幕图标（满版方块）随 PWA 在 2026-10-11 删掉了。
+//! 安装包的 AppIcon.icns 由 `cargo xtask pkg` 直接从这里现画，不在这里出。
 
 use std::path::Path;
 
@@ -226,23 +224,23 @@ pub fn run(args: &[String]) -> Result<()> {
     if let Some(a) = args.first() {
         bail!("未知参数：{a}");
     }
-    let web_out = native().join("web/icons");
+    let win_icon = native().join("crates/falcon-desktop/assets/icon-512.png");
     let native_out = native().join("crates/falcon-ui/assets/app-icons");
     // 从头出：删掉的图标不留旧文件
-    let _ = std::fs::remove_dir_all(&web_out);
     let _ = std::fs::remove_dir_all(&native_out);
     std::fs::create_dir_all(&native_out)?;
+    if let Some(dir) = win_icon.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let all = icons();
     for (id, icon) in &all {
-        let dir = web_out.join(id);
-        std::fs::create_dir_all(&dir)?;
-        let any = rounded(icon);
-        raster(&any, &dir.join("icon-192.png"), 192)?;
-        raster(&any, &dir.join("icon-512.png"), 512)?;
+        if *id == DEFAULT_ID {
+            raster(&rounded(icon), &win_icon, 512)?;
+        }
         raster(&macos(icon), &native_out.join(format!("{id}.png")), 512)?;
     }
     let rel = |p: &Path| p.strip_prefix(root()).unwrap_or(p).display().to_string();
-    println!("wrote {} icons → {}, {}", all.len(), rel(&web_out), rel(&native_out));
+    println!("wrote {} icons → {}, {}", all.len(), rel(&win_icon), rel(&native_out));
     Ok(())
 }
 

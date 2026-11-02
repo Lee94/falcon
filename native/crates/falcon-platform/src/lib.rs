@@ -1,12 +1,12 @@
-//! 平台能力接口（docs/design/rust-unification.md 决定六）。
+//! 平台能力接口。
 //!
-//! 客户端一套界面代码（falcon-ui）、两种产物：原生桌面（falcon-desktop）与浏览器 wasm
-//! （falcon-web）。界面层不写 `cfg(target_family = "wasm")`，凡是"这台机器上有没有 / 怎么做"
+//! 界面层（falcon-ui）不写平台特定的系统调用，凡是"这台机器上有没有 / 怎么做"
 //! 的事都问这里的 [`Platform`]：偏好与工作区存哪儿、服务端从哪儿来、访问密码、本机服务、
-//! 字体、下载、HTML 预览视图、交给别的应用的链接、应用图标。两个入口在开窗口之前用 [`install`] 挂一份实现。
+//! 下载目录、HTML 预览视图、交给别的应用的链接、应用图标。入口（falcon-desktop）在开窗口之前用
+//! [`install`] 挂一份实现。
 //!
-//! 只放接口与少量数据类型，不放实现：文件、凭据库、wry、AppKit 在 falcon-desktop，
-//! localStorage、DOM 在 falcon-web。所有方法都在 GPUI 的前台线程上调（实现可以是 `!Send` 的），
+//! 只放接口与少量数据类型，不放实现：文件、凭据库、wry、AppKit 在 falcon-desktop。
+//! 所有方法都在 GPUI 的前台线程上调（实现可以是 `!Send` 的），
 //! 唯一的例外是 [`LocalService`]——它阻塞，要放到后台执行器上跑。
 
 use std::collections::BTreeMap;
@@ -16,56 +16,24 @@ use std::sync::Arc;
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window};
 
-/// 跑在什么地方。`mac` / `windows` 说的是操作系统——浏览器里是浏览器所在的那台
+/// 跑在什么地方
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlatformInfo {
     /// 键位按 mac 习惯（⌘ 系列）还是 Ctrl+Shift 系列
     pub mac: bool,
     pub windows: bool,
-    /// 跑在浏览器里：单窗口、服务端就是页面的源、没有本机文件系统、浏览器保留了 ⌘T / ⌘W 这类键
-    pub browser: bool,
 }
 
 impl PlatformInfo {
     /// 窗口左上角有系统画的红绿灯（原生 macOS），标题条要给它让位
     pub fn traffic_lights(&self) -> bool {
-        self.mac && !self.browser
+        self.mac
     }
 
     /// 窗口按钮要自己画（原生 Windows：无边框窗口，标题条右边三颗按钮 + 拖动区）
     pub fn custom_window_controls(&self) -> bool {
-        self.windows && !self.browser
+        self.windows
     }
-}
-
-/// 服务端从哪儿来
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ServerSource {
-    /// 浏览器：唯一的一台就是页面所在的源。`host` 用来在标题条上称呼它
-    PageOrigin { origin: String, host: String },
-    /// 原生：用户维护的配置表（[`Platform::load_profiles`]）+ App 托管的本机服务，
-    /// `local_url` 是"本机"这条配置此刻该连的基址（每次启动现算）
-    Profiles { local_url: String },
-}
-
-/// 回退字体（Ioskeley / Maple 中文 / Nerd 图标）从哪儿来。正文字体（Berkeley Mono TX-02）
-/// 永远嵌在界面层里
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FontSource {
-    /// 嵌在二进制里：字节由平台交进来（原生调 `falcon_ui::embedded_fallback_fonts()`）。
-    /// 不由界面层自己按分支选——那样两条路都会被链接进去，浏览器版平白多 24MB
-    Embedded(Vec<&'static [u8]>),
-    /// 启动后从 `<base_url>/fonts/*.ttf` 拉：wasm 要整个下载完才能启动，嵌全套会多出 24MB
-    Fetch { base_url: String },
-}
-
-/// 下载落到哪儿
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Downloads {
-    /// App 自己流式写盘；多个文件时缺省落在这个目录（"下载"文件夹）
-    LocalDir(PathBuf),
-    /// 交给浏览器的下载管理器（[`Platform::hand_off_download`]）
-    Browser,
 }
 
 /// 本机服务托管的结果
@@ -93,17 +61,16 @@ pub trait HtmlView {
     fn focus_parent(&self);
 }
 
-/// 平台能力。原生与浏览器各实现一份，界面层经 [`get`] 取
+/// 平台能力。原生入口实现一份，界面层经 [`get`] 取
 pub trait Platform {
     fn info(&self) -> PlatformInfo;
 
     // ---------------- 偏好（KvStore）----------------
 
-    /// 启动时把偏好整份读进来。键沿用旧 React 版 localStorage 里的那些（`falcon.themes` /
-    /// `falcon.term` …），形状逐字一致——浏览器版因此直接接上 React 版老用户的主题 / 终端设置
+    /// 启动时把偏好整份读进来
     fn load_prefs(&self) -> BTreeMap<String, String>;
 
-    /// 一个键改了。`all` 是改完之后的整份：存成一个文件的整份重写，localStorage 只写这一个键
+    /// 一个键改了。`all` 是改完之后的整份
     fn store_pref(&self, key: &str, value: &str, all: &BTreeMap<String, String>);
 
     // ---------------- 工作区（按服务端配置各一份）----------------
@@ -114,48 +81,26 @@ pub trait Platform {
 
     // ---------------- 服务端 ----------------
 
-    fn server_source(&self) -> ServerSource;
+    /// "本机"这条配置此刻该连的基址（每次启动现算）
+    fn local_server_url(&self) -> String;
 
-    /// 服务端配置表（JSON）。只有 [`ServerSource::Profiles`] 才有，另一种返回 `None`
+    /// 服务端配置表（JSON）
     fn load_profiles(&self) -> Option<String>;
     fn store_profiles(&self, json: &str);
 
     /// 记住的访问密码（按配置分条；原生在 macOS 上是数据目录里的 0600 文件、Windows 是凭据管理器，
-    /// macOS 为什么不用钥匙串见 falcon-desktop 的 passwords.rs）。浏览器里不存，登录态在 cookie 里，恒为 `None`
+    /// macOS 为什么不用钥匙串见 falcon-desktop 的 passwords.rs）
     fn password(&self, profile_id: &str) -> Option<String>;
     /// `None` = 删掉
     fn store_password(&self, profile_id: &str, password: Option<&str>);
-    /// 有没有能记住访问密码的地方（原生有）。没有的平台，设置页不画"记住的密码"那一行
-    fn has_password_store(&self) -> bool;
-    /// 登录成功后要不要离开这个页面。浏览器版被服务端从 px0 入口送来登录（`/?next=/px0/…`，
-    /// 原生客户端把 px0 地址交给系统浏览器时就是这样）时，跳回那里并返回 true——页面随即卸载，
-    /// app 不必再初始化；地址的校验在 falcon-core 的 `px0::login_next`。原生恒为 false
-    fn redirect_after_login(&self) -> bool;
 
-    /// App 托管的本机服务；没有的平台（浏览器）返回 `None`，"本机"配置就直接连
+    /// App 托管的本机服务
     fn local_service(&self) -> Option<Arc<dyn LocalService>>;
-
-    /// 文件窗口里有没有没存的修改。浏览器版据此在关标签页 / 刷新 / 离开时让浏览器先问一句
-    /// （`beforeunload`）；原生在窗口关闭与 ⌘Q 上自己弹确认框，不用这个
-    fn set_unsaved_changes(&self, _unsaved: bool) {}
-
-    /// 回到前台 / 网络恢复时调 `f`（不在 GPUI 的上下文里调，调用方自己转进去）。浏览器版接
-    /// window 的 `online` 与标签页切回可见（`visibilitychange`）：后台标签页的定时器被节流到
-    /// 分钟级，工作区看墙钟的唤醒检测在那里靠不住（旧 React 版 TerminalView 也是接这两个
-    /// 事件）。原生不调——睡眠唤醒由工作区看墙钟发现
-    fn on_resume(&self, f: Box<dyn Fn()>);
-
-    // ---------------- 字体 ----------------
-
-    fn font_source(&self) -> FontSource;
 
     // ---------------- 下载 ----------------
 
-    fn downloads(&self) -> Downloads;
-
-    /// 把一个同源下载地址交给浏览器（[`Downloads::Browser`] 时才调）。必须在用户手势的同步
-    /// 调用栈里调，否则可能被当成弹窗拦掉
-    fn hand_off_download(&self, url: &str) -> Result<(), String>;
+    /// 多个文件下载时缺省落在这个目录（"下载"文件夹）
+    fn downloads_dir(&self) -> PathBuf;
 
     // ---------------- HTML 预览 ----------------
 
@@ -174,9 +119,7 @@ pub trait Platform {
 
     /// 把自定义协议的链接（`zed://`、`vscode://`，「用编辑器打开」）交给认领它的应用。
     /// false = 确定没有应用认领这个协议（编辑器没装）；问不到的平台一律 true，没人认领时由
-    /// 系统 / 浏览器自己提示。浏览器不走 `cx.open_url`：GPUI 网页版那是 `window.open`，会为
-    /// 外部协议先开一个空白标签页、处理完也不关。尽量在用户手势里调——浏览器会拦没有手势
-    /// 的外部协议跳转（点完几秒内都还算）
+    /// 系统自己提示
     fn open_app_link(&self, url: &str, cx: &App) -> bool;
 
     // ---------------- 应用图标 ----------------
@@ -192,8 +135,7 @@ pub trait Platform {
     // ---------------- 提示音 ----------------
 
     /// 响一声「跑完了」（程序经 OSC 7501 报告 done / error，ADR 0020 决定六；设置里的试听）。
-    /// 原生用系统自带的提示音，浏览器用 Web Audio 合成；放不出来（没有声卡、浏览器还没等到
-    /// 用户手势）就静默不响，不报错——这是锦上添花
+    /// 原生用系统自带的提示音；放不出来（没有声卡）就静默不响，不报错——这是锦上添花
     fn play_chime(&self);
 }
 

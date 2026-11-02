@@ -36,7 +36,6 @@ rand = "0.10.3"
 hex = "0.4.3"
 subtle = "2.6.1"
 axum = { version = "0.8.9", features = ["ws"] }
-tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
 russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa", "flate2", "des"] }
 sha2 = "0.11.0"
@@ -44,7 +43,6 @@ indexmap = "2"
 getrandom = "0.4"
 http = "1"
 portable-pty = "0.9.0"
-rust-embed = { version = "8", features = ["interpolate-folder-path", "mime-guess"], optional = true }
 # 编进发布版的会话守护进程是 gzip 过的（5 个目标，见 sessiond/bin.rs）
 flate2 = { version = "1", optional = true }
 # 下载第三方二进制（px0，ADR 0017 决定四）。TLS 与 falcon-client 同一套：rustls + ring +
@@ -70,9 +68,6 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 libc = "0.2.190"
 
 [features]
-# 把前端产物编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_WEB_DIR 指向产物目录（绝对路径），
-# 运行时 FALCON_WEB_DIST 仍可覆盖
-embed-web = ["dep:rust-embed"]
 # 把本平台的 meegle CLI 编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_MEEGLE_BIN 指向它（绝对路径），
 # 运行时首次用到时释放到 <dataDir>/bin/
 embed-meegle = []

@@ -110,7 +110,7 @@ pub fn init(cx: &mut App) {
         .flat_map(|cmd| {
             shortcuts::bindings(cmd, info.mac)
                 .into_iter()
-                .filter(|b| b.role != BindingRole::BrowserAlias || info.browser)
+                .filter(|b| b.role != BindingRole::BrowserAlias)
                 .map(move |b| bind(cmd, &b.keystroke.gpui()))
         })
         .collect();
@@ -119,7 +119,7 @@ pub fn init(cx: &mut App) {
     let m = if info.mac { "cmd" } else { "ctrl-shift" };
     bindings.extend([
         KeyBinding::new(&format!("{m}-,"), OpenSettings, None),
-        // 界面缩放（浏览器的 ⌘+ / ⌘−）：= 与 + 同一个键，带不带 Shift 都认。⌘0 已经是会话总览，
+        // 界面缩放（⌘+ / ⌘−）：= 与 + 同一个键，带不带 Shift 都认。⌘0 已经是会话总览，
         // 「实际大小」只放在菜单与设置里
         KeyBinding::new(&format!("{m}-="), ZoomIn, None),
         KeyBinding::new(&format!("{m}-+"), ZoomIn, None),
@@ -134,15 +134,11 @@ pub fn init(cx: &mut App) {
         // NoAction 在更深的 context 上屏蔽掉它，按键落回终端自己的 key_down 编码。
         KeyBinding::new("tab", NoAction, Some("Terminal")),
         KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
-        // 文件窗口里保存。不在终端里，裸 Ctrl+S 没有 shell 语义要让（浏览器的「存网页」被
-        // 处理过的按键 preventDefault 掉）
+        // 文件窗口里保存。不在终端里，裸 Ctrl+S 没有 shell 语义要让
         KeyBinding::new(if info.mac { "cmd-s" } else { "ctrl-s" }, file_view::Save, Some("FileView")),
-        // 助手面板里切 Shell / Agent 输入。浏览器里 Ctrl+Shift+I（mac 的 ⌘⌥I）是开发者工具，另给 Alt+I
+        // 助手面板里切 Shell / Agent 输入
         KeyBinding::new(if info.mac { "cmd-shift-i" } else { "ctrl-shift-i" }, assistant::ToggleMode, Some("Assistant")),
     ]);
-    if info.browser {
-        bindings.push(KeyBinding::new("alt-i", assistant::ToggleMode, Some("Assistant")));
-    }
     // 对话里答最上面那张等批准的卡片：⌘↵ 执行（卡片按钮上标着），⌥⌘Y 总是允许、⌥⌘Z 拒绝（与 Zed
     // 一致）。挂在一段对话的 key context 上：焦点在它的终端里时也生效；在 Agent 输入行里时 ⌘↵ 先被
     // 输入框变成 `Enter { secondary }`，由那一行自己转成批准（pane.rs 的 agent_line）
@@ -165,10 +161,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &ZoomIn, cx| crate::zoom::step(1, cx));
     cx.on_action(|_: &ZoomOut, cx| crate::zoom::step(-1, cx));
     cx.on_action(|_: &ZoomReset, cx| crate::zoom::reset(cx));
-    // 连接到别的服务端 = 另开一个窗口；浏览器版只有一个窗口、连的就是页面的源
-    if !info.browser {
-        cx.on_action(|_: &ConnectServer, cx| crate::dialogs::connect::open_connect_window(cx));
-    }
+    cx.on_action(|_: &ConnectServer, cx| crate::dialogs::connect::open_connect_window(cx));
 
     set_menus(cx);
 }

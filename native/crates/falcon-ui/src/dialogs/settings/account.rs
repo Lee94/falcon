@@ -122,14 +122,14 @@ impl Render for AccountPane {
         let can_submit = !self.busy && self.next.read(cx).value().chars().count() >= 6;
 
         let status = |text: String| div().text_sm().text_color(ui.muted_foreground).child(text);
-        let mut items = vec![(
-            t!("settings.passwordStatus").to_string(),
-            None,
-            status(if password_set { t!("settings.passwordSet") } else { t!("settings.passwordUnset") }.to_string())
-                .into_any_element(),
-        )];
-        if falcon_platform::get(cx).has_password_store() {
-            items.push((
+        let items = vec![
+            (
+                t!("settings.passwordStatus").to_string(),
+                None,
+                status(if password_set { t!("settings.passwordSet") } else { t!("settings.passwordUnset") }.to_string())
+                    .into_any_element(),
+            ),
+            (
                 t!("native.settings.savedPassword").to_string(),
                 Some(t!("native.settings.savedPasswordHint").to_string()),
                 div()
@@ -149,8 +149,8 @@ impl Render for AccountPane {
                             .on_click(cx.listener(|this, _, _, cx| this.forget(cx))),
                     )
                     .into_any_element(),
-            ));
-        }
+            ),
+        ];
         let mut children = rows(items, true, cx);
         let mut form = div().flex().flex_col().gap_3().pt_4().max_w(zpx(448.));
         if password_set {

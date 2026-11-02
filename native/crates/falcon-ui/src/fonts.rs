@@ -1,4 +1,4 @@
-//! 字体注册：正文字体永远嵌着、启动时注册；回退字体原生也嵌着，浏览器版按需拉（见 [`register`]）。
+//! 字体注册：正文字体与回退字体全部嵌进二进制、启动时注册（见 [`register`]）。
 //!
 //! 字体栈照旧 React 版的 `lib/term.ts` / `styles.css`：界面与终端默认都是 Berkeley Mono（TX-02），
 //! 缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
@@ -11,7 +11,6 @@
 
 use std::borrow::Cow;
 
-use falcon_platform::FontSource;
 use gpui_kit::{App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, SharedString};
 
 /// 内嵌字体的 family 名（取自字体文件的 name 表，改字体前先确认）。
@@ -27,80 +26,22 @@ macro_rules! embedded {
     };
 }
 
-/// 注册字体。正文字体（TX-02 四个字重，共约 330KB）永远嵌着；回退字体看平台
-/// （[`FontSource`]）：原生把嵌着的字节交进来，浏览器版启动后按需拉——wasm 要整个下载完才能
-/// 启动，嵌全套会多出 24MB（Maple 中文一份就 21MB）
+/// 注册内嵌字体
 pub fn register(cx: &mut App) {
-    let mut fonts: Vec<Cow<'static, [u8]>> = [
+    let fonts: Vec<Cow<'static, [u8]>> = [
         embedded!("TX-02-Regular.ttf"),
         embedded!("TX-02-Bold.ttf"),
         embedded!("TX-02-Oblique.ttf"),
         embedded!("TX-02-BoldOblique.ttf"),
-    ]
-    .into_iter()
-    .map(Cow::Borrowed)
-    .collect();
-    let source = falcon_platform::get(cx).font_source();
-    let base_url = match source {
-        FontSource::Embedded(fallbacks) => {
-            fonts.extend(fallbacks.into_iter().map(Cow::Borrowed));
-            None
-        }
-        FontSource::Fetch { base_url } => Some(base_url),
-    };
-    if let Err(err) = cx.text_system().add_fonts(fonts) {
-        log::error!("注册内嵌字体失败：{err:#}");
-    }
-    if let Some(base_url) = base_url {
-        fetch_fallbacks(&base_url, cx);
-    }
-}
-
-/// 嵌进二进制的回退字体，给原生平台交回 [`FontSource::Embedded`]。界面层自己不调它：
-/// 浏览器版没人引用，链接时整段丢掉
-pub fn embedded_fallbacks() -> Vec<&'static [u8]> {
-    vec![
         embedded!("IoskeleyMonoTerm.ttf"),
         embedded!("MapleMonoNL-NF-CN.ttf"),
         embedded!("SymbolsNerdFontMono.ttf"),
     ]
-}
-
-/// 回退字体从 `<base>/fonts/*.ttf` 拉（浏览器版的构建脚本从 OUT_DIR 拷进产物），到了再注册、
-/// 重画，与 React 版按 unicode-range 懒加载同一个思路。到之前 gpui-web 的 Canvas 回落只顶 emoji
-/// （它的默认档），中文先是缺字形的方块。到了以后已排好的文字要重新整形：gpui-fast 会把上一帧的
-/// 排版结果原样沿用，靠 vendor/gpui-fast 的改动 1 比字体代数才会重排
-fn fetch_fallbacks(base_url: &str, cx: &mut App) {
-    // 小的先到：图标与拉丁回退几百 KB，中文 21MB 放最后
-    for name in ["SymbolsNerdFontMono.ttf", "IoskeleyMonoTerm.ttf", "MapleMonoNL-NF-CN.ttf"] {
-        let url = format!("{base_url}/fonts/{name}");
-        let http = cx.http_client();
-        cx.spawn(async move |cx| {
-            use futures::AsyncReadExt as _;
-            let started = web_time::Instant::now();
-            let bytes = async {
-                let mut resp = http.get(&url, Default::default(), true).await?;
-                anyhow::ensure!(resp.status().is_success(), "HTTP {}", resp.status());
-                let mut buf = Vec::new();
-                resp.body_mut().read_to_end(&mut buf).await?;
-                anyhow::Ok(buf)
-            }
-            .await;
-            match bytes {
-                Ok(bytes) => {
-                    let len = bytes.len();
-                    cx.update(|cx| {
-                        if let Err(err) = cx.text_system().add_fonts(vec![Cow::Owned(bytes)]) {
-                            log::error!("注册字体 {name} 失败：{err:#}");
-                        }
-                        cx.refresh_windows();
-                    });
-                    log::info!("字体 {name} 到位：{len} 字节，{} ms", started.elapsed().as_millis());
-                }
-                Err(err) => log::warn!("拉字体 {url} 失败：{err:#}"),
-            }
-        })
-        .detach();
+    .into_iter()
+    .map(Cow::Borrowed)
+    .collect();
+    if let Err(err) = cx.text_system().add_fonts(fonts) {
+        log::error!("注册内嵌字体失败：{err:#}");
     }
 }
 

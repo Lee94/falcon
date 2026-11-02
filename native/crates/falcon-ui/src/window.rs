@@ -112,11 +112,8 @@ fn window_title(profile: &ServerProfile, cx: &App) -> String {
     }
 }
 
-pub fn display_name(profile: &ServerProfile, cx: &App) -> String {
-    // 浏览器里"本机"无从谈起：页面开在哪台服务端，就叫它的主机名（profiles.rs 里放在 name 上）
-    if falcon_platform::get(cx).info().browser {
-        profile.name.clone()
-    } else if profile.is_local() {
+pub fn display_name(profile: &ServerProfile, _cx: &App) -> String {
+    if profile.is_local() {
         t!("native.server.local").to_string()
     } else if profile.name.trim().is_empty() {
         profile.url.clone()

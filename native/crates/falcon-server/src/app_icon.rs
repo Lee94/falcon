@@ -28,7 +28,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub use crate::auth::SettingsStore;
-use crate::term_env::js;
 
 // ---------------- shared/appIcon.ts ----------------
 
@@ -50,28 +49,6 @@ pub fn resolve_app_icon(stored: Option<&str>, custom: Option<&str>) -> &'static 
         return if custom.is_some_and(|c| !c.is_empty()) { CUSTOM } else { DEFAULT_APP_ICON };
     }
     stored.and_then(|s| APP_ICON_IDS.iter().find(|id| **id == s)).copied().unwrap_or(DEFAULT_APP_ICON)
-}
-
-/// 内置图标的标签页图标：圆角方块的 192 PNG（不用 SVG：默认图标是栅格插画，做成 SVG 就是
-/// 1MB 多的 favicon）
-pub fn builtin_icon_url(id: &str) -> String {
-    format!("/icons/{id}/icon-192.png")
-}
-
-pub fn custom_icon_url(version: &str) -> String {
-    format!("/api/app-icon/custom.png?v={}", js::encode_uri_component(version))
-}
-
-/// 当前选择落到页面上的标签页图标地址。选了自定义且确实有图（JS 真值）就是那张，
-/// 否则是内置的（选的是 custom 却没有图时回默认）
-pub fn favicon_url(state: &AppIconState) -> String {
-    if state.selected == CUSTOM
-        && let Some(version) = state.custom.as_deref().filter(|c| !c.is_empty())
-    {
-        return custom_icon_url(version);
-    }
-    let id = if state.selected == CUSTOM { DEFAULT_APP_ICON } else { &state.selected };
-    builtin_icon_url(id)
 }
 
 // ---------------- server/appIcon.ts ----------------
@@ -257,32 +234,8 @@ mod tests {
         assert!(!is_app_icon_choice(Some(&json!(1))));
     }
 
-    // describe("appIconLinks")（PWA 删掉后只剩标签页图标）
-
-    #[test]
-    fn favicon_builtin_uses_rounded_192_png() {
-        // 内置图标：标签页用圆角的 192 png
-        assert_eq!(favicon_url(&state("glyph", None)), "/icons/glyph/icon-192.png");
-    }
-
-    #[test]
-    fn favicon_custom_url_carries_the_version() {
-        // 自定义图标的地址带版本，换图就换地址
-        assert_eq!(favicon_url(&state("custom", Some("0f3c"))), "/api/app-icon/custom.png?v=0f3c");
-    }
-
-    #[test]
-    fn favicon_uploaded_custom_but_builtin_selected_uses_builtin() {
-        // 上传过自定义但选的是内置，用内置的
-        assert_eq!(favicon_url(&state("flash", Some("0f3c"))), "/icons/flash/icon-192.png");
-    }
-
     #[test]
     fn js_compat_edges() {
-        // 选了 custom 却没有图（含删过后存的空串）回默认
-        assert_eq!(favicon_url(&state("custom", None)), "/icons/emberwing/icon-192.png");
-        assert_eq!(favicon_url(&state("custom", Some(""))), "/icons/emberwing/icon-192.png");
-        assert_eq!(custom_icon_url("a b/中"), "/api/app-icon/custom.png?v=a%20b%2F%E4%B8%AD");
         assert_eq!(resolve_app_icon(Some("custom"), Some("")), "emberwing");
         assert_eq!(resolve_app_icon(Some(""), None), "emberwing");
     }

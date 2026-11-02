@@ -44,7 +44,6 @@ mod client;
 mod error;
 mod external;
 mod runtime;
-#[cfg(not(target_family = "wasm"))]
 mod tls;
 mod ws;
 
@@ -55,15 +54,13 @@ pub use api::system::ProbeTarget;
 pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
-#[cfg(not(target_family = "wasm"))]
-pub use runtime::runtime;
-pub use runtime::{MaybeSend, block_in_place};
+pub use runtime::{MaybeSend, block_in_place, runtime};
 pub use ws::assistant::{AssistantEvent, AssistantSink, AssistantSocket};
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 
 /// 传输进度回调：`(已完成字节数, 总字节数)`。总数未知时为 `None`。
 ///
-/// 在网络线程上调用（浏览器里是主线程），按时间节流（约 100ms 一次，开头与结尾各保证一次）；
+/// 在网络线程上调用，按时间节流（约 100ms 一次，开头与结尾各保证一次）；
 /// 回调里别做重活，要更新界面就把数字丢给 UI 线程。
 pub type ProgressFn = dyn Fn(u64, Option<u64>) + Send + Sync;

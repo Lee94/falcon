@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use falcon_platform::{
-    Downloads, FontSource, HtmlView, LocalService, Platform, PlatformInfo, ServerSource,
-};
+use falcon_platform::{HtmlView, LocalService, Platform, PlatformInfo};
 use gpui_kit::{App, Window};
 
 /// "本机"配置的缺省基址：没装过服务、也没用 FALCON_LOCAL_URL 改指别处时
@@ -58,7 +56,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 impl Platform for Desktop {
     fn info(&self) -> PlatformInfo {
-        PlatformInfo { mac: cfg!(target_os = "macos"), windows: cfg!(windows), browser: false }
+        PlatformInfo { mac: cfg!(target_os = "macos"), windows: cfg!(windows) }
     }
 
     fn load_prefs(&self) -> BTreeMap<String, String> {
@@ -85,15 +83,14 @@ impl Platform for Desktop {
         }
     }
 
-    fn server_source(&self) -> ServerSource {
+    fn local_server_url(&self) -> String {
         // "本机"连哪儿每次启动现算，不信存下来的：开发时 FALCON_LOCAL_URL 指向 cargo run -p falcon-server
         // 或临时实例；否则按已安装服务的端口（自定义过 --port 的也能连上）；都没有才是默认 4923
-        let local_url = std::env::var("FALCON_LOCAL_URL").ok().unwrap_or_else(|| {
+        std::env::var("FALCON_LOCAL_URL").ok().unwrap_or_else(|| {
             crate::local_service::installed_service_args()
                 .map(|a| a.local_url())
                 .unwrap_or_else(|| LOCAL_URL.to_string())
-        });
-        ServerSource::Profiles { local_url }
+        })
     }
 
     fn load_profiles(&self) -> Option<String> {
@@ -110,16 +107,6 @@ impl Platform for Desktop {
         crate::passwords::get(&self.data_dir, profile_id)
     }
 
-    fn has_password_store(&self) -> bool {
-        true
-    }
-
-    fn redirect_after_login(&self) -> bool {
-        false
-    }
-
-    fn on_resume(&self, _f: Box<dyn Fn()>) {}
-
     fn store_password(&self, profile_id: &str, password: Option<&str>) {
         crate::passwords::set(&self.data_dir, profile_id, password);
     }
@@ -128,19 +115,10 @@ impl Platform for Desktop {
         Some(Arc::new(crate::local_service::BundledService))
     }
 
-    fn font_source(&self) -> FontSource {
-        FontSource::Embedded(falcon_ui::embedded_fallback_fonts())
-    }
-
-    fn downloads(&self) -> Downloads {
-        let dir = directories::UserDirs::new()
+    fn downloads_dir(&self) -> PathBuf {
+        directories::UserDirs::new()
             .and_then(|u| u.download_dir().map(Path::to_path_buf).or_else(|| Some(u.home_dir().to_path_buf())))
-            .unwrap_or_else(std::env::temp_dir);
-        Downloads::LocalDir(dir)
-    }
-
-    fn hand_off_download(&self, _url: &str) -> Result<(), String> {
-        Err("原生客户端自己写盘，不交给浏览器".into())
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     #[cfg(feature = "webview")]

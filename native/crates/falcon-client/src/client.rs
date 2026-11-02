@@ -3,24 +3,19 @@
 //! 具体的 REST 方法按功能域分在 `api/` 下，这里只有它们共用的那层管道。
 
 use std::future::Future;
-#[cfg(not(target_family = "wasm"))]
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use parking_lot::{Mutex, RwLock};
-use reqwest::header::CONTENT_TYPE;
-#[cfg(not(target_family = "wasm"))]
-use reqwest::header::{CONTENT_LENGTH, COOKIE, HeaderMap, SET_COOKIE};
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, SET_COOKIE};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
-#[cfg(not(target_family = "wasm"))]
 use crate::ProgressFn;
 use crate::error::{ApiError, ApiErrorKind, ApiResult};
 use crate::runtime::{self, MaybeSend};
@@ -96,9 +91,6 @@ impl Auth {
         self.token.read().clone()
     }
 
-    /// 浏览器里 Cookie 是脚本不许设的请求头，登录 cookie 又是 httpOnly：由浏览器自己带
-    /// （同源 fetch / WebSocket 默认就带），这里不出手。
-    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn cookie_header(&self) -> Option<String> {
         self.token.read().as_ref().map(|t| format!("{COOKIE_NAME}={t}"))
     }
@@ -182,7 +174,6 @@ pub(crate) enum ReqBody {
     Json(Bytes),
     Raw { data: Bytes, content_type: String },
     /// 本机文件按流上传。每次发送（含重登后的重放）都重新打开文件、重新计进度。
-    #[cfg(not(target_family = "wasm"))]
     File { path: PathBuf, progress: Option<Arc<ProgressFn>> },
 }
 
@@ -312,14 +303,6 @@ pub(crate) fn json_body<B: Serialize + ?Sized>(body: &B) -> ApiResult<ReqBody> {
         .map_err(|e| ApiError::internal(format!("请求体序列化失败：{e}")))
 }
 
-#[cfg(target_family = "wasm")]
-fn build_http() -> Result<reqwest::Client, String> {
-    // 浏览器的 fetch：TLS、连接池、代理、超时都归浏览器管，能设的只剩请求头。
-    // credentials 用 fetch 的缺省 same-origin——服务端就是页面的源，登录 cookie 自动带上
-    reqwest::Client::builder().build().map_err(|e| crate::error::error_chain(&e))
-}
-
-#[cfg(not(target_family = "wasm"))]
 fn build_http() -> Result<reqwest::Client, String> {
     use crate::error::error_chain;
     use crate::runtime::runtime;
@@ -353,9 +336,7 @@ impl Inner {
     }
 
     async fn build(&self, req: &Req) -> ApiResult<reqwest::RequestBuilder> {
-        #[allow(unused_mut)]
         let mut rb = self.http()?.request(req.method.clone(), format!("{}{}", self.base, req.path));
-        #[cfg(not(target_family = "wasm"))]
         if let Some(cookie) = self.auth.cookie_header() {
             rb = rb.header(COOKIE, cookie);
         }
@@ -365,7 +346,6 @@ impl Inner {
             ReqBody::Raw { data, content_type } => {
                 rb.header(CONTENT_TYPE, content_type.as_str()).body(data.clone())
             }
-            #[cfg(not(target_family = "wasm"))]
             ReqBody::File { path, progress } => {
                 let file = tokio::fs::File::open(path)
                     .await
@@ -466,17 +446,7 @@ impl Inner {
         };
         let resp = self.send_once(&req).await?;
         let status = resp.status().as_u16();
-        #[cfg(not(target_family = "wasm"))]
         let token = token_from_headers(resp.headers());
-        // 浏览器读不到 Set-Cookie（httpOnly，而且 fetch 本来就把它藏起来），cookie 已经
-        // 进了浏览器的罐子。这里记一枚每次登录都不同的占位 token：登录态的"新旧"判断
-        // （login_required / relogin 里比 token）照旧成立
-        #[cfg(target_family = "wasm")]
-        let token = {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static SEQ: AtomicU64 = AtomicU64::new(1);
-            Some(format!("browser-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
-        };
         let body = resp.bytes().await.map_err(|e| ApiError::network(&e))?;
         if !(200..300).contains(&status) {
             return Err(ApiError::http(status, &body));
@@ -501,7 +471,6 @@ impl Inner {
 }
 
 /// 从响应头里挑出 `falcon_token`。
-#[cfg(not(target_family = "wasm"))]
 ///
 /// 只认名字对得上的那一条：反代可能自己也种 cookie（会话粘滞之类），那些不归我们管。
 /// 服务端登出时会种一个清空的同名 cookie（值为空），那不算 token。
@@ -515,7 +484,7 @@ fn token_from_headers(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;

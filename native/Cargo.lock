@@ -2235,8 +2235,6 @@ dependencies = [
  "bytes",
  "falcon-proto",
  "futures",
- "gloo-timers",
- "js-sys",
  "log",
  "parking_lot",
  "percent-encoding",
@@ -2251,9 +2249,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "web-time",
 ]
 
@@ -2337,7 +2332,6 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "russh",
- "rust-embed",
  "rustls",
  "rustls-platform-verifier",
  "scrypt",
@@ -2352,7 +2346,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tower",
- "tower-http 0.7.1",
  "url",
 ]
 
@@ -2403,19 +2396,6 @@ dependencies = [
  "url",
  "web-time",
  "woff2-patched",
-]
-
-[[package]]
-name = "falcon-web"
-version = "0.3.18"
-dependencies = [
- "falcon-core",
- "falcon-platform",
- "falcon-ui",
- "gpui-kit",
- "log",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -3156,18 +3136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gloo-timers"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
-dependencies = [
- "futures-channel",
- "futures-core",
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3373,6 +3341,8 @@ dependencies = [
 [[package]]
 name = "gpui-fast"
 version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35cb4c01c92462871c34d560b4ef21b7287a355036afa1a1cafede9c13ce55a0"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3579,6 +3549,8 @@ dependencies = [
 [[package]]
 name = "gpui-fast-platform"
 version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4367bf7c733230468d44823d356aef89b1586b391afaf7f9a280d1a6703ac02c"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3593,6 +3565,8 @@ dependencies = [
 [[package]]
 name = "gpui-fast-web"
 version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007dd7d6aea0c857037b8a655c824082de1124265c3da666186dcb5f09a63c99"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3613,6 +3587,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm_thread",
  "web-sys",
  "web-time",
 ]
@@ -3962,6 +3937,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbdbdac421178313fed8929fe95b42634a266a735079fcf03ff231bc2ccb2c5e"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -4045,6 +4022,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand 0.9.5",
+ "wasm_thread",
  "web-time",
 ]
 
@@ -4085,6 +4063,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aedd55b99dc77e28df8202b0ea868aa5c90fda4aefff539ea21087d7c2ff4bfb"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4105,6 +4085,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm_thread",
  "web-sys",
  "web-time",
 ]
@@ -4493,12 +4474,6 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "http-range-header"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -7802,7 +7777,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
- "tower-http 0.6.11",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -8075,7 +8050,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d84e8ba78bd384263e5922f084cbe1b081c3b7e69add59c8fb097b879ba968a"
 dependencies = [
  "globset",
- "mime_guess",
  "sha2 0.11.0",
  "walkdir",
 ]
@@ -9787,31 +9761,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "bitflags 2.13.2",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "http-range-header",
- "httpdate",
- "mime",
- "mime_guess",
- "percent-encoding",
- "pin-project-lite",
- "tokio",
- "tokio-util",
- "tower-layer",
- "tower-service",
-]
-
-[[package]]
 name = "tower-layer"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10678,6 +10627,18 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm_thread"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7516db7f32decdadb1c3b8deb1b7d78b9df7606c5cc2f6241737c2ab3a0258e"
+dependencies = [
+ "futures",
+ "js-sys",
+ "wasm-bindgen",
  "web-sys",
 ]
 

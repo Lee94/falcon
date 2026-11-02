@@ -12,9 +12,7 @@
 
 use std::any::Any;
 use std::future::Future;
-use std::sync::Arc;
-#[cfg(not(target_family = "wasm"))]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::maybe_send::MaybeSend;
 use crate::ttl_cache::{LoadError, TtlCache, TtlCacheLoadOpts, now_ms};
@@ -91,20 +89,9 @@ impl MeegleCache {
 }
 
 /// 进程级的那一份（React 版的模块单例）
-#[cfg(not(target_family = "wasm"))]
 pub fn meegle_cache() -> &'static MeegleCache {
     static CACHE: OnceLock<MeegleCache> = OnceLock::new();
     CACHE.get_or_init(MeegleCache::new)
-}
-
-/// 浏览器里只有一条线程；在飞的 load 不是 `Send`，缓存也就不是 `Sync`，放不进 static。
-/// 线程局部里存一份泄漏出来的 `'static` 引用，对外签名不变
-#[cfg(target_family = "wasm")]
-pub fn meegle_cache() -> &'static MeegleCache {
-    thread_local! {
-        static CACHE: &'static MeegleCache = Box::leak(Box::new(MeegleCache::new()));
-    }
-    CACHE.with(|c| *c)
 }
 
 #[cfg(test)]

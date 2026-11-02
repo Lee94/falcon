@@ -26,16 +26,6 @@ pub struct ExternalResponse {
     pub body: Vec<u8>,
 }
 
-#[cfg(target_family = "wasm")]
-fn client() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| reqwest::Client::builder().build().map_err(|e| format!("建外链 HTTP 客户端失败：{e}")))
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-#[cfg(not(target_family = "wasm"))]
 fn client() -> Result<&'static reqwest::Client, String> {
     use std::time::Duration;
 
@@ -85,7 +75,6 @@ pub fn fetch_external(
             for (name, value) in headers {
                 req = req.header(name, value);
             }
-            #[allow(unused_mut)]
             let mut resp = req.send().await.map_err(|e| e.to_string())?;
             if resp.content_length().is_some_and(|n| n as usize > EXTERNAL_MAX_BYTES) {
                 return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
@@ -96,26 +85,13 @@ pub fn fetch_external(
                 .iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
                 .collect();
-            #[cfg(not(target_family = "wasm"))]
-            let body = {
-                let mut body = Vec::new();
-                while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-                    if body.len() + chunk.len() > EXTERNAL_MAX_BYTES {
-                        return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                body
-            };
-            // fetch 的响应体只能整份读；上限照样查（读完之后）
-            #[cfg(target_family = "wasm")]
-            let body = {
-                let body = resp.bytes().await.map_err(|e| e.to_string())?;
-                if body.len() > EXTERNAL_MAX_BYTES {
+            let mut body = Vec::new();
+            while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+                if body.len() + chunk.len() > EXTERNAL_MAX_BYTES {
                     return Err(format!("响应超过 {} MB 上限", EXTERNAL_MAX_BYTES / 1024 / 1024));
                 }
-                body.to_vec()
-            };
+                body.extend_from_slice(&chunk);
+            }
             Ok(ExternalResponse { status, headers, body })
         };
         run(fut).await.map_err(|_| "网络运行时已关闭".to_string())?

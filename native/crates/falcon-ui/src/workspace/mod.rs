@@ -248,7 +248,6 @@ impl Workspace {
         self._tasks.push(Self::poll(cx, Duration::from_millis(1500), |this, cx| this.pull_askpass(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
         self._tasks.push(Self::watch_wake(cx));
-        self._tasks.push(Self::watch_resume(cx));
         // 自动重登成功后，停在"需要登录"的界面自己恢复
         let mut events = self.client.subscribe_auth();
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -285,23 +284,6 @@ impl Workspace {
                 if gap < TICK + Duration::from_secs(10) {
                     continue;
                 }
-                if this.update(cx, |this, cx| this.resume(cx)).is_err() {
-                    break;
-                }
-            }
-        })
-    }
-
-    /// 浏览器版的网络恢复 / 标签页切回前台（`Platform::on_resume`）：与睡眠唤醒同样处理。
-    /// 原生不触发，回调随即被丢掉，这个任务读到通道关闭就结束
-    fn watch_resume(cx: &mut Context<Self>) -> Task<()> {
-        let (tx, mut resumes) = futures::channel::mpsc::unbounded::<()>();
-        falcon_platform::get(cx).on_resume(Box::new(move || {
-            let _ = tx.unbounded_send(());
-        }));
-        cx.spawn(async move |this, cx| {
-            use futures::StreamExt;
-            while resumes.next().await.is_some() {
                 if this.update(cx, |this, cx| this.resume(cx)).is_err() {
                     break;
                 }
@@ -427,10 +409,6 @@ impl Workspace {
                     if remember {
                         this.store_password(Some(&password));
                         this.client.set_relogin_password(Some(password.clone()));
-                    }
-                    // 浏览器版从 px0 入口被送来登录的：直接回去，页面随即卸载
-                    if falcon_platform::get(cx).redirect_after_login() {
-                        return;
                     }
                     this.auth_phase = AuthPhase::Checking;
                     this.init(cx);

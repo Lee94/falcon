@@ -8,14 +8,11 @@
 //!
 //! 工作区状态（列排布、侧栏展开……）按配置分开存：id 只在一台服务端内唯一。
 //!
-//! 配置表存哪儿、密码记在哪儿、"本机"连哪个端口都归平台（falcon-platform 的
-//! [`ServerSource`]）。浏览器版只有一份配置：页面所在的源。id 就用 `local`——localStorage
-//! 天然按源分，偏好键不加配置后缀，沿用旧 React 版存的键；访问密码不存（浏览器里没有地方存，
-//! 登录态在 cookie 里）。
+//! 配置表存哪儿、密码记在哪儿、"本机"连哪个端口都归平台（falcon-platform 的 [`Platform`]）。
 
 use std::rc::Rc;
 
-use falcon_platform::{Platform, ServerSource};
+use falcon_platform::Platform;
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
 
@@ -74,32 +71,23 @@ impl Global for Profiles {}
 impl Profiles {
     pub fn init(cx: &mut App) {
         let platform = falcon_platform::get(cx);
-        let file = match platform.server_source() {
-            // 浏览器：唯一的配置就是页面的源（name 放主机名，标题条上显示它）
-            ServerSource::PageOrigin { origin, host } => ProfilesFile {
-                profiles: vec![ServerProfile { id: LOCAL_PROFILE_ID.into(), name: host, url: origin, plaintext_ok: true }],
-                last_connected: None,
-            },
-            // 原生："本机"连哪儿每次启动现算（平台给的 local_url），不信存下来的
-            ServerSource::Profiles { local_url } => {
-                let mut file: ProfilesFile =
-                    platform.load_profiles().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-                if let Some(p) = file.profiles.iter_mut().find(|p| p.id == LOCAL_PROFILE_ID) {
-                    p.url = local_url;
-                } else {
-                    file.profiles.insert(
-                        0,
-                        ServerProfile {
-                            id: LOCAL_PROFILE_ID.into(),
-                            name: String::new(),
-                            url: local_url,
-                            plaintext_ok: true,
-                        },
-                    );
-                }
-                file
-            }
-        };
+        // "本机"连哪儿每次启动现算（平台给的 local_server_url），不信存下来的
+        let local_url = platform.local_server_url();
+        let mut file: ProfilesFile =
+            platform.load_profiles().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        if let Some(p) = file.profiles.iter_mut().find(|p| p.id == LOCAL_PROFILE_ID) {
+            p.url = local_url;
+        } else {
+            file.profiles.insert(
+                0,
+                ServerProfile {
+                    id: LOCAL_PROFILE_ID.into(),
+                    name: String::new(),
+                    url: local_url,
+                    plaintext_ok: true,
+                },
+            );
+        }
         cx.set_global(Profiles { file, platform });
     }
 

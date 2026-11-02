@@ -1,8 +1,8 @@
-# Falcon 的 Cargo workspace：服务端（falcon-server）、客户端（原生 falcon-desktop + 浏览器 falcon-web，
-# 界面在 falcon-ui）与构建任务（xtask）。客户端设计见 docs/design/gpui-client.md 与 rust-unification.md。
+# Falcon 的 Cargo workspace：服务端（falcon-server）、原生客户端（falcon-desktop，
+# 界面在 falcon-ui）与构建任务（xtask）。客户端设计见 docs/design/gpui-client.md。
 #
 # 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。GPUI 只出现在客户端的
-# falcon-platform / falcon-ui / falcon-desktop / falcon-web 四个 crate，其余 crate 不依赖 GPUI——
+# falcon-platform / falcon-ui / falcon-desktop 三个 crate，其余 crate 不依赖 GPUI——
 # GPUI 每次破坏性升级只波及这一层。
 [workspace]
 resolver = "3"
@@ -65,33 +65,6 @@ opt-level = 1
 [profile.release]
 debug = "line-tables-only"
 
-# 浏览器版（falcon-web）：体积优先。wasm 要整个下载完才能启动，每 MB 都是首屏时间；
-# 调试行表在浏览器里也用不上
-[profile.web]
-inherits = "release"
-opt-level = "s"
-debug = false
-strip = true
-lto = true
-codegen-units = 1
-
-# 构建脚本是宿主机上的可执行文件，绕开 rustup 代理时 strip 用的 rust-objcopy 找不到 libLLVM
-# 而报警告；它们也不进产物，不必 strip
-[profile.web.build-override]
-strip = false
-
 # 去掉 tty 模块的 alacritty fork（vendor/alacritty_terminal/Cargo.toml 顶部注释写了改了什么、怎么升级）
 [patch."https://github.com/zed-industries/alacritty"]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
-
-# GPUI 的 fork（各自 Cargo.toml 顶部有改动清单）：
-# - gpui-fast：文字排版跨帧沿用时比字体代数，浏览器版后到的中文字体才会生效；
-# - web / platform 两层：浏览器版跑的是 gpui-fast-web，IME 候选框跟随光标的补丁在它身上；四份都
-#   关掉了默认的 `multithreaded`——它拉进只能 nightly 编的 wasm_thread，而 gpui-kit 按默认
-#   feature 依赖这两层，上游 gpui-pre 那一族开了 gpui-fast 也照样参与编译，所以两族都得关
-[patch.crates-io]
-gpui-fast = { path = "vendor/gpui-fast" }
-gpui-fast-web = { path = "vendor/gpui-fast-web" }
-gpui-fast-platform = { path = "vendor/gpui-fast-platform" }
-gpui-pre-web = { path = "vendor/gpui-pre-web" }
-gpui-pre-platform = { path = "vendor/gpui-pre-platform" }

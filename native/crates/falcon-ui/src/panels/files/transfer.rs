@@ -20,7 +20,6 @@ use std::time::Duration;
 use falcon_client::{ApiError, FalconClient};
 use falcon_core::file_path::{deepest_upload_dirs, rel_dir};
 use falcon_core::file_search::basename;
-use falcon_platform::Downloads;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::Sizable;
@@ -456,28 +455,14 @@ fn unique_dest(dir: &Path, name: &str) -> PathBuf {
 
 /// 把工作目录里的文件下载到本机。调用方只传**文件**：文件夹要打包，那是终端里的事（ADR 0009）。
 ///
-/// - 原生：一个文件弹系统"存储为"对话框（它自己会问覆盖）；多个文件选一次文件夹，逐个存
-///   进去——每个文件弹一次存储框太烦，而浏览器那种做法（交给浏览器的下载目录）在原生上没有对应物；
-/// - 浏览器：逐个交给 `<a download>`，进度与存到哪儿归浏览器的下载管理器（沿用 React 版）。
-///   在点击的同步调用栈里触发，不会被当成弹窗拦掉。
+/// 一个文件弹系统"存储为"对话框（它自己会问覆盖）；多个文件选一次文件夹，逐个存进去——
+/// 每个文件弹一次存储框太烦。
 pub(crate) fn download(ws: Entity<Workspace>, project_id: String, paths: Vec<String>, window: &mut Window, cx: &mut App) {
     if paths.is_empty() {
         return;
     }
     let client = ws.read(cx).client.clone();
-    let platform = falcon_platform::get(cx);
-    let downloads_dir = match platform.downloads() {
-        Downloads::LocalDir(dir) => dir,
-        Downloads::Browser => {
-            for path in paths {
-                let url = format!("{}{}", client.base_url(), client.download_path(&project_id, &path));
-                if let Err(err) = platform.hand_off_download(&url) {
-                    log::warn!("触发下载失败（{path}）：{err}");
-                }
-            }
-            return;
-        }
-    };
+    let downloads_dir = falcon_platform::get(cx).downloads_dir();
     let single = paths.len() == 1;
     if let Some(dest) = test_paths(if single { "FALCON_TEST_SAVE_AS" } else { "FALCON_TEST_SAVE_DIR" }).and_then(|p| p.into_iter().next()) {
         let targets = if single {

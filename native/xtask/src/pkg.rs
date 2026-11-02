@@ -2,14 +2,12 @@
 //! postinstall 以当前登录用户跑 `falcon service install`（用户级 LaunchAgent，不能用 root
 //! 的 guid），装过服务的话带上原 plist 里的 --host / --port / --data-dir。
 //!
-//! App 的可执行文件默认是原生客户端（GPUI，设计见 docs/design/gpui-client.md）：
-//! 它启动时自己做 launcher.sh 那两步（service install → 等端口），然后直接连本机服务。
-//! `--launcher` 退回旧的 launcher.sh（注册服务后用浏览器打开浏览器版界面）。
+//! App 的可执行文件是原生客户端（GPUI，设计见 docs/design/gpui-client.md）：
+//! 它启动时自己做 `service install` → 等端口，然后直接连本机服务。
 //!
 //! ```text
 //! cargo xtask pkg                 # 没有当前平台的服务端产物就先 cargo xtask server
 //! cargo xtask pkg --skip-bin      # 必须已有 release/falcon-v*-darwin-*
-//! cargo xtask pkg --launcher      # App 里放 launcher.sh 而不是原生客户端
 //! ```
 //!
 //! 产物 release/Falcon-v<版本>-darwin-<arch>.pkg。无开发者证书，只做 ad-hoc
@@ -23,7 +21,7 @@ use anyhow::{Result, bail};
 
 use crate::util::{self, TempDir, host_platform, native, root, version};
 
-fn build(skip_bin: bool, use_launcher: bool) -> Result<()> {
+fn build(skip_bin: bool) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("macOS 安装包只能在 macOS 上打（需要 pkgbuild / iconutil / codesign）");
     }
@@ -39,7 +37,7 @@ fn build(skip_bin: bool, use_launcher: bool) -> Result<()> {
             bail!("找不到 {}，先 cargo xtask server", rel(&server_bin));
         }
         println!("== 没有服务端产物，先 cargo xtask server ==");
-        crate::server::build(&target, false)?;
+        crate::server::build(&target)?;
     }
     if !server_bin.is_file() {
         bail!("cargo xtask server 之后仍没有 {}", rel(&server_bin));
@@ -87,19 +85,14 @@ fn build(skip_bin: bool, use_launcher: bool) -> Result<()> {
     // 也和 launchd KeepAlive 抢同一个端口。启动器只负责 install + 打开界面。
     copy_exec(&server_bin, &resources.join("falcon"))?;
 
-    // 读已装服务原参数的 shell 片段：postinstall 与 launcher.sh 都从 App 里 source 它，
-    // 所以不论 App 入口是原生客户端还是 launcher.sh 都要带上
+    // 读已装服务原参数的 shell 片段：postinstall 从 App 里 source 它
     std::fs::copy(templates.join("service-args.sh"), resources.join("service-args.sh"))?;
 
     let exe = macos_dir.join("Falcon");
-    if use_launcher {
-        copy_exec(&templates.join("launcher.sh"), &exe)?;
-    } else {
-        // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
-        println!("== cargo build --release -p falcon-desktop ==");
-        util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
-        copy_exec(&native().join("target/release/falcon-desktop"), &exe)?;
-    }
+    // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
+    println!("== cargo build --release -p falcon-desktop ==");
+    util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
+    copy_exec(&native().join("target/release/falcon-desktop"), &exe)?;
 
     let plist = std::fs::read_to_string(templates.join("Info.plist"))?.replace("__VERSION__", ver);
     std::fs::write(contents.join("Info.plist"), plist)?;
@@ -138,15 +131,13 @@ fn build(skip_bin: bool, use_launcher: bool) -> Result<()> {
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut skip_bin = false;
-    let mut use_launcher = false;
     for a in args {
         match a.as_str() {
             "--skip-bin" => skip_bin = true,
-            "--launcher" => use_launcher = true,
             other => bail!("未知参数：{other}"),
         }
     }
-    build(skip_bin, use_launcher)
+    build(skip_bin)
 }
 
 /// 拷贝并设成可执行

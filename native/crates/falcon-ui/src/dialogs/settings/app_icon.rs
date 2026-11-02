@@ -169,7 +169,7 @@ impl Render for AppIconPicker {
                 }),
         );
         let info = falcon_platform::get(cx).info();
-        let dock_note = info.mac && !info.browser;
+        let dock_note = info.mac;
         let footer = div()
             .mt_3()
             .flex()

@@ -39,7 +39,7 @@ impl LoginView {
         Self {
             ws,
             input,
-            remember: falcon_platform::get(cx).has_password_store(),
+            remember: true,
             error: None,
             busy: false,
         }
@@ -93,17 +93,15 @@ impl Render for LoginView {
                     .child(div().text_base().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(t!("login.title").to_string()))
                     .child(div().text_xs().text_color(ui.muted_foreground).child(server))
                     .child(Input::new(&self.input))
-                    .when(falcon_platform::get(cx).has_password_store(), |d| {
-                        d.child(
-                            Checkbox::new("login-remember")
-                                .checked(self.remember)
-                                .label(t!("native.login.remember").to_string())
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.remember = *checked;
-                                    cx.notify();
-                                })),
-                        )
-                    })
+                    .child(
+                        Checkbox::new("login-remember")
+                            .checked(self.remember)
+                            .label(t!("native.login.remember").to_string())
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.remember = *checked;
+                                cx.notify();
+                            })),
+                    )
                     .when_some(self.error.clone(), |d, err| {
                         d.child(div().text_xs().text_color(ui.destructive).child(err))
                     })

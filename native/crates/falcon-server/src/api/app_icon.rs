@@ -10,7 +10,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -21,7 +21,7 @@ use super::auth_routes::LenientJson;
 use super::body::{Media, body_too_large, drain_body, media_of, query_param, unsupported_media_type};
 use super::error::{ApiError, ApiResult};
 use crate::app_icon::{
-    AppIcons, check_custom_icon, custom_icon_cache_control, custom_icon_reject_status, favicon_url,
+    AppIcons, check_custom_icon, custom_icon_cache_control, custom_icon_reject_status,
 };
 use crate::db::Db;
 
@@ -34,9 +34,7 @@ pub fn router() -> Router<AppState> {
 
 /// 不要登录的取图路由
 pub fn public_router() -> Router<AppState> {
-    Router::new()
-        .route("/api/app-icon/custom.png", get(custom_png))
-        .route("/api/app-icon/favicon", get(favicon))
+    Router::new().route("/api/app-icon/custom.png", get(custom_png))
 }
 
 fn icons(state: &AppState) -> AppIcons<std::sync::Arc<Db>> {
@@ -90,7 +88,7 @@ async fn delete_custom(State(state): State<AppState>) -> ApiResult<Json<AppIconS
     blocking(move || icons.remove_custom()).await.map(Json)
 }
 
-/// 地址里的 v 是内容哈希：对上了就能永久缓存；对不上（旧页面拿着旧地址）给当前这张、不缓存
+/// 地址里的 v 是内容哈希：对上了就能永久缓存；对不上给当前这张、不缓存
 async fn custom_png(State(state): State<AppState>, uri: Uri) -> ApiResult<Response> {
     let icons = icons(&state);
     let Some(file) = icons.custom_file() else {
@@ -100,14 +98,6 @@ async fn custom_png(State(state): State<AppState>, uri: Uri) -> ApiResult<Respon
     let cache = custom_icon_cache_control(v.as_deref(), icons.state().custom.as_deref());
     let bytes = tokio::fs::read(&file).await.map_err(ApiError::internal)?;
     Ok(([(CACHE_CONTROL, cache), (CONTENT_TYPE, "image/png")], bytes).into_response())
-}
-
-/// index.html 的 `<link rel="icon">` 指向这条：服务端按当前选择跳过去，页面不用等 JS 就是
-/// 对的图标。跳转本身不缓存，换了图标下次加载就换。
-/// 302 同 Fastify 的 `reply.redirect` 默认（axum 的 `Redirect::to` 是 303）
-async fn favicon(State(state): State<AppState>) -> Response {
-    let target = favicon_url(&icons(&state).state());
-    (StatusCode::FOUND, [(CACHE_CONTROL, "no-cache".to_string()), (LOCATION, target)]).into_response()
 }
 
 #[cfg(test)]
@@ -184,20 +174,12 @@ mod tests {
         let res = app.get("/api/app-icon/custom.png?v=old").await;
         assert_eq!(header(&res, "cache-control"), "no-cache");
 
-        // 标签页图标的跳转跟着选择走
-        let res = app.get("/api/app-icon/favicon").await;
-        assert_eq!(res.status(), StatusCode::FOUND);
-        assert_eq!(header(&res, "location"), format!("/api/app-icon/custom.png?v={version}"));
-        assert_eq!(header(&res, "cache-control"), "no-cache");
-
         // 删掉回默认
         let req = Request::delete("/api/app-icon/custom").body(Body::empty()).unwrap();
         let (status, body) = json_of(app.send(req).await).await;
         assert_eq!((status, body), (StatusCode::OK, json!({ "selected": "emberwing", "custom": null })));
         let (status, body) = json_of(app.get("/api/app-icon/custom.png").await).await;
         assert_eq!((status, body), (StatusCode::NOT_FOUND, json!({ "error": "没有自定义图标" })));
-        let res = app.get("/api/app-icon/favicon").await;
-        assert_eq!(header(&res, "location"), "/icons/emberwing/icon-192.png");
     }
 
     #[tokio::test]
@@ -207,7 +189,6 @@ mod tests {
         assert_eq!(app.get("/api/app-icon").await.status(), StatusCode::UNAUTHORIZED);
         let req = Request::delete("/api/app-icon/custom").body(Body::empty()).unwrap();
         assert_eq!(app.send(req).await.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(app.get("/api/app-icon/favicon").await.status(), StatusCode::FOUND);
         assert_eq!(app.get("/api/app-icon/custom.png").await.status(), StatusCode::NOT_FOUND);
     }
 }
