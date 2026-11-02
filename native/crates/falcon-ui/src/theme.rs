@@ -135,6 +135,7 @@ pub const GAP: gpui_kit::Pixels = px(6.);
 #[derive(Clone, Debug, PartialEq)]
 pub struct TermPrefs {
     pub family: String,
+    pub fallback_families: Vec<String>,
     pub font_size: f32,
     pub line_height: f32,
     pub cursor_shape: CursorShape,
@@ -145,6 +146,7 @@ impl Default for TermPrefs {
     fn default() -> Self {
         Self {
             family: fonts::BERKELEY.to_string(),
+            fallback_families: Vec::new(),
             font_size: 13.0,
             line_height: 1.0,
             cursor_shape: CursorShape::Block,
@@ -163,13 +165,14 @@ impl TermPrefs {
     /// 偏好（形状沿用 React 版）→ 终端渲染用的这份。`system` 交给 Menlo（React 版是整条交给
     /// 系统回退栈，GPUI 没有"系统等宽"这个名字）；`custom` 空着回落默认字体
     pub fn from_pref(pref: &falcon_core::term::TermPref) -> Self {
-        use falcon_core::term::{TermCursorStyle, TermFontId, primary_family};
+        use falcon_core::term::{TermCursorStyle, TermFontId, fallback_families, primary_family};
         let family = match pref.font_id {
             TermFontId::System => "Menlo".to_string(),
             _ => primary_family(pref).unwrap_or_else(|| fonts::BERKELEY.to_string()),
         };
         Self {
             family,
+            fallback_families: fallback_families(pref),
             font_size: pref.font_size as f32,
             line_height: pref.line_height as f32,
             cursor_shape: match pref.cursor_style {
@@ -355,7 +358,7 @@ fn apply(cx: &mut App) {
         },
         text: TermTextStyle {
             font: {
-                let mut f = fonts::mono(term.family.clone());
+                let mut f = fonts::mono(term.family.clone(), &term.fallback_families);
                 f.weight = FontWeight::NORMAL;
                 f
             },

@@ -57,6 +57,7 @@ pub struct AppearancePane {
     dark: Entity<ThemePicker>,
     term: TermPref,
     custom_font: Entity<InputState>,
+    fallback_font: Entity<InputState>,
     font_size: Entity<SliderState>,
     line_height: Entity<SliderState>,
 }
@@ -76,6 +77,18 @@ impl AppearancePane {
             if matches!(ev, InputEvent::Change) {
                 let v = input.read(cx).value().to_string();
                 this.set_term(|t| t.custom_family = v, cx);
+            }
+        })
+        .detach();
+        let fallback_font = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("settings.termFallbackFontPlaceholder").to_string())
+                .default_value(term.fallback_families.clone())
+        });
+        cx.subscribe(&fallback_font, |this, input, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let v = input.read(cx).value().to_string();
+                this.set_term(|t| t.fallback_families = v, cx);
             }
         })
         .detach();
@@ -107,7 +120,7 @@ impl AppearancePane {
             }
         })
         .detach();
-        Self { app_icon, light, dark, term, custom_font, font_size, line_height }
+        Self { app_icon, light, dark, term, custom_font, fallback_font, font_size, line_height }
     }
 
     /// React 版的 `setTerm(patch)`：合并 → 清洗 → 落盘，终端立即换上
@@ -126,6 +139,7 @@ impl AppearancePane {
     fn reset_term(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let d = TermPref::default();
         self.custom_font.update(cx, |i, cx| i.set_value(d.custom_family.clone(), window, cx));
+        self.fallback_font.update(cx, |i, cx| i.set_value(d.fallback_families.clone(), window, cx));
         self.font_size.update(cx, |s, cx| s.set_value(d.font_size as f32, window, cx));
         self.line_height.update(cx, |s, cx| s.set_value(d.line_height as f32, window, cx));
         crate::theme::update_term(cx, term_look(&d), serialize_term_pref(&d));
@@ -293,6 +307,11 @@ impl AppearancePane {
                 div().w(zpx(256.)).child(Input::new(&self.custom_font).small()).into_any_element(),
             ));
         }
+        list.push((
+            t!("settings.termFallbackFont").to_string(),
+            Some(t!("settings.termFallbackFontHint").to_string()),
+            div().w(zpx(256.)).child(Input::new(&self.fallback_font).small()).into_any_element(),
+        ));
         list.push((t!("settings.termFontSize").to_string(), None, size.into_any_element()));
         list.push((t!("settings.termLineHeight").to_string(), None, line.into_any_element()));
         list.push((t!("settings.termCursor").to_string(), None, cursor.into_any_element()));

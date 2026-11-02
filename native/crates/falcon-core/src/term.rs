@@ -10,7 +10,7 @@
 //!
 //! 不在这里的：React 版的 `termFontStack`（拼 CSS font-family 字符串：图标字体打头、内置字体
 //! 垫底、再接一长串系统回退）。GPUI 客户端的字体回退链在 falcon-ui 的 `fonts.rs`，顺序与它
-//! 刻意不同（见那里的注释），这里只留"字体 id → family 名"的映射。
+//! 刻意不同（见那里的注释），这里只留"字体 id → family 名"的映射与自定义回退列表的解析。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -119,6 +119,8 @@ pub enum TermCursorStyle {
 pub struct TermPref {
     pub font_id: TermFontId,
     pub custom_family: String,
+    /// 用户追加的回退字体，原文是逗号分隔的 family 列表；顺序就是回退顺序
+    pub fallback_families: String,
     #[serde(with = "js_num")]
     pub font_size: f64,
     #[serde(with = "js_num")]
@@ -133,6 +135,7 @@ impl Default for TermPref {
         TermPref {
             font_id: TermFontId::Berkeley,
             custom_family: String::new(),
+            fallback_families: String::new(),
             font_size: 13.0,
             line_height: 1.0,
             cursor_style: TermCursorStyle::Block,
@@ -155,6 +158,47 @@ pub fn primary_family(pref: &TermPref) -> Option<String> {
         TermFontId::Custom => Some(js_trim(&pref.custom_family).to_string()).filter(|s| !s.is_empty()),
         id => id.family().map(str::to_string),
     }
+}
+
+/// 设置里的逗号分隔原文 → 有序 family 列表。空项忽略；成对引号去掉，方便直接粘贴 CSS
+/// font-family 列表。引号内的逗号不拆开（family 名本身可以带逗号）。
+pub fn fallback_families(pref: &TermPref) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut item = String::new();
+    let mut quote = None;
+    let push = |item: &str, result: &mut Vec<String>| {
+        let item = js_trim(item);
+        let item = if item.len() >= 2
+            && ((item.starts_with('"') && item.ends_with('"')) || (item.starts_with('\'') && item.ends_with('\'')))
+        {
+            &item[1..item.len() - 1]
+        } else {
+            item
+        };
+        let item = js_trim(item);
+        if !item.is_empty() {
+            result.push(item.to_string());
+        }
+    };
+    for ch in pref.fallback_families.chars() {
+        match ch {
+            '"' | '\'' if quote == Some(ch) => {
+                quote = None;
+                item.push(ch);
+            }
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(ch);
+                item.push(ch);
+            }
+            ',' if quote.is_none() => {
+                push(&item, &mut result);
+                item.clear();
+            }
+            _ => item.push(ch),
+        }
+    }
+    push(&item, &mut result);
+    result
 }
 
 /// 字号取整后夹到 [10, 24]；NaN / ±∞ 回默认
@@ -190,6 +234,7 @@ pub fn sanitize_term_pref(raw: &Value) -> TermPref {
     TermPref {
         font_id,
         custom_family: get("customFamily").and_then(Value::as_str).map(|s| js_slice_utf16(s, 120).to_string()).unwrap_or_default(),
+        fallback_families: get("fallbackFamilies").and_then(Value::as_str).map(|s| js_slice_utf16(s, 480).to_string()).unwrap_or_default(),
         font_size: clamp_font_size(js_number(get("fontSize"))),
         line_height: clamp_line_height(js_number(get("lineHeight"))),
         cursor_style,
@@ -239,11 +284,21 @@ mod tests {
     }
 
     #[test]
+    fn fallback_families_keep_order_and_accept_css_quotes() {
+        let pref = sanitize_term_pref(&json!({
+            "fallbackFamilies": " Sarasa Term SC, \"PingFang SC\", , 'Family, With Comma' "
+        }));
+        assert_eq!(fallback_families(&pref), vec!["Sarasa Term SC", "PingFang SC", "Family, With Comma"]);
+        assert!(fallback_families(&TermPref::default()).is_empty());
+        assert_eq!(sanitize_term_pref(&json!({ "fallbackFamilies": 42 })).fallback_families, "");
+    }
+
+    #[test]
     fn json_shape_matches_web() {
         // 以下是 Rust 侧补的：落盘形状、JS 的 Number() 转换、load 的兜底
         assert_eq!(
             serialize_term_pref(&TermPref::default()),
-            r#"{"fontId":"berkeley","customFamily":"","fontSize":13,"lineHeight":1,"cursorStyle":"block","cursorBlink":true}"#
+            r#"{"fontId":"berkeley","customFamily":"","fallbackFamilies":"","fontSize":13,"lineHeight":1,"cursorStyle":"block","cursorBlink":true}"#
         );
         let p = sanitize_term_pref(&json!({ "fontSize": "15", "lineHeight": 1.23, "cursorBlink": 0, "fontId": "fira-code" }));
         assert_eq!((p.font_size, p.line_height, p.cursor_blink, p.font_id), (15.0, 1.25, true, TermFontId::FiraCode));

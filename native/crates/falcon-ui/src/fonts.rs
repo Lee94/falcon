@@ -45,26 +45,55 @@ pub fn register(cx: &mut App) {
     }
 }
 
-/// 主字体之后的回退链。系统 CJK / emoji 兜 Maple 没覆盖的生僻字、假名、谚文、emoji——与
-/// React 版的 FALLBACK_STACK 同一个理由（Maple CN 不是全集）。
-pub fn fallbacks() -> FontFallbacks {
-    FontFallbacks::from_fonts(vec![
-        NERD_SYMBOLS.to_string(),
+/// 主字体之后的回退链。用户配的 family 插在图标字体之后、内置回退之前：这样既保住 Nerd
+/// 图标的宽度口径，又能让自定义中文 / 拉丁字体先于 Maple / Ioskeley 命中。系统 CJK / emoji
+/// 兜 Maple 没覆盖的生僻字、假名、谚文、emoji——与 React 版的 FALLBACK_STACK 同一个理由
+/// （Maple CN 不是全集）。
+pub fn fallbacks(custom: &[String]) -> FontFallbacks {
+    let mut families = vec![NERD_SYMBOLS.to_string()];
+    families.extend(custom.iter().cloned());
+    families.extend([
         IOSKELEY.to_string(),
         MAPLE.to_string(),
         "PingFang SC".to_string(),
         "Hiragino Sans GB".to_string(),
         "Apple Color Emoji".to_string(),
-    ])
+    ]);
+    FontFallbacks::from_fonts(families)
 }
 
-/// 终端 / 界面用的等宽字体。`family` 是用户在设置里选的（默认 Berkeley）。
-pub fn mono(family: impl Into<SharedString>) -> Font {
+/// 终端 / 界面用的等宽字体。`family` 是用户在设置里选的（默认 Berkeley），
+/// `custom_fallbacks` 是设置里追加的有序回退列表。
+pub fn mono(family: impl Into<SharedString>, custom_fallbacks: &[String]) -> Font {
     Font {
         family: family.into(),
         features: FontFeatures::disable_ligatures(),
-        fallbacks: Some(fallbacks()),
+        fallbacks: Some(fallbacks(custom_fallbacks)),
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_fallbacks_follow_icons_and_precede_builtins() {
+        let custom = vec!["Sarasa Term SC".to_string(), "My Icons".to_string()];
+        assert_eq!(
+            fallbacks(&custom).fallback_list(),
+            [
+                NERD_SYMBOLS,
+                "Sarasa Term SC",
+                "My Icons",
+                IOSKELEY,
+                MAPLE,
+                "PingFang SC",
+                "Hiragino Sans GB",
+                "Apple Color Emoji",
+            ]
+        );
+        assert_eq!(fallbacks(&[]).fallback_list()[..3], [NERD_SYMBOLS, IOSKELEY, MAPLE]);
     }
 }
