@@ -132,6 +132,9 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     };
     state.db.update_host(&row);
     state.db.update_projects_from_host(&row);
+    state.engine.send(|engine| {
+        engine.sessions.sync_project_labels("");
+    });
     // 连接配置变了才换链路：只改显示名也拆一遍会让这台主机上的中转无端断一下
     if conn_changed(&existing, &row) {
         let host_id = id.clone();

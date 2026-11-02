@@ -506,6 +506,7 @@ impl SessionManager {
     /// 这里按库存尺寸自动接回（跟总览里点接回同一条路，见 term_size.rs）。
     pub fn resume_unverified(&self) {
         self.ensure_hc_listener();
+        super::hc_proxy::sync_all_session_labels(&self.data_dir, &self.db);
         for row in self.db.list_sessions() {
             if row.state != "unverified" || row.durable != 1 {
                 continue;
@@ -533,14 +534,9 @@ impl SessionManager {
         super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, &project, &row);
     }
 
-    /// 同步某项目下所有持久会话的 `<sid>.labels.json`（项目改名或更新后调用）。
-    pub fn sync_project_labels(&self, project_id: &str) {
-        let Some(project) = owner_row(&self.db, project_id) else { return };
-        for row in self.db.list_sessions_by_project(project_id) {
-            if row.durable == 1 {
-                super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, &project, &row);
-            }
-        }
+    /// 同步某项目（及其下属 worktree）或全局持久会话的 `<sid>.labels.json`（项目/主机改名或排序变化后调用）。
+    pub fn sync_project_labels(&self, _project_id: &str) {
+        super::hc_proxy::sync_all_session_labels(&self.data_dir, &self.db);
     }
 
     /// 判定某项目的宿主机能否提供持久会话，必要时把会话守护进程推上去（ADR 0020）。
@@ -1361,10 +1357,26 @@ impl SessionManager {
         let hint = entry.color_hint();
         let mut labels = std::collections::BTreeMap::new();
         if !reattach && !is_machine_owner(&row.project_id) {
+            let (space_name, sort_key, src_id, wt_branch) =
+                super::hc_proxy::project_sidebar_meta(&self.db, project);
             labels.insert("falcon.project".into(), project.id.clone());
             labels.insert("falcon.project_name".into(), project.name.clone());
+            labels.insert("falcon.space_name".into(), space_name);
+            labels.insert("falcon.sort_key".into(), sort_key);
             labels.insert("falcon.session".into(), row.name.clone());
             labels.insert("falcon.session_id".into(), row.id.clone());
+            if let Some(agent) = row.agent.as_deref().filter(|s| !s.is_empty()) {
+                labels.insert("falcon.agent".into(), agent.to_string());
+            }
+            if let Some(shell) = project.shell.as_deref().filter(|s| !s.is_empty()) {
+                labels.insert("falcon.shell".into(), shell.to_string());
+            }
+            if let Some(src) = src_id {
+                labels.insert("falcon.source_project".into(), src);
+            }
+            if let Some(br) = wt_branch {
+                labels.insert("falcon.worktree_branch".into(), br);
+            }
             if falcon_proto::is_standalone_project_id(&project.id) {
                 labels.insert("falcon.standalone".into(), "true".into());
             }
@@ -1799,6 +1811,9 @@ impl SessionManager {
             return;
         }
         entry.s.borrow_mut().title = next.clone();
+        if entry.durable && !is_machine_owner(&entry.project_id) {
+            super::hc_proxy::sync_session_runtime_title(&self.data_dir, &entry.session_id, next.as_deref());
+        }
         self.broadcast(entry, &ServerMessage::Title { title: next });
     }
 

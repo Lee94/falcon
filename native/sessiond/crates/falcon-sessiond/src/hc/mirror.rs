@@ -5,7 +5,7 @@
 //! - 有事件订阅者时按 1 Hz 向 holder 轮询 `ClientMsg::Foreground`，发现前台进程/目录变化即发 `foreground` 事件；
 //! - 维护单调递增 `seq` 与事件广播，驱动 `events.subscribe` 与 `terminal.wait`。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -77,6 +77,7 @@ pub struct TerminalEntry {
     pub reason: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    pub raw_title: String,
     pub title: String,
     pub argv: Vec<String>,
     pub cwd: String,
@@ -341,7 +342,7 @@ impl GatewayState {
     }
 }
 
-/// 合成 `herdr.space` / `herdr.tab` / `where` 标签（当 `synthesize_labels` 开启时）
+/// 合成 `herdr.space` / `herdr.tab` / `falcon.space_name` / `where` 标签（当 `synthesize_labels` 开启时）
 pub fn synthesize_labels(
     sid: &str,
     raw: &BTreeMap<String, String>,
@@ -355,18 +356,44 @@ pub fn synthesize_labels(
     let project_name = out.get("falcon.project_name").cloned().filter(|s| !s.is_empty());
     let host_name = out.get("falcon.host_name").cloned().filter(|s| !s.is_empty());
     let session_name = out.get("falcon.session").cloned().filter(|s| !s.is_empty());
+    let worktree_branch = out.get("falcon.worktree_branch").cloned().filter(|s| !s.is_empty());
+    let is_standalone = out.get("falcon.standalone").is_some_and(|v| v == "true")
+        || project_id == "standalone"
+        || project_id.starts_with("standalone:");
+
+    let space_name = out
+        .get("falcon.space_name")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let proj_label = if is_standalone {
+                Some(project_name.unwrap_or_else(|| "无项目".into()))
+            } else {
+                match (project_name, worktree_branch) {
+                    (Some(p), Some(b)) if !p.contains(" / ") => Some(format!("{p} / {b}")),
+                    (Some(p), _) => Some(p),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            };
+            match (host_name, proj_label) {
+                (Some(h), Some(p)) => Some(format!("{h} · {p}")),
+                (Some(h), None) => Some(h),
+                (None, Some(p)) => Some(p),
+                (None, None) => None,
+            }
+        });
+
+    if let Some(sn) = &space_name {
+        out.entry("falcon.space_name".into())
+            .or_insert_with(|| sn.clone());
+    }
     out.entry("herdr.space".into())
         .or_insert_with(|| format!("falcon.{project_id}"));
     out.entry("herdr.tab".into())
         .or_insert_with(|| format!("falcon.{sid}"));
     if !out.contains_key("where") {
-        let prefix = match (host_name, project_name) {
-            (Some(h), Some(p)) => Some(format!("{h} · {p}")),
-            (Some(h), None) => Some(h),
-            (None, Some(p)) => Some(p),
-            (None, None) => None,
-        };
-        match (prefix, session_name) {
+        match (space_name, session_name) {
             (Some(p), Some(s)) => {
                 out.insert("where".into(), format!("{p} / {s}"));
             }
@@ -380,6 +407,286 @@ pub fn synthesize_labels(
         }
     }
     out
+}
+
+fn same_alnum_name(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let na = norm(a);
+    !na.is_empty() && na == norm(b)
+}
+
+fn app_display_label(app: &str) -> String {
+    match app.trim() {
+        "claude-code" => "claude".into(),
+        other => other.to_string(),
+    }
+}
+
+fn agent_app_id(cmd: &str) -> Option<&'static str> {
+    let leaf = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd);
+    let bare = leaf
+        .strip_suffix(".sh")
+        .or_else(|| leaf.strip_suffix(".cmd"))
+        .or_else(|| leaf.strip_suffix(".exe"))
+        .or_else(|| leaf.strip_suffix(".bat"))
+        .unwrap_or(leaf);
+    match bare.to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" => Some("claude-code"),
+        "codex" => Some("codex"),
+        "grok" => Some("grok"),
+        "devin" => Some("devin"),
+        _ => None,
+    }
+}
+
+fn extract_agent_from_launcher_path(arg0: &str) -> Option<String> {
+    let normalized = arg0.replace('\\', "/");
+    let (_, tail) = normalized.rsplit_once("/agents/")?;
+    let stem = tail
+        .strip_suffix(".sh")
+        .or_else(|| tail.strip_suffix(".cmd"))
+        .or_else(|| tail.strip_suffix(".ps1"))
+        .or_else(|| tail.strip_suffix(".bat"))
+        .unwrap_or(tail);
+    (!stem.is_empty() && !stem.contains('/')).then(|| stem.to_string())
+}
+
+fn shell_leaf(shell: Option<&str>) -> String {
+    let leaf = shell.unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("");
+    let bare = if leaf.len() >= 4 && leaf.is_char_boundary(leaf.len() - 4) {
+        let (head, tail) = leaf.split_at(leaf.len() - 4);
+        if [".exe", ".cmd", ".bat"]
+            .iter()
+            .any(|s| tail.eq_ignore_ascii_case(s))
+        {
+            head
+        } else {
+            leaf
+        }
+    } else {
+        leaf
+    };
+    let bare = bare.strip_prefix('-').unwrap_or(bare);
+    if bare.is_empty() {
+        "zsh".to_string()
+    } else {
+        bare.to_string()
+    }
+}
+
+fn is_shell_name(name: &str, configured_shell: Option<&str>) -> bool {
+    let b = shell_leaf(Some(name)).to_ascii_lowercase();
+    if matches!(
+        b.as_str(),
+        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh" | "nu" | "pwsh" | "powershell" | "cmd"
+    ) {
+        return true;
+    }
+    if let Some(cfg) = configured_shell {
+        let cfg_b = shell_leaf(Some(cfg)).to_ascii_lowercase();
+        if !cfg_b.is_empty() && b == cfg_b {
+            return true;
+        }
+    }
+    false
+}
+
+/// 清理终端标题：
+/// 1. 剥去打头的状态符号（如 Claude Code 的 `✳ `、`◐ `、`◑ `、盲文转圈 `⠋ `）；
+/// 2. 剥去 Codex CLI 拼接的 ` | <虚拟项目 UUID 前缀或目录名>` 后缀；
+/// 3. 若标题仅为程序自身名字（如 `"Claude Code"`），视为空串以便回退到统一的程序标识。
+pub fn clean_terminal_title(
+    raw: &str,
+    cwd: &str,
+    project_id: Option<&str>,
+    app_or_agent: Option<&str>,
+) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect();
+    let s = cleaned.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    let s = match s.split_once(char::is_whitespace) {
+        Some((head, rest))
+            if head.chars().count() <= 2
+                && head.chars().all(|c| !c.is_alphanumeric() && !c.is_ascii())
+                && !rest.trim().is_empty() =>
+        {
+            rest.trim()
+        }
+        _ => s,
+    };
+    let s = if let Some((lhs, rhs)) = s.rsplit_once(" | ") {
+        let lhs_trim = lhs.trim();
+        let rhs_trim = rhs.trim();
+        let rhs_no_dots = rhs_trim.trim_end_matches(['.', '…']);
+        let is_uuid_like = rhs_no_dots.len() >= 8
+            && rhs_no_dots.contains('-')
+            && rhs_no_dots.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+        let matches_proj_id = project_id
+            .filter(|pid| pid.len() >= 8 && !rhs_no_dots.is_empty())
+            .is_some_and(|pid| pid.starts_with(rhs_no_dots));
+        let cwd_leaf = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or("");
+        let matches_cwd_leaf = !cwd_leaf.is_empty()
+            && !rhs_no_dots.is_empty()
+            && (rhs_trim == cwd_leaf || cwd_leaf.starts_with(rhs_no_dots));
+        if !lhs_trim.is_empty() && (is_uuid_like || matches_proj_id || matches_cwd_leaf) {
+            lhs_trim
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+    if same_alnum_name(s, "Claude Code")
+        || same_alnum_name(s, "Codex")
+        || app_or_agent.is_some_and(|a| same_alnum_name(s, a))
+    {
+        return String::new();
+    }
+    s.to_string()
+}
+
+/// 计算会话在 Falcon 侧栏与 `herdr-app` 标签栏中的显示名称，优先级与 `falcon-core::session_title` 一致：
+/// 手动命名 > 清理后的主题标题 > 正在前台运行的程序名 / 7501 状态应用名 > 会话绑定的 agent 名 > shell 名。
+pub fn effective_session_name(t: &TerminalEntry) -> String {
+    if let Some(n) = t.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return n.to_string();
+    }
+    if let Some(n) = t.labels.get("falcon.session").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return n.to_string();
+    }
+    if !t.title.trim().is_empty() {
+        return t.title.trim().to_string();
+    }
+    let proj_id = t.labels.get("falcon.project").map(String::as_str);
+    let agent_lbl = t
+        .labels
+        .get("falcon.agent")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| t.argv.first().and_then(|a| extract_agent_from_launcher_path(a)));
+    if let Some(ft) = t.labels.get("falcon.title").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let cleaned = clean_terminal_title(ft, &t.cwd, proj_id, agent_lbl.as_deref());
+        if !cleaned.is_empty() {
+            return cleaned;
+        }
+    }
+    if let Some(st) = &t.status {
+        if !st.title.trim().is_empty() {
+            let cleaned = clean_terminal_title(&st.title, &t.cwd, proj_id, Some(&st.app));
+            if !cleaned.is_empty() {
+                return cleaned;
+            }
+        }
+        if !st.app.trim().is_empty() {
+            return app_display_label(&st.app);
+        }
+    }
+    let cfg_shell = t.labels.get("falcon.shell").map(String::as_str);
+    if let Some(fg) = &t.foreground {
+        let fg_name = fg.name.trim();
+        if !fg_name.is_empty() && !is_shell_name(fg_name, cfg_shell) {
+            return app_display_label(fg_name);
+        }
+    }
+    if let Some(agent) = agent_lbl {
+        return app_display_label(&agent);
+    }
+    if let Some(fg) = &t.foreground
+        && !fg.name.trim().is_empty()
+    {
+        return shell_leaf(Some(&fg.name));
+    }
+    if let Some(sh) = cfg_shell.filter(|s| !s.trim().is_empty()) {
+        return shell_leaf(Some(sh));
+    }
+    if let Some(arg0) = t.argv.first().map(String::as_str).filter(|s| !s.is_empty() && *s != "sh") {
+        return shell_leaf(Some(arg0));
+    }
+    "zsh".to_string()
+}
+
+/// 刷新终端的派生展示字段（归一化 `argv`、清理 `title`、补齐活跃 agent 的默认 `status`、更新 `where` 标签）
+pub fn refresh_terminal_derived(t: &mut TerminalEntry, synthesize: bool) {
+    let agent_lbl = t
+        .labels
+        .get("falcon.agent")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| t.argv.first().and_then(|a| extract_agent_from_launcher_path(a)));
+    if let Some(agent) = &agent_lbl {
+        t.labels
+            .entry("falcon.agent".into())
+            .or_insert_with(|| agent.clone());
+    }
+
+    // 归一化 argv：把 `<root>/agents/<agent>.sh` 或空 `["sh"]` 替换为真实的 agent 或 shell 命令
+    if let Some(arg0) = t.argv.first()
+        && let Some(agent) = extract_agent_from_launcher_path(arg0)
+    {
+        t.argv = vec![agent];
+    } else if t.argv.is_empty() || (t.argv.len() == 1 && t.argv[0] == "sh") {
+        if let Some(agent) = &agent_lbl {
+            t.argv = vec![agent.clone()];
+        } else if let Some(fg) = &t.foreground
+            && !fg.name.is_empty()
+        {
+            t.argv = vec![fg.name.clone()];
+        } else if let Some(sh) = t.labels.get("falcon.shell").filter(|s| !s.is_empty()) {
+            t.argv = vec![shell_leaf(Some(sh))];
+        }
+    }
+
+    // 清理标题（剥去转圈符号、虚拟项目 UUID 后缀及重复的程序自身名称）
+    let proj_id = t.labels.get("falcon.project").map(String::as_str);
+    let app_hint = t
+        .status
+        .as_ref()
+        .map(|s| s.app.as_str())
+        .filter(|s| !s.is_empty())
+        .or(agent_lbl.as_deref());
+    let source_title = if !t.raw_title.is_empty() {
+        t.raw_title.clone()
+    } else {
+        t.labels.get("falcon.title").cloned().unwrap_or_default()
+    };
+    t.title = clean_terminal_title(&source_title, &t.cwd, proj_id, app_hint);
+
+    // 若会话仍在运行、7501 记录为空，但前台正在运行已知 agent（或尚未完成首次前台探测的 agent 会话），
+    // 合成一条默认 idle 状态，使 `herdr-app` 将其识别为 Agent 并展示对应图标。
+    if t.alive && t.raw_records.is_empty() {
+        let active_agent_app = match &t.foreground {
+            Some(fg) => agent_app_id(&fg.name),
+            None => agent_lbl.as_deref().and_then(agent_app_id),
+        };
+        t.status = active_agent_app.map(|app| HcStatus {
+            state: "idle".into(),
+            kind: None,
+            progress: None,
+            app: app.into(),
+            title: String::new(),
+            msg: String::new(),
+        });
+    }
+
+    if synthesize {
+        let eff_name = effective_session_name(t);
+        if let Some(space_name) = t.labels.get("falcon.space_name").filter(|s| !s.is_empty()).cloned() {
+            t.labels.insert("where".into(), format!("{space_name} / {eff_name}"));
+        }
+    }
 }
 
 /// 将 `ProgramStatusRecord` 列表转换为 `(root_status, sub_records)`
@@ -501,6 +808,7 @@ pub fn sync_directory(gw: &SharedGateway, emit_events: bool) {
             let was = cur.to_public_json();
             let was_alive = cur.alive;
             let old_labels = cur.labels.clone();
+            let old_title = cur.title.clone();
             cur.name = custom_name;
             cur.labels = labels.clone();
             cur.holder_pid = e.pid;
@@ -510,19 +818,40 @@ pub fn sync_directory(gw: &SharedGateway, emit_events: bool) {
             if let Some(c) = e.cwd {
                 cur.cwd = c;
             }
-            if old_labels != cur.labels && emit_events {
-                let lbl_json = json!({ "labels": cur.labels });
-                let sid = e.sid.clone();
-                st.emit("labels", &sid, lbl_json, Some(was.clone()));
-            }
-            if was_alive && !e.alive {
-                let sid = e.sid.clone();
-                handle_terminal_exit(&mut st, &sid, exit_code, signal, reason.unwrap_or_else(|| "exited".into()), finished_ms, emit_events);
+            if !was_alive && e.alive {
+                cur.alive = true;
+                cur.pid = Some(e.pid);
+                cur.finished_ms = None;
+                cur.exit_code = None;
+                cur.signal = None;
+                cur.reason = None;
+                refresh_terminal_derived(cur, synthesize);
+                if emit_events {
+                    let sid = e.sid.clone();
+                    let rec = st.terminals[&sid].to_public_json();
+                    st.emit("created", &sid, rec, Some(was));
+                }
                 dirty_reg = true;
+            } else {
+                refresh_terminal_derived(cur, synthesize);
+                let new_labels = cur.labels.clone();
+                let new_title = cur.title.clone();
+                let sid = e.sid.clone();
+                if old_labels != new_labels && emit_events {
+                    let lbl_json = json!({ "labels": new_labels });
+                    st.emit("labels", &sid, lbl_json, Some(was.clone()));
+                }
+                if old_title != new_title && emit_events {
+                    st.emit("title", &sid, json!({ "title": new_title }), None);
+                }
+                if was_alive && !e.alive {
+                    handle_terminal_exit(&mut st, &sid, exit_code, signal, reason.unwrap_or_else(|| "exited".into()), finished_ms, emit_events);
+                    dirty_reg = true;
+                }
             }
         } else {
             let addr = format_addr(persisted.seq);
-            let entry = TerminalEntry {
+            let mut entry = TerminalEntry {
                 sid: e.sid.clone(),
                 session_id: persisted.session_id.clone(),
                 seq: persisted.seq,
@@ -539,6 +868,7 @@ pub fn sync_directory(gw: &SharedGateway, emit_events: bool) {
                 reason,
                 cols: 80,
                 rows: 24,
+                raw_title: String::new(),
                 title: String::new(),
                 argv: default_argv,
                 cwd: default_cwd,
@@ -552,6 +882,7 @@ pub fn sync_directory(gw: &SharedGateway, emit_events: bool) {
                 reported: false,
                 foreground: None,
             };
+            refresh_terminal_derived(&mut entry, synthesize);
             let sid = e.sid.clone();
             st.terminals.insert(sid.clone(), entry);
             if emit_events {
@@ -563,6 +894,10 @@ pub fn sync_directory(gw: &SharedGateway, emit_events: bool) {
         if e.alive && !st.monitors.contains_key(&e.sid) {
             to_monitor.push(e.sid);
         }
+    }
+
+    if sync_herdr_app_doc(&mut st, emit_events) {
+        dirty_reg = true;
     }
 
     if dirty_reg {
@@ -676,6 +1011,7 @@ pub fn spawn_holder_monitor(gw: SharedGateway, sid: String) {
                     fin_ms,
                     true,
                 );
+                let _ = sync_herdr_app_doc(&mut st, true);
                 st.registry.save_terminals();
             }
         })
@@ -704,6 +1040,8 @@ fn run_holder_monitor(
     if writer.write_all(&hello.encode()).is_err() {
         return;
     }
+    // 握手后立即请求一次前台进程信息，使终端在首次查询时即具备完整的 foreground 与标题
+    let _ = writer.write_all(&ClientMsg::Foreground { req: 1 }.encode());
 
     // 写线程：转发网关下发的探测命令（如 Foreground）
     std::thread::spawn(move || {
@@ -731,17 +1069,31 @@ fn run_holder_monitor(
             HolderMsg::Status { records } => {
                 let mut st = gw.lock().unwrap_or_else(|p| p.into_inner());
                 apply_status_records(&mut st, sid, records, true);
+                if let Some(tx) = st.monitors.get(sid) {
+                    let _ = tx.send(ClientMsg::Foreground { req: 1 });
+                }
+                let _ = sync_herdr_app_doc(&mut st, true);
             }
             HolderMsg::Event(ev) => {
                 let mut st = gw.lock().unwrap_or_else(|p| p.into_inner());
+                let synthesize = st.registry.identity.synthesize_labels;
                 match ev {
                     Event::Title { title } => {
-                        if let Some(t) = st.terminals.get_mut(sid)
-                            && t.title != title
-                        {
-                            t.title = title.clone();
-                            st.emit("title", sid, json!({ "title": title }), None);
+                        let changed_title = if let Some(t) = st.terminals.get_mut(sid) {
+                            let prev_title = t.title.clone();
+                            t.raw_title = title;
+                            refresh_terminal_derived(t, synthesize);
+                            (t.title != prev_title).then(|| t.title.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(new_title) = changed_title {
+                            st.emit("title", sid, json!({ "title": new_title }), None);
                         }
+                        if let Some(tx) = st.monitors.get(sid) {
+                            let _ = tx.send(ClientMsg::Foreground { req: 1 });
+                        }
+                        let _ = sync_herdr_app_doc(&mut st, true);
                     }
                     Event::Size { cols, rows } => {
                         if let Some(t) = st.terminals.get_mut(sid)
@@ -763,11 +1115,13 @@ fn run_holder_monitor(
                     "exited".into()
                 };
                 handle_terminal_exit(&mut st, sid, status.code, status.signal, reason, None, true);
+                let _ = sync_herdr_app_doc(&mut st, true);
                 st.registry.save_terminals();
                 break;
             }
             HolderMsg::ForegroundIs { name, pid, argv, cwd, .. } => {
                 let mut st = gw.lock().unwrap_or_else(|p| p.into_inner());
+                let synthesize = st.registry.identity.synthesize_labels;
                 let (changed, new_fg) = {
                     let Some(t) = st.terminals.get_mut(sid) else { continue };
                     let new_fg = name.map(|n| HcForeground {
@@ -778,6 +1132,7 @@ fn run_holder_monitor(
                     });
                     if t.foreground != new_fg {
                         t.foreground = new_fg.clone();
+                        refresh_terminal_derived(t, synthesize);
                         (true, new_fg)
                     } else {
                         (false, None)
@@ -785,10 +1140,391 @@ fn run_holder_monitor(
                 };
                 if changed {
                     st.emit("foreground", sid, json!(new_fg), None);
+                    let _ = sync_herdr_app_doc(&mut st, true);
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn collect_node_terminals(node: &Value, out: &mut HashSet<String>) {
+    match node.get("type").and_then(Value::as_str) {
+        Some("block") => {
+            if let Some(addr) = node
+                .get("content")
+                .and_then(|c| c.get("terminal"))
+                .and_then(Value::as_str)
+            {
+                out.insert(addr.to_string());
+            }
+        }
+        Some("row" | "column" | "stack") => {
+            if let Some(children) = node.get("children").and_then(Value::as_array) {
+                for child in children {
+                    collect_node_terminals(child, out);
+                }
+            }
+        }
+        Some("split") => {
+            if let Some(first) = node.get("first") {
+                collect_node_terminals(first, out);
+            }
+            if let Some(second) = node.get("second") {
+                collect_node_terminals(second, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn prune_node_terminals(node: &Value, valid_addrs: &HashSet<String>) -> Option<Value> {
+    match node.get("type").and_then(Value::as_str) {
+        Some("block") => {
+            if let Some(addr) = node
+                .get("content")
+                .and_then(|c| c.get("terminal"))
+                .and_then(Value::as_str)
+            {
+                if valid_addrs.contains(addr) {
+                    Some(node.clone())
+                } else {
+                    None
+                }
+            } else {
+                // 非终端面板（如 markdown/image/canvas）原样保留
+                Some(node.clone())
+            }
+        }
+        Some("row" | "column" | "stack") => {
+            let children = node.get("children").and_then(Value::as_array)?;
+            let kept: Vec<Value> = children
+                .iter()
+                .filter_map(|c| prune_node_terminals(c, valid_addrs))
+                .collect();
+            if kept.is_empty() {
+                None
+            } else {
+                let mut out = node.clone();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("children".into(), Value::Array(kept));
+                }
+                Some(out)
+            }
+        }
+        Some("split") => {
+            let first = node.get("first").and_then(|n| prune_node_terminals(n, valid_addrs));
+            let second = node.get("second").and_then(|n| prune_node_terminals(n, valid_addrs));
+            match (first, second) {
+                (Some(f), Some(s)) => {
+                    let mut out = node.clone();
+                    if let Some(obj) = out.as_object_mut() {
+                        obj.insert("first".into(), f);
+                        obj.insert("second".into(), s);
+                    }
+                    Some(out)
+                }
+                (Some(f), None) => Some(f),
+                (None, Some(s)) => Some(s),
+                (None, None) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn ensure_container_root(tab_id: &str, node: Value) -> Value {
+    if node.get("type").and_then(Value::as_str) == Some("block") {
+        json!({
+            "id": tab_id,
+            "type": "row",
+            "children": [node],
+        })
+    } else {
+        node
+    }
+}
+
+struct FalconSpaceGroup {
+    space_id: String,
+    space_name: String,
+    sort_key: String,
+    folder: String,
+    terminals: Vec<FalconTabItem>,
+}
+
+struct FalconTabItem {
+    sid: String,
+    address: String,
+    tab_id: String,
+    tab_name: String,
+}
+
+fn build_normalized_herdr_app_doc(st: &mut GatewayState) -> (Option<Value>, bool) {
+    let mut dirty_reg = false;
+    let mut sids_to_keep = Vec::new();
+    let mut by_space: BTreeMap<String, Vec<(u64, u32, FalconTabItem, String, String, String)>> = BTreeMap::new();
+
+    for t in st.terminals.values() {
+        if !t.alive {
+            continue;
+        }
+        let Some(space_id) = t.labels.get("herdr.space").filter(|s| s.starts_with("falcon.")).cloned() else {
+            continue;
+        };
+        if !t.keep {
+            sids_to_keep.push(t.sid.clone());
+        }
+        let space_name = t
+            .labels
+            .get("falcon.space_name")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .or_else(|| {
+                t.labels
+                    .get("where")
+                    .and_then(|w| w.split(" / ").next())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            })
+            .or_else(|| t.labels.get("falcon.project_name").filter(|s| !s.is_empty()).cloned())
+            .unwrap_or_else(|| space_id.strip_prefix("falcon.").unwrap_or(&space_id).to_string());
+        let sort_key = t
+            .labels
+            .get("falcon.sort_key")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("s9/{space_name}"));
+        let tab_id = t
+            .labels
+            .get("herdr.tab")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("falcon.{}", t.sid));
+        let tab_name = effective_session_name(t);
+        let item = FalconTabItem {
+            sid: t.sid.clone(),
+            address: t.address.clone(),
+            tab_id,
+            tab_name,
+        };
+        by_space
+            .entry(space_id)
+            .or_default()
+            .push((t.created_ms, t.seq, item, space_name, sort_key, t.cwd.clone()));
+    }
+
+    for sid in sids_to_keep {
+        if let Some(t) = st.terminals.get_mut(&sid) {
+            t.keep = true;
+        }
+        if let Some(p) = st.registry.terminals.entries.get_mut(&sid)
+            && !p.keep
+        {
+            p.keep = true;
+            dirty_reg = true;
+        }
+    }
+
+    let existing_doc = st.registry.docs.get("herdr-app").map(|r| r.data.clone());
+    let had_falcon_spaces = existing_doc
+        .as_ref()
+        .and_then(|d| d.get("spaces"))
+        .and_then(Value::as_array)
+        .is_some_and(|arr| {
+            arr.iter().any(|sp| {
+                sp.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("falcon."))
+            })
+        });
+
+    if by_space.is_empty() && !had_falcon_spaces {
+        return (None, dirty_reg);
+    }
+
+    let mut groups: Vec<FalconSpaceGroup> = by_space
+        .into_iter()
+        .map(|(space_id, mut list)| {
+            list.sort_by_key(|(created_ms, seq, _, _, _, _)| (*created_ms, *seq));
+            let space_name = list
+                .iter()
+                .find_map(|(_, _, _, sn, _, _)| (!sn.is_empty()).then(|| sn.clone()))
+                .unwrap_or_else(|| space_id.clone());
+            let sort_key = list
+                .iter()
+                .find_map(|(_, _, _, _, sk, _)| (!sk.is_empty()).then(|| sk.clone()))
+                .unwrap_or_else(|| format!("s9/{space_name}"));
+            let folder = list
+                .iter()
+                .find_map(|(_, _, _, _, _, cwd)| (!cwd.is_empty()).then(|| cwd.clone()))
+                .unwrap_or_default();
+            let terminals = list.into_iter().map(|(_, _, item, _, _, _)| item).collect();
+            FalconSpaceGroup {
+                space_id,
+                space_name,
+                sort_key,
+                folder,
+                terminals,
+            }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| {
+        a.sort_key
+            .cmp(&b.sort_key)
+            .then_with(|| a.space_name.cmp(&b.space_name))
+            .then_with(|| a.space_id.cmp(&b.space_id))
+    });
+
+    let mut existing_falcon_spaces: HashMap<String, Value> = HashMap::new();
+    let mut non_falcon_spaces: Vec<Value> = Vec::new();
+    if let Some(arr) = existing_doc
+        .as_ref()
+        .and_then(|d| d.get("spaces"))
+        .and_then(Value::as_array)
+    {
+        for sp in arr {
+            let id = sp.get("id").and_then(Value::as_str).unwrap_or_default();
+            if id.starts_with("falcon.") {
+                existing_falcon_spaces.insert(id.to_string(), sp.clone());
+            } else {
+                non_falcon_spaces.push(sp.clone());
+            }
+        }
+    }
+
+    let mut new_spaces: Vec<Value> = Vec::with_capacity(groups.len() + non_falcon_spaces.len());
+    for g in groups {
+        let valid_addrs: HashSet<String> = g.terminals.iter().map(|t| t.address.clone()).collect();
+        let tab_names_by_id: HashMap<&str, &str> = g
+            .terminals
+            .iter()
+            .map(|t| (t.tab_id.as_str(), t.tab_name.as_str()))
+            .collect();
+        let tab_names_by_addr: HashMap<&str, &str> = g
+            .terminals
+            .iter()
+            .map(|t| (t.address.as_str(), t.tab_name.as_str()))
+            .collect();
+
+        let mut tabs: Vec<Value> = Vec::new();
+        let mut seen_addrs: HashSet<String> = HashSet::new();
+
+        if let Some(old_sp) = existing_falcon_spaces.remove(&g.space_id)
+            && let Some(old_tabs) = old_sp.get("tabs").and_then(Value::as_array)
+        {
+            for old_tab in old_tabs {
+                let Some(root) = old_tab.get("root") else { continue };
+                let Some(pruned_root) = prune_node_terminals(root, &valid_addrs) else {
+                    continue;
+                };
+                let mut tab_addrs = HashSet::new();
+                collect_node_terminals(&pruned_root, &mut tab_addrs);
+                seen_addrs.extend(tab_addrs.iter().cloned());
+                let mut tab_obj = old_tab.clone();
+                if let Some(obj) = tab_obj.as_object_mut() {
+                    let tid = obj.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let container_root = ensure_container_root(&tid, pruned_root);
+                    obj.insert("root".into(), container_root);
+                    if let Some(&expected_name) = tab_names_by_id.get(tid.as_str()) {
+                        if !expected_name.is_empty() {
+                            obj.insert("name".into(), json!(expected_name));
+                        }
+                    } else if tab_addrs.len() == 1
+                        && let Some(addr) = tab_addrs.iter().next()
+                        && let Some(&expected_name) = tab_names_by_addr.get(addr.as_str())
+                        && !expected_name.is_empty()
+                    {
+                        obj.insert("name".into(), json!(expected_name));
+                    }
+                }
+                tabs.push(tab_obj);
+            }
+        }
+
+        for item in &g.terminals {
+            if seen_addrs.contains(&item.address) {
+                continue;
+            }
+            seen_addrs.insert(item.address.clone());
+            tabs.push(json!({
+                "id": item.tab_id,
+                "name": item.tab_name,
+                "root": {
+                    "id": item.tab_id,
+                    "type": "row",
+                    "children": [
+                        {
+                            "id": format!("p_{}", item.sid),
+                            "type": "block",
+                            "content": {
+                                "terminal": item.address,
+                            }
+                        }
+                    ]
+                }
+            }));
+        }
+
+        new_spaces.push(json!({
+            "id": g.space_id,
+            "name": g.space_name,
+            "folder": g.folder,
+            "tabs": tabs,
+        }));
+    }
+
+    new_spaces.extend(non_falcon_spaces);
+    (Some(json!({ "spaces": new_spaces })), dirty_reg)
+}
+
+/// 将 Falcon 左侧栏项目结构（名称与排序）同步至 `herdr-app` 共享文档，返回是否修改了 `terminals` 持久化属性
+pub fn sync_herdr_app_doc(st: &mut GatewayState, emit_events: bool) -> bool {
+    let (Some(new_data), dirty_reg) = build_normalized_herdr_app_doc(st) else {
+        return false;
+    };
+    let unchanged = st
+        .registry
+        .docs
+        .get("herdr-app")
+        .is_some_and(|r| r.data == new_data);
+    if !unchanged {
+        let next_ver = st
+            .registry
+            .docs
+            .get("herdr-app")
+            .map(|r| r.version + 1)
+            .unwrap_or(1);
+        st.registry.docs.insert(
+            "herdr-app".into(),
+            crate::hc::registry::DocRecord {
+                data: new_data,
+                version: next_ver,
+                updated_at: (now_ms().max(0) as u64) / 1000,
+            },
+        );
+        st.registry.save_docs();
+        if emit_events {
+            st.emit_doc("herdr-app", next_ver);
+        }
+    }
+    dirty_reg
+}
+
+/// 在 `doc.set("herdr-app")` 写入后原地修正 `falcon.*` 空间的标题与顺序（保持同一版本号以免打断客户端乐观锁）
+pub fn normalize_herdr_app_doc_in_place(st: &mut GatewayState) {
+    let (Some(new_data), dirty_reg) = build_normalized_herdr_app_doc(st) else {
+        return;
+    };
+    if dirty_reg {
+        st.registry.save_terminals();
+    }
+    if let Some(rec) = st.registry.docs.get_mut("herdr-app")
+        && rec.data != new_data
+    {
+        rec.data = new_data;
+        st.registry.save_docs();
     }
 }
 
@@ -798,6 +1534,7 @@ fn apply_status_records(
     records: Vec<ProgramStatusRecord>,
     emit: bool,
 ) {
+    let synthesize = st.registry.identity.synthesize_labels;
     let Some(t) = st.terminals.get_mut(sid) else { return };
     let was_working = t.status.as_ref().is_some_and(|s| s.state == "working");
     let was_word = t.status.as_ref().map(|s| s.state.clone());
@@ -808,13 +1545,18 @@ fn apply_status_records(
     if !records.is_empty() {
         t.reported = true;
     }
-    let changed = t.status != new_root || t.records != new_map;
+    let prev_status = t.status.clone();
+    let prev_records = t.records.clone();
+    t.status = new_root;
+    t.records = new_map.clone();
+    t.raw_records = records;
+    refresh_terminal_derived(t, synthesize);
+
+    let effective_root = t.status.clone();
+    let changed = prev_status != effective_root || prev_records != new_map;
     if was_word != new_word && (new_word.is_some() || was_word.is_some()) {
         t.status_ms = Some(now_ms().max(0) as u64);
     }
-    t.status = new_root.clone();
-    t.records = new_map.clone();
-    t.raw_records = records;
 
     let turn_ended = was_working && !now_working;
     if turn_ended {
@@ -834,7 +1576,7 @@ fn apply_status_records(
             "status",
             sid,
             json!({
-                "status": new_root,
+                "status": effective_root,
                 "records": new_map,
                 "reported": reported,
             }),
@@ -901,6 +1643,132 @@ mod tests {
         standalone_raw.insert("falcon.standalone".into(), "true".into());
         standalone_raw.insert("falcon.host_name".into(), "dev-box".into());
         let out2 = synthesize_labels("fedcba9876543210", &standalone_raw, true);
-        assert_eq!(out2.get("where").map(String::as_str), Some("dev-box"));
+        assert_eq!(out2.get("where").map(String::as_str), Some("dev-box · 无项目"));
+        assert_eq!(out2.get("falcon.space_name").map(String::as_str), Some("dev-box · 无项目"));
+    }
+
+    #[test]
+    fn sync_herdr_app_doc_orders_and_names_spaces_by_sidebar_structure() {
+        let tmp = std::env::temp_dir().join(format!("falcon-hc-doc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let layout = Layout::new(tmp.clone());
+        let gw = GatewayState::new(layout).unwrap();
+        let mut st = gw.lock().unwrap();
+
+        let make_entry = |sid: &str, seq: u32, addr: &str, cwd: &str, labels: &[(&str, &str)]| -> TerminalEntry {
+            let mut raw = BTreeMap::new();
+            for (k, v) in labels {
+                raw.insert((*k).to_string(), (*v).to_string());
+            }
+            TerminalEntry {
+                sid: sid.into(),
+                session_id: sid.into(),
+                seq,
+                address: addr.into(),
+                name: None,
+                keep: false,
+                alive: true,
+                pid: Some(100 + seq),
+                holder_pid: 100 + seq,
+                created_ms: (seq as u64) * 1000,
+                finished_ms: None,
+                exit_code: None,
+                signal: None,
+                reason: None,
+                cols: 80,
+                rows: 24,
+                raw_title: String::new(),
+                title: String::new(),
+                argv: vec!["zsh".into()],
+                cwd: cwd.into(),
+                owner: "falcon".into(),
+                labels: synthesize_labels(sid, &raw, true),
+                status: None,
+                status_ms: None,
+                records: BTreeMap::new(),
+                raw_records: Vec::new(),
+                turn: 0,
+                reported: false,
+                foreground: None,
+            }
+        };
+
+        // 1. 远端主机虚拟项目（磁盘目录是 UUID，左侧栏名为 linux · script，排在远端组 s1）
+        st.terminals.insert(
+            "04f537b6b51b4fa6".into(),
+            make_entry(
+                "04f537b6b51b4fa6",
+                1,
+                "t1",
+                "/home/fay/.falcon/projects/04f537b6-b51b-4fa6-a61f-ab4169a5db78",
+                &[
+                    ("falcon.project", "04f537b6-b51b-4fa6-a61f-ab4169a5db78"),
+                    ("falcon.project_name", "script"),
+                    ("falcon.host_name", "linux"),
+                    ("falcon.space_name", "linux · script"),
+                    ("falcon.sort_key", "s1:0000/p1:0001:0:0000"),
+                    ("falcon.session", "Claude"),
+                ],
+            ),
+        );
+        // 2. 本机项目 mojito（排在本机组 s0）
+        st.terminals.insert(
+            "a0920c4e1160590d".into(),
+            make_entry(
+                "a0920c4e1160590d",
+                2,
+                "t2",
+                "/Volumes/faye/Code/mojito/native",
+                &[
+                    ("falcon.project", "17a3ff7a-2fd6-4090-beab-03179a82b574"),
+                    ("falcon.project_name", "mojito"),
+                    ("falcon.space_name", "mojito"),
+                    ("falcon.sort_key", "s0:0000/p1:0000:0:0000"),
+                    ("falcon.session", "终端 1"),
+                ],
+            ),
+        );
+
+        sync_herdr_app_doc(&mut st, false);
+        let doc = &st.registry.docs["herdr-app"].data;
+        let spaces = doc["spaces"].as_array().unwrap();
+        assert_eq!(spaces.len(), 2);
+        // 本机 mojito 排第一，远端 linux · script 排第二；且显示名为项目名而非实际目录名
+        assert_eq!(spaces[0]["id"].as_str(), Some("falcon.17a3ff7a-2fd6-4090-beab-03179a82b574"));
+        assert_eq!(spaces[0]["name"].as_str(), Some("mojito"));
+        assert_eq!(spaces[0]["tabs"][0]["name"].as_str(), Some("终端 1"));
+        assert_eq!(spaces[0]["tabs"][0]["root"]["type"].as_str(), Some("row"));
+        assert_eq!(
+            spaces[0]["tabs"][0]["root"]["children"][0]["content"]["terminal"].as_str(),
+            Some("t2")
+        );
+        assert_eq!(spaces[1]["id"].as_str(), Some("falcon.04f537b6-b51b-4fa6-a61f-ab4169a5db78"));
+        assert_eq!(spaces[1]["name"].as_str(), Some("linux · script"));
+        assert_eq!(spaces[1]["tabs"][0]["name"].as_str(), Some("Claude"));
+        drop(st);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn clean_terminal_title_strips_spinners_uuid_suffix_and_self_name() {
+        let cwd = "/home/fay/.falcon/projects/04f537b6-b51b-4fa6-a61f-ab4169a5db78";
+        let proj_id = Some("04f537b6-b51b-4fa6-a61f-ab4169a5db78");
+        assert_eq!(
+            clean_terminal_title(
+                "查看并汇总三个 Bug | 04f537b6-b51b-4fa6-a6...",
+                cwd,
+                proj_id,
+                Some("codex")
+            ),
+            "查看并汇总三个 Bug"
+        );
+        assert_eq!(
+            clean_terminal_title("✳ Claude Code", cwd, proj_id, Some("claude-code")),
+            ""
+        );
+        assert_eq!(
+            clean_terminal_title("◐ 修复登录问题", cwd, proj_id, Some("claude-code")),
+            "修复登录问题"
+        );
     }
 }

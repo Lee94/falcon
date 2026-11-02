@@ -66,6 +66,90 @@ impl Drop for HcProxyHandle {
     }
 }
 
+/// Computes the sidebar display name (`falcon.space_name`) and sidebar sort key (`falcon.sort_key`)
+/// for a project, matching the left sidebar hierarchy (`ServerGroup -> FolderGroup -> Worktree`).
+pub fn project_sidebar_meta(
+    db: &Db,
+    project: &ProjectRow,
+) -> (String, String, Option<String>, Option<String>) {
+    let hosts = db.list_hosts();
+    let (server_sort, host_prefix) = if project.project_type == "local" {
+        ("s0:0000".to_string(), None)
+    } else {
+        let host_id = project
+            .host_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| falcon_proto::standalone_host_id(&project.id));
+        if let Some(hid) = host_id
+            && let Some((idx, h)) = hosts.iter().enumerate().find(|(_, h)| h.id == hid)
+        {
+            (format!("s1:{idx:04}"), Some(h.name.clone()))
+        } else {
+            let conn = project
+                .ssh_host
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "ssh".into());
+            (format!("s2:{conn}"), Some(conn))
+        }
+    };
+
+    let (proj_sort, proj_label, src_id_out, wt_branch_out) =
+        if falcon_proto::is_standalone_project_id(&project.id) {
+            (
+                "p0:0000:0:0000".to_string(),
+                "无项目".to_string(),
+                None,
+                None,
+            )
+        } else {
+            let all_projects = db.list_projects();
+            let src_id = project
+                .source_project_id
+                .as_deref()
+                .filter(|s| !s.is_empty());
+            if let Some(sid) = src_id
+                && let Some((s_idx, src_proj)) =
+                    all_projects.iter().enumerate().find(|(_, p)| p.id == sid)
+            {
+                let w_idx = all_projects
+                    .iter()
+                    .position(|p| p.id == project.id)
+                    .unwrap_or(9999);
+                let branch = project
+                    .worktree_branch
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&project.name);
+                (
+                    format!("p1:{s_idx:04}:1:{w_idx:04}"),
+                    format!("{} / {branch}", src_proj.name),
+                    Some(sid.to_string()),
+                    Some(branch.to_string()),
+                )
+            } else {
+                let p_idx = all_projects
+                    .iter()
+                    .position(|p| p.id == project.id)
+                    .unwrap_or(9999);
+                (
+                    format!("p1:{p_idx:04}:0:0000"),
+                    project.name.clone(),
+                    None,
+                    None,
+                )
+            }
+        };
+
+    let space_name = match host_prefix {
+        Some(h) if !h.is_empty() => format!("{h} · {proj_label}"),
+        _ => proj_label,
+    };
+    let sort_key = format!("{server_sort}/{proj_sort}");
+    (space_name, sort_key, src_id_out, wt_branch_out)
+}
+
 /// Synchronizes `<data_dir>/sessiond/sessions/<sid>.labels.json` for a session (local or remote).
 /// Preserves existing non-`falcon.*` labels (such as `hc.name`).
 pub fn sync_session_labels(data_dir: &Path, db: &Db, project: &ProjectRow, row: &SessionRow) {
@@ -80,10 +164,34 @@ pub fn sync_session_labels(data_dir: &Path, db: &Db, project: &ProjectRow, row: 
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
 
+    let (space_name, sort_key, src_id, wt_branch) = project_sidebar_meta(db, project);
+
     labels.insert("falcon.project".into(), project.id.clone());
     labels.insert("falcon.project_name".into(), project.name.clone());
+    labels.insert("falcon.space_name".into(), space_name);
+    labels.insert("falcon.sort_key".into(), sort_key);
     labels.insert("falcon.session".into(), row.name.clone());
     labels.insert("falcon.session_id".into(), row.id.clone());
+    if let Some(agent) = row.agent.as_deref().filter(|s| !s.is_empty()) {
+        labels.insert("falcon.agent".into(), agent.to_string());
+    } else {
+        labels.remove("falcon.agent");
+    }
+    if let Some(shell) = project.shell.as_deref().filter(|s| !s.is_empty()) {
+        labels.insert("falcon.shell".into(), shell.to_string());
+    } else {
+        labels.remove("falcon.shell");
+    }
+    if let Some(src) = src_id {
+        labels.insert("falcon.source_project".into(), src);
+    } else {
+        labels.remove("falcon.source_project");
+    }
+    if let Some(br) = wt_branch {
+        labels.insert("falcon.worktree_branch".into(), br);
+    } else {
+        labels.remove("falcon.worktree_branch");
+    }
     if falcon_proto::is_standalone_project_id(&project.id) {
         labels.insert("falcon.standalone".into(), "true".into());
     } else {
@@ -111,9 +219,55 @@ pub fn sync_session_labels(data_dir: &Path, db: &Db, project: &ProjectRow, row: 
         if !host_name.is_empty() {
             labels.insert("falcon.host_name".into(), host_name);
         }
+    } else {
+        labels.remove("falcon.remote");
+        labels.remove("falcon.host");
+        labels.remove("falcon.host_name");
     }
 
     let _ = write_atomic_json(&labels_path, &labels);
+}
+
+/// Updates `falcon.title` in `<data_dir>/sessiond/sessions/<sid>.labels.json` when a durable
+/// session's computed auto-title changes.
+pub fn sync_session_runtime_title(data_dir: &Path, session_id: &str, title: Option<&str>) {
+    let sid = sid_of(session_id);
+    let labels_path = data_dir
+        .join(SESSIOND_DIR)
+        .join("sessions")
+        .join(format!("{sid}.labels.json"));
+    let Ok(bytes) = std::fs::read(&labels_path) else {
+        return;
+    };
+    let Ok(mut labels) = serde_json::from_slice::<BTreeMap<String, String>>(&bytes) else {
+        return;
+    };
+    let next = title.map(str::trim).filter(|s| !s.is_empty());
+    let cur = labels.get("falcon.title").map(String::as_str);
+    if cur == next {
+        return;
+    }
+    match next {
+        Some(t) => {
+            labels.insert("falcon.title".into(), t.to_string());
+        }
+        None => {
+            labels.remove("falcon.title");
+        }
+    }
+    let _ = write_atomic_json(&labels_path, &labels);
+}
+
+/// Synchronizes `<sid>.labels.json` for all durable sessions in the database.
+pub fn sync_all_session_labels(data_dir: &Path, db: &Db) {
+    for row in db.list_sessions() {
+        if row.durable != 1 || super::machine::is_machine_owner(&row.project_id) {
+            continue;
+        }
+        if let Some(project) = owner_row(db, &row.project_id) {
+            sync_session_labels(data_dir, db, &project, &row);
+        }
+    }
 }
 
 /// Merges additional user/herdr labels into `<sid>.labels.json` without clobbering `falcon.*`.
@@ -181,6 +335,12 @@ pub fn start_remote_proxy(
 
     sync_session_labels(data_dir, db, project, row);
 
+    let default_cmd = row
+        .agent
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| project.shell.clone().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "zsh".into());
     let meta = SessionMeta {
         sid: sid.clone(),
         session_id: row.id.clone(),
@@ -193,7 +353,7 @@ pub fn start_remote_proxy(
         cwd: cwd
             .or(project.working_dir.as_deref())
             .map(str::to_string),
-        argv: Vec::new(),
+        argv: vec![default_cmd],
     };
     write_atomic_json(&meta_path, &meta).ok()?;
 
@@ -634,6 +794,8 @@ mod tests {
 
         assert_eq!(labels.get("falcon.project").map(String::as_str), Some("proj-ssh-1"));
         assert_eq!(labels.get("falcon.project_name").map(String::as_str), Some("backend-api"));
+        assert_eq!(labels.get("falcon.space_name").map(String::as_str), Some("Prod EU · backend-api"));
+        assert_eq!(labels.get("falcon.sort_key").map(String::as_str), Some("s1:0000/p1:0000:0:0000"));
         assert_eq!(labels.get("falcon.session").map(String::as_str), Some("tail-logs"));
         assert_eq!(labels.get("falcon.remote").map(String::as_str), Some("true"));
         assert_eq!(labels.get("falcon.host").map(String::as_str), Some("host-1"));

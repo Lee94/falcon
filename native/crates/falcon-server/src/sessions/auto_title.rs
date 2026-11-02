@@ -180,7 +180,24 @@ fn clean_program_title(raw: &str) -> Option<String> {
         }
         _ => s,
     };
+    let s = strip_uuid_pipe_suffix(s);
     (!s.is_empty()).then(|| s.to_string())
+}
+
+/// Codex CLI 会把终端标题设为 `<主题> | <工作目录名>`；在无 `working_dir` 的虚拟项目中，
+/// 工作目录名是项目 UUID（或被截断为 `04f537b6-b51b-4fa6-a6...`），剥去该后缀只留主题。
+fn strip_uuid_pipe_suffix(s: &str) -> &str {
+    if let Some((lhs, rhs)) = s.rsplit_once(" | ") {
+        let trimmed_rhs = rhs.trim().trim_end_matches(['.', '…']);
+        if trimmed_rhs.len() >= 8
+            && trimmed_rhs.contains('-')
+            && trimmed_rhs.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+            && !lhs.trim().is_empty()
+        {
+            return lhs.trim();
+        }
+    }
+    s
 }
 
 /// 两个名字是不是同一个：只比字母数字、不分大小写（"Claude Code" = "claude-code"）

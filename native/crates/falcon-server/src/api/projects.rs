@@ -320,6 +320,9 @@ async fn move_project(State(state): State<AppState>, Path(id): Path<String>, bod
     let rows = match falcon_core::project_tree::move_in_order(&ids, String::as_str, &id, target, after) {
         Some(order) => {
             state.db.set_project_order(&order);
+            state.engine.send(move |engine| {
+                engine.sessions.sync_project_labels(&id);
+            });
             state.db.list_projects()
         }
         // 挪到自己旁边 / 本来就挨着：什么都不写，照样回整份列表

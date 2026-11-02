@@ -289,6 +289,37 @@ mod unix_impl {
         resp.get("result").cloned()
     }
 
+    /// 检查 socket 上是否已有当前版本的网关在运行；若是旧版本的 falcon 网关则平滑终止它并返回 false
+    fn ensure_gateway_up_to_date(socket: &Path) -> bool {
+        let Some(status) = probe_running_gateway(socket) else {
+            return false;
+        };
+        if status["installed_by"].as_str() != Some("falcon") {
+            return true;
+        }
+        let expected = crate::hc::rpc::hc_version_string();
+        if status["version"].as_str() == Some(expected.as_str()) {
+            return true;
+        }
+        if let Some(pid) = status["pid"].as_u64().map(|p| p as u32)
+            && pid != std::process::id()
+            && crate::proc::is_sessiond(pid)
+        {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && crate::proc::alive(pid) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if crate::proc::is_sessiond(pid) {
+                crate::proc::kill(pid);
+            }
+            let _ = std::fs::remove_file(socket);
+        }
+        false
+    }
+
     /// 在 `spawn` / `bridge` / `list` 时顺手确保默认 `~/.falcon`（或 `~/.mojito`）下的 `hc` 网关已在后台运行。
     /// 可通过 `FALCON_NO_HC=1` 禁用；非默认根目录（如临时测试目录）除非设了 `FALCON_AUTOSTART_HC=1`
     /// 否则不自动拉起后台进程。
@@ -304,7 +335,7 @@ mod unix_impl {
             return;
         }
         let paths = resolve_paths(layout, None);
-        if std::os::unix::net::UnixStream::connect(&paths.socket_path).is_ok() {
+        if ensure_gateway_up_to_date(&paths.socket_path) {
             return;
         }
         let _ = layout.ensure_dirs();
@@ -313,7 +344,9 @@ mod unix_impl {
 
     /// 确保网关在后台运行，返回已连接的 `UnixStream`
     pub fn ensure_running(layout: &Layout, paths: &HcPaths) -> Result<std::os::unix::net::UnixStream> {
-        if let Ok(s) = std::os::unix::net::UnixStream::connect(&paths.socket_path) {
+        if ensure_gateway_up_to_date(&paths.socket_path)
+            && let Ok(s) = std::os::unix::net::UnixStream::connect(&paths.socket_path)
+        {
             return Ok(s);
         }
         spawn_gateway_background(layout, paths)?;
@@ -429,6 +462,15 @@ mod unix_impl {
             .write(true)
             .open(&paths.lock_path)
             .with_context(|| format!("打不开 {}", paths.lock_path.display()))?;
+
+        if !try_flock_exclusive(&lock_file) {
+            if !ensure_gateway_up_to_date(&paths.socket_path) {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline && !try_flock_exclusive(&lock_file) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
 
         if !try_flock_exclusive(&lock_file) {
             // 已经有进程拿住锁了：检查是不是我们自己的网关；如果是真 hc 占住了，报错提示

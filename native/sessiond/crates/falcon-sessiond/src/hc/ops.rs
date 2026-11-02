@@ -1097,7 +1097,13 @@ fn handle_doc_get(gw: &SharedGateway, params: Value) -> Result<Value, RpcError> 
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::invalid_params("missing `name` parameter"))?;
-    let st = gw.lock().unwrap_or_else(|p| p.into_inner());
+    if name == "herdr-app" {
+        sync_directory(gw, true);
+    }
+    let mut st = gw.lock().unwrap_or_else(|p| p.into_inner());
+    if name == "herdr-app" {
+        let _ = crate::hc::mirror::sync_herdr_app_doc(&mut st, false);
+    }
     st.registry.doc_get(name)
 }
 
@@ -1111,6 +1117,9 @@ fn handle_doc_set(gw: &SharedGateway, params: Value) -> Result<Value, RpcError> 
     let version = params.get("version").and_then(Value::as_u64).unwrap_or(0);
     let mut st = gw.lock().unwrap_or_else(|p| p.into_inner());
     let new_ver = st.registry.doc_set(&name, value, version)?;
+    if name == "herdr-app" {
+        crate::hc::mirror::normalize_herdr_app_doc_in_place(&mut st);
+    }
     st.emit_doc(&name, new_ver);
     Ok(json!({ "version": new_ver }))
 }
