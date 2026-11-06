@@ -102,8 +102,8 @@ mod tests {
     #[test]
     fn agent_falls_back_to_its_wire_literal() {
         assert_eq!(title_of("", None, Some(SessionAgent::Grok)).as_deref(), Some("grok"));
-        // 已知出入：新服务端的 agent（比如 "gemini"）在 falcon-proto 里落成 Unknown，
-        // 原值已丢，这里只能叫 "unknown"；React 版会原样显示 "gemini"
+        // 已知出入：新服务端的 agent（比如 "future-agent"）在 falcon-proto 里落成 Unknown，
+        // 原值已丢，这里只能叫 "unknown"；React 版会原样显示 "future-agent"
         assert_eq!(title_of("", None, Some(SessionAgent::Unknown)).as_deref(), Some("unknown"));
     }
 }

@@ -19,7 +19,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use falcon_proto::term_modes::TermModeTracker;
 use falcon_proto::{
-    DeadReason, NonDurableReason, OscColorHint, ProgramStatusRecord, ProgramStatusSummary, ServerMessage, Session, SessionAgent,
+    DeadReason, NativeDisplayRefresh, NonDurableReason, OscColorHint, ProgramStatusRecord, ProgramStatusSummary, ServerMessage, Session, SessionAgent,
     SessionForeground, SessionState, TERM_FRAME_OUTPUT, TERM_FRAME_REPLAY, TermAppearance, summarize,
 };
 use futures::FutureExt as _;
@@ -32,7 +32,7 @@ use super::backend::{Backend, BackendCallbacks, BackendEvent};
 use super::forward::ForwardManager;
 use super::local::{
     LocalHost, LocalSessionState, attach_local, default_local_shell, local_kill, local_list_sessions, local_session_state,
-    open_local_sessiond, spawn_failure_reason,
+    open_local_sessiond, run_sessiond, spawn_failure_reason,
 };
 use super::machine::{Machine, is_machine_owner, owner_row};
 use super::relay::{LinkFor, WantReconnect};
@@ -54,6 +54,7 @@ use crate::shells::is_shell_command;
 use crate::term_env::{OscColorGate, parse_hex_rgb};
 use crate::host::HostKind;
 use crate::sessiond::backend::ConnectError;
+use crate::sessiond::command::{exec_command, reprobe_argv};
 use crate::sessiond::deploy::{Deployed, InstallError, StageFn};
 use crate::virtualdir::{
     container_manifest_files, posix_write_manifest_command, remove_local_virtual_dir, remove_virtual_dir_command,
@@ -191,8 +192,6 @@ struct EntryState {
     /// 持久会话所用的守护进程，接回时要用
     deployed: Option<Deployed>,
     backend: Option<Rc<dyn Backend>>,
-    /// 远端 SSH 持久会话在本机 `<data_dir>/sessiond/` 下的 Unix socket 代理（供 Herdr 发现与挂接）
-    hc_proxy: Option<super::hc_proxy::HcProxyHandle>,
     /// 非持久会话的回放来源；持久会话的回放是守护进程给的快照，不用它
     buffer: RingBuffer,
     viewers: Vec<Rc<Viewer>>,
@@ -264,7 +263,6 @@ impl LiveEntry {
             s: RefCell::new(EntryState {
                 deployed: init.deployed,
                 backend: None,
-                hc_proxy: None,
                 buffer: RingBuffer::new(),
                 viewers: Vec::new(),
                 arbiter: ViewerArbiter::new(),
@@ -388,6 +386,8 @@ pub struct SessionManager {
     /// 主机链路的退避重连，只为还有启用中的中转而坚持；键是 hostId
     host_reconnects: RefCell<HashMap<String, Rc<ReconnectState>>>,
     entries: RefCell<HashMap<String, Rc<LiveEntry>>>,
+    /// 同一个会话只允许一次显示刷新，避免多个连接同时重建同一原生界面。
+    reprobes: RefCell<HashSet<String>>,
     reconnects: RefCell<HashMap<String, Rc<ReconnectState>>>,
     /// 本地持久会话的自动接回退避，键是 sessionId
     local_reattach: RefCell<HashMap<String, Rc<ReconnectState>>>,
@@ -409,8 +409,6 @@ pub struct SessionManager {
     machine_run_locks: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
     /// 对话终端里用户敲完的命令交给谁（AI 助手的 hub）
     block_listener: RefCell<Option<Rc<dyn Fn(&str, CommandBlock)>>>,
-    /// `<data_dir>/sessiond/server-hc.sock` 监听任务（供 `falcon-sessiond` 把远端 `terminal.run` 委托给本服务）
-    hc_listener: RefCell<Option<AbortHandle>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -449,6 +447,7 @@ impl SessionManager {
                 host_links: RefCell::default(),
                 host_reconnects: RefCell::default(),
                 entries: RefCell::default(),
+                reprobes: RefCell::default(),
                 reconnects: RefCell::default(),
                 local_reattach: RefCell::default(),
                 virtual_dirs: RefCell::default(),
@@ -459,7 +458,6 @@ impl SessionManager {
                 machine_shell_locks: RefCell::default(),
                 machine_run_locks: RefCell::default(),
                 block_listener: RefCell::default(),
-                hc_listener: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -505,8 +503,6 @@ impl SessionManager {
     /// 以前要等用户打开 tab 或点「接回」才验证—— falcon 一重启侧栏就一片黄。
     /// 这里按库存尺寸自动接回（跟总览里点接回同一条路，见 term_size.rs）。
     pub fn resume_unverified(&self) {
-        self.ensure_hc_listener();
-        super::hc_proxy::sync_all_session_labels(&self.data_dir, &self.db);
         for row in self.db.list_sessions() {
             if row.state != "unverified" || row.durable != 1 {
                 continue;
@@ -514,29 +510,6 @@ impl SessionManager {
             let entry = self.hydrate_entry(&row);
             self.kick_auto_reattach(&entry);
         }
-    }
-
-    /// 确保 `<data_dir>/sessiond/server-hc.sock` 监听已启动（在 LocalSet 内按需调用，幂等）。
-    pub fn ensure_hc_listener(&self) {
-        let mut slot = self.hc_listener.borrow_mut();
-        if slot.is_none() {
-            *slot = super::hc_proxy::start_server_listener(self.me.clone(), self.data_dir.clone());
-        }
-    }
-
-    /// 同步单个会话在 `<data_dir>/sessiond/sessions/<sid>.labels.json` 中的标签（会话改名后调用）。
-    pub fn sync_session_labels(&self, session_id: &str) {
-        let Some(row) = self.db.get_session(session_id) else { return };
-        if row.durable != 1 || is_machine_owner(&row.project_id) {
-            return;
-        }
-        let Some(project) = owner_row(&self.db, &row.project_id) else { return };
-        super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, &project, &row);
-    }
-
-    /// 同步某项目（及其下属 worktree）或全局持久会话的 `<sid>.labels.json`（项目/主机改名或排序变化后调用）。
-    pub fn sync_project_labels(&self, _project_id: &str) {
-        super::hc_proxy::sync_all_session_labels(&self.data_dir, &self.db);
     }
 
     /// 判定某项目的宿主机能否提供持久会话，必要时把会话守护进程推上去（ADR 0020）。
@@ -656,7 +629,6 @@ impl SessionManager {
             tokio::task::spawn_local(async move {
                 let Some(d) = me.local.peek().and_then(|l| l.deployed) else { return };
                 let Some(list) = local_list_sessions(&d).await else { return };
-                me.adopt_hc_entries(&list, falcon_proto::STANDALONE_LOCAL);
                 let orphans = me.orphans(list);
                 if !orphans.is_empty() {
                     log::info!("清理本机的孤儿会话：{orphans:?}");
@@ -672,123 +644,14 @@ impl SessionManager {
         if self.swept.borrow_mut().insert(key.clone()) {
             let me = self.me();
             let link = link.clone();
-            let default_standalone = proj
-                .host_id
-                .as_deref()
-                .or_else(|| falcon_proto::standalone_host_id(&proj.id))
-                .map(falcon_proto::standalone_for_host);
             tokio::task::spawn_local(async move {
                 let Some(list) = link.list_sessions(&deployed).await else { return };
-                if let Some(standalone_id) = &default_standalone {
-                    me.adopt_hc_entries(&list, standalone_id);
-                }
                 let orphans = me.orphans(list);
                 if !orphans.is_empty() {
                     log::info!("清理 {key} 上的孤儿会话：{orphans:?}");
                     link.kill_sessions(&deployed, &orphans).await;
                 }
             });
-        }
-    }
-
-    /// 收养由 `hc` / `herdr-app` 在宿主机上直接创建的持久会话（`owner` 以 `"hc:"` 开头）：
-    /// - 若带了合法的 `falcon.project` 标签且该项目存在，则归入该项目；
-    /// - 否则归入该机器的「无项目」虚拟分组（`standalone:local` 或 `standalone:host:<hostId>`）。
-    pub fn adopt_hc_entries(&self, entries: &[falcon_proto::sessiond::ListEntry], default_standalone_id: &str) {
-        if owner_row(&self.db, default_standalone_id).is_none() {
-            return;
-        }
-        for e in entries {
-            if !e.alive || !e.owner.starts_with("hc:") || e.session_id.is_empty() {
-                continue;
-            }
-            if self.db.get_session(&e.session_id).is_some() {
-                continue;
-            }
-            let project_id = e
-                .labels
-                .get("falcon.project")
-                .filter(|pid| owner_row(&self.db, pid).is_some())
-                .cloned()
-                .unwrap_or_else(|| default_standalone_id.to_string());
-            let name = e
-                .labels
-                .get("hc.name")
-                .or_else(|| e.labels.get("falcon.session"))
-                .cloned()
-                .or_else(|| {
-                    e.argv
-                        .first()
-                        .and_then(|s| s.rsplit(['/', '\\']).next())
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| "Terminal".into());
-            let created_at = if e.created_at > 0 { e.created_at } else { now_ms() };
-            let row = SessionRow {
-                id: e.session_id.clone(),
-                project_id,
-                name,
-                state: "unverified".into(),
-                durable: 1,
-                dead_reason: None,
-                non_durable_reason: None,
-                created_at,
-                last_active_at: created_at,
-                cols: None,
-                rows: None,
-                agent: None,
-            };
-            self.db.insert_session(&row);
-            let entry = self.hydrate_entry(&row);
-            self.kick_auto_reattach(&entry);
-        }
-    }
-
-    /// 同步扫描本机 `<data_dir>/sessiond/sessions/` 下由 `hc` 新建的存活会话并收养入库。
-    /// 供 `GET /api/sessions` 调用，使本机 `hc run` 出来的会话无需重启即可出现在侧栏「无项目」下。
-    pub fn adopt_local_hc_sessions(&self) {
-        let sessions_dir = self.data_dir.join(falcon_proto::sessiond::SESSIOND_DIR).join("sessions");
-        let Ok(rd) = std::fs::read_dir(&sessions_dir) else { return };
-        let mut found = Vec::new();
-        for item in rd.flatten() {
-            let path = item.path();
-            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            let Some(sid) = fname.strip_suffix(".json") else { continue };
-            if !falcon_proto::sessiond::valid_sid(sid) {
-                continue;
-            }
-            if sessions_dir.join(format!("{sid}.exit")).exists() {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let Ok(meta) = serde_json::from_slice::<falcon_proto::sessiond::SessionMeta>(&bytes) else { continue };
-            if !meta.owner.starts_with("hc:") || meta.session_id.is_empty() {
-                continue;
-            }
-            if self.db.get_session(&meta.session_id).is_some() {
-                continue;
-            }
-            let labels: std::collections::BTreeMap<String, String> = std::fs::read(sessions_dir.join(format!("{sid}.labels.json")))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default();
-            found.push(falcon_proto::sessiond::ListEntry {
-                sid: meta.sid,
-                session_id: meta.session_id,
-                pid: meta.pid,
-                version: meta.version,
-                owner: meta.owner,
-                created_at: meta.created_at,
-                alive: true,
-                exited: None,
-                cwd: meta.cwd,
-                argv: meta.argv,
-                labels,
-            });
-        }
-        if !found.is_empty() {
-            self.adopt_hc_entries(&found, falcon_proto::STANDALONE_LOCAL);
         }
     }
 
@@ -1355,32 +1218,6 @@ impl SessionManager {
 
         let size = fallback_term_size(entry.size());
         let hint = entry.color_hint();
-        let mut labels = std::collections::BTreeMap::new();
-        if !reattach && !is_machine_owner(&row.project_id) {
-            let (space_name, sort_key, src_id, wt_branch) =
-                super::hc_proxy::project_sidebar_meta(&self.db, project);
-            labels.insert("falcon.project".into(), project.id.clone());
-            labels.insert("falcon.project_name".into(), project.name.clone());
-            labels.insert("falcon.space_name".into(), space_name);
-            labels.insert("falcon.sort_key".into(), sort_key);
-            labels.insert("falcon.session".into(), row.name.clone());
-            labels.insert("falcon.session_id".into(), row.id.clone());
-            if let Some(agent) = row.agent.as_deref().filter(|s| !s.is_empty()) {
-                labels.insert("falcon.agent".into(), agent.to_string());
-            }
-            if let Some(shell) = project.shell.as_deref().filter(|s| !s.is_empty()) {
-                labels.insert("falcon.shell".into(), shell.to_string());
-            }
-            if let Some(src) = src_id {
-                labels.insert("falcon.source_project".into(), src);
-            }
-            if let Some(br) = wt_branch {
-                labels.insert("falcon.worktree_branch".into(), br);
-            }
-            if falcon_proto::is_standalone_project_id(&project.id) {
-                labels.insert("falcon.standalone".into(), "true".into());
-            }
-        }
         let opts = AttachOptions {
             session_id: entry.session_id.clone(),
             cwd,
@@ -1402,11 +1239,9 @@ impl SessionManager {
                 let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
                 super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive)
             },
-            labels,
         };
 
         let backend: Rc<dyn Backend> = if entry.durable {
-            self.ensure_hc_listener();
             let (backend, welcome) = if project.project_type == "local" {
                 open_local_sessiond(&self.local, &opts, cb).await?
             } else {
@@ -1417,32 +1252,6 @@ impl SessionManager {
                 s.exit_seen = false;
                 s.bridge_exit = None;
                 s.sync_in_flight = false;
-            }
-            if !is_machine_owner(&row.project_id) {
-                if project.project_type == "local" {
-                    super::hc_proxy::sync_session_labels(&self.data_dir, &self.db, project, row);
-                } else if let Some(d) = entry.deployed() {
-                    if let Some(old) = entry.s.borrow_mut().hc_proxy.take() {
-                        old.stop(false);
-                    }
-                    let proxy = super::hc_proxy::start_remote_proxy(
-                        &self.data_dir,
-                        &self.db,
-                        project,
-                        row,
-                        &welcome,
-                        opts.cwd.as_deref(),
-                        d,
-                        self.get_link(project),
-                    );
-                    entry.s.borrow_mut().hc_proxy = proxy;
-                    if self.local.peek().is_none() {
-                        let me = self.me();
-                        tokio::task::spawn_local(async move {
-                            let _ = me.local.prepare().await;
-                        });
-                    }
-                }
             }
             // 宿主机上的 VT 进程不是这份二进制里的 ghostty：热升级（设计文档 2.3），升级 ghostty
             // 不必等存量会话自然消亡。holder 会用二进制快照交接，解不了就用原始尾巴重建
@@ -1717,6 +1526,52 @@ impl SessionManager {
         self.db.get_session(session_id).ok_or_else(|| SessionError::NotFound("会话不存在".into()))
     }
 
+    /// 合作刷新前台 OMP 的显示协商。只操作已连接的 active 持久会话，失败原样返回；
+    /// 不接回、不重启，也不把执行失败伪装成「前台不是 OMP」。
+    pub async fn reprobe_ui(&self, session_id: &str) -> Result<bool, String> {
+        let row = self.db.get_session(session_id).ok_or_else(|| "会话不存在".to_string())?;
+        if row.state != "active" || row.durable != 1 {
+            return Err("显示刷新需要 active 持久会话".into());
+        }
+        let entry = self.entry(session_id).ok_or_else(|| "会话尚未连接".to_string())?;
+        {
+            let s = entry.s.borrow();
+            if !entry.durable || s.backend.is_none() || s.terminating || s.exit_seen {
+                return Err("会话尚未连接或正在结束".into());
+            }
+        }
+        let project = owner_row(&self.db, &row.project_id).ok_or_else(|| "会话所属项目或主机不存在".to_string())?;
+        let deployed = entry.deployed().ok_or_else(|| "会话没有已部署的守护进程".to_string())?;
+        if deployed.kind == HostKind::Windows {
+            return Err("Windows 宿主机不支持原生显示刷新".into());
+        }
+        if !self.reprobes.borrow_mut().insert(session_id.to_string()) {
+            return Err("此会话的显示刷新正在进行".into());
+        }
+        // 引擎请求被取消、执行超时或返回错误时也释放登记；按 session 而非 entry 互斥，
+        // 连接重建换掉 entry 也不能同时启动第二次显示刷新。
+        let _guard = DisplayRefreshGuard { pending: &self.reprobes, session_id };
+        let sid = falcon_proto::sessiond::sid_of(session_id);
+        let argv = reprobe_argv(&deployed.bin, &deployed.root, &sid);
+        let stdout = if project.project_type == "local" {
+            run_sessiond(&argv).await?
+        } else {
+            let link = self.get_link(&project);
+            let command = exec_command(deployed.kind, &argv);
+            let res = tokio::time::timeout(Duration::from_secs(15), link.exec(&command, None))
+                .await
+                .map_err(|_| "守护进程 15 秒内没有回话".to_string())?
+                .map_err(|e| e.to_string())?;
+            if !res.ok() {
+                return Err(fail_text(&res.stderr, "守护进程显示刷新失败", res.code));
+            }
+            res.stdout
+        };
+        serde_json::from_str::<NativeDisplayRefresh>(stdout.trim())
+            .map(|result| result.refreshed)
+            .map_err(|e| format!("守护进程显示刷新的回话看不懂：{e}：{}", stdout.trim()))
+    }
+
     /// 会话前台是否有程序在跑（关 tab 前的确认依据）。
     ///
     /// 持久会话问宿主机上的守护进程（它直接 tcgetpgrp，Windows 上沿进程树找）；非持久本地
@@ -1811,9 +1666,6 @@ impl SessionManager {
             return;
         }
         entry.s.borrow_mut().title = next.clone();
-        if entry.durable && !is_machine_owner(&entry.project_id) {
-            super::hc_proxy::sync_session_runtime_title(&self.data_dir, &entry.session_id, next.as_deref());
-        }
         self.broadcast(entry, &ServerMessage::Title { title: next });
     }
 
@@ -1891,9 +1743,6 @@ impl SessionManager {
         }
 
         if let Some(e) = &entry {
-            if let Some(proxy) = e.s.borrow_mut().hc_proxy.take() {
-                proxy.stop(true);
-            }
             self.broadcast(e, &ServerMessage::State { state: SessionState::Dead, dead_reason: Some(DeadReason::Exited) });
             self.drop_output(e);
             self.entries.borrow_mut().remove(session_id);
@@ -2249,14 +2098,7 @@ impl SessionManager {
     }
 
     fn mark_dead(&self, entry: &LiveEntry, reason: DeadReason) {
-        let proxy = {
-            let mut s = entry.s.borrow_mut();
-            s.backend = None;
-            s.hc_proxy.take()
-        };
-        if let Some(proxy) = proxy {
-            proxy.stop(reason == DeadReason::Exited);
-        }
+        entry.s.borrow_mut().backend = None;
         // 先把还没广播的尾巴发出去（shell 的告别输出），再释放
         self.flush_output(entry);
         // dead 会话不可能再回放（add_viewer 对 dead 行早退），立刻释放 Scrollback
@@ -2275,14 +2117,7 @@ impl SessionManager {
     }
 
     fn mark_unverified(&self, entry: &Rc<LiveEntry>) {
-        let proxy = {
-            let mut s = entry.s.borrow_mut();
-            s.backend = None;
-            s.hc_proxy.take()
-        };
-        if let Some(proxy) = proxy {
-            proxy.stop(false);
-        }
+        entry.s.borrow_mut().backend = None;
         self.db.update_session_state(&entry.session_id, SessionState::Unverified, None);
         self.broadcast(entry, &ServerMessage::State { state: SessionState::Unverified, dead_reason: None });
         if !entry.terminating() {
@@ -2522,6 +2357,17 @@ impl SessionManager {
     }
 }
 
+struct DisplayRefreshGuard<'a> {
+    pending: &'a RefCell<HashSet<String>>,
+    session_id: &'a str,
+}
+
+impl Drop for DisplayRefreshGuard<'_> {
+    fn drop(&mut self) {
+        self.pending.borrow_mut().remove(self.session_id);
+    }
+}
+
 fn dead_reason_of(row: &SessionRow) -> Option<DeadReason> {
     row.dead_reason.as_deref().map(|r| DeadReason::from_wire(r).unwrap_or(DeadReason::Unknown))
 }
@@ -2553,3 +2399,100 @@ pub use machine_run::{CANCELLED, ShellRun, shell_input};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod display_refresh_tests {
+    use super::*;
+    use crate::sessiond::command::SessiondTarget;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+    struct ConnectedBackend;
+
+    impl Backend for ConnectedBackend {
+        fn write(&self, _: &str) { panic!("reprobe must not inject terminal input"); }
+        fn resize(&self, _: u16, _: u16) { panic!("reprobe must not resize the session"); }
+        fn destroy(&self) { panic!("reprobe must not disconnect the session"); }
+    }
+
+    fn harness(owner: &str, state: &str, durable: bool) -> (tempfile::TempDir, Rc<SessionManager>, Rc<LiveEntry>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Db::open(dir.path()).unwrap());
+        let secrets = Arc::new(SecretBox::open(dir.path()).unwrap());
+        let mgr = SessionManager::new(db.clone(), secrets, dir.path().into(), Arc::new(AskpassHub::new()));
+        if !is_machine_owner(owner) && !falcon_proto::is_standalone_project_id(owner) {
+            db.insert_project(&ProjectRow { id: owner.into(), project_type: "local".into(), ..Default::default() });
+        }
+        db.insert_session(&SessionRow {
+            id: ID.into(), project_id: owner.into(), state: state.into(), durable: i64::from(durable), ..Default::default()
+        });
+        let entry = LiveEntry::new(EntryInit {
+            session_id: ID.into(), project_id: owner.into(), durable,
+            deployed: Some(Deployed {
+                kind: HostKind::Posix,
+                root: dir.path().join("sessiond root's").to_string_lossy().into_owned(),
+                bin: dir.path().join("deployed sessiond").to_string_lossy().into_owned(),
+                target: SessiondTarget::Aarch64Mac,
+                ghostty: String::new(),
+            }),
+            size: None, hint: OscColorHint::default(),
+        });
+        entry.s.borrow_mut().backend = Some(Rc::new(ConnectedBackend));
+        mgr.entries.borrow_mut().insert(ID.into(), entry.clone());
+        (dir, mgr, entry)
+    }
+
+    fn script(entry: &LiveEntry, body: &str) {
+        let bin = entry.deployed().unwrap().bin;
+        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_reports_stderr_and_rejects_invalid_json_without_success() {
+        let (_dir, mgr, entry) = harness("p1", "active", true);
+        script(&entry, "printf '%s' '{\"refreshed\":true}'; printf '%s' 'cannot resume OMP' >&2; exit 7");
+        assert!(mgr.reprobe_ui(ID).await.unwrap_err().contains("cannot resume OMP"));
+        script(&entry, "exit 7");
+        assert!(mgr.reprobe_ui(ID).await.unwrap_err().contains("exit status: 7"));
+        for output in ["{}", "{\"refreshed\":\"true\"}", "invalid JSON"] {
+            script(&entry, &format!("printf '%s' {}", crate::host::quote_posix(output)));
+            assert!(mgr.reprobe_ui(ID).await.is_err());
+        }
+        script(&entry, "printf '%s' '{\"refreshed\":true}'");
+        assert!(mgr.reprobe_ui(ID).await.unwrap());
+    }
+
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_rejects_overlapping_requests_and_releases_the_session_after_completion() {
+        let (dir, mgr, entry) = harness("p1", "active", true);
+        let calls = dir.path().join("calls");
+        script(&entry, &format!(
+            "echo called >> {}; sleep 0.05; printf '%s' '{{\"refreshed\":true}}'",
+            crate::host::quote_posix(calls.to_str().unwrap())
+        ));
+        let (first, second) = tokio::join!(mgr.reprobe_ui(ID), mgr.reprobe_ui(ID));
+        assert_eq!(first, Ok(true));
+        assert!(second.is_err());
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "called\n");
+        assert!(mgr.reprobe_ui(ID).await.unwrap());
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "called\ncalled\n");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_refresh_releases_its_session_guard() {
+        let (_dir, mgr, entry) = harness("p1", "active", true);
+        script(&entry, "sleep 1; printf '%s' '{\"refreshed\":true}'");
+        {
+            let mut pending = Box::pin(mgr.reprobe_ui(ID));
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert!(mgr.reprobes.borrow().contains(ID));
+        }
+        assert!(mgr.reprobes.borrow().is_empty());
+        script(&entry, "printf '%s' '{\"refreshed\":false}'");
+        assert_eq!(mgr.reprobe_ui(ID).await, Ok(false));
+    }
+}

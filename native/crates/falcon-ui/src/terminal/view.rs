@@ -41,6 +41,10 @@ use super::element::{TerminalElement, TerminalGeometry};
 use crate::theme::TerminalLook;
 use crate::zoom::zpx;
 
+#[path = "file_links.rs"]
+mod file_links;
+use file_links::{FileLinkContext, ImageHover};
+
 /// 会话在这扇窗口里的连接状态（展示用；会话本身的 active / unverified / dead 以服务端为准）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnState {
@@ -56,6 +60,7 @@ pub enum ConnState {
 
 /// 网络线程 → UI 线程的消息
 enum UiEvent {
+    Cwd(String),
     /// 终端内容变了（脏位由 0 变 1）
     Dirty,
     /// 终端产生的事件（回复、剪贴板），每段输出解析完就取走送来
@@ -65,6 +70,7 @@ enum UiEvent {
 
 /// 挂在 socket 上的回调。在网络线程上顺序执行：终端字节就地解析，其余转给 UI。
 struct Sink {
+    cwd_scanner: parking_lot::Mutex<falcon_core::terminal_link::CwdScanner>,
     core: Arc<TermCore>,
     tx: UnboundedSender<UiEvent>,
     /// AI 助手的实时区域（见 [`LiveTrack`]）；普通终端是 None
@@ -162,6 +168,9 @@ impl SessionSink for Sink {
     fn on_event(&self, ev: SessionEvent) {
         match ev {
             SessionEvent::Output(bytes) => {
+                if let Some(cwd) = self.cwd_scanner.lock().feed(&bytes) {
+                    let _ = self.tx.unbounded_send(UiEvent::Cwd(cwd));
+                }
                 let woke = match &self.live {
                     Some(live) => self.advance_live(live, &bytes),
                     None => self.core.advance(&bytes),
@@ -179,7 +188,15 @@ impl SessionSink for Sink {
                 // 旧 React 版在主线程解析回放同一个水平（设计文档决定七）。不能丢给别的线程——回放之后
                 // 紧跟的实时输出必须在它换上之后才应用，顺序由"回调顺序执行"保证
                 log::debug!("replay {} bytes", bytes.len());
-                let changed = falcon_client::block_in_place(|| self.core.replace_with_replay(&bytes));
+                let changed = falcon_client::block_in_place(|| {
+                    let mut scanner = self.cwd_scanner.lock();
+                    *scanner = falcon_core::terminal_link::CwdScanner::default();
+                    if let Some(cwd) = scanner.feed(&bytes) {
+                        let _ = self.tx.unbounded_send(UiEvent::Cwd(cwd));
+                    }
+                    drop(scanner);
+                    self.core.replace_with_replay(&bytes)
+                });
                 // 回放里没有提示符标记（守护进程导出的是画面）：先把光标所在行当提示符，下一个
                 // 提示符到了再校准
                 if let Some(live) = &self.live {
@@ -339,6 +356,9 @@ pub struct TerminalView {
     reported_held: u8,
     /// 按着链接修饰键（[`link_modifier`]）时指针下的链接：画下划线、换手形指针
     hovered_link: Option<LinkSpan>,
+    file_context: Option<FileLinkContext>,
+    image_hover: Option<ImageHover>,
+    output_cwd: Option<String>,
     scrollbar: Scrollbar,
     pub conn: ConnState,
     /// WS 断开后第几次自动重连（0 = 没断）
@@ -381,6 +401,7 @@ pub struct TerminalView {
 
 /// 终端视图对外的事件
 pub enum TerminalViewEvent {
+    OpenFile { project_id: String, path: String },
     TitleChanged,
     StateChanged,
     /// WS 推来的会话状态：立刻写进工作区的列表，不等 5s 轮询
@@ -459,6 +480,7 @@ impl TerminalView {
         });
         let grid = Arc::new(GridPlan::default());
         let sink = Arc::new(Sink {
+            cwd_scanner: parking_lot::Mutex::default(),
             core: core.clone(),
             tx,
             live: live.clone(),
@@ -511,6 +533,9 @@ impl TerminalView {
             dragging: None,
             reported_held: 0,
             hovered_link: None,
+            file_context: None,
+            image_hover: None,
+            output_cwd: None,
             scrollbar: Scrollbar::default(),
             conn: ConnState::Connecting,
             ws_retry: 0,
@@ -566,6 +591,7 @@ impl TerminalView {
         if self.visible != visible {
             self.visible = visible;
             self.socket.set_visible(visible);
+            if !visible { self.image_hover = None; }
         }
     }
 
@@ -628,6 +654,11 @@ impl TerminalView {
 
     fn on_ui_event(&mut self, ev: UiEvent, cx: &mut Context<Self>) {
         match ev {
+            UiEvent::Cwd(cwd) => {
+                self.output_cwd = Some(cwd);
+                self.image_hover = None;
+                cx.notify();
+            }
             UiEvent::Dirty => cx.notify(),
             UiEvent::Term(events) => {
                 for event in events {
@@ -787,7 +818,7 @@ impl TerminalView {
         if self.core.take_dirty() {
             self.snapshot = Arc::new(self.core.snapshot());
         }
-        self.link_at(pos).map(|l| l.url)
+        self.link_at(pos).map(|l| l.target.text().to_string())
     }
 
     pub(super) fn set_marked_text(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1046,6 +1077,7 @@ impl TerminalView {
     }
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_hover.take().is_some() { cx.notify(); }
         window.focus(&self.focus, cx);
         self.mark_seen();
         let button = match e.button {
@@ -1061,7 +1093,7 @@ impl TerminalView {
             && link_modifier(&e.modifiers)
             && let Some(link) = self.link_at(e.position)
         {
-            cx.open_url(&link.url);
+            self.open_link(link, cx);
             cx.stop_propagation();
             return;
         }
@@ -1089,13 +1121,14 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn mouse_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         // 拖滑块：指针离开那一窄条后照样跟（挂在整扇终端上）
         if self.scrollbar.drag.is_some() {
             self.scrollbar_drag(e, cx);
             return;
         }
         if e.pressed_button.is_none() {
+            self.refresh_image_hover(e.position, window, cx);
             // 空手移动：之前按着的键肯定都松了（兜住没收到的松开）
             self.reported_held = 0;
             // 悬停链接在上报之前算：程序接管鼠标时也要看得出哪里能点
@@ -1103,6 +1136,7 @@ impl TerminalView {
                 cx.notify();
             }
         }
+        if e.pressed_button.is_some() && self.image_hover.take().is_some() { cx.notify(); }
         if self.reporting(&e.modifiers) {
             let button = match e.pressed_button {
                 // 按下不在这里（拖窗口标题栏、拖分隔条经过这扇终端）：一条都不报
@@ -1178,6 +1212,7 @@ impl TerminalView {
     }
 
     fn scroll_wheel(&mut self, e: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_hover.take().is_some() { cx.notify(); }
         let Some(geo) = self.geometry else {
             return;
         };
@@ -1543,11 +1578,15 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.visible { self.image_hover = None; }
         if self.core.take_dirty() {
             self.snapshot = Arc::new(self.core.snapshot());
             // 链接底下的内容变了（滚动、输出把它顶走）：按现在的画面重认
             if self.hovered_link.is_some() {
                 self.refresh_hovered_link(window.mouse_position(), &window.modifiers());
+            }
+            if self.image_hover.is_some() {
+                self.refresh_image_hover(window.mouse_position(), window, cx);
             }
         }
         // 滚动条的位置每帧从快照推：输出在涨、回放换了整个终端、滚轮与拖动都会改它，
@@ -1582,6 +1621,7 @@ impl Render for TerminalView {
         }
         let scrollbar = if self.live.is_some() { None } else { self.scrollbar_overlay(cx) };
         let items = self.context_items(cx);
+        let preview = self.file_preview(cx);
         let dim = self.conn != ConnState::Active && self.conn != ConnState::Connecting;
         use gpui_kit::component::menu::ContextMenuExt;
         let body = div()
@@ -1596,6 +1636,9 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                if !hovered && this.image_hover.take().is_some() { cx.notify(); }
+            }))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
@@ -1613,6 +1656,7 @@ impl Render for TerminalView {
             .when(dim, |d| d.opacity(0.55))
             .child(element)
             .children(scrollbar)
+            .children(preview)
             .context_menu(move |menu, _, _| crate::menus::to_popup(menu, items.clone()));
         div().size_full().flex().flex_col().children(banner).child(div().flex_1().min_h_0().child(body))
     }

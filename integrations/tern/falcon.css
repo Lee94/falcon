@@ -1,0 +1,49 @@
+[data-surface='plugin.falcon.projects'] [data-role='falcon.directory'],
+[data-surface='plugin.falcon.projects'] [data-role='falcon.connection'],
+[data-surface='plugin.falcon.projects'] [data-role='falcon.session-title'],
+[data-surface='plugin.falcon.projects'] [data-role='falcon.status'],
+[data-surface='plugin.falcon.projects'] [data-role='falcon.error'],
+[data-surface='plugin.falcon.projects'] [data-role='falcon.help'] {
+	min-width: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+[data-surface='plugin.falcon.projects'] .sf-section > .sf-section-head {
+	min-width: 0;
+	height: auto;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+
+[data-surface='plugin.falcon.projects'] .sf-section .sf-head {
+	min-width: 0;
+	white-space: normal;
+	overflow: visible;
+	text-overflow: clip;
+	overflow-wrap: anywhere;
+}
+
+[data-surface='plugin.falcon.projects'] [data-role='falcon.session'] {
+	padding: 6px 0 10px;
+	border-bottom: 1px solid var(--hairline);
+	align-items: flex-start;
+}
+
+[data-surface='plugin.falcon.projects'] [data-role='falcon.session'].sf-act {
+	min-height: 44px;
+	border-radius: 6px;
+}
+
+[data-surface='plugin.falcon.projects'] [data-role='falcon.session'].sf-act:hover {
+	background: var(--hover);
+}
+
+[data-surface='plugin.falcon.projects'] [data-role='falcon.session'] .sf-text {
+	align-self: stretch;
+}
+
+[data-surface='plugin.falcon.projects'] [data-role='falcon.toolbar'] {
+	flex-wrap: wrap;
+}

@@ -926,7 +926,7 @@ impl Canvas {
             .text_color(ui.muted_foreground)
             .child(t!("canvas.empty").to_string());
         if let Some(pid) = pid {
-            let items = crate::menus::new_session_items(&self.ws, &pid, None);
+            let items = crate::menus::new_session_items(&self.ws, &pid, None, cx);
             use gpui_kit::component::button::Button;
             use gpui_kit::component::menu::DropdownMenu;
             col = col.child(
@@ -989,6 +989,8 @@ impl Canvas {
                 if let Some(bar) = falcon_core::host_color::ssh_bar(project.as_ref()) {
                     info = info.child(host_bar(Some(bar), zpx(14.), cx));
                 }
+                let agent = session.and_then(|s| s.agent).or_else(|| pending.and_then(|p| p.agent));
+                info = info.child(crate::session_icon::session_icon(agent).size(zpx(14.)).text_color(ui.muted_foreground));
                 if let Some(state) = state {
                     info = info.child(status_mark(state, zpx(12.), cx));
                 }

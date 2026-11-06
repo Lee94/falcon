@@ -5,6 +5,13 @@
 //! holder 会重启它并用原始尾巴重建（ADR 0020 决定一）。
 
 use std::io::{BufWriter, Write as _};
+use std::sync::mpsc::{self, RecvTimeoutError};
+
+mod native;
+
+pub(crate) fn version() -> String {
+    format!("{}+tsp.2", ghostty_vt::GHOSTTY_COMMIT)
+}
 
 use anyhow::Result;
 use falcon_proto::program_status::{ProgramBlockKind, ProgramState, ProgramStatusReport};
@@ -26,6 +33,8 @@ struct VtHandler {
     suppress: bool,
     scheme: Option<ColorScheme>,
     version: String,
+    /// Capture only the DA1 sentinel following a TSP hello, until its owner is known.
+    held_reply: Option<Vec<u8>>,
 }
 
 impl VtHandler {
@@ -41,7 +50,11 @@ impl Handler for VtHandler {
         }
         let data = strip_kitty_query_reply(data);
         if !data.is_empty() {
-            self.push(FromVt::PtyWrite(data));
+            if let Some(held) = &mut self.held_reply {
+                held.extend_from_slice(&data);
+            } else {
+                self.push(FromVt::PtyWrite(data));
+            }
         }
     }
 
@@ -260,61 +273,108 @@ fn apply_appearance(t: &mut Terminal<VtHandler>, a: &Appearance) {
 }
 
 pub fn run(cols: u16, rows: u16, scrollback: usize) -> Result<()> {
-    let mut input = std::io::stdin().lock();
     let mut output = BufWriter::new(std::io::stdout().lock());
-    let handler = VtHandler { out: Vec::new(), suppress: false, scheme: None, version: format!("falcon {FALCON_VERSION}") };
+    let handler = VtHandler {
+        out: Vec::new(), suppress: false, scheme: None,
+        version: format!("falcon {FALCON_VERSION}"), held_reply: None,
+    };
     let mut term = Terminal::new(cols, rows, handler)?;
+    let mut native = native::NativeState::default();
     configure(&mut term, scrollback)?;
-    output.write_all(&FromVt::Ready(Ready { ghostty: ghostty_vt::GHOSTTY_COMMIT.into() }).encode())?;
+    output.write_all(&FromVt::Ready(Ready { ghostty: version() }).encode())?;
     output.flush()?;
 
-    while let Some((k, p)) = read_frame(&mut input)? {
+    // A reader thread leaves the VT free to expire a hello sentinel even when
+    // its program is waiting for a reply and produces no further output.
+    let (tx, rx) = mpsc::sync_channel(8);
+    std::thread::Builder::new().name("falcon-vt-input".into()).spawn(move || {
+        let mut input = std::io::stdin().lock();
+        loop {
+            let frame = read_frame(&mut input);
+            let end = !matches!(&frame, Ok(Some(_)));
+            if tx.send(frame).is_err() || end { break; }
+        }
+    })?;
+    loop {
+        native.expire(&mut term);
+        let out = std::mem::take(&mut term.handler_mut().out);
+        if !out.is_empty() {
+            output.write_all(&out)?;
+            output.flush()?;
+        }
+        let frame = match native.timeout() {
+            Some(wait) => match rx.recv_timeout(wait) {
+                Ok(frame) => frame,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() { Ok(frame) => frame, Err(_) => break },
+        };
+        let Some((k, p)) = frame? else { break };
         let Ok(msg) = ToVt::decode(k, p) else { continue };
         match msg {
             ToVt::Feed { replay, bytes } => {
                 term.handler_mut().suppress = replay;
-                term.vt_write(&bytes);
+                native.feed(&mut term, &bytes, replay);
                 term.handler_mut().suppress = false;
             }
-            ToVt::Resize(r) => {
-                let _ = term.resize(r.cols, r.rows);
-            }
+            ToVt::Resize(r) => { let _ = term.resize(r.cols, r.rows); }
             ToVt::Snapshot { req } => {
-                let snapshot = replay_bytes(&term);
-                let continuation = term.continuation().unwrap_or_default();
+                let mut snapshot = replay_bytes(&term);
+                let continuation = native.snapshot_continuation(term.continuation().unwrap_or_default());
+                let budget = falcon_proto::tsp::MAX_SNAPSHOT_BYTES
+                    .saturating_sub(snapshot.len() + continuation.as_ref().map_or(0, Vec::len) + 32);
+                let document = native.replay_with_limit(budget);
+                let continuation = match (document, continuation) {
+                    (Ok(bytes), Ok(continuation)) => {
+                        snapshot.extend_from_slice(&bytes);
+                        continuation
+                    }
+                    (Err(error), _) | (_, Err(error)) => {
+                        snapshot.extend_from_slice(format!("\r\n[Falcon native snapshot failed: {error}]\r\n").as_bytes());
+                        Vec::new()
+                    }
+                };
                 term.handler_mut().push(FromVt::Snapshotted { req, snapshot, continuation });
             }
             ToVt::Export { req, format } => {
-                let bytes = export(&term, format);
+                let mut bytes = export(&term, format);
+                if format == ExportFormat::Vt {
+                    match native.replay_with_limit(falcon_proto::tsp::MAX_SNAPSHOT_BYTES.saturating_sub(bytes.len())) {
+                        Ok(native) => bytes.extend_from_slice(&native),
+                        Err(error) => {
+                            bytes.clear();
+                            bytes.extend_from_slice(falcon_proto::sessiond::EXPORT_ERROR_PREFIX);
+                            bytes.extend_from_slice(error.to_string().as_bytes());
+                        }
+                    }
+                }
                 term.handler_mut().push(FromVt::Exported { req, bytes });
             }
             ToVt::Appearance(a) => apply_appearance(&mut term, &a),
             ToVt::Encode { req } => {
-                let bytes = term.encode_snapshot().unwrap_or_default();
+                let grid = term.encode_snapshot().unwrap_or_default();
+                let bytes = native.encode(&grid);
                 term.handler_mut().push(FromVt::Encoded { req, bytes });
             }
             ToVt::Restore(bytes) => {
                 let h = VtHandler {
                     out: std::mem::take(&mut term.handler_mut().out),
-                    suppress: false,
-                    scheme: term.handler().scheme,
-                    version: term.handler().version.clone(),
+                    suppress: false, scheme: term.handler().scheme,
+                    version: term.handler().version.clone(), held_reply: None,
                 };
-                match Terminal::decode_snapshot(&bytes, h) {
+                let restored = native.restore(&bytes)
+                    .and_then(|grid| Terminal::decode_snapshot(grid, h).map_err(Into::into));
+                match restored {
                     Ok(mut restored) => {
                         configure(&mut restored, scrollback)?;
                         term = restored;
                         term.handler_mut().push(FromVt::Restored(Restored { ok: true, message: String::new() }));
                     }
-                    Err(e) => term.handler_mut().push(FromVt::Restored(Restored { ok: false, message: e.to_string() })),
+                    Err(error) => term.handler_mut().push(FromVt::Restored(Restored { ok: false, message: error.to_string() })),
                 }
             }
             ToVt::Unknown(_) => {}
-        }
-        let out = std::mem::take(&mut term.handler_mut().out);
-        if !out.is_empty() {
-            output.write_all(&out)?;
-            output.flush()?;
         }
     }
     Ok(())
@@ -329,7 +389,7 @@ mod tests {
     }
 
     fn term() -> Terminal<VtHandler> {
-        let h = VtHandler { out: Vec::new(), suppress: false, scheme: None, version: "falcon test".into() };
+        let h = VtHandler { out: Vec::new(), suppress: false, scheme: None, version: "falcon test".into(), held_reply: None };
         let mut t = Terminal::new(40, 10, h).unwrap();
         configure(&mut t, 1000).unwrap();
         t

@@ -56,6 +56,16 @@ wire_enum! {
         Codex => "codex",
         Grok => "grok",
         Devin => "devin",
+        Gemini => "gemini",
+        OpenCode => "opencode",
+        Cursor => "cursor-agent",
+        Copilot => "copilot",
+        Aider => "aider",
+        Amp => "amp",
+        Qwen => "qwen",
+        Droid => "droid",
+        Agy => "agy",
+        Omp => "omp",
     }
 }
 
@@ -137,6 +147,13 @@ pub struct SessionForeground {
     pub command: Option<String>,
 }
 
+/// `POST /api/sessions/:id/reprobe` 的返回：前台 OMP 已合作刷新原生显示协商；
+/// `false` 表示前台不是 OMP，没有改动会话。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeDisplayRefresh {
+    pub refreshed: bool,
+}
+
 /// 粘贴图片的大小上限。Retina 全屏截图的 PNG 能到 10 MB 上下，取 20 MB；
 /// 前端超限时不发请求（React 版当初还直接提示，falcon-ui 眼下只记一条日志），
 /// 后端的 bodyLimit 用同一个数兜底。
@@ -176,13 +193,16 @@ mod tests {
     use super::*;
     use crate::test_util::roundtrip;
 
+
     #[test]
-    fn agents_match_ts() {
+    fn agents_have_stable_wire_names() {
         let names: Vec<_> = SESSION_AGENTS.iter().map(|a| a.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "grok", "devin"]);
+        assert_eq!(names, ["claude", "codex", "grok", "devin", "gemini", "opencode", "cursor-agent", "copilot", "aider", "amp", "qwen", "droid", "agy", "omp"]);
         assert_eq!(SessionAgent::from_wire("codex"), Some(SessionAgent::Codex));
         assert_eq!(SessionAgent::from_wire("unknown"), None);
-        assert_eq!(SessionAgent::from_wire("gemini"), None);
+        assert_eq!(SessionAgent::from_wire("gemini"), Some(SessionAgent::Gemini));
+        assert_eq!(SessionAgent::from_wire("agy"), Some(SessionAgent::Agy));
+        assert_eq!(SessionAgent::from_wire("omp"), Some(SessionAgent::Omp));
     }
 
     #[test]
@@ -223,7 +243,7 @@ mod tests {
         // 新服务端多了状态、原因、agent：列表照样解得出来，认不出的落到 Unknown
         let list: Vec<SessionWithProject> = serde_json::from_str(
             r#"[{"id":"s1","projectId":"p1","name":"","state":"hibernating","durable":true,
-                 "agent":"gemini","createdAt":0,"lastActiveAt":0,"projectName":"a","projectType":"local"},
+                 "agent":"future-agent","createdAt":0,"lastActiveAt":0,"projectName":"a","projectType":"local"},
                 {"id":"s2","projectId":"p1","name":"","state":"dead","deadReason":"oom-killed","durable":false,
                  "nonDurableReason":"rootless","createdAt":0,"lastActiveAt":0,"projectName":"a","projectType":"local"}]"#,
         )

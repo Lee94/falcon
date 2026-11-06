@@ -5,7 +5,6 @@ pub mod auto_title;
 pub mod backend;
 pub mod forward;
 pub mod forward_spec;
-pub mod hc_proxy;
 pub mod local;
 pub mod login_env;
 pub mod machine;
@@ -21,3 +20,5 @@ pub mod ssh_host;
 pub mod term_size;
 pub mod viewer;
 pub mod viewer_arbiter;
+
+pub mod agent_detect;

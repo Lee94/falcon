@@ -75,6 +75,10 @@ pub mod system;
 pub mod term_env;
 /// VT 模式跟踪：服务端拼回放前缀、客户端合成鼠标报文共用一个跟踪器（shared/termModes.ts）
 pub mod term_modes;
+/// Tern native documents and streaming protocol state shared with the persistent VT.
+pub mod tsp;
+/// Filter outer-terminal replies while keeping the persistent VT as query owner.
+pub mod terminal_replies;
 pub mod worktree;
 pub mod ws;
 /// 会话守护进程的部署（推二进制）与宿主机的持久能力

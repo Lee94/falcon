@@ -736,14 +736,14 @@ fn auto_title_follows_the_program_even_with_nobody_watching() {
         h.mgr.resize(&s.id, a.id(), 80, 24);
         a.wait("提示符", has_output("$")).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        // 一条命令走完全程：shell 在提示符写的标题（不算）→ sleep → 没人看着时换成 awk → awk 报 7501
-        // （身份）→ awk 写标题（带 Claude Code 的状态符号）。报状态、写标题的得是 shell 之外的进程：
-        // shell 自己写的标题守护进程不收，`sh -c` 又会被当成 shell
+        // Keep each background title state until the test has observed it. Fixed
+        // sleep windows can skip the intermediate app identity under build load.
+        // Status and custom titles must originate from the foreground awk process.
         h.mgr.input(
             &s.id,
             a.id(),
-            "printf '\\033]2;fay@mac: ~\\007'; sleep 4; echo go; awk 'BEGIN{system(\"sleep 4\"); \
-             printf \"\\033]7501;state=working:app=claude-code\\033\\\\\"; fflush(); system(\"sleep 3\"); \
+            "printf '\\033]2;fay@mac: ~\\007'; sleep 4; echo go; awk 'BEGIN{getline gate; \
+             printf \"\\033]7501;state=working:app=claude-code\\033\\\\\"; fflush(); getline gate; \
              printf \"\\033]2;\u{2733} 修复登录 bug\\007\"; fflush(); system(\"sleep 30\")}'\n",
         );
         a.wait("前台命令", |seen| seen.iter().any(|g| matches!(g, Got::Msg(m) if m["type"] == "title" && m["title"] == "sleep")))
@@ -752,7 +752,9 @@ fn auto_title_follows_the_program_even_with_nobody_watching() {
         // 走开：之后的变化照样探得到（侧栏上的后台会话不再停在最后一次有人看时）
         h.mgr.remove_viewer(&s.id, a.id());
         wait_title(&h, &s.id, "awk").await;
+        h.mgr.input(&s.id, a.id(), "status\n");
         wait_title(&h, &s.id, "claude").await;
+        h.mgr.input(&s.id, a.id(), "title\n");
         wait_title(&h, &s.id, "修复登录 bug").await;
         h.mgr.terminate(&s.id, false).await;
         kill_all(&h).await;

@@ -31,3 +31,11 @@
 ## 后记（2026-10-21）
 
 能续接的 CLI（claude / grok）开场时由 falcon 钉对话 id（就是会话 id），宿主机上的会话没了、原地重开时脚本用它 `--resume`。id 与模式经环境变量交给脚本，脚本仍是每个 agent 一份。见 ADR 0024。POSIX SSH 远端验过：`zsh -l -c` 找不到 `~/.local/bin/claude`（PATH 在 `.zshrc`），改 `-i -l -c` 后 `command -v claude` 与 `claude --version` 都成功。
+
+## 后记（2026-11-04）：本地 CLI 自动检测
+
+本地新建会话菜单只列出后端本机已安装的 CLI，侧栏、画布与命令面板共用检测结果。`GET /api/agents` 返回 `Vec<SessionAgent>`；首次结果返回前只显示普通终端。检测支持 Claude Code、Codex、Grok、Devin、Gemini CLI、OpenCode、Cursor Agent（`cursor-agent`）、GitHub Copilot（`copilot`）、Aider、Amp、Qwen Code（`qwen`）、Factory Droid（`droid`）、Antigravity CLI（`agy`）、Oh My Pi（`omp`）。新增工具沿用已有启动脚本，只有 claude / grok 具有按 Falcon 会话 id 续接的能力。
+
+`sessions/agent_detect.rs` 重新解析交互登录 shell 的环境，在 PATH 中检查固定清单里的可执行文件；Unix 检查执行权限，Windows 按 PATHEXT 检查 `.exe` / `.cmd` 等文件。检测不运行 CLI，也不安装软件；符号链接跟随到目标，同名目录、损坏链接和不可执行文件不显示。服务端缓存 30 秒并合并并发探测，客户端登录后立即请求、之后每 30 秒刷新，安装器修改 shell 配置后也能重新发现。
+
+本地与 SSH 项目均只显示目标机器实际检测到的 CLI。`GET /api/agents` 不带参数时检测后端本机，带 `hostId` 或 `projectId` 时经 SSH 在远端的交互登录 shell 中执行 `command -v`（Windows 使用 `Get-Command`），不启动 agent。同一主机的项目共用客户端清单并每 30 秒刷新；检测失败或尚未完成时不显示候选项，不返回完整清单。AI 助手的 ACP 配置（ADR 0021）有独立的适配器要求，不属于开场 CLI 检测。

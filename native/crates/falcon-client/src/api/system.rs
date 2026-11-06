@@ -29,7 +29,7 @@ pub enum ProbeTarget {
 }
 
 impl ProbeTarget {
-    fn query(&self, q: Query) -> Query {
+    pub(crate) fn query(&self, q: Query) -> Query {
         match self {
             ProbeTarget::Backend => q,
             ProbeTarget::SshHost(id) => q.nonempty("hostId", Some(id)),

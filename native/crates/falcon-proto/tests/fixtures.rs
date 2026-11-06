@@ -59,6 +59,7 @@ fn table() -> Vec<(&'static str, Check)> {
         "fs-validate-missing" => FsValidateResult,
         "fs-list" => FsListing,
         "shells" => ShellsInfo,
+        "local-agents" => Vec<SessionAgent>,
         // 远端主机
         "host-create" => SshHost,
         "host-update" => SshHost,

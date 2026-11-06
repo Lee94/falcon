@@ -28,19 +28,9 @@ pub use falcon_proto::{SESSION_AGENTS, SessionAgent};
 use crate::git::path::join_path;
 use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 
-/// CLI 的可执行名。装完都在 PATH 上：claude / codex / grok 是 npm 全局包，devin 是自己的
-/// 安装脚本 / brew cask / Windows 安装器。
-///
-/// `Unknown` 是 falcon-proto 给反序列化留的兜底，服务端收请求时已用 `SessionAgent::from_wire`
-/// 挡掉（`api/sessions.rs`），到不了这里；真到了也只是生成一个"找不到 unknown、落回 shell"的脚本，无害。
+/// CLI 的可执行名与协议标识一致；这里只返回固定清单里的值，不接受用户输入。
 pub fn agent_bin(agent: SessionAgent) -> &'static str {
-    match agent {
-        SessionAgent::Claude => "claude",
-        SessionAgent::Codex => "codex",
-        SessionAgent::Grok => "grok",
-        SessionAgent::Devin => "devin",
-        SessionAgent::Unknown => "unknown",
-    }
+    agent.as_str()
 }
 
 /// 脚本从这两个环境变量知道要不要钉对话 id、是不是接着上次的对话（[`launch_env`]）
@@ -229,7 +219,7 @@ mod tests {
     use super::*;
     use base64::Engine as _;
 
-    const AGENTS: [SessionAgent; 4] = [SessionAgent::Claude, SessionAgent::Codex, SessionAgent::Grok, SessionAgent::Devin];
+
 
     // ---- launcherBody（POSIX） ----
 
@@ -249,7 +239,7 @@ mod tests {
     /// 绝不读 $SHELL——Windows 那条路径上它就是这个脚本自己，会递归
     #[test]
     fn posix_body_never_reads_dollar_shell() {
-        for agent in AGENTS {
+        for &agent in SESSION_AGENTS {
             assert!(!launcher_body(agent, HostKind::Posix, "/bin/bash").contains("$SHELL"));
         }
     }
@@ -349,6 +339,8 @@ mod tests {
         assert_eq!(agent_bin(SessionAgent::Codex), "codex");
         assert_eq!(agent_bin(SessionAgent::Grok), "grok");
         assert_eq!(agent_bin(SessionAgent::Devin), "devin");
+        assert_eq!(agent_bin(SessionAgent::Agy), "agy");
+        assert_eq!(agent_bin(SessionAgent::Omp), "omp");
     }
 
     // ---- 以下不在 agent.test.ts 里 ----

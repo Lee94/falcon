@@ -11,7 +11,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use falcon_proto::{
-    HostInstallStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
+    HostInstallStatus, NativeDisplayRefresh, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
 };
 use serde_json::{Value, json};
 
@@ -31,8 +31,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{id}/host", get(host_status).post(host_update))
         .route("/api/sessions", get(list))
+        .route("/api/agents", get(super::system::agents))
         .route("/api/projects/{id}/sessions", post(create))
         .route("/api/sessions/{id}/reattach", post(reattach))
+        .route("/api/sessions/{id}/reprobe", post(reprobe))
         .route("/api/sessions/{id}/foreground", get(foreground))
         .route("/api/sessions/{id}/terminate", post(terminate))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
@@ -100,7 +102,6 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
     let out = state
         .engine
         .call(|engine| async move {
-            engine.sessions.adopt_local_hc_sessions();
             let db = engine.db.clone();
             let projects: std::collections::HashMap<_, _> =
                 db.list_projects().into_iter().map(|p| (p.id.clone(), p)).collect();
@@ -174,6 +175,13 @@ async fn reattach(State(state): State<AppState>, Path(id): Path<String>) -> ApiR
     }
 }
 
+/// 沿 sessions::router 进入 protected_router；无请求体，失败保留守护进程的真实原因。
+async fn reprobe(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<NativeDisplayRefresh>> {
+    let res = state.engine.call(move |engine| async move { engine.sessions.reprobe_ui(&id).await }).await?;
+    res.map(|refreshed| Json(NativeDisplayRefresh { refreshed }))
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("显示刷新失败：{e}")))
+}
+
 /// 关 tab 前问一嘴前台有没有程序在跑。会话不存在也答"空闲"——
 /// 这条路径上前端接下来就是终止，404 只会让它多走一个错误分支
 async fn foreground(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<SessionForeground>> {
@@ -201,7 +209,6 @@ async fn rename(State(state): State<AppState>, Path(id): Path<String>, body: Len
     }
     // 空串是合法的：清掉名字就回到自动标题，这是"取消重命名"的唯一出口
     state.db.rename_session(&id, js::trim(name));
-    state.engine.send(move |engine| engine.sessions.sync_session_labels(&id));
     Ok(ok())
 }
 
@@ -277,6 +284,23 @@ async fn paste_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::test_support::{TestApp, json_of};
+    use axum::http::Request;
+
+    #[tokio::test]
+    async fn reprobe_requires_login_and_accepts_a_bare_post() {
+        let app = TestApp::new();
+        let request = || Request::post("/api/sessions/missing/reprobe").body(Body::empty()).unwrap();
+        let (status, _) = json_of(app.send(request()).await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(app.state.auth.set_password("secret1", None));
+        assert_eq!(app.send(request()).await.status(), StatusCode::UNAUTHORIZED);
+        let token = app.state.auth.login("secret1").unwrap();
+        let mut authenticated = request();
+        authenticated.headers_mut().insert("cookie", format!("falcon_token={token}").parse().unwrap());
+        let (status, _) = json_of(app.send(authenticated).await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
 
     #[test]
     fn js_truthiness() {

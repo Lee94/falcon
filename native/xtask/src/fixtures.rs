@@ -160,6 +160,7 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     )?;
     out.save("fs-list", &api.get(&format!("/api/fs/list?{}", qs(&[("path", REPO)])))?)?;
     out.save("shells", &api.get("/api/shells")?)?;
+    out.save("local-agents", &api.get("/api/agents")?)?;
 
     // ---- 远端主机：只落库、不真连（127.0.0.1:1 连不上，正好拿到 ok:false 的探测）----
     let host = api.call(

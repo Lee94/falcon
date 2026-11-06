@@ -24,6 +24,7 @@ mod panels;
 mod prefs;
 mod profiles;
 mod rightbar;
+mod session_icon;
 mod sidebar;
 mod snapshot;
 mod terminal;

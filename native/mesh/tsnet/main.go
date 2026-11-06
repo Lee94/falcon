@@ -1,7 +1,7 @@
 // falcon-tsnet：把 Tailscale 的 tsnet 嵌进一个小进程，给 Rust 服务端当 sidecar。
 //
-// Falcon 是 Rust，tsnet 是 Go 库，链不进去。这个进程就是 Rex `--tailscale` 的对应物：
-// userspace 节点，不必另装 tailscaled，也不要 root。stdout 上只打一行 JSON 状态；
+// Falcon 是 Rust，tsnet 是 Go 库，链不进去。这个进程是独立的 userspace 节点，
+// 不必另装 tailscaled，也不要 root。stdout 上只打一行 JSON 状态；
 // 登录 URL 走日志（第一次没有 auth key 时 tsnet 自己打出来）。
 //
 // 密钥与控制面地址从环境变量读，不进 argv，免得落进进程列表：

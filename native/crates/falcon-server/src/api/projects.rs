@@ -276,7 +276,6 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let refreshed = row.clone();
     state.engine.send(move |engine| {
         let id = refreshed.id.clone();
-        engine.sessions.sync_project_labels(&id);
         if container {
             // 名字与成员都会进虚拟目录的清单（见 virtualdir.rs），编辑后作废缓存。
             // 刷新是 fire-and-forget：宿主离线不能挡编辑；正在跑的会话尽快看到新清单
@@ -320,9 +319,6 @@ async fn move_project(State(state): State<AppState>, Path(id): Path<String>, bod
     let rows = match falcon_core::project_tree::move_in_order(&ids, String::as_str, &id, target, after) {
         Some(order) => {
             state.db.set_project_order(&order);
-            state.engine.send(move |engine| {
-                engine.sessions.sync_project_labels(&id);
-            });
             state.db.list_projects()
         }
         // 挪到自己旁边 / 本来就挨着：什么都不写，照样回整份列表

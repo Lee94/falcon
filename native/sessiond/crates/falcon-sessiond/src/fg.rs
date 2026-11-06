@@ -25,6 +25,12 @@ pub fn foreground_info(master: &dyn MasterPty, shell_pid: u32) -> FgInfo {
     imp::foreground_info(master, shell_pid)
 }
 
+/// Read only this process's argv; does not inspect its environment or descendants.
+#[cfg(unix)]
+pub fn process_argv(pid: u32) -> Option<Vec<String>> {
+    imp::argv_of(pid)
+}
+
 /// 前台回到了 shell 自己：进程组就是 shell 的、而且 shell 没有子进程。holder 拿它清程序状态、
 /// 判断终端标题是不是 shell 自己写的。
 ///
@@ -74,7 +80,7 @@ mod imp {
     }
 
     #[cfg(target_os = "macos")]
-    fn argv_of(pid: u32) -> Option<Vec<String>> {
+    pub(super) fn argv_of(pid: u32) -> Option<Vec<String>> {
         unsafe {
             let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
             let mut size: libc::size_t = 0;
@@ -111,7 +117,7 @@ mod imp {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn argv_of(pid: u32) -> Option<Vec<String>> {
+    pub(super) fn argv_of(pid: u32) -> Option<Vec<String>> {
         let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         let mut parts: Vec<String> = bytes.split(|&b| b == 0).map(|s| String::from_utf8_lossy(s).into_owned()).collect();
         while parts.last().is_some_and(|s| s.is_empty()) {

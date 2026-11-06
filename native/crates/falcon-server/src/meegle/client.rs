@@ -1529,8 +1529,9 @@ printf '","api_name":"t","is_disable":2}]}\n'"#,
 case "$*" in
   "auth login --host=project.feishu.cn --device-code")
     echo "请在浏览器中打开下面的链接完成授权"
-    echo "URL: https://project.feishu.cn/device?code=1"
-    echo "Authorization code: ABCD-1234"
+    # The URL is the readiness marker; provide its optional code first so
+    # single-flight/cancellation tests do not depend on stdout read batching.
+    printf '%s\n' 'Authorization code: ABCD-1234' 'URL: https://project.feishu.cn/device?code=1'
     exec sleep 30 ;;
   "auth login --host=quiet.example.com --device-code") exec sleep 30 ;;
   "auth login --host=fail.example.com --device-code") echo "Error: host not reachable"; exit 3 ;;

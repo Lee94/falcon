@@ -58,7 +58,6 @@ fn spec(argv: &[&str]) -> SpawnSpec {
         scrollback_lines: 1000,
         owner: "test".into(),
         appearance: None,
-        labels: Default::default(),
     }
 }
 
@@ -283,11 +282,13 @@ fn program_titles_are_kept_for_new_connections_and_shell_titles_do_not_count() {
     // 握手后紧跟着当前标题：还没有，空串也发（对端手上的可能已经过时）
     c.until("初始标题", |m| matches!(m, HolderMsg::Event(Event::Title { title }) if title.is_empty()));
     c.ready();
-    // shell 在提示符写的（内建 printf）不算；子进程写的存下；回到 shell 后 shell 再写一个，等于
-    // 程序走了、清掉；最后一个程序写完标题发 RIS，复位
+    // Finish the shell-only title phase before starting a foreground process.
+    // Otherwise its job-control change can overtake VT processing of the title.
+    c.input("printf '\\033]2;shell-title\\007'; printf '\\123\\110\\105\\114\\114\\055\\104\\117\\116\\105\\012'\n");
+    c.expect_output("SHELL-DONE");
+    c.sync(2);
     c.input(
-        "printf '\\033]2;shell-title\\007'; sh -c \"printf '\\033]2;修复登录 bug\\007'; sleep 2\"; \
-         printf '\\033]2;back-at-shell\\007'; sh -c \"printf '\\033]2;again\\007'; sleep 1; printf '\\033c'; sleep 30\"\n",
+        "sh -c \"printf '\\033]2;修复登录 bug\\007'; sleep 2\"; printf '\\033]2;back-at-shell\\007'\n",
     );
     let mut titles = Vec::new();
     let title = |c: &mut Client| match c.until("标题", |m| matches!(m, HolderMsg::Event(Event::Title { .. }))) {
@@ -298,7 +299,11 @@ fn program_titles_are_kept_for_new_connections_and_shell_titles_do_not_count() {
     // 服务端重连：一握手就拿到，不用等程序再写一次
     let mut c2 = Client::connect(&root, sid);
     c2.until("接回的标题", |m| matches!(m, HolderMsg::Event(Event::Title { title }) if title == "修复登录 bug"));
-    for _ in 0..3 {
+    titles.push(title(&mut c));
+    // Wait for the shell transition before starting the next foreground program;
+    // otherwise its job-control change can overtake processing of the shell title.
+    c.input("sh -c \"printf '\\033]2;again\\007'; sleep 1; printf '\\033c'; sleep 30\"\n");
+    for _ in 0..2 {
         titles.push(title(&mut c));
     }
     assert_eq!(titles, ["修复登录 bug", "", "again", ""]);

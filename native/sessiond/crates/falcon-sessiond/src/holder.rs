@@ -110,7 +110,6 @@ struct Conn {
 enum VtPending {
     Sync { conn: u64, req: u32 },
     Export { conn: u64, req: u32, format: ExportFormat },
-    ScreenDump,
     Encode,
 }
 
@@ -169,8 +168,6 @@ struct Holder {
     fg_checked: Instant,
     /// 第一次看到前台在 shell 手里的时刻（要连续两次才清状态）
     at_shell_since: Option<Instant>,
-    /// 最近一次收到 PTY 输出的时刻
-    last_output_at: Instant,
 }
 
 pub fn run(layout: Layout, sid: String) -> Result<()> {
@@ -207,6 +204,9 @@ fn run_inner(layout: &Layout, sid: &str) -> Result<()> {
     }
     if !spec.env.iter().any(|(k, _)| k == "FALCON_SESSIOND_ID") {
         cmd.env("FALCON_SESSIOND_ID", sid);
+    }
+    if !spec.env.iter().any(|(key, _)| key == "FALCON_SESSION_ID") {
+        cmd.env("FALCON_SESSION_ID", &spec.session_id);
     }
     // 目录没了（项目被删 / 盘没挂）时不该起不来：退回家目录
     let home = spec.env.iter().find(|(k, _)| k == "HOME" || k == "USERPROFILE").map(|(_, v)| v.clone());
@@ -303,12 +303,6 @@ fn run_inner(layout: &Layout, sid: &str) -> Result<()> {
     })?;
     // 这次会话没有旧的退出记录（同一个 sid 不会复用，保险起见）
     let _ = std::fs::remove_file(layout.exit_path(sid));
-    let _ = std::fs::remove_file(layout.screen_path(sid));
-    if !spec.labels.is_empty() {
-        let mut merged = layout.read_labels(sid);
-        merged.extend(spec.labels.clone());
-        let _ = layout.write_labels(sid, &merged);
-    }
 
     let mut h = Holder {
         layout: layout.clone(),
@@ -348,7 +342,6 @@ fn run_inner(layout: &Layout, sid: &str) -> Result<()> {
         terminate_at: None,
         fg_checked: Instant::now(),
         at_shell_since: None,
-        last_output_at: Instant::now(),
     };
     h.start_vt(Seed::Tail);
     h.main_loop(rx);
@@ -416,13 +409,7 @@ impl Holder {
 
     fn finished(&self) -> bool {
         match &self.exit {
-            Some((_, at)) => {
-                let dump_pending = self.vt_pending.values().any(|p| matches!(p, VtPending::ScreenDump));
-                if dump_pending && at.elapsed() < Duration::from_millis(200) {
-                    return false;
-                }
-                self.pty_eof || at.elapsed() >= EOF_GRACE
-            }
+            Some((_, at)) => self.pty_eof || at.elapsed() >= EOF_GRACE,
             None => false,
         }
     }
@@ -492,10 +479,6 @@ impl Holder {
             Ev::ShellExit(s) => {
                 logf!("shell 退出：{s:?}");
                 self.exit = Some((s, Instant::now()));
-                if self.vt_alive() {
-                    let vreq = self.vt_req(VtPending::ScreenDump);
-                    self.vt_send(ToVt::Export { req: vreq, format: ExportFormat::Plain });
-                }
             }
             Ev::Accept(stream) => self.accept(stream),
             Ev::Frame(id, msg) => self.on_frame(id, msg),
@@ -509,7 +492,6 @@ impl Holder {
     // ------------------------------------------------------------ 输出
 
     fn on_output(&mut self, bytes: Vec<u8>) {
-        self.last_output_at = Instant::now();
         let at = self.offset;
         self.offset += bytes.len() as u64;
         self.tail.extend(bytes.iter().copied());
@@ -524,8 +506,7 @@ impl Holder {
         self.vt_send(ToVt::Feed { replay: false, bytes: bytes.clone() });
         let frame = HolderMsg::Output { offset: at, bytes: bytes.clone() }.encode();
         for c in self.conns.values_mut() {
-            // Role::Hc 是后台事件监控连接，不收实时字节流
-            if !c.hello || c.role == Role::Hc {
+            if !c.hello {
                 continue;
             }
             if c.syncs.is_empty() {
@@ -745,7 +726,6 @@ impl Holder {
                         app_cursor: self.modes.app_cursor(),
                         alt_screen: self.modes.alt_screen(),
                         mouse_tracking: self.modes.mouse_tracking(),
-                        quiet_ms: self.last_output_at.elapsed().as_millis() as u64,
                     }),
                 );
             }
@@ -985,10 +965,6 @@ impl Holder {
                     let vreq = self.vt_req(VtPending::Export { conn, req, format });
                     self.vt_send(ToVt::Export { req: vreq, format });
                 }
-                VtPending::ScreenDump => {
-                    let vreq = self.vt_req(VtPending::ScreenDump);
-                    self.vt_send(ToVt::Export { req: vreq, format: ExportFormat::Plain });
-                }
                 // 旧进程的二进制快照拿不回来了：升级失败（on_vt_died 里已经回话）
                 VtPending::Encode => {}
             }
@@ -1031,9 +1007,6 @@ impl Holder {
             FromVt::Exported { req, bytes } => match self.vt_pending.remove(&req) {
                 Some(VtPending::Export { conn, req: creq, .. }) => {
                     self.send(conn, &HolderMsg::Exported { req: creq, bytes });
-                }
-                Some(VtPending::ScreenDump) => {
-                    let _ = self.layout.write_screen(&self.sid, &String::from_utf8_lossy(&bytes));
                 }
                 _ => {}
             },
@@ -1084,7 +1057,7 @@ impl Holder {
                         self.send(conn, &HolderMsg::Synced { req, offset, snapshot: snapshot.clone(), continuation: Vec::new() });
                     }
                     VtPending::Export { conn, req, .. } => self.send(conn, &HolderMsg::Exported { req, bytes: snapshot.clone() }),
-                    VtPending::ScreenDump | VtPending::Encode => {}
+                    VtPending::Encode => {}
                 }
             }
             self.broadcast(&HolderMsg::Event(Event::VtDegraded));
@@ -1169,10 +1142,6 @@ impl Holder {
         // 规范：附着的进程退出时必须丢掉 working / blocked
         if self.status.drop_active() {
             self.broadcast_status();
-        }
-        if !self.layout.screen_path(&self.sid).is_file() {
-            let snap = self.raw_snapshot();
-            let _ = self.layout.write_screen(&self.sid, &String::from_utf8_lossy(&snap));
         }
         let _ = self.layout.write_exit(&self.sid, &ExitRecord { status, at: now_ms() });
         self.broadcast(&HolderMsg::Exit(status));

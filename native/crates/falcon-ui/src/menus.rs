@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use falcon_client::ProbeTarget;
 use falcon_core::editor::{Editor, EditorTarget, editor_target, editor_url};
-use falcon_proto::{Project, SESSION_AGENTS, SessionAgent, SessionState, SessionWithProject, SshHost};
+use falcon_proto::{Project, SessionAgent, SessionState, SessionWithProject, SshHost};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::{App, ClipboardItem, Entity, SharedString, Window, div};
 use rust_i18n::t;
@@ -23,6 +24,7 @@ pub type Handler = Rc<dyn Fn(&mut Window, &mut App)>;
 #[derive(Clone)]
 pub struct MenuItemSpec {
     pub label: String,
+    pub icon: Option<Icon>,
     pub kbd: Option<SharedString>,
     pub disabled: bool,
     pub checked: Option<bool>,
@@ -36,6 +38,7 @@ impl MenuItemSpec {
     pub fn new(label: impl Into<String>, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         Self {
             label: label.into(),
+            icon: None,
             kbd: None,
             disabled: false,
             checked: None,
@@ -46,6 +49,10 @@ impl MenuItemSpec {
     }
     pub fn sep(mut self) -> Self {
         self.separated = true;
+        self
+    }
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
         self
     }
     pub fn danger(mut self) -> Self {
@@ -74,7 +81,7 @@ pub fn to_popup(mut menu: PopupMenu, items: Vec<MenuItemSpec>) -> PopupMenu {
         let handler = item.on_select.clone();
         // PopupMenuItem 的纯文字项既没有危险色也不会把快捷键右对齐，自己画：
         // 危险项（终止、删除）用 destructive 色（照 React 版的 Menu）
-        let (label, kbd, danger) = (item.label.clone(), item.kbd.clone(), item.danger);
+        let (label, kbd, danger, icon) = (item.label.clone(), item.kbd.clone(), item.danger, item.icon.clone());
         let mut entry = PopupMenuItem::element(move |_, cx| {
             let ui = crate::theme::Ui::global(cx);
             div()
@@ -82,7 +89,11 @@ pub fn to_popup(mut menu: PopupMenu, items: Vec<MenuItemSpec>) -> PopupMenu {
                 .items_center()
                 .gap_4()
                 .w_full()
-                .child(div().flex_1().when(danger, |d| d.text_color(ui.destructive)).child(label.clone()))
+                .child(
+                    div().flex_1().flex().items_center().gap_2()
+                        .when_some(icon.clone(), |d, icon| d.child(icon.size(crate::zoom::zpx(14.)).text_color(ui.muted_foreground)))
+                        .child(div().when(danger, |d| d.text_color(ui.destructive)).child(label.clone())),
+                )
                 .when_some(kbd.clone(), |d, k| d.child(div().flex_none().text_xs().text_color(ui.muted_foreground).child(k)))
         })
         .disabled(item.disabled)
@@ -247,7 +258,7 @@ pub fn copy_conn(ws: &Entity<Workspace>, project: &Project, cx: &mut App) {
 }
 
 /// 新建会话的菜单：普通终端 + 各家 CLI。after 给了就插在那扇窗口所在列的右边
-pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option<String>) -> Vec<MenuItemSpec> {
+pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option<String>, cx: &App) -> Vec<MenuItemSpec> {
     let mut items = Vec::new();
     {
         let ws = ws.clone();
@@ -257,17 +268,18 @@ pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option
             MenuItemSpec::new(t!("agent.terminal").to_string(), move |_, cx| {
                 ws.update(cx, |w, cx| w.new_terminal(&pid, None, after.clone(), cx))
             })
-            .kbd(crate::ui::chord("newTerminal")),
+            .kbd(crate::ui::chord("newTerminal"))
+            .icon(crate::session_icon::session_icon(None)),
         );
     }
-    for (i, agent) in SESSION_AGENTS.iter().enumerate() {
+    for (i, agent) in ws.read(cx).session_agents(project_id).iter().enumerate() {
         let ws = ws.clone();
         let pid = project_id.to_string();
         let after = after.clone();
         let agent: SessionAgent = *agent;
         let mut item = MenuItemSpec::new(t!(format!("agent.{}", agent.as_str())).to_string(), move |_, cx| {
             ws.update(cx, |w, cx| w.new_terminal(&pid, Some(agent), after.clone(), cx))
-        });
+        }).icon(crate::session_icon::session_icon(Some(agent)));
         if i == 0 {
             item = item.sep();
         }
@@ -418,7 +430,7 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
             .danger(),
         ];
     }
-    let mut items = new_session_items(ws, &project.id, None);
+    let mut items = new_session_items(ws, &project.id, None, cx);
     // 去别处看：px0 审阅、外部编辑器，一组
     let mut elsewhere = Vec::new();
     // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器——不嵌进

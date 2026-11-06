@@ -342,7 +342,11 @@ impl SessionOverview {
                     .text_sm()
                     .when(dead, |d| d.text_color(ui.muted_foreground).line_through())
                     .tooltip(move |window, cx| Tooltip::new(label_tip.clone()).build(window, cx))
-                    .child(label),
+                    .child(
+                        div().flex().items_center().gap(zpx(6.))
+                            .child(crate::session_icon::session_icon(session.agent).size(zpx(14.)).text_color(ui.muted_foreground))
+                            .child(div().min_w_0().truncate().child(label)),
+                    ),
             )
             .child(
                 div()

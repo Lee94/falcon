@@ -45,6 +45,28 @@ fn futures_are_lazy() {
 }
 
 #[test]
+fn local_agent_detection_decodes_new_and_future_tools() {
+    let mock = Mock::start(|req| {
+        assert_eq!(req.path_only(), "/api/agents");
+        HttpResp::json(200, json!(["claude", "gemini", "opencode", "cursor-agent", "agy", "omp", "future-agent"]))
+    });
+    let agents = block_on(mock.client().local_agents()).unwrap();
+    use falcon_proto::SessionAgent;
+    assert_eq!(agents, [SessionAgent::Claude, SessionAgent::Gemini, SessionAgent::OpenCode, SessionAgent::Cursor, SessionAgent::Agy, SessionAgent::Omp, SessionAgent::Unknown]);
+}
+
+#[test]
+fn agent_detection_uses_the_requested_host_or_project() {
+    let mock = Mock::start(|req| {
+        assert!(req.path == "/api/agents?hostId=linux+host" || req.path == "/api/agents?projectId=ssh-project");
+        HttpResp::json(200, json!(["agy", "omp"]))
+    });
+    let client = mock.client();
+    assert_eq!(block_on(client.agents(&ProbeTarget::SshHost("linux host".into()))).unwrap().len(), 2);
+    assert_eq!(block_on(client.agents(&ProbeTarget::Project("ssh-project".into()))).unwrap().len(), 2);
+}
+
+#[test]
 fn error_shape_matches_api_request_error() {
     let mock = Mock::start(|req| match req.path_only() {
         "/api/projects" => HttpResp::json(409, json!({ "error": "项目仍有 2 个未终止的会话" })),

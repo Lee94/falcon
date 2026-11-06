@@ -271,8 +271,7 @@ impl Sidebar {
         node.into_any_element()
     }
 
-    /// 无项目的独立会话分组行（每台机器顶上一条）：不绑目录，支持直接点 ＋ 新建终端，并接回
-    /// 从外部（`hc` / `herdr-app`）创建的无项目会话
+    /// 无项目的独立会话分组行（每台机器顶上一条）：不绑目录，支持直接点 ＋ 新建终端。
     fn standalone_node(&self, standalone_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.ws.read(cx);
         let selected = ws.state.selected_project_id.as_deref() == Some(standalone_id);
@@ -292,7 +291,7 @@ impl Sidebar {
         let pid_badge = pid.clone();
         let pid_select = pid.clone();
         let pid_filter = pid.clone();
-        let new_items = menus::new_session_items(&self.ws, standalone_id, None);
+        let new_items = menus::new_session_items(&self.ws, standalone_id, None, cx);
         let mut ctx_items = new_items.clone();
         ctx_items.push(
             menus::MenuItemSpec::new(t!("project.filterInOverview").to_string(), move |_, cx| {
@@ -503,7 +502,7 @@ impl Sidebar {
         let pid_badge = pid.clone();
         let pid_select = pid.clone();
         let ctx_items = menus::project_menu_items(&self.ws, project, cx);
-        let new_items = menus::new_session_items(&self.ws, &project.id, None);
+        let new_items = menus::new_session_items(&self.ws, &project.id, None, cx);
         let badge = expandable.then(|| {
             session_count_badge(
                 format!("badge-{pid_badge}"),
@@ -569,7 +568,6 @@ impl Sidebar {
         let status = reading.map(|r| r.status);
         let ws_open = self.ws.clone();
         let sid = session.id.clone();
-        let icon_name = if session.agent.is_some() { IconName::Bot } else { IconName::SquareTerminal };
         let tip: SharedString = format!("{label} · {}", t!("sidebar.projectContext")).into();
         let mut row = div()
             .id(SharedString::from(format!("sess-{}", session.id)))
@@ -590,7 +588,7 @@ impl Sidebar {
         };
         row = row
             .child(div().flex_none().size(zpx(18.)))
-            .child(icon(icon_name).size(zpx(14.)).text_color(ui.muted_foreground))
+            .child(crate::session_icon::session_icon(session.agent).size(zpx(14.)).text_color(ui.muted_foreground))
             .child(
                 div()
                     .flex_1()

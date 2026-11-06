@@ -129,6 +129,11 @@ pub fn kill_argv(bin: &str, root: &str, sids: &[String]) -> Vec<String> {
     argv
 }
 
+/// 合作刷新前台 OMP 的显示协商，不重启或终止会话。
+pub fn reprobe_argv(bin: &str, root: &str, sid: &str) -> Vec<String> {
+    vec![bin.into(), "reprobe".into(), sid.into(), "--root".into(), root.into()]
+}
+
 /// 远端跑一条守护进程子命令拿输出（version / list / kill）
 pub fn exec_command(kind: HostKind, argv: &[String]) -> String {
     let no_env: &[(&str, &str)] = &[];
@@ -298,6 +303,7 @@ mod tests {
         assert_eq!(binary_path(HostKind::Posix, "/home/u/.falcon/", "x"), "/home/u/.falcon/bin/x");
         assert_eq!(binary_path(HostKind::Windows, "C:\\Users\\u\\.falcon", "x.exe"), "C:\\Users\\u\\.falcon\\bin\\x.exe");
     }
+
 
     #[test]
     fn posix_bridge_runs_under_a_login_shell() {

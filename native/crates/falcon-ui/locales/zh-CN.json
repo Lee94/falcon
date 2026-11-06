@@ -680,7 +680,17 @@
     "claude": "Claude Code",
     "codex": "Codex",
     "grok": "Grok",
-    "devin": "Devin"
+    "devin": "Devin",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+    "cursor-agent": "Cursor Agent",
+    "copilot": "GitHub Copilot",
+    "aider": "Aider",
+    "amp": "Amp",
+    "qwen": "Qwen Code",
+    "droid": "Factory Droid",
+    "agy": "Antigravity CLI",
+    "omp": "Oh My Pi"
   },
   "session": {
     "state_active": "运行中",

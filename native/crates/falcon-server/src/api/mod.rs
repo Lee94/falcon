@@ -155,7 +155,10 @@ pub async fn not_found() -> Response {
 /// 不走登录 cookie、各自验身份的路由：原始字节（作用域令牌）、应用图标的取图路由
 /// （publicAsset）、askpass helper（Bearer）
 fn public_router() -> Router<AppState> {
-    Router::new().merge(askpass::helper_router()).merge(files::raw_router()).merge(app_icon::public_router())
+    Router::new()
+        .merge(askpass::helper_router())
+        .merge(files::raw_router())
+        .merge(app_icon::public_router())
 }
 
 /// 要登录的 `/api/*`（S4 起逐组填进来）

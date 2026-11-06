@@ -171,7 +171,7 @@ pub fn local_base_env_fn() -> BaseEnvFn {
     Arc::new(|| Box::pin(local_base_env()))
 }
 
-async fn resolve_base_env() -> Vec<(String, String)> {
+pub(super) async fn resolve_base_env() -> Vec<(String, String)> {
     let env = process_env();
     // Windows 没有 login shell / rc 这套机制，编码走的也是 PowerShell 的路
     if cfg!(windows) {
@@ -412,8 +412,8 @@ fn endpoint(deployed: &Deployed, sid: &str) -> String {
     }
 }
 
-/// 跑一条守护进程子命令拿 stdout（spawn / list / kill）。15 秒兜底：spawn 自己等就绪最多 10 秒
-async fn run_sessiond(argv: &[String]) -> Result<String, String> {
+/// 跑一条守护进程子命令拿 stdout（spawn / list / kill / reprobe）。15 秒兜底：spawn 自己等就绪最多 10 秒
+pub(super) async fn run_sessiond(argv: &[String]) -> Result<String, String> {
     let (bin, args) = argv.split_first().expect("argv");
     let child = tokio::process::Command::new(bin)
         .args(args)
@@ -424,11 +424,17 @@ async fn run_sessiond(argv: &[String]) -> Result<String, String> {
         .output();
     match tokio::time::timeout(Duration::from_secs(15), child).await {
         Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-        Ok(Ok(out)) => Err([String::from_utf8_lossy(&out.stdout).trim().to_string(), String::from_utf8_lossy(&out.stderr).trim().to_string()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")),
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = match (stdout.trim(), stderr.trim()) {
+                ("", "") => format!("守护进程执行失败（{}）", out.status),
+                (out, "") => out.to_string(),
+                ("", err) => err.to_string(),
+                (out, err) => format!("{out} {err}"),
+            };
+            Err(detail)
+        }
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("守护进程 15 秒内没有回话".into()),
     }

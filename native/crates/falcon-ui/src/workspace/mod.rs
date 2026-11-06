@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use falcon_client::FalconClient;
+use falcon_client::{FalconClient, ProbeTarget};
 use falcon_core::layout::{self as layout, ColumnLayout};
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_platform::Platform;
@@ -116,6 +116,11 @@ pub struct Workspace {
     pub projects: Vec<Project>,
     pub hosts: Vec<SshHost>,
     pub sessions: Vec<SessionWithProject>,
+    /// 后端本机检测到的 CLI；首次检测完成前只显示普通终端。
+    pub local_agents: Vec<SessionAgent>,
+    agents_in_flight: bool,
+    remote_agents: HashMap<String, Vec<SessionAgent>>,
+    remote_agents_in_flight: HashSet<String>,
     /// 排布与选择（store.ts 纯函数部分的移植）
     pub state: WorkspaceState,
     pub heads: HashMap<String, ProjectHead>,
@@ -194,6 +199,10 @@ impl Workspace {
             projects: Vec::new(),
             hosts: Vec::new(),
             sessions: Vec::new(),
+            local_agents: Vec::new(),
+            agents_in_flight: false,
+            remote_agents: HashMap::new(),
+            remote_agents_in_flight: HashSet::new(),
             state,
             heads: HashMap::new(),
             changes: HashMap::new(),
@@ -247,6 +256,7 @@ impl Workspace {
         self._tasks.push(Self::poll(cx, Duration::from_secs(5), |this, cx| this.refresh_sessions(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_millis(1500), |this, cx| this.pull_askpass(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
+        self._tasks.push(Self::poll(cx, Duration::from_secs(30), |this, cx| this.refresh_agents(cx)));
         self._tasks.push(Self::watch_wake(cx));
         // 自动重登成功后，停在"需要登录"的界面自己恢复
         let mut events = self.client.subscribe_auth();
@@ -393,6 +403,7 @@ impl Workspace {
                 this.refresh_changes(cx);
                 this.load_app_icon(cx);
                 this.refresh_plugins(cx);
+                this.refresh_agents(cx);
                 cx.notify();
             })
             .ok();
@@ -512,6 +523,7 @@ impl Workspace {
     fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
         self.state.apply_projects(&projects);
         self.projects = projects;
+        self.refresh_remote_agents(cx);
         self.refresh_heads(cx);
         cx.notify();
     }
@@ -523,6 +535,7 @@ impl Workspace {
             this.update(cx, |this, cx| match result {
                 Ok(h) => {
                     this.hosts = h;
+                    this.refresh_remote_agents(cx);
                     cx.notify();
                 }
                 Err(err) => this.handle_error(&err, cx),
@@ -530,6 +543,85 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// CLI 清单来自会话实际所在的机器；没有检测结果时不显示候选项。
+    pub fn session_agents(&self, project_id: &str) -> &[SessionAgent] {
+        let Some(project) = self.owner_project(project_id) else { return &self.local_agents };
+        if project.project_type != falcon_proto::ProjectType::Ssh {
+            return &self.local_agents;
+        }
+        let key = if let Some(host_id) = project.host_id {
+            format!("host:{host_id}")
+        } else {
+            format!("project:{}", project.id)
+        };
+        self.remote_agents.get(&key).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    fn refresh_remote_agents(&mut self, cx: &mut Context<Self>) {
+        if self.auth_phase != AuthPhase::Ready {
+            return;
+        }
+        // 同一主机的项目共用一份清单；未绑定已保存主机的旧 SSH 项目按项目探测。
+        let mut targets: Vec<_> = self.hosts.iter().map(|host| {
+            (format!("host:{}", host.id), ProbeTarget::SshHost(host.id.clone()))
+        }).collect();
+        targets.extend(self.projects.iter().filter(|p| {
+            p.project_type == falcon_proto::ProjectType::Ssh && p.host_id.is_none()
+                && p.worktree.as_ref().is_none_or(|w| w.archived_at.is_none())
+        }).map(|p| (format!("project:{}", p.id), ProbeTarget::Project(p.id.clone()))));
+        for (key, target) in targets {
+            if !self.remote_agents_in_flight.insert(key.clone()) {
+                continue;
+            }
+            let fut = self.client.agents(&target);
+            cx.spawn(async move |this, cx| {
+                let result = fut.await;
+                this.update(cx, |this, cx| {
+                    this.remote_agents_in_flight.remove(&key);
+                    let agents: Vec<_> = match result {
+                        Ok(agents) => agents.into_iter().filter(|a| *a != SessionAgent::Unknown).collect(),
+                        Err(err) => {
+                            log::warn!("检测远端 agent CLI 失败（{key}）：{err}");
+                            this.handle_error(&err, cx);
+                            Vec::new()
+                        }
+                    };
+                    if this.remote_agents.get(&key) != Some(&agents) {
+                        this.remote_agents.insert(key, agents);
+                        cx.notify();
+                    }
+                }).ok();
+            }).detach();
+        }
+    }
+
+    fn refresh_agents(&mut self, cx: &mut Context<Self>) {
+        self.refresh_remote_agents(cx);
+        if self.auth_phase != AuthPhase::Ready || self.agents_in_flight {
+            return;
+        }
+        self.agents_in_flight = true;
+        let fut = self.client.local_agents();
+        cx.spawn(async move |this, cx| {
+            let result = fut.await;
+            this.update(cx, |this, cx| {
+                this.agents_in_flight = false;
+                let agents = match result {
+                    Ok(agents) => agents.into_iter().filter(|a| *a != SessionAgent::Unknown).collect(),
+                    Err(err) => {
+                        log::warn!("检测本地 agent CLI 失败：{err}");
+                        this.handle_error(&err, cx);
+                        Vec::new()
+                    }
+                };
+                if this.local_agents != agents {
+                    this.local_agents = agents;
+                    cx.notify();
+                }
+            }).ok();
+        }).detach();
     }
 
     pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
@@ -937,6 +1029,7 @@ impl Workspace {
             let view = cx.new(|cx| TerminalView::new(sid, client, local, durable, window, cx));
             let sid = id.clone();
             cx.subscribe(&view, move |this, view, ev: &TerminalViewEvent, cx| match ev {
+                TerminalViewEvent::OpenFile { project_id, path } => this.open_file(project_id, path, cx),
                 TerminalViewEvent::TitleChanged => {
                     let title = view.read(cx).server_title.clone();
                     this.apply_session_title(&sid, title, cx);
@@ -963,6 +1056,10 @@ impl Workspace {
             })
             .detach();
             self.terminals.insert(id, view);
+        }
+        for (id, view) in &self.terminals {
+            let project = self.tab_project_id(id).and_then(|pid| self.owner_project(&pid));
+            view.update(cx, |v, _| v.set_file_context(project));
         }
         // 新建的视图在 socket 上默认看得见；建在后台画布上的要在它报格子之前说清楚
         self.sync_terminal_visibility(cx);

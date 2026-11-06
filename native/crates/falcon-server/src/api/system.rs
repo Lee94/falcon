@@ -6,7 +6,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::Uri;
 use axum::routing::{get, post};
-use falcon_proto::{FsListing, FsValidateResult, OkResponse, ShellsInfo, SystemInfo};
+use falcon_proto::{FsListing, FsValidateResult, OkResponse, SessionAgent, ShellsInfo, SystemInfo};
 use serde_json::Value;
 
 use super::auth_routes::LenientJson;
@@ -159,11 +159,42 @@ async fn shells(State(state): State<AppState>, uri: Uri) -> ApiResult<Json<Shell
     res.map(Json).map_err(ApiError::bad_request)
 }
 
+/// 与 shell / 目录探测使用同一份目标解析，避免把本机的安装情况套用到 SSH 项目。
+pub(super) async fn agents(State(state): State<AppState>, uri: Uri) -> ApiResult<Json<Vec<SessionAgent>>> {
+    use crate::sessions::agent_detect::{detect_local_agents, detect_remote_agents};
+    let host_id = query_param(&uri, "hostId").filter(|s| !s.is_empty());
+    let project_id = query_param(&uri, "projectId").filter(|s| !s.is_empty());
+    if host_id.is_none() && project_id.is_none() {
+        return Ok(Json(detect_local_agents().await));
+    }
+    let target = resolve_link_target(&state, host_id.as_deref(), project_id.as_deref()).map_err(ApiError::bad_request)?;
+    let result = state.engine.call(move |engine| async move {
+        let link = match target {
+            LinkTarget::Project(row) => engine.sessions.get_link(&row),
+            LinkTarget::Host(host) => engine.sessions.get_host_link(&host),
+        };
+        let facts = link.host_facts().await.map_err(|e| e.to_string())?;
+        detect_remote_agents(&*link, facts.kind, &facts.shell).await
+    }).await?;
+    result.map(Json).map_err(ApiError::bad_request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{TestApp, json_of, write};
     use axum::http::StatusCode;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn agents_validate_the_requested_machine() {
+        let app = TestApp::new();
+        app.local_project("local-agent-test");
+        for path in ["/api/agents?hostId=missing", "/api/agents?projectId=missing", "/api/agents?projectId=local-agent-test"] {
+            let (status, body) = json_of(app.get(path).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(body["error"].is_string());
+        }
+    }
 
     #[tokio::test]
     async fn fs_validate_shapes() {

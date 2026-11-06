@@ -6,10 +6,10 @@
 
 use std::rc::Rc;
 
-use falcon_proto::{SESSION_AGENTS, SessionState};
+use falcon_proto::SessionState;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown, MoveUp};
-use gpui_kit::component::WindowExt;
+use gpui_kit::component::{Icon, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     App, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, Render,
@@ -31,7 +31,7 @@ pub struct PickItem {
     pub key: String,
     pub label: String,
     pub meta: Option<String>,
-    pub icon: IconName,
+    pub icon: Icon,
     pub tone: Option<Hsla>,
     pub run: Run,
 }
@@ -169,7 +169,7 @@ impl Render for Picker {
                     .rounded(radius::SM)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| this.confirm(i, window, cx)))
-                    .child(icon(item.icon.clone()).size(zpx(14.)).text_color(item.tone.unwrap_or(ui.muted_foreground)))
+                    .child(item.icon.clone().size(zpx(14.)).text_color(item.tone.unwrap_or(ui.muted_foreground)))
                     .child(div().flex_1().min_w_0().truncate().child(item.label.clone()));
                 if let Some(meta) = &item.meta {
                     row = row.child(div().flex_none().text_size(zpx(11.)).text_color(ui.muted_foreground).child(meta.clone()));
@@ -250,7 +250,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 key: format!("@{name} {} {host}", s.project_name),
                 label: name,
                 meta: Some(format!("{} · {host}", s.project_name)),
-                icon: ic,
+                icon: if s.state == SessionState::Active { crate::session_icon::session_icon(s.agent) } else { icon(ic) },
                 tone: Some(tone),
                 run: run(move |_, cx| w.update(cx, |w, cx| w.open_session(&id, cx))),
             }
@@ -268,19 +268,19 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 key: format!("#{} {}", p.name, t!("sidebar.newTerminal")),
                 label: t!("palette.newTerminalIn", name = p.name.clone()).to_string(),
                 meta: Some(host.clone()),
-                icon: IconName::SquareTerminal,
+                icon: icon(IconName::SquareTerminal),
                 tone: None,
                 run: run(move |_, cx| w.update(cx, |w, cx| w.new_terminal(&pid, None, None, cx))),
             });
         }
-        for agent in SESSION_AGENTS {
+        for agent in ws.session_agents(&p.id) {
             let agent_name = t!(format!("agent.{}", agent.as_str())).to_string();
             let (w, pid, a) = (ws_entity.clone(), p.id.clone(), *agent);
             project_items.push(PickItem {
                 key: format!("#{} {agent_name}", p.name),
                 label: t!("palette.newAgentIn", agent = agent_name, name = p.name.clone()).to_string(),
                 meta: Some(host.clone()),
-                icon: IconName::Bot,
+                icon: crate::session_icon::session_icon(Some(a)),
                 tone: None,
                 run: run(move |_, cx| w.update(cx, |w, cx| w.new_terminal(&pid, Some(a), None, cx))),
             });
@@ -292,7 +292,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                     key: format!("#{} {}", p.name, editor.name()),
                     label: t!("palette.openInEditor", editor = editor.name(), name = p.name.clone()).to_string(),
                     meta: Some(host.clone()),
-                    icon: IconName::ExternalLink,
+                    icon: icon(IconName::ExternalLink),
                     tone: None,
                     run: run(move |_, cx| crate::menus::open_in_editor(&w, &pid, editor, &target, cx)),
                 });
@@ -305,7 +305,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!("#{}", t!("palette.newProject")),
             label: t!("palette.newProject").to_string(),
             meta: None,
-            icon: IconName::Plus,
+            icon: icon(IconName::Plus),
             tone: None,
             run: run(move |window, cx| crate::dialogs::project_form::open(&w, None, Default::default(), window, cx)),
         });
@@ -319,7 +319,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {name}", t!("session.reattach")),
             label: t!("palette.reattachOne", name = name).to_string(),
             meta: Some(chord("reattach").to_string()),
-            icon: IconName::CircleAlert,
+            icon: icon(IconName::CircleAlert),
             tone: Some(ui.warning),
             run: run(move |_, cx| crate::menus::reattach(&w, &id, cx)),
         });
@@ -335,7 +335,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {}", t!("palette.enableDurable", host = host.clone()), p.name),
             label: t!("palette.enableDurable", host = host).to_string(),
             meta: Some(p.name.clone()),
-            icon: IconName::ShieldCheck,
+            icon: icon(IconName::ShieldCheck),
             tone: None,
             run: run(move |window, cx| crate::dialogs::install::open(&w, &pid, None, window, cx)),
         });
@@ -347,7 +347,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 key: format!(">{}", t!("palette.terminateCurrent")),
                 label: t!("palette.terminateCurrent").to_string(),
                 meta: None,
-                icon: IconName::CircleX,
+                icon: icon(IconName::CircleX),
                 tone: Some(ui.destructive),
                 run: run(move |window, cx| crate::menus::terminate(&w, &current, window, cx)),
             });
@@ -357,7 +357,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {}", t!("palette.zoomOn"), t!("palette.zoomOff")),
             label: if ws.state.term_zoomed { t!("palette.zoomOff") } else { t!("palette.zoomOn") }.to_string(),
             meta: None,
-            icon: if ws.state.term_zoomed { IconName::Minimize2 } else { IconName::Maximize2 },
+            icon: icon(if ws.state.term_zoomed { IconName::Minimize2 } else { IconName::Maximize2 }),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_term_zoom(cx))),
         });
@@ -368,7 +368,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.goToFile")),
             label: t!("palette.goToFile").to_string(),
             meta: Some(chord("quickOpen").to_string()),
-            icon: IconName::FileText,
+            icon: icon(IconName::FileText),
             tone: None,
             run: run(move |window, cx| crate::dialogs::quick_open::open(&w, window, cx)),
         });
@@ -377,7 +377,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.overview")),
             label: t!("palette.overview").to_string(),
             meta: Some(chord("overview").to_string()),
-            icon: IconName::LayoutDashboard,
+            icon: icon(IconName::LayoutDashboard),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.show_overview(cx))),
         });
@@ -386,7 +386,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.openSettings")),
             label: t!("palette.openSettings").to_string(),
             meta: None,
-            icon: IconName::Settings,
+            icon: icon(IconName::Settings),
             tone: None,
             run: run(move |window, cx| crate::dialogs::settings::open(&w, Default::default(), window, cx)),
         });
@@ -395,7 +395,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} AI Agent Shell", t!("assistant.title")),
             label: t!("assistant.title").to_string(),
             meta: Some(chord("toggleAssistant").to_string()),
-            icon: IconName::Sparkles,
+            icon: icon(IconName::Sparkles),
             tone: None,
             run: run(move |window, cx| crate::assistant::toggle(&w, window, cx)),
         });
@@ -404,7 +404,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {}", t!("palette.toggleSidebarOn"), t!("palette.toggleSidebarOff")),
             label: if ws.state.sidebar_open { t!("palette.toggleSidebarOn") } else { t!("palette.toggleSidebarOff") }.to_string(),
             meta: Some(chord("toggleSidebar").to_string()),
-            icon: IconName::PanelLeft,
+            icon: icon(IconName::PanelLeft),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_sidebar(cx))),
         });
@@ -421,7 +421,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {}", t!(on), t!(off)),
             label: if showing { t!(on) } else { t!(off) }.to_string(),
             meta: Some(chord(ch).to_string()),
-            icon: ic,
+            icon: icon(ic),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_right_panel(panel.clone(), cx))),
         });
@@ -435,7 +435,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {} {} plugin", t!("palette.togglePluginOn", name = p.name), t!("palette.togglePluginOff", name = p.name), p.id),
             label: if showing { t!("palette.togglePluginOn", name = p.name) } else { t!("palette.togglePluginOff", name = p.name) }.to_string(),
             meta: None,
-            icon: crate::panels::plugin::plugin_icon(&p.icon),
+            icon: icon(crate::panels::plugin::plugin_icon(&p.icon)),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.toggle_right_panel(panel.clone(), cx))),
         });
@@ -452,11 +452,11 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} {} theme", t!("theme.label"), t!(key)),
             label: t!("palette.theme", name = t!(key)).to_string(),
             meta: None,
-            icon: match pref {
+            icon: icon(match pref {
                 falcon_theme::ThemePref::Light => IconName::Sun,
                 falcon_theme::ThemePref::Dark => IconName::Moon,
                 _ => IconName::SunMoon,
-            },
+            }),
             tone: None,
             run: run(move |_, cx| crate::theme::update_settings(cx, |s| s.mode = pref)),
         });
@@ -467,7 +467,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{} theme ghostty", t!("palette.pickTheme")),
             label: t!("palette.pickTheme").to_string(),
             meta: None,
-            icon: IconName::Palette,
+            icon: icon(IconName::Palette),
             tone: None,
             run: run(move |window, cx| crate::dialogs::settings::open(&w, crate::dialogs::settings::Tab::Appearance, window, cx)),
         });
@@ -476,7 +476,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.openRelays")),
             label: t!("palette.openRelays").to_string(),
             meta: Some(chord("openRelays").to_string()),
-            icon: IconName::ArrowLeftRight,
+            icon: icon(IconName::ArrowLeftRight),
             tone: None,
             run: run(move |window, cx| crate::dialogs::settings::open(&w, crate::dialogs::settings::Tab::Relays, window, cx)),
         });
@@ -485,7 +485,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.setPassword")),
             label: t!("palette.setPassword").to_string(),
             meta: None,
-            icon: IconName::Settings,
+            icon: icon(IconName::Settings),
             tone: None,
             run: run(move |window, cx| crate::dialogs::settings::open(&w, crate::dialogs::settings::Tab::Account, window, cx)),
         });
@@ -494,7 +494,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.addHost")),
             label: t!("palette.addHost").to_string(),
             meta: None,
-            icon: IconName::Plus,
+            icon: icon(IconName::Plus),
             tone: None,
             run: run(move |window, cx| crate::dialogs::host_form::open(&w, None, None, window, cx)),
         });
@@ -502,7 +502,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("native.menu.connect")),
             label: t!("native.menu.connect").to_string(),
             meta: None,
-            icon: IconName::Server,
+            icon: icon(IconName::Server),
             tone: None,
             run: run(|_, cx| crate::dialogs::connect::open_connect_window(cx)),
         });
@@ -513,7 +513,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             key: format!(">{}", t!("palette.logout")),
             label: t!("palette.logout").to_string(),
             meta: None,
-            icon: IconName::X,
+            icon: icon(IconName::X),
             tone: None,
             run: run(move |_, cx| w.update(cx, |w, cx| w.logout(cx))),
         });

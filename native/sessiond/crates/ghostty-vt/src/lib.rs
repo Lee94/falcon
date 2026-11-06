@@ -498,6 +498,10 @@ impl<H: Handler> Terminal<H> {
         self.get::<sys::GhosttyString>(sys::GHOSTTY_TERMINAL_DATA_TITLE).map(|s| string_of(&s)).unwrap_or_default()
     }
 
+    pub fn pwd(&self) -> String {
+        self.get::<sys::GhosttyString>(sys::GHOSTTY_TERMINAL_DATA_PWD).map(|s| string_of(&s)).unwrap_or_default()
+    }
+
     /// 流此刻是否停在 ground（不在任何序列 / 多字节字符的中间）
     pub fn at_ground(&self) -> bool {
         self.get::<bool>(sys::GHOSTTY_TERMINAL_DATA_VT_GROUND).unwrap_or(true)

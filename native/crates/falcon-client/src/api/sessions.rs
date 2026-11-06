@@ -7,18 +7,30 @@ use std::future::Future;
 
 use bytes::Bytes;
 use falcon_proto::{
-    CreateSessionRequest, OkResponse, PasteImageResult, Session, SessionForeground,
-    SessionWithProject,
+    CreateSessionRequest, NativeDisplayRefresh, OkResponse, PasteImageResult, Session, SessionForeground,
+    SessionWithProject, SessionAgent,
 };
 use reqwest::Method;
 use serde::Serialize;
 
-use super::seg;
+use super::{Query, seg};
+use super::system::ProbeTarget;
 use crate::client::{FalconClient, Req, ReqBody, json_body};
 use crate::error::ApiResult;
 use crate::runtime::MaybeSend;
 
 impl FalconClient {
+    /// 后端本机实际可用的开场 CLI。
+    pub fn local_agents(&self) -> impl Future<Output = ApiResult<Vec<SessionAgent>>> + MaybeSend + 'static {
+        self.agents(&ProbeTarget::Backend)
+    }
+
+    /// 指定宿主机实际可用的 CLI；SSH 主机与项目沿用其它探测接口的目标参数。
+    pub fn agents(&self, target: &ProbeTarget) -> impl Future<Output = ApiResult<Vec<SessionAgent>>> + MaybeSend + 'static {
+        let query = target.query(Query::new()).finish();
+        self.get(format!("/api/agents{query}"))
+    }
+
     /// `GET /api/sessions`：全部会话（含已丢失的），带所属项目名。界面每 5s 轮询一次。
     pub fn list_sessions(&self) -> impl Future<Output = ApiResult<Vec<SessionWithProject>>> + MaybeSend + 'static {
         self.get("/api/sessions".to_owned())
@@ -41,6 +53,12 @@ impl FalconClient {
     /// `POST /api/sessions/:id/reattach`：手动接回。确认已死时照样 200，返回 dead 的行。
     pub fn reattach_session(&self, id: &str) -> impl Future<Output = ApiResult<Session>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/sessions/{}/reattach", seg(id)))
+    }
+
+    /// `POST /api/sessions/:id/reprobe`：让前台 OMP 合作刷新原生显示协商。
+    /// false 表示前台不是 OMP；未连接、Windows、并发刷新或执行失败均返回 API 错误。
+    pub fn reprobe_session(&self, id: &str) -> impl Future<Output = ApiResult<NativeDisplayRefresh>> + MaybeSend + 'static {
+        self.bare(Method::POST, format!("/api/sessions/{}/reprobe", seg(id)))
     }
 
     /// `GET /api/sessions/:id/foreground`：关窗口（Terminate）前问一嘴前台有没有程序在跑。

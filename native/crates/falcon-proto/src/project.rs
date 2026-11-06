@@ -232,7 +232,7 @@ pub struct DeleteProjectResult {
     pub warnings: Option<Vec<String>>,
 }
 
-/// 本机「无项目」虚拟分组 ID（ADR 0026）：归属到这台机器但未绑定具体项目目录的会话。
+/// 本机「无项目」虚拟分组 ID：归属到这台机器但未绑定具体项目目录的会话。
 pub const STANDALONE_LOCAL: &str = "standalone:local";
 /// 远端 SSH 主机「无项目」虚拟分组 ID 前缀：`standalone:host:<hostId>`。
 pub const STANDALONE_HOST_PREFIX: &str = "standalone:host:";

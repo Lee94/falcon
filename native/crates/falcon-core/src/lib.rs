@@ -34,6 +34,7 @@ pub mod host_color;
 pub mod relay;
 /// 对应 React 版的 lib/filePath.ts：宿主机路径（posix / windows，不用 std::path）
 pub mod file_path;
+pub mod terminal_link;
 /// 对应 React 版的 lib/fileTree.ts：改动文件的目录树
 pub mod file_tree;
 /// 对应 React 版的 lib/fileSearch.ts：⌘P 文件搜索打分
