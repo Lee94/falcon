@@ -1,5 +1,8 @@
 .DS_Store
 *.bin
+# 仓库根的本地产物。Cargo 的编译目录在 native/，由 native/.gitignore 忽略；
+# 这里挡住根目录 target/（例如 Tern 调试截图 target/shots）。
+/target/
 # 例外：会话守护进程的接回比对语料是录下来的 PTY 原始输出，测试要读（设计文档 session-daemon.md 第 15 节）
 !native/sessiond/crates/falcon-sessiond/tests/corpus/*.bin
 release/
