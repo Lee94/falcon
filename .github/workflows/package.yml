@@ -68,8 +68,8 @@ jobs:
 
       # 打包一共写三个 target 目录：native/target（原生客户端）、
       # target-sessiond（守护进程的 5 个交叉目标）、target-server（带 embed 的服务端）。
-      # rust-cache 默认只管 <workspace>/target，其余两个连工具链缓存（zig / ghostty 静态库 /
-      # meegle CLI）一起补上；cache-on-failure 让失败的冷启动也留下缓存，重跑不用从零编
+      # rust-cache 默认只管 <workspace>/target，其余两个连工具链缓存（zig / ghostty 静态库）
+      # 一起补上；cache-on-failure 让失败的冷启动也留下缓存，重跑不用从零编
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
@@ -79,22 +79,16 @@ jobs:
             native/target-server
             native/.cache
 
-      # 守护进程的交叉编译用 cargo-zigbuild（Zig 本身由 xtask 按钉死的版本下载、校验）
+      # 守护进程的交叉编译用 cargo-zigbuild（Zig 本身由 xtask 按锁定版本下载、校验）
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
 
-      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸；server.rs 用 go 编 mesh sidecar
+      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
       - name: Install librsvg
         run: brew install librsvg
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: native/mesh/go.mod
-          cache-dependency-path: native/mesh/go.sum
-
-      # 没有服务端产物时 pkg 会先走 server（构建浏览器版、从 npm 仓库取锁定版本的 meegle CLI、
-      # 编 5 个目标的会话守护进程、cargo 编服务端）
+      # 没有服务端产物时 pkg 会先走 server（编 5 个目标的会话守护进程、cargo 编服务端）
       - name: Build pkg
         run: cargo run --manifest-path native/Cargo.toml -p xtask -- pkg
 
