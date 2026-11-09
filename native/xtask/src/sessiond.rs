@@ -214,16 +214,18 @@ pub fn lib_dir(build_id: &str, triple: &str) -> PathBuf {
     cache().join("ghostty").join(build_id).join(triple)
 }
 
-/// 编一个目标的静态库（已有就跳过），返回 zig 的安装前缀（include 在里面）
-fn build_lib(zig: &Path, src: &Path, pin: &Pin, triple: &str, zig_target: &str, force: bool) -> Result<PathBuf> {
+/// 编一个目标的静态库（已有就跳过），返回 zig 的安装前缀（include 在里面）。
+/// 源码按需准备：缓存已命中静态库与头文件时不下载、不解包 ghostty 源码。
+fn build_lib(zig: &Path, pin: &Pin, triple: &str, zig_target: &str, force: bool) -> Result<PathBuf> {
     let prefix = cache().join("ghostty").join(pin.build_id()).join(format!("out-{triple}"));
     let dest_dir = lib_dir(&pin.build_id(), triple);
     let dest = dest_dir.join("libghostty-vt.a");
     if dest.is_file() && prefix.join("include/ghostty/vt.h").is_file() && !force {
         return Ok(prefix);
     }
+    let src = ensure_ghostty_src(pin)?;
     println!("== libghostty-vt：{triple}（zig -Dtarget={zig_target}）==");
-    let env = zig_env(zig, src);
+    let env = zig_env(zig, &src);
     let env_ref: Vec<(&str, &std::ffi::OsStr)> = env.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
     run_env(
         zig,
@@ -235,7 +237,7 @@ fn build_lib(zig: &Path, src: &Path, pin: &Pin, triple: &str, zig_target: &str, 
             "--prefix".into(),
             prefix.clone().into(),
         ],
-        Some(src),
+        Some(&src),
         &env_ref,
     )?;
     // Windows 上 zig 出的静态库叫 ghostty-vt-static.lib（ghostty-vt.lib 是 DLL 的导入库）
@@ -294,9 +296,8 @@ pub fn ghostty(args: &[String]) -> Result<()> {
     }
     let pin = pin()?;
     let zig = ensure_zig()?;
-    let src = ensure_ghostty_src(&pin)?;
     for (triple, zt) in targets {
-        build_lib(&zig, &src, &pin, triple, zt, force)?;
+        build_lib(&zig, &pin, triple, zt, force)?;
         println!("libghostty-vt（{triple}）：{}", lib_dir(&pin.build_id(), triple).display());
     }
     Ok(())
@@ -309,9 +310,8 @@ pub fn bindgen(args: &[String]) -> Result<()> {
     }
     let pin = pin()?;
     let zig = ensure_zig()?;
-    let src = ensure_ghostty_src(&pin)?;
     let (triple, zt) = host_target()?;
-    let prefix = build_lib(&zig, &src, &pin, triple, zt, false)?;
+    let prefix = build_lib(&zig, &pin, triple, zt, false)?;
     let out = native().join("sessiond/crates/ghostty-vt-sys/src/bindings.rs");
     let mut env: Vec<(&str, OsString)> = Vec::new();
     // macOS 上 bindgen 要的 libclang 在 CommandLineTools 里；别处按 bindgen 自己的规矩找
@@ -383,9 +383,8 @@ pub fn run(args: &[String]) -> Result<()> {
 pub fn build(targets: &[(&'static str, &'static str)], check: bool, test: bool) -> Result<()> {
     let pin = pin()?;
     let zig = ensure_zig()?;
-    let src = ensure_ghostty_src(&pin)?;
     for (triple, zt) in targets {
-        build_lib(&zig, &src, &pin, triple, zt, false)?;
+        build_lib(&zig, &pin, triple, zt, false)?;
     }
     let (host_triple, _) = host_target()?;
     let tc = rustup_toolchain_bin()?;

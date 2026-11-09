@@ -52,9 +52,10 @@ pub fn build(target: &str) -> Result<PathBuf> {
     }
 
     // ---- 2. cargo ----
-    // 发布产物不带调试信息（工作区的 release profile 为原生客户端留着 debuginfo）。改 profile 会让
-    // 依赖全部重编，所以单独一个 target 目录，不跟原生客户端的 release 缓存互相冲掉
-    let target_dir = native().join("target-server");
+    // 本机构建直接共用工作区的 native/target（与原生客户端共用同一套 release profile 缓存，
+    // 公共依赖只编一遍），拷出发布产物后再用系统 strip 剥离符号；交叉编译产物本来就落在
+    // target/<triple>/ 下，不冲掉宿主缓存，继续由 cargo 直接 strip。
+    let target_dir = native().join("target");
     let mut cargo_args: Vec<String> = [
         "build",
         "--release",
@@ -62,35 +63,38 @@ pub fn build(target: &str) -> Result<PathBuf> {
         "falcon-server",
         "--features",
         "embed-sessiond",
-        "--config",
-        "profile.release.debug=false",
-        "--config",
-        "profile.release.strip=\"symbols\"",
     ]
     .map(str::to_string)
     .to_vec();
     if cross {
         // rustup 的工具链排在前面：PATH 上的 Homebrew rustc 没有交叉目标的标准库
-        cargo_args.extend(["--target".to_string(), triple.to_string()]);
+        cargo_args.extend([
+            "--target".to_string(),
+            triple.to_string(),
+            "--config".to_string(),
+            "profile.release.debug=false".to_string(),
+            "--config".to_string(),
+            "profile.release.strip=\"symbols\"".to_string(),
+        ]);
     }
     println!("== cargo {} ==", cargo_args.join(" "));
     run_env(
         "cargo",
         &cargo_args,
         Some(&native()),
-        &[
-            ("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str()),
-            ("CARGO_TARGET_DIR", target_dir.as_os_str()),
-        ],
+        &[("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str())],
     )?;
 
-    let built = if cross { target_dir.join(triple) } else { target_dir.clone() }.join("release/falcon-server");
+    let built = if cross { target_dir.join(triple) } else { target_dir }.join("release/falcon-server");
     let release = root().join("release");
     std::fs::create_dir_all(&release)?;
     let out = release.join(format!("falcon-v{}-{target}", version()));
     // 先删再拷：覆盖一个正在跑的同名文件时，macOS 会因改了已映射的签名文件把它 SIGKILL
     let _ = std::fs::remove_file(&out);
     std::fs::copy(&built, &out).with_context(|| format!("拷贝 {} 失败", built.display()))?;
+    if !cross {
+        crate::util::run("strip", [out.as_os_str()], None)?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

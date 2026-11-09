@@ -1,9 +1,11 @@
 # 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）与 macOS（.pkg，原生客户端 +
 # Resources 里的 Rust 服务端）。打法与本机一样，直接跑 cargo xtask win / cargo xtask pkg，xtask 是唯一真相。
-# 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run -p xtask --。
+# 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
 # - 推 v* tag：两个包都打完后建 GitHub Release 并挂上；
-# - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版。
+# - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
+# - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
+#   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
 #
 # 都没有签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，与本机打的包一样。
 name: package
@@ -11,6 +13,8 @@ name: package
 on:
   push:
     tags: ["v*"]
+  schedule:
+    - cron: "0 18 * * 0"
   workflow_dispatch:
 
 concurrency:
@@ -32,21 +36,22 @@ jobs:
       # Windows 包里只有原生客户端，不编浏览器版，不用 wasm target
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: native
-          # 失败的冷启动也留缓存，重跑不用从零编
-          cache-on-failure: true
-
       # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
-      # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具
-      - name: Build installer
-        run: cargo run --manifest-path native/Cargo.toml -p xtask -- win
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
 
-      - uses: actions/upload-artifact@v4
+      # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具。
+      # xtask 也用 --release 跑，与 falcon-desktop 共用 target/release 的依赖，不再单独编一份 debug
+      - name: Build installer
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- win
+
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
         with:
           name: falcon-windows
           path: release/*.exe
@@ -66,19 +71,6 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
 
-      # 打包一共写三个 target 目录：native/target（原生客户端）、
-      # target-sessiond（守护进程的 5 个交叉目标）、target-server（带 embed 的服务端）。
-      # rust-cache 默认只管 <workspace>/target，其余两个连工具链缓存（zig / ghostty 静态库）
-      # 一起补上；cache-on-failure 让失败的冷启动也留下缓存，重跑不用从零编
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: native
-          cache-on-failure: true
-          cache-directories: |
-            native/target-sessiond
-            native/target-server
-            native/.cache
-
       # 守护进程的交叉编译用 cargo-zigbuild（Zig 本身由 xtask 按锁定版本下载、校验）
       - uses: taiki-e/install-action@v2
         with:
@@ -86,13 +78,45 @@ jobs:
 
       # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
       - name: Install librsvg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: brew install librsvg
+
+      # Zig 工具链、zig-global（musl / mingw C 运行库缓存）与 5 个目标的 libghostty-vt 静态库
+      # 只随 ghostty.pin / 补丁 / sessiond.rs 变动，单独缓存后跨版本永久命中，省掉约 11.5 分钟的
+      # Zig 编译；排除 900MB+ 的 ghostty 源码与 .zig-cache 中间目录以及原始压缩包
+      - name: Cache Zig and libghostty-vt
+        uses: actions/cache@v4
+        with:
+          path: |
+            native/.cache/zig/zig-*
+            !native/.cache/zig/*.tar.xz
+            native/.cache/zig-global
+            native/.cache/ghostty/*/out-*/include
+            native/.cache/ghostty/*/*-linux-musl
+            native/.cache/ghostty/*/*-apple-darwin
+            native/.cache/ghostty/*/*-windows-gnu
+          key: zig-ghostty-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/sessiond/ghostty.pin', 'native/sessiond/ghostty-patches/**', 'native/xtask/src/sessiond.rs') }}
+          restore-keys: |
+            zig-ghostty-${{ runner.os }}-${{ runner.arch }}-
+
+      # 服务端与客户端共用 native/target；守护进程是独立工作区 native/sessiond（产物在
+      # native/target-sessiond），按 workspace -> target 语法交给 rust-cache 统一管理并保留
+      # 工作区内部 lib crate 缓存。不开启 cache-on-failure，避免前置步骤偶发失败时写入空缓存
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native
+            native/sessiond -> ../target-sessiond
+          cache-workspace-crates: true
 
       # 没有服务端产物时 pkg 会先走 server（编 5 个目标的会话守护进程、cargo 编服务端）
       - name: Build pkg
-        run: cargo run --manifest-path native/Cargo.toml -p xtask -- pkg
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- pkg
 
-      - uses: actions/upload-artifact@v4
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
         with:
           name: falcon-macos
           path: release/*.pkg
