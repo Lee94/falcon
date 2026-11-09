@@ -10,7 +10,7 @@
 //! 唯一的例外是 [`LocalService`]——它阻塞，要放到后台执行器上跑。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -137,6 +137,70 @@ pub trait Platform {
     /// 响一声「跑完了」（程序经 OSC 7501 报告 done / error，ADR 0020 决定六；设置里的试听）。
     /// 原生用系统自带的提示音；放不出来（没有声卡）就静默不响，不报错——这是锦上添花
     fn play_chime(&self);
+
+    // ---------------- 应用更新（ADR 0026）----------------
+
+    /// 检查并安装本机应用。没有这一能力的平台返回 None。
+    /// 返回的对象可以丢到后台执行器上：两个方法都阻塞
+    fn app_updater(&self) -> Option<Arc<dyn AppUpdater>> {
+        None
+    }
+
+    /// 本进程退出之后打开 `bundle`。只在用户已经确认退出时调用：帮手脱离本进程，
+    /// 等 pid 消失再打开，避免取消「没保存的修改」之后仍被拉起第二份
+    fn schedule_relaunch(&self, bundle: &Path) -> Result<(), String> {
+        let _ = bundle;
+        Err("这个平台不会在退出后重新打开应用".into())
+    }
+}
+
+/// 一份可以安装的 GitHub Release
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableUpdate {
+    pub version: String,
+    pub asset_name: String,
+    pub download_url: String,
+    /// macOS 安装包里带着服务端，装完按原来的参数执行 `service install`
+    pub installs_local_service: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateCheck {
+    UpToDate { version: String },
+    Available(AvailableUpdate),
+    Failed(UpdateFailure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstalledUpdate {
+    pub version: String,
+    /// 被换下来的旧应用。没有旧应用时是 None
+    pub backup_path: Option<String>,
+    /// 这次进程是从刚被换掉的 `.app` 里启动的，退出后重新打开才是新客户端
+    pub relaunch: bool,
+    /// 退出本进程后要打开的应用包。开发构建换的是另一份应用，这里是 None，不退出当前进程
+    pub relaunch_bundle: Option<String>,
+    /// 安装包已下载，但没有运行。Windows 的安装程序会关掉正在运行的客户端
+    pub staged_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateFailure {
+    /// 没有公开的 Release，或仓库对未登录的请求返回 404
+    NoRelease,
+    Network(String),
+    NoPackage { platform: String },
+    BadDownloadUrl,
+    /// 换应用这一步失败，磁盘上的旧应用还在
+    Install(String),
+    /// `service install` 失败。能改回去的时候应用和本机服务都已改回
+    Service(String),
+}
+
+/// 阻塞。界面把它放到后台执行器上调
+pub trait AppUpdater: Send + Sync {
+    fn check(&self, current_version: &str) -> UpdateCheck;
+    fn install(&self, update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure>;
 }
 
 struct Installed(Rc<dyn Platform>);

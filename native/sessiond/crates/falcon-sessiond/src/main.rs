@@ -25,11 +25,8 @@ mod holder;
 mod ipc;
 mod layout;
 mod log;
-#[cfg(unix)]
-mod omp_extension;
 mod proc;
 mod replay;
-mod reprobe;
 mod spawn;
 mod vt;
 mod vtproto;
@@ -48,7 +45,6 @@ const USAGE: &str = "falcon-sessiond —— falcon 的会话守护进程
   falcon-sessiond list [--json]                列出会话
   falcon-sessiond kill <会话>...               结束会话
   falcon-sessiond history <会话> [--vt|--plain|--html]   导出会话历史
-  falcon-sessiond reprobe <会话> [--root <目录>]   让前台 OMP 重新探测当前显示端
   falcon-sessiond version [--json]
 
   <会话> 是 16 位的会话短 id（list 里的 SID）。
@@ -263,14 +259,6 @@ fn run(cmd: &str, mut a: Args) -> Result<i32> {
             let sid = a.positional_sid()?;
             a.done()?;
             attach::run(&layout, &sid, force)
-        }
-        "reprobe" => {
-            let layout = a.root()?;
-            let sid = a.positional_sid()?;
-            a.done()?;
-            let refreshed = reprobe::run(&layout, &sid)?;
-            println!("{}", serde_json::json!({ "refreshed": refreshed }));
-            Ok(0)
         }
         "list" => {
             let json = a.flag("--json");

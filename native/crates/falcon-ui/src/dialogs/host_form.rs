@@ -43,6 +43,13 @@ impl Default for SshInit {
     }
 }
 
+/// 新建主机时的预填。Tailscale 设备走这条：地址和显示名已经有了，用户名是猜测，保存前还能改
+#[derive(Clone, Debug)]
+pub struct HostDraft {
+    pub name: String,
+    pub ssh: SshInit,
+}
+
 /// 表单当前填的值
 #[derive(Clone, Debug)]
 pub struct SshValues {
@@ -164,11 +171,21 @@ pub struct HostForm {
 }
 
 impl HostForm {
-    fn new(ws: Entity<Workspace>, existing: Option<SshHost>, on_saved: Option<OnSaved>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        ws: Entity<Workspace>,
+        existing: Option<SshHost>,
+        draft: Option<HostDraft>,
+        on_saved: Option<OnSaved>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let name_value = existing
+            .as_ref()
+            .map(|h| h.name.clone())
+            .or_else(|| draft.as_ref().map(|d| d.name.clone()))
+            .unwrap_or_default();
         let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(t!("host.namePlaceholder").to_string())
-                .default_value(existing.as_ref().map(|h| h.name.clone()).unwrap_or_default())
+            InputState::new(window, cx).placeholder(t!("host.namePlaceholder").to_string()).default_value(name_value)
         });
         cx.subscribe_in(&name, window, |_, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -176,16 +193,19 @@ impl HostForm {
             }
         })
         .detach();
-        let init = existing
-            .as_ref()
-            .map(|h| SshInit {
+        let init = if let Some(h) = existing.as_ref() {
+            SshInit {
                 host: h.host.clone(),
                 port: h.port,
                 username: h.username.clone(),
                 auth_method: h.auth_method,
                 key_path: h.key_path.clone().unwrap_or_default(),
-            })
-            .unwrap_or_default();
+            }
+        } else if let Some(d) = draft {
+            d.ssh
+        } else {
+            SshInit::default()
+        };
         let ssh = SshFields::new(init, existing.as_ref().is_some_and(|h| h.has_secret), window, cx);
         ssh.on_change(window, cx, |this: &mut Self, cx| {
             this.probe = None;
@@ -350,7 +370,18 @@ impl Render for HostForm {
 }
 
 pub fn open(ws: &Entity<Workspace>, edit: Option<SshHost>, on_saved: Option<OnSaved>, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| HostForm::new(ws.clone(), edit, on_saved, window, cx));
+    let form = cx.new(|cx| HostForm::new(ws.clone(), edit, None, on_saved, window, cx));
+    present(form, window, cx);
+}
+
+/// 用 Tailscale 设备（或别的来源）预填一张新建表单。`on_saved` 与 [`open`] 相同：
+/// 项目表单靠它把刚保存的主机选进下拉框
+pub fn open_draft(ws: &Entity<Workspace>, draft: HostDraft, on_saved: Option<OnSaved>, window: &mut Window, cx: &mut App) {
+    let form = cx.new(|cx| HostForm::new(ws.clone(), None, Some(draft), on_saved, window, cx));
+    present(form, window, cx);
+}
+
+fn present(form: Entity<HostForm>, window: &mut Window, cx: &mut App) {
     let f = form.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
         let title = if f.read(cx).existing.is_some() { t!("host.editTitle") } else { t!("host.createTitle") };

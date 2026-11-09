@@ -1,4 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M20 15a3 3 0 0 1-3 3H9l-5 3v-6a3 3 0 0 1-1-2V7a3 3 0 0 1 3-3h11a3 3 0 0 1 3 3v8Z"/>
-  <path d="M8 13v-3a3 3 0 0 1 6 0v3M8 11h6"/>
+<!-- Aider 标志。剪影取自官方 apple-touch-icon.png（Aider-AI/aider aider/website/assets/icons）。原图有扫描线，竖直方向补上断开的笔画，避免字形被切成横条。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 184" fill="currentColor">
+  <rect x="56" y="15" width="54" height="1"/>
+  <rect x="56" y="16" width="55" height="1"/>
+  <rect x="55" y="17" width="56" height="4"/>
+  <rect x="55" y="166" width="56" height="2"/>
+  <rect x="55" y="21" width="57" height="23"/>
+  <rect x="55" y="44" width="74" height="1"/>
+  <rect x="55" y="45" width="75" height="2"/>
+  <rect x="55" y="76" width="75" height="2"/>
+  <rect x="55" y="47" width="76" height="1"/>
+  <rect x="55" y="75" width="76" height="1"/>
+  <rect x="55" y="78" width="76" height="2"/>
+  <rect x="56" y="48" width="75" height="1"/>
+  <rect x="56" y="74" width="75" height="1"/>
+  <rect x="57" y="49" width="74" height="1"/>
+  <rect x="111" y="50" width="20" height="1"/>
+  <rect x="110" y="51" width="21" height="7"/>
+  <rect x="110" y="66" width="21" height="8"/>
+  <rect x="110" y="110" width="21" height="6"/>
+  <rect x="110" y="128" width="21" height="6"/>
+  <rect x="110" y="58" width="22" height="8"/>
+  <rect x="110" y="116" width="22" height="12"/>
+  <rect x="54" y="80" width="77" height="7"/>
+  <rect x="54" y="98" width="77" height="6"/>
+  <rect x="53" y="87" width="78" height="11"/>
+  <rect x="36" y="104" width="95" height="2"/>
+  <rect x="35" y="106" width="95" height="2"/>
+  <rect x="35" y="108" width="96" height="2"/>
+  <rect x="35" y="110" width="20" height="3"/>
+  <rect x="34" y="113" width="21" height="21"/>
+  <rect x="35" y="134" width="113" height="1"/>
+  <rect x="35" y="135" width="114" height="4"/>
+  <rect x="37" y="139" width="112" height="1"/>
+  <rect x="54" y="140" width="58" height="7"/>
+  <rect x="54" y="156" width="58" height="8"/>
+  <rect x="130" y="140" width="19" height="7"/>
+  <rect x="130" y="156" width="19" height="12"/>
+  <rect x="53" y="147" width="59" height="1"/>
+  <rect x="53" y="155" width="59" height="1"/>
+  <rect x="130" y="147" width="20" height="9"/>
+  <rect x="53" y="148" width="60" height="7"/>
+  <rect x="54" y="164" width="57" height="2"/>
+  <rect x="55" y="168" width="55" height="1"/>
+  <rect x="131" y="168" width="17" height="1"/>
 </svg>

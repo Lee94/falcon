@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 
-use crate::config::{ServerConfig, home_dir, is_loopback, parse_args};
+use crate::config::{ServerConfig, home_dir, parse_args};
 use crate::service::{
     SYSTEMD_NAME, ServiceCli, install_service_binary, launchd_domain, launchd_plist, launchd_plist_path,
     launchd_status_report, launchd_target, parse_service_cli, service_bin_path, systemctl_argv, systemd_unit,
@@ -77,18 +77,6 @@ fn run(program: &str, args: &[&str], can_fail: bool) -> anyhow::Result<String> {
     }
 }
 
-/// 绑非 localhost 且尚未设密码时服务会启动即退，被 init 反复拉起——提前把话说明白
-fn warn_if_non_loopback(server_args: &[String]) -> anyhow::Result<ServerConfig> {
-    let config = server_config(server_args)?;
-    if !is_loopback(&config.host) {
-        println!(
-            "注意：绑定 {}（非 localhost）要求已设置访问密码，否则服务会反复启动失败。\n如未设置，请先在 localhost 启动并通过界面设置密码（数据目录需一致）。",
-            config.host
-        );
-    }
-    Ok(config)
-}
-
 // ---- macOS: launchd（用户级 LaunchAgent）----
 
 /// bootout 是异步的：job 尚在卸载时立刻 bootstrap 会报 "Bootstrap failed: 5:
@@ -132,7 +120,7 @@ fn launchd(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
 
     match cmd {
         "install" => {
-            let config = warn_if_non_loopback(server_args)?;
+            let config = server_config(server_args)?;
             let log_dir = config.data_dir.join("logs");
             std::fs::create_dir_all(&log_dir)?; // launchd 不会替我们建日志目录
             let log_file = log_dir.join("falcon.log");
@@ -205,7 +193,7 @@ fn systemd(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
 
     match cmd {
         "install" => {
-            let config = warn_if_non_loopback(server_args)?;
+            let config = server_config(server_args)?;
             if let Some(parent) = unit_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }

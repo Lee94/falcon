@@ -24,16 +24,12 @@ use serde_json::Value;
 ///
 /// 这些都不影响客户端使用（字段本来就不读，或者 null 与缺省对客户端是一回事），但它们
 /// 是 TS 类型与服务端实际输出之间的出入，列在这里让人看得见。
-const ACCEPTED: &[&str] = &[
-    // 飞书项目 409 的错误体比 shared 的 ApiError 多带 reason / code（meegle/routes.ts 的
-    // fail()）。客户端经 falcon-client 的 ApiError::meegle_reason() 从原始 body 里读，
-    // 不经这个类型。只有本机 meegle CLI 没装 / 没登录时才会生成这个 fixture。
-    "error-meegle-unavailable: .code: 字段被丢掉",
-    "error-meegle-unavailable: .reason: 字段被丢掉",
-];
+/// 目前没有「解了会丢东西、但可以接受」的差异。清单空着也要留：测试会在出现新差异、
+/// 或这里写了已经不再出现的条目时失败。
+const ACCEPTED: &[&str] = &[];
 
-/// 本机环境决定生不生成的 fixture（见 xtask 的 fixtures.rs）。
-const OPTIONAL: &[&str] = &["error-meegle-unavailable"];
+/// 本机环境决定生不生成的 fixture（见 xtask 的 fixtures.rs）。目前没有这种 fixture。
+const OPTIONAL: &[&str] = &[];
 
 type Check = fn(&str, &str, &mut Vec<String>) -> Result<(), String>;
 
@@ -83,9 +79,6 @@ fn table() -> Vec<(&'static str, Check)> {
         "host-status-denied" => HostInstallStatus,
         "host-authorization" => OkResponse,
         // Git
-        "git-snapshot" => GitSnapshot,
-        "git-snapshot-multi" => GitSnapshot,
-        "git-snapshot-unavailable" => GitSnapshot,
         "git-changes" => GitChangeCounts,
         "git-changes-batch" => HashMap<String, GitChangeCounts>,
         "git-diff" => GitFileDiff,
@@ -93,14 +86,6 @@ fn table() -> Vec<(&'static str, Check)> {
         "git-diff-unavailable" => GitFileDiff,
         "git-working" => GitWorkingChanges,
         "git-working-unavailable" => GitWorkingChanges,
-        "git-log" => GitLogPage,
-        "git-log-unavailable" => GitLogPage,
-        "git-refs" => GitRefsInfo,
-        "git-refs-unavailable" => GitRefsInfo,
-        "git-commit-detail" => GitCommitDetail,
-        "git-commit-diff" => GitFileDiff,
-        "git-op-fetch" => GitSyncResult,
-        "git-push" => GitSyncResult,
         // 文件
         "files" => WorkspaceListing,
         "files-subdir" => WorkspaceListing,
@@ -142,12 +127,6 @@ fn table() -> Vec<(&'static str, Check)> {
         "ws-session-missing" => Vec<ServerMessage>,
         "ws-install-local" => Vec<InstallServerMessage>,
         "ws-install-missing" => Vec<InstallServerMessage>,
-        // 飞书项目
-        "meegle-status" => MeegleStatus,
-        "meegle-pin-create" => MeeglePin,
-        "meegle-pin-rename" => MeeglePin,
-        "meegle-pins" => Vec<MeeglePin>,
-        "meegle-pin-delete" => OkResponse,
         // 右侧栏插件（ADR 0025）
         "plugins" => PluginList,
         "plugin-render-sysmon" => PluginView,
@@ -162,7 +141,6 @@ fn table() -> Vec<(&'static str, Check)> {
         "error-not-found" => ApiError,
         "error-unauthorized" => ApiError,
         "error-session-clear" => ApiError,
-        "error-meegle-unavailable" => ApiError,
     }
 }
 
@@ -261,11 +239,10 @@ fn every_fixture_deserializes_without_loss() {
 fn fixture_semantics() {
     let de = |name: &str| read(name);
 
-    // 没有 upstream 的仓库：ahead / behind 的三态里取 null（不是缺省）
-    let snap: GitSnapshot = serde_json::from_str(&de("git-snapshot")).unwrap();
-    assert!(snap.available);
-    assert_eq!(snap.ahead_count(), None);
-    let unavailable: GitSnapshot = serde_json::from_str(&de("git-snapshot-unavailable")).unwrap();
+    let working: GitWorkingChanges = serde_json::from_str(&de("git-working")).unwrap();
+    assert!(working.available);
+    assert_eq!(working.file_count, 2);
+    let unavailable: GitWorkingChanges = serde_json::from_str(&de("git-working-unavailable")).unwrap();
     assert!(!unavailable.available);
     assert_eq!(unavailable.reason, Some(GitUnavailableReason::NotARepo));
 

@@ -1,5 +1,5 @@
-//! 外观：明暗模式、浅 / 深两个主题槽位（ADR 0006）、应用图标（ADR 0018，app_icon.rs）、
-//! 终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。旧 React 版的 AppearancePane。
+//! 外观：明暗模式、窗口底的透明效果、浅 / 深两个主题槽位（ADR 0006）、应用图标（ADR 0018，
+//! app_icon.rs）、终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。旧 React 版的 AppearancePane。
 //!
 //! 旧 React 版还有一节"实验性 · 终端渲染引擎（xterm.js / Rio）"，随 React 前端删了：两种产物
 //! 现在只有一套终端渲染（alacritty_terminal + GPUI）。偏好 JSON 里遗留的 `engine` 键读入时丢掉。
@@ -9,10 +9,8 @@ use falcon_core::term::{
     TermCursorStyle, TermFontId, TermPref, clamp_font_size, clamp_line_height, load_term_pref,
     sanitize_term_pref, serialize_term_pref,
 };
-use falcon_theme::{
-    FALCON_DARK, FALCON_LIGHT, GHOSTTY_THEMES_COUNT, GHOSTTY_THEMES_ORIGIN, ThemeMode, ThemePref, choice_of,
-    is_default_theme_settings,
-};
+use falcon_core::window_background::AppBackground;
+use falcon_theme::{FALCON_DARK, FALCON_LIGHT, ThemeMode, ThemePref, choice_of, is_default_theme_settings};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
@@ -148,7 +146,6 @@ impl AppearancePane {
     }
 
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
-        let ui = Ui::global(cx).clone();
         let settings = ThemeState::global(cx).settings.clone();
         let mode = segmented(
             "theme-mode",
@@ -165,24 +162,28 @@ impl AppearancePane {
             |pref, _, cx| crate::theme::update_settings(cx, |s| s.mode = pref),
             cx,
         );
+        let background = segmented(
+            "window-background",
+            crate::window_background::current(cx),
+            [
+                (AppBackground::Opaque, "settings.windowBackgroundOpaque"),
+                (AppBackground::Transparent, "settings.windowBackgroundTransparent"),
+                (AppBackground::Blurred, "settings.windowBackgroundBlurred"),
+            ]
+            .into_iter()
+            .map(|(value, key)| SegOption { value, label: t!(key).to_string(), icon: None })
+            .collect(),
+            true,
+            |value, window, cx| crate::window_background::set(value, window, cx),
+            cx,
+        );
         let mut children = rows(
             vec![
-                (t!("theme.label").to_string(), Some(t!("settings.themeHint").to_string()), mode.into_any_element()),
-                (
-                    t!("theme.lightTheme").to_string(),
-                    Some(t!("theme.lightThemeHint").to_string()),
-                    self.light.clone().into_any_element(),
-                ),
-                (
-                    t!("theme.darkTheme").to_string(),
-                    Some(t!("theme.darkThemeHint").to_string()),
-                    self.dark.clone().into_any_element(),
-                ),
-                (
-                    t!("native.settings.uiZoom").to_string(),
-                    Some(t!("native.settings.uiZoomHint").to_string()),
-                    zoom_control(cx),
-                ),
+                (t!("theme.label").to_string(), None, mode.into_any_element()),
+                (t!("settings.windowBackground").to_string(), None, background.into_any_element()),
+                (t!("theme.lightTheme").to_string(), None, self.light.clone().into_any_element()),
+                (t!("theme.darkTheme").to_string(), None, self.dark.clone().into_any_element()),
+                (t!("native.settings.uiZoom").to_string(), None, zoom_control(cx)),
             ],
             true,
             cx,
@@ -190,15 +191,8 @@ impl AppearancePane {
         children.push(
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
+                .justify_end()
                 .pt_3()
-                .child(
-                    div().text_xs().text_color(ui.muted_foreground).child(
-                        t!("theme.ghosttyOrigin", n = GHOSTTY_THEMES_COUNT, origin = GHOSTTY_THEMES_ORIGIN).to_string(),
-                    ),
-                )
                 .child(
                     Button::new("theme-reset")
                         .outline()
@@ -299,7 +293,7 @@ impl AppearancePane {
                 this.set_term(|t| t.cursor_blink = v, cx);
             }));
 
-        let mut list = vec![(t!("settings.termFont").to_string(), Some(t!("settings.termFontHint").to_string()), font.into_any_element())];
+        let mut list = vec![(t!("settings.termFont").to_string(), None, font.into_any_element())];
         if term.font_id == TermFontId::Custom {
             list.push((
                 t!("settings.termCustomFont").to_string(),
@@ -309,7 +303,7 @@ impl AppearancePane {
         }
         list.push((
             t!("settings.termFallbackFont").to_string(),
-            Some(t!("settings.termFallbackFontHint").to_string()),
+            None,
             div().w(zpx(256.)).child(Input::new(&self.fallback_font).small()).into_any_element(),
         ));
         list.push((t!("settings.termFontSize").to_string(), None, size.into_any_element()));
@@ -340,7 +334,7 @@ impl AppearancePane {
                 .child(term_preview(cx))
                 .into_any_element(),
         );
-        section(t!("settings.terminalTitle").to_string(), Some(t!("settings.terminalHint").to_string()), children, cx)
+        section(t!("settings.terminalTitle").to_string(), None, children, cx)
             .into_any_element()
     }
 }

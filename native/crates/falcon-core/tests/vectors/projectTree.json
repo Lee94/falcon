@@ -7,7 +7,7 @@
   ],
   "groupServers": [
     {
-      "ts": "groupServers with multi-repo projects > a container is a source folder; its derived multi project nests under it",
+      "ts": "groupServers with multi-repo projects > a derived multi project is its own folder beside the container",
       "projects": [
         {
           "id": "c1",
@@ -35,7 +35,7 @@
       "localName": "本机",
       "showArchived": false,
       "expected": [
-        { "key": "s:local", "kind": "local", "name": "本机", "folders": [{ "project": "c1", "worktrees": ["d1"] }] }
+        { "key": "s:local", "kind": "local", "name": "本机", "folders": [{ "project": "c1", "worktrees": [] }, { "project": "d1", "worktrees": [] }] }
       ]
     },
     {

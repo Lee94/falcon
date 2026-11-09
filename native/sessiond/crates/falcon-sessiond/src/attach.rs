@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use falcon_proto::sessiond::{ClientMsg, ExportFormat, Hello, HolderMsg, PROTO_MAX, PROTO_MIN, Resize, Role, Welcome, read_frame};
-use falcon_proto::terminal_replies::ReplyFilter;
 
 use crate::ipc;
 use crate::layout::Layout;
@@ -57,9 +56,6 @@ pub fn run(layout: &Layout, sid: &str, force: bool) -> Result<i32> {
     {
         bail!("你正在 falcon 会话 {inside} 里，在会话里再 attach 会套娃；确定要这么做就加 --force");
     }
-    let native = std::env::var("TERM_PROGRAM").is_ok_and(|program| program.eq_ignore_ascii_case("tern"));
-    let filter = native.then(|| Arc::new(Mutex::new(ReplyFilter::default())));
-    let _signals = term::DetachSignals::install(native)?;
     let (mut r, w, welcome) = handshake(layout, sid, Role::Attach)?;
     let w = Arc::new(Mutex::new(w));
     let send = {
@@ -76,15 +72,13 @@ pub fn run(layout: &Layout, sid: &str, force: bool) -> Result<i32> {
     let raw = term::RawMode::enable()?;
     let mut out = std::io::stdout().lock();
     // 清屏连同滚动历史：接下来的快照按"一个全新的终端"来画
-    write_output(&mut out, &filter, b"\x1b[H\x1b[2J\x1b[3J")?;
+    out.write_all(b"\x1b[H\x1b[2J\x1b[3J")?;
     out.flush()?;
 
     let detached = Arc::new(AtomicBool::new(false));
-    // 键盘与 TSP 回包保留；普通终端查询由 holder 的 VT 回答，不能再送一次。
     {
         let send = send.clone();
         let detached = detached.clone();
-        let filter = filter.clone();
         let key = detach_key();
         std::thread::spawn(move || {
             let mut stdin = std::io::stdin().lock();
@@ -101,102 +95,70 @@ pub fn run(layout: &Layout, sid: &str, force: bool) -> Result<i32> {
                 if let Some(k) = key
                     && let Some(i) = chunk.iter().position(|&b| b == k)
                 {
-                    forward_input(&filter, &chunk[..i], true, &send);
+                    if i > 0 && !send(ClientMsg::Input(chunk[..i].to_vec())) {
+                        break;
+                    }
                     break;
                 }
-                if !forward_input(&filter, chunk, false, &send) {
+                if !send(ClientMsg::Input(chunk.to_vec())) {
                     break;
                 }
-            }
-            if !detached.load(Ordering::SeqCst) {
-                forward_input(&filter, &[], true, &send);
             }
             // EOF 也是 detach；Ping 的 Pong 叫醒阻塞在 read_frame 的主循环。
             detached.store(true, Ordering::SeqCst);
             send(ClientMsg::Ping);
         });
     }
-    // 同一个定时线程负责 Escape 的 30ms 截止、信号唤醒与 250ms 尺寸节流。
     let timer = {
         let send = send.clone();
         let detached = detached.clone();
-        let filter = filter.clone();
         std::thread::spawn(move || {
             let mut last = (cols, rows);
-            let mut size_checked = Instant::now();
             loop {
-                std::thread::sleep(Duration::from_millis(if native { 30 } else { 250 }));
-                if native && term::detach_requested() {
-                    detached.store(true, Ordering::SeqCst);
-                }
+                std::thread::sleep(Duration::from_millis(250));
                 if detached.load(Ordering::SeqCst) {
                     send(ClientMsg::Ping);
                     break;
                 }
-                if !forward_input(&filter, &[], true, &send) {
-                    detached.store(true, Ordering::SeqCst);
-                    send(ClientMsg::Ping);
-                    break;
-                }
-                if size_checked.elapsed() >= Duration::from_millis(250) {
-                    size_checked = Instant::now();
-                    if let Some(now) = term::size()
-                        && now != last
-                    {
-                        last = now;
-                        if !send(ClientMsg::Resize(Resize { cols: now.0, rows: now.1 })) {
-                            detached.store(true, Ordering::SeqCst);
-                            send(ClientMsg::Ping);
-                            break;
-                        }
+                if let Some(now) = term::size()
+                    && now != last
+                {
+                    last = now;
+                    if !send(ClientMsg::Resize(Resize { cols: now.0, rows: now.1 })) {
+                        detached.store(true, Ordering::SeqCst);
+                        send(ClientMsg::Ping);
+                        break;
                     }
                 }
             }
         })
     };
 
-    let refresh_result = Arc::new(Mutex::new(None));
-    let mut refresh_thread = None;
     let mut synced = false;
     let mut ended: Option<String> = None;
     let display_result = (|| -> Result<()> {
         loop {
-            if detached.load(Ordering::SeqCst) || (native && term::detach_requested()) {
+            if detached.load(Ordering::SeqCst) {
                 break;
             }
-            report_refresh_result(&refresh_result);
             let Ok(Some((k, p))) = read_frame(&mut r) else {
                 ended = Some("会话关闭了连接".into());
                 break;
             };
-            // 输入线程或信号已经请求离开时，不再把排队的 Output 写给 Tern。
-            if detached.load(Ordering::SeqCst) || (native && term::detach_requested()) {
+            if detached.load(Ordering::SeqCst) {
                 break;
             }
             let Ok(msg) = HolderMsg::decode(k, p) else { continue };
             match msg {
                 HolderMsg::Synced { snapshot, continuation, .. } if !synced => {
                     synced = true;
-                    write_output(&mut out, &filter, &snapshot)?;
-                    write_output(&mut out, &filter, &continuation)?;
+                    out.write_all(&snapshot)?;
+                    out.write_all(&continuation)?;
                     out.flush()?;
-                    if native && !detached.load(Ordering::SeqCst) && !term::detach_requested()
-                        && !falcon_proto::tsp::snapshot_parts_have_live_surface(&[&snapshot, &continuation])
-                    {
-                        let layout = layout.clone();
-                        let sid = sid.to_owned();
-                        let result = refresh_result.clone();
-                        let send = send.clone();
-                        // 重探会等 TSP hello；主循环必须继续转发输出和输入才能完成握手。
-                        refresh_thread = Some(std::thread::spawn(move || {
-                            *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::reprobe::run(&layout, &sid));
-                            send(ClientMsg::Ping);
-                        }));
-                    }
                 }
                 // Synced 之前的输出都已含在快照里。
                 HolderMsg::Output { bytes, .. } if synced => {
-                    write_output(&mut out, &filter, &bytes)?;
+                    out.write_all(&bytes)?;
                     out.flush()?;
                 }
                 HolderMsg::Exit(s) => {
@@ -214,22 +176,10 @@ pub fn run(layout: &Layout, sid: &str, force: bool) -> Result<i32> {
     })();
     detached.store(true, Ordering::SeqCst);
     let _ = timer.join();
-    // 先停止输出并恢复外层终端，再让仍在运行的同一个 OMP 回到 ANSI。
     let reset_result = out.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m\r\n")
         .and_then(|()| out.flush());
     drop(out);
     drop(raw);
-    if let Some(refresh) = refresh_thread
-        && refresh.join().is_err()
-    {
-        eprintln!("[falcon-sessiond] 切入 Tern 时的 OMP 重探线程异常退出");
-    }
-    report_refresh_result(&refresh_result);
-    if native
-        && let Err(error) = crate::reprobe::run(layout, sid)
-    {
-        eprintln!("[falcon-sessiond] OMP 切回 ANSI 失败：{error:#}");
-    }
     display_result?;
     reset_result?;
     match ended {
@@ -237,39 +187,6 @@ pub fn run(layout: &Layout, sid: &str, force: bool) -> Result<i32> {
         None => eprintln!("[falcon-sessiond] 已断开，会话 {sid} 照常运行（falcon-sessiond attach {sid} 接回）"),
     }
     Ok(0)
-}
-
-fn write_output(out: &mut impl std::io::Write, filter: &Option<Arc<Mutex<ReplyFilter>>>, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(filter) = filter {
-        filter.lock().unwrap_or_else(|e| e.into_inner()).observe_output(bytes);
-    }
-    out.write_all(bytes)
-}
-
-fn forward_input(filter: &Option<Arc<Mutex<ReplyFilter>>>, bytes: &[u8], flush: bool, send: &impl Fn(ClientMsg) -> bool) -> bool {
-    if let Some(filter) = filter {
-        // 保持 push/flush 与发送的顺序一致，避免定时线程把后半段抢先发出去。
-        let mut filter = filter.lock().unwrap_or_else(|e| e.into_inner());
-        let output = if bytes.is_empty() { Vec::new() } else { filter.push(bytes) };
-        if !output.is_empty() && !send(ClientMsg::Input(output)) {
-            return false;
-        }
-        if flush && filter.has_pending() {
-            let pending = filter.flush_pending();
-            if !pending.is_empty() {
-                return send(ClientMsg::Input(pending));
-            }
-        }
-        true
-    } else {
-        bytes.is_empty() || send(ClientMsg::Input(bytes.to_vec()))
-    }
-}
-
-fn report_refresh_result(result: &Mutex<Option<Result<bool>>>) {
-    if let Some(Err(error)) = result.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        eprintln!("[falcon-sessiond] OMP 切入 Tern 失败：{error:#}");
-    }
 }
 
 pub fn kill(layout: &Layout, sid: &str) -> Result<()> {
@@ -322,9 +239,6 @@ pub fn history(layout: &Layout, sid: &str, format: ExportFormat) -> Result<()> {
     loop {
         let (k, p) = read_frame(&mut r)?.context("会话关闭了连接")?;
         if let HolderMsg::Exported { bytes, .. } = HolderMsg::decode(k, p)? {
-            if let Some(error) = bytes.strip_prefix(falcon_proto::sessiond::EXPORT_ERROR_PREFIX) {
-                bail!("原生界面导出失败：{}", String::from_utf8_lossy(error));
-            }
             let mut out = std::io::stdout().lock();
             out.write_all(&bytes)?;
             out.flush()?;
@@ -335,71 +249,6 @@ pub fn history(layout: &Layout, sid: &str, format: ExportFormat) -> Result<()> {
 
 /// 终端的 raw 模式与尺寸
 mod term {
-    #[cfg(unix)]
-    static DETACH_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-    #[cfg(unix)]
-    extern "C" fn request_detach(_: libc::c_int) {
-        DETACH_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn detach_requested() -> bool {
-        #[cfg(unix)]
-        { DETACH_SIGNAL.load(std::sync::atomic::Ordering::SeqCst) }
-        #[cfg(not(unix))]
-        { false }
-    }
-
-    pub struct DetachSignals {
-        #[cfg(unix)]
-        saved: Option<[libc::sigaction; 2]>,
-    }
-
-    impl DetachSignals {
-        pub fn install(native: bool) -> anyhow::Result<Self> {
-            #[cfg(unix)]
-            {
-                if !native {
-                    return Ok(Self { saved: None });
-                }
-                DETACH_SIGNAL.store(false, std::sync::atomic::Ordering::SeqCst);
-                unsafe {
-                    let mut action: libc::sigaction = std::mem::zeroed();
-                    action.sa_sigaction = request_detach as *const () as libc::sighandler_t;
-                    action.sa_flags = libc::SA_RESTART;
-                    libc::sigemptyset(&mut action.sa_mask);
-                    let mut saved: [libc::sigaction; 2] = std::mem::zeroed();
-                    if libc::sigaction(libc::SIGHUP, &action, &mut saved[0]) != 0 {
-                        anyhow::bail!("安装 SIGHUP 处理器失败：{}", std::io::Error::last_os_error());
-                    }
-                    if libc::sigaction(libc::SIGTERM, &action, &mut saved[1]) != 0 {
-                        let error = std::io::Error::last_os_error();
-                        libc::sigaction(libc::SIGHUP, &saved[0], std::ptr::null_mut());
-                        anyhow::bail!("安装 SIGTERM 处理器失败：{error}");
-                    }
-                    Ok(Self { saved: Some(saved) })
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = native;
-                Ok(Self {})
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    impl Drop for DetachSignals {
-        fn drop(&mut self) {
-            if let Some(saved) = &self.saved {
-                unsafe {
-                    libc::sigaction(libc::SIGHUP, &saved[0], std::ptr::null_mut());
-                    libc::sigaction(libc::SIGTERM, &saved[1], std::ptr::null_mut());
-                }
-            }
-        }
-    }
-
     #[cfg(unix)]
     pub fn size() -> Option<(u16, u16)> {
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };

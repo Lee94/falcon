@@ -6,7 +6,6 @@
 //! 提交 `9c9d045`）。
 
 use falcon_core::file_search::{FILE_SEARCH_LIMIT, basename, dirname, filter_files, score_path};
-use falcon_core::git_graph::{GraphCommit, GraphRow, layout_commit_graph};
 use falcon_core::layout::{
     COLUMN_EDGE_PX, COLUMN_FIT_PX, COLUMN_MIN_PX, CANVAS_GAP_PX, CanvasFrames, ColumnLayout, ColumnRect, DropSpot,
     PANE_MIN_PX, PaneAt, Point, ThumbRect, Viewport, apply_drop, assign_canvases, canvas_fits, canvas_groups,
@@ -27,7 +26,6 @@ fn load(name: &str) -> Value {
         "sessionTitle" => include_str!("vectors/sessionTitle.json"),
         "projectTree" => include_str!("vectors/projectTree.json"),
         "fileSearch" => include_str!("vectors/fileSearch.json"),
-        "gitGraph" => include_str!("vectors/gitGraph.json"),
         other => panic!("没有这份向量：{other}"),
     };
     serde_json::from_str(raw).unwrap_or_else(|e| panic!("{name}.json 不是合法 JSON：{e}"))
@@ -552,30 +550,4 @@ fn file_search_vectors() {
     }
 
     f.finish("fileSearch.json", total);
-}
-
-// ---------------- gitGraph ----------------
-
-#[test]
-fn git_graph_vectors() {
-    let v = load("gitGraph");
-    let mut f = Failures::default();
-    let mut total = 0;
-
-    for case in cases(&v, "layoutCommitGraph") {
-        total += 1;
-        let commits: Vec<GraphCommit> = case["commits"]
-            .as_array()
-            .expect("commits")
-            .iter()
-            .map(|spec| {
-                let mut parts = strings(spec).into_iter();
-                GraphCommit { sha: parts.next().expect("sha"), parents: parts.collect() }
-            })
-            .collect();
-        let want: Vec<GraphRow> = serde_json::from_value(case["expected"].clone()).expect("expected");
-        f.check(case, "layoutCommitGraph", layout_commit_graph(&commits), want);
-    }
-
-    f.finish("gitGraph.json", total);
 }

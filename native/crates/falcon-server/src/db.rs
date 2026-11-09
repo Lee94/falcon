@@ -16,8 +16,8 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use anyhow::Context;
 use falcon_proto::{
-    DeadReason, MeeglePin, MeeglePinKind, MultiRepoInfo, MultiRepoMember, NonDurableReason, Project, ProjectType,
-    Session, SessionAgent, SessionState, SshAuthMethod, SshConfig, SshHost, WorktreeInfo,
+    DeadReason, MultiRepoInfo, MultiRepoMember, NonDurableReason, Project, ProjectType, Session, SessionAgent,
+    SessionState, SshAuthMethod, SshConfig, SshHost, WorktreeInfo,
 };
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
@@ -115,37 +115,6 @@ pub struct HostShareRow {
     pub dest_host: String,
     pub dest_port: i64,
     pub enabled: i64,
-    pub created_at: i64,
-}
-
-/// AI 助手的一段对话（docs/design/ai-assistant.md 第 5 节）
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AssistantThreadRow {
-    pub id: String,
-    /// `local` 或 SSH Host 的 id
-    pub machine: String,
-    pub agent: String,
-    pub title: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-    /// 界面条目（JSON 的 Entry[]）：重开面板、服务端重启后照样看得到
-    pub entries: String,
-    /// agent 自己的状态（JSON）：内置 agent 是 API 的原始 messages（继续对话要原样回传）
-    pub provider: String,
-    /// 这段对话的终端会话（一段对话一个 shell）
-    pub session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MeeglePinRow {
-    pub id: String,
-    pub kind: String,
-    pub space_key: String,
-    pub space_name: Option<String>,
-    pub target_id: String,
-    pub type_key: Option<String>,
-    pub label: String,
-    pub url: Option<String>,
     pub created_at: i64,
 }
 
@@ -257,34 +226,6 @@ fn share_from_row(r: &Row) -> rusqlite::Result<HostShareRow> {
     })
 }
 
-fn pin_from_row(r: &Row) -> rusqlite::Result<MeeglePinRow> {
-    Ok(MeeglePinRow {
-        id: r.get("id")?,
-        kind: r.get("kind")?,
-        space_key: r.get("space_key")?,
-        space_name: r.get("space_name")?,
-        target_id: r.get("target_id")?,
-        type_key: r.get("type_key")?,
-        label: r.get("label")?,
-        url: r.get("url")?,
-        created_at: r.get("created_at")?,
-    })
-}
-
-fn assistant_thread_from_row(r: &Row) -> rusqlite::Result<AssistantThreadRow> {
-    Ok(AssistantThreadRow {
-        id: r.get("id")?,
-        machine: r.get("machine")?,
-        agent: r.get("agent")?,
-        title: r.get("title")?,
-        created_at: r.get("created_at")?,
-        updated_at: r.get("updated_at")?,
-        entries: r.get("entries")?,
-        provider: r.get("provider")?,
-        session_id: r.get("session_id")?,
-    })
-}
-
 fn session_host_from_row(r: &Row) -> rusqlite::Result<SessionHostRow> {
     Ok(SessionHostRow {
         host: r.get("host")?,
@@ -326,7 +267,9 @@ fn db_has_user_data(path: &Path) -> bool {
         "session_hosts",
         "host_forwards",
         "host_shares",
+        // 旧版飞书项目的固定列表。功能已去掉、新库不再建，但只在这张表里有数据的旧库仍算有用户数据
         "meegle_pins",
+        // 旧版 AI 助手的表。功能已去掉、新库不再建，但只在这张表里有数据的旧库仍算有用户数据
         "assistant_threads",
     ];
     let Ok(conn) = Connection::open(path) else { return true };
@@ -513,34 +456,8 @@ impl Db {
             )?;
         }
         self.migrate_relays_to_hosts()?;
-        // 飞书项目面板的固定列表（ADR 0010）。不挂在项目上：CLI 的登录态是整台机器一份
-        self.lock().execute_batch(
-            "CREATE TABLE IF NOT EXISTS meegle_pins (
-                id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                space_key TEXT NOT NULL,
-                space_name TEXT,
-                target_id TEXT NOT NULL,
-                type_key TEXT,
-                label TEXT NOT NULL,
-                url TEXT,
-                created_at INTEGER NOT NULL
-            );",
-        )?;
-        // AI 助手的对话（docs/design/ai-assistant.md 第 5 节）。按机器挂，不挂项目
-        self.lock().execute_batch(
-            "CREATE TABLE IF NOT EXISTS assistant_threads (
-                id TEXT PRIMARY KEY,
-                machine TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                title TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                entries TEXT NOT NULL,
-                provider TEXT NOT NULL
-            );",
-        )?;
-        add_column(&self.lock(), "assistant_threads", "session_id", "TEXT")?;
+        // 飞书项目面板已去掉。旧库里的 meegle_pins 留着，不 DROP：只在这张表里有数据的库
+        // 仍算有用户数据（见 USER_TABLES）。新库不再建这张表。
         Ok(())
     }
 
@@ -1072,111 +989,6 @@ impl Db {
     pub fn delete_relays_of_host(&self, host_id: &str) {
         self.exec("DELETE FROM host_forwards WHERE host_id = ?", [host_id]);
         self.exec("DELETE FROM host_shares WHERE host_id = ?", [host_id]);
-    }
-
-    // ---- 飞书项目面板的固定列表 ----
-
-    pub fn to_meegle_pin(row: &MeeglePinRow) -> MeeglePin {
-        MeeglePin {
-            id: row.id.clone(),
-            kind: MeeglePinKind::from_wire(&row.kind).unwrap_or(MeeglePinKind::Unknown),
-            space_key: row.space_key.clone(),
-            space_name: row.space_name.clone(),
-            target_id: row.target_id.clone(),
-            type_key: row.type_key.clone(),
-            label: row.label.clone(),
-            url: row.url.clone(),
-            created_at: row.created_at,
-        }
-    }
-
-    // ---- AI 助手的对话 ----
-
-    /// 某台机器上的对话，新的在前
-    pub fn list_assistant_threads(&self, machine: &str) -> Vec<AssistantThreadRow> {
-        self.query_all(
-            "SELECT * FROM assistant_threads WHERE machine = ? ORDER BY updated_at DESC",
-            [machine],
-            assistant_thread_from_row,
-        )
-    }
-
-    /// 全部对话，新的在前（面板的对话列表跨机器）
-    pub fn list_all_assistant_threads(&self) -> Vec<AssistantThreadRow> {
-        self.query_all("SELECT * FROM assistant_threads ORDER BY updated_at DESC", [], assistant_thread_from_row)
-    }
-
-    /// 这个终端会话属于哪段对话
-    pub fn find_assistant_thread_by_session(&self, session_id: &str) -> Option<AssistantThreadRow> {
-        self.query_one("SELECT * FROM assistant_threads WHERE session_id = ?", [session_id], assistant_thread_from_row)
-    }
-
-    pub fn get_assistant_thread(&self, id: &str) -> Option<AssistantThreadRow> {
-        self.query_one("SELECT * FROM assistant_threads WHERE id = ?", [id], assistant_thread_from_row)
-    }
-
-    /// 整行写入（新建与每次保存都走它）
-    pub fn upsert_assistant_thread(&self, row: &AssistantThreadRow) {
-        self.exec(
-            "INSERT INTO assistant_threads (id, machine, agent, title, created_at, updated_at, entries, provider, session_id)
-             VALUES (:id, :machine, :agent, :title, :created_at, :updated_at, :entries, :provider, :session_id)
-             ON CONFLICT(id) DO UPDATE SET agent = excluded.agent, title = excluded.title,
-               updated_at = excluded.updated_at, entries = excluded.entries, provider = excluded.provider,
-               session_id = excluded.session_id",
-            named_params! {
-                ":id": row.id, ":machine": row.machine, ":agent": row.agent, ":title": row.title,
-                ":created_at": row.created_at, ":updated_at": row.updated_at, ":entries": row.entries,
-                ":provider": row.provider, ":session_id": row.session_id,
-            },
-        );
-    }
-
-    pub fn delete_assistant_thread(&self, id: &str) {
-        self.exec("DELETE FROM assistant_threads WHERE id = ?", [id]);
-    }
-
-    /// 主机删掉了：它上面的对话跟着删
-    pub fn delete_assistant_threads_of(&self, machine: &str) {
-        self.exec("DELETE FROM assistant_threads WHERE machine = ?", [machine]);
-    }
-
-    pub fn list_meegle_pins(&self) -> Vec<MeeglePinRow> {
-        self.query_all("SELECT * FROM meegle_pins ORDER BY created_at ASC", [], pin_from_row)
-    }
-
-    pub fn get_meegle_pin(&self, id: &str) -> Option<MeeglePinRow> {
-        self.query_one("SELECT * FROM meegle_pins WHERE id = ?", [id], pin_from_row)
-    }
-
-    /// 同一个东西只固定一次
-    pub fn find_meegle_pin(&self, kind: &str, space_key: &str, target_id: &str) -> Option<MeeglePinRow> {
-        self.query_one(
-            "SELECT * FROM meegle_pins WHERE kind = ? AND space_key = ? AND target_id = ?",
-            [kind, space_key, target_id],
-            pin_from_row,
-        )
-    }
-
-    pub fn insert_meegle_pin(&self, row: &MeeglePinRow) {
-        self.exec(
-            "INSERT INTO meegle_pins
-               (id, kind, space_key, space_name, target_id, type_key, label, url, created_at)
-             VALUES
-               (:id, :kind, :space_key, :space_name, :target_id, :type_key, :label, :url, :created_at)",
-            named_params! {
-                ":id": row.id, ":kind": row.kind, ":space_key": row.space_key, ":space_name": row.space_name,
-                ":target_id": row.target_id, ":type_key": row.type_key, ":label": row.label, ":url": row.url,
-                ":created_at": row.created_at,
-            },
-        );
-    }
-
-    pub fn rename_meegle_pin(&self, id: &str, label: &str) {
-        self.exec("UPDATE meegle_pins SET label = ? WHERE id = ?", [label, id]);
-    }
-
-    pub fn delete_meegle_pin(&self, id: &str) {
-        self.exec("DELETE FROM meegle_pins WHERE id = ?", [id]);
     }
 
     // ---- saved SSH hosts ----

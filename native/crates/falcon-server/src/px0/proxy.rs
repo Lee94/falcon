@@ -276,8 +276,7 @@ fn page_html(project_name: &str, head_extra: &str, body: &str) -> String {
     .join("\n")
 }
 
-/// 照抄 TS 语义要用到的几处 JavaScript 行为（与 meegle/command.rs 的 `js` 同源；
-/// falcon-server 还没有公共的落脚点，先各带一份）。
+/// 照抄 TS 语义要用到的几处 JavaScript 行为（falcon-server 还没有公共的落脚点，先各带一份）。
 mod js {
     /// `String.prototype.trim` 的空白集（ECMAScript WhiteSpace + LineTerminator）
     pub(super) fn trim(s: &str) -> &str {

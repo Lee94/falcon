@@ -1,12 +1,17 @@
 //! 侧栏：服务器 → 文件夹 → 检出 → 会话（旧 React 版的 `components/Sidebar.tsx`）。
 //!
+//! 多仓库项目不再往下挂检出：项目行自己承接会话，批量派生出来的项目与源项目同级。
+//! 单仓库的附属项目仍缩进在源项目的检出下面。
+//!
 //! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
 //! - 会话行默认收起：一个检出能挂五六个终端，全摊开就占满侧栏；检出行尾巴上摆计数徽标 +
 //!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）；
-//! - 源项目（文件夹行）可以拖着在同一台机器的组里排序，顺序存在服务端，各个客户端看到的一样。
+//! - 文件夹行可以拖着在同一台机器的组里排序，顺序存在服务端，各个客户端看到的一样。
+//!   单仓库附属项目跟着源项目走，不单独拖；多仓库派生自己占一行，可以拖；
+//! - 本机分组一直留着。每台机器的「无项目」行不占空位：已有独立会话、正在创建，或当前选中它时才画。
+//!   没画出来时，在这台机器上开终端走机器行的菜单。
 
-use falcon_core::meegle_drag::MeegleWorkItemDragPayload;
 use falcon_core::program_status::{RowReading, RowStatus};
 use falcon_core::project_tree::{
     FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers, lands_in_place,
@@ -26,7 +31,7 @@ use crate::labels::{age_text, local_word, session_label};
 use crate::menus::{self, to_popup};
 use crate::theme::{Ui, radius};
 use crate::ui::{DragLabel, Mark, host_bar, icon, needs_you_mark, spinner, status_mark};
-use crate::workspace::{ActiveView, PendingSession, ProjectChanges, ToastKind, Workspace};
+use crate::workspace::{ActiveView, PendingSession, ProjectChanges, Workspace};
 use crate::zoom::zpx;
 
 const ROW_H: f32 = 30.;
@@ -89,20 +94,8 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
-        let has_local_standalone = ws
-            .sessions
-            .iter()
-            .any(|s| s.project_id == falcon_proto::STANDALONE_LOCAL)
-            || ws
-                .state
-                .pending
-                .iter()
-                .any(|p| p.project_id == falcon_proto::STANDALONE_LOCAL)
-            || ws.state.selected_project_id.as_deref() == Some(falcon_proto::STANDALONE_LOCAL);
-        let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived)
-            .into_iter()
-            .filter(|s| s.kind != ServerKind::Local || !s.folders.is_empty() || ws.hosts.is_empty() || has_local_standalone)
-            .collect();
+        // 本机分组一律画出来。空的「无项目」不跟着画，见 [`Sidebar::server_node`]。
+        let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived);
         let empty = ws.projects.is_empty() && ws.hosts.is_empty();
 
         let mut tree = div()
@@ -110,7 +103,7 @@ impl Render for Sidebar {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(zpx(6.))
+            .p(zpx(8.))
             .flex()
             .flex_col();
         if empty {
@@ -130,14 +123,13 @@ impl Render for Sidebar {
 
         let ws_handle = self.ws.clone();
         let ws_handle2 = self.ws.clone();
-        let ws_assistant = self.ws.clone();
         let bottom = div()
-            .h(zpx(36.))
+            .h(zpx(40.))
             .flex_none()
             .flex()
             .items_center()
             .gap_2()
-            .px(zpx(6.))
+            .px(zpx(8.))
             .child(
                 Button::new("sidebar-settings")
                     .ghost()
@@ -147,15 +139,6 @@ impl Render for Sidebar {
                     .on_click(move |_, window, cx| {
                         crate::dialogs::settings::open(&ws_handle, Default::default(), window, cx)
                     }),
-            )
-            .child(
-                Button::new("sidebar-assistant")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Sparkles)
-                    .label(t!("sidebar.assistant").to_string())
-                    .tooltip(format!("{} · {}", t!("assistant.title"), crate::ui::chord("toggleAssistant")))
-                    .on_click(move |_, window, cx| crate::assistant::toggle(&ws_assistant, window, cx)),
             )
             .child(div().flex_1())
             .child(
@@ -186,11 +169,24 @@ impl Sidebar {
         let ws_toggle = self.ws.clone();
         let icon_name = if server.kind == ServerKind::Local { IconName::Monitor } else { IconName::Server };
 
-        let menu_items = match (&server.kind, &server.host) {
+        // 空的「无项目」不占一行。有会话、正在创建，或当前选中它（主区还停在这上面）才画。
+        // 没画出来时，开终端的入口接到机器行菜单前面。
+        let standalone_id = server.standalone_id.clone();
+        let show_standalone = standalone_id.as_deref().is_some_and(|id| {
+            ws.sessions.iter().any(|s| s.project_id == id)
+                || ws.state.pending.iter().any(|p| p.project_id == id)
+                || ws.state.selected_project_id.as_deref() == Some(id)
+        });
+        let mut menu_items = match (&server.kind, &server.host) {
             (ServerKind::Host, Some(host)) => Some(menus::host_menu_items(&self.ws, host)),
             (ServerKind::Local, _) => Some(menus::server_menu_items(&self.ws, true)),
             _ => None,
         };
+        if let Some(id) = standalone_id.as_deref().filter(|_| !show_standalone)
+            && let Some(items) = menu_items.take()
+        {
+            menu_items = Some(menus::with_machine_terminal(&self.ws, id, items, cx));
+        }
         let ctx_items = menu_items
             .clone()
             .unwrap_or_else(|| menus::server_menu_items(&self.ws, false));
@@ -246,11 +242,11 @@ impl Sidebar {
 
         let mut node = div().mb(zpx(ROW_GAP)).flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expanded {
-            if let Some(standalone_id) = &server.standalone_id {
-                node = node.child(self.standalone_node(standalone_id, cx));
+            if show_standalone && let Some(id) = &standalone_id {
+                node = node.child(self.standalone_node(id, cx));
             }
             if server.folders.is_empty() {
-                if server.standalone_id.is_none() {
+                if !show_standalone {
                     node = node.child(
                         div()
                             .py_1()
@@ -271,7 +267,7 @@ impl Sidebar {
         node.into_any_element()
     }
 
-    /// 无项目的独立会话分组行（每台机器顶上一条）：不绑目录，支持直接点 ＋ 新建终端。
+    /// 无项目的独立会话分组行：不绑目录，点 ＋ 新建终端。调用方只在有内容或正选中它时画。
     fn standalone_node(&self, standalone_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.ws.read(cx);
         let selected = ws.state.selected_project_id.as_deref() == Some(standalone_id);
@@ -334,7 +330,6 @@ impl Sidebar {
                 context: Some(ctx_items),
                 on_new: Some(new_items),
                 trailing: badge,
-                meegle_drop: None,
                 drag: None,
             },
             cx,
@@ -360,6 +355,9 @@ impl Sidebar {
 
     /// `group` / `index`：所在服务器分组的键与组内下标，拖拽排序用
     fn folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        if folder.project.multi.is_some() {
+            return self.multi_folder_node(folder, group, index, cx);
+        }
         let ws = self.ws.read(cx);
         let project = folder.project.clone();
         // 只有源项目能拖、能当落点。孤儿附属项目（源项目被藏起来了）也占一个文件夹位，但它们
@@ -367,11 +365,6 @@ impl Sidebar {
         let sortable = project.worktree.is_none();
         let open = ws.state.collapsed.get(&folder_key(&project.id)).copied() != Some(true);
         let head = ws.heads.get(&project.id).cloned();
-        let member_names: Vec<String> = project
-            .multi
-            .as_ref()
-            .map(|m| m.repos.iter().map(|r| basename(&r.dir)).collect())
-            .unwrap_or_default();
         let selected = ws.state.selected_project_id.clone();
         let changes = ws.changes.clone();
 
@@ -379,17 +372,13 @@ impl Sidebar {
         let ws_select = self.ws.clone();
         let fkey = folder_key(&project.id);
         let pid = project.id.clone();
-        let title = if project.multi.is_some() {
-            member_names.join(" · ")
-        } else {
-            project.working_dir.clone().unwrap_or_else(|| project.name.clone())
-        };
+        let title = project.working_dir.clone().unwrap_or_else(|| project.name.clone());
         let items = menus::project_menu_items(&self.ws, &project, cx);
         let row = tree_row(TreeRowOpts {
             id: format!("fld-{}", project.id),
             depth: 1,
             expanded: Some(open),
-            icon: if project.multi.is_some() { IconName::Folders } else { IconName::Folder },
+            icon: IconName::Folder,
             label: project.name.clone(),
             meta: None,
             changes: None,
@@ -402,22 +391,20 @@ impl Sidebar {
             context: Some(items),
             on_new: None,
             trailing: None,
-            meegle_drop: project.worktree.is_none().then(|| (self.ws.clone(), project.id.clone())),
             drag: sortable.then(|| ProjectDrag { id: project.id.clone(), group: group.to_string(), index }),
         }, cx);
 
         let mut node = div().relative().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if open {
-            let label = if project.multi.is_some() {
-                t!("multi.repoCount", n = member_names.len()).to_string()
-            } else {
-                checkout_label(&project, head.as_ref())
-            };
-            let meta = project
-                .multi
-                .as_ref()
-                .map(|_| member_names.iter().take(3).cloned().collect::<Vec<_>>().join(" · "));
-            node = node.child(self.checkout_node(&project, label, meta, changes.get(&project.id).cloned(), selected.as_deref() == Some(project.id.as_str()), cx));
+            let label = checkout_label(&project, head.as_ref());
+            node = node.child(self.checkout_node(
+                &project,
+                label,
+                None,
+                changes.get(&project.id).cloned(),
+                selected.as_deref() == Some(project.id.as_str()),
+                cx,
+            ));
             for wt in &folder.worktrees {
                 node = node.child(self.checkout_node(
                     wt,
@@ -430,6 +417,125 @@ impl Sidebar {
             }
         }
         if sortable {
+            for after in [false, true] {
+                node = node.child(drop_zone(&self.ws, &project.id, group, index, after, cx));
+            }
+        }
+        node.into_any_element()
+    }
+
+    /// 多仓库项目：没有检出这一层。会话直接挂在项目行上；批量派生出来的也是这样一行，
+    /// 与源项目同级（分组在 [`group_servers`]）。存档的仍置灰，恢复走右键。
+    fn multi_folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.ws.read(cx);
+        let project = folder.project;
+        let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
+        let member_names: Vec<String> = project
+            .multi
+            .as_ref()
+            .map(|m| m.repos.iter().map(|r| basename(&r.dir)).collect())
+            .unwrap_or_default();
+        let mine: Vec<&SessionWithProject> = ws.sessions.iter().filter(|s| s.project_id == project.id).collect();
+        let mine_pending: Vec<&PendingSession> = ws.state.pending.iter().filter(|p| p.project_id == project.id).collect();
+        let sessions_open = ws.state.sessions_open.get(&project.id).copied().unwrap_or(false);
+        let active_child_visible = sessions_open
+            && match &ws.state.active {
+                ActiveView::Terminal { session_id } => mine.iter().any(|s| &s.id == session_id),
+                _ => false,
+            };
+        let source_name = project
+            .worktree
+            .as_ref()
+            .and_then(|wt| ws.project(&wt.source_project_id))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let title = if project.worktree.is_some() {
+            let mut parts = vec![t!("worktree.derivedFrom", name = source_name).to_string()];
+            if let Some(dir) = &project.working_dir {
+                parts.push(dir.clone());
+            }
+            parts.join(" · ")
+        } else {
+            let names = member_names.join(" · ");
+            if names.is_empty() {
+                project.name.clone()
+            } else {
+                names
+            }
+        };
+        let count = mine.len() + mine_pending.len();
+        let expandable = archived_at.is_none() && count > 0;
+        let worst = worst_state(&mine, &mine_pending);
+        let blocked = mine
+            .iter()
+            .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
+        let selected = archived_at.is_none()
+            && !active_child_visible
+            && ws.state.selected_project_id.as_deref() == Some(project.id.as_str());
+        let meta = archived_at
+            .map(archive_countdown)
+            .or_else(|| (!member_names.is_empty()).then(|| t!("multi.repoCount", n = member_names.len()).to_string()));
+        let changes = if archived_at.is_some() { None } else { ws.changes.get(&project.id).cloned() };
+
+        let pid = project.id.clone();
+        let (ws1, ws2, ws3) = (self.ws.clone(), self.ws.clone(), self.ws.clone());
+        let pid_toggle = pid.clone();
+        let pid_badge = pid.clone();
+        let pid_select = pid.clone();
+        let items = menus::project_menu_items(&self.ws, &project, cx);
+        let new_items = menus::new_session_items(&self.ws, &project.id, None, cx);
+        let badge = expandable.then(|| {
+            session_count_badge(
+                format!("badge-{pid_badge}"),
+                count,
+                worst,
+                blocked && !sessions_open,
+                sessions_open,
+                move |cx| ws2.update(cx, |w, cx| w.toggle_sessions(&pid_badge, cx)),
+                cx,
+            )
+        });
+        let row = tree_row(
+            TreeRowOpts {
+                id: format!("fld-{pid}"),
+                depth: 1,
+                expanded: expandable.then_some(sessions_open),
+                icon: if archived_at.is_some() { IconName::Archive } else { IconName::Folders },
+                label: project.name.clone(),
+                meta,
+                changes,
+                title,
+                muted: archived_at.is_some(),
+                selected,
+                on_toggle: expandable.then(|| -> Box<dyn Fn(&mut App)> {
+                    Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
+                }),
+                on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut App)> {
+                    Box::new(move |cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
+                }),
+                menu: Some(items.clone()),
+                context: Some(items),
+                on_new: archived_at.is_none().then_some(new_items),
+                trailing: badge,
+                drag: archived_at.is_none().then(|| ProjectDrag { id: project.id.clone(), group: group.to_string(), index }),
+            },
+            cx,
+        );
+
+        let mut node = div().relative().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
+        if expandable && sessions_open {
+            let active = match &ws.state.active {
+                ActiveView::Terminal { session_id: id } => Some(id.clone()),
+                _ => None,
+            };
+            for s in &mine {
+                node = node.child(self.session_row(s, 2, active.as_deref() == Some(s.id.as_str()), cx));
+            }
+            for p in mine_pending {
+                node = node.child(pending_row(p, 2, cx));
+            }
+        }
+        if archived_at.is_none() {
             for after in [false, true] {
                 node = node.child(drop_zone(&self.ws, &project.id, group, index, after, cx));
             }
@@ -450,6 +556,12 @@ impl Sidebar {
         let mine: Vec<&SessionWithProject> = ws.sessions.iter().filter(|s| s.project_id == project.id).collect();
         let mine_pending: Vec<&PendingSession> = ws.state.pending.iter().filter(|p| p.project_id == project.id).collect();
         let sessions_open = ws.state.sessions_open.get(&project.id).copied().unwrap_or(false);
+        // 活动会话摊在检出下面时只强调最具体的那一行；检出收起后才由检出行承担选中态。
+        let active_child_visible = sessions_open
+            && match &ws.state.active {
+                ActiveView::Terminal { session_id } => mine.iter().any(|s| &s.id == session_id),
+                _ => false,
+            };
         let source_name = project
             .worktree
             .as_ref()
@@ -458,19 +570,7 @@ impl Sidebar {
             .unwrap_or_default();
         // 存档的附属项目：置灰、显示删除倒计时、点击不再选中（要恢复走右键菜单）
         let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
-        let archived_note = archived_at.map(|at| {
-            let deadline = at + falcon_proto::WORKTREE_ARCHIVE_TTL_MS;
-            let now = web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let days_left = ((deadline - now) as f64 / 86_400_000.0).ceil() as i64;
-            if days_left >= 1 {
-                t!("worktree.archivedMetaDays", n = days_left).to_string()
-            } else {
-                t!("worktree.archivedMetaSoon").to_string()
-            }
-        });
+        let archived_note = archived_at.map(archive_countdown);
         let title = if project.worktree.is_some() {
             let mut parts = vec![t!("worktree.derivedFrom", name = source_name).to_string()];
             if let Some(dir) = &project.working_dir {
@@ -489,13 +589,7 @@ impl Sidebar {
             .iter()
             .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
 
-        let icon_name = if archived_at.is_some() {
-            IconName::Archive
-        } else if project.multi.is_some() && project.worktree.is_none() {
-            IconName::Folders
-        } else {
-            IconName::GitBranch
-        };
+        let icon_name = if archived_at.is_some() { IconName::Archive } else { IconName::GitBranch };
         let pid = project.id.clone();
         let (ws1, ws2, ws3) = (self.ws.clone(), self.ws.clone(), self.ws.clone());
         let pid_toggle = pid.clone();
@@ -524,7 +618,7 @@ impl Sidebar {
             changes: if archived_at.is_some() { None } else { changes },
             title,
             muted: archived_at.is_some(),
-            selected,
+            selected: selected && !active_child_visible,
             on_toggle: expandable.then(|| -> Box<dyn Fn(&mut App)> {
                 Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
             }),
@@ -535,7 +629,6 @@ impl Sidebar {
             context: Some(ctx_items),
             on_new: archived_at.is_none().then_some(new_items),
             trailing: badge,
-            meegle_drop: None,
             drag: None,
         }, cx);
 
@@ -588,7 +681,11 @@ impl Sidebar {
         };
         row = row
             .child(div().flex_none().size(zpx(18.)))
-            .child(crate::session_icon::session_icon(session.agent).size(zpx(14.)).text_color(ui.muted_foreground))
+            .child(
+                crate::session_icon::session_icon(session.agent)
+                    .size(zpx(14.))
+                    .text_color(if selected { ui.tint_foreground } else { ui.muted_foreground }),
+            )
             .child(
                 div()
                     .flex_1()
@@ -604,8 +701,12 @@ impl Sidebar {
             Some(reading) => status_cell(session, reading, selected, cx),
             None => status_mark(Mark::from(session.state), zpx(12.), cx),
         });
-        row.context_menu(move |menu, _, _| to_popup(menu, ctx.clone()))
-            .into_any_element()
+        let row = row.context_menu(move |menu, _, _| to_popup(menu, ctx.clone()));
+        if selected {
+            crate::ui::selected_fade(format!("sel-sess-{}", session.id), row, ui.tint).into_any_element()
+        } else {
+            row.into_any_element()
+        }
     }
 }
 
@@ -696,6 +797,18 @@ fn pending_row(p: &PendingSession, depth: usize, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// 存档附属项目行上的删除倒计时。0 在调用方已经被当成「没存档」。
+fn archive_countdown(archived_at: i64) -> String {
+    let deadline = archived_at + falcon_proto::WORKTREE_ARCHIVE_TTL_MS;
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let days_left = ((deadline - now) as f64 / 86_400_000.0).ceil() as i64;
+    if days_left >= 1 {
+        t!("worktree.archivedMetaDays", n = days_left).to_string()
+    } else {
+        t!("worktree.archivedMetaSoon").to_string()
+    }
+}
+
 fn basename(path: &str) -> String {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -746,12 +859,12 @@ fn session_count_badge(
     div()
         .id(SharedString::from(id))
         .flex_none()
-        .h(zpx(20.))
+        .h(zpx(22.))
         .flex()
         .items_center()
-        .gap(zpx(2.))
-        .px(zpx(2.))
-        .rounded(zpx(4.))
+        .gap(zpx(3.))
+        .px(zpx(4.))
+        .rounded(zpx(6.))
         .text_size(zpx(11.))
         .text_color(if expanded { ui.foreground } else { ui.muted_foreground })
         .hover(|s| s.text_color(ui.foreground))
@@ -800,8 +913,6 @@ struct TreeRowOpts {
     on_new: Option<Vec<menus::MenuItemSpec>>,
     /// 摆在 +N −M 左边的附加徽标（检出行的会话计数）
     trailing: Option<AnyElement>,
-    /// 源项目行：接住从飞书项目面板拖来的工作项，以它的 Key 预填派生表单
-    meegle_drop: Option<(Entity<Workspace>, String)>,
     /// 源项目行：可拖着排序（落点是 [`drop_zone`]，盖在整个文件夹节点上）
     drag: Option<ProjectDrag>,
 }
@@ -843,7 +954,11 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
         _ => row.child(div().flex_none().size(zpx(18.))),
     };
     row = row
-        .child(icon(o.icon).size(zpx(14.)).text_color(ui.muted_foreground))
+        .child(
+            icon(o.icon)
+                .size(zpx(14.))
+                .text_color(if o.selected { ui.tint_foreground } else { ui.muted_foreground }),
+        )
         .child(
             div()
                 .flex_1()
@@ -891,18 +1006,22 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
                 .dropdown_menu(move |menu, _, _| to_popup(menu, items.clone())),
         );
     }
-    if let Some((ws, source_id)) = o.meegle_drop {
-        // 落点只认类型化的载荷（React 版是自定义 dataTransfer 类型）；拖到上面时整行换底色
-        let over = ui.accent;
-        row = row
-            .drag_over::<MeegleWorkItemDragPayload>(move |s, _, _, _| s.bg(over))
-            .on_drop(move |payload: &MeegleWorkItemDragPayload, window, cx| {
-                open_worktree_from_meegle(ws.clone(), source_id.clone(), payload.clone(), window, cx)
-            });
-    }
     match o.context {
-        Some(items) => row.context_menu(move |menu, _, _| to_popup(menu, items.clone())).into_any_element(),
-        None => row.into_any_element(),
+        Some(items) => {
+            let row = row.context_menu(move |menu, _, _| to_popup(menu, items.clone()));
+            if o.selected {
+                crate::ui::selected_fade(format!("sel-{}", o.id), row, ui.tint).into_any_element()
+            } else {
+                row.into_any_element()
+            }
+        }
+        None => {
+            if o.selected {
+                crate::ui::selected_fade(format!("sel-{}", o.id), row, ui.tint).into_any_element()
+            } else {
+                row.into_any_element()
+            }
+        }
     }
 }
 
@@ -912,7 +1031,7 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
 ///
 /// 两半各往外探出一道行缝，线就正好落在缝里、不压着相邻行的高亮；相邻两个节点探进同一道缝的两半
 /// 语义相同（A 的后面 = B 的前面），同时亮也是同一个位置。落点层没有点击监听、hitbox 不是 opaque
-/// 的，底下的行照常点击、悬停、接飞书工作项（落下只认 [`ProjectDrag`] 这个类型）
+/// 的，底下的行照常点击、悬停（落下只认 [`ProjectDrag`] 这个类型）
 fn drop_zone(ws: &Entity<Workspace>, target: &str, group: &str, index: usize, after: bool, cx: &App) -> AnyElement {
     let line = Ui::global(cx).tint_strong;
     let (ws, target, group) = (ws.clone(), target.to_string(), group.to_string());
@@ -938,60 +1057,4 @@ fn drop_zone(ws: &Entity<Workspace>, target: &str, group: &str, index: usize, af
             .drag_over::<ProjectDrag>(move |s, _, _, _| s.border_t(zpx(ROW_GAP)).border_color(line))
     };
     zone.into_any_element()
-}
-
-/// 飞书项目工作项拖到源项目上（React 版 `Sidebar.tsx` 的 `openWorktreeFromMeegle`）：取详情
-/// 拿到带前缀的 Key，预填派生表单的名字与分支（new-branch 模式，基点是源项目的默认基点或 HEAD）。
-/// 什么都不直接建——表单等用户确认
-fn open_worktree_from_meegle(
-    ws: Entity<Workspace>,
-    source_id: String,
-    payload: MeegleWorkItemDragPayload,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let client = ws.read(cx).client.clone();
-    let handle = window.window_handle();
-    let fetch = client.meegle_work_item(&payload.space_key, &payload.id, false);
-    // 命中服务端缓存时详情几十毫秒就回来，立刻提示只是闪一下；慢了才值得交代在等什么
-    let done = std::rc::Rc::new(std::cell::Cell::new(false));
-    let (done_hint, ws_hint) = (done.clone(), ws.clone());
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
-        if !done_hint.get() {
-            cx.update(|cx| ws_hint.update(cx, |w, cx| w.toast(ToastKind::Info, t!("meegle.dropKeyLoading").to_string(), None, cx)));
-        }
-    })
-    .detach();
-    cx.spawn(async move |cx| {
-        let result = fetch.await;
-        done.set(true);
-        cx.update(|cx| {
-            let key = match &result {
-                Ok(detail) => falcon_core::meegle_key::meegle_display_key(detail),
-                Err(err) => {
-                    ws.update(cx, |w, cx| {
-                        w.handle_error(err, cx);
-                        w.toast(ToastKind::Warning, t!("meegle.dropKeyFallback").to_string(), None, cx);
-                    });
-                    payload.id.clone()
-                }
-            };
-            let start_point = ws
-                .read(cx)
-                .project(&source_id)
-                .and_then(|p| p.default_worktree_branch.clone())
-                .filter(|b| !b.is_empty())
-                .unwrap_or_else(|| "HEAD".to_string());
-            let preset = crate::dialogs::worktree_form::Preset {
-                branch: Some(key.clone()),
-                name: Some(key),
-                start_point: Some(start_point),
-            };
-            let _ = handle.update(cx, |_, window, cx| {
-                crate::dialogs::worktree_form::open(&ws, &source_id, preset, window, cx)
-            });
-        });
-    })
-    .detach();
 }

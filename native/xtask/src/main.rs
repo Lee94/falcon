@@ -11,23 +11,19 @@
 mod fixtures;
 mod fonts;
 mod icons;
-mod meegle;
 mod pkg;
 mod server;
 mod sessiond;
 mod themes;
-mod tern;
 mod util;
 mod win;
 
 const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
-  server [--target <平台>]               服务端发布单文件（内嵌 meegle CLI 与 5 个目标的会话守护进程），产物 release/falcon-v<版本>-<平台>
+  server [--target <平台>]               服务端发布单文件（内嵌 5 个目标的会话守护进程），产物 release/falcon-v<版本>-<平台>
   pkg [--skip-bin]                       macOS 安装包（Falcon.app = 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，只有原生客户端）
-  tern                                  构建 Tern 连接程序，产物 release/falcon-tern-v<版本>-<平台>
-  meegle [--target <平台>]               取锁定版本的 meegle CLI 到 native/.cache/meegle/（server 会自动调）
 
 会话守护进程（ADR 0020；目标：host（默认）/ all / 逗号分隔的 Rust 三元组）
   ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库（先打 sessiond/ghostty-patches/ 的补丁），落在 native/.cache/ghostty/
@@ -56,8 +52,6 @@ fn main() {
         "server" => server::run(&args),
         "pkg" => pkg::run(&args),
         "win" => win::run(&args),
-        "tern" => tern::run(&args),
-        "meegle" => meegle::run(&args),
         "ghostty" => sessiond::ghostty(&args),
         "ghostty-bindgen" => sessiond::bindgen(&args),
         "sessiond" => sessiond::run(&args),

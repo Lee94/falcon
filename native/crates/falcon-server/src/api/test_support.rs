@@ -51,12 +51,7 @@ impl TestApp {
         )
         .expect("起引擎");
         let config = ServerConfig { host: "127.0.0.1".into(), port: 0, data_dir: data_dir.clone() };
-        // 路由测试碰不到飞书项目；基底环境给空的，别去跑用户的 login shell
-        let meegle = crate::meegle::client::MeegleClient::new(
-            "meegle-not-used-in-tests".into(),
-            Arc::new(|| Box::pin(async { Arc::new(Vec::new()) })),
-        );
-        // 插件进程同样不跑 login shell：基底环境只给一条 PATH——测试自己的 bin 在前，再是系统的；
+        // 插件进程不跑 login shell：基底环境只给一条 PATH——测试自己的 bin 在前，再是系统的；
         // HOME 指到测试自己的 root，避免内置插件（如 tokens）扫用户真实的家目录
         let bin = base.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -70,8 +65,7 @@ impl TestApp {
                 Box::pin(async move { Arc::new(vec![("PATH".to_string(), path), ("HOME".to_string(), home)]) })
             }),
         );
-        let mesh = crate::mesh::MeshHost::new(&data_dir);
-        let state = AppState::new(config, db, secrets, askpass, engine, meegle, plugins, mesh);
+        let state = AppState::new(config, db, secrets, askpass, engine, plugins);
         let router = super::app(state.clone());
         TestApp { state, router, data_dir, root, bin, _dir: dir }
     }

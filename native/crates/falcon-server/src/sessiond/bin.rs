@@ -1,4 +1,4 @@
-//! 各平台的守护进程二进制从哪来（照 `meegle/bin.rs` 的优先级链，设计文档 10.5）：
+//! 各平台的守护进程二进制从哪来（设计文档 10.5）：
 //!
 //! 1. `FALCON_SESSIOND_DIR`：一个目录，里面按目标三元组分子目录放 `falcon-sessiond[.exe]`
 //!    （即 `native/target-sessiond` 的布局：`<目录>/<三元组>/release/falcon-sessiond`），

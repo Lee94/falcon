@@ -41,7 +41,7 @@ pub enum ActiveView {
     Terminal { session_id: String },
     /// 选中了项目但还没有可显示的终端
     Project,
-    /// Git 面板点开的文件差异（见 [`WorkspaceState::diff_tab`]）
+    /// 「修改」面板点开的文件差异（见 [`WorkspaceState::diff_tab`]）
     Diff,
     /// 文件查看窗口；path 一并带着，好让排布 key 认得出是哪个文件
     File { project_id: String, path: String },
@@ -49,16 +49,14 @@ pub enum ActiveView {
 
 /// 右侧栏打开的是哪一格。加面板时在这里加一个值，持久化形状不用改。
 ///
-/// 落盘是一个字符串（沿用 React 版 RightPanelId 的字面量）：内置面板是 `git` / `files` 这样的名字，
+/// 落盘是一个字符串（沿用 React 版 RightPanelId 的字面量）：内置面板是 `files` / `changes` 这样的名字，
 /// 插件是 `plugin:<id>`（ADR 0025）。插件可能已经被删 / 停用了——读回来照样是它，由右侧栏在插件
 /// 列表拉回来之后说"没有这个插件"，而不是在这里退回默认：列表还没拉回来时谁也不知道它在不在。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum RightPanelId {
-    #[default]
-    Git,
     Changes,
+    #[default]
     Files,
-    Meegle,
     /// 右侧栏插件（`/api/plugins`），带插件 id
     Plugin(String),
 }
@@ -70,11 +68,10 @@ impl RightPanelId {
     /// 持久化的布局可能来自旧版本，认不出的面板名一律退回默认（由调用方处理 `None`）
     pub fn from_wire(s: &str) -> Option<Self> {
         Some(match s {
-            "git" => RightPanelId::Git,
             "changes" => RightPanelId::Changes,
-            // 旧版本的 "forward"（转发面板）已挪进设置的「中转」页（ADR 0016），落到默认
             "files" => RightPanelId::Files,
-            "meegle" => RightPanelId::Meegle,
+            // 旧版本的 "forward"（转发面板，ADR 0016）、"git"（历史面板）和 "meegle"（飞书项目面板）
+            // 跟认不出的名字一样，落到 `_`，由调用方 `unwrap_or_default()` 退回默认（文件）
             _ => {
                 let id = s.strip_prefix(PLUGIN_PANEL_PREFIX).filter(|id| !id.is_empty())?;
                 RightPanelId::Plugin(id.to_string())
@@ -85,10 +82,8 @@ impl RightPanelId {
     /// 持久化里的字面量，也是元素 id 的后缀
     pub fn as_wire(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            RightPanelId::Git => "git".into(),
             RightPanelId::Changes => "changes".into(),
             RightPanelId::Files => "files".into(),
-            RightPanelId::Meegle => "meegle".into(),
             RightPanelId::Plugin(id) => format!("{PLUGIN_PANEL_PREFIX}{id}").into(),
         }
     }
@@ -112,23 +107,13 @@ impl<'de> Deserialize<'de> for RightPanelId {
     }
 }
 
-/// 差异窗口看的是哪次提交（从 History 的提交详情点进来时才有）
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiffCommit {
-    pub sha: String,
-    pub short: String,
-    pub subject: String,
-}
-
 /// 差异查看窗口的目标。单例：再点别的文件就地替换内容，像编辑器的预览标签——
 /// 每个文件各开一扇只会让人在一排窗口里找不到终端。不持久化：刷新后工作区的 diff
-/// 早就变了，恢复一个过期视图没有意义。
+/// 早就变了，恢复一个过期视图没有意义。看的是工作区现状（「修改」面板点进来）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffTabTarget {
     pub project_id: String,
     pub file: GitFileChange,
-    /// 带上就取那一次提交的改动；不带就是「修改」面板点进来的，看工作区现状
-    pub commit: Option<DiffCommit>,
     /// 多仓库项目：diff 属于哪个成员仓库（成员 dir 原文）
     pub repo: Option<String>,
 }
@@ -215,7 +200,7 @@ impl Default for PersistedWorkspace {
             active: ActiveView::Overview,
             sidebar_open: true,
             right_open: false,
-            right_panel: RightPanelId::Git,
+            right_panel: RightPanelId::Files,
             collapsed: BTreeMap::new(),
             sessions_open: BTreeMap::new(),
             selected_project_id: None,
@@ -369,7 +354,7 @@ pub fn pane_view(key: &str) -> Option<ActiveView> {
     })
 }
 
-/// 多仓库项目在 Git / 修改面板里当前看的成员仓库；没选过（或选的成员已被编辑掉）就
+/// 多仓库项目在「修改」面板里当前看的成员仓库；没选过（或选的成员已被编辑掉）就
 /// 退回第一个成员。非多仓库项目给 `None`——调用方原样把它传给 api 的 repo 参数即可。
 pub fn select_multi_repo_dir(multi_repo: &BTreeMap<String, String>, project: Option<&Project>) -> Option<String> {
     let project = project?;
@@ -444,8 +429,8 @@ pub struct WorkspaceState {
     pub collapsed: BTreeMap<String, bool>,
     pub sessions_open: BTreeMap<String, bool>,
     pub show_archived: bool,
-    /// 多仓库项目在 Git / 修改面板里当前看的成员（projectId → 成员 dir）。不持久化；
-    /// 两个面板 + 差异窗口必须看同一个成员，所以放这里不放面板自己
+    /// 多仓库项目在「修改」面板里当前看的成员（projectId → 成员 dir）。不持久化；
+    /// 面板与差异窗口必须看同一个成员，所以放这里不放面板自己
     pub multi_repo: BTreeMap<String, String>,
     /// 侧栏当前选中的项目；主区只显示它下面的窗口。`None` = 在总览
     pub selected_project_id: Option<String>,
@@ -1146,7 +1131,7 @@ impl WorkspaceState {
         self.show_archived = !self.show_archived;
     }
 
-    /// 多仓库项目：切换 Git / 修改面板正在看的成员仓库
+    /// 多仓库项目：切换「修改」面板正在看的成员仓库
     pub fn set_multi_repo(&mut self, project_id: &str, dir: &str) {
         self.multi_repo.insert(project_id.to_string(), dir.to_string());
     }
@@ -1199,7 +1184,7 @@ mod tests {
             "active": { "kind": "file", "projectId": "p", "path": "a" },
             "sidebarOpen": 0,
             "rightOpen": "yes",
-            "rightPanel": "meegle",
+            "rightPanel": "files",
             "collapsed": { "s:local": true, "p:x": 0 },
             "selectedProjectId": 5,
             "sidebarWidth": 1000,
@@ -1220,7 +1205,7 @@ mod tests {
         assert_eq!(ws.active, ActiveView::Overview);
         assert!(ws.sidebar_open, "只有 false 才算关");
         assert!(!ws.right_open, "只有 true 才算开");
-        assert_eq!(ws.right_panel, RightPanelId::Meegle);
+        assert_eq!(ws.right_panel, RightPanelId::Files);
         assert_eq!(ws.collapsed.get("s:local"), Some(&true));
         assert_eq!(ws.collapsed.get("p:x"), Some(&false));
         assert_eq!(ws.selected_project_id, None);
@@ -1231,20 +1216,22 @@ mod tests {
             session_id: "s9".into()
         });
         assert_eq!(load_workspace(Some(r#"{"active":{"kind":"project"}}"#)).active, ActiveView::Project);
-        assert_eq!(load_workspace(Some(r#"{"rightPanel":"nope"}"#)).right_panel, RightPanelId::Git);
-        // 转发面板挪进了设置（ADR 0016）：旧布局里存的 "forward" 退回默认
-        assert_eq!(load_workspace(Some(r#"{"rightPanel":"forward"}"#)).right_panel, RightPanelId::Git);
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"nope"}"#)).right_panel, RightPanelId::Files);
+        // 转发面板挪进了设置（ADR 0016）、历史面板与飞书项目面板已去掉：旧布局里存的名字退回默认
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"forward"}"#)).right_panel, RightPanelId::Files);
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"git"}"#)).right_panel, RightPanelId::Files);
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"meegle"}"#)).right_panel, RightPanelId::Files);
         // 插件面板（ADR 0025）：带 id 原样读回；光有前缀不算
         assert_eq!(
             load_workspace(Some(r#"{"rightPanel":"plugin:sysmon"}"#)).right_panel,
             RightPanelId::Plugin("sysmon".into())
         );
-        assert_eq!(load_workspace(Some(r#"{"rightPanel":"plugin:"}"#)).right_panel, RightPanelId::Git);
+        assert_eq!(load_workspace(Some(r#"{"rightPanel":"plugin:"}"#)).right_panel, RightPanelId::Files);
     }
 
     #[test]
     fn right_panel_wire_round_trip() {
-        for p in [RightPanelId::Git, RightPanelId::Meegle, RightPanelId::Plugin("hello-2".into())] {
+        for p in [RightPanelId::Files, RightPanelId::Changes, RightPanelId::Plugin("hello-2".into())] {
             let json = serde_json::to_string(&p).unwrap();
             assert_eq!(serde_json::from_str::<RightPanelId>(&json).unwrap(), p);
         }
@@ -1264,7 +1251,7 @@ mod tests {
         let out = serialize_workspace(&ws.persisted());
         assert_eq!(
             out,
-            r#"{"tabs":["s1"],"columns":[{"basis":null,"panes":[{"key":"t:s1","basis":null}],"pinned":false}],"active":{"kind":"project"},"sidebarOpen":true,"rightOpen":false,"rightPanel":"git","collapsed":{"s:local":true},"sessionsOpen":{},"selectedProjectId":"p","showArchived":false,"sidebarWidth":260,"rightWidth":260,"termZoomed":false}"#
+            r#"{"tabs":["s1"],"columns":[{"basis":null,"panes":[{"key":"t:s1","basis":null}],"pinned":false}],"active":{"kind":"project"},"sidebarOpen":true,"rightOpen":false,"rightPanel":"files","collapsed":{"s:local":true},"sessionsOpen":{},"selectedProjectId":"p","showArchived":false,"sidebarWidth":260,"rightWidth":260,"termZoomed":false}"#
         );
         // 读回来还是同一份
         assert_eq!(load_workspace(Some(&out)), ws.persisted());
@@ -1322,7 +1309,6 @@ mod tests {
         let diff = DiffTabTarget {
             project_id: "p".into(),
             file: GitFileChange { path: "a.ts".into(), orig_path: None, index: "M".into(), work: " ".into() },
-            commit: None,
             repo: None,
         };
         ws.open_diff(diff, &sessions);

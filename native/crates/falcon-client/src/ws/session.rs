@@ -62,9 +62,6 @@ pub enum SessionEvent {
     /// `message` 是程序给的不可信文本，显示到终端之外前要过 `sanitize_display_text`。
     /// 只有持久会话有（解析在宿主机的 VT 进程里）；Windows 宿主机上 ConPTY 会吞掉它，收不到
     ProgramStatus(Vec<ProgramStatusRecord>),
-    /// 对话终端的 shell 状态（shell integration 报的当前目录、有没有命令在跑）。只有按机器挂的
-    /// 对话终端有（docs/design/ai-assistant.md 4.2）
-    Shell { cwd: Option<String>, busy: bool, user: Option<String>, home: Option<String> },
     /// PTY 眼下的尺寸，`owner` = 是按这扇窗口报的格子定的（ADR 0022）。不是的话终端网格要按这个
     /// 尺寸建、在本地缩放 / 裁剪着画——**和输出、回放同在网络线程上按顺序处理**：服务端在回放、
     /// 在按新尺寸排的输出之前发它，换到 UI 线程上再改网格就晚了。老服务端不发
@@ -609,7 +606,6 @@ impl Driver {
             ServerMessage::Title { title } => SessionEvent::Title(title),
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
             ServerMessage::ProgramStatus { records } => SessionEvent::ProgramStatus(records),
-            ServerMessage::Shell { cwd, busy, user, home } => SessionEvent::Shell { cwd, busy, user, home },
             ServerMessage::Size { cols, rows, owner } => SessionEvent::Size { cols, rows, owner },
             // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
             // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown

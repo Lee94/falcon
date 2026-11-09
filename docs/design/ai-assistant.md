@@ -1,6 +1,6 @@
 # AI 助手：一段对话 = 一个终端 + 一段 AI 上下文
 
-> 状态：**已实施**（2026-10-15，同日从「弹窗 + Shell / Agent 两页」改成现在的 Warp 式面板，见 ADR 0021 后记）· 决定见 [ADR 0021](../adr/0021-ai-assistant.md)，本文给做法 · 范围：侧栏「设置」旁边一个入口，点开是浮在主区左下角的面板。面板里一段**对话**就是某台机器（本机或一台 SSH Host）上的一个终端加一段 AI 上下文：你在终端里敲命令，跑完的命令记成时间线上的命令块；⌘⇧I 切到 Agent 输入，把任务交给 AI，AI 的命令打进同一个终端。AI 有两种来源：falcon 内置的 agent（直连 Claude API，任一台机器），以及经 ACP（Agent Client Protocol）接入的本地 agent（Claude Code / Codex / Gemini CLI 等，只在本机）· **没验证过的**：真的 Claude API（只对模拟的 SSE 服务端跑过，见第 11 节）、真的 Claude Code / Codex / Gemini ACP 适配器（只对按协议写的替身跑过）、SSH Host 上的对话（终端、命令块、文件工具）、浏览器版里的交互、fish 上的命令块
+> 状态：**已删除**（代码已从仓库去掉，本文只留 2026-10-15 的做法；同日从「弹窗 + Shell / Agent 两页」改成 Warp 式面板，见 ADR 0021 后记）· 决定见 [ADR 0021](../adr/0021-ai-assistant.md)，本文给做法 · 范围：侧栏「设置」旁边一个入口，点开是浮在主区左下角的面板。面板里一段**对话**就是某台机器（本机或一台 SSH Host）上的一个终端加一段 AI 上下文：你在终端里敲命令，跑完的命令记成时间线上的命令块；⌘⇧I 切到 Agent 输入，把任务交给 AI，AI 的命令打进同一个终端。AI 有两种来源：falcon 内置的 agent（直连 Claude API，任一台机器），以及经 ACP（Agent Client Protocol）接入的本地 agent（Claude Code / Codex / Gemini CLI 等，只在本机）· **没验证过的**：真的 Claude API（只对模拟的 SSE 服务端跑过，见第 11 节）、真的 Claude Code / Codex / Gemini ACP 适配器（只对按协议写的替身跑过）、SSH Host 上的对话（终端、命令块、文件工具）、浏览器版里的交互、fish 上的命令块
 >
 > 术语沿用 [CONTEXT.md](../../CONTEXT.md)。「本机」= falcon 后端所在的机器（与「中转」同一个口径）；「机器」= 本机或一台已保存的 SSH Host。
 

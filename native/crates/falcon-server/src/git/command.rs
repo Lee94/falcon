@@ -17,13 +17,9 @@
 //! - `.length` / `slice` 按 UTF-16 码元算；`trim()` / 正则 `\s` 用 JS 的空白集合；
 //! - `Number(x)` 走 [`js_string_to_number`]，不用 `str::parse`（后者不认 `0x`、空串，反而认 `inf`）。
 
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use falcon_proto::{
-    GitBranchRef, GitCommit, GitCommitFile, GitConflictKind, GitFileChange, GitOpInput, GitRefKind, GitRefLabel,
-    GitRemote, GitResetMode, GitTakeSide,
-};
+use falcon_proto::{GitConflictKind, GitFileChange, GitOpInput, GitTakeSide};
 use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::Value;
@@ -244,20 +240,6 @@ pub fn ahead_args(git: &str, dir: &str) -> Vec<String> {
     at(git, dir, &["rev-list", "--count", "@{upstream}..HEAD"])
 }
 
-/// 未拉取提交数。与 ahead 一样，没有 upstream 时退出码 128。
-pub fn behind_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["rev-list", "--count", "HEAD..@{upstream}"])
-}
-
-/// 当前分支跟踪的远程。没有 upstream 时退出码 128。
-pub fn upstream_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["rev-parse", "--abbrev-ref", "@{upstream}"])
-}
-
-pub fn remote_verbose_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["remote", "-v"])
-}
-
 /// git 内建的空树对象。仓库还没有任何提交（无 HEAD）时拿它当 diff 基准，
 /// 语义不变：工作区对比"一无所有"。
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -280,143 +262,6 @@ pub fn diff_file_args(git: &str, dir: &str, base: &str, path: &str, orig_path: O
 /// 空的未跟踪文件两边相同，退出码 0、无输出。
 pub fn diff_untracked_args(git: &str, dir: &str, path: &str) -> Vec<String> {
     at(git, dir, &["diff", "--no-index", "--", "/dev/null", path])
-}
-
-/// 最近提交。%at 是 unix 秒——相对时间在前端按界面语言格式化，
-/// 不拿 git 的 %ar（那会跟 LC_ALL=C 一起变成英文）。`n` 缺省 12。
-pub fn log_args(git: &str, dir: &str, n: Option<usize>) -> Vec<String> {
-    let n = n.unwrap_or(12).to_string();
-    at(git, dir, &["log", "-n", &n, "--format=%h%x09%an%x09%at%x09%s"])
-}
-
-// ---------------- History 面板 ----------------
-
-/// 只看这三类 ref，**不用 `--all`**。
-///
-/// --all 会把 refs/ 下的一切都算进来，包括 IDE 写的私有 ref——JetBrains 的
-/// Local History 就挂在 refs/jb/* 下，每按几下保存就是一条提交。实测本仓库
-/// `git log --all` 的头几条全是 "Local History"，把真实历史挤到了看不见的地方。
-/// refs/stash 同理。
-const HISTORY_REFS: [&str; 3] = ["--branches", "--remotes", "--tags"];
-
-/// History 每页条数与作者聚合的采样深度
-pub const LOG_PAGE: usize = 60;
-pub const AUTHOR_SAMPLE: usize = 400;
-
-/// [`log_page_args`] 的查询。空串与 `None` 等价（TS 里按真假判）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LogQuery {
-    /// 只看某条分支（Branch 下拉）。缺省看 HISTORY_REFS
-    pub rev: Option<String>,
-    /// 提交信息搜索（字面量，不是正则）
-    pub grep: Option<String>,
-    /// 作者筛选（字面量）
-    pub author: Option<String>,
-    pub skip: Option<usize>,
-    /// 缺省 [`LOG_PAGE`]
-    pub limit: Option<usize>,
-}
-
-/// `Option<String>` 在 TS `if (q.x)` 里的真假
-fn non_empty(s: &Option<String>) -> Option<&str> {
-    s.as_deref().filter(|s| !s.is_empty())
-}
-
-/// History 列表。
-///
-/// `-F`（--fixed-strings）对 --grep 与 --author 同时生效，把用户在搜索框里
-/// 敲的东西一律当字面量——不加它，一个 `(` 就够 git 报 "Unmatched ( or \("
-/// 然后整页空白。`-i` 对固定字符串同样生效。
-///
-/// rev 走 `<rev> --` 的位置参数：分支名以 `-` 开头时（git 允许 `--` 之后的
-/// refname 长这样）不加终结符会被当成选项解析。
-pub fn log_page_args(git: &str, dir: &str, q: &LogQuery) -> Vec<String> {
-    let limit = q.limit.unwrap_or(LOG_PAGE);
-    let n = limit.saturating_add(1).to_string();
-    let mut args: Vec<String> = vec![
-        "log".into(),
-        // %P 空 = 根提交；%D 空 = 这条上没有任何 ref。subject 放最后一列，
-        // 它是唯一可能含 TAB 的字段（ref 名与作者名都禁止控制字符）
-        "--format=%H%x09%h%x09%an%x09%ae%x09%at%x09%P%x09%D%x09%s".into(),
-        // 多取一条探"还有没有下一页"，比 rev-list --count 便宜得多
-        "-n".into(),
-        n,
-    ];
-    if let Some(skip) = q.skip.filter(|&s| s != 0) {
-        args.push(format!("--skip={skip}"));
-    }
-    let grep = non_empty(&q.grep);
-    let author = non_empty(&q.author);
-    if grep.is_some() || author.is_some() {
-        args.push("--fixed-strings".into());
-        args.push("--regexp-ignore-case".into());
-    }
-    if let Some(g) = grep {
-        args.push(format!("--grep={g}"));
-    }
-    if let Some(a) = author {
-        args.push(format!("--author={a}"));
-    }
-    // 指定了分支就只看它，否则看全部分支/远程/标签——两者都要 --date-order，
-    // 不然多分支并行时提交会按拓扑挤成一坨，画出来的图与时间轴对不上
-    args.push("--date-order".into());
-    match non_empty(&q.rev) {
-        Some(rev) => {
-            args.push(rev.into());
-            args.push("--".into());
-        }
-        None => args.extend(HISTORY_REFS.iter().map(|s| s.to_string())),
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    at(git, dir, &refs)
-}
-
-/// 作者下拉的候选：采样近若干条提交的 %an，去重与排序在解析侧做。`n` 缺省 [`AUTHOR_SAMPLE`]
-pub fn log_authors_args(git: &str, dir: &str, n: Option<usize>) -> Vec<String> {
-    let n = n.unwrap_or(AUTHOR_SAMPLE).to_string();
-    let mut args = vec!["log", "-n", &n, "--format=%an"];
-    args.extend(HISTORY_REFS);
-    at(git, dir, &args)
-}
-
-/// 作者下拉里「我」是谁。没配 user.name 时退出码 1、无输出——那是正常状态
-/// （这台机器上还没设过身份），不是错误。
-pub fn config_user_name_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["config", "--get", "user.name"])
-}
-
-/// 合并提交的 diff 取 first-parent。
-///
-/// 不加这个的话 `git show <merge>` 一个文件都不输出（默认 --diff-merges=off），
-/// 面板上看起来就像"这次合并什么都没改"。git ≥ 2.31，与 --path-format=absolute
-/// 是同一代要求。
-const FIRST_PARENT: &str = "--diff-merges=first-parent";
-
-/// 提交元数据（一行）。字段顺序与 [`parse_commit_meta`] 一一对应
-pub fn commit_meta_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["show", "-s", "--format=%H%x09%h%x09%an%x09%ae%x09%at%x09%cn%x09%ct%x09%P%x09%D", sha, "--"])
-}
-
-/// 完整提交信息。单独一条命令：%B 含换行，塞不进上面那种一行多列的格式
-pub fn commit_message_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["show", "-s", "--format=%B", sha, "--"])
-}
-
-/// 改动文件：一条命令同时要 --raw 与 --numstat。
-///
-/// 两段都要是因为各缺一半：--raw 给状态字母与**未压缩**的新旧路径（重命名是
-/// `R100\told\tnew` 两列），--numstat 给增删行数但重命名路径会被压成
-/// `dir/{old => new}/f` 这种紧凑形式。git 对两段用的是同一个 diff queue，
-/// 文件顺序一致，所以按下标配对——解析侧对不上时退化成"数字未知"，见 [`parse_commit_files`]。
-pub fn commit_files_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["show", "--format=", FIRST_PARENT, "--raw", "--numstat", sha, "--"])
-}
-
-/// 某条提交里单个文件的 diff
-pub fn commit_file_diff_args(git: &str, dir: &str, sha: &str, path: &str, orig_path: Option<&str>) -> Vec<String> {
-    let mut args = vec!["show", "--format=", FIRST_PARENT, sha, "--"];
-    args.extend(path_pair(path, orig_path));
-    at(git, dir, &args)
 }
 
 /// 工作区已跟踪文件的增删行数，基准 HEAD（暂存 + 未暂存一起看）。
@@ -508,134 +353,17 @@ pub fn pathspec_too_long<S: AsRef<str>>(paths: &[S]) -> bool {
     paths.iter().map(|p| utf16_len(p.as_ref()) + 3).sum::<usize>() > COMMIT_PATHSPEC_BUDGET
 }
 
-/// Pull。--ff-only 是刻意的：能快进就快进，不能就停下报错。
-///
-/// 面板上一个按钮不该在用户看不见的地方造出合并提交，更不该把工作区搅成冲突
-/// 状态——那之后所有会话里的 shell 都在一个半挂的仓库里干活。真要合并/变基，
-/// 用户在终端里做，那是他清楚自己在做什么的地方。
-pub fn pull_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["pull", "--ff-only"])
-}
-
 /// Push 当前分支到它的 upstream。
 ///
 /// 不传 refspec 也不加 --set-upstream：没有 upstream 时 git 会直接报错并把
 /// 该敲的命令印在 stderr 里，那比我们替他猜一个远程分支名要好。
-/// 绝不加 --force——按钮点下去要么是安全的，要么就失败。
-pub fn push_args(git: &str, dir: &str, force_with_lease: bool) -> Vec<String> {
-    let mut args = vec!["push"];
-    // --force-with-lease 不是 --force：远端若多了你没 fetch 到的提交会拒绝，
-    // 不会把别人刚推上去的历史盖掉。面板上的「强制推送」只走这条。
-    if force_with_lease {
-        args.push("--force-with-lease");
-    }
-    at(git, dir, &args)
-}
-
-// ---------------- History 面板写操作 ----------------
-
-/// Fetch 全部远程并剪掉已删的跟踪分支。不改工作区、不动 HEAD——所以可以
-/// 做成工具条上的 icon，不必再确认。
-///
-/// `--all` 而不是只 fetch upstream：面板上能看见的远程分支都该能刷新，
-/// 用户点 origin/foo 的徽标时不想还停在上周的 sha。
-pub fn fetch_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["fetch", "--all", "--prune"])
-}
-
-/// 检出一次提交 / 一个标签，HEAD 进入游离。
-///
-/// 用 `--detach` 而不是光传 sha：意图写在 argv 里，git 不会在 rev 恰好
-/// 也是分支名时（少见，但 `git checkout v1` 会优先匹配分支）悄悄切走。
-/// 不加 `-f`：脏工作区让 git 自己拒绝，面板按钮不该丢掉未提交的改动。
-pub fn checkout_detach_args(git: &str, dir: &str, rev: &str) -> Vec<String> {
-    at(git, dir, &["checkout", "--detach", rev])
-}
-
-/// 检出一条本地分支。
-///
-/// **不能**写成 `checkout -- <branch>`：checkout 的 `--` 后面是 pathspec，
-/// 会去工作区里找同名文件，而不是切分支。分支名以 `-` 开头的在进这里
-/// 之前就被 is_safe_ref_name 挡掉了。
-pub fn checkout_branch_args(git: &str, dir: &str, branch: &str) -> Vec<String> {
-    at(git, dir, &["checkout", branch])
-}
-
-/// 从远程分支建本地跟踪分支并检出。本地还没有对应分支时才走这条。
-///
-/// `--track` 显式写上：即使用户关了 autoSetupMerge，点远程徽标的预期
-/// 也是"这条本地分支对着那条远程推"，跟 IDEA 点 origin/x 的行为一致。
-pub fn checkout_track_args(git: &str, dir: &str, local: &str, remote: &str) -> Vec<String> {
-    at(git, dir, &["checkout", "-b", local, "--track", remote])
-}
-
-pub fn cherry_pick_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["cherry-pick", sha])
-}
-
-/// 用一次新提交撤销指定提交。`--no-edit`：面板上没有提交信息编辑器，
-/// 沿用 git 默认的 `Revert "…"` 标题。撞冲突不 abort——Falcon 没有
-/// merge tool，终端就在旁边，git 的原文比我们替他善后更有用。
-pub fn revert_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["revert", "--no-edit", sha])
-}
-
-/// 只建分支，不检出。`--` 挡住以 `-` 开头的名字被当成选项（调用方也会先拒）。
-pub fn branch_create_args(git: &str, dir: &str, name: &str, start_point: &str) -> Vec<String> {
-    at(git, dir, &["branch", "--", name, start_point])
-}
-
-/// 建分支并立刻检出。与 branch_create_args 成对，对应对话框里「创建后检出」。
-pub fn checkout_new_branch_args(git: &str, dir: &str, name: &str, start_point: &str) -> Vec<String> {
-    at(git, dir, &["checkout", "-b", name, start_point])
-}
-
-/// 重置当前分支到某次提交。
-///
-/// hard 会丢掉工作区——面板上单独确认。不加 `--force` 之外的花样，
-/// mixed / soft 也把 mode 写进 argv，避免默认值让人猜。
-pub fn reset_args(git: &str, dir: &str, rev: &str, mode: GitResetMode) -> Vec<String> {
-    at(git, dir, &["reset", &format!("--{}", mode.as_str()), rev])
-}
-
-/// 把 rev 合并进当前分支。`--no-edit`：面板没有提交信息编辑器。
-/// 不加 `--ff-only`：用户点 Merge 就是要这次合并，快进不了就该造合并提交。
-/// 冲突不 abort。
-pub fn merge_args(git: &str, dir: &str, rev: &str) -> Vec<String> {
-    at(git, dir, &["merge", "--no-edit", rev])
-}
-
-/// 把当前分支变基到 rev 之上。不加 `--force` / `-i`：交互式变基没有终端 UI
-/// 可接。冲突不 abort，git 的原文告诉用户该在终端里怎么继续。
-pub fn rebase_args(git: &str, dir: &str, rev: &str) -> Vec<String> {
-    at(git, dir, &["rebase", rev])
-}
-
-/// 从当前分支拿掉 sha 这一笔：把它后面的提交接到它的第一父上。
-///
-/// 不用 `rebase -i`：那要一个能改 todo 文件的编辑器，POSIX / Windows /
-/// SSH 各写一套太脆。`--onto <sha>~1 <sha>` 对线性历史就是 drop；
-/// 合并提交 git 会自己拒绝，原文回给面板。
-pub fn drop_commit_args(git: &str, dir: &str, sha: &str) -> Vec<String> {
-    at(git, dir, &["rebase", "--onto", &format!("{sha}~1"), sha])
-}
-
-/// 丢掉当前 HEAD。空 todo 的 rebase --onto 不会移动 HEAD，必须走 reset。
-pub fn drop_head_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["reset", "--hard", "HEAD~1"])
-}
-
-/// 把 HEAD 压进上一条：软重置留下工作区，amend 合成一次提交。
-pub fn squash_head_soft_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["reset", "--soft", "HEAD~1"])
+/// 绝不加 --force：提交并推送要么快进成功，要么失败，不改写远端历史。
+pub fn push_args(git: &str, dir: &str) -> Vec<String> {
+    at(git, dir, &["push"])
 }
 
 pub fn rev_exists_args(git: &str, dir: &str, rev: &str) -> Vec<String> {
     at(git, dir, &["rev-parse", "-q", "--verify", rev])
-}
-
-pub fn head_sha_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["rev-parse", "HEAD"])
 }
 
 /// TS 的三元链：merge / rebase / cherry-pick 各自对上，其余（含 Rust 侧的 `Unknown`）落到 revert
@@ -675,37 +403,9 @@ pub fn clean_paths_args<S: AsRef<str>>(git: &str, dir: &str, paths: &[S]) -> Vec
     at(git, dir, &with_paths(&["clean", "-f", "--"], paths))
 }
 
-/// 标签短名，新的在前。History 左侧树 Tags 一组用
-pub fn tag_list_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["for-each-ref", "--format=%(refname:short)", "--sort=-creatordate", "refs/tags"])
-}
-
-/// `cap` 缺省 200。注意 TS 是先 push 再判 `>= cap`，所以 cap 为 0 时仍会留一条——照搬。
-pub fn parse_tag_list(stdout: &str, cap: Option<usize>) -> Vec<String> {
-    let cap = cap.unwrap_or(200);
-    let mut out = Vec::new();
-    for line in lines(stdout) {
-        let name = js_trim(line);
-        if name.is_empty() {
-            continue;
-        }
-        out.push(name.to_string());
-        if out.len() >= cap {
-            break;
-        }
-    }
-    out
-}
-
 /// HEAD 完整提交说明。空仓库时 git log 退出码 128，调用方当没有。
 pub fn head_message_args(git: &str, dir: &str) -> Vec<String> {
     at(git, dir, &["log", "-1", "--format=%B"])
-}
-
-/// 完整 sha 或 git 允许的短 sha（TS 的 `GIT_SHA_RE = /^[0-9a-f]{4,40}$/i`）。
-/// 面板点进来的都是 40 位，短的留给手填/测试。
-pub fn is_git_sha(s: &str) -> bool {
-    (4..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// 能安全塞进 argv 当 ref 的名字。不是 git check-ref-format 的完整复刻，
@@ -745,47 +445,6 @@ pub fn parse_default_worktree_branch(raw: Option<&Value>) -> Result<Option<Strin
     Ok(Some(s.to_string()))
 }
 
-/// `origin/main` + remotes `["origin"]` → `"main"`。多个远程时取最长前缀，
-/// 避免 `origin` 把 `origin-backup/x` 切错。对不上或切完不合法就 None。
-pub fn tracking_local_name<S: AsRef<str>>(remote_branch: &str, remotes: &[S]) -> Option<String> {
-    let mut names: Vec<&str> = remotes.iter().map(AsRef::as_ref).collect();
-    // 稳定排序，按 UTF-16 长度降序（同 TS 的 sort((a, b) => b.length - a.length)）
-    names.sort_by_key(|r| std::cmp::Reverse(utf16_len(r)));
-    for remote in names {
-        let Some(local) = remote_branch.strip_prefix(remote).and_then(|r| r.strip_prefix('/')) else {
-            continue;
-        };
-        if is_safe_ref_name(local) {
-            return Some(local.to_string());
-        }
-    }
-    None
-}
-
-fn as_trimmed(v: Option<&Value>) -> Option<&str> {
-    match v {
-        Some(Value::String(s)) => Some(js_trim(s)).filter(|t| !t.is_empty()),
-        _ => None,
-    }
-}
-
-fn as_sha(v: Option<&Value>) -> Option<String> {
-    as_trimmed(v).filter(|s| is_git_sha(s)).map(str::to_string)
-}
-
-fn as_ref_name(v: Option<&Value>) -> Option<String> {
-    as_trimmed(v).filter(|s| is_safe_ref_name(s)).map(str::to_string)
-}
-
-fn as_rev(v: Option<&Value>) -> Option<String> {
-    as_sha(v).or_else(|| as_ref_name(v))
-}
-
-/// TS 的 `o.x === true`
-fn is_true(v: Option<&Value>) -> bool {
-    matches!(v, Some(Value::Bool(true)))
-}
-
 /// 缺省 / null → 空列表；不是数组、或任一项不是非空字符串 / 以 `-` 开头 / 含 TAB 以外的
 /// 控制字符（`/[\x00-\x08\x0a-\x1f]/`）→ `None`
 fn as_paths(v: Option<&Value>) -> Option<Vec<String>> {
@@ -806,10 +465,9 @@ fn as_paths(v: Option<&Value>) -> Option<Vec<String>> {
 }
 
 /// POST /git/op 的 body。形状不对返回 `Err(说明)`，让路由回 400；
-/// git 自己会失败的情况（脏工作区、分支占用）不在这里拦，留给 runGitOp。
+/// git 自己会失败的情况（脏工作区、冲突还在）不在这里拦，留给 run_git_op。
 ///
-/// 可选的布尔字段一律填 `Some(..)`：TS 版总是带上 `detach: o.detach === true` 这类字段，
-/// 序列化出来的形状要一致。
+/// Restore 的 untracked 一律 `Some(..)`：TS 版总是带上这个字段，序列化出来的形状要一致。
 pub fn parse_git_op_input(body: &Value) -> Result<GitOpInput, String> {
     let o = match body {
         Value::Object(o) => o,
@@ -820,40 +478,6 @@ pub fn parse_git_op_input(body: &Value) -> Result<GitOpInput, String> {
     let g = |k: &str| o.get(k);
     let op = g("op").and_then(Value::as_str).unwrap_or("");
     match op {
-        "fetch" => Ok(GitOpInput::Fetch),
-        "checkout" => {
-            let rev = as_rev(g("rev")).ok_or("rev 不合法")?;
-            Ok(GitOpInput::Checkout { rev, detach: Some(is_true(g("detach"))) })
-        }
-        "checkout-branch" => {
-            let branch = as_ref_name(g("branch")).ok_or("branch 不合法")?;
-            Ok(GitOpInput::CheckoutBranch { branch, create_tracking: Some(is_true(g("createTracking"))) })
-        }
-        "cherry-pick" | "revert" => {
-            let sha = as_sha(g("sha")).ok_or("sha 参数不合法")?;
-            Ok(if op == "cherry-pick" { GitOpInput::CherryPick { sha } } else { GitOpInput::Revert { sha } })
-        }
-        "branch-create" => {
-            let name = as_ref_name(g("name"));
-            let start_point = as_rev(g("startPoint"));
-            let name = name.ok_or("分支名不合法")?;
-            let start_point = start_point.ok_or("起点不合法")?;
-            Ok(GitOpInput::BranchCreate { name, start_point, checkout: Some(is_true(g("checkout"))) })
-        }
-        "reset" => {
-            let rev = as_rev(g("rev")).ok_or("rev 不合法")?;
-            let mode = match g("mode").and_then(Value::as_str) {
-                Some("soft") => GitResetMode::Soft,
-                Some("mixed") => GitResetMode::Mixed,
-                Some("hard") => GitResetMode::Hard,
-                _ => return Err("reset mode 不合法".into()),
-            };
-            Ok(GitOpInput::Reset { rev, mode })
-        }
-        "merge" | "rebase" => {
-            let rev = as_rev(g("rev")).ok_or("rev 不合法")?;
-            Ok(if op == "merge" { GitOpInput::Merge { rev } } else { GitOpInput::Rebase { rev } })
-        }
         "restore" => {
             let (Some(paths), Some(untracked)) = (as_paths(g("paths")), as_paths(g("untracked"))) else {
                 return Err("路径不合法".into());
@@ -865,18 +489,6 @@ pub fn parse_git_op_input(body: &Value) -> Result<GitOpInput, String> {
                 return Err("选中的文件太多，路径拼不进一条命令行。少选几个再丢弃。".into());
             }
             Ok(GitOpInput::Restore { paths, untracked: Some(untracked) })
-        }
-        "push" => Ok(GitOpInput::Push { force_with_lease: Some(is_true(g("forceWithLease"))) }),
-        "drop" | "squash" => {
-            let sha = as_sha(g("sha")).ok_or("sha 参数不合法")?;
-            Ok(if op == "drop" { GitOpInput::Drop { sha } } else { GitOpInput::Squash { sha } })
-        }
-        "reword" => {
-            let sha = as_sha(g("sha"));
-            let message = as_trimmed(g("message"));
-            let sha = sha.ok_or("sha 参数不合法")?;
-            let message = message.ok_or("缺少提交信息")?.to_string();
-            Ok(GitOpInput::Reword { sha, message })
         }
         "continue" => Ok(GitOpInput::Continue),
         "abort" => Ok(GitOpInput::Abort),
@@ -963,8 +575,8 @@ const BATCH_MARK: &str = "__FALCON_GIT_";
 
 /// 把多条 git 命令拼成**一次** exec：每条命令后打一行 `__FALCON_GIT_<i>_<code>__`
 /// 哨兵，带序号与真实退出码。SSH 上一条 exec 就是一次 channel open/close 往返，
-/// Git 面板一轮快照要跑十来条命令，逐条发就是十来个往返——与 exists_many_command
-/// 是同一笔账。
+/// 「修改」面板一轮要跑近十条命令，派生前探测也是两批，逐条发就是十来个往返——与
+/// exists_many_command 是同一笔账。
 ///
 /// 退出码的取法两边不同但语义一致：POSIX 直接 `$?`；PowerShell 沿用
 /// powershell_script 的预置哨兵 127（命令没跑起来时 $LASTEXITCODE 不会被赋值，
@@ -1168,8 +780,14 @@ pub fn unquote_c_path(s: &str) -> String {
     String::from_utf16_lossy(&out)
 }
 
-/// `for-each-ref` 解析出的分支（TS 的 `ParsedBranch`），与协议里的 GitBranchRef 同形
-pub type ParsedBranch = GitBranchRef;
+/// `for-each-ref` 解析出的分支（TS 的 `ParsedBranch`）。只给派生前探测用，不进线上协议。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedBranch {
+    pub name: String,
+    pub remote: bool,
+    pub head: bool,
+    pub upstream: Option<String>,
+}
 
 fn is_remote_name<S: AsRef<str>>(name: &str, remotes: &[S]) -> bool {
     remotes.iter().any(|r| {
@@ -1197,7 +815,7 @@ pub fn parse_branch_list<S: AsRef<str>>(stdout: &str, remotes: &[S]) -> Vec<Pars
         if !symref.is_empty() {
             continue;
         }
-        res.push(GitBranchRef {
+        res.push(ParsedBranch {
             name: name.to_string(),
             remote: is_remote_name(name, remotes),
             head: head == "*",
@@ -1296,215 +914,6 @@ pub fn parse_status_entries(stdout: &str) -> Vec<GitStatusEntry> {
     out
 }
 
-/// `git remote -v`：每个 remote 只取 fetch 那一行
-pub fn parse_remotes(stdout: &str) -> Vec<GitRemote> {
-    // /^(\S+)\s+(\S+)\s+\((fetch|push)\)/，\s 用 JS 的空白集合
-    static RE: LazyLock<Regex> = LazyLock::new(|| {
-        let ws = JS_WS_CLASS;
-        Regex::new(&format!(r"^([^{ws}]+)[{ws}]+([^{ws}]+)[{ws}]+\((fetch|push)\)")).expect("remote -v regex")
-    });
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for line in lines(stdout) {
-        let Some(m) = RE.captures(js_trim(line)) else { continue };
-        if &m[3] != "fetch" || !seen.insert(m[1].to_string()) {
-            continue;
-        }
-        out.push(GitRemote { name: m[1].to_string(), url: m[2].to_string() });
-    }
-    out
-}
-
-/// `git log` 的一条（TS 的 `GitLogEntry`），与协议里的 GitCommit 同形
-pub type GitLogEntry = GitCommit;
-
-/// unix 秒（字符串）→ 毫秒。`Number.isFinite(sec) ? sec * 1000 : 0`
-fn sec_to_ms(s: &str) -> i64 {
-    let sec = js_string_to_number(s);
-    if sec.is_finite() { (sec * 1000.0) as i64 } else { 0 }
-}
-
-/// `git log --format=%h\t%an\t%at\t%s`。subject 里可能有 TAB，只切前三列。
-pub fn parse_log(stdout: &str) -> Vec<GitLogEntry> {
-    let mut out = Vec::new();
-    for line in lines(stdout) {
-        if line.is_empty() {
-            continue;
-        }
-        let mut cols = line.splitn(4, '\t');
-        let sha = cols.next().unwrap_or("");
-        let author = cols.next().unwrap_or("");
-        let at = cols.next().unwrap_or("");
-        let subject = cols.next().unwrap_or("");
-        if sha.is_empty() || author.is_empty() || at.is_empty() {
-            continue;
-        }
-        out.push(GitCommit {
-            sha: sha.to_string(),
-            author: author.to_string(),
-            authored_at: sec_to_ms(at),
-            subject: subject.to_string(),
-        });
-    }
-    out
-}
-
-// ---------------- History 面板的解析 ----------------
-
-/// 解析 %D（decoration）。
-///
-/// 形如 `HEAD -> main, origin/main, tag: v1.0, origin/HEAD`。
-/// - `HEAD -> x` 里的 x 是当前分支，标 head: Some(true)；
-/// - 光杆 `HEAD`（detached）不是 ref，丢掉；
-/// - `origin/HEAD` 是指向默认分支的 symref，与 parse_branch_list 同一个理由丢掉——
-///   它跟 origin/main 永远同时出现在同一条提交上，列出来就是重复一格。
-pub fn parse_ref_labels<S: AsRef<str>>(decoration: &str, remotes: &[S]) -> Vec<GitRefLabel> {
-    let mut out = Vec::new();
-    for raw in decoration.split(',') {
-        let mut name = js_trim(raw);
-        if name.is_empty() {
-            continue;
-        }
-        if let Some(tag) = name.strip_prefix("tag: ") {
-            out.push(GitRefLabel { name: js_trim(tag).to_string(), kind: GitRefKind::Tag, head: None });
-            continue;
-        }
-        let mut head = false;
-        if let Some(arrow) = name.find(" -> ") {
-            // 左边必然是字面量 HEAD，右边才是分支名
-            name = js_trim(&name[arrow + 4..]);
-            head = true;
-        }
-        if name.is_empty() || name == "HEAD" {
-            continue;
-        }
-        let remote = is_remote_name(name, remotes);
-        if remote && name.ends_with("/HEAD") {
-            continue;
-        }
-        out.push(GitRefLabel {
-            name: name.to_string(),
-            kind: if remote { GitRefKind::Remote } else { GitRefKind::Local },
-            head: head.then_some(true),
-        });
-    }
-    out
-}
-
-/// [`log_page_args`] 输出的一行
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ParsedLogCommit {
-    pub sha: String,
-    pub short: String,
-    pub author: String,
-    pub author_email: String,
-    /// unix 毫秒
-    pub authored_at: i64,
-    pub subject: String,
-    pub parents: Vec<String>,
-    pub decoration: String,
-}
-
-/// `(parents ?? "").split(" ").filter(Boolean)`
-fn split_parents(s: &str) -> Vec<String> {
-    s.split(' ').filter(|p| !p.is_empty()).map(str::to_string).collect()
-}
-
-/// 解析 log_page_args 的输出。列不齐的行直接丢——宁可少一条也不要画错的图
-pub fn parse_log_page(stdout: &str) -> Vec<ParsedLogCommit> {
-    let mut out = Vec::new();
-    for line in lines(stdout) {
-        if js_trim(line).is_empty() {
-            continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 8 {
-            continue;
-        }
-        let (sha, short) = (cols[0], cols[1]);
-        if sha.is_empty() || short.is_empty() {
-            continue;
-        }
-        out.push(ParsedLogCommit {
-            sha: sha.to_string(),
-            short: short.to_string(),
-            author: cols[2].to_string(),
-            author_email: cols[3].to_string(),
-            authored_at: sec_to_ms(cols[4]),
-            parents: split_parents(cols[5]),
-            decoration: cols[6].to_string(),
-            // subject 是最后一列，里面的 TAB 要原样拼回去
-            subject: cols[7..].join("\t"),
-        });
-    }
-    out
-}
-
-/// 作者采样：按出现次数降序，同次数按首次出现的顺序（log 是新→旧，即最近活跃优先）
-pub fn rank_authors(stdout: &str) -> Vec<String> {
-    // 插入顺序 = 首次出现顺序（TS 的 Map），稳定排序保住同次数时的先后
-    let mut order: Vec<(&str, usize)> = Vec::new();
-    let mut idx: HashMap<&str, usize> = HashMap::new();
-    for line in lines(stdout) {
-        let name = js_trim(line);
-        if name.is_empty() {
-            continue;
-        }
-        match idx.get(name) {
-            Some(&i) => order[i].1 += 1,
-            None => {
-                idx.insert(name, order.len());
-                order.push((name, 1));
-            }
-        }
-    }
-    order.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-    order.into_iter().map(|(n, _)| n.to_string()).collect()
-}
-
-/// [`commit_meta_args`] 的一行输出
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ParsedCommitMeta {
-    pub sha: String,
-    pub short: String,
-    pub author: String,
-    pub author_email: String,
-    /// unix 毫秒
-    pub authored_at: i64,
-    pub committer: String,
-    /// unix 毫秒
-    pub committed_at: i64,
-    pub parents: Vec<String>,
-    pub decoration: String,
-}
-
-/// 解析 commit_meta_args 的一行输出。列不齐返回 None，调用方当"读不到这条提交"
-pub fn parse_commit_meta(stdout: &str) -> Option<ParsedCommitMeta> {
-    let line = lines(stdout).find(|l| !js_trim(l).is_empty())?;
-    let cols: Vec<&str> = line.split('\t').collect();
-    if cols.len() < 8 {
-        return None;
-    }
-    let (sha, short) = (cols[0], cols[1]);
-    if sha.is_empty() || short.is_empty() {
-        return None;
-    }
-    Some(ParsedCommitMeta {
-        sha: sha.to_string(),
-        short: short.to_string(),
-        author: cols[2].to_string(),
-        author_email: cols[3].to_string(),
-        authored_at: sec_to_ms(cols[4]),
-        committer: cols[5].to_string(),
-        committed_at: sec_to_ms(cols[6]),
-        parents: split_parents(cols[7]),
-        decoration: cols.get(8).copied().unwrap_or("").to_string(),
-    })
-}
-
-/// 提交里改动的一个文件（TS 的 `ParsedCommitFile`），与协议里的 GitCommitFile 同形
-pub type ParsedCommitFile = GitCommitFile;
-
 /// numstat 的一列：二进制文件是 `-`（记 None，不是 0——"改了但不知道多少行"和
 /// "一行没改"在界面上是两回事）。
 ///
@@ -1515,66 +924,6 @@ fn numstat_col(s: Option<&str>) -> Option<u64> {
     let n = js_string_to_number(s);
     (n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= u64::MAX as f64).then_some(n as u64)
 }
-
-/// 解析 commit_files_args 的两段输出。
-///
-/// raw 段每行以 `:` 开头：`:<旧模式> <新模式> <旧sha> <新sha> <状态>\t<路径>[\t<新路径>]`。
-/// 状态可能带相似度数字（R100 / C85），只取首字母。
-///
-/// numstat 段是 `<增>\t<删>\t<路径>`，二进制文件两列都是 `-`（记 None，不是 0——
-/// "改了但不知道多少行"和"一行没改"在界面上是两回事）。
-///
-/// 两段的文件顺序由 git 的同一个 diff queue 决定，一致，所以按下标配对。
-/// 条数对不上（不该发生，但输出被 profile 之类污染过就会）时宁可丢掉全部数字，
-/// 也不要把 A 文件的行数记到 B 文件头上。
-pub fn parse_commit_files(stdout: &str) -> Vec<ParsedCommitFile> {
-    let mut raw: Vec<GitCommitFile> = Vec::new();
-    let mut nums: Vec<(Option<u64>, Option<u64>)> = Vec::new();
-    for line in lines(stdout) {
-        if js_trim(line).is_empty() {
-            continue;
-        }
-        if line.starts_with(':') {
-            // 状态与路径之间是 TAB，前面那截模式/sha 用空格分隔
-            let Some(tab) = line.find('\t') else { continue };
-            // head.trim().split(/\s+/) 的最后一段，再 charAt(0)
-            let last = js_trim(&line[..tab]).rsplit(is_js_whitespace).next().unwrap_or("");
-            let status = char_at0(last);
-            let paths: Vec<String> =
-                line[tab + 1..].split('\t').map(|p| unquote_c_path(js_trim(p))).filter(|p| !p.is_empty()).collect();
-            if status.is_empty() || paths.is_empty() {
-                continue;
-            }
-            let mut paths = paths.into_iter();
-            let first = paths.next().unwrap_or_default();
-            // R / C 有两个路径：先旧后新
-            let (path, orig_path) = match paths.next() {
-                Some(second) => (second, Some(first)),
-                None => (first, None),
-            };
-            raw.push(GitCommitFile { path, orig_path, status, added: None, deleted: None });
-            continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 3 {
-            continue;
-        }
-        nums.push((numstat_col(cols.first().copied()), numstat_col(cols.get(1).copied())));
-    }
-    let aligned = nums.len() == raw.len();
-    raw.into_iter()
-        .enumerate()
-        .map(|(i, mut f)| {
-            if aligned {
-                (f.added, f.deleted) = nums[i];
-            }
-            f
-        })
-        .collect()
-}
-
-/// 提交详情里最多列多少个文件。改了几千个文件的提交不该把面板撑爆
-pub const COMMIT_FILE_CAP: usize = 300;
 
 /// numstat 的一行：增删行数，二进制 / 读不出时为 None
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1666,9 +1015,6 @@ pub(crate) fn is_js_whitespace(c: char) -> bool {
     )
 }
 
-/// 同一套空白写成正则字符类的内容（用在 `[...]` / `[^...]` 里）
-const JS_WS_CLASS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
-
 /// `String.prototype.trim`
 pub(crate) fn js_trim(s: &str) -> &str {
     s.trim_matches(is_js_whitespace)
@@ -1677,15 +1023,6 @@ pub(crate) fn js_trim(s: &str) -> &str {
 /// `s.length`：UTF-16 码元数
 fn utf16_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
-}
-
-/// `s.charAt(0)`：第一个 UTF-16 码元。非 BMP 字符只取到半个代理，Rust 表示不了，记 U+FFFD
-fn char_at0(s: &str) -> String {
-    match s.chars().next() {
-        None => String::new(),
-        Some(c) if c.len_utf16() == 1 => c.to_string(),
-        Some(_) => '\u{FFFD}'.to_string(),
-    }
 }
 
 /// `Number(string)`（ECMAScript StringToNumber）：首尾空白、空串为 0、十六进制 / 八进制 /
@@ -1863,187 +1200,6 @@ mod tests {
         }
     }
 
-    mod log_page_args {
-        use super::*;
-
-        #[test]
-        fn looks_at_branches_remotes_tags_rather_than_all() {
-            // --all 会把 IDE 写在 refs/jb/* 下的 Local History 提交也算进来
-            let args = log_page_args("git", "/repo", &LogQuery::default());
-            assert!(has(&args, "--branches"));
-            assert!(has(&args, "--remotes"));
-            assert!(has(&args, "--tags"));
-            assert!(!has(&args, "--all"));
-        }
-
-        #[test]
-        fn takes_one_extra_row_so_the_caller_can_tell_whether_there_is_a_next_page() {
-            let args = log_page_args("git", "/repo", &LogQuery { limit: Some(20), ..Default::default() });
-            assert_eq!(after(&args, "-n"), "21");
-        }
-
-        #[test]
-        fn treats_the_search_box_as_a_literal_not_a_regex() {
-            let args = log_page_args("git", "/repo", &LogQuery { grep: Some("fix(".into()), ..Default::default() });
-            assert!(has(&args, "--fixed-strings"));
-            assert!(has(&args, "--regexp-ignore-case"));
-            assert!(has(&args, "--grep=fix("));
-        }
-
-        #[test]
-        fn terminates_a_branch_filter_with_dashdash_so_a_leading_dash_cannot_become_an_option() {
-            let args = log_page_args("git", "/repo", &LogQuery { rev: Some("-weird-branch".into()), ..Default::default() });
-            assert_eq!(tail(&args, 2), ["-weird-branch", "--"]);
-            assert!(!has(&args, "--branches"));
-        }
-    }
-
-    mod parse_ref_labels {
-        use super::*;
-
-        fn label(name: &str, kind: GitRefKind, head: Option<bool>) -> GitRefLabel {
-            GitRefLabel { name: name.into(), kind, head }
-        }
-
-        #[test]
-        fn splits_decoration_into_local_remote_and_tag_labels() {
-            let refs = parse_ref_labels("HEAD -> main, origin/main, tag: v1.0", &["origin"]);
-            assert_eq!(
-                refs,
-                [
-                    label("main", GitRefKind::Local, Some(true)),
-                    label("origin/main", GitRefKind::Remote, None),
-                    label("v1.0", GitRefKind::Tag, None),
-                ]
-            );
-        }
-
-        #[test]
-        fn drops_origin_head_and_a_detached_bare_head() {
-            assert_eq!(
-                parse_ref_labels("HEAD, origin/HEAD, origin/main", &["origin"]),
-                [label("origin/main", GitRefKind::Remote, None)]
-            );
-        }
-
-        #[test]
-        fn returns_nothing_for_an_undecorated_commit() {
-            assert_eq!(parse_ref_labels("", &["origin"]), []);
-        }
-    }
-
-    mod parse_log_page {
-        use super::*;
-
-        fn row(cols: &[&str]) -> String {
-            cols.join("\t")
-        }
-
-        #[test]
-        fn parses_parents_refs_and_a_subject_containing_tabs() {
-            let sha = "a".repeat(40);
-            let out = parse_log_page(&row(&[&sha, "aaaaaaa", "fay", "f@x.io", "1700000000", "", "HEAD -> main", "fix:\tthing"]));
-            assert_eq!(out.len(), 1);
-            assert_eq!(out[0].parents, Vec::<String>::new());
-            assert_eq!(out[0].subject, "fix:\tthing");
-            assert_eq!(out[0].authored_at, 1_700_000_000_000);
-            assert_eq!(out[0].decoration, "HEAD -> main");
-        }
-
-        #[test]
-        fn keeps_both_parents_of_a_merge_in_git_order() {
-            let (m, p, q) = ("m".repeat(40), "p".repeat(40), "q".repeat(40));
-            let parents = format!("{p} {q}");
-            let out = parse_log_page(&row(&[&m, "mmmmmmm", "fay", "f@x.io", "1", &parents, "", "Merge"]));
-            assert_eq!(out[0].parents, [p, q]);
-        }
-
-        #[test]
-        fn drops_short_rows_instead_of_drawing_a_wrong_graph() {
-            assert_eq!(parse_log_page("deadbeef\tfay\tbroken"), []);
-        }
-    }
-
-    mod rank_authors {
-        use super::*;
-
-        #[test]
-        fn orders_by_commit_count_most_active_first() {
-            assert_eq!(rank_authors("fay\nlee\nfay\nfay\nlee\nzhu\n"), ["fay", "lee", "zhu"]);
-        }
-    }
-
-    mod parse_commit_meta {
-        use super::*;
-
-        #[test]
-        fn reads_author_and_committer_timestamps_separately() {
-            let sha = "s".repeat(40);
-            let meta =
-                parse_commit_meta(&[sha.as_str(), "sssssss", "fay", "f@x.io", "1700000000", "lee", "1700000060", "", ""].join("\t"))
-                    .unwrap();
-            assert_eq!(meta.authored_at, 1_700_000_000_000);
-            assert_eq!(meta.committed_at, 1_700_000_060_000);
-            assert_eq!(meta.committer, "lee");
-        }
-
-        #[test]
-        fn returns_null_when_the_row_is_malformed() {
-            assert_eq!(parse_commit_meta("nope"), None);
-        }
-    }
-
-    mod parse_commit_files {
-        use super::*;
-
-        fn file(path: &str, orig: Option<&str>, status: &str, added: Option<u64>, deleted: Option<u64>) -> GitCommitFile {
-            GitCommitFile { path: path.into(), orig_path: orig.map(Into::into), status: status.into(), added, deleted }
-        }
-
-        #[test]
-        fn pairs_the_raw_section_with_the_numstat_section_by_position() {
-            let files = parse_commit_files(
-                &[
-                    ":000000 100644 0000000 353b768 A\tCLAUDE.md",
-                    ":100644 100644 f35f9b5 e5a4e35 M\tpackage.json",
-                    "75\t0\tCLAUDE.md",
-                    "2\t1\tpackage.json",
-                ]
-                .join("\n"),
-            );
-            assert_eq!(
-                files,
-                [file("CLAUDE.md", None, "A", Some(75), Some(0)), file("package.json", None, "M", Some(2), Some(1))]
-            );
-        }
-
-        #[test]
-        fn keeps_both_paths_of_a_rename_and_strips_the_similarity_score() {
-            let files = parse_commit_files(&[":100644 100644 aaa bbb R100\told.ts\tnew.ts", "0\t0\tsrc/{old.ts => new.ts}"].join("\n"));
-            assert_eq!(files, [file("new.ts", Some("old.ts"), "R", Some(0), Some(0))]);
-        }
-
-        #[test]
-        fn records_a_binary_file_as_unknown_line_counts_not_zero() {
-            let files = parse_commit_files(&[":100644 100644 aaa bbb M\tlogo.png", "-\t-\tlogo.png"].join("\n"));
-            assert_eq!(files[0], file("logo.png", None, "M", None, None));
-        }
-
-        #[test]
-        fn drops_every_line_count_when_the_two_sections_disagree_rather_than_misattributing_them() {
-            let files = parse_commit_files(
-                &[":000000 100644 0000000 353b768 A\ta.ts", ":100644 100644 f35f9b5 e5a4e35 M\tb.ts", "5\t1\tb.ts"].join("\n"),
-            );
-            let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.added, f.deleted)).collect();
-            assert_eq!(got, [("a.ts", None, None), ("b.ts", None, None)]);
-        }
-
-        #[test]
-        fn returns_nothing_for_a_commit_with_no_diff() {
-            assert_eq!(parse_commit_files(""), []);
-        }
-    }
-
     mod parse_branch_list {
         use super::*;
 
@@ -2071,7 +1227,7 @@ mod tests {
             let out = parse_branch_list(&row("main", "origin/main", "*", ""), &["origin"]);
             assert_eq!(
                 out,
-                [GitBranchRef { name: "main".into(), remote: false, upstream: Some("origin/main".into()), head: true }]
+                [ParsedBranch { name: "main".into(), remote: false, upstream: Some("origin/main".into()), head: true }]
             );
         }
     }
@@ -2087,62 +1243,8 @@ mod tests {
         }
     }
 
-    mod history_write_argv {
+    mod write_argv {
         use super::*;
-
-        #[test]
-        fn fetches_every_remote_and_prunes_stale_tracking_branches() {
-            assert_eq!(tail(&fetch_args("git", "/repo"), 3), ["fetch", "--all", "--prune"]);
-        }
-
-        #[test]
-        fn detaches_head_at_the_revision_instead_of_guessing_a_branch() {
-            assert_eq!(tail(&checkout_detach_args("git", "/repo", "abc"), 3), ["checkout", "--detach", "abc"]);
-        }
-
-        #[test]
-        fn checks_out_a_local_branch_without_dashdash_so_git_does_not_treat_it_as_a_pathspec() {
-            let argv = checkout_branch_args("git", "/repo", "main");
-            assert_eq!(tail(&argv, 2), ["checkout", "main"]);
-            assert!(!has(&argv, "--"));
-        }
-
-        #[test]
-        fn creates_a_tracking_branch_from_the_remote_ref() {
-            assert_eq!(
-                tail(&checkout_track_args("git", "/repo", "main", "origin/main"), 5),
-                ["checkout", "-b", "main", "--track", "origin/main"]
-            );
-        }
-
-        #[test]
-        fn cherry_picks_and_reverts_by_full_sha_revert_without_opening_an_editor() {
-            let sha = "a".repeat(40);
-            assert_eq!(tail(&cherry_pick_args("git", "/repo", &sha), 2), ["cherry-pick", sha.as_str()]);
-            assert_eq!(tail(&revert_args("git", "/repo", &sha), 3), ["revert", "--no-edit", sha.as_str()]);
-        }
-
-        #[test]
-        fn creates_a_branch_with_dashdash_so_a_leading_dash_name_cannot_become_an_option() {
-            assert_eq!(tail(&branch_create_args("git", "/repo", "feat", "HEAD"), 4), ["branch", "--", "feat", "HEAD"]);
-        }
-
-        #[test]
-        fn creates_and_checks_out_a_branch_in_one_checkout_b() {
-            assert_eq!(tail(&checkout_new_branch_args("git", "/repo", "feat", "abc"), 4), ["checkout", "-b", "feat", "abc"]);
-        }
-
-        #[test]
-        fn writes_the_reset_mode_into_argv_instead_of_relying_on_git_defaults() {
-            assert_eq!(tail(&reset_args("git", "/repo", "abc", GitResetMode::Hard), 3), ["reset", "--hard", "abc"]);
-            assert!(has(&reset_args("git", "/repo", "abc", GitResetMode::Mixed), "--mixed"));
-        }
-
-        #[test]
-        fn merges_without_opening_an_editor_and_rebases_onto_the_revision() {
-            assert_eq!(tail(&merge_args("git", "/repo", "abc"), 3), ["merge", "--no-edit", "abc"]);
-            assert_eq!(tail(&rebase_args("git", "/repo", "abc"), 2), ["rebase", "abc"]);
-        }
 
         #[test]
         fn restores_tracked_files_from_head_and_cleans_untracked_paths_behind_dashdash() {
@@ -2162,18 +1264,10 @@ mod tests {
         }
 
         #[test]
-        fn force_pushes_with_lease_never_force() {
-            assert!(!push_args("git", "/repo", false).iter().any(|a| a == "--force" || a == "--force-with-lease"));
-            let forced = push_args("git", "/repo", true);
-            assert!(has(&forced, "--force-with-lease"));
-            assert!(!has(&forced, "--force"));
-        }
-
-        #[test]
-        fn drops_a_commit_by_rebasing_later_commits_onto_its_parent() {
-            let sha = "a".repeat(40);
-            let parent = format!("{sha}~1");
-            assert_eq!(tail(&drop_commit_args("git", "/repo", &sha), 4), ["rebase", "--onto", parent.as_str(), sha.as_str()]);
+        fn pushes_without_force() {
+            let argv = push_args("git", "/repo");
+            assert!(!argv.iter().any(|a| a == "--force" || a == "--force-with-lease"));
+            assert_eq!(tail(&argv, 1), ["push"]);
         }
 
         #[test]
@@ -2233,55 +1327,11 @@ mod tests {
         }
     }
 
-    mod tracking_local_name {
-        use super::*;
-
-        #[test]
-        fn strips_the_longest_matching_remote_prefix() {
-            assert_eq!(tracking_local_name("origin/main", &["origin"]).as_deref(), Some("main"));
-            assert_eq!(tracking_local_name("origin/feat/x", &["origin"]).as_deref(), Some("feat/x"));
-            assert_eq!(tracking_local_name("origin-backup/x", &["origin", "origin-backup"]).as_deref(), Some("x"));
-        }
-
-        #[test]
-        fn returns_null_when_the_name_is_not_under_a_known_remote() {
-            assert_eq!(tracking_local_name("main", &["origin"]), None);
-            assert_eq!(tracking_local_name("origin", &["origin"]), None);
-        }
-    }
-
     mod parse_git_op_input {
         use super::*;
 
         #[test]
-        fn accepts_fetch_with_no_extra_fields() {
-            assert_eq!(parse_git_op_input(&json!({ "op": "fetch" })), Ok(GitOpInput::Fetch));
-        }
-
-        #[test]
-        fn rejects_an_unsafe_branch_name_instead_of_letting_it_become_an_option() {
-            assert!(parse_git_op_input(&json!({ "op": "checkout-branch", "branch": "-n" })).is_err());
-        }
-
-        #[test]
-        fn requires_a_hex_sha_for_cherry_pick_and_revert() {
-            assert!(parse_git_op_input(&json!({ "op": "cherry-pick", "sha": "HEAD" })).is_err());
-            assert_eq!(
-                parse_git_op_input(&json!({ "op": "revert", "sha": "abcd" })),
-                Ok(GitOpInput::Revert { sha: "abcd".into() })
-            );
-        }
-
-        #[test]
-        fn accepts_reset_merge_restore_and_rejects_an_empty_restore() {
-            assert_eq!(
-                parse_git_op_input(&json!({ "op": "reset", "rev": "abcd", "mode": "hard" })),
-                Ok(GitOpInput::Reset { rev: "abcd".into(), mode: GitResetMode::Hard })
-            );
-            assert_eq!(
-                parse_git_op_input(&json!({ "op": "merge", "rev": "main" })),
-                Ok(GitOpInput::Merge { rev: "main".into() })
-            );
+        fn rejects_an_empty_restore_and_accepts_untracked_only() {
             assert!(parse_git_op_input(&json!({ "op": "restore", "paths": [] })).is_err());
             assert_eq!(
                 parse_git_op_input(&json!({ "op": "restore", "untracked": ["scratch.ts"] })),
@@ -2290,19 +1340,21 @@ mod tests {
         }
 
         #[test]
-        fn parses_force_with_lease_push_drop_and_conflict_take() {
-            assert_eq!(
-                parse_git_op_input(&json!({ "op": "push", "forceWithLease": true })),
-                Ok(GitOpInput::Push { force_with_lease: Some(true) })
-            );
-            assert_eq!(
-                parse_git_op_input(&json!({ "op": "drop", "sha": "abcd" })),
-                Ok(GitOpInput::Drop { sha: "abcd".into() })
-            );
+        fn accepts_continue_abort_and_take() {
+            assert_eq!(parse_git_op_input(&json!({ "op": "continue" })), Ok(GitOpInput::Continue));
+            assert_eq!(parse_git_op_input(&json!({ "op": "abort" })), Ok(GitOpInput::Abort));
             assert_eq!(
                 parse_git_op_input(&json!({ "op": "take", "side": "ours", "paths": ["a.ts"] })),
                 Ok(GitOpInput::Take { side: GitTakeSide::Ours, paths: vec!["a.ts".into()] })
             );
+            assert!(parse_git_op_input(&json!({ "op": "take", "side": "both", "paths": ["a.ts"] })).is_err());
+            assert!(parse_git_op_input(&json!({ "op": "take", "side": "ours", "paths": [] })).is_err());
+        }
+
+        #[test]
+        fn rejects_unknown_ops() {
+            assert!(parse_git_op_input(&json!({ "op": "fetch" })).is_err());
+            assert!(parse_git_op_input(&json!([])).is_err());
         }
     }
 
@@ -2435,17 +1487,6 @@ mod tests {
         }
 
         #[test]
-        fn remotes_keep_one_fetch_url_each() {
-            assert_eq!(
-                parse_remotes("origin\tgit@x:y.git (fetch)\norigin\tgit@x:y.git (push)\nup  https://u (push)\nup https://u (fetch)\n"),
-                [
-                    GitRemote { name: "origin".into(), url: "git@x:y.git".into() },
-                    GitRemote { name: "up".into(), url: "https://u".into() },
-                ]
-            );
-        }
-
-        #[test]
         fn worktree_list_porcelain() {
             let out = parse_worktree_list(
                 "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree \"/a\\\"b\"\nHEAD def\ndetached\nlocked reason\nprunable\n\nworktree \nHEAD x\n",
@@ -2461,18 +1502,6 @@ mod tests {
                         prunable: true,
                         ..Default::default()
                     },
-                ]
-            );
-        }
-
-        #[test]
-        fn log_uses_js_number_for_timestamps() {
-            assert_eq!(
-                parse_log("abc\tfay\t1700000000\tfix:\tthing\r\nbad\n \t \t \nx\ty\t0x10\ts"),
-                [
-                    GitCommit { sha: "abc".into(), author: "fay".into(), authored_at: 1_700_000_000_000, subject: "fix:\tthing".into() },
-                    GitCommit { sha: " ".into(), author: " ".into(), authored_at: 0, subject: String::new() },
-                    GitCommit { sha: "x".into(), author: "y".into(), authored_at: 16_000, subject: "s".into() },
                 ]
             );
         }
@@ -2499,9 +1528,6 @@ mod tests {
 
         #[test]
         fn small_parsers() {
-            assert_eq!(parse_tag_list("v1\n\n v2 \nv3", Some(0)), ["v1"]);
-            assert_eq!(parse_tag_list("v1\n\n v2 \nv3", None), ["v1", "v2", "v3"]);
-            assert_eq!(rank_authors("b\na\na\nb\nc\n"), ["b", "a", "c"]);
             assert_eq!(parse_exists_many("yes\r\nno\n\n junk \n yes "), [true, false, true]);
             assert_eq!(count_ignored("!! a\n?? b\n!! c/\n"), 2);
             assert_eq!(

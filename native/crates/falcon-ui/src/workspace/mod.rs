@@ -23,7 +23,7 @@ use falcon_core::layout::{self as layout, ColumnLayout};
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_platform::Platform;
 pub use falcon_core::workspace::{
-    ActiveView, DiffCommit, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
+    ActiveView, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
     WorkspaceState, is_pending_id,
 };
 use falcon_proto::{AppIconState, AuthStatus, PluginList, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
@@ -50,14 +50,13 @@ pub struct AskpassSpec {
     pub prompt: String,
 }
 
-/// 登录态：React 版里 `auth.required && !auth.authenticated` 时整页换成 Login
+/// 连上服务端没有：能连上就进入 Ready，不再有登录页。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AuthPhase {
     /// 还没问过服务端
     Checking,
     /// 服务端连不上（本机服务没起来 / 网络）
     Unreachable(String),
-    NeedLogin,
     Ready,
 }
 
@@ -143,8 +142,6 @@ pub struct Workspace {
     /// 右侧栏插件（ADR 0025）：这台服务端装了哪些；None = 还没取到
     pub plugins: Option<PluginList>,
 
-    /// AI 助手面板（assistant/mod.rs）：第一次打开时建，之后常驻——收起不卸载，各段对话的 WS 一直连着
-    pub assistant: Option<Entity<crate::assistant::AssistantPanel>>,
     /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
     /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
@@ -184,9 +181,6 @@ impl Workspace {
     pub fn new(profile: ServerProfile, cx: &mut Context<Self>) -> Self {
         let platform = falcon_platform::get(cx);
         let client = FalconClient::new(profile.url.parse().expect("服务端基址在配置里校验过"));
-        if let Some(pw) = platform.password(&profile.id) {
-            client.set_relogin_password(Some(pw));
-        }
         let state = WorkspaceState::from_persisted(&persist::load(&*platform, &profile));
         let mut this = Self {
             profile,
@@ -214,7 +208,6 @@ impl Workspace {
             custom_icon: None,
             app_icon_busy: false,
             plugins: None,
-            assistant: None,
             terminals: HashMap::new(),
             program_alerts: Default::default(),
             finish_chimes: Default::default(),
@@ -258,24 +251,6 @@ impl Workspace {
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(30), |this, cx| this.refresh_agents(cx)));
         self._tasks.push(Self::watch_wake(cx));
-        // 自动重登成功后，停在"需要登录"的界面自己恢复
-        let mut events = self.client.subscribe_auth();
-        self._tasks.push(cx.spawn(async move |this, cx| {
-            use futures::StreamExt;
-            while let Some(ev) = events.next().await {
-                let keep = this
-                    .update(cx, |this, cx| {
-                        if matches!(ev, falcon_client::AuthEvent::LoggedIn) && this.auth_phase == AuthPhase::NeedLogin {
-                            this.auth_phase = AuthPhase::Checking;
-                            this.init(cx);
-                        }
-                    })
-                    .is_ok();
-                if !keep {
-                    break;
-                }
-            }
-        }));
     }
 
     /// 睡眠唤醒后立即重连（设计文档 §3.2）。拿不到系统的唤醒通知，改看墙钟：定时器在睡眠期间
@@ -335,10 +310,10 @@ impl Workspace {
         self.auth_phase == AuthPhase::Ready
     }
 
-    /// 启动 / 登录之后：认证状态 → 系统信息 + 项目 + 主机 + 会话
+    /// 启动之后：能问到认证状态就进入工作区，拉系统信息 + 项目 + 主机 + 会话。
+    /// 问不到就是连不上，不再因为 `required` 停在登录页。
     pub fn init(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
-        let password = self.saved_password();
         cx.spawn(async move |this, cx| {
             let status = match client.auth_status().await {
                 Ok(s) => s,
@@ -351,22 +326,12 @@ impl Workspace {
                     return;
                 }
             };
-            let mut need_login = status.required && !status.authenticated;
-            // 本机记着密码就先静默登一次
-            if need_login && let Some(pw) = password {
-                need_login = client.login(&pw).await.is_err();
-            }
             this.update(cx, |this, cx| {
                 this.auth = Some(status);
-                if need_login {
-                    this.auth_phase = AuthPhase::NeedLogin;
-                    cx.notify();
-                } else {
-                    this.auth_phase = AuthPhase::Ready;
-                    // 连上了才记作下次启动的默认服务端：连不上 / 停在登录页的不算
-                    cx.global_mut::<crate::profiles::Profiles>().mark_connected(&this.profile.id);
-                    this.load_all(cx);
-                }
+                this.auth_phase = AuthPhase::Ready;
+                // 连上了才记作下次启动的默认服务端
+                cx.global_mut::<crate::profiles::Profiles>().mark_connected(&this.profile.id);
+                this.load_all(cx);
             })
             .ok();
         })
@@ -411,47 +376,8 @@ impl Workspace {
         .detach();
     }
 
-    /// 登录框提交
-    pub fn login(&mut self, password: String, remember: bool, cx: &mut Context<Self>) -> Task<Result<(), String>> {
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| match client.login(&password).await {
-            Ok(()) => {
-                this.update(cx, |this, cx| {
-                    if remember {
-                        this.store_password(Some(&password));
-                        this.client.set_relogin_password(Some(password.clone()));
-                    }
-                    this.auth_phase = AuthPhase::Checking;
-                    this.init(cx);
-                    // 停在 Unauthorized 的终端 socket 登录成功后会自己接着连；保险起见叫醒一次
-                    for view in this.terminals.values() {
-                        view.read(cx).reconnect_now();
-                    }
-                })
-                .ok();
-                Ok(())
-            }
-            Err(err) => Err(err.to_string()),
-        })
-    }
-
-    pub fn logout(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        self.store_password(None);
-        self.client.set_relogin_password(None);
-        cx.spawn(async move |this, cx| {
-            let _ = client.logout().await;
-            this.update(cx, |this, cx| {
-                this.auth_phase = AuthPhase::NeedLogin;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// 重启连着的服务端：POST /api/system/restart 返回后它就会退出重起，连接走自动重连
-    /// （记住密码时自动重登）。失败统一交 handle_error——401 回登录页
+    /// 重启连着的服务端：POST /api/system/restart 返回后它就会退出重起，连接走自动重连。
+    /// 失败统一交 handle_error。
     pub fn restart_server(&mut self, cx: &mut Context<Self>) {
         if self.restarting {
             return;
@@ -478,11 +404,10 @@ impl Workspace {
         .detach();
     }
 
-    /// REST 失败的统一出口：401 回登录页（React 版的 handleApiError）
+    /// REST 失败的统一出口。401 不再切到登录页（没有账户门禁），只提示一下。
     pub fn handle_error(&mut self, err: &falcon_client::ApiError, cx: &mut Context<Self>) {
-        if err.is_unauthorized() && self.auth_phase == AuthPhase::Ready {
-            self.auth_phase = AuthPhase::NeedLogin;
-            cx.notify();
+        if err.is_unauthorized() {
+            self.toast(ToastKind::Warning, err.to_string(), None, cx);
         }
     }
 
@@ -917,10 +842,6 @@ impl Workspace {
             let visible = shown.contains(id);
             view.update(cx, |v, _| v.set_visible(visible));
         }
-        if let Some(panel) = self.assistant.clone() {
-            let window_visible = self.window_visible;
-            panel.update(cx, |p, cx| p.sync_visibility(window_visible, cx));
-        }
     }
 
     /// 某个终端窗口属于哪个项目
@@ -1044,15 +965,10 @@ impl Workspace {
                 }
                 TerminalViewEvent::ClearRecord => this.clear_dead(&sid, cx),
                 TerminalViewEvent::Askpass { id, prompt } => this.push_askpass(id.clone(), prompt.clone(), cx),
-                TerminalViewEvent::Unauthorized => {
-                    if this.auth_phase == AuthPhase::Ready {
-                        this.auth_phase = AuthPhase::NeedLogin;
-                        cx.notify();
-                    }
-                }
+                // 服务端不再因未登录关掉 socket。旧服务端若仍回 4401，终端自己停在未连接，不切登录页。
+                TerminalViewEvent::Unauthorized => {}
                 TerminalViewEvent::Toast { kind, title, body } => this.toast(*kind, title.clone(), body.clone(), cx),
                 TerminalViewEvent::ProgramStatus(records) => this.apply_program_records(&sid, records, cx),
-                TerminalViewEvent::ShellChanged | TerminalViewEvent::LiveChanged => {}
             })
             .detach();
             self.terminals.insert(id, view);
@@ -1067,15 +983,5 @@ impl Workspace {
 
     pub fn persist(&self) {
         persist::save(&*self.platform, &self.profile, &self.state);
-    }
-
-    /// 本机记着的访问密码（浏览器里恒为 None）
-    pub fn saved_password(&self) -> Option<String> {
-        self.platform.password(&self.profile.id)
-    }
-
-    /// 记住 / 忘掉访问密码
-    pub fn store_password(&self, password: Option<&str>) {
-        self.platform.store_password(&self.profile.id, password);
     }
 }

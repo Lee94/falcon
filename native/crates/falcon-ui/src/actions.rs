@@ -19,12 +19,9 @@ actions!(
         CloseTab,
         DetachTab,
         ToggleSidebar,
-        ToggleGitPanel,
         ToggleChangesPanel,
         OpenRelays,
         ToggleFilesPanel,
-        ToggleMeeglePanel,
-        ToggleAssistant,
         ToggleZoom,
         Reattach,
         Overview,
@@ -51,12 +48,6 @@ actions!(
     ]
 );
 
-/// AI 助手面板里的动作（key context "Assistant"，docs/design/ai-assistant.md）
-pub mod assistant {
-    use gpui_kit::actions;
-    actions!(assistant, [ToggleMode, AllowOnce, AllowAlways, Reject]);
-}
-
 /// 文件窗口里的动作（key context "FileView"）
 pub mod file_view {
     use gpui_kit::actions;
@@ -77,13 +68,10 @@ fn bind(cmd: Command, keys: &str) -> KeyBinding {
         Command::NewTerminal => KeyBinding::new(keys, NewTerminal, None),
         Command::CloseTab => KeyBinding::new(keys, CloseTab, None),
         Command::ToggleSidebar => KeyBinding::new(keys, ToggleSidebar, None),
-        Command::ToggleGitPanel => KeyBinding::new(keys, ToggleGitPanel, None),
         Command::ToggleChangesPanel => KeyBinding::new(keys, ToggleChangesPanel, None),
         // 原来转发面板的键位：中转挪进设置后（ADR 0016）打开设置的「中转」页
         Command::OpenRelays => KeyBinding::new(keys, OpenRelays, None),
         Command::ToggleFilesPanel => KeyBinding::new(keys, ToggleFilesPanel, None),
-        Command::ToggleMeeglePanel => KeyBinding::new(keys, ToggleMeeglePanel, None),
-        Command::ToggleAssistant => KeyBinding::new(keys, ToggleAssistant, None),
         Command::Reattach => KeyBinding::new(keys, Reattach, None),
         Command::Overview => KeyBinding::new(keys, Overview, None),
         Command::NextTab => KeyBinding::new(keys, NextTab, None),
@@ -136,18 +124,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
         // 文件窗口里保存。不在终端里，裸 Ctrl+S 没有 shell 语义要让
         KeyBinding::new(if info.mac { "cmd-s" } else { "ctrl-s" }, file_view::Save, Some("FileView")),
-        // 助手面板里切 Shell / Agent 输入
-        KeyBinding::new(if info.mac { "cmd-shift-i" } else { "ctrl-shift-i" }, assistant::ToggleMode, Some("Assistant")),
-    ]);
-    // 对话里答最上面那张等批准的卡片：⌘↵ 执行（卡片按钮上标着），⌥⌘Y 总是允许、⌥⌘Z 拒绝（与 Zed
-    // 一致）。挂在一段对话的 key context 上：焦点在它的终端里时也生效；在 Agent 输入行里时 ⌘↵ 先被
-    // 输入框变成 `Enter { secondary }`，由那一行自己转成批准（pane.rs 的 agent_line）
-    let (allow, always, reject) =
-        if info.mac { ("cmd-enter", "alt-cmd-y", "alt-cmd-z") } else { ("ctrl-enter", "ctrl-alt-y", "ctrl-alt-z") };
-    bindings.extend([
-        KeyBinding::new(allow, assistant::AllowOnce, Some("AssistantAgent")),
-        KeyBinding::new(always, assistant::AllowAlways, Some("AssistantAgent")),
-        KeyBinding::new(reject, assistant::Reject, Some("AssistantAgent")),
     ]);
     if info.mac {
         bindings.extend([
@@ -209,9 +185,6 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action(t!("sidebar.collapse").to_string(), ToggleSidebar),
                 MenuItem::action(t!("native.menu.files").to_string(), ToggleFilesPanel),
                 MenuItem::action(t!("native.menu.changes").to_string(), ToggleChangesPanel),
-                MenuItem::action(t!("native.menu.git").to_string(), ToggleGitPanel),
-                MenuItem::action(t!("native.menu.meegle").to_string(), ToggleMeeglePanel),
-                MenuItem::action(t!("assistant.title").to_string(), ToggleAssistant),
                 MenuItem::separator(),
                 MenuItem::action(t!("native.menu.zoomIn").to_string(), ZoomIn),
                 MenuItem::action(t!("native.menu.zoomOut").to_string(), ZoomOut),

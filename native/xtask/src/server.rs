@@ -2,12 +2,11 @@
 //!
 //! `cargo xtask server` 出 `release/falcon-v<版本>-<平台>`，`cargo xtask pkg` 把它放进
 //! Falcon.app 的 Resources，`falcon service install` 再把它拷到 `<dataDir>/bin/falcon`。
-//! 不需要首次运行的解压步骤：
-//! - 锁定版本的 meegle CLI 编进二进制，首次用到时释放到 `<dataDir>/bin/meegle-<内容哈希>`；
-//! - 5 个目标的会话守护进程（falcon-sessiond，ADR 0020）gzip 后编进二进制：Mac 上的后端也要往
-//!   Linux arm64 的远端推，用到哪个目标就释放 / 推送哪个（falcon-server 的 sessiond/bin.rs）。
+//! 不需要首次运行的解压步骤：5 个目标的会话守护进程（falcon-sessiond，ADR 0020）gzip 后编进
+//! 二进制。Mac 上的后端也要往 Linux arm64 的远端推，用到哪个目标就释放 / 推送哪个
+//! （falcon-server 的 sessiond/bin.rs）。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
@@ -33,27 +32,6 @@ pub fn run(args: &[String]) -> Result<()> {
     build(&target).map(|_| ())
 }
 
-/// 编两个 sidecar 并 gzip 到 `dir`。go 不在 PATH 上就失败——发布包没了它，
-/// 装好的 falcon 打开网络页会显示「没有可用的程序」。
-fn build_mesh(dir: &Path) -> Result<()> {
-    println!("== 构建 mesh sidecar（native/mesh） ==");
-    std::fs::create_dir_all(dir)?;
-    for (pkg, name) in [("tsnet", "falcon-tsnet"), ("netbird", "falcon-netbird")] {
-        let bin = native().join("target-mesh").join(name);
-        std::fs::create_dir_all(bin.parent().unwrap())?;
-        let out = bin.clone();
-        let arg = format!("./{pkg}");
-        crate::util::run_env("go", &["build", "-o", &out.to_string_lossy(), &arg], Some(&native().join("mesh")), &[])
-        .with_context(|| format!("go build {pkg} 失败"))?;
-        let bytes = std::fs::read(&bin)?;
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-        std::io::Write::write_all(&mut gz, &bytes)?;
-        std::fs::write(dir.join(format!("{name}.gz")), gz.finish()?)?;
-        println!("{name}：{}（{:.1} MB）", bin.display(), bytes.len() as f64 / 1024.0 / 1024.0);
-    }
-    Ok(())
-}
-
 /// 构建并返回产物路径
 pub fn build(target: &str) -> Result<PathBuf> {
     let Some((_, triple)) = TRIPLES.iter().find(|(p, _)| *p == target) else {
@@ -61,10 +39,7 @@ pub fn build(target: &str) -> Result<PathBuf> {
     };
     let cross = target != host_platform();
 
-    // ---- 1. 本平台的 meegle CLI ----
-    let meegle_bin = crate::meegle::ensure(target)?;
-
-    // ---- 2. 5 个目标的会话守护进程（要 Zig 与 cargo-zigbuild，见 sessiond.rs）----
+    // ---- 1. 5 个目标的会话守护进程（要 Zig 与 cargo-zigbuild，见 sessiond.rs）----
     println!("== 构建会话守护进程（cargo xtask sessiond --targets all） ==");
     crate::sessiond::build(&crate::sessiond::TARGETS, false, false)?;
     let embed_dir = native().join("target-sessiond/embed");
@@ -76,14 +51,7 @@ pub fn build(target: &str) -> Result<PathBuf> {
         std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
     }
 
-    // ---- 3. 本平台的 mesh sidecar（tsnet / NetBird）。Go 编的，只编宿主平台这一份：
-    // 异地互联跑在 falcon 后端本机，不往远端推。交叉编服务端时没有对应的 Go 工具链，跳过。
-    let mesh_dir = native().join("target-mesh/embed");
-    if !cross {
-        build_mesh(&mesh_dir)?;
-    }
-
-    // ---- 4. cargo ----
+    // ---- 2. cargo ----
     // 发布产物不带调试信息（工作区的 release profile 为原生客户端留着 debuginfo）。改 profile 会让
     // 依赖全部重编，所以单独一个 target 目录，不跟原生客户端的 release 缓存互相冲掉
     let target_dir = native().join("target-server");
@@ -93,7 +61,7 @@ pub fn build(target: &str) -> Result<PathBuf> {
         "-p",
         "falcon-server",
         "--features",
-        "embed-meegle,embed-sessiond,embed-mesh",
+        "embed-sessiond",
         "--config",
         "profile.release.debug=false",
         "--config",
@@ -111,9 +79,7 @@ pub fn build(target: &str) -> Result<PathBuf> {
         &cargo_args,
         Some(&native()),
         &[
-            ("FALCON_EMBED_MEEGLE_BIN", meegle_bin.as_os_str()),
             ("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str()),
-            ("FALCON_EMBED_MESH_DIR", mesh_dir.as_os_str()),
             ("CARGO_TARGET_DIR", target_dir.as_os_str()),
         ],
     )?;

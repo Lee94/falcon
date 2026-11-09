@@ -1,8 +1,8 @@
 //! 错误形状：对齐旧 React 版的 `ApiRequestError`（`packages/web/src/api.ts`）。
 //!
 //! React 版那边：非 2xx 时取响应体里的 `error` 字段当消息（没有就是 `HTTP <status>`），
-//! 整个响应体原样挂在 `body` 上给调用方按需收窄（批量派生的 `MultiDeriveError`、
-//! 飞书项目 409 的 `reason`）；网络层失败 status 为 0。Rust 侧 status 用 `Option`，
+//! 整个响应体原样挂在 `body` 上给调用方按需收窄（批量派生的 `MultiDeriveError`）；
+//! 网络层失败 status 为 0。Rust 侧 status 用 `Option`，
 //! 网络层失败是 `None`。
 //!
 //! **环境事实不是错误**：git / repo / 主机探测这些端点一律 200 + `ok` / `available`
@@ -10,8 +10,6 @@
 
 use std::fmt;
 
-use falcon_proto::MeegleUnavailableReason;
-use serde::Deserialize as _;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -106,7 +104,7 @@ impl ApiError {
     }
 
     /// 409：状态冲突。上传撞上同名文件（问过用户再带 overwrite 重发）、派生时分支
-    /// 被占用、飞书项目 CLI 没装 / 没登录（配合 [`ApiError::meegle_reason`]）都是它。
+    /// 被占用，都是它。
     pub fn is_conflict(&self) -> bool {
         self.status == Some(409)
     }
@@ -123,16 +121,6 @@ impl ApiError {
     /// 把错误体收窄成具体类型，如批量派生失败的 [`falcon_proto::MultiDeriveError`]。
     pub fn body_as<T: DeserializeOwned>(&self) -> Option<T> {
         self.body.as_ref().and_then(|v| T::deserialize(v).ok())
-    }
-
-    /// 飞书项目接口 409 时响应体里的 `reason`：前端据此切到安装 / 登录提示
-    /// （ADR 0010：业务请求撞上 409 就重新拉 `/api/meegle/status`）。
-    pub fn meegle_reason(&self) -> Option<MeegleUnavailableReason> {
-        if !self.is_conflict() {
-            return None;
-        }
-        let reason = self.body.as_ref()?.get("reason")?;
-        MeegleUnavailableReason::deserialize(reason).ok()
     }
 }
 
@@ -193,16 +181,5 @@ mod tests {
         );
         let d: MultiDeriveError = e.body_as().unwrap();
         assert_eq!(d.leftover.unwrap(), vec!["/w/x".to_owned()]);
-    }
-
-    #[test]
-    fn meegle_reason_only_on_409() {
-        let e = ApiError::http(
-            409,
-            r#"{"error":"未登录","reason":"not-authenticated","code":1}"#.as_bytes(),
-        );
-        assert_eq!(e.meegle_reason(), Some(MeegleUnavailableReason::NotAuthenticated));
-        let e = ApiError::http(502, r#"{"error":"x","reason":"cli-error"}"#.as_bytes());
-        assert_eq!(e.meegle_reason(), None);
     }
 }

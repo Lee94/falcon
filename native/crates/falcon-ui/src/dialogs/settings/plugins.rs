@@ -13,7 +13,7 @@ use gpui_kit::{AnyElement, App, ClipboardItem, Entity, FontWeight, IntoElement, 
 use rust_i18n::t;
 
 use super::widgets;
-use crate::panels::meegle::widgets::pill;
+use crate::panels::widgets::pill;
 use crate::panels::plugin::plugin_icon;
 use crate::theme::Ui;
 use crate::ui::icon;
@@ -124,5 +124,5 @@ pub fn render(ws: &Entity<Workspace>, cx: &App) -> impl IntoElement {
             }
         }
     }
-    widgets::section(t!("plugin.settingsTitle").to_string(), Some(t!("plugin.settingsHint").to_string()), rows, cx)
+    widgets::section(t!("plugin.settingsTitle").to_string(), None, rows, cx)
 }

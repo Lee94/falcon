@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use falcon_platform::{HtmlView, LocalService, Platform, PlatformInfo};
+use falcon_platform::{AppUpdater, HtmlView, LocalService, Platform, PlatformInfo};
 use gpui_kit::{App, Window};
 
 /// "本机"配置的缺省基址：没装过服务、也没用 FALCON_LOCAL_URL 改指别处时
@@ -157,5 +157,13 @@ impl Platform for Desktop {
 
     fn play_chime(&self) {
         crate::chime::play();
+    }
+
+    fn app_updater(&self) -> Option<Arc<dyn AppUpdater>> {
+        Some(Arc::new(crate::app_update::GithubUpdater))
+    }
+
+    fn schedule_relaunch(&self, bundle: &std::path::Path) -> Result<(), String> {
+        crate::app_update::schedule_relaunch(bundle)
     }
 }

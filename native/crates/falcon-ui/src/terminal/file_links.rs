@@ -92,11 +92,10 @@ impl TerminalView {
                     return;
                 };
                 let client = self.client.clone();
-                let cwd = self.shell_cwd.clone().or_else(|| self.output_cwd.clone());
-                let home = self.shell_home.clone();
+                let cwd = self.output_cwd.clone();
                 cx.spawn(async move |this, cx| {
                     let result = context
-                        .resolve(&client, &raw, cwd.as_deref(), home.as_deref())
+                        .resolve(&client, &raw, cwd.as_deref(), None)
                         .await;
                     this.update(cx, |_, cx| match result {
                         Ok(path) => cx.emit(TerminalViewEvent::OpenFile {
@@ -141,8 +140,7 @@ impl TerminalView {
             return;
         };
         let client = self.client.clone();
-        let cwd = self.shell_cwd.clone().or_else(|| self.output_cwd.clone());
-        let home = self.shell_home.clone();
+        let cwd = self.output_cwd.clone();
         let expected = link.clone();
         let svg = cx.svg_renderer();
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -171,7 +169,7 @@ impl TerminalView {
             };
             let result = async {
                 let path = context
-                    .resolve(&client, raw, cwd.as_deref(), home.as_deref())
+                    .resolve(&client, raw, cwd.as_deref(), None)
                     .await?;
                 let file = client.read_file(&context.project_id, &path).await?;
                 if !matches!(file.preview, falcon_proto::FilePreview::Image { .. }) {

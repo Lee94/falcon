@@ -1,6 +1,6 @@
 # 写一个右侧栏插件
 
-falcon 右侧栏内置四格之后可以挂插件：一个插件一格，面板内容由插件给（内置的「系统监控」「Docker」与「Agent 用量」也是插件，走的是同一套面板文档）。插件就是 falcon **后端那台机器上**的一个程序——任何语言都行——它把面板内容以 JSON 打到标准输出，falcon 用自己的组件、按当前主题画出来，原生客户端与浏览器版一模一样。设计取舍见 [ADR 0025](adr/0025-right-panel-plugins.md)。
+falcon 右侧栏内置两格（文件 / 修改）之后可以挂插件：一个插件一格，面板内容由插件给（内置的「系统监控」「Docker」与「Agent 用量」也是插件，走的是同一套面板文档）。插件就是 falcon **后端那台机器上**的一个程序——任何语言都行——它把面板内容以 JSON 打到标准输出，falcon 用自己的组件、按当前主题画出来。设计取舍见 [ADR 0025](adr/0025-right-panel-plugins.md)。
 
 例子在 [`docs/plugins/examples/`](plugins/examples/)：
 
@@ -143,7 +143,7 @@ stdout 打一个 JSON 对象：
 
 ## 调试
 
-面板就是最快的回路：改脚本 → 点刷新。不想开客户端时直接打 API（后端绑在回环上且没设密码时不用登录；否则先在浏览器里登录，带上 `falcon_token` cookie）：
+面板就是最快的回路：改脚本 → 点刷新。不想开客户端时直接打 API（能连上就允许使用，不用登录）：
 
 ```sh
 curl -s -X POST localhost:4923/api/plugins/<id>/render -H 'content-type: application/json' \

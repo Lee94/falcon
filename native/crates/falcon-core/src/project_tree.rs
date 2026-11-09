@@ -55,11 +55,22 @@ pub struct ServerGroup {
     pub folders: Vec<FolderGroup>,
 }
 
-/// 第二层：一个源项目（文件夹）。第三层永远是当前检出 + 附属 worktree
+/// 第二层：一个文件夹项目。
+///
+/// 普通源项目的第三层是当前检出，再加缩进在它下面的单仓库附属项目。多仓库项目
+/// （含批量派生出来的）自己就是这一层：`worktrees` 为空，会话直接挂在项目行上，
+/// 派生产物按全局顺序另占一行，不嵌在源项目下面。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderGroup {
     pub project: Project,
     pub worktrees: Vec<Project>,
+}
+
+/// 侧栏上独占一行的项目：普通源项目，以及多仓库项目。
+///
+/// 批量派生仍记下 `source_project_id`（删除级联和存档靠它），但多仓库行不再缩进。
+fn is_sidebar_folder(p: &Project) -> bool {
+    p.worktree.is_none() || p.multi.is_some()
 }
 
 pub fn folder_key(project_id: &str) -> String {
@@ -68,8 +79,8 @@ pub fn folder_key(project_id: &str) -> String {
 
 /// 检出行的标签。
 ///
-/// 多仓库容器没有单一 HEAD，返回空串让调用方给「N 个仓库」这类多仓库专用标签。
-/// `??` 语义照抄：探到的分支名是空串也原样用，不往下落。
+/// 多仓库容器没有单一 HEAD，返回空串。侧栏不再给多仓库项目画检出行。
+/// `??` 语义照抄：探到的分支名是空串也原样用，不往下落。派生行（含多仓库派生）用分支名。
 pub fn checkout_label(project: &Project, head: Option<&ProjectHead>) -> String {
     if let Some(wt) = &project.worktree {
         return wt.branch.clone();
@@ -96,13 +107,17 @@ fn legacy_conn(p: &Project) -> String {
 }
 
 pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, show_archived: bool) -> Vec<ServerGroup> {
-    // 存档的附属项目默认不占侧栏；开关一开就在原来的位置出现
+    // 存档的附属项目默认不占侧栏；开关一开，单仓库的回到源项目下面，多仓库的回到自己那一行
     let shown: Vec<&Project> = projects.iter().filter(|p| show_archived || !archived(p)).collect();
-    let sources: Vec<&Project> = shown.iter().copied().filter(|p| p.worktree.is_none()).collect();
+    let sources: Vec<&Project> = shown.iter().copied().filter(|p| is_sidebar_folder(p)).collect();
     let source_ids: HashSet<&str> = sources.iter().map(|p| p.id.as_str()).collect();
     let mut kids_by_source: HashMap<&str, Vec<&Project>> = HashMap::new();
     let mut orphans: Vec<&Project> = Vec::new();
     for p in &shown {
+        // 多仓库派生是同级文件夹，不挂到源项目下面
+        if is_sidebar_folder(p) {
+            continue;
+        }
         // sourceProjectId 为空串的附属项目在 TS 里既不是源、也不挂在谁下面，整个不出现
         let Some(src) = p.worktree.as_ref().map(|w| w.source_project_id.as_str()).filter(|s| !s.is_empty()) else {
             continue;
@@ -178,8 +193,8 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
 /// 侧栏拖拽排序：把 `id` 挪到 `target` 的前面（`after = false`）或后面，其余的相对顺序不动。
 ///
 /// 顺序是全局一条（服务端 `projects.sort_order`），侧栏按服务器分组时保留相对顺序，所以在
-/// 全局列表里挪到 target 旁边，组内看就是挪到了 target 旁边；附属项目挂在源项目下面、不看全局
-/// 位置，跟着走不用管。服务端落库与客户端的乐观更新都走这一个函数，两边挪出来的才一样。
+/// 全局列表里挪到 target 旁边，组内看就是挪到了 target 旁边；单仓库附属项目挂在源项目下面、不看全局
+/// 位置，跟着走不用管。多仓库派生自己占一行，排序跟普通项目一样。服务端落库与客户端的乐观更新都走这一个函数，两边挪出来的才一样。
 ///
 /// 两个都得在、且不是同一个，否则 None；挪完和原来一样（本来就挨着）也是 None——调用方据此
 /// 省掉一次请求
@@ -300,5 +315,31 @@ mod tests {
         assert!(group_servers(&projects, &[], "本机", false)[0].folders[0].worktrees.is_empty());
         assert_eq!(group_servers(&projects, &[], "本机", true)[0].folders[0].worktrees.len(), 1);
         assert_eq!(folder_key("s"), "p:s");
+    }
+
+    #[test]
+    fn derived_multi_project_is_a_sibling_folder() {
+        let projects = vec![
+            p(r#"{"id":"s","name":"s","type":"local","createdAt":0}"#),
+            p(r#"{"id":"w","name":"w","type":"local","createdAt":0,
+                  "worktree":{"sourceProjectId":"s","branch":"x","repoDir":"/r","createdByFalcon":true}}"#),
+            p(r#"{"id":"c","name":"组合","type":"local","createdAt":0,"multi":{"repos":[{"dir":"/a/web"}]}}"#),
+            p(r#"{"id":"d","name":"feat-x","type":"local","createdAt":0,
+                  "multi":{"repos":[{"dir":"/a/组合-feat-x/web","repoDir":"/a/web"}]},
+                  "worktree":{"sourceProjectId":"c","branch":"feat/x","repoDir":"","createdByFalcon":true}}"#),
+            p(r#"{"id":"h","name":"hidden","type":"local","createdAt":0,
+                  "multi":{"repos":[{"dir":"/a/组合-old/web","repoDir":"/a/web"}]},
+                  "worktree":{"sourceProjectId":"c","branch":"old","repoDir":"","createdByFalcon":true,"archivedAt":5}}"#),
+        ];
+        let folders = &group_servers(&projects, &[], "本机", false)[0].folders;
+        let ids: Vec<&str> = folders.iter().map(|f| f.project.id.as_str()).collect();
+        assert_eq!(ids, ["s", "c", "d"]);
+        assert_eq!(folders[0].worktrees[0].id, "w");
+        assert!(folders[1].worktrees.is_empty());
+        assert!(folders[2].worktrees.is_empty());
+        let shown = &group_servers(&projects, &[], "本机", true)[0].folders;
+        let shown_ids: Vec<&str> = shown.iter().map(|f| f.project.id.as_str()).collect();
+        assert_eq!(shown_ids, ["s", "c", "d", "h"]);
+        assert!(shown.iter().all(|f| f.project.id == "s" || f.worktrees.is_empty()));
     }
 }

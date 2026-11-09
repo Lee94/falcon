@@ -45,7 +45,8 @@ impl Js {
         Ok(v)
     }
 
-    /// 字面量对象，键按给出的顺序
+    /// 字面量对象，键按给出的顺序。只在测试里拼期望值；生成 fixture 走 `parse`
+    #[cfg(test)]
     pub fn obj<const N: usize>(pairs: [(&str, Js); N]) -> Js {
         Js::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
@@ -58,14 +59,6 @@ impl Js {
     pub fn get(&self, key: &str) -> Option<&Js> {
         match self {
             Js::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            _ => None,
-        }
-    }
-
-    /// `value[i]`
-    pub fn at(&self, i: usize) -> Option<&Js> {
-        match self {
-            Js::Arr(items) => items.get(i),
             _ => None,
         }
     }
@@ -88,17 +81,6 @@ impl Js {
             Some(Js::Num(n)) => Ok(number(*n)),
             Some(other) => Err(format!("字段 {key} 不是字符串：{}", other.compact())),
             None => Err(format!("没有字段 {key}：{}", self.compact())),
-        }
-    }
-
-    /// JS 的真值：缺字段（None）由调用方当 false
-    pub fn truthy(&self) -> bool {
-        match self {
-            Js::Undefined | Js::Null => false,
-            Js::Bool(b) => *b,
-            Js::Num(n) => *n != 0.0 && !n.is_nan(),
-            Js::Str(s) => !s.is_empty(),
-            Js::Arr(_) | Js::Obj(_) => true,
         }
     }
 

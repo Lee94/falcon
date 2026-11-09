@@ -100,8 +100,7 @@ impl TerminalGeometry {
     }
 }
 
-/// 网格离元素左 / 上边的留白（真实像素，不随界面缩放）。AI 助手的实时区域按它把网格对齐到
-/// 要露出的那几行
+/// 网格离元素左 / 上边的留白（真实像素，不随界面缩放）
 pub const PADDING_X: f32 = 8.;
 pub const PADDING_Y: f32 = 6.;
 
@@ -121,8 +120,6 @@ pub struct TerminalElement {
     hovered_link: Option<LinkSpan>,
     /// 左 / 上的内边距（React 版是 pl-2 py-1.5）
     padding: Point<Pixels>,
-    /// AI 助手的实时区域：外面按行号裁着露，这里不缩放、不竖着平移
-    live: bool,
     /// PTY 的尺寸跟着别的窗口时为 Some（ADR 0022）：网格放不下就缩放 / 裁剪，网格比窗口小时
     /// 网格之外那块铺这个色，一眼看出那里不属于终端。这扇窗口自己定尺寸时 None，照旧原样画——
     /// 拖窗那一帧快照还是旧尺寸，这时缩放或标窗口外都会闪一下
@@ -141,7 +138,6 @@ impl TerminalElement {
         cursor_visible: bool,
         marked_text: Option<String>,
         hovered_link: Option<LinkSpan>,
-        live: bool,
         follow: Option<Hsla>,
     ) -> Self {
         Self {
@@ -155,7 +151,6 @@ impl TerminalElement {
             marked_text,
             hovered_link,
             padding: point(px(PADDING_X), px(PADDING_Y)),
-            live,
             follow,
         }
     }
@@ -489,25 +484,6 @@ fn block_element_regions_to_rects(regions: Vec<BackgroundRegion>) -> Vec<BlockEl
 // ---------------------------------------------------------------------------
 // 颜色
 // ---------------------------------------------------------------------------
-
-/// 调色板里第 `index` 色：0–15 取主题的 16 色，16–255 取主题给的扩展色或 xterm 标准色立方。
-/// AI 助手的命令块（静态文字）按它上色，与终端画面同一套颜色
-pub fn indexed_color(palette: &TermPalette, index: u8) -> Hsla {
-    if index < 16 {
-        return palette.ansi[index as usize];
-    }
-    if let Some(ext) = &palette.extended
-        && let Some(c) = ext.get(index as usize - 16)
-    {
-        return *c;
-    }
-    let (r, g, b) = indexed_rgb(index);
-    rgb_to_hsla(r, g, b)
-}
-
-pub fn rgb_color(r: u8, g: u8, b: u8) -> Hsla {
-    rgb_to_hsla(r, g, b)
-}
 
 /// xterm 256 色表里 16–255 的部分：6×6×6 色立方 + 24 级灰。
 fn indexed_rgb(index: u8) -> (u8, u8, u8) {
@@ -899,7 +875,7 @@ impl Element for TerminalElement {
         let following = self.follow.is_some();
         let need_w = f32::from(cell_width) * cols as f32;
         let need_h = f32::from(line_height) * rows as f32;
-        if following && !self.live && (need_w > f32::from(avail_w) || need_h > f32::from(avail_h)) {
+        if following && (need_w > f32::from(avail_w) || need_h > f32::from(avail_h)) {
             let k = (f32::from(avail_w) / need_w).min(f32::from(avail_h) / need_h).clamp(MIN_FOLLOW_SCALE, 1.0);
             if k < 1.0 {
                 font_size = font_size * k;
@@ -913,7 +889,7 @@ impl Element for TerminalElement {
                 let ox = (c.col + 1).saturating_sub(vis_cols).min(cols - vis_cols);
                 origin.x -= cell_width * ox as f32;
             }
-            if !self.live && rows > vis_rows {
+            if rows > vis_rows {
                 let oy = (c.row + 1).saturating_sub(vis_rows).min(rows - vis_rows);
                 origin.y -= line_height * oy as f32;
             }
@@ -922,7 +898,7 @@ impl Element for TerminalElement {
         // 窗口外：跟着别的窗口的尺寸、网格右边 / 下边空出至少一整格（按原字号）才标，不到一格的
         // 零头本来就有
         let mut outside = Vec::new();
-        if following && !self.live {
+        if following {
             let right = origin.x + cell_width * cols as f32;
             let bottom = origin.y + line_height * rows as f32;
             let (max_x, max_y) = (bounds.origin.x + bounds.size.width, bounds.origin.y + bounds.size.height);

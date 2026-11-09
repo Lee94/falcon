@@ -4,7 +4,7 @@
 //! type 仍只有 local / ssh，提交时映射成 type + repos（选了主机 ⇒ ssh，否则 local；编辑时跟
 //! existing 走，PUT 不许改类型）。
 //!
-//! - SSH 从已保存主机里选（可就地「添加主机」→ 主机表单，存完回调把新主机选进来）；存量项目
+//! - SSH 从已保存主机里选（可就地「添加主机」或「从 Tailscale 添加」→ 主机表单，存完回调把新主机选进来）；存量项目
 //!   没有 hostId，可以继续手写 SSH 字段，也可以改绑到已保存主机。
 //! - 工作目录旁的「浏览…」打开 [`FolderPicker`]：列的是**宿主机**上的目录（本地项目是后端
 //!   所在机器，SSH 项目是远端），不是这台 Mac 的系统文件夹选择器。选择器嵌在同一个对话框里
@@ -22,7 +22,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent};
-use gpui_kit::component::{Disableable, WindowExt};
+use gpui_kit::component::{Disableable, Sizable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Context, Entity, IntoElement, Render, SharedString, Task, Window, div};
 use rust_i18n::t;
@@ -737,18 +737,34 @@ impl ProjectForm {
 
     // ---------------- 渲染 ----------------
 
+    fn on_host_saved(&self, cx: &mut Context<Self>) -> host_form::OnSaved {
+        let form = cx.entity().downgrade();
+        std::rc::Rc::new(move |h: &SshHost, window, cx| {
+            let id = h.id.clone();
+            form.update(cx, |f, cx| f.set_host(id, window, cx)).ok();
+        })
+    }
+
     fn render_add_host(&self, cx: &mut Context<Self>) -> Button {
         Button::new("pf-add-host")
             .outline()
             .label(t!("host.add").to_string())
             .on_click(cx.listener(|this, _, window, cx| {
-                let form = cx.entity().downgrade();
-                let on_saved: host_form::OnSaved = std::rc::Rc::new(move |h: &SshHost, window, cx| {
-                    let id = h.id.clone();
-                    form.update(cx, |f, cx| f.set_host(id, window, cx)).ok();
-                });
-                host_form::open(&this.ws, None, Some(on_saved), window, cx);
+                host_form::open(&this.ws, None, Some(this.on_host_saved(cx)), window, cx);
             }))
+    }
+
+    fn render_from_tailscale(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        // 对话框只有 448 宽，和主机下拉挤在一行会把下拉挤没。单独放一行
+        div().flex().child(
+            Button::new("pf-add-tailscale")
+                .outline()
+                .small()
+                .label(t!("host.fromTailscale").to_string())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    crate::dialogs::tailscale::open(&this.ws, Some(this.on_host_saved(cx)), window, cx);
+                })),
+        )
     }
 
     fn render_repos(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -835,6 +851,7 @@ impl ProjectForm {
                         .child(div().flex_1().min_w_0().child(Select::new(&self.location_select).w_full()))
                         .child(self.render_add_host(cx));
                     form = form.child(field(Some(t!("multi.location").to_string()), control, conn.clone().map(|c| (c, Tone::Muted)), cx));
+                    form = form.child(self.render_from_tailscale(cx));
                 }
                 let hint = self.repos_readonly.then(|| (t!("multi.reposReadonly").to_string(), Tone::Muted));
                 form = form.child(field(Some(t!("multi.repos").to_string()), self.render_repos(cx), hint, cx));
@@ -901,6 +918,7 @@ impl ProjectForm {
                             .child(self.render_add_host(cx))
                     };
                     form = form.child(field(Some(label.to_string()), control, hint, cx));
+                    form = form.child(self.render_from_tailscale(cx));
                 }
                 if legacy && self.host_id.is_empty() {
                     form = form.children(self.legacy_ssh.render(cx));

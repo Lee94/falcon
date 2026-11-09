@@ -1,4 +1,4 @@
-//! 给 GPUI 挂上 HTTP 客户端：`img("https://…")`（飞书项目的头像、Markdown 里的外链图片）
+//! 给 GPUI 挂上 HTTP 客户端：`img("https://…")`（Markdown 里的外链图片）
 //! 靠它取字节。GPUI 自己不带实现（Zed 用的是它内部的 reqwest 封装），这里转给
 //! falcon-client 的 [`falcon_client::fetch_external`]：同一个网络运行时、同一套 TLS，
 //! 不带 falcon 的 cookie，只允许 GET / HEAD，响应体有上限。

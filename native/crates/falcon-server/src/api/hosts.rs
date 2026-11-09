@@ -151,17 +151,9 @@ async fn remove(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
     // 中转挂在主机上（ADR 0016），主机没了规则无处可挂：先停隧道再连同规则一起删
     let host_id = id.clone();
     state.engine.call(move |e| async move { e.sessions.dispose_host_link(&host_id, false).await }).await?;
-    // 对话终端也挂在主机上（docs/design/ai-assistant.md 第 3 节）：主机没了，会话接不回也看不见
-    let machine = crate::sessions::machine::Machine::Host(id.clone());
-    state
-        .engine
-        .call(move |e| async move {
-            e.sessions.forget_machine(&machine).await;
-            if let crate::sessions::machine::Machine::Host(h) = &machine {
-                e.assistant.forget_machine(h).await;
-            }
-        })
-        .await?;
+    // 这台主机上的「无项目」会话跟着终止。旧版助手挂在 machine:host: 上的终端如果还在库里，一并停掉
+    let gone = id.clone();
+    state.engine.call(move |e| async move { e.sessions.forget_host(&gone).await }).await?;
     state.db.delete_relays_of_host(&id);
     state.db.delete_host(&id);
     Ok(ok())

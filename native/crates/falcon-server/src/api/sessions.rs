@@ -11,7 +11,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use falcon_proto::{
-    HostInstallStatus, NativeDisplayRefresh, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
+    HostInstallStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
 };
 use serde_json::{Value, json};
 
@@ -34,7 +34,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents", get(super::system::agents))
         .route("/api/projects/{id}/sessions", post(create))
         .route("/api/sessions/{id}/reattach", post(reattach))
-        .route("/api/sessions/{id}/reprobe", post(reprobe))
         .route("/api/sessions/{id}/foreground", get(foreground))
         .route("/api/sessions/{id}/terminate", post(terminate))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
@@ -107,7 +106,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                 db.list_projects().into_iter().map(|p| (p.id.clone(), p)).collect();
             db.list_sessions()
                 .into_iter()
-                // 对话终端按机器挂、不属于任何项目，侧栏 / 总览 / 命令面板都不该看见（sessions/machine.rs）
+                // 旧版 AI 助手的对话终端还可能留在库里，侧栏 / 总览 / 命令面板都不该看见
                 .filter(|row| !is_machine_owner(&row.project_id))
                 .map(|row| {
                     let p = projects.get(&row.project_id);
@@ -173,13 +172,6 @@ async fn reattach(State(state): State<AppState>, Path(id): Path<String>) -> ApiR
             _ => Err(ApiError::new(StatusCode::BAD_GATEWAY, format!("接回失败：{e}"))),
         },
     }
-}
-
-/// 沿 sessions::router 进入 protected_router；无请求体，失败保留守护进程的真实原因。
-async fn reprobe(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<NativeDisplayRefresh>> {
-    let res = state.engine.call(move |engine| async move { engine.sessions.reprobe_ui(&id).await }).await?;
-    res.map(|refreshed| Json(NativeDisplayRefresh { refreshed }))
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("显示刷新失败：{e}")))
 }
 
 /// 关 tab 前问一嘴前台有没有程序在跑。会话不存在也答"空闲"——
@@ -284,23 +276,6 @@ async fn paste_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::test_support::{TestApp, json_of};
-    use axum::http::Request;
-
-    #[tokio::test]
-    async fn reprobe_requires_login_and_accepts_a_bare_post() {
-        let app = TestApp::new();
-        let request = || Request::post("/api/sessions/missing/reprobe").body(Body::empty()).unwrap();
-        let (status, _) = json_of(app.send(request()).await).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(app.state.auth.set_password("secret1", None));
-        assert_eq!(app.send(request()).await.status(), StatusCode::UNAUTHORIZED);
-        let token = app.state.auth.login("secret1").unwrap();
-        let mut authenticated = request();
-        authenticated.headers_mut().insert("cookie", format!("falcon_token={token}").parse().unwrap());
-        let (status, _) = json_of(app.send(authenticated).await).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-    }
 
     #[test]
     fn js_truthiness() {

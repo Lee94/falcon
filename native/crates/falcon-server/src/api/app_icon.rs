@@ -1,10 +1,9 @@
 //! 应用图标的路由（ADR 0018，TS 的 `registerAppIconRoutes`）：选择存在 settings 表，
 //! 自定义图片落在 `<dataDir>/app-icon/custom.png`。
 //!
-//! 公开（不要登录）的只有「取图」这几条：登录页的标签页图标也得是对的，浏览器取它时不带
-//! 登录态（Node 版路由上的 `config.publicAsset`）——它们挂在 [`public_router`] 上。
+//! 取图挂在 [`public_router`] 上（Node 版路由上的 `config.publicAsset`）。
 //! PWA 的清单与 iOS 主屏幕图标跳转 2026-10-11 随 PWA 删掉了。
-//! 改选择、上传、删除照常要登录（[`router`]）。
+//! 改选择、上传、删除走 [`router`]，和别的接口一样，能连上就可以用。
 
 use axum::Json;
 use axum::Router;
@@ -183,12 +182,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn asset_routes_are_public_the_rest_need_login() {
+    async fn app_icon_routes_do_not_require_login() {
         let app = TestApp::new();
         assert!(app.state.auth.set_password("secret1", None));
-        assert_eq!(app.get("/api/app-icon").await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.get("/api/app-icon").await.status(), StatusCode::OK);
         let req = Request::delete("/api/app-icon/custom").body(Body::empty()).unwrap();
-        assert_eq!(app.send(req).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.send(req).await.status(), StatusCode::OK);
         assert_eq!(app.get("/api/app-icon/custom.png").await.status(), StatusCode::NOT_FOUND);
     }
 }

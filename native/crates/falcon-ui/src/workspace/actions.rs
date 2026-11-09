@@ -10,12 +10,12 @@ use std::time::Duration;
 use falcon_client::MoveProjectInput;
 use falcon_core::layout::DropSpot;
 use falcon_core::pane_key::{self, PaneItem};
-use falcon_proto::{GitFileChange, SessionAgent, SessionState};
+use falcon_proto::{SessionAgent, SessionState};
 use gpui_kit::Context;
 use rust_i18n::t;
 
 use super::{
-    ActiveView, DiffCommit, DiffTabTarget, FileRename, FileTabTarget, RightPanelId, ToastKind, Workspace,
+    ActiveView, FileRename, FileTabTarget, RightPanelId, ToastKind, Workspace,
     WorkspaceEvent, is_pending_id,
 };
 
@@ -142,23 +142,7 @@ impl Workspace {
         self.confirm(crate::panels::file_view::discard_spec(&name, on_confirm), cx);
     }
 
-    pub fn open_diff(
-        &mut self,
-        project_id: &str,
-        file: GitFileChange,
-        commit: Option<DiffCommit>,
-        repo: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.state.open_diff(DiffTabTarget {
-            project_id: project_id.to_string(),
-            file,
-            commit,
-            repo,
-        }, &self.sessions);
-        self.commit(true, cx);
-    }
-
+    /// 画布上的差异窗口还能关。点「修改」里的文件不再从这里开：预览在右侧面板下半部分。
     pub fn close_diff(&mut self, cx: &mut Context<Self>) {
         self.state.close_diff(&self.sessions);
         self.commit(false, cx);

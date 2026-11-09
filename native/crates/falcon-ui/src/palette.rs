@@ -392,15 +392,6 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
         });
         let w = ws_entity.clone();
         actions.push(PickItem {
-            key: format!(">{} AI Agent Shell", t!("assistant.title")),
-            label: t!("assistant.title").to_string(),
-            meta: Some(chord("toggleAssistant").to_string()),
-            icon: icon(IconName::Sparkles),
-            tone: None,
-            run: run(move |window, cx| crate::assistant::toggle(&w, window, cx)),
-        });
-        let w = ws_entity.clone();
-        actions.push(PickItem {
             key: format!(">{} {}", t!("palette.toggleSidebarOn"), t!("palette.toggleSidebarOff")),
             label: if ws.state.sidebar_open { t!("palette.toggleSidebarOn") } else { t!("palette.toggleSidebarOff") }.to_string(),
             meta: Some(chord("toggleSidebar").to_string()),
@@ -412,8 +403,6 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
     for (panel, ic, on, off, ch) in [
         (RightPanelId::Files, IconName::Folder, "palette.toggleFilesOn", "palette.toggleFilesOff", "toggleFilesPanel"),
         (RightPanelId::Changes, IconName::FileDiff, "palette.toggleChangesOn", "palette.toggleChangesOff", "toggleChangesPanel"),
-        (RightPanelId::Git, IconName::GitBranch, "palette.toggleGitOn", "palette.toggleGitOff", "toggleGitPanel"),
-        (RightPanelId::Meegle, IconName::ListTodo, "palette.toggleMeegleOn", "palette.toggleMeegleOff", "toggleMeeglePanel"),
     ] {
         let showing = ws.state.right_open && ws.state.right_panel == panel;
         let w = ws_entity.clone();
@@ -482,15 +471,6 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
         });
         let w = ws_entity.clone();
         actions.push(PickItem {
-            key: format!(">{}", t!("palette.setPassword")),
-            label: t!("palette.setPassword").to_string(),
-            meta: None,
-            icon: icon(IconName::Settings),
-            tone: None,
-            run: run(move |window, cx| crate::dialogs::settings::open(&w, crate::dialogs::settings::Tab::Account, window, cx)),
-        });
-        let w = ws_entity.clone();
-        actions.push(PickItem {
             key: format!(">{}", t!("palette.addHost")),
             label: t!("palette.addHost").to_string(),
             meta: None,
@@ -505,17 +485,6 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             icon: icon(IconName::Server),
             tone: None,
             run: run(|_, cx| crate::dialogs::connect::open_connect_window(cx)),
-        });
-    }
-    if ws.auth.as_ref().is_some_and(|a| a.required && a.authenticated) {
-        let w = ws_entity.clone();
-        actions.push(PickItem {
-            key: format!(">{}", t!("palette.logout")),
-            label: t!("palette.logout").to_string(),
-            meta: None,
-            icon: icon(IconName::X),
-            tone: None,
-            run: run(move |_, cx| w.update(cx, |w, cx| w.logout(cx))),
         });
     }
 

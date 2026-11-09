@@ -68,13 +68,6 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 libc = "0.2.190"
 
 [features]
-# 把本平台的 meegle CLI 编进二进制（S7 发布构建用）。构建时用 FALCON_EMBED_MEEGLE_BIN 指向它（绝对路径），
-# 运行时首次用到时释放到 <dataDir>/bin/
-embed-meegle = []
 # 把 5 个目标的会话守护进程（falcon-sessiond，ADR 0020）编进二进制（发布构建用）。构建时用
 # FALCON_EMBED_SESSIOND_DIR 指向放 `<三元组>.gz` 的目录（绝对路径），cargo xtask server 准备
 embed-sessiond = ["dep:flate2"]
-# 把本平台的 mesh sidecar（falcon-tsnet、falcon-netbird）编进二进制。构建时
-# FALCON_EMBED_MESH_DIR 指向放 `<名字>.gz` 的目录。只在发布构建开：开发构建从
-# native/target-mesh/ 找，省得每次改 sidecar 都重编服务端。
-embed-mesh = ["dep:flate2"]

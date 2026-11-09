@@ -67,6 +67,7 @@ HTML 预览用 wry 的 WebView（WKWebView），守 ADR 0007 的边界：只加�
 - **图标字体走回退链而不是按码位指定**：GPUI 拒绝把不含 `m` 的字体当主字体（Symbols Nerd Font Mono 就是），所以它挂在回退链的第一位，排在 Ioskeley / Maple 前面——效果与 web 字体栈"图标字体排在主字体前"一致，Maple 的宽形 NF 图标不会被选中。
 - **界面验证靠 Metal 回读**：`--features snapshot` 打开 `Window::render_to_image()`，配 `FALCON_AUTOMATE` 的脚本步骤（选项目、开终端、打字、点击、拖拽、滚轮、派发动作、截图、定速重画）驱动。锁屏 / 远程时 `screencapture` 是黑的，这条路不受影响；但锁屏时显示链路也不走，notify 过的内容不会自己画出来，`snap` 前要手动画两帧（第一帧里画布这类靠 prepaint 量尺寸的视图还是空的）。`snapshot` 带着 gpui-kit 的 test-support，压测用只含脚本驱动的 `automation` feature。
 - **Windows 仍只守住不堵路**：平台相关的只有 `local_service.rs`（仅 macOS）、记住的密码（`passwords.rs`：macOS 存文件、其它平台走 `keyring`）与数据目录（跨平台 crate）、菜单栏；快捷键在非 mac 上是 ctrl-shift 系。
+- **关窗口不再退出进程（macOS）**：菜单栏状态项可以启动、停止、重启 launchd 里的本机服务（走已有的 `falcon service`，停止是 bootout，否则 KeepAlive 会把进程拉起来）。关掉最后一扇窗口只收起界面，激活策略改为 Accessory，Dock 图标一起走，进程和菜单栏留下；「打开 Falcon」再把窗口叫回来。真正退出仍是 ⌘Q / 「退出 Falcon」，语义仍是全部 Detach，不会 Terminate。`FALCON_AUTOMATE` 仍是关最后一扇窗口就退出，避免脚本挂住。Windows 没有本机服务，也没有这块菜单栏，关最后一扇窗口照旧退出。
 
 ## 踩过的坑
 
@@ -80,7 +81,7 @@ HTML 预览用 wry 的 WebView（WKWebView），守 ADR 0007 的边界：只加�
 - **Root 把 Tab / Shift+Tab 绑成了焦点轮转**（context "Root"）：keymap 先于 `on_key_down` 匹配，终端里的 Tab 永远到不了 shell。在 "Terminal" context 上绑 `NoAction` 屏蔽掉。以后组件库再往 Root 上加裸键绑定，照此办理。
 - **GPUI 的滚动监听从不 stop_propagation，只开一个轴的容器还会把另一轴的滚轮换算过来**：画布只开了横向，差异 / 文件 / 没有回滚的终端里纵向一滚，画布就跟着横漂。画布加 `restrict_scroll_to_axis()`（同 web 的 WheelAxisLock）；差异视图的 list 还能横滚时自己 stop_propagation（web 的 innerTakesWheel）。
 - **窗口内容里的点击要在捕获阶段激活窗口**：zellij 常开鼠标上报，终端的 mouse_down 上报完就 stop_propagation，挂在窗口上的冒泡监听收不到——键盘焦点跟过去了，标题栏着色和侧栏选中却留在原处。
-- **ContentMask 只有矩形**：窗口 `.rounded()` 裁不住子元素，终端 / 文件 / 差异的实心底和活动标题栏的 tint 会把圆角铺成直角。窗口最上层叠一圈窗口底色的粗描边盖住圆弧以外的角（`canvas.rs` 的 `corner_caps`），活动窗口的 `tint_strong` 描边也是叠上去的——给窗口加 border 会占布局，终端少一列、换活动窗口就触发 resize。
+- **ContentMask 只有矩形**：光靠 `.rounded()` 裁不住子元素。gpui-fast 在两轴都 `overflow_hidden` 且带圆角时另有圆角裁剪（着色器按内缘算覆盖，侧栏的 `island` 与画布窗口都走它）。画布窗口曾经在最上层盖一圈不透明 `app` 描边来挡直角；窗口底改成模糊或透明后，缝透出桌面，描边仍是实色，圆角外面留着一块直角背景。现在直接裁。活动窗口的 `tint_strong` 描边叠在裁剪外面——给窗口加 border 会占布局，终端少一列、换活动窗口就触发 resize。
 - **画布量出宽度之前不许滚到活动列**：开窗第一帧视口是 0，那时算的滚动量是错的、又记成"已滚过"，重启后活动窗口停在视口外。
 - **滚动条要自己控制显隐**：GPUI 在 macOS（系统设成"自动"时）只在滚动时显示滚动条，它的 Hover 模式也只认指针落在滚动条那一窄条上。差异视图在指针进入时强制 `ScrollbarMode::Always`，对齐 web 的"悬停浮出"。
 

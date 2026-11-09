@@ -46,7 +46,7 @@ use crate::actions::file_view::Save;
 use crate::prefs::Prefs;
 use crate::theme::Ui;
 use crate::ui::icon;
-use crate::workspace::{ActiveView, ConfirmSpec, ToastKind, Workspace};
+use crate::workspace::{ActiveView, ConfirmSpec, RightPanelId, ToastKind, Workspace};
 
 use self::code::{CodePane, CodePaneEvent};
 use self::html::HtmlPane;
@@ -101,11 +101,30 @@ pub struct FileView {
     /// 编辑器里的内容与 `base.body` 不同
     dirty: bool,
     saving: bool,
+    /// 嵌在右侧文件面板里。不占用画布上那扇查看窗口，也不往工作区的 `file_dirty` 上报
+    /// （那份是画布窗口换文件 / 关窗口前确认用的）。
+    embedded: bool,
     _subs: Vec<Subscription>,
 }
 
 impl FileView {
-    pub fn new(ws: Entity<Workspace>, project_id: String, path: String, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(ws: Entity<Workspace>, project_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::create(ws, project_id, path, false, window, cx)
+    }
+
+    /// 右侧文件面板里的预览。与画布上的查看窗口各持一份内容，脏标记互不占用。
+    pub fn embedded(ws: Entity<Workspace>, project_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::create(ws, project_id, path, true, window, cx)
+    }
+
+    fn create(
+        ws: Entity<Workspace>,
+        project_id: String,
+        path: String,
+        embedded: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subs = vec![cx.observe(&ws, |this, _, cx| {
             this.sync_shown(cx);
             cx.notify();
@@ -130,10 +149,28 @@ impl FileView {
             base: None,
             dirty: false,
             saving: false,
+            embedded,
             _subs: subs,
         };
         this.load(cx);
         this
+    }
+
+    pub(crate) fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// 有没存的修改就先问。问过了返回 true（确认后跑 `on_confirm`）；没有就返回 false，调用方接着做。
+    pub(crate) fn confirm_if_dirty(
+        &self,
+        on_confirm: Rc<dyn Fn(&mut Workspace, &mut Context<Workspace>)>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        self.confirm_discard(on_confirm, cx);
+        true
     }
 
     /// 同一扇窗口换内容（预览语义：点另一个文件不新开窗口）。没存的修改在这之前已经由
@@ -246,7 +283,9 @@ impl FileView {
             return;
         }
         self.dirty = dirty;
-        self.ws.update(cx, |w, _| w.set_file_dirty(dirty));
+        if !self.embedded {
+            self.ws.update(cx, |w, _| w.set_file_dirty(dirty));
+        }
         cx.notify();
     }
 
@@ -402,8 +441,12 @@ impl FileView {
     /// 最大化 / 切到了总览）时，GPUI 不再摆它的位置，得明确藏起来
     fn sync_shown(&mut self, cx: &mut Context<Self>) {
         let Body::Html(pane) = &self.body else { return };
-        let key = falcon_core::workspace::FileTabTarget { project_id: self.project_id.clone(), path: self.path.clone() }.key();
-        let shown = {
+        let shown = if self.embedded {
+            // 网页视图压在画面上，面板切走或右侧栏关上之后 GPUI 不再摆它，必须自己藏
+            let ws = self.ws.read(cx);
+            ws.state.right_open && ws.state.right_panel == RightPanelId::Files
+        } else {
+            let key = falcon_core::workspace::FileTabTarget { project_id: self.project_id.clone(), path: self.path.clone() }.key();
             let ws = self.ws.read(cx);
             let visible = ws.visible_columns();
             let present = falcon_core::layout::find_pane(&visible, &key).is_some();

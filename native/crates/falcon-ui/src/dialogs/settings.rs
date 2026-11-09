@@ -1,7 +1,6 @@
-//! 设置（旧 React 版的 `components/SettingsModal.tsx`）：外观（明暗模式、浅 / 深两个主题槽位、
-//! 应用图标、终端字体 / 字号 / 行高 / 光标）、通知（程序跑完时的提示音）、账户（访问密码、记住的
-//! 密码、退出登录）、远端主机、中转（端口转发与公网发布，按机器管理，ADR 0016）、插件（右侧栏插件的
-//! 开关与插件目录，ADR 0025）、关于。
+//! 设置（旧 React 版的 `components/SettingsModal.tsx`）：外观（明暗模式、窗口底透明效果、浅 / 深两个主题槽位、
+//! 应用图标、终端字体 / 字号 / 行高 / 光标）、通知（程序跑完时的提示音）、远端主机、中转（端口转发与公网发布，按机器管理，ADR 0016）、插件（右侧栏插件的
+//! 开关与插件目录，ADR 0025）、关于（含应用更新，ADR 0026）。
 //!
 //! 设置是覆盖层，不是一页：几乎铺满窗口的对话框，左侧按模块切（顶上一个搜索框按名字 /
 //! 分组 / 关键字筛模块），右侧是当前模块的项，各自滚动。
@@ -10,12 +9,9 @@
 //! 一起释放——主题选择器在释放时把预览复原（theme_picker.rs）。例外是中转页：它开着就每 3s
 //! 轮询，所以只在切到它时建、切走就丢（沿用 React 版：切 tab 即卸载）。
 
-mod account;
 mod app_icon;
 mod appearance;
-mod assistant;
 mod hosts;
-mod mesh;
 mod plugins;
 mod relays;
 mod widgets;
@@ -24,7 +20,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Sizable, WindowExt};
+use gpui_kit::component::{Disableable, Sizable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Context, Entity, FontWeight, IntoElement, Render, SharedString, Window, div};
 use rust_i18n::t;
@@ -40,13 +36,8 @@ pub enum Tab {
     #[default]
     Appearance,
     Notifications,
-    Account,
     Hosts,
     Relays,
-    /// 异地互联：本机的 tsnet / NetBird sidecar
-    Mesh,
-    /// AI 助手：模型、API key、审批策略（docs/design/ai-assistant.md 2.3）
-    Assistant,
     /// 右侧栏插件（ADR 0025）
     Plugins,
     About,
@@ -59,27 +50,21 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 9] = [
+    const ALL: [Tab; 6] = [
         Tab::Appearance,
         Tab::Notifications,
-        Tab::Account,
-        Tab::Assistant,
         Tab::Plugins,
         Tab::About,
         Tab::Hosts,
         Tab::Relays,
-        Tab::Mesh,
     ];
 
     fn id(self) -> &'static str {
         match self {
             Tab::Appearance => "appearance",
             Tab::Notifications => "notifications",
-            Tab::Account => "account",
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
-            Tab::Mesh => "mesh",
-            Tab::Assistant => "assistant",
             Tab::Plugins => "plugins",
             Tab::About => "about",
         }
@@ -87,7 +72,7 @@ impl Tab {
 
     fn group(self) -> Group {
         match self {
-            Tab::Hosts | Tab::Relays | Tab::Mesh => Group::Connection,
+            Tab::Hosts | Tab::Relays => Group::Connection,
             _ => Group::General,
         }
     }
@@ -96,11 +81,8 @@ impl Tab {
         match self {
             Tab::Appearance => IconName::Palette,
             Tab::Notifications => IconName::Bell,
-            Tab::Account => IconName::Shield,
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
-            Tab::Mesh => IconName::Globe,
-            Tab::Assistant => IconName::Sparkles,
             Tab::Plugins => IconName::Puzzle,
             Tab::About => IconName::Info,
         }
@@ -144,8 +126,7 @@ pub fn open(ws: &Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App)
             .h(h)
             .margin_top((vp.height - h) * 0.5)
             .p_0()
-            // 单行输入框里的回车会冒泡成对话框的"确定"：设置没有确定这回事（密码表单自己
-            // 接 PressEnter），别让它把整个设置关掉
+            // 单行输入框里的回车会冒泡成对话框的"确定"：设置没有确定这回事，别让它把整个设置关掉
             .on_ok(|_, _, _| false)
             .child(div().h(h - zpx(2.)).child(view.clone()))
     });
@@ -158,13 +139,9 @@ struct SettingsView {
     tab: Tab,
     search: Entity<InputState>,
     appearance: Entity<appearance::AppearancePane>,
-    account: Entity<account::AccountPane>,
     hosts: Entity<hosts::HostsPane>,
     /// 只在停在中转页时存在（见模块注释）
     relays: Option<Entity<relays::RelaysPane>>,
-    mesh: Option<Entity<mesh::MeshPane>>,
-    /// 切到时才建：建的时候要向服务端取一次设置
-    assistant: Option<Entity<assistant::AssistantPane>>,
 }
 
 impl SettingsView {
@@ -177,12 +154,13 @@ impl SettingsView {
         })
         .detach();
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+        let updates = crate::app_update::observe(cx);
+        cx.observe(&updates, |_, _, cx| cx.notify()).detach();
         // 插件目录是用户手动改的：每次打开设置都重新扫一遍，插件页看到的就是现状
         ws.update(cx, |w, cx| w.refresh_plugins(cx));
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
-        let account = cx.new(|cx| account::AccountPane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
-        Self { ws, tab, search, appearance, account, hosts, relays: None, mesh: None, assistant: None }
+        Self { ws, tab, search, appearance, hosts, relays: None }
     }
 
     /// 按名字 / 分组名 / 关键字（`settings.tab_*_keys`）筛模块
@@ -243,6 +221,11 @@ impl SettingsView {
                     }))
                     .child(icon(tab.icon()).size(zpx(14.)))
                     .child(tab.label());
+                let b = if on {
+                    crate::ui::selected_fade(format!("settings-sel-{}", tab.id()), b, ui.tint).into_any_element()
+                } else {
+                    b.into_any_element()
+                };
                 block = block.child(b);
             }
             list = list.child(block);
@@ -284,14 +267,10 @@ impl SettingsView {
             .on_click(|_, _, cx| crate::chime::play(cx));
         widgets::section(
             t!("settings.soundTitle").to_string(),
-            Some(t!("settings.soundDescription").to_string()),
+            None,
             widgets::rows(
                 vec![
-                    (
-                        t!("settings.finishSound").to_string(),
-                        Some(t!("settings.finishSoundHint").to_string()),
-                        toggle.into_any_element(),
-                    ),
+                    (t!("settings.finishSound").to_string(), None, toggle.into_any_element()),
                     (
                         t!("settings.finishSoundPreviewLabel").to_string(),
                         None,
@@ -312,6 +291,16 @@ impl SettingsView {
             div().font_family(crate::fonts::BERKELEY).text_sm().text_color(ui.muted_foreground).child(text)
         };
         let dash = "—".to_string();
+        let update_phase = crate::app_update::phase(cx);
+        let update_hint = crate::app_update::status_hint(&update_phase);
+        let update_label = crate::app_update::button_label(&update_phase);
+        let update_enabled = crate::app_update::button_enabled(&update_phase);
+        let check_update = Button::new("check-update")
+            .outline()
+            .small()
+            .disabled(!update_enabled)
+            .label(update_label)
+            .on_click(|_, window, cx| crate::app_update::on_about_action(window, cx));
         let ws = self.ws.clone();
         let restart = Button::new("restart-server")
             .outline()
@@ -366,10 +355,20 @@ impl SettingsView {
                 cx,
             ))
             .child(widgets::section(
-                t!("settings.serverTitle").to_string(),
-                Some(t!("settings.serverDescription").to_string()),
+                t!("native.update.title").to_string(),
+                Some(t!("native.update.intro").to_string()),
                 widgets::rows(
-                    vec![(t!("settings.restartServer").to_string(), Some(t!("settings.restartServerHint").to_string()), restart.into_any_element())],
+                    vec![(t!("native.update.check").to_string(), update_hint, check_update.into_any_element())],
+                    false,
+                    cx,
+                ),
+                cx,
+            ))
+            .child(widgets::section(
+                t!("settings.serverTitle").to_string(),
+                None,
+                widgets::rows(
+                    vec![(t!("settings.restartServer").to_string(), None, restart.into_any_element())],
                     false,
                     cx,
                 ),
@@ -379,16 +378,6 @@ impl SettingsView {
 }
 
 impl SettingsView {
-    fn assistant_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<assistant::AssistantPane> {
-        if let Some(pane) = &self.assistant {
-            return pane.clone();
-        }
-        let ws = self.ws.clone();
-        let pane = cx.new(|cx| assistant::AssistantPane::new(ws, window, cx));
-        self.assistant = Some(pane.clone());
-        pane
-    }
-
     fn relays_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<relays::RelaysPane> {
         if let Some(pane) = &self.relays {
             return pane.clone();
@@ -406,16 +395,6 @@ impl SettingsView {
         self.relays = Some(pane.clone());
         pane
     }
-
-    fn mesh_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<mesh::MeshPane> {
-        if let Some(pane) = &self.mesh {
-            return pane.clone();
-        }
-        let ws = self.ws.clone();
-        let pane = cx.new(|cx| mesh::MeshPane::new(ws, window, cx));
-        self.mesh = Some(pane.clone());
-        pane
-    }
 }
 
 impl Render for SettingsView {
@@ -429,11 +408,8 @@ impl Render for SettingsView {
         let pane = match active {
             Tab::Appearance => self.appearance.clone().into_any_element(),
             Tab::Notifications => self.render_notifications(cx).into_any_element(),
-            Tab::Account => self.account.clone().into_any_element(),
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),
-            Tab::Mesh => self.mesh_pane(window, cx).into_any_element(),
-            Tab::Assistant => self.assistant_pane(window, cx).into_any_element(),
             Tab::Plugins => plugins::render(&self.ws, cx).into_any_element(),
             Tab::About => self.render_about(cx).into_any_element(),
         };

@@ -15,10 +15,9 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use falcon_proto::{
-    GitBranchRef, GitChangeCounts, GitCommitDetail, GitCommitInput, GitConflict, GitConflictKind, GitFileChange,
-    GitFileDiff, GitLogCommit, GitLogPage, GitOpInput, GitRefsInfo, GitSnapshot, GitSyncResult, GitUnavailableReason,
-    GitWorkingChanges, GitWorkingFile, GitWorktreeRef, RepoBranch, RepoInfo, WorktreeFailure, WorktreeMode,
-    WorktreeStatus,
+    GitChangeCounts, GitCommitInput, GitConflict, GitConflictKind, GitFileChange, GitFileDiff, GitOpInput,
+    GitSyncResult, GitUnavailableReason, GitWorkingChanges, GitWorkingFile, RepoBranch, RepoInfo, WorktreeFailure,
+    WorktreeMode, WorktreeStatus,
 };
 use regex::Regex;
 use tokio_util::sync::CancellationToken;
@@ -39,7 +38,7 @@ pub const TIMEOUT_READ: Duration = Duration::from_secs(15);
 pub const TIMEOUT_ADD: Duration = Duration::from_secs(120);
 pub const TIMEOUT_REMOVE: Duration = Duration::from_secs(60);
 
-/// pull / push 的超时。比读操作宽得多——网络慢的时候一次 push 走几十秒是常事，
+/// 提交后推送的超时。比读操作宽得多——网络慢的时候一次 push 走几十秒是常事，
 /// 但仍必须有：卡住的 git 会让请求永远不返回（见 [`TIMEOUT_READ`] 的注释）。
 pub const TIMEOUT_SYNC: Duration = Duration::from_secs(120);
 
@@ -160,8 +159,8 @@ pub struct BatchOutput {
 }
 
 /// 一次 exec 跑多条 git 命令（见 batch_git_command_line），返回与入参同序的
-/// 结果与整批的 stderr。SSH 上一条 exec 就是一次 channel 往返，快照类探测
-/// 的往返数直接决定面板延迟。
+/// 结果与整批的 stderr。SSH 上一条 exec 就是一次 channel 往返，工作区改动和派生前
+/// 探测的往返数直接决定面板延迟。
 pub async fn batch_git(
     host: &GitHost,
     argvs: &[Vec<String>],
@@ -449,34 +448,7 @@ pub async fn describe_repo(host: &GitHost, working_dir: &str, opts: &RunOpts) ->
     Ok(RepoInfo { derivable: true, reason: None, detail: None, repo_dir: Some(main), head_branch, head_sha, branches })
 }
 
-// ---------------- Git 面板 ----------------
-
-const GIT_FILE_CAP: usize = 200;
-
-fn blank_snapshot(available: bool) -> GitSnapshot {
-    GitSnapshot {
-        available,
-        reason: None,
-        detail: None,
-        repo_dir: None,
-        work_dir: None,
-        head_branch: None,
-        head_sha: None,
-        detached: None,
-        upstream: None,
-        ahead: None,
-        behind: None,
-        remotes: Vec::new(),
-        files: Vec::new(),
-        file_count: 0,
-        worktrees: Vec::new(),
-        commits: Vec::new(),
-    }
-}
-
-pub fn unavailable_snapshot(reason: GitUnavailableReason, detail: Option<String>) -> GitSnapshot {
-    GitSnapshot { reason: Some(reason), detail, ..blank_snapshot(false) }
-}
+// ---------------- 修改计数与差异 ----------------
 
 pub fn unavailable_changes() -> GitChangeCounts {
     GitChangeCounts { available: false, added: 0, deleted: 0 }
@@ -489,7 +461,7 @@ pub fn unavailable_diff(reason: GitUnavailableReason, detail: Option<String>) ->
 /// [`describe_git_diff`] 的目标
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitDiffTarget {
-    /// 仓库根相对路径，前端从快照原样带回
+    /// 仓库根相对路径，前端从工作区改动原样带回
     pub path: String,
     /// 重命名 / 复制前的路径
     pub orig_path: Option<String>,
@@ -497,11 +469,11 @@ pub struct GitDiffTarget {
     pub untracked: bool,
 }
 
-/// Git 面板里单个文件的 diff。
+/// 工作区里单个文件的 diff。
 ///
-/// 与 describe_git 同一类探测：环境事实报 WorktreeError，由路由写成 200 +
-/// available:false。基准取 HEAD（暂存 + 未暂存一起看）——面板列的是
-/// `status --porcelain` 的合并视图，点开看到的也该是同一份合并答案。
+/// 环境事实报 WorktreeError，由路由写成 200 + available:false。基准取 HEAD
+/// （暂存 + 未暂存一起看）——「修改」面板列的是 `status --porcelain` 的合并视图，
+/// 点开看到的也该是同一份合并答案。
 pub async fn describe_git_diff(
     host: &GitHost,
     working_dir: &str,
@@ -584,259 +556,8 @@ pub async fn describe_git_changes_many(
     Ok(out.results.iter().map(change_counts).collect())
 }
 
-/// 右侧 Git 面板的仓库快照。
-///
-/// 跟 describe_repo 一样是探测：环境事实（没装 git、不是仓库）报 WorktreeError，
-/// 由路由写成 200 + available:false。
-///
-/// 全部命令批成**一次** exec：SSH 一条连接默认 MaxSessions=10，逐条串行虽然
-/// 躲开了并发上限，但 100ms RTT 的链路上十来条就是 1.5s+，而这个快照每 5 秒
-/// 轮询一次。批量后既没有并发压力也没有串行延迟。所有命令用 -C workingDir
-/// 而不是先等仓库根：porcelain / rev-parse / log / worktree list 在仓库内
-/// 任何目录下答案都一样（porcelain 路径本就相对仓库根），根从批里那条
-/// rev-parse 拿。
-pub async fn describe_git(host: &GitHost, working_dir: &str, opts: &RunOpts) -> Result<GitSnapshot, WorktreeError> {
-    let git = &host.git;
-    let out = batch_git(
-        host,
-        &[
-            gc::version_args(git),
-            gc::repo_root_args(git, working_dir),
-            gc::head_branch_args(git, working_dir),
-            gc::head_short_sha_args(git, working_dir),
-            gc::upstream_args(git, working_dir),
-            gc::ahead_args(git, working_dir),
-            gc::behind_args(git, working_dir),
-            gc::status_args(git, working_dir),
-            gc::remote_verbose_args(git, working_dir),
-            gc::log_args(git, working_dir, None),
-            gc::worktree_list_args(git, working_dir),
-        ],
-        gc::GIT_ENV_RO,
-        opts,
-    )
-    .await?;
-    let [
-        ver_res,
-        root_res,
-        head_branch_res,
-        head_sha_res,
-        upstream_res,
-        ahead_res,
-        behind_res,
-        status_res,
-        remotes_res,
-        log_res,
-        wt_res,
-    ] = &out.results[..]
-    else {
-        unreachable!("parse_git_batch 按条数返回")
-    };
-
-    ensure_version(host, ver_res, &out.stderr)?;
-    let root = root_from(host, root_res, &out.stderr)?;
-
-    let head_raw = if head_branch_res.code == Some(0) { js_trim(&head_branch_res.stdout) } else { "" };
-    let detached = head_raw.is_empty() || head_raw == "HEAD";
-    let head_branch = (!detached).then(|| head_raw.to_string());
-    let head_sha = if head_sha_res.code == Some(0) {
-        Some(js_trim(&head_sha_res.stdout)).filter(|s| !s.is_empty()).map(str::to_string)
-    } else {
-        None
-    };
-
-    let upstream_raw = if upstream_res.code == Some(0) { js_trim(&upstream_res.stdout) } else { "" };
-    let upstream = (!upstream_raw.is_empty() && upstream_raw != "HEAD").then(|| upstream_raw.to_string());
-
-    let files = if status_res.code == Some(0) { gc::parse_status_entries(&status_res.stdout) } else { Vec::new() };
-    let remotes = if remotes_res.code == Some(0) { gc::parse_remotes(&remotes_res.stdout) } else { Vec::new() };
-    let commits = if log_res.code == Some(0) { gc::parse_log(&log_res.stdout) } else { Vec::new() };
-
-    let worktrees: Vec<GitWorktreeRef> = if wt_res.code == Some(0) {
-        gc::parse_worktree_list(&wt_res.stdout)
-            .into_iter()
-            .map(|e| GitWorktreeRef {
-                path: normalize_sep(host.kind, &e.path),
-                current: path_eq(host.kind, &e.path, &root),
-                head: js_prefix(&e.head, 7),
-                branch: e.branch,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let (ahead, behind) = if upstream.is_some() {
-        (count_or_null(ahead_res.code, &ahead_res.stdout), count_or_null(behind_res.code, &behind_res.stdout))
-    } else {
-        (None, None)
-    };
-    let file_count = files.len() as u32;
-    Ok(GitSnapshot {
-        repo_dir: Some(root),
-        work_dir: Some(normalize_sep(host.kind, working_dir)),
-        head_branch,
-        head_sha,
-        detached: Some(detached),
-        upstream,
-        // 有快照就一定带这两项：没有 upstream 时是 null，不是缺省
-        ahead: Some(ahead),
-        behind: Some(behind),
-        remotes,
-        files: files.into_iter().take(GIT_FILE_CAP).collect(),
-        file_count,
-        worktrees,
-        commits,
-        ..blank_snapshot(true)
-    })
-}
-
-// ---------------- History 面板 ----------------
-
-/// git 输出给用户看的上限。一次 pull 的输出可以很长，面板上放不下也没人读
+/// git 输出给用户看的上限。一次提交或推送的输出可以很长，面板上放不下也没人读
 const SYNC_OUTPUT_CAP: usize = 4_000;
-
-pub fn unavailable_log(reason: GitUnavailableReason, detail: Option<String>) -> GitLogPage {
-    GitLogPage { available: false, reason: Some(reason), detail, commits: Vec::new(), has_more: false }
-}
-
-pub fn unavailable_refs(reason: GitUnavailableReason, detail: Option<String>) -> GitRefsInfo {
-    GitRefsInfo {
-        available: false,
-        reason: Some(reason),
-        detail,
-        branches: Vec::new(),
-        tags: Vec::new(),
-        authors: Vec::new(),
-        me: None,
-    }
-}
-
-pub fn unavailable_commit(reason: GitUnavailableReason, detail: Option<String>) -> GitCommitDetail {
-    GitCommitDetail {
-        available: false,
-        reason: Some(reason),
-        detail,
-        sha: String::new(),
-        short: String::new(),
-        author: String::new(),
-        author_email: String::new(),
-        authored_at: 0,
-        committer: String::new(),
-        committed_at: 0,
-        parents: Vec::new(),
-        refs: Vec::new(),
-        message: String::new(),
-        files: Vec::new(),
-        file_count: 0,
-    }
-}
-
-/// History 列表的一页。
-///
-/// 与 describe_git 一样批成一次 exec：远程名单是解析 %D 所必需的（要判断
-/// origin/main 是远程分支还是一条叫 "origin/main" 的本地分支），单发一条就是
-/// 白白多一个 SSH 往返，而翻页 / 改筛选都会重跑这个查询。
-pub async fn describe_git_log(
-    host: &GitHost,
-    working_dir: &str,
-    query: &gc::LogQuery,
-    opts: &RunOpts,
-) -> Result<GitLogPage, WorktreeError> {
-    static NO_HISTORY: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new("(?i-u)does not have any commits|bad default revision|unknown revision").unwrap());
-    let git = &host.git;
-    let limit = query.limit.unwrap_or(gc::LOG_PAGE);
-    let out = batch_git(
-        host,
-        &[
-            gc::version_args(git),
-            gc::remote_list_args(git, working_dir),
-            gc::log_page_args(git, working_dir, &gc::LogQuery { limit: Some(limit), ..query.clone() }),
-        ],
-        gc::GIT_ENV_RO,
-        opts,
-    )
-    .await?;
-    let [ver_res, remotes_res, log_res] = &out.results[..] else { unreachable!("parse_git_batch 按条数返回") };
-    ensure_version(host, ver_res, &out.stderr)?;
-    if log_res.code != Some(0) {
-        // 空仓库（还没有任何提交）也走这里：log 在没有 HEAD 时退出码 128。
-        // 那不是错误，是"还没有历史"，所以给一页空的而不是报 not-a-repo。
-        if NO_HISTORY.is_match(&out.stderr) {
-            return Ok(GitLogPage {
-                available: true,
-                reason: None,
-                detail: None,
-                commits: Vec::new(),
-                has_more: false,
-            });
-        }
-        return Err(failure(
-            WorktreeFailure::NotARepo,
-            first_text(&[&out.stderr], || format!("退出码 {}", code_text(log_res.code))),
-        ));
-    }
-
-    let remotes = if remotes_res.code == Some(0) { remote_names(&remotes_res.stdout) } else { Vec::new() };
-    let parsed = gc::parse_log_page(&log_res.stdout);
-    let has_more = parsed.len() > limit;
-    let commits = parsed
-        .into_iter()
-        .take(limit)
-        .map(|c| GitLogCommit {
-            refs: gc::parse_ref_labels(&c.decoration, &remotes),
-            sha: c.sha,
-            short: c.short,
-            author: c.author,
-            author_email: c.author_email,
-            authored_at: c.authored_at,
-            subject: c.subject,
-            parents: c.parents,
-        })
-        .collect();
-    Ok(GitLogPage { available: true, reason: None, detail: None, commits, has_more })
-}
-
-/// Branch / User 下拉的候选值。面板挂载时取一次，不参与轮询
-pub async fn describe_git_refs(
-    host: &GitHost,
-    working_dir: &str,
-    opts: &RunOpts,
-) -> Result<GitRefsInfo, WorktreeError> {
-    let git = &host.git;
-    let out = batch_git(
-        host,
-        &[
-            gc::version_args(git),
-            gc::remote_list_args(git, working_dir),
-            gc::branch_list_args(git, working_dir),
-            gc::tag_list_args(git, working_dir),
-            gc::log_authors_args(git, working_dir, None),
-            gc::config_user_name_args(git, working_dir),
-        ],
-        gc::GIT_ENV_RO,
-        opts,
-    )
-    .await?;
-    let [ver_res, remotes_res, branch_res, tag_res, author_res, me_res] = &out.results[..] else {
-        unreachable!("parse_git_batch 按条数返回")
-    };
-    ensure_version(host, ver_res, &out.stderr)?;
-
-    let remotes = if remotes_res.code == Some(0) { remote_names(&remotes_res.stdout) } else { Vec::new() };
-    let branches: Vec<GitBranchRef> =
-        if branch_res.code == Some(0) { gc::parse_branch_list(&branch_res.stdout, &remotes) } else { Vec::new() };
-    let tags = if tag_res.code == Some(0) { gc::parse_tag_list(&tag_res.stdout, None) } else { Vec::new() };
-    let authors = if author_res.code == Some(0) { gc::rank_authors(&author_res.stdout) } else { Vec::new() };
-    // 没配 user.name 时 git config 退出码 1，那是正常状态不是错误
-    let me = if me_res.code == Some(0) {
-        Some(js_trim(&me_res.stdout)).filter(|s| !s.is_empty()).map(str::to_string)
-    } else {
-        None
-    };
-    Ok(GitRefsInfo { available: true, reason: None, detail: None, branches, tags, authors, me })
-}
 
 pub fn unavailable_working(reason: GitUnavailableReason, detail: Option<String>) -> GitWorkingChanges {
     GitWorkingChanges {
@@ -980,132 +701,22 @@ fn base_name(kind: HostKind, p: &str) -> String {
     n.split('/').rfind(|s| !s.is_empty()).map_or_else(|| p.to_string(), str::to_string)
 }
 
-/// 选中提交的详情。元数据 / 提交信息 / 改动文件三条命令批成一次 exec——
-/// 用户在列表里上下点，每一下都是一轮往返，SSH 上尤其明显。
-pub async fn describe_commit(
-    host: &GitHost,
-    working_dir: &str,
-    sha: &str,
-    opts: &RunOpts,
-) -> Result<GitCommitDetail, WorktreeError> {
-    let git = &host.git;
-    let out = batch_git(
-        host,
-        &[
-            gc::version_args(git),
-            gc::remote_list_args(git, working_dir),
-            gc::commit_meta_args(git, working_dir, sha),
-            gc::commit_message_args(git, working_dir, sha),
-            gc::commit_files_args(git, working_dir, sha),
-        ],
-        gc::GIT_ENV_RO,
-        opts,
-    )
-    .await?;
-    let [ver_res, remotes_res, meta_res, msg_res, files_res] = &out.results[..] else {
-        unreachable!("parse_git_batch 按条数返回")
-    };
-    ensure_version(host, ver_res, &out.stderr)?;
 
-    let meta = if meta_res.code == Some(0) { gc::parse_commit_meta(&meta_res.stdout) } else { None };
-    let Some(meta) = meta else {
-        // 最常见的是提交在这一侧不存在（面板还停在旧数据上，而分支已经被强推重写）
-        return Err(WorktreeError::new(
-            WorktreeFailure::NotARepo,
-            "读不到这条提交",
-            Some(first_text(&[&out.stderr], || format!("退出码 {}", code_text(meta_res.code)))),
-        ));
-    };
-
-    let remotes = if remotes_res.code == Some(0) { remote_names(&remotes_res.stdout) } else { Vec::new() };
-    let files = if files_res.code == Some(0) { gc::parse_commit_files(&files_res.stdout) } else { Vec::new() };
-    let file_count = files.len() as u32;
-    Ok(GitCommitDetail {
-        available: true,
-        reason: None,
-        detail: None,
-        refs: gc::parse_ref_labels(&meta.decoration, &remotes),
-        sha: meta.sha,
-        short: meta.short,
-        author: meta.author,
-        author_email: meta.author_email,
-        authored_at: meta.authored_at,
-        committer: meta.committer,
-        committed_at: meta.committed_at,
-        parents: meta.parents,
-        // %B 结尾恒带一个换行，去掉它免得详情区多出一行空白
-        message: if msg_res.code == Some(0) { strip_one_newline(&msg_res.stdout).to_string() } else { String::new() },
-        files: files.into_iter().take(gc::COMMIT_FILE_CAP).collect(),
-        file_count,
-    })
-}
-
-/// 某条提交里单个文件的 diff。与工作区那份共用 GitFileDiff 形状
-pub async fn describe_commit_diff(
-    host: &GitHost,
-    working_dir: &str,
-    sha: &str,
-    path: &str,
-    orig_path: Option<&str>,
-    opts: &RunOpts,
-) -> Result<GitFileDiff, WorktreeError> {
-    let res =
-        probe_git(host, &gc::commit_file_diff_args(&host.git, working_dir, sha, path, orig_path), gc::GIT_ENV_RO, opts)
-            .await?;
-    if res.code != Some(0) {
-        return Err(diff_error(&res));
-    }
-    let t = gc::truncate_diff(&res.stdout, None);
-    Ok(GitFileDiff { available: true, reason: None, detail: None, diff: t.text, truncated: t.truncated })
-}
-
-/// [`sync_git`] 的动作
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncAction {
-    Pull,
-    Push,
-}
-
-/// pull / push。
+/// 提交成功之后的 push。
 ///
 /// **失败不报错**：凭据不对、非快进、远端拒绝都是仓库的正常状态，把 git 说的话
-/// 原样回给前端。GIT_ENV（不是 RO）——这两条是写操作，本来就要拿锁；用
-/// GIT_OPTIONAL_LOCKS=0 反而会让 pull 在需要更新 index 时行为古怪。
-pub async fn sync_git(
-    host: &GitHost,
-    working_dir: &str,
-    action: SyncAction,
-    opts: &RunOpts,
-) -> Result<GitSyncResult, WorktreeError> {
-    let (argv, label) = match action {
-        SyncAction::Pull => (gc::pull_args(&host.git, working_dir), "pull"),
-        SyncAction::Push => (gc::push_args(&host.git, working_dir, false), "push"),
-    };
+/// 原样回给前端。GIT_ENV（不是 RO）——这是写操作，本来就要拿锁。
+/// 绝不加 --force：要么快进成功，要么失败。
+pub async fn sync_git(host: &GitHost, working_dir: &str, opts: &RunOpts) -> Result<GitSyncResult, WorktreeError> {
+    let argv = gc::push_args(&host.git, working_dir);
     let res = probe_git(host, &argv, gc::GIT_ENV, &opts.with_default_timeout(TIMEOUT_SYNC)).await?;
-    Ok(sync_result(&res, label))
+    Ok(sync_result(&res, "push"))
 }
 
-/// HEAD 的完整 sha（小写）；读不到时是空串
-async fn head_sha(host: &GitHost, working_dir: &str, opts: &RunOpts) -> Result<String, WorktreeError> {
-    let head = probe_git(host, &gc::head_sha_args(&host.git, working_dir), gc::GIT_ENV_RO, opts).await?;
-    Ok(if head.code == Some(0) { js_trim(&head.stdout).to_lowercase() } else { String::new() })
-}
 
-/// sha 是不是 HEAD（两边都可能是短 sha，按前缀互认）。
+/// 「修改」面板的写操作。失败不报错，git 的原话进 detail。
 ///
-/// **与 TS 的一处刻意差别**：TS 在 HEAD 读不到（`full` 为空串）时 `target.startsWith("")`
-/// 恒真，于是把任意提交都当成 HEAD——drop 会落到 `reset --hard HEAD~1`，丢掉的是 HEAD
-/// 那一笔外加工作区里全部未提交的改动，而不是用户点的那一条。读不到 HEAD 一律当
-/// "不是 HEAD"：drop 走 rebase --onto（脏工作区 git 自己会拒绝），squash / reword 直接
-/// 拒绝，都不会悄悄毁数据。
-fn is_head(full: &str, sha: &str) -> bool {
-    let target = sha.to_lowercase();
-    !full.is_empty() && (full == target || full.starts_with(&target) || target.starts_with(full))
-}
-
-/// 历史面板的写操作。与 sync_git 同一条规矩：失败不报错，git 的原话进 detail。
-///
-/// checkout / cherry-pick / revert 都会动工作区；fetch 只更新远程跟踪。
+/// 丢弃会动工作区；继续 / 中止看的是进行中的合并或变基（终端里起的也算）。
 /// 冲突不 abort——面板没有 merge tool，终端就在旁边。
 pub async fn run_git_op(
     host: &GitHost,
@@ -1122,44 +733,6 @@ pub async fn run_git_op(
     let refuse = |detail: &str| Ok(GitSyncResult { ok: false, reason: None, detail: detail.to_string() });
 
     match input {
-        GitOpInput::Fetch => run(gc::fetch_args(git, working_dir), "fetch").await,
-        GitOpInput::Checkout { rev, detach } => {
-            let argv = if *detach == Some(true) {
-                gc::checkout_detach_args(git, working_dir, rev)
-            } else {
-                gc::checkout_branch_args(git, working_dir, rev)
-            };
-            run(argv, "checkout").await
-        }
-        GitOpInput::CheckoutBranch { branch, create_tracking } => {
-            if *create_tracking != Some(true) {
-                return run(gc::checkout_branch_args(git, working_dir, branch), "checkout").await;
-            }
-            let remotes_res = probe_git(host, &gc::remote_list_args(git, working_dir), gc::GIT_ENV_RO, opts).await?;
-            let remotes = if remotes_res.code == Some(0) { remote_names(&remotes_res.stdout) } else { Vec::new() };
-            let Some(local) = gc::tracking_local_name(branch, &remotes) else {
-                return refuse(&format!("无法从 {branch} 解析本地分支名"));
-            };
-            let exists =
-                probe_git(host, &gc::branch_exists_args(git, working_dir, &local), gc::GIT_ENV_RO, opts).await?;
-            // 本地已有同名分支：切过去，不要再 -b 一次（git 会拒绝 already exists）
-            if exists.code == Some(0) {
-                return run(gc::checkout_branch_args(git, working_dir, &local), "checkout").await;
-            }
-            run(gc::checkout_track_args(git, working_dir, &local, branch), "checkout").await
-        }
-        GitOpInput::CherryPick { sha } => run(gc::cherry_pick_args(git, working_dir, sha), "cherry-pick").await,
-        GitOpInput::Revert { sha } => run(gc::revert_args(git, working_dir, sha), "revert").await,
-        GitOpInput::BranchCreate { name, start_point, checkout } => {
-            if *checkout == Some(true) {
-                run(gc::checkout_new_branch_args(git, working_dir, name, start_point), "checkout").await
-            } else {
-                run(gc::branch_create_args(git, working_dir, name, start_point), "branch").await
-            }
-        }
-        GitOpInput::Reset { rev, mode } => run(gc::reset_args(git, working_dir, rev, *mode), "reset").await,
-        GitOpInput::Merge { rev } => run(gc::merge_args(git, working_dir, rev), "merge").await,
-        GitOpInput::Rebase { rev } => run(gc::rebase_args(git, working_dir, rev), "rebase").await,
         GitOpInput::Restore { paths, untracked } => {
             if !paths.is_empty() {
                 let restored = run(gc::restore_args(git, working_dir, paths), "restore").await?;
@@ -1174,38 +747,6 @@ pub async fn run_git_op(
                 }
             }
             Ok(GitSyncResult { ok: true, reason: None, detail: "已丢弃所选改动".into() })
-        }
-        GitOpInput::Push { force_with_lease } => {
-            run(gc::push_args(git, working_dir, *force_with_lease == Some(true)), "push").await
-        }
-        GitOpInput::Drop { sha } => {
-            let full = head_sha(host, working_dir, opts).await?;
-            let argv = if is_head(&full, sha) {
-                gc::drop_head_args(git, working_dir)
-            } else {
-                gc::drop_commit_args(git, working_dir, sha)
-            };
-            run(argv, "rebase").await
-        }
-        GitOpInput::Squash { sha } => {
-            let full = head_sha(host, working_dir, opts).await?;
-            if !is_head(&full, sha) {
-                return refuse("只能把最新一次提交压进上一条。更早的提交请在终端里 rebase -i。");
-            }
-            let soft = run(gc::squash_head_soft_args(git, working_dir), "reset").await?;
-            if !soft.ok {
-                return Ok(soft);
-            }
-            let commit_opts = gc::CommitOpts { amend: true, no_edit: true };
-            run(gc::commit_args::<String>(git, working_dir, "", &[], commit_opts), "commit").await
-        }
-        GitOpInput::Reword { sha, message } => {
-            let full = head_sha(host, working_dir, opts).await?;
-            if !is_head(&full, sha) {
-                return refuse("只能改最新一次提交的说明。更早的提交请在终端里 rebase -i。");
-            }
-            let commit_opts = gc::CommitOpts { amend: true, no_edit: false };
-            run(gc::commit_args::<String>(git, working_dir, message, &[], commit_opts), "commit").await
         }
         GitOpInput::Continue | GitOpInput::Abort => {
             let Some(kind) = detect_conflict(host, working_dir, opts).await? else {
@@ -1249,7 +790,7 @@ pub(crate) fn sync_result(res: &ExecResult, label: &str) -> GitSyncResult {
     let (a, b) = if res.code == Some(0) { (&res.stdout, &res.stderr) } else { (&res.stderr, &res.stdout) };
     // `(a || b).trim()`：先挑非空的那一边，再 trim
     let text = js_trim(if a.is_empty() { b } else { a });
-    // 成功且 git 一声不吭（fetch 已经是最新）也要有回声，否则按钮像没反应。
+    // 成功且 git 一声不吭（已经是最新）也要有回声，否则提交并推送看着像没反应。
     // 失败才把退出码写进 detail——成功时「退出码 0」看着像报错。
     let detail = if !text.is_empty() {
         text.to_string()
@@ -1329,7 +870,7 @@ pub async fn commit_working(
         return Ok(GitSyncResult { ok: true, reason: None, detail: committed });
     }
 
-    let pushed = sync_git(host, working_dir, SyncAction::Push, opts).await?;
+    let pushed = sync_git(host, working_dir, opts).await?;
     if !pushed.ok {
         return Ok(refuse(js_prefix(&format!("已提交。推送失败：\n{}", pushed.detail), SYNC_OUTPUT_CAP)));
     }
@@ -1559,16 +1100,6 @@ pub(crate) mod tests {
         assert_eq!(sync_result(&r(Some(0), &long, ""), "pull").detail.chars().count(), SYNC_OUTPUT_CAP);
     }
 
-    #[test]
-    fn head_matching_is_prefix_both_ways_but_never_on_unknown_head() {
-        let full = "65e13da0000000000000000000000000000000aa";
-        assert!(is_head(full, "65E13DA"));
-        assert!(is_head(full, full));
-        assert!(is_head("65e13da", full));
-        assert!(!is_head(full, "7b37903"));
-        // TS 在这里是 true（"x".startsWith("")），见 is_head 的注释
-        assert!(!is_head("", "7b37903"));
-    }
 
     #[test]
     fn js_helpers() {
@@ -1710,21 +1241,6 @@ pub(crate) mod tests {
         assert_eq!(err.detail.as_deref(), Some("sh: git: command not found"));
     }
 
-    #[tokio::test]
-    async fn run_git_op_refusals_never_touch_the_repo() {
-        // HEAD 读不到时 squash / reword 拒绝，drop 不会落到 reset --hard
-        let (host, script) = script_host("test:op-head", |_| {
-            Ok(ExecResult { code: Some(128), stdout: String::new(), stderr: "fatal: bad HEAD\n".into() })
-        });
-        let r = run_git_op(&host, "/r", &GitOpInput::Squash { sha: "65e13da".into() }, &no_opts()).await.unwrap();
-        assert!(!r.ok);
-        let r = run_git_op(&host, "/r", &GitOpInput::Drop { sha: "65e13da".into() }, &no_opts()).await.unwrap();
-        assert!(!r.ok);
-        let calls = script.calls.borrow();
-        assert!(calls.iter().all(|c| !c.contains("'--hard'")));
-        assert!(calls.last().unwrap().contains("'--onto'"));
-    }
-
     // ---------------- 真 git（临时目录）----------------
 
     /// 本机有 git 才跑；没有就跳过（CI 镜像可能没装）
@@ -1775,7 +1291,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_working_changes_commit_and_log_on_a_real_repo() {
+    async fn working_changes_and_commit_on_a_real_repo() {
         if !have_git() {
             return;
         }
@@ -1787,17 +1303,6 @@ pub(crate) mod tests {
         let o = no_opts();
 
         sh(&repo, "printf 'a\\nb\\n' > a.txt && printf 'x\\ny\\nz\\n' > new.txt && mkdir -p sub");
-        let snap = describe_git(&host, &format!("{dir}/sub"), &o).await.unwrap();
-        assert!(snap.available);
-        assert_eq!(snap.repo_dir.as_deref(), Some(dir));
-        assert_eq!(snap.head_branch.as_deref(), Some("main"));
-        assert_eq!(snap.detached, Some(false));
-        assert_eq!(snap.ahead, Some(None));
-        assert_eq!(snap.file_count, 2);
-        assert_eq!(snap.worktrees.len(), 1);
-        assert!(snap.worktrees[0].current);
-        let json = serde_json::to_value(&snap).unwrap();
-        assert!(json["ahead"].is_null() && json.get("upstream").is_none());
 
         let changes = describe_git_changes(&host, dir, &o).await.unwrap();
         assert_eq!((changes.available, changes.added, changes.deleted), (true, 2, 0));
@@ -1839,54 +1344,13 @@ pub(crate) mod tests {
         let empty = GitCommitInput { message: "  ".into(), all: true, paths: None, amend: None, push: None };
         assert_eq!(commit_working(&host, dir, &empty, &o).await.unwrap().detail, "提交信息不能为空");
 
-        let log = describe_git_log(&host, dir, &gc::LogQuery::default(), &o).await.unwrap();
-        assert_eq!(log.commits.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["add new", "init"]);
-        assert!(!log.has_more);
-        assert!(log.commits[0].refs.iter().any(|r| r.name == "main" && r.head == Some(true)));
-        let page =
-            describe_git_log(&host, dir, &gc::LogQuery { limit: Some(1), ..Default::default() }, &o).await.unwrap();
-        assert!(page.has_more);
-
-        let detail = describe_commit(&host, dir, &log.commits[0].sha, &o).await.unwrap();
-        // `show -s --format=%B` 实际以两个换行结尾（正文自带一个 + tformat 的行终止符），
-        // TS 只去掉一个，于是还剩一个——照搬
-        assert_eq!(detail.message, "add new\n");
-        assert_eq!(detail.files.len(), 1);
-        let cd = describe_commit_diff(&host, dir, &log.commits[0].sha, "new.txt", None, &o).await.unwrap();
-        assert!(cd.diff.contains("+x"));
-        let missing = describe_commit(&host, dir, "0000000", &o).await.unwrap_err();
-        assert_eq!(missing.message, "读不到这条提交");
-
-        let refs = describe_git_refs(&host, dir, &o).await.unwrap();
-        assert_eq!(refs.me.as_deref(), Some("t"));
-        assert!(refs.branches.iter().any(|b| b.name == "main" && b.head));
-
-        // 历史面板写操作：建分支并切过去，再 reword HEAD
-        let r = run_git_op(
-            &host,
-            dir,
-            &GitOpInput::BranchCreate { name: "feat/x".into(), start_point: "main".into(), checkout: Some(true) },
-            &o,
-        )
-        .await
-        .unwrap();
-        assert!(r.ok, "{}", r.detail);
-        let r = run_git_op(
-            &host,
-            dir,
-            &GitOpInput::Reword { sha: log.commits[0].sha.clone(), message: "add new.txt".into() },
-            &o,
-        )
-        .await
-        .unwrap();
-        assert!(r.ok, "{}", r.detail);
         let r = run_git_op(&host, dir, &GitOpInput::Continue, &o).await.unwrap();
         assert_eq!((r.ok, r.detail.as_str()), (false, "现在没有进行中的合并或变基"));
 
         let files = list_repo_files(&host, dir, &o).await.unwrap().unwrap();
         assert!(files.contains(&"new.txt".to_string()));
         assert_eq!(list_repo_files(&host, base.to_str().unwrap(), &o).await.unwrap(), None);
-        let not_repo = describe_git(&host, base.to_str().unwrap(), &o).await.unwrap_err();
+        let not_repo = describe_working_changes(&host, base.to_str().unwrap(), &o).await.unwrap_err();
         assert_eq!(not_repo.reason, WorktreeFailure::NotARepo);
     }
 

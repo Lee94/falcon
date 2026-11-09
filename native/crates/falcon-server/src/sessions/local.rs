@@ -133,7 +133,7 @@ impl LocalHost {
         let fut = match pending {
             Some(f) => f,
             None => {
-                // 底下是进程级的那一份（local_base_env）：meegle / px0 也用它，login shell 只跑一次
+                // 底下是进程级的那一份（local_base_env）：px0、cloudflared、插件也用它，login shell 只跑一次
                 let f: LocalBoxFuture<'static, _> = Box::pin(async { Rc::new(local_base_env().await.as_ref().clone()) });
                 let shared = f.shared();
                 *self.base_env.borrow_mut() = Some(shared.clone());
@@ -153,10 +153,10 @@ fn process_env() -> Vec<(String, String)> {
 }
 
 /// 在后端本机起进程时用的基底环境，可注入。TS 里是模块级的 `resolveLocalBaseEnv()`，PTY、
-/// cloudflared、meegle、px0 共用同一个缓存的 Promise；Rust 版做成函数值，生产上给
+/// cloudflared、px0、插件共用同一个缓存的 Promise；Rust 版做成函数值，生产上给
 /// [`local_base_env_fn`]，测试给一份固定环境，不去跑用户的 login shell。
 ///
-/// 是 `Send + Sync` 的：meegle 客户端挂在 axum 的多线程状态里。
+/// 是 `Send + Sync` 的：插件宿主挂在 axum 的多线程状态里。
 pub type BaseEnvFn = Arc<dyn Fn() -> BoxFuture<'static, Arc<Vec<(String, String)>>> + Send + Sync>;
 
 /// 进程级缓存的本地基底环境（TS 的 `resolveLocalBaseEnv()`）：login shell 整个进程只跑一次，
@@ -412,7 +412,7 @@ fn endpoint(deployed: &Deployed, sid: &str) -> String {
     }
 }
 
-/// 跑一条守护进程子命令拿 stdout（spawn / list / kill / reprobe）。15 秒兜底：spawn 自己等就绪最多 10 秒
+/// 跑一条守护进程子命令拿 stdout（spawn / list / kill）。15 秒兜底：spawn 自己等就绪最多 10 秒
 pub(super) async fn run_sessiond(argv: &[String]) -> Result<String, String> {
     let (bin, args) = argv.split_first().expect("argv");
     let child = tokio::process::Command::new(bin)

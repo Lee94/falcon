@@ -193,7 +193,7 @@ impl Render for AppIconPicker {
 
         section(
             t!("appIcon.title").to_string(),
-            Some(t!("appIcon.hint").to_string()),
+            None,
             vec![grid.into_any_element(), footer.into_any_element()],
             cx,
         )

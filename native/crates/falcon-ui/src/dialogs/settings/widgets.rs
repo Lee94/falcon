@@ -1,5 +1,5 @@
-//! 设置页的排版件（旧 React 版 SettingsModal 里的 SettingSection / SettingRow，common/Field
-//! 的 Field / Segmented）。颜色一律取语义 token。
+//! 设置页的排版件（旧 React 版 SettingsModal 里的 SettingSection / SettingRow，以及分段选择）。
+//! 颜色一律取语义 token。
 
 use std::rc::Rc;
 
@@ -59,17 +59,6 @@ pub fn rows(items: Vec<(String, Option<String>, AnyElement)>, more: bool, cx: &A
         .collect()
 }
 
-/// 表单字段：小号标签 + 控件 + 提示（React 版的 Field）
-pub fn field(label: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> Div {
-    let ui = Ui::global(cx);
-    div()
-        .flex()
-        .flex_col()
-        .gap(zpx(6.))
-        .child(div().text_xs().text_color(ui.muted_foreground).child(label.into()))
-        .child(control)
-}
-
 pub struct SegOption<T> {
     pub value: T,
     pub label: String,
@@ -114,7 +103,13 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
         if let Some(name) = opt.icon {
             b = b.child(icon(name).size(zpx(14.)));
         }
-        group = group.child(b.child(opt.label));
+        let b = b.child(opt.label);
+        // 选中的那块从透明淡入到岛的材质，未选中的保持瞬时 hover
+        group = group.child(if on {
+            crate::ui::selected_fade(format!("seg-{id}-{i}"), b, ui.background).into_any_element()
+        } else {
+            b.into_any_element()
+        });
     }
     group
 }

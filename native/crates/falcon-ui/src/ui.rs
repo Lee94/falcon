@@ -1,15 +1,19 @@
 //! 界面小件：岛、图标按钮、状态记号、主机色条。颜色一律取 [`crate::theme::Ui`] 的语义 token。
 
+use std::panic::Location;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use falcon_core::shortcuts::{self, Command};
 use falcon_proto::SessionState;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::animation::ease_out_cubic;
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Hsla, IntoElement, Pixels, Render, SharedString,
-    Stateful, Transformation, Window, div, hsla, percentage,
+    AnyElement, Animation, AnimationExt, App, ClickEvent, Context, Div, Element, ElementId, Entity, GlobalElementId, Hsla,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, Pixels, Render, SharedString, Stateful, Styled,
+    Transformation, Window, div, hsla, percentage,
 };
 
 use crate::theme::{Ui, radius};
@@ -24,7 +28,8 @@ pub fn island(cx: &App) -> Div {
         .overflow_hidden()
 }
 
-/// 岛里再嵌一块（统计卡、代码块、分段控件的槽）：借窗口底色，不用边框
+/// 岛里再嵌一块（统计卡、代码块、分段控件的槽）：借窗口底色，不用边框。
+/// 窗口底开了透明或模糊时这里仍用实色 `app`：它垫在岛的实底上，跟着变透明会在面板里开一个洞
 pub fn sunken(cx: &App) -> Div {
     let ui = Ui::global(cx);
     div().bg(ui.app).rounded(radius::MD)
@@ -34,7 +39,7 @@ pub fn icon(name: IconName) -> Icon {
     Icon::new(name)
 }
 
-/// 拖动时跟着指针的小标签（飞书工作项、侧栏的项目）。落点只认载荷的类型，标签只是给人看的
+/// 拖动时跟着指针的小标签（侧栏的项目）。落点只认载荷的类型，标签只是给人看的
 pub struct DragLabel {
     label: SharedString,
 }
@@ -64,7 +69,133 @@ impl Render for DragLabel {
     }
 }
 
-/// 小号图标按钮：hover 灰、按下 / 选中用 tint（"当前选中"用 tint，hover 用灰）
+/// 「当前选中」那块着色面的淡入（150ms，先快后慢）：`color` 从全透明淡到实色，文字色瞬时切换。
+/// 只包在选中的那一块上；未选中不包动画，取消选中立即褪去，不做淡出。
+/// 一次性动画在「减少动态效果」下直接落在完成帧（`AnimationElement` 的 oneshot 语义），不会丢选中色；
+/// 元素状态按 id 记，主题切换 / 列表重画不会重播，只有新挂上的选中块淡入一次
+pub fn selected_fade<E>(id: impl Into<ElementId>, el: E, color: Hsla) -> impl IntoElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    el.with_animation(id.into(), Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic), move |el, delta| {
+        el.bg(color.opacity(delta))
+    })
+}
+
+/// 按钮 hover 底色的淡入淡出（120ms）。用法：在按钮里垫一层交给它的绝对定位背景块
+/// （`relative` 的按钮 + `inset_0` 的这块），按钮本体的返回类型与交互链不变；hover 的
+/// 文字色仍由按钮自己的 `hover()` 闭包瞬时切换。背景块不挂监听、不挡事件。
+///
+/// **只给按钮类控件用**（活动栏、图标按钮、画布条格子），别给列表行：指针扫过一串行会拖
+/// 尾迹，而且每行都要在过渡期间逐帧重画所在的视图。
+///
+/// hover 状态渲染时读不到（`hover()` 只是样式闭包），`on_hover` 挂在这种 absolute 内垫块上
+/// 又收不到事件（实测不触发），所以这里自己判定：prepaint 记下元素矩形，request_layout 时
+/// 与 `window.mouse_position()` 比对。hover 进出时按钮本体的 hover 样式（文字色）本来就会
+/// 通知视图重画，状态变化随之被读到；过渡期间由动画自己排帧。初次挂载不包动画——否则按钮
+/// 一出现就闪一下 hover 色；「减少动态效果」下 oneshot 直接落完成帧，hover 色不丢
+pub fn hover_fade(id: impl Into<ElementId>, bg: Hsla, radius: Pixels) -> HoverFade {
+    let id = id.into();
+    HoverFade { id: id.clone(), element: Some(div().id((id, "bg")).absolute().inset_0().rounded(radius)), bg }
+}
+
+pub struct HoverFade {
+    id: ElementId,
+    element: Option<Stateful<Div>>,
+    bg: Hsla,
+}
+
+#[derive(Default)]
+struct HoverState {
+    /// 上一帧的元素矩形（request_layout 时本帧的还没算出来）
+    bounds: Option<gpui_kit::Bounds<Pixels>>,
+    hovered: bool,
+    /// 第一次 hover 之后才包动画（初次挂载不播）
+    touched: bool,
+}
+
+impl IntoElement for HoverFade {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for HoverFade {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        window.with_element_state(global_id.expect("HoverFade 总有 id"), |state: Option<HoverState>, window| {
+            let mut state = state.unwrap_or_default();
+            let hovered = state.bounds.is_some_and(|b| b.contains(&window.mouse_position()));
+            if hovered != state.hovered {
+                state.hovered = hovered;
+                state.touched = true;
+            }
+            let el = self.element.take().expect("request_layout 只调一次");
+            let mut el = if state.touched {
+                let (bg, h) = (self.bg, state.hovered);
+                el.with_animation(
+                    (self.id.clone(), if h { "on" } else { "off" }),
+                    Animation::new(Duration::from_millis(120)).with_easing(ease_out_cubic),
+                    move |el, delta| el.bg(bg.opacity(bg.a * if h { delta } else { 1. - delta })),
+                )
+                .into_any_element()
+            } else {
+                el.into_any_element()
+            };
+            ((el.request_layout(window, cx), el), state)
+        })
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: gpui_kit::Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.with_element_state(id.expect("HoverFade 总有 id"), |state: Option<HoverState>, _| {
+            let mut state = state.unwrap_or_default();
+            state.bounds = Some(bounds);
+            ((), state)
+        });
+        element.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: gpui_kit::Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.paint(window, cx);
+    }
+}
+
+/// 小号图标按钮：hover 灰（底色淡入淡出）、按下 / 选中用 tint（"当前选中"用 tint，hover 用灰）
 pub fn icon_button(
     id: impl Into<ElementId>,
     name: IconName,
@@ -75,17 +206,21 @@ pub fn icon_button(
 ) -> Stateful<Div> {
     let ui = Ui::global(cx);
     let tooltip: SharedString = tooltip.into();
+    let id = id.into();
     div()
-        .id(id.into())
+        .id(id.clone())
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
         .size(size)
-        .rounded(zpx(6.))
+        .relative()
+        .rounded(zpx(8.))
         .text_color(ui.muted_foreground)
         .cursor_pointer()
-        .hover(|s| s.bg(ui.muted).text_color(ui.foreground))
+        // 底色交给背景块淡入淡出，文字色瞬时
+        .hover(|s| s.text_color(ui.foreground))
+        .child(hover_fade((id, "hover"), ui.muted, zpx(8.)))
         .child(icon(name).size(size * 0.6))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)

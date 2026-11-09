@@ -3,8 +3,9 @@
 //!
 //! **不横向滚动**：列分在一块块画布上（[`ColumnLayout::canvas`]），一次只显示一块，一块正好一屏宽
 //! （列平分视口）。新开的列在当前画布排不下就自动另起一块（工作区的 settle_canvases）。有两块以上
-//! 时底下出一条画布条：点数字切过去，把窗口拖到数字上就挪到那块，拖到 ＋ 上就新开一块。两指横滑 /
-//! 快捷键也能翻。固定列在每块画布的最右都有。
+//! 时，切换用的缩略图排在窗口标题条里（[`Canvas::title_switcher`]，跟画布左缘对齐），不再占主区
+//! 一行。点图切过去，把窗口拖到图上就挪到那块，拖到 ＋ 上就新开一块。两指横滑 / 快捷键也能翻。
+//! 固定列在每块画布的最右都有。
 //!
 //! 与旧 React 版的差别：React 版必须"每扇窗口绝对定位、DOM 顺序恒定"，因为 xterm 的画布换过父节点
 //! 渲染尺寸就毁了；GPUI 的终端元素每帧按快照重画，挂在树的哪个位置都一样，这条约束不存在。这里
@@ -48,7 +49,7 @@ use crate::zoom::zpx;
 const DRAG_SLOP: f32 = 4.;
 /// 把手压在缝上，够点得中又不挡住窗口
 const HANDLE: f32 = 8.;
-const HEADER_H: f32 = 28.;
+const HEADER_H: f32 = 30.;
 /// 拖到画布条上"新画布"那一格
 const NEW_CANVAS: &str = "+";
 
@@ -81,10 +82,9 @@ pub struct Canvas {
     ws: Entity<Workspace>,
     file_view: Option<Entity<FileView>>,
     diff_view: Option<Entity<DiffView>>,
-    /// 画布内容区（窗口坐标，不含上方的画布条）；几何都从它算
+    /// 画布内容区（窗口坐标）；几何都从它算。切换缩略图在标题条里，不占这里的高度
     bounds: Bounds<Pixels>,
-    /// 整个画布（含画布条）的左上角，窗口坐标。拖拽标签挂在最外层，按它换算——画布条在
-    /// 上方时它与 `bounds.origin` 差一条画布条的高
+    /// 画布元素的左上角（窗口坐标）。拖拽标签挂在画布上，按它把指针换算成画布内坐标
     root_origin: Point<Pixels>,
     drag: Option<Drag>,
     resize: Option<Resize>,
@@ -235,9 +235,15 @@ impl Canvas {
             .map(|(id, _)| id.clone())
     }
 
+    /// 正在拖一扇窗口或一条缝。标题条上的缩略图不在画布元素里，指针移上去时画布自己收不到
+    /// `mouse_move`，窗口把事件转进来
+    pub(crate) fn tracking_pointer(&self) -> bool {
+        self.drag.is_some() || self.resize.is_some()
+    }
+
     // ---------------- 鼠标：拖窗口 / 拖缝 ----------------
 
-    fn on_mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_mouse_move(&mut self, e: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // 左键已经松了还在"拖"：松手那一下没传到画布（别的元素 stop_propagation 了 mouse_up，
         // 或者松在了窗口外），状态就残留下来，之后空手一晃窗口就跟着跑。按"没拖成"收掉
         if e.pressed_button != Some(MouseButton::Left) && (self.drag.is_some() || self.resize.is_some()) {
@@ -261,6 +267,9 @@ impl Canvas {
                     self.ws.update(cx, |w_, cx| w_.set_pane_height(&key, Some(h), cx));
                 }
             }
+            // 窗口根上也听着同一下（标题条里的缩略图要靠它续上拖拽）。这里已经处理了就截住，
+            // 免得根上再转一次
+            cx.stop_propagation();
             return;
         }
         let target = self.hit_target(e.position);
@@ -268,6 +277,7 @@ impl Canvas {
             if !drag.moved {
                 let d = (e.position.x - drag.start.x).abs() + (e.position.y - drag.start.y).abs();
                 if f32::from(d) < DRAG_SLOP {
+                    cx.stop_propagation();
                     return;
                 }
                 drag.moved = true;
@@ -275,6 +285,7 @@ impl Canvas {
             drag.pos = e.position;
             drag.target = target;
             cx.notify();
+            cx.stop_propagation();
         }
     }
 
@@ -346,7 +357,7 @@ impl Render for Canvas {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_views(window, cx);
         let ui = Ui::global(cx).clone();
-        let Shown { groups, current, columns } = self.shown(cx);
+        let Shown { groups, columns, .. } = self.shown(cx);
         let frames = layout::layout_frames(&columns, self.viewport(), CANVAS_GAP_PX);
         let (active_key, show_canvas, pane_count) = {
             let ws = self.ws.read(cx);
@@ -497,11 +508,6 @@ impl Render for Canvas {
             }
         }
 
-        let pager = groups.len() > 1;
-        // "新画布"那一格：拖的窗口独占一块画布时挪去新画布等于没动，不出
-        let new_target = dragging.is_some_and(|d| !solo.contains(&d.key));
-        let hot = dragging.and_then(|d| d.target.clone());
-
         let mut area = div()
             .id("work-canvas-area")
             .relative()
@@ -512,20 +518,6 @@ impl Render for Canvas {
             .child(content);
         if columns.is_empty() && show_canvas {
             area = area.child(self.empty_state(cx));
-        }
-        let thumb = layout::canvas_thumb_size(viewport);
-        if !pager && new_target {
-            // 只有一块画布、没有画布条：在画布顶上（标题栏下面）浮一个"新画布"落点
-            area = area.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(zpx(36.))
-                    .flex()
-                    .justify_center()
-                    .child(self.new_canvas_target(hot.as_deref() == Some(NEW_CANVAS), true, thumb, &ui)),
-            );
         }
 
         let mut root = div()
@@ -541,18 +533,6 @@ impl Render for Canvas {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
         if !show_canvas {
             root = root.invisible();
-        }
-        if pager {
-            let bar = PagerState {
-                groups: &groups,
-                current,
-                viewport,
-                active: active_key.as_deref(),
-                dragging: dragging.is_some(),
-                new_target,
-                hot: hot.as_deref(),
-            };
-            root = root.child(self.pager(bar, &ui, cx));
         }
         root = root.child(area);
 
@@ -617,13 +597,63 @@ fn thumb_tone(ui: &Ui, hot: bool, on: bool) -> (Hsla, Hsla) {
     }
 }
 
+/// 这扇窗口是不是独占它所在的那块画布（固定列不算）。独占时拖去「新画布」等于没动
+fn pane_is_alone(groups: &[CanvasGroup], key: &str) -> bool {
+    groups.iter().any(|g| {
+        let mut keys = g.columns.iter().filter(|c| !c.pinned).flat_map(|c| c.panes.iter().map(|p| p.key.as_str()));
+        keys.next() == Some(key) && keys.next().is_none()
+    })
+}
+
 impl Canvas {
-    /// 画布条：主区顶上靠左、窗口底上的一排**布局缩略图**（不成岛，与右侧活动栏同一个做法），只在
-    /// 两块以上时出现。每张图按这块画布真实的列与窗口等比缩小（[`layout::canvas_thumb`]），一眼
-    /// 看出哪块是"左右两个终端"、哪块是"一列叠三扇"。当前那块着色，正在输入的那扇加深；别的
-    /// 画布加深它上次停的那扇——点过去焦点就落在那。点图切过去；拖窗口时图是落点（挪到那块
-    /// 画布），末尾多一格 ＋（新开一块）。
-    fn pager(&self, st: PagerState<'_>, ui: &Ui, cx: &mut Context<Self>) -> AnyElement {
+    /// 多画布切换：一排布局缩略图，画在窗口标题条里（调用方负责对齐到画布左缘）。
+    /// 两块以上才出现。只有一块时不占位置；把窗口往外拖时，末尾补一格 ＋（新开一块）。
+    /// 总览盖住画布时不出。格子的矩形在 prepaint 里记到 [`Self::targets`]，拖拽落点靠它命中。
+    pub(crate) fn title_switcher(&self, cx: &App) -> Option<AnyElement> {
+        if matches!(self.ws.read(cx).state.active, ActiveView::Overview) {
+            return None;
+        }
+        let Shown { groups, current, .. } = self.shown(cx);
+        let active = self.ws.read(cx).active_key();
+        let dragging = self.drag.as_ref().filter(|d| d.moved);
+        // 独占一块画布的窗口挪去新画布等于没动，不出 ＋
+        let new_target = dragging.is_some_and(|d| !pane_is_alone(&groups, &d.key));
+        if groups.len() < 2 && !new_target {
+            return None;
+        }
+        let ui = Ui::global(cx).clone();
+        let hot = dragging.and_then(|d| d.target.clone());
+        let size = layout::canvas_thumb_size(self.viewport());
+        // 只有一块画布：标题条里只放「新画布」那一格，不给当前这块再画一张缩略图
+        if groups.len() < 2 {
+            return Some(
+                div()
+                    .id("canvas-switcher")
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(self.new_canvas_target(hot.as_deref() == Some(NEW_CANVAS), size, &ui))
+                    .into_any_element(),
+            );
+        }
+        let bar = PagerState {
+            groups: &groups,
+            current,
+            viewport: self.viewport(),
+            active: active.as_deref(),
+            dragging: dragging.is_some(),
+            new_target,
+            hot: hot.as_deref(),
+        };
+        Some(self.pager(bar, &ui, cx))
+    }
+
+    /// 画布条：标题条里靠画布左缘的一排**布局缩略图**（不成岛）。每张图按这块画布真实的列与窗口
+    /// 等比缩小（[`layout::canvas_thumb`]），一眼看出哪块是"左右两个终端"、哪块是"一列叠三扇"。
+    /// 当前那块着色，正在输入的那扇加深；别的画布加深它上次停的那扇——点过去焦点就落在那。
+    /// 点图切过去；拖窗口时图是落点（挪到那块画布），末尾多一格 ＋（新开一块）。
+    fn pager(&self, st: PagerState<'_>, ui: &Ui, cx: &App) -> AnyElement {
         let keys_hint = t!(
             "canvas.switchHint",
             next = crate::ui::chord("nextCanvas"),
@@ -669,76 +699,57 @@ impl Canvas {
 
             let id = g.id.clone();
             let ws = self.ws.clone();
-            // 外框比图本身每边大 2px，留出着色底与圆角
+            // 外框比图本身大 2px，留出着色底与圆角
             let mut cell = div()
                 .id(SharedString::from(format!("canvas-thumb-{}", g.id)))
                 .flex_none()
+                .relative()
                 .p(zpx(2.))
                 .rounded(zpx(4.))
                 .cursor_pointer()
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .on_click(move |_, _, cx| ws.update(cx, |w, cx| w.show_canvas(&id, cx)))
-                .on_prepaint(self.record_target(&g.id))
-                .child(thumb);
-            // 拖拽命中时不能带 hover 的底色：指针正压在上面，hover 会盖过高亮
+                .on_prepaint(self.record_target(&g.id));
+            // 拖拽命中时不能带 hover 的底色：指针正压在上面，hover 会盖过高亮。
+            // 未选中的格子 hover 底色走背景块的淡入淡出（垫在缩略图下面，先画）
             cell = if hot {
                 cell.bg(ui.primary)
             } else if on {
                 cell.bg(ui.tint)
             } else {
-                cell.hover(|s| s.bg(ui.background.opacity(0.6)))
+                cell.child(crate::ui::hover_fade(format!("thumb-hover-{}", g.id), ui.background.opacity(0.6), zpx(4.)))
             };
-            row = row.child(cell);
+            row = row.child(cell.child(thumb));
         }
         if st.dragging && st.new_target {
-            row = row.child(self.new_canvas_target(st.hot == Some(NEW_CANVAS), false, size, ui));
+            row = row.child(self.new_canvas_target(st.hot == Some(NEW_CANVAS), size, ui));
         }
-        // 靠左排：贴着画布的左边起头。别改回居中——拖拽一开始末尾才冒出 ＋，居中的话整排会
-        // 左移，指针底下的那一格就换了人
-        div().flex_none().mb(zpx(6.)).h(zpx(20.)).flex().items_center().child(row).into_any_element()
+        // 靠左排，调用方把这一排的起点对齐画布左缘。别改回居中——拖拽一开始末尾才冒出 ＋，
+        // 居中的话整排会左移，指针底下的那一格就换了人
+        div().id("canvas-switcher").flex_none().h_full().flex().items_center().child(row).into_any_element()
     }
 
-    /// 拖窗口时"新开一块画布"的落点。画布条上是一张与缩略图同尺寸的虚线框；`lifted` = 只有一块
-    /// 画布、没有画布条时浮在画布顶上，带字、像拖拽标签那样托起来
-    fn new_canvas_target(&self, hot: bool, lifted: bool, size: Viewport, ui: &Ui) -> AnyElement {
-        if !lifted {
-            let mut el = div()
-                .id("canvas-thumb-new")
-                // 外框与缩略图格子一样大：图本身 + 每边 2px
-                .w(zpx(size.width as f32 + 4.))
-                .h(zpx(size.height as f32 + 4.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(zpx(4.))
-                .border_1()
-                .border_dashed()
-                .on_prepaint(self.record_target(NEW_CANVAS))
-                .tooltip(|window, cx| Tooltip::new(t!("canvas.new").to_string()).build(window, cx))
-                .child(icon(IconName::Plus).size(zpx(12.)));
-            el = if hot {
-                el.border_color(ui.primary).bg(ui.primary).text_color(ui.primary_foreground)
-            } else {
-                el.border_color(ui.muted_foreground.opacity(0.5)).text_color(ui.muted_foreground)
-            };
-            return el.into_any_element();
-        }
+    /// 拖窗口时「新开一块画布」的落点：与缩略图同尺寸的虚线框
+    fn new_canvas_target(&self, hot: bool, size: Viewport, ui: &Ui) -> AnyElement {
         let mut el = div()
             .id("canvas-thumb-new")
-            .h(zpx(28.))
-            .px(zpx(10.))
+            // 外框与缩略图格子一样大：图本身 + 每边 2px
+            .w(zpx(size.width as f32 + 4.))
+            .h(zpx(size.height as f32 + 4.))
             .flex()
             .items_center()
             .justify_center()
-            .gap(zpx(4.))
-            .rounded(radius::SM)
-            .text_xs()
-            .bg(ui.popover)
-            .shadow_md()
+            .rounded(zpx(4.))
+            .border_1()
+            .border_dashed()
             .on_prepaint(self.record_target(NEW_CANVAS))
-            .child(icon(IconName::Plus).size(zpx(12.)))
-            .child(t!("canvas.new").to_string());
-        el = if hot { el.bg(ui.primary).text_color(ui.primary_foreground) } else { el.text_color(ui.muted_foreground) };
+            .tooltip(|window, cx| Tooltip::new(t!("canvas.new").to_string()).build(window, cx))
+            .child(icon(IconName::Plus).size(zpx(12.)));
+        el = if hot {
+            el.border_color(ui.primary).bg(ui.primary).text_color(ui.primary_foreground)
+        } else {
+            el.border_color(ui.muted_foreground.opacity(0.5)).text_color(ui.muted_foreground)
+        };
         el.into_any_element()
     }
 
@@ -781,7 +792,7 @@ fn isolate(_: &MouseDownEvent, _: &mut Window, cx: &mut App) {
 /// `on_prepaint` 的回调：记下画布的矩形，尺寸变了就再画一帧（首帧 / 窗口缩放）
 trait PrepaintListener {
     fn listener_prepaint(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
-    /// 记下整个画布（含画布条）的左上角
+    /// 记下画布元素的左上角
     fn listener_root_origin(&self) -> Box<dyn Fn(Bounds<Pixels>, &mut Window, &mut App)>;
 }
 
@@ -836,28 +847,9 @@ impl Round {
     }
 }
 
-/// 窗口的圆角。GPUI 的裁剪只有矩形（ContentMask 不带圆角），给窗口 `.rounded()` 裁不住子元素：
-/// 终端 / 文件 / 差异的实心底和活动标题栏的 tint 会把角铺成直角。所以在窗口最上层叠一圈窗口底色
-/// （`app`，岛外露出来的那层）的粗描边：外框向四周各扩 8px、外圆角 R+8，内缘正好是半径 R 的
-/// 圆角矩形（着色器按 CSS 的规矩算，内圆角 = 外圆角 − 边宽）；外扩的部分被窗口的 overflow_hidden
-/// 裁掉，剩下的只有四个角上圆弧以外那一小块。角点离圆心 √2·R，边宽至少要 (√2−1)·R ≈ 5px 才盖
-/// 得住。不挂监听就没有 hitbox，点击照样落到下面。
-fn corner_caps(round: Round, ui: &Ui) -> Div {
-    let cap = px(8.);
-    round
-        .apply(div(), radius::LG + cap)
-        .absolute()
-        .top(-cap)
-        .left(-cap)
-        .right(-cap)
-        .bottom(-cap)
-        .border_8()
-        .border_color(ui.app)
-}
-
-/// 活动窗口的描边（画布上不止一扇时才有，与标题栏的 tint 同一条件）：语义蓝 `tint_strong`，
-/// 圆角与 [`corner_caps`] 的内缘重合。叠在内容上而不是给窗口加 border——border 占布局，
-/// 终端会因此少一列 / 一行、换活动窗口就触发一次 resize
+/// 活动窗口的描边（画布上不止一扇时才有，与标题栏的 tint 同一条件）：语义蓝 `tint_strong`。
+/// 叠在内容上而不是给窗口加 border——border 占布局，终端会因此少一列 / 一行、换活动窗口就触发 resize。
+/// 不放进圆角裁剪里：裁的是内缘，1px 描边正好压在边上，抗锯齿会被裁掉一半
 fn active_ring(round: Round, ui: &Ui) -> Div {
     round.apply(div(), radius::LG).absolute().inset_0().border_1().border_color(ui.tint_strong)
 }
@@ -986,6 +978,14 @@ impl Canvas {
                     (None, Some(s)) => (s.state != falcon_proto::SessionState::Active).then(|| Mark::from(s.state)),
                     (None, None) => Some(Mark::Creating),
                 };
+                // 程序状态（OSC 7501，ADR 0020）：胶囊放在标题栏最前面，窄窗口先保住它。
+                // 程序那半句（msg）不进标题栏——Claude Code 跑一轮时它一直在换，标题栏跟着一跳一跳，
+                // 还跟路径抢宽度；放在胶囊的悬停提示里。胶囊与底边线是会动的小视图（见
+                // sync_status_slots），这里只管挂
+                if let Some([chip, line]) = self.status_slots.get(id) {
+                    info = info.child(chip.clone());
+                    edge = Some(line.clone());
+                }
                 if let Some(bar) = falcon_core::host_color::ssh_bar(project.as_ref()) {
                     info = info.child(host_bar(Some(bar), zpx(14.), cx));
                 }
@@ -1000,13 +1000,6 @@ impl Canvas {
                     info = info.child(
                         div().flex_shrink(1.).min_w(zpx(32.)).max_w(zpx(260.)).truncate().font_weight(FontWeight::MEDIUM).child(name),
                     );
-                }
-                // 程序状态（OSC 7501，ADR 0020）：胶囊跟在名字后面。程序那半句（msg）不进标题栏——
-                // Claude Code 跑一轮时它一直在换，标题栏跟着一跳一跳，还跟路径抢宽度；放在胶囊的
-                // 悬停提示里。胶囊与底边线是会动的小视图（见 sync_status_slots），这里只管挂
-                if let Some([chip, line]) = self.status_slots.get(id) {
-                    info = info.child(chip.clone());
-                    edge = Some(line.clone());
                 }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));
             }
@@ -1135,6 +1128,12 @@ impl Canvas {
         )
         .on_mouse_down(MouseButton::Left, isolate));
         let header = header.context_menu(move |m, _, _| to_popup(m, menu.clone()));
+        // 活动窗口的标题栏着色淡入（取消活动立即褪去，不淡出）
+        let header = if is_active && mark_active {
+            crate::ui::selected_fade(format!("pane-sel-{key}"), header, ui.tint).into_any_element()
+        } else {
+            header.into_any_element()
+        };
 
         // ---- 内容 ----
         let body: AnyElement = match &item {
@@ -1162,28 +1161,38 @@ impl Canvas {
             .top(frame.origin.y)
             .w(frame.size.width)
             .h(frame.size.height)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
             .when(dimmed, |d| d.opacity(0.5))
-            .child(header)
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    // 点进内容就成为活动窗口，必须在捕获阶段接：程序开着鼠标上报（vim、tmux、
-                    // 各家 agent 的 TUI）时终端的 mouse_down 上报完就 stop_propagation，冒泡阶段
-                    // 等不到——键盘焦点跟过去了，标题栏的着色却还留在原来那扇上。标题栏自己的
-                    // mouse_down 另有处理
-                    .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                        if !is_active {
-                            let k = key_focus.clone();
-                            this.ws.update(cx, |w, cx| w.focus_pane(&k, cx));
-                        }
-                    }))
-                    .child(body),
+                // 终端 / 文件 / 差异的实心底是直角矩形。ContentMask 仍只有矩形，但 gpui-fast
+                // 在两轴都 overflow_hidden 且带圆角时会把子元素裁进圆角（与侧栏的 island 同一条
+                // 路，金属着色器按内缘算覆盖）。以前在最上面盖一圈不透明的 `app` 描边，外缘被
+                // 矩形裁掉后内缘是圆的；窗口底改成模糊或透明之后，缝透出桌面，这圈描边还是实色，
+                // 圆角外面就留着一块直角的背景。裁掉角上的像素，底下才是真正的窗口底
+                round
+                    .apply(div(), radius::LG)
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .child(header)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            // 点进内容就成为活动窗口，必须在捕获阶段接：程序开着鼠标上报（vim、tmux、
+                            // 各家 agent 的 TUI）时终端的 mouse_down 上报完就 stop_propagation，冒泡阶段
+                            // 等不到——键盘焦点跟过去了，标题栏的着色却还留在原来那扇上。标题栏自己的
+                            // mouse_down 另有处理
+                            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                                if !is_active {
+                                    let k = key_focus.clone();
+                                    this.ws.update(cx, |w, cx| w.focus_pane(&k, cx));
+                                }
+                            }))
+                            .child(body),
+                    ),
             )
-            .child(corner_caps(round, &ui))
             .when(is_active && mark_active, |d| d.child(active_ring(round, &ui)))
             .into_any_element()
     }

@@ -31,14 +31,6 @@ fn main() -> anyhow::Result<()> {
     let db = Arc::new(Db::open(&config.data_dir)?);
     let secrets = Arc::new(SecretBox::open(&config.data_dir)?);
 
-    if !loopback && !falcon_server::auth::Auth::new(db.clone(), loopback).password_set() {
-        eprintln!(
-            "拒绝启动：绑定 {}（非 localhost）但尚未设置访问密码。\n请先在 localhost 上启动并通过界面设置密码，再对外绑定。",
-            config.host
-        );
-        std::process::exit(1);
-    }
-
     let askpass = Arc::new(AskpassHub::new());
     askpass.set_origin(&format!("http://127.0.0.1:{}", config.port));
     // 会话引擎：SessionManager 的构造里做启动恢复（上次 active 的会话归类为 unverified / dead）
@@ -63,15 +55,11 @@ fn main() -> anyhow::Result<()> {
         let engine = engine.clone();
         askpass.set_on_prompt(move |p| engine.send(move |e| e.sessions.broadcast_askpass(&p)));
     }
-    // 飞书项目面板的 CLI 客户端：无状态、按需起进程，登录进程也归它管
-    let meegle = falcon_server::meegle::client::MeegleClient::for_server(&config.data_dir);
     let plugins = falcon_server::plugins::PluginHost::new(
         &config.data_dir,
         falcon_server::sessions::local::local_base_env_fn(),
     );
-    let mesh = falcon_server::mesh::MeshHost::new(&config.data_dir);
-    let state = AppState::new(config.clone(), db, secrets, askpass, engine, meegle, plugins, mesh);
-    falcon_server::api::mesh::load_stored(&state);
+    let state = AppState::new(config.clone(), db, secrets, askpass, engine, plugins);
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -87,15 +75,12 @@ fn main() -> anyhow::Result<()> {
         // 会话在 DB 中保持 active，下次启动由 recover_sessions_on_startup 归类
         let engine = state.engine.clone();
         let shutdown = state.shutdown.clone();
-        let mesh = state.mesh.clone();
         tokio::select! {
             res = axum::serve(listener, api::app(state)) => res?,
             () = shutdown_signal() => {}
             () = shutdown.notified() => {}
         }
         // cloudflared / 本机 px0 是子进程，后端退出不会自动带走（见 Engine::shutdown）。
-        // mesh 的 sidecar 同样：先杀再走，别留一个还占着 tailnet 名额的进程。
-        mesh.shutdown();
         let stop = engine.call(|e| async move { e.shutdown().await });
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
         anyhow::Ok(())

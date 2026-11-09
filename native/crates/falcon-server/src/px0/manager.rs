@@ -28,8 +28,7 @@
 //! - 反代要的上游连接：[`Px0Manager::connect`]（LocalSet 上调，本地是一条 TcpStream，远端是
 //!   一条 forward_out 通道）。本地实例还可以用 [`Px0Lease::local_addr`] 在任何线程上直接连。
 //! - 本地 px0 的退出不靠读端 EOF 判断，而是单独一条线程 `wait()` 子进程：pty 从端的 fd
-//!   要是被别的子进程继承走（macOS 上建 fd 与补 CLOEXEC 之间的竞争，见 meegle/client.rs 的
-//!   `run_to_end`），EOF 就永远不来。
+//!   要是被别的子进程继承走（macOS 上建 fd 与补 CLOEXEC 之间的竞争），EOF 就永远不来。
 //! - 输出的尾巴按字节截（TS 按 UTF-16 码元），只是给起不来时看最后几行，差别无所谓。
 
 use std::cell::{Cell, RefCell};

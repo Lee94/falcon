@@ -73,6 +73,7 @@ fn project_not_found() -> ApiError {
 }
 
 fn resolve_file_project(db: &Db, id: &str) -> Result<ProjectRow, ApiError> {
+    // 旧版 AI 助手的对话终端还可能留在库里（owner 前缀 `machine:`），文件接口不认
     if crate::sessions::machine::is_machine_owner(id) {
         return Err(project_not_found());
     }
@@ -511,11 +512,10 @@ async fn raw_empty(
 /// 路由是**路径形状**而不是 `?path=`：HTML 里的 `./style.css` 要能按 URL 规则
 /// 相对当前文档解析到 `.../raw/<token>/docs/style.css`，query 形状做不到。
 ///
-/// 鉴权与别的 /api 不同（不经 require_login）：HTML 预览跑在没有
-/// allow-same-origin 的沙箱 iframe 里，origin 是 opaque 的，浏览器不给它的子资源
-/// 请求带 SameSite=Lax 的登录 cookie，所以凭据只能放在 URL 里——一枚只能读这个
-/// 项目文件的作用域令牌（Auth::raw_token）。登录 cookie 若在（用户直接在新标签页
-/// 打开原始地址）也认。
+/// 不经 require_login：HTML 预览跑在没有 allow-same-origin 的沙箱 iframe 里，
+/// origin 是 opaque 的，子资源只能靠 URL 里的作用域令牌（Auth::raw_token）。
+/// 令牌有效时只读绑定范围；令牌缺失或过期时，因为能连上就允许使用，退回该项目根
+/// 的普通读取。
 ///
 /// 响应头是另一半护栏：`Content-Security-Policy: sandbox` 让这个 HTML 即使被
 /// 当成顶层页面打开也跑在 opaque origin 里，碰不到本站的 cookie / storage /
@@ -842,11 +842,6 @@ mod tests {
     use super::{FilePath, Located, RawScope, absolute_parts, preview_scope, protect_roots, raw_relative};
     use crate::host::HostKind;
 
-    async fn signed(app: &TestApp, login: &str, mut req: Request<Body>) -> axum::response::Response {
-        req.headers_mut().insert("cookie", format!("falcon_token={login}").parse().unwrap());
-        app.send(req).await
-    }
-
     fn get_request(uri: &str) -> Request<Body> {
         Request::get(uri).body(Body::empty()).unwrap()
     }
@@ -864,68 +859,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absolute_paths_outside_project_use_login_for_all_file_operations() {
+    async fn absolute_paths_outside_project_are_usable_without_login() {
         let app = TestApp::new();
         let wd = app.local_project("p1");
         let outside = app.root.join("outside space");
         write(&outside.join("a.txt"), "original");
-        assert!(app.state.auth.set_password("secret1", None));
-        let login = app.state.auth.login("secret1").unwrap();
         let oct = Some("application/octet-stream");
-        for op in ["files", "file", "download"] {
-            let path = if op == "files" { outside.clone() } else { outside.join("a.txt") };
-            assert_eq!(app.get(&path_query(op, &path)).await.status(), StatusCode::UNAUTHORIZED);
-        }
-        for op in ["mkdir", "rename", "remove"] {
-            let req = json_request(&format!("/api/projects/p1/{op}"), json!({"path": outside, "name":"x", "paths":[outside]}));
-            assert_eq!(app.send(req).await.status(), StatusCode::UNAUTHORIZED);
-        }
-        for op in ["file", "upload"] {
-            let uri = format!("{}&name=new", path_query(op, &outside.join("a.txt")));
-            assert_eq!(app.send(put(&uri, oct, "x", Some(1))).await.status(), StatusCode::UNAUTHORIZED);
-        }
 
-        let (_, list) = json_of(signed(&app, &login, get_request(&path_query("files", &outside))).await).await;
+        let (_, list) = json_of(app.send(get_request(&path_query("files", &outside))).await).await;
         assert_eq!(list["path"], outside.to_string_lossy().as_ref());
         assert_eq!(list["entries"][0]["path"], outside.join("a.txt").to_string_lossy().as_ref());
-        let (status, file) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("a.txt")))).await).await;
+        let (status, file) = json_of(app.send(get_request(&path_query("file", &outside.join("a.txt")))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(file["preview"]["text"], "original");
         assert_eq!(file["rawPath"], "a.txt");
         let version = file["preview"]["version"].as_str().unwrap();
         let uri = format!("{}&base={version}", path_query("file", &outside.join("a.txt")));
-        let (status, saved) = json_of(signed(&app, &login, put(&uri, oct, "changed", Some(7))).await).await;
+        let (status, saved) = json_of(app.send(put(&uri, oct, "changed", Some(7))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["path"], outside.join("a.txt").to_string_lossy().as_ref());
         assert_eq!(std::fs::read(outside.join("a.txt")).unwrap(), b"changed");
-        assert_eq!(signed(&app, &login, put(&uri, oct, "stale", Some(5))).await.status(), StatusCode::CONFLICT);
-        let downloaded = signed(&app, &login, get_request(&path_query("download", &outside.join("a.txt")))).await;
+        assert_eq!(app.send(put(&uri, oct, "stale", Some(5))).await.status(), StatusCode::CONFLICT);
+        let downloaded = app.send(get_request(&path_query("download", &outside.join("a.txt")))).await;
         assert_eq!(downloaded.status(), StatusCode::OK);
         assert_eq!(body_bytes(downloaded).await, b"changed");
 
         let upload = format!("{}&name=new.txt", path_query("upload", &outside));
-        let (status, uploaded) = json_of(signed(&app, &login, put(&upload, oct, "upload", Some(6))).await).await;
+        let (status, uploaded) = json_of(app.send(put(&upload, oct, "upload", Some(6))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(uploaded["path"], outside.join("new.txt").to_string_lossy().as_ref());
         assert_eq!(std::fs::read(outside.join("new.txt")).unwrap(), b"upload");
         let empty = format!("{}&name=empty", path_query("upload", &outside));
-        assert_eq!(signed(&app, &login, put(&empty, None, Body::empty(), Some(0))).await.status(), StatusCode::OK);
+        assert_eq!(app.send(put(&empty, None, Body::empty(), Some(0))).await.status(), StatusCode::OK);
 
         let dir = outside.join("new/nested");
-        let (status, made) = json_of(signed(&app, &login, json_request("/api/projects/p1/mkdir", json!({"path":dir,"recursive":true}))).await).await;
+        let (status, made) = json_of(app.send(json_request("/api/projects/p1/mkdir", json!({"path":dir,"recursive":true}))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(made["path"], dir.to_string_lossy().as_ref());
-        let (status, renamed) = json_of(signed(&app, &login, json_request("/api/projects/p1/rename", json!({"path":outside.join("new.txt"),"name":"renamed.txt"}))).await).await;
+        let (status, renamed) = json_of(app.send(json_request("/api/projects/p1/rename", json!({"path":outside.join("new.txt"),"name":"renamed.txt"}))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(renamed["path"], outside.join("renamed.txt").to_string_lossy().as_ref());
-        let (status, removed) = json_of(signed(&app, &login, json_request("/api/projects/p1/remove", json!({"paths":[outside.join("new"),dir,outside.join("renamed.txt"),outside.join("missing")]}))).await).await;
+        let (status, removed) = json_of(app.send(json_request("/api/projects/p1/remove", json!({"paths":[outside.join("new"),dir,outside.join("renamed.txt"),outside.join("missing")]}))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(removed["removed"], json!([outside.join("new"), outside.join("renamed.txt")]));
         assert_eq!(removed["errors"][0]["path"], outside.join("missing").to_string_lossy().as_ref());
         assert!(!outside.join("new").exists() && !outside.join("renamed.txt").exists());
         assert!(wd.is_dir());
         write(&outside.join("valid"), "ok");
-        let (status, partial) = json_of(signed(&app, &login, json_request("/api/projects/p1/remove", json!({"paths":[outside.join("valid"),format!("{}/../invalid", outside.display()),"/"]}))).await).await;
+        let (status, partial) = json_of(app.send(json_request("/api/projects/p1/remove", json!({"paths":[outside.join("valid"),format!("{}/../invalid", outside.display()),"/"]}))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(partial["removed"], json!([outside.join("valid")]));
         assert_eq!(partial["errors"].as_array().unwrap().len(), 2);
@@ -933,10 +914,10 @@ mod tests {
 
         // 绝对目录浏览不改变 Quick Open 的项目范围，连 ?path= 也不能切换索引根。
         write(&wd.join("inside.txt"), "in");
-        let (status, index) = json_of(signed(&app, &login, get_request(&path_query("files/index", &outside))).await).await;
+        let (status, index) = json_of(app.send(get_request(&path_query("files/index", &outside))).await).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(index["paths"], json!(["inside.txt"]));
-        let (_, relative) = json_of(signed(&app, &login, get_request("/api/projects/p1/file?path=inside.txt")).await).await;
+        let (_, relative) = json_of(app.send(get_request("/api/projects/p1/file?path=inside.txt")).await).await;
         assert!(relative.get("rawPath").is_none());
     }
 
@@ -988,9 +969,7 @@ mod tests {
         write(&outside.join("style.css"), "x{}");
         write(&app.root.join("outside/secret.txt"), "secret");
         write(&wd.join("inside.txt"), "inside");
-        assert!(app.state.auth.set_password("secret1", None));
-        let login = app.state.auth.login("secret1").unwrap();
-        let (status, file) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("index.html")))).await).await;
+        let (status, file) = json_of(app.send(get_request(&path_query("file", &outside.join("index.html")))).await).await;
         assert_eq!(status, StatusCode::OK);
         let base = file["rawBase"].as_str().unwrap();
         assert_eq!(file["rawPath"], "index.html");
@@ -1007,13 +986,14 @@ mod tests {
         }
         // 改请求中的 query / project 都不能改根。
         assert_eq!(app.get(&format!("{base}secret.txt?path={}", super::encode_uri_component(&app.root.to_string_lossy()))).await.status(), StatusCode::NOT_FOUND);
-        assert_eq!(app.get(&format!("/api/projects/p2/raw/{token}/style.css")).await.status(), StatusCode::UNAUTHORIZED);
-        let (_, old) = json_of(signed(&app, &login, get_request("/api/projects/p1/file?path=inside.txt")).await).await;
+        // 令牌对不上另一个项目时，退回那个项目自己的根，读不到这份目录外的文件。
+        assert_eq!(app.get(&format!("/api/projects/p2/raw/{token}/style.css")).await.status(), StatusCode::NOT_FOUND);
+        let (_, old) = json_of(app.send(get_request("/api/projects/p1/file?path=inside.txt")).await).await;
         let project_base = old["rawBase"].as_str().unwrap();
         assert_ne!(base, project_base);
         assert_eq!(app.get(&format!("{project_base}style.css")).await.status(), StatusCode::NOT_FOUND);
-        // 同时带 cookie 也按目录范围，而不是回退项目根。
-        assert_eq!(signed(&app, &login, get_request(&format!("{base}inside.txt"))).await.status(), StatusCode::NOT_FOUND);
+        // 有效的目录令牌即使调用方已被放行，也只读绑定范围，不退回项目根。
+        assert_eq!(app.send(get_request(&format!("{base}inside.txt"))).await.status(), StatusCode::NOT_FOUND);
         let big = std::fs::File::create(outside.join("big.bin")).unwrap();
         big.set_len(falcon_proto::WORKSPACE_RAW_CAP + 1).unwrap();
         assert_eq!(app.get(&format!("{base}big.bin")).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1027,13 +1007,15 @@ mod tests {
         assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::UNAUTHORIZED);
         temp_sql(&app, "UPDATE projects SET type = ? WHERE id = ?", ["local", "p1"]);
         app.state.auth.expire_raw_for_test(token);
-        assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::UNAUTHORIZED);
-        let (_, next) = json_of(signed(&app, &login, get_request(&path_query("file", &outside.join("index.html")))).await).await;
+        // 过期后不再授予目录外的文件，只剩普通的项目根读取。
+        assert_eq!(app.get(&format!("{base}style.css")).await.status(), StatusCode::NOT_FOUND);
+        let (_, next) = json_of(app.send(get_request(&path_query("file", &outside.join("index.html")))).await).await;
         let next_base = next["rawBase"].as_str().unwrap();
-        let logout = signed(&app, &login, json_request("/api/auth/logout", json!({}))).await;
+        let logout = app.send(json_request("/api/auth/logout", json!({}))).await;
         assert_eq!(logout.status(), StatusCode::OK);
-        assert_eq!(app.get(&format!("{next_base}index.html")).await.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(app.get(&format!("{project_base}inside.txt")).await.status(), StatusCode::UNAUTHORIZED);
+        // 登出作废令牌，但不把人挡在外面：目录外的文件读不到，项目内的按项目根读。
+        assert_eq!(app.get(&format!("{next_base}index.html")).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(app.get(&format!("{project_base}inside.txt")).await.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
@@ -1229,42 +1211,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_token_is_scoped_when_login_is_required() {
+    async fn project_files_are_readable_without_login() {
         let app = TestApp::new();
         let wd = app.local_project("p1");
         app.local_project("p2");
         write(&wd.join("a.css"), "x{}");
         assert!(app.state.auth.set_password("secret1", None));
-        let login = app.state.auth.login("secret1").unwrap();
 
-        // 没登录：普通 /api 401，原始字节没令牌也 401
-        let (status, _) = json_of(app.get("/api/projects/p1/file?path=a.css").await).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, body) = json_of(app.get("/api/projects/p1/raw/bogus/a.css").await).await;
-        assert_eq!((status, body), (StatusCode::UNAUTHORIZED, json!({ "error": "未认证" })));
-
-        let req = Request::get("/api/projects/p1/file?path=a.css")
-            .header("cookie", format!("falcon_token={login}"))
-            .body(Body::empty())
-            .unwrap();
-        let (status, body) = json_of(app.send(req).await).await;
+        let (status, body) = json_of(app.get("/api/projects/p1/file?path=a.css").await).await;
         assert_eq!(status, StatusCode::OK);
+        // 没有有效令牌时按项目根读，不要求登录
+        assert_eq!(app.get("/api/projects/p1/raw/bogus/a.css").await.status(), StatusCode::OK);
         let raw_base = body["rawBase"].as_str().unwrap().to_string();
 
-        // 令牌（没有 cookie）能读这个项目
         let res = app.get(&format!("{raw_base}a.css")).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(header(&res, "content-type"), "text/css; charset=utf-8");
-        // 换个项目就不认
+        // 换个项目：对不上的令牌退回那个项目自己的根，p2 里没有这个文件
         let token = raw_base.trim_end_matches('/').rsplit('/').next().unwrap();
-        let (status, _) = json_of(app.get(&format!("/api/projects/p2/raw/{token}/a.css")).await).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        // 登录 cookie 也认（新标签页直接打开原始地址）
-        let req = Request::get("/api/projects/p1/raw/bogus/a.css")
-            .header("cookie", format!("falcon_token={login}"))
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.send(req).await.status(), StatusCode::OK);
+        assert_eq!(app.get(&format!("/api/projects/p2/raw/{token}/a.css")).await.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

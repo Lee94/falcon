@@ -4,7 +4,7 @@
 //! - **内置**（`builtin`）：falcon-server 自己实现：系统监控（[`sysmon`]）与 Docker（[`docker`]），
 //!   看哪台机器由它们共用的 [`machine`] 定；
 //! - **命令**（`command`）：用户把一个目录放进 `<数据目录>/plugins/<id>/`，里面一份 `plugin.json`
-//!   说要跑什么。服务端在**后端本机**起进程（不经 shell、不跟项目走——与 meegle / cloudflared 同一个
+//!   说要跑什么。服务端在**后端本机**起进程（不经 shell、不跟项目走——与 cloudflared 同一个
 //!   口径），请求经 stdin 与环境变量交过去，stdout 是面板文档。
 //!
 //! 插件不经 API 安装：能往数据目录里放可执行文件的人，本来就能以 falcon 的身份跑任何东西；

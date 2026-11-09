@@ -1,0 +1,66 @@
+# 开发
+
+仓库里只有 Rust。`native/` 是一个 Cargo workspace：服务端 `falcon-server`，界面 `falcon-ui`，原生入口 `falcon-desktop`。构建、打包与资源生成都是 `cargo xtask`（别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`）。
+
+给代理与贡献者的模块约定、测试命令与架构说明在仓库根的 [CLAUDE.md](../CLAUDE.md)。
+
+## 结构
+
+```
+native/
+├── crates/
+│   ├── falcon-proto/      协议类型（服务端与客户端共用）
+│   ├── falcon-server/     服务端：axum + portable-pty + russh + rusqlite
+│   ├── falcon-client/     REST / WebSocket
+│   ├── falcon-term/       终端：alacritty_terminal + 按键 / 鼠标 / 滚轮
+│   ├── falcon-theme/      主题（Ghostty 主题、界面色派生）
+│   ├── falcon-core/       与界面框架无关的纯逻辑
+│   ├── falcon-platform/   平台能力接口
+│   ├── falcon-ui/         界面
+│   └── falcon-desktop/    原生客户端入口与平台实现
+├── sessiond/              会话守护进程（独立工作区）
+├── xtask/                 构建 / 打包 / 资源生成
+└── assets/fonts/          内嵌字体
+```
+
+会话核心跑在服务端一条专用线程上。持久会话的设计见 [docs/design/session-daemon.md](./design/session-daemon.md)。
+
+## 常用命令
+
+在 `native/` 下：
+
+```bash
+cargo xtask --help
+cargo run -p falcon-server
+cargo run -p falcon-desktop
+cargo check --workspace --tests
+cargo test --workspace
+```
+
+`cargo xtask` 的发布与打包命令见 [deploy.md](./deploy.md)。其余命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `sessiond [--targets …] [--check\|--test]` | 编 falcon-sessiond。开发构建的服务端从 `native/target-sessiond` 取二进制 |
+| `ghostty [--targets …]` | 按锁定版本用 Zig 编 libghostty-vt 静态库 |
+| `ghostty-bindgen` | 升 pin 时重新生成绑定 |
+| `icons` | 生成内置应用图标 |
+| `vendor-fonts` / `vendor-themes` | 重新生成已入库的字体与主题 |
+| `fixtures` / `compare-fixtures` | 从真服务端落盘协议响应，或比较两套响应的形状 |
+
+改了守护进程要重跑 `cargo xtask sessiond`。远端用的目标加 `--targets all`。同版本号不会因为文件名相同而跳过推送：文件名按内容哈希，新编的会被当成新文件。
+
+## 升级 libghostty-vt
+
+改 `native/sessiond/ghostty.pin` 的 commit 与源码包 sha256，然后：
+
+```bash
+cd native
+cargo xtask ghostty --targets all
+cargo xtask ghostty-bindgen
+cargo xtask sessiond --check --targets all && cargo xtask sessiond --test
+```
+
+`ghostty` 会先打上 `native/sessiond/ghostty-patches/` 里的补丁。改补丁时要同步 pin 文件里的补丁记录。`ghostty-bindgen` 的 diff 就是这次的 ABI 变化。`sessiond --test` 含真 PTY 用例和接回比对语料。
+
+宿主机上已有的会话不受影响：新版 falcon 接回时把它们的 VT 进程热换成新版本。

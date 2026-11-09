@@ -1561,18 +1561,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
-name = "crossterm"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
-dependencies = [
- "bitflags 2.13.2",
- "document-features",
- "parking_lot",
- "rustix",
-]
-
-[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2291,6 +2279,7 @@ dependencies = [
  "image",
  "keyring",
  "lb-wry",
+ "libc",
  "log",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -2373,22 +2362,6 @@ dependencies = [
  "regex",
  "serde",
  "web-time",
-]
-
-[[package]]
-name = "falcon-tern"
-version = "0.3.19"
-dependencies = [
- "anyhow",
- "crossterm",
- "falcon-client",
- "falcon-core",
- "falcon-proto",
- "serde",
- "serde_json",
- "tokio",
- "url",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3368,9 +3341,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast"
-version = "0.1.7"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35cb4c01c92462871c34d560b4ef21b7287a355036afa1a1cafede9c13ce55a0"
+checksum = "f539554aee0e994d84014d99e85f3923db613a62a94f248a6559e628bbb0b0be"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3437,9 +3410,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast-apple"
-version = "0.1.7"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7430efcfe8fadf11c1b923bcc435a3b646566f77a8e386e0505a4827c3d08046"
+checksum = "cd2f932eea173f357ace60f2267cd0c8031123fc788160b61f8566efe51f6bd0"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3524,9 +3497,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast-macos"
-version = "0.1.7"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ade501d3f4f6d5e0fa546bf60d441fcf0965379a2cb93e1db953e3ce023db63"
+checksum = "0c9656cc924a624ebbc44bb9f8149f5206fe6e94b262349f662efe692e03d900"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3564,9 +3537,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast-macros"
-version = "0.1.7"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07a2291699eb41f1cc9f956cbd359a16a397bab44d496cb44ad2b5900a935b9f"
+checksum = "46724abd05d2c874cc31e1996bb862539c5735780dd363cb550469003a6e5140"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",

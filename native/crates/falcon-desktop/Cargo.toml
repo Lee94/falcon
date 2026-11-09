@@ -47,9 +47,30 @@ wry = { package = "lb-wry", version = "=0.53.3", optional = true }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 keyring = "4"
 
-# 运行时换 Dock 图标（src/dock.rs）、「跑完了」的系统提示音（src/chime.rs）与把编辑器链接交给
-# Launch Services（src/app_link.rs）。版本跟 GPUI / wry 已经带进来的那份一致，不多编一套
+# 运行时换 Dock 图标（src/dock.rs）、菜单栏状态项（src/menu_bar.rs）、「跑完了」的系统提示音
+# （src/chime.rs）与把编辑器链接交给 Launch Services（src/app_link.rs）。版本跟 GPUI / wry
+# 已经带进来的那份一致，不多编一套
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSSound", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSBundle", "NSData", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSImage",
+    "NSCell",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSound",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+    "NSWorkspace",
+    "libc",
+    "objc2-core-foundation",
+] }
+libc = "0.2.190"

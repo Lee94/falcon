@@ -48,14 +48,13 @@ mod tls;
 mod ws;
 
 pub use api::files::{RawBytes, raw_url};
-pub use api::git::{GitFileRef, GitLogQuery, GitSyncAction};
+pub use api::git::GitFileRef;
 pub use api::projects::{DeriveInput, HostAuthorizationPatch, MoveProjectInput};
 pub use api::system::ProbeTarget;
 pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
 pub use runtime::{MaybeSend, block_in_place, runtime};
-pub use ws::assistant::{AssistantEvent, AssistantSink, AssistantSocket};
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 

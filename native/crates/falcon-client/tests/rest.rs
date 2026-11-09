@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use falcon_client::{
-    ApiErrorKind, AuthEvent, AuthState, FalconClient, GitLogQuery, ProbeTarget, runtime,
+    ApiErrorKind, AuthEvent, AuthState, FalconClient, GitFileRef, ProbeTarget, runtime,
 };
-use falcon_proto::{MeegleTodoAction, OkResponse};
+use falcon_proto::OkResponse;
 use futures::executor::block_on;
 use serde_json::json;
 use support::{HttpReq, HttpResp, Mock};
@@ -219,8 +219,8 @@ fn logout_forgets_token_and_password() {
 #[test]
 fn paths_queries_and_bodies_follow_the_server() {
     let mock = Mock::start(|req| match req.path_only() {
-        p if p.ends_with("/git/log") => {
-            HttpResp::json(200, json!({ "available": true, "commits": [], "hasMore": false }))
+        p if p.contains("/git/diff") => {
+            HttpResp::json(200, json!({ "available": true, "diff": "", "truncated": false }))
         }
         "/api/fs/list" => HttpResp::json(
             200,
@@ -229,23 +229,19 @@ fn paths_queries_and_bodies_follow_the_server() {
         p if p.starts_with("/api/projects/") && req.method == "DELETE" => {
             HttpResp::json(200, json!({ "ok": true }))
         }
-        "/api/meegle/todo" => HttpResp::json(200, json!({ "items": [], "page": 2, "hasMore": false })),
         "/api/auth/password" => HttpResp::json(200, json!({ "ok": true })),
         _ => HttpResp::json(404, json!({ "error": "?" })),
     });
     let client = mock.client();
-    let q = GitLogQuery {
-        branch: Some("origin/main".into()),
-        author: Some("".into()),
-        q: Some("fix 滚轮".into()),
-        skip: 50,
-        repo: None,
+    let file = GitFileRef {
+        path: "src/a.ts".into(),
+        orig_path: Some("old name.ts".into()),
+        untracked: true,
     };
-    block_on(client.git_log("p/1", &q)).unwrap();
+    block_on(client.git_file_diff("p/1", &file, None)).unwrap();
     // path="" 是 Windows 盘符列表，必须带上；hostId 带上
     block_on(client.list_dir(Some(""), &ProbeTarget::SshHost("h1".into()))).unwrap();
     block_on(client.delete_project("p1", true)).unwrap();
-    block_on(client.meegle_todo(MeegleTodoAction::ThisWeek, 2, true)).unwrap();
     let _: OkResponse = block_on(client.set_password("abcdef", None)).unwrap();
 
     let reqs = mock.requests();
@@ -253,16 +249,15 @@ fn paths_queries_and_bodies_follow_the_server() {
     assert_eq!(
         paths,
         [
-            "/api/projects/p%2F1/git/log?branch=origin%2Fmain&q=fix+%E6%BB%9A%E8%BD%AE&skip=50",
+            "/api/projects/p%2F1/git/diff?path=src%2Fa.ts&origPath=old+name.ts&untracked=1",
             "/api/fs/list?path=&hostId=h1",
             "/api/projects/p1?force=true",
-            "/api/meegle/todo?action=this_week&page=2&fresh=1",
             "/api/auth/password",
         ]
     );
     // current 缺省时不写出来（与 JSON.stringify 丢掉 undefined 一致）
-    assert_eq!(reqs[4].json(), json!({ "next": "abcdef" }));
-    assert_eq!(reqs[4].header("content-type"), Some("application/json"));
+    assert_eq!(reqs[3].json(), json!({ "next": "abcdef" }));
+    assert_eq!(reqs[3].header("content-type"), Some("application/json"));
     // 没有请求体的 DELETE 不带 Content-Type
     assert_eq!(reqs[2].header("content-type"), None);
 }

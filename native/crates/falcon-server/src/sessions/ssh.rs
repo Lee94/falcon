@@ -17,6 +17,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -431,23 +432,43 @@ async fn authenticate(
     let method = p.ssh_auth_method.as_deref().unwrap_or("");
     let ok = match method {
         "key" => {
-            let path = p.ssh_key_path.as_deref().unwrap_or("");
-            let pem = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("读私钥 {path} 失败：{e}"))?;
-            let key = russh::keys::decode_secret_key(&pem, secret)?;
-            let hash = rsa_hash(handle, &key).await;
-            handle
-                .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-                .await?
-                .success()
+            let path = Path::new(p.ssh_key_path.as_deref().unwrap_or(""));
+            authenticate_key_file(handle, username, path, secret).await?
         }
         "password" => handle.authenticate_password(username, secret.unwrap_or("")).await?.success(),
+        // agent 没有钥匙、或套接字根本连不上时，OpenSSH 还会试 ~/.ssh 里的默认身份文件。
+        // 只问 agent 的话，空 agent 会被收成「无法探测宿主机」，新建终端出不来。
         "agent" => authenticate_agent(handle, username).await?,
         other => anyhow::bail!("不支持的认证方式：{other}"),
     };
     if !ok {
-        anyhow::bail!("All configured authentication methods failed");
+        let extra = if method == "agent" { "（SSH agent 与默认身份文件都没有登录成功）" } else { "" };
+        anyhow::bail!("All configured authentication methods failed{extra}");
     }
     Ok(())
+}
+
+/// OpenSSH 未指定 IdentityFile 时尝试的私钥，顺序与 ssh(1) 的默认值一致。
+fn default_identity_files(home: &Path) -> Vec<PathBuf> {
+    ["id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519", "id_ed25519_sk"]
+        .into_iter()
+        .map(|name| home.join(".ssh").join(name))
+        .collect()
+}
+
+async fn authenticate_key_file(
+    handle: &mut client::Handle<Handler>,
+    username: &str,
+    path: &Path,
+    secret: Option<&str>,
+) -> anyhow::Result<bool> {
+    let pem = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("读私钥 {} 失败：{e}", path.display()))?;
+    let key = russh::keys::decode_secret_key(&pem, secret)?;
+    let hash = rsa_hash(handle, &key).await;
+    Ok(handle
+        .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .await?
+        .success())
 }
 
 /// RSA 钥用服务端声明支持的哈希（rsa-sha2-512 / 256），不支持扩展协商的老服务端退回 ssh-rsa
@@ -459,6 +480,26 @@ async fn rsa_hash(handle: &client::Handle<Handler>, key: &russh::keys::PrivateKe
 }
 
 async fn authenticate_agent(handle: &mut client::Handle<Handler>, username: &str) -> anyhow::Result<bool> {
+    match try_agent_identities(handle, username).await {
+        Ok(true) => return Ok(true),
+        Ok(false) => log::debug!("SSH agent 没有能登录的钥匙，改试默认身份文件"),
+        Err(e) => log::debug!("SSH agent 不可用，改试默认身份文件：{e:#}"),
+    }
+    for path in default_identity_files(&crate::config::home_dir()) {
+        if !path.is_file() {
+            continue;
+        }
+        // 加密的默认身份文件没有口令可试，跳过。指定了密钥路径的认证方式仍会带上表单里的口令。
+        match authenticate_key_file(handle, username, &path, None).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => continue,
+            Err(e) => log::debug!("默认身份文件 {} 跳过：{e:#}", path.display()),
+        }
+    }
+    Ok(false)
+}
+
+async fn try_agent_identities(handle: &mut client::Handle<Handler>, username: &str) -> anyhow::Result<bool> {
     #[cfg(unix)]
     let mut agent = russh::keys::agent::client::AgentClient::connect_env().await?;
     #[cfg(windows)]
@@ -481,6 +522,22 @@ async fn authenticate_agent(handle: &mut client::Handle<Handler>, username: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_fallback_uses_openssh_default_identity_files() {
+        let home = std::path::Path::new("/Users/fay");
+        let files = default_identity_files(home);
+        assert_eq!(
+            files,
+            vec![
+                home.join(".ssh/id_rsa"),
+                home.join(".ssh/id_ecdsa"),
+                home.join(".ssh/id_ecdsa_sk"),
+                home.join(".ssh/id_ed25519"),
+                home.join(".ssh/id_ed25519_sk"),
+            ]
+        );
+    }
 
     #[test]
     fn fingerprint_is_sha256_of_wire_blob() {

@@ -9,7 +9,6 @@
 
 pub mod app_icon;
 pub mod askpass;
-pub mod assistant;
 pub mod auth_routes;
 pub mod body;
 pub mod error;
@@ -17,14 +16,13 @@ pub mod files;
 pub mod git_routes;
 pub mod hosts;
 pub mod input;
-pub mod meegle;
-pub mod mesh;
 pub mod plugins;
 pub mod projects;
 pub mod px0;
 pub mod relays;
 pub mod sessions;
 pub mod system;
+pub mod tailscale;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod worktrees;
@@ -48,7 +46,6 @@ use crate::config::ServerConfig;
 use crate::crypto::SecretBox;
 use crate::db::Db;
 use crate::engine::EngineHandle;
-use crate::meegle::client::MeegleClient;
 use crate::plugins::PluginHost;
 use error::ApiError;
 
@@ -68,12 +65,8 @@ pub struct Inner {
     pub askpass: Arc<AskpassHub>,
     /// 会话引擎（LocalSet 上的 SessionManager 等），见 engine.rs
     pub engine: EngineHandle,
-    /// 飞书项目 CLI（只在后端本机起进程，Send + Sync，不进引擎）
-    pub meegle: MeegleClient,
     /// 右侧栏插件（命令插件只在后端本机起进程；系统监控看远端时才借引擎拿链路）
     pub plugins: PluginHost,
-    /// 异地互联的两个 sidecar（tsnet / NetBird）。只在后端本机起进程，不进引擎
-    pub mesh: crate::mesh::MeshHost,
     /// `POST /api/system/restart` 要的关停信号：主循环拿它走与 SIGTERM 同一条退出路径
     /// （先 Engine::shutdown 收子进程再退出），launchd / systemd 或 respawn 帮手负责拉起
     pub shutdown: Arc<tokio::sync::Notify>,
@@ -96,12 +89,9 @@ impl AppState {
         secrets: Arc<SecretBox>,
         askpass: Arc<AskpassHub>,
         engine: EngineHandle,
-        meegle: MeegleClient,
         plugins: PluginHost,
-        mesh: crate::mesh::MeshHost,
     ) -> Self {
-        let loopback = crate::config::is_loopback(&config.host);
-        let auth = Auth::new(db.clone(), loopback);
+        let auth = Auth::new(db.clone());
         AppState {
             inner: Arc::new(Inner {
                 config,
@@ -110,16 +100,14 @@ impl AppState {
                 secrets,
                 askpass,
                 engine,
-                meegle,
                 plugins,
-                mesh,
                 shutdown: Arc::new(tokio::sync::Notify::new()),
                 restarting: AtomicBool::new(false),
             }),
         }
     }
 
-    /// 请求带来的登录 cookie 有没有效（不需要认证的部署恒为 true）
+    /// 能连上就允许使用，不再看登录 cookie。
     pub fn authenticated(&self, headers: &HeaderMap) -> bool {
         self.auth.is_authenticated(cookie(headers, COOKIE_NAME).as_deref())
     }
@@ -141,7 +129,6 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes::router())
         .merge(ws::router())
-        .merge(assistant::ws_router())
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)))
         .fallback(not_found)
@@ -161,29 +148,27 @@ fn public_router() -> Router<AppState> {
         .merge(app_icon::public_router())
 }
 
-/// 要登录的 `/api/*`（S4 起逐组填进来）
+/// `/api/*` 与 `/px0/*`。`require_login` 还在，账户门禁去掉之后直接放行。
 fn protected_router() -> Router<AppState> {
     Router::new()
         .merge(sessions::router())
-        .merge(assistant::router())
         .merge(askpass::router())
         .merge(system::router())
         .merge(files::router())
         .merge(app_icon::router())
         .merge(hosts::router())
+        .merge(tailscale::router())
         .merge(projects::router())
         .merge(relays::router())
         .merge(git_routes::router())
         .merge(worktrees::router())
-        .merge(meegle::router())
         .merge(plugins::router())
         .merge(px0::router())
-        .merge(mesh::router())
-        // 没有对应路由的 /api/*：同 Node 版的 onRequest 钩子，没登录先 401，登录了才 404
+        // 没有对应路由的 /api/*：404。账户门禁去掉之后不再先回 401。
         .route("/api/{*rest}", axum::routing::any(not_found))
 }
 
-/// `/api/*` 与 `/px0/*` 的登录检查（Node 版 onRequest 钩子的那一段）
+/// 原先的登录检查。账户门禁去掉之后 `authenticated` 恒为 true，请求直接放行。
 async fn require_login(State(state): State<AppState>, req: Request, next: Next) -> Response {
     if state.authenticated(req.headers()) {
         return next.run(req).await;

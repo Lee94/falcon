@@ -2,19 +2,24 @@
 //! （falcon-platform 的 trait）：偏好 / 配置 / 工作区存数据目录的 JSON 文件、记住的访问密码
 //! （macOS 也是数据目录里的文件，Windows 进凭据管理器）、App 托管本机服务、HTML 预览用 wry、Dock 图标走 AppKit。
 //!
-//! 会话活在 launchd 服务里，不在 App 进程里——关掉最后一个窗口就退出 App（= 全部 Detach）。
+//! 会话活在 launchd 服务里，不在 App 进程里。macOS 上关窗口只收起界面，菜单栏状态项留下，
+//! 从那里启动 / 停止 / 重启本机服务，或把窗口再打开；退出（⌘Q）才是全部 Detach。
+//! Windows 没有本机服务，关掉最后一扇窗口就退出。
 
 // Windows release：GUI 子系统，双击 / 开始菜单启动时不再带出一个黑色控制台窗口。代价是日志
 // （eprintln）没处去了——要看日志用 debug 构建（`cargo run -p falcon-desktop`），它仍是控制台程序
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app_link;
+mod app_update;
 mod chime;
 mod dock;
 #[cfg(feature = "webview")]
 mod html_view;
 mod http;
 mod local_service;
+#[cfg(target_os = "macos")]
+mod menu_bar;
 mod passwords;
 mod platform;
 
@@ -26,11 +31,19 @@ fn main() {
     gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(|cx| {
         http::install(cx);
         falcon_ui::init(Rc::new(platform::Desktop::new()), cx);
+        #[cfg(target_os = "macos")]
+        menu_bar::install(cx);
 
-        // 关掉最后一个窗口就退出 App：会话活在 launchd 服务里，退出 = 全部 Detach
+        // macOS：最后一扇窗口关掉之后进程还在，菜单栏继续管 launchd 里的服务。
+        // 激活策略改成 Accessory，Dock 图标一起收起，否则会剩一个没有窗口的普通应用。
+        // 自动化脚本靠关窗结束进程，不走这条路。Windows 没有菜单栏，关窗即退出
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
-                cx.quit();
+                if keep_menu_bar_after_close() {
+                    cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
+                } else {
+                    cx.quit();
+                }
             }
         })
         .detach();
@@ -38,6 +51,17 @@ fn main() {
         falcon_ui::open_startup_window(cx);
         cx.activate(true);
     });
+}
+
+fn keep_menu_bar_after_close() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        menu_bar::installed() && std::env::var_os("FALCON_AUTOMATE").is_none()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 fn init_logging() {

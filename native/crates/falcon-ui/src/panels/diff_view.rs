@@ -1,5 +1,8 @@
-//! 画布上的差异窗口（旧 React 版的 `components/GitDiffView.tsx`）：split / unified 两种视图，
-//! 内容来自工作区的 `diff_tab`（就地替换的预览语义，全工作区只有一扇）。
+//! 差异视图（旧 React 版的 `components/GitDiffView.tsx`）：split / unified 两种视图。
+//!
+//! 画布上那扇跟着工作区的 `diff_tab`（就地替换的预览语义，全工作区只有一扇）。
+//! 右侧「修改」面板自己持有一份（[`DiffView::new_local`]），点击不写进 `diff_tab`，
+//! 否则画布上会再开一扇。
 //!
 //! 打开 / 切换文件 / 手动刷新时拉一次，**不轮询**——正看着的 diff 在眼皮底下变动只会让人
 //! 跟丢行号。
@@ -62,7 +65,6 @@ struct DiffKey {
     orig_path: Option<String>,
     index: String,
     work: String,
-    commit: Option<String>,
 }
 
 impl DiffKey {
@@ -74,7 +76,6 @@ impl DiffKey {
             orig_path: t.file.orig_path.clone(),
             index: t.file.index.clone(),
             work: t.file.work.clone(),
-            commit: t.commit.as_ref().map(|c| c.sha.clone()),
         }
     }
 }
@@ -120,8 +121,16 @@ enum Side {
     Right,
 }
 
+enum TargetSource {
+    /// 画布窗口：跟工作区的 `diff_tab`
+    Workspace,
+    /// 右侧「修改」面板：自己的目标，不碰画布
+    Local(Option<DiffTabTarget>),
+}
+
 pub struct DiffView {
     ws: Entity<Workspace>,
+    source: TargetSource,
     key: Option<DiffKey>,
     result: Option<GitFileDiff>,
     parsed: Option<Parsed>,
@@ -146,8 +155,26 @@ impl DiffView {
             cx.notify();
         })
         .detach();
-        let mut this = Self {
+        let mut this = Self::blank(ws, TargetSource::Workspace);
+        this.sync_target(false, cx);
+        this
+    }
+
+    /// 右侧「修改」面板用。不观察 `diff_tab`，目标由 [`Self::set_local`] 推进来。
+    pub fn new_local(ws: Entity<Workspace>, _cx: &mut Context<Self>) -> Self {
+        Self::blank(ws, TargetSource::Local(None))
+    }
+
+    pub fn set_local(&mut self, target: Option<DiffTabTarget>, cx: &mut Context<Self>) {
+        self.source = TargetSource::Local(target);
+        self.sync_target(false, cx);
+        cx.notify();
+    }
+
+    fn blank(ws: Entity<Workspace>, source: TargetSource) -> Self {
+        Self {
             ws,
+            source,
             key: None,
             result: None,
             parsed: None,
@@ -160,14 +187,19 @@ impl DiffView {
             wheel_side: Side::Right,
             hovered: false,
             _load: Task::ready(()),
-        };
-        this.sync_target(false, cx);
-        this
+        }
+    }
+
+    fn current_target(&self, cx: &App) -> Option<DiffTabTarget> {
+        match &self.source {
+            TargetSource::Workspace => self.ws.read(cx).state.diff_tab.clone(),
+            TargetSource::Local(target) => target.clone(),
+        }
     }
 
     /// 目标变了（或手动刷新）就重新拉。换了文件时清掉旧内容、滚回顶
     fn sync_target(&mut self, force: bool, cx: &mut Context<Self>) {
-        let target = self.ws.read(cx).state.diff_tab.clone();
+        let target = self.current_target(cx);
         let key = target.as_ref().map(DiffKey::of);
         if !force && key == self.key {
             return;
@@ -195,13 +227,8 @@ impl DiffView {
         };
         let repo = target.repo.clone();
         let pid = target.project_id.clone();
-        let commit = target.commit.as_ref().map(|c| c.sha.clone());
         self._load = cx.spawn(async move |this, cx| {
-            // 带 commit = History 里点进来的，看的是那一次改动；否则是工作区现状
-            let result = match commit {
-                Some(sha) => client.git_commit_diff(&pid, &sha, &file, repo.as_deref()).await,
-                None => client.git_file_diff(&pid, &file, repo.as_deref()).await,
-            };
+            let result = client.git_file_diff(&pid, &file, repo.as_deref()).await;
             this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
@@ -259,7 +286,7 @@ impl DiffView {
 impl Render for DiffView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
-        let Some(target) = self.ws.read(cx).state.diff_tab.clone() else {
+        let Some(target) = self.current_target(cx) else {
             return div().size_full().into_any_element();
         };
         let mode = view_mode(cx);
@@ -304,21 +331,6 @@ impl Render for DiffView {
                     .text_color(ui.muted_foreground)
                     .child(status_text(&porcelain_status(&file.index, &file.work))),
             );
-        if let Some(commit) = &target.commit {
-            // 看的是哪一次提交必须写在标题上：同一个文件在不同提交里的 diff 长得可以很像
-            let tip: SharedString = commit.subject.clone().into();
-            bar = bar.child(
-                div()
-                    .id("diff-commit")
-                    .min_w_0()
-                    .flex_shrink(1.)
-                    .truncate()
-                    .text_size(zpx(11.))
-                    .text_color(ui.muted_foreground)
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .child(format!("{} {}", commit.short, commit.subject)),
-            );
-        }
         if self.result.as_ref().is_some_and(|r| r.truncated) {
             bar = bar.child(
                 div()

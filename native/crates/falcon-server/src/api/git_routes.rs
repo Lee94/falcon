@@ -1,9 +1,8 @@
-//! 右侧 Git 面板与派生前探测的路由（routes.ts 从 `GET /api/projects/:id/repo` 到
-//! `POST /api/projects/:id/git/:action` 那一段）。
+//! 「修改」面板、工作区差异与派生前探测的路由。
 //!
 //! **探测端点永不因环境事实报错**：没装 git、不是仓库、没填工作目录、连不上，一律 200 +
-//! available/derivable:false + reason，让前端渲染一句具体说明。写操作（commit / op / pull /
-//! push）的失败同样不是 4xx——凭据不对、非快进、钩子拒绝都是仓库的正常状态，git 的原话
+//! available/derivable:false + reason，让前端渲染一句具体说明。写操作（commit / op）
+//! 的失败同样不是 4xx——凭据不对、非快进、钩子拒绝都是仓库的正常状态，git 的原话
 //! 比"操作失败"有用得多。只有请求本身造错了（缺参数、repo 不是成员）才 400。
 //!
 //! git 命令都在会话引擎里跑（SSH 项目复用项目链路）。客户端中途断开不影响写操作跑完：
@@ -12,18 +11,15 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::LazyLock;
-
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use falcon_proto::{
-    GitChangeCounts, GitCommitDetail, GitCommitInput, GitFileDiff, GitLogPage, GitRefsInfo, GitSnapshot, GitSyncResult,
-    GitUnavailableReason, GitWorkingChanges, MultiRepoProbe, MultiRepoProbeMember, RepoInfo, WorktreeFailure,
+    GitChangeCounts, GitCommitInput, GitFileDiff, GitSyncResult, GitUnavailableReason, GitWorkingChanges,
+    MultiRepoProbe, MultiRepoProbeMember, RepoInfo, WorktreeFailure,
 };
-use regex::Regex;
 use serde_json::Value;
 
 use super::AppState;
@@ -31,33 +27,27 @@ use super::auth_routes::LenientJson;
 use super::error::{ApiError, ApiResult};
 use super::input::field;
 use crate::db::{Db, ProjectRow};
-use crate::git::command::{LogQuery, parse_git_op_input};
+use crate::git::command::parse_git_op_input;
 use crate::git::error::{WorktreeError, worktree_failure_text};
 use crate::git::host::{GitHost, git_host_for, host_key_of};
 use crate::git::lock::{repo_lock_key, with_repo_lock};
 use crate::git::path::dirname_of;
 use crate::git::repo::{
-    GitDiffTarget, RunOpts, SyncAction, commit_working, describe_commit, describe_commit_diff, describe_git,
-    describe_git_changes, describe_git_changes_many, describe_git_diff, describe_git_log, describe_git_refs,
-    describe_repo, describe_working_changes, repo_root, run_git_op, sync_git, unavailable_changes, unavailable_commit,
-    unavailable_diff, unavailable_log, unavailable_refs, unavailable_snapshot, unavailable_working,
+    GitDiffTarget, RunOpts, commit_working, describe_git_changes, describe_git_changes_many, describe_git_diff,
+    describe_repo, describe_working_changes, repo_root, run_git_op, unavailable_changes, unavailable_diff,
+    unavailable_working,
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{id}/repo", get(repo))
         .route("/api/projects/{id}/repos", get(repos))
-        .route("/api/projects/{id}/git", get(snapshot))
         .route("/api/projects/{id}/git/changes", get(changes))
         .route("/api/git/changes", post(changes_many))
         .route("/api/projects/{id}/git/diff", get(diff))
         .route("/api/projects/{id}/git/working", get(working))
-        .route("/api/projects/{id}/git/log", get(log))
-        .route("/api/projects/{id}/git/refs", get(refs))
-        .route("/api/projects/{id}/git/commit", get(commit_detail).post(commit))
-        .route("/api/projects/{id}/git/commit/diff", get(commit_diff))
+        .route("/api/projects/{id}/git/commit", post(commit))
         .route("/api/projects/{id}/git/op", post(op))
-        .route("/api/projects/{id}/git/{action}", post(sync))
 }
 
 type Q = Query<HashMap<String, String>>;
@@ -104,20 +94,20 @@ where
     Ok(res)
 }
 
-/// git 面板端点的目标目录
+/// git 端点的目标目录
 enum Target {
     Dir(String),
     BadRequest(&'static str),
     NoWorkingDir,
 }
 
-/// git 面板端点的目标目录解析。
+/// git 端点的目标目录解析。
 ///
 /// 非多仓库行忽略 repo 参数，照旧用 working_dir。多仓库行的 working_dir 不是
 /// 仓库（容器 = 可选会话 cwd，派生行 = 集中目录），git 目标是某个成员：
 /// repo 给了必须**精确等于**某个成员 dir——前端从 project.multi.repos 原样带回，
 /// 不需要归一化比较，不匹配就是请求造错了（400）；repo 缺省时读端点回退第一个
-/// 成员（面板至少有东西看），写端点（commit / pull / push / op）拒绝——写操作不猜。
+/// 成员（面板至少有东西看），写端点（commit / op）拒绝——写操作不猜。
 fn git_target_of(row: &ProjectRow, repo: Option<&str>, write: bool) -> Target {
     let Some(members) = Db::parse_multi_repos(row.multi_repos.as_deref()) else {
         return match &row.working_dir {
@@ -223,17 +213,7 @@ async fn repos(State(state): State<AppState>, Path(id): Path<String>) -> ApiResu
     })))
 }
 
-/// 右侧 Git 面板的仓库快照。源项目和附属项目都能问（跟 GET /repo 不同，那边拒绝附属项目）。
-async fn snapshot(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitSnapshot>> {
-    let row = project(&state, &id)?;
-    let Some(dir) = read_target(&row, &q)? else {
-        return Ok(Json(unavailable_snapshot(GitUnavailableReason::NoWorkingDir, no_working_dir_text())));
-    };
-    let res = on_host(&state, row, move |host| async move { describe_git(&host, &dir, &RunOpts::default()).await }).await?;
-    Ok(Json(res.unwrap_or_else(|e| unavailable_snapshot(git_reason_of(&e), Some(detail_of(&e))))))
-}
-
-/// 侧栏最后一层的 +N −M。比 GET /git 轻一个数量级（一条 status），环境事实同样不抛 4xx。
+/// 侧栏最后一层的 +N −M。只跑一条 status，环境事实同样不抛 4xx。
 async fn changes(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<GitChangeCounts>> {
     let row = project(&state, &id)?;
     let Some(wd) = row.working_dir.clone().filter(|d| !d.is_empty()) else {
@@ -324,7 +304,7 @@ async fn changes_many(State(state): State<AppState>, body: LenientJson) -> ApiRe
     Ok(([(axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8")], body).into_response())
 }
 
-/// Git 面板里单个文件的 diff。path / origPath 由前端从快照原样带回
+/// 工作区里单个文件的 diff。path / origPath 由前端从工作区改动原样带回
 /// （仓库根相对路径），untracked=1 表示走 --no-index 伪 diff。
 async fn diff(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitFileDiff>> {
     let row = project(&state, &id)?;
@@ -356,80 +336,6 @@ async fn working(State(state): State<AppState>, Path(id): Path<String>, Query(q)
         on_host(&state, row, move |host| async move { describe_working_changes(&host, &dir, &RunOpts::default()).await })
             .await?;
     Ok(Json(res.unwrap_or_else(|e| unavailable_working(git_reason_of(&e), Some(detail_of(&e))))))
-}
-
-/// `Number(x)`，再按 `Number.isFinite(skip) && skip > 0 ? Math.floor(skip) : 0`
-fn parse_skip(raw: Option<&String>) -> usize {
-    let n = match raw.map(|s| s.trim()) {
-        None => return 0,
-        Some("") => 0.0,
-        Some(s) => s.parse::<f64>().unwrap_or(f64::NAN),
-    };
-    if n.is_finite() && n > 0.0 { n.floor() as usize } else { 0 }
-}
-
-/// History 列表的一页。筛选与分页全在 query 里：branch / author / q / skip。
-async fn log(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitLogPage>> {
-    let row = project(&state, &id)?;
-    let Some(dir) = read_target(&row, &q)? else {
-        return Ok(Json(unavailable_log(GitUnavailableReason::NoWorkingDir, no_working_dir_text())));
-    };
-    let query = LogQuery {
-        rev: non_empty(&q, "branch"),
-        author: non_empty(&q, "author"),
-        grep: non_empty(&q, "q"),
-        skip: Some(parse_skip(q.get("skip"))),
-        limit: None,
-    };
-    let res =
-        on_host(&state, row, move |host| async move { describe_git_log(&host, &dir, &query, &RunOpts::default()).await })
-            .await?;
-    Ok(Json(res.unwrap_or_else(|e| unavailable_log(git_reason_of(&e), Some(detail_of(&e))))))
-}
-
-/// Branch / User 两个筛选下拉的候选值。面板挂载时取一次，不参与轮询
-async fn refs(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitRefsInfo>> {
-    let row = project(&state, &id)?;
-    let Some(dir) = read_target(&row, &q)? else {
-        return Ok(Json(unavailable_refs(GitUnavailableReason::NoWorkingDir, no_working_dir_text())));
-    };
-    let res = on_host(&state, row, move |host| async move { describe_git_refs(&host, &dir, &RunOpts::default()).await })
-        .await?;
-    Ok(Json(res.unwrap_or_else(|e| unavailable_refs(git_reason_of(&e), Some(detail_of(&e))))))
-}
-
-/// 只认十六进制：sha 要作为 rev 传给 git，形状先钉死，别指望下游转义
-fn valid_sha(sha: Option<&String>) -> Option<String> {
-    static SHA: LazyLock<Regex> = LazyLock::new(|| Regex::new("(?i)^[0-9a-f]{4,40}$").unwrap());
-    sha.filter(|s| SHA.is_match(s)).cloned()
-}
-
-/// 选中提交的详情：完整提交信息 + 改动文件
-async fn commit_detail(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitCommitDetail>> {
-    let row = project(&state, &id)?;
-    let Some(sha) = valid_sha(q.get("sha")) else { return Err(ApiError::bad_request("sha 参数不合法")) };
-    let Some(dir) = read_target(&row, &q)? else {
-        return Ok(Json(unavailable_commit(GitUnavailableReason::NoWorkingDir, no_working_dir_text())));
-    };
-    let res = on_host(&state, row, move |host| async move { describe_commit(&host, &dir, &sha, &RunOpts::default()).await })
-        .await?;
-    Ok(Json(res.unwrap_or_else(|e| unavailable_commit(git_reason_of(&e), Some(detail_of(&e))))))
-}
-
-/// 某条提交里单个文件的 diff。path / origPath 由前端从详情原样带回
-async fn commit_diff(State(state): State<AppState>, Path(id): Path<String>, Query(q): Q) -> ApiResult<Json<GitFileDiff>> {
-    let row = project(&state, &id)?;
-    let Some(sha) = valid_sha(q.get("sha")) else { return Err(ApiError::bad_request("sha 参数不合法")) };
-    let Some(path) = non_empty(&q, "path") else { return Err(ApiError::bad_request("缺少 path 参数")) };
-    let Some(dir) = read_target(&row, &q)? else {
-        return Ok(Json(unavailable_diff(GitUnavailableReason::NoWorkingDir, no_working_dir_text())));
-    };
-    let orig = non_empty(&q, "origPath");
-    let res = on_host(&state, row, move |host| async move {
-        describe_commit_diff(&host, &dir, &sha, &path, orig.as_deref(), &RunOpts::default()).await
-    })
-    .await?;
-    Ok(Json(res.unwrap_or_else(|e| unavailable_diff(git_reason_of(&e), Some(detail_of(&e))))))
 }
 
 /// 写操作的目标：多仓库项目必须显式指定成员，不猜。没有工作目录是结果，不是错误
@@ -464,7 +370,7 @@ where
     Ok(Json(res.unwrap_or_else(|e| sync_failure(&e))))
 }
 
-/// 提交工作区改动。与 pull/push 同样两条规矩：走仓库锁，失败不是 4xx（没配 user.name、
+/// 提交工作区改动。与 op 同样两条规矩：走仓库锁，失败不是 4xx（没配 user.name、
 /// pre-commit 钩子拒绝、没有可提交的改动，都是仓库的正常状态）。
 async fn commit(
     State(state): State<AppState>,
@@ -504,8 +410,8 @@ async fn commit(
     .await
 }
 
-/// 历史面板写操作：fetch / checkout / cherry-pick / revert / 建分支。规矩与 commit / pull /
-/// push 相同：仓库锁、多仓库强制 repo、git 失败回 GitSyncResult 而不是 4xx。
+/// 「修改」面板的写操作：丢弃 / 继续 / 中止 / 取边。规矩与 commit 相同：仓库锁、
+/// 多仓库强制 repo、git 失败回 GitSyncResult 而不是 4xx。
 async fn op(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -520,28 +426,6 @@ async fn op(
     };
     locked_write(&state, row, dir, move |host, root| async move {
         run_git_op(&host, &root, &input, &RunOpts::default()).await
-    })
-    .await
-}
-
-/// Pull / Push。同一棵检出上并发 pull 会争 index.lock，报出来的错对用户毫无意义，所以走仓库锁。
-async fn sync(
-    State(state): State<AppState>,
-    Path((id, action)): Path<(String, String)>,
-    Query(q): Q,
-) -> ApiResult<Json<GitSyncResult>> {
-    let action = match action.as_str() {
-        "pull" => SyncAction::Pull,
-        "push" => SyncAction::Push,
-        _ => return Err(ApiError::not_found("未知操作")),
-    };
-    let row = project(&state, &id)?;
-    let dir = match write_target(&row, &q)? {
-        Ok(d) => d,
-        Err(res) => return Ok(Json(res)),
-    };
-    locked_write(&state, row, dir, move |host, root| async move {
-        sync_git(&host, &root, action, &RunOpts::default()).await
     })
     .await
 }
@@ -572,16 +456,4 @@ mod tests {
         assert!(matches!(git_target_of(&row(None, Some("[]")), None, false), Target::NoWorkingDir));
     }
 
-    #[test]
-    fn skip_and_sha_parsing() {
-        let s = |v: &str| Some(v.to_string());
-        assert_eq!(parse_skip(None), 0);
-        assert_eq!(parse_skip(s("40").as_ref()), 40);
-        assert_eq!(parse_skip(s("2.7").as_ref()), 2);
-        assert_eq!(parse_skip(s("-3").as_ref()), 0);
-        assert_eq!(parse_skip(s("abc").as_ref()), 0);
-        assert_eq!(valid_sha(s("ABCDEF12").as_ref()).as_deref(), Some("ABCDEF12"));
-        assert_eq!(valid_sha(s("abc").as_ref()), None);
-        assert_eq!(valid_sha(s("abcd;rm").as_ref()), None);
-    }
 }

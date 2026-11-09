@@ -1,6 +1,5 @@
-//! 「修改」「历史」两个面板与差异窗口共用的小件：不可用原因的文案、porcelain 状态、
-//! 改动文件的列表 / 目录树（旧 React 版的 `FileChangeView.tsx`）、三态勾选框、多仓库成员切换、
-//! 提交时间。
+//! 「修改」面板与差异窗口共用的小件：不可用原因的文案、porcelain 状态、
+//! 改动文件的列表 / 目录树（旧 React 版的 `FileChangeView.tsx`）、三态勾选框、多仓库成员切换。
 //!
 //! 改动文件的列表在 React 版里是一棵组件树（目录行 + 文件行递归），这里压平成一串等高的行交给
 //! `uniform_list`：几千个改动文件也只画视口里那几十行，不用 React 版那种"文件多了再说"的妥协。
@@ -98,31 +97,10 @@ pub fn hint(text: impl Into<SharedString>, detail: Option<String>, cx: &App) -> 
     d
 }
 
-/// 详情头 / 提交行上的时间。当天只给时分（图里就是这样），跨天才补日期——一屏里绝大多数
-/// 提交都是今天的，天天重复同一个日期是噪音（React 版 `formatWhen`）。
-pub fn format_when(ms: i64) -> String {
-    if ms == 0 {
-        return String::new();
-    }
-    let now = web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let d = crate::local_time::civil(ms);
-    let today = crate::local_time::civil(now);
-    let time = format!("{:02}:{:02}", d.hour, d.minute);
-    if (d.year, d.month, d.day) == (today.year, today.month, today.day) {
-        time
-    } else {
-        // zh-CN 的 toLocaleDateString：2026/9/24
-        format!("{}/{}/{} {time}", d.year, d.month, d.day)
-    }
-}
-
 // ---------------- 列表 / 目录树偏好 ----------------
 
-/// 列表 / 目录树。「修改」面板与 History 的提交详情共用一个键（`falcon.fileView`，沿用 React 版）：
-/// 同一个人对"列表还是树"的偏好不会在两个面板之间反复横跳。每次渲染现读，两处天然同步
+/// 列表 / 目录树。偏好键 `falcon.fileView` 沿用 React 版（当时与历史面板共用），
+/// 现在只有「修改」面板用。每次渲染现读。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileViewMode {
     List,
@@ -246,9 +224,8 @@ pub fn checkbox(
 
 // ---------------- 多仓库成员切换 ----------------
 
-/// 多仓库项目在 Git / 修改面板头部的成员切换器（React 版 `MultiRepoSelect`）。非多仓库项目给
-/// None，两个面板可以无条件挂上它。选择存在工作区（`multi_repo`）——两个面板与差异窗口
-/// 必须看同一个成员，面板自己记必然漂移。
+/// 多仓库项目在「修改」面板头部的成员切换器（React 版 `MultiRepoSelect`）。非多仓库项目给
+/// None。选择存在工作区（`multi_repo`）——面板与差异窗口必须看同一个成员，面板自己记必然漂移。
 pub fn multi_repo_select(id: &str, ws: &Entity<Workspace>, project: Option<&Project>, cx: &App) -> Option<AnyElement> {
     let project = project?;
     let multi = project.multi.as_ref()?;
@@ -424,7 +401,7 @@ pub fn group_check(paths: &[String], excluded: &HashSet<String>) -> Check {
     }
 }
 
-/// 列表的宿主（「修改」面板 / 历史面板）：点文件、折叠目录、勾选
+/// 列表的宿主（「修改」面板）：点文件、折叠目录、勾选
 pub trait FileListHost: Sized + 'static {
     fn open_file(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>);
     fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>);
@@ -432,12 +409,13 @@ pub trait FileListHost: Sized + 'static {
     fn toggle_select(&mut self, _paths: &[String], _next: bool, _cx: &mut Context<Self>) {}
 }
 
-/// 画一行。`excluded` 给了才画勾选框列——History 的提交详情不需要选
+/// 画一行。`excluded` 给了才画勾选框列
 pub fn render_file_row<V: FileListHost>(
     prefix: &str,
     row: &FileRow,
     files: &[FileItem],
     excluded: Option<&HashSet<String>>,
+    active_path: Option<&str>,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let ui = Ui::global(cx).clone();
@@ -524,6 +502,7 @@ pub fn render_file_row<V: FileListHost>(
             let Some(file) = files.get(*idx) else {
                 return div().h(zpx(FILE_ROW_H)).into_any_element();
             };
+            let active = active_path.is_some_and(|p| p == file.path.as_str());
             let idx = *idx;
             let dir = if *name_only { "" } else { dir_of(&file.path) };
             let label = status_text(&file.status);
@@ -591,7 +570,8 @@ pub fn render_file_row<V: FileListHost>(
                 .items_center()
                 .pr_2()
                 .cursor_pointer()
-                .hover(|s| s.bg(ui.muted))
+                .when(active, |d| d.bg(ui.tint))
+                .when(!active, |d| d.hover(|s| s.bg(ui.muted)))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_file(idx, window, cx)))
                 .child(body);

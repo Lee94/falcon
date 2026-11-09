@@ -11,21 +11,19 @@
 //! - TS 的可选字段 `x?: T` → `Option<T>` + `default` + `skip_serializing_if`：缺省就是
 //!   缺省，写回时不会凭空多出一个 `null`（对服务端来说 `null` 与缺省并不总是一回事）。
 //! - TS 的必填可空字段 `x: T | null` → `Option<T>`，**不跳过**，`None` 写成 `null`。
-//! - TS 的 `x?: T | null`（只有 `GitSnapshot.ahead / behind`）→ `Option<Option<T>>`，
-//!   缺省 / null / 有值三态原样来回。
 //! - 字符串字面量联合 → 枚举，每个变体显式写出字面量（见 `wire::wire_enum!`）。
 //! - 可辨识联合 → `#[serde(tag = "…")]` 的枚举；唯一的例外是按布尔 `ok` 判别的
 //!   [`SshProbeResult`]，经平铺形状转一道。
 //! - `extends` → `#[serde(flatten)]` + `Deref`（[`SessionWithProject`]、
-//!   [`GitWorkingFile`]、[`MeegleTodoItem`]、[`MeegleWorkItemDetail`]）。
+//!   [`GitWorkingFile`]）。
 //! - TS 里内联的匿名对象类型在 Rust 侧起了名字（如 [`MultiRepoProbeMember`]、
-//!   [`FileRemoveError`]、[`MeegleAttachment`]），注释里写明出处。
+//!   [`FileRemoveError`]），注释里写明出处。
 //!
 //! # 数字
 //!
 //! JS 只有一种数字，Rust 侧按语义挑：毫秒时间戳 `i64`；端口 `u16`；终端行列 `u16`；
 //! 字节数 `u64`；条目数 / 轮次 / 页码 `u32`；git 的增删行数 `u64`；文件 mtime 是
-//! Unix **秒**（`i64`）；飞书 CLI 原样透传的 `expiresInMinutes` 不保证是整数，用 `f64`。
+//! Unix **秒**（`i64`）。插件面板文档里的刷新间隔、进度与走势是 JS 数字，用 `f64`。
 //!
 //! # `Unknown` 兜底
 //!
@@ -33,13 +31,11 @@
 //! 新服务端多一个值时，老客户端不至于让整张列表反序列化失败：
 //! [`SessionState`]、[`DeadReason`]、[`SessionAgent`]、[`NonDurableReason`]、
 //! [`InstallFailure`]、[`InstallStage`]、[`ProgramState`]、[`ProgramBlockKind`]、[`WorktreeFailure`]、
-//! [`GitUnavailableReason`]、[`GitConflictKind`]、[`ForwardState`]、
-//! [`MeegleUnavailableReason`]、[`MeeglePinKind`]，以及可辨识联合
-//! [`FilePreview`]、[`ServerMessage`]、[`InstallServerMessage`]、[`MeshState`]。各自的理由写在类型注释里。
+//! [`GitUnavailableReason`]、[`GitConflictKind`]、[`ForwardState`]，以及可辨识联合
+//! [`FilePreview`]、[`ServerMessage`]、[`InstallServerMessage`]。各自的理由写在类型注释里。
 //!
-//! 刻意**不加**的：客户端写出去的值（请求体、[`ClientMessage`]、[`GitOpInput`]、
-//! [`MeegleTodoAction`]）；TS 注释明说不会再加值的结构性判别（[`ProjectType`]
-//! 等）；单个响应里认不出就该报错的判别（[`MeegleUrlTarget`]）。
+//! 刻意**不加**的：客户端写出去的值（请求体、[`ClientMessage`]、[`GitOpInput`]）；
+//! TS 注释明说不会再加值的结构性判别（[`ProjectType`] 等）。
 //!
 //! # 没有镜像的
 //!
@@ -58,12 +54,9 @@
 
 mod wire;
 
-/// AI 助手：对话、条目（照 ACP 的形状）、WS 消息、设置（docs/design/ai-assistant.md）
-pub mod assistant;
 pub mod files;
 pub mod forward;
 pub mod git;
-pub mod meegle;
 /// 右侧栏插件：清单、面板文档、动作、给命令插件的请求（ADR 0025）
 pub mod plugin;
 pub mod program_status;
@@ -72,13 +65,10 @@ pub mod session;
 /// falcon-server 与宿主机上会话守护进程（falcon-sessiond）之间的帧协议（ADR 0020）
 pub mod sessiond;
 pub mod system;
+pub mod tailscale;
 pub mod term_env;
 /// VT 模式跟踪：服务端拼回放前缀、客户端合成鼠标报文共用一个跟踪器（shared/termModes.ts）
 pub mod term_modes;
-/// Tern native documents and streaming protocol state shared with the persistent VT.
-pub mod tsp;
-/// Filter outer-terminal replies while keeping the persistent VT as query owner.
-pub mod terminal_replies;
 pub mod worktree;
 pub mod ws;
 /// 会话守护进程的部署（推二进制）与宿主机的持久能力
@@ -87,12 +77,12 @@ pub mod install;
 pub use files::*;
 pub use forward::*;
 pub use git::*;
-pub use meegle::*;
 pub use plugin::*;
 pub use program_status::*;
 pub use project::*;
 pub use session::*;
 pub use system::*;
+pub use tailscale::*;
 pub use term_env::*;
 pub use worktree::*;
 pub use install::*;

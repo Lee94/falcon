@@ -1,23 +1,26 @@
-//! 一台 falcon 服务端的窗口：浮动岛骨架（ADR 0011）——窗口底铺 `app`，侧栏 / 主区 / 右面板
-//! 是浮在上面的圆角岛，之间只有一道 6px 的缝；右侧活动栏不成岛，图标直接落在窗口底上。
+//! 一台 falcon 服务端的窗口：浮动岛骨架（ADR 0011）——窗口底铺 `app`（透明度见
+//! `window_background`：实色 / 透出桌面 / 系统模糊），侧栏 / 主区 / 右面板是浮在上面的圆角岛，
+//! 之间只有一道 8px 的缝；右侧活动栏不成岛，图标直接落在窗口底上。
 //!
-//! 顶上一条 36px 的标题条（旧 React 版没有）：放 macOS 的红绿灯（Windows 上是自绘的三颗窗口
-//! 按钮）、写明这是哪台 falcon 服务端（"身份先于内容"——远处的服务端要让人一眼认出来，别把
-//! 命令敲错机器），也是拖窗口的地方。
+//! 顶上一条 40px 的标题条（旧 React 版没有）：放 macOS 的红绿灯（Windows 上是自绘的三颗窗口
+//! 按钮）和应用图标、名称，也是拖窗口的地方。多块画布时，切换用的缩略图也排在这条里、对齐
+//! 主区画布的左缘，不再在主区顶上另占一行。连的不是本机服务端时，名称后面再写那台服务端，
+//! 免得把命令敲错机器。
+
+use std::sync::Arc;
 
 use gpui_kit::component::Root;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, IntoElement, Render, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, point, px, size,
+    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Image, IntoElement, MouseButton, MouseDownEvent,
+    Render, Stateful, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, img, point, px, size,
 };
 use rust_i18n::t;
 
 use crate::actions::*;
 use crate::canvas::Canvas;
 use crate::dialogs;
-use crate::login::LoginView;
 use crate::palette;
 use crate::profiles::ServerProfile;
 use crate::rightbar::{PanelHost, RightBar};
@@ -26,7 +29,19 @@ use crate::theme::{GAP, Ui};
 use crate::workspace::{ActiveView, AuthPhase, RightPanelId, Workspace, WorkspaceEvent};
 use crate::zoom::zpx;
 
-const TITLE_STRIP: f32 = 36.;
+const TITLE_STRIP: f32 = 40.;
+/// 标题条上的应用图标。图是 macOS 版式，四周留了透明边，看得见的部分比这个数小一圈
+const TITLE_MARK: f32 = 22.;
+const APP_NAME: &str = "Falcon";
+
+/// 有窗口就把其中一扇带到前面；一扇都没有就返回 false，调用方再开启动时那一台
+pub fn present(cx: &mut App) -> bool {
+    let Some(handle) = cx.windows().into_iter().next() else {
+        return false;
+    };
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    true
+}
 
 pub fn open_server_window(profile: ServerProfile, cx: &mut App) {
     let title = window_title(&profile, cx);
@@ -34,17 +49,22 @@ pub fn open_server_window(profile: ServerProfile, cx: &mut App) {
         titlebar: Some(TitlebarOptions {
             title: Some(title.into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(12.), px(12.))),
+            traffic_light_position: Some(point(px(14.), px(14.))),
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
         window_min_size: Some(size(px(820.), px(480.))),
+        window_background: crate::window_background::appearance(cx),
+        // 标题条里有可点的画布缩略图。交给 AppKit 拖窗口的话，它会把整条标题当成拖动区，
+        // 点击先被拿去分辨是不是双击，缩略图要点第二次才有反应。拖动改由标题条空白处自己调
+        // start_window_move（见 title_drag_zone）
+        app_owns_titlebar_drag: true,
         ..Default::default()
     };
     let mut ws_out = None;
     let result = cx.open_window(options, |window, cx| {
         let view = cx.new(|cx| ServerWindow::new(profile, window, cx));
         ws_out = Some(view.read(cx).ws.clone());
-        cx.new(|cx| Root::new(view, window, cx))
+        cx.new(|cx| crate::window_background::mount_root(view, window, cx))
     });
     match result {
         Ok(handle) => {
@@ -69,28 +89,50 @@ pub fn quit(cx: &mut App) {
     cx.defer(quit_now);
 }
 
-fn quit_now(cx: &mut App) {
-    let dirty = cx.windows().into_iter().find_map(|handle| {
-        let root = handle.downcast::<Root>()?;
-        let view = root.read(cx).ok()?.view().clone().downcast::<ServerWindow>().ok()?;
-        let name = view.read(cx).ws.read(cx).dirty_file_name()?;
-        Some((handle, name))
+/// 和 [`quit`] 同一条未保存确认。没有未保存修改，或用户确认放弃，才调用 `on_quit`。
+/// 取消则留下当前进程。更新装完后用它再打开新应用：帮手必须等确认之后才派，
+/// 否则用户点了取消，旧进程还在，退出时仍会被打开第二份
+pub fn quit_and_then(footnote: Option<String>, on_quit: impl Fn(&mut App) + 'static, cx: &mut App) {
+    let on_quit = std::rc::Rc::new(on_quit);
+    cx.defer(move |cx| {
+        let on_quit = on_quit.clone();
+        let Some((handle, name)) = dirty_window(cx) else {
+            on_quit(cx);
+            return;
+        };
+        handle
+            .update(cx, move |_, window, cx| {
+                window.activate_window();
+                let mut opts = unsaved_opts(&name, t!("native.files.quitAnyway").to_string());
+                opts.footnote = footnote;
+                let on_quit = on_quit.clone();
+                dialogs::confirm(opts, move |_, cx| on_quit(cx), window, cx);
+            })
+            .ok();
     });
-    let Some((handle, name)) = dirty else {
+}
+
+fn quit_now(cx: &mut App) {
+    let Some((handle, name)) = dirty_window(cx) else {
         cx.quit();
         return;
     };
     // 用 AnyWindowHandle 进窗口：WindowHandle<Root> 的 update 会把 Root 借走，开对话框又要读它
-    handle.update(cx, |_, window, cx| {
-        window.activate_window();
-        dialogs::confirm(
-            unsaved_opts(&name, t!("native.files.quitAnyway").to_string()),
-            |_, cx| cx.quit(),
-            window,
-            cx,
-        );
+    handle
+        .update(cx, |_, window, cx| {
+            window.activate_window();
+            dialogs::confirm(unsaved_opts(&name, t!("native.files.quitAnyway").to_string()), |_, cx| cx.quit(), window, cx);
+        })
+        .ok();
+}
+
+fn dirty_window(cx: &mut App) -> Option<(gpui_kit::AnyWindowHandle, String)> {
+    cx.windows().into_iter().find_map(|handle| {
+        let root = handle.downcast::<Root>()?;
+        let view = root.read(cx).ok()?.view().clone().downcast::<ServerWindow>().ok()?;
+        let name = view.read(cx).ws.read(cx).dirty_file_name()?;
+        Some((handle, name))
     })
-    .ok();
 }
 
 fn unsaved_opts(name: &str, confirm_label: String) -> dialogs::ConfirmOpts {
@@ -106,10 +148,26 @@ fn unsaved_opts(name: &str, confirm_label: String) -> dialogs::ConfirmOpts {
 
 fn window_title(profile: &ServerProfile, cx: &App) -> String {
     if profile.is_local() {
-        "Falcon".to_string()
+        APP_NAME.to_string()
     } else {
-        format!("Falcon — {}", display_name(profile, cx))
+        format!("{APP_NAME} — {}", display_name(profile, cx))
     }
+}
+
+/// 标题条上的应用图标，跟设置里选的那张走。自定义图还在取、或还没连上服务端时用默认的那张。
+fn app_mark(ws: &crate::workspace::Workspace) -> Arc<Image> {
+    use falcon_core::app_icon::{CUSTOM, DEFAULT_APP_ICON};
+    if let Some(state) = &ws.app_icon {
+        if state.selected == CUSTOM
+            && let Some(custom) = &ws.custom_icon
+        {
+            return custom.image.clone();
+        }
+        if let Some(image) = crate::app_icon::builtin_image(&state.selected) {
+            return image;
+        }
+    }
+    crate::app_icon::builtin_image(DEFAULT_APP_ICON).expect("默认应用图标嵌在二进制里")
 }
 
 pub fn display_name(profile: &ServerProfile, _cx: &App) -> String {
@@ -129,10 +187,11 @@ pub struct ServerWindow {
     overview: Entity<dialogs::overview::SessionOverview>,
     rightbar: Entity<RightBar>,
     panels: Entity<PanelHost>,
-    login: Entity<LoginView>,
     focus: FocusHandle,
     /// 拖侧栏 / 右面板宽度中（旧 React 版的 ResizableSlot）
     panel_resize: Option<PanelDrag>,
+    /// macOS：按下了标题条的空白处，下一记移动才开始拖窗口。缩略图不在这块里，点它不会拖窗口
+    title_drag: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -152,10 +211,11 @@ impl ServerWindow {
         let overview = cx.new(|cx| dialogs::overview::SessionOverview::new(ws.clone(), window, cx));
         let rightbar = cx.new(|cx| RightBar::new(ws.clone(), window, cx));
         let panels = cx.new(|cx| PanelHost::new(ws.clone(), window, cx));
-        let login = cx.new(|cx| LoginView::new(ws.clone(), window, cx));
 
         let subs = vec![
             cx.observe(&ws, |_, _, cx| cx.notify()),
+            // 拖窗口时缩略图的高亮在画布上改、画在标题条里。画布通知不会自动重画窗口根
+            cx.observe(&canvas, |_, _, cx| cx.notify()),
             cx.subscribe_in(&ws, window, Self::on_workspace_event),
             // 系统切明暗：跟随系统时重新派生主题
             cx.observe_window_appearance(window, |_, window, cx| crate::theme::on_window_appearance(window, cx)),
@@ -226,9 +286,9 @@ impl ServerWindow {
             overview,
             rightbar,
             panels,
-            login,
             focus: cx.focus_handle(),
             panel_resize: None,
+            title_drag: false,
             _subs: subs,
         }
     }
@@ -274,40 +334,93 @@ impl ServerWindow {
         }
     }
 
-    fn render_title_strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 标题条上能拖窗口的一段。macOS 上点击交给我们自己（`app_owns_titlebar_drag`），空白处按下
+    /// 再移动才 `start_window_move`，双击仍是系统的标题条动作。Windows 沿用 `HTCAPTION`，不在
+    /// 这里再调一次，否则会拖两下。缩略图不要放进这个元素里。
+    fn title_drag_zone(&self, zone: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let info = falcon_platform::get(cx).info();
+        if info.custom_window_controls() {
+            return crate::window_controls::drag_area(zone, cx);
+        }
+        if !info.traffic_lights() {
+            return zone;
+        }
+        zone.on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, _| {
+            if e.click_count >= 2 {
+                this.title_drag = false;
+                window.titlebar_double_click();
+                return;
+            }
+            this.title_drag = true;
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.title_drag = false))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, _| this.title_drag = false))
+    }
+
+    fn render_title_strip(&self, window: &Window, switcher: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
         let profile = &ws.profile;
-        let name = display_name(profile, cx);
+        // 侧栏开着时，缩略图的起点跟主区画布的左缘对齐（主区左边是缝 + 侧栏 + 缝）。
+        // 侧栏收起时画布几乎贴着窗口左边，再对齐会压到红绿灯，改成跟在名称后面
+        let pin_left = switcher.is_some().then(|| {
+            if ws.state.sidebar_visible() {
+                Some(GAP + zpx(ws.state.sidebar_width as f32) + GAP)
+            } else {
+                None
+            }
+        });
         // 文字区就是拖动区；Windows 上右边再贴最小化 / 最大化 / 关闭（window_controls.rs），
-        // 两者是兄弟而不是嵌套，按钮的命中区不会被拖动区盖住
-        let mut strip = div()
+        // 两者是兄弟而不是嵌套，按钮的命中区不会被拖动区盖住。缩略图夹在两段拖动区中间，
+        // 自己接收点击
+        let mut identity = div()
             .id("title-strip-drag")
-            .flex_1()
-            .min_w_0()
             .h_full()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(zpx(6.))
             // macOS 留出红绿灯占的位置
-            .pl(px(if falcon_platform::get(cx).info().traffic_lights() { 84. } else { 12. }))
-            .pr_3()
+            .pl(px(if falcon_platform::get(cx).info().traffic_lights() { 88. } else { 14. }))
+            .pr(zpx(8.))
+            .min_w_0()
+            .overflow_hidden()
             .text_xs()
             .text_color(ui.muted_foreground)
-            .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).text_color(ui.foreground).child(name));
+            .child(img(app_mark(ws)).size(zpx(TITLE_MARK)).flex_none())
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .text_color(ui.foreground)
+                    .child(APP_NAME),
+            );
         if !profile.is_local() {
-            strip = strip.child(div().child(profile.url.clone()));
+            identity = identity
+                .child(div().flex_none().child(display_name(profile, cx)))
+                .child(div().min_w_0().flex_1().truncate().child(profile.url.clone()));
             if profile.is_insecure() {
-                strip = strip.child(div().text_color(ui.warning).child(t!("native.server.plaintext").to_string()));
+                identity = identity.child(
+                    div().flex_none().text_color(ui.warning).child(t!("native.server.plaintext").to_string()),
+                );
             }
         }
-        div()
+        identity = match pin_left {
+            Some(Some(width)) => identity.w(width).flex_none(),
+            Some(None) => identity.flex_none(),
+            None => identity.flex_1(),
+        };
+        let mut strip = div()
             .id("title-strip")
             .h(px(TITLE_STRIP))
             .flex_none()
             .flex()
-            .child(crate::window_controls::drag_area(strip, cx))
-            .children(crate::window_controls::controls(px(TITLE_STRIP), window, cx))
+            .overflow_hidden()
+            .child(self.title_drag_zone(identity, cx))
+            .children(switcher);
+        if pin_left.is_some() {
+            strip = strip.child(self.title_drag_zone(div().id("title-strip-rest").flex_1().h_full().min_w(px(24.)), cx));
+        }
+        strip.children(crate::window_controls::controls(px(TITLE_STRIP), window, cx))
     }
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -323,11 +436,10 @@ impl ServerWindow {
         let show_sidebar = ws.state.sidebar_visible();
         let show_right = ws.state.right_open;
         let overview = ws.state.active == ActiveView::Overview;
-        let assistant = ws.assistant.clone().filter(|p| p.read(cx).open);
 
         // 侧栏、右侧面板、图标栏走缓存视图：没被 notify 就复用上一帧的布局与绘制。终端刷屏时
         // 只有终端视图在变，不缓存的话整棵树每帧重排——实测 7 行的侧栏每帧就要 3ms 多，
-        // 开着历史面板再加近 3ms。它们都订阅了工作区（变了会 notify），主题切换走
+        // 右侧面板开着再加一截。它们都订阅了工作区（变了会 notify），主题切换走
         // refresh_windows（无视缓存），所以不会画旧。画布不缓存：终端就在它里面
         let full = || gpui_kit::StyleRefinement::default().size_full();
         let mut main = div().flex().flex_1().min_w_0().min_h_0().pl(GAP).pb(GAP);
@@ -343,10 +455,7 @@ impl ServerWindow {
                 .min_w_0()
                 .h_full()
                 .child(self.canvas.clone())
-                .when(overview, |d| d.child(div().absolute().inset_0().child(self.overview.clone())))
-                // AI 助手面板浮在主区左下角、贴着侧栏（入口按钮就在侧栏左下角）。不是对话框：开着时
-                // 照样能点画布里的终端，⌘J 也走窗口上这一份
-                .when_some(assistant, |d, panel| d.child(panel)),
+                .when(overview, |d| d.child(div().absolute().inset_0().child(self.overview.clone()))),
         );
         if show_right {
             main = main
@@ -403,9 +512,22 @@ impl ServerWindow {
             }))
     }
 
-    fn on_panel_drag(&mut self, e: &gpui_kit::MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_panel_drag(&mut self, e: &gpui_kit::MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         use falcon_core::panel_width::{PanelResize, ResizeEdge, resize_panel_width};
-        let Some(d) = &self.panel_resize else {
+        if self.title_drag {
+            self.title_drag = false;
+            if e.pressed_button == Some(gpui_kit::MouseButton::Left) {
+                window.start_window_move();
+            }
+            return;
+        }
+        // 画布上的拖拽进行中、指针又移进了标题条：画布元素收不到这一下，转给它更新落点
+        let Some((edge, start_x0, start_width)) = self.panel_resize.as_ref().map(|d| (d.edge, d.start_x, d.start_width)) else {
+            self.canvas.update(cx, |c, cx| {
+                if c.tracking_pointer() {
+                    c.on_mouse_move(e, window, cx);
+                }
+            });
             return;
         };
         if e.pressed_button != Some(gpui_kit::MouseButton::Left) {
@@ -416,9 +538,8 @@ impl ServerWindow {
         }
         // 存下来的宽度是缩放前的逻辑像素（渲染时再乘倍数），指针位移要先折回去
         let z = crate::zoom::zoom() as f64;
-        let (start_x, x) = (d.start_x as f64 / z, f32::from(e.position.x) as f64 / z);
-        let width = resize_panel_width(&PanelResize::new(d.start_width, start_x, x, d.edge));
-        let edge = d.edge;
+        let (start_x, x) = (start_x0 as f64 / z, f32::from(e.position.x) as f64 / z);
+        let width = resize_panel_width(&PanelResize::new(start_width, start_x, x, edge));
         self.ws.update(cx, |w, cx| {
             let changed = match edge {
                 ResizeEdge::Right => w.state.set_sidebar_width(width),
@@ -431,6 +552,7 @@ impl ServerWindow {
     }
 
     fn on_panel_drag_end(&mut self, _: &gpui_kit::MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.title_drag = false;
         if self.panel_resize.take().is_some() {
             // 拖的途中只改内存，松手才落盘
             self.ws.read(cx).persist();
@@ -448,9 +570,11 @@ impl Render for ServerWindow {
             self.ws.update(cx, |w, cx| w.ensure_terminal_views(window, cx));
         }
 
+        // 缩略图跟着标题条走。连上之后才有画布可切；总览时 title_switcher 自己返回 None
+        let switcher = (phase == AuthPhase::Ready).then(|| self.canvas.read(cx).title_switcher(cx)).flatten();
+
         let body = match phase {
             AuthPhase::Ready => self.render_main(window, cx).into_any_element(),
-            AuthPhase::NeedLogin => div().flex_1().child(self.login.clone()).into_any_element(),
             AuthPhase::Checking => div()
                 .flex_1()
                 .flex()
@@ -507,7 +631,8 @@ impl Render for ServerWindow {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ui.app)
+            // 岛在各自的视图里另铺实色，这里只铺窗口底
+            .bg(crate::window_background::fill(cx))
             .text_color(ui.foreground)
             .font_family(crate::fonts::BERKELEY)
             .text_size(zpx(13.))
@@ -549,12 +674,9 @@ impl Render for ServerWindow {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.ws.update(cx, |w, cx| w.toggle_sidebar(cx))))
             .on_action(cx.listener(|this, _: &ToggleFilesPanel, _, cx| this.ws.update(cx, |w, cx| w.toggle_right_panel(RightPanelId::Files, cx))))
             .on_action(cx.listener(|this, _: &ToggleChangesPanel, _, cx| this.ws.update(cx, |w, cx| w.toggle_right_panel(RightPanelId::Changes, cx))))
-            .on_action(cx.listener(|this, _: &ToggleGitPanel, _, cx| this.ws.update(cx, |w, cx| w.toggle_right_panel(RightPanelId::Git, cx))))
             .on_action(cx.listener(|this, _: &OpenRelays, window, cx| {
                 dialogs::settings::open(&this.ws, dialogs::settings::Tab::Relays, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleMeeglePanel, _, cx| this.ws.update(cx, |w, cx| w.toggle_right_panel(RightPanelId::Meegle, cx))))
-            .on_action(cx.listener(|this, _: &ToggleAssistant, window, cx| crate::assistant::toggle(&this.ws, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.ws.update(cx, |w, cx| w.toggle_term_zoom(cx))))
             .on_action(cx.listener(|this, _: &Overview, _, cx| this.ws.update(cx, |w, cx| w.show_overview(cx))))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.ws.update(cx, |w, cx| w.cycle_tab(1, cx))))
@@ -572,7 +694,7 @@ impl Render for ServerWindow {
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.ws.update(cx, |w, cx| w.focus_tab_at(8, cx))))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| dialogs::settings::open(&this.ws, Default::default(), window, cx)))
             .on_action(cx.listener(|this, _: &NewProject, window, cx| dialogs::project_form::open(&this.ws, None, Default::default(), window, cx)))
-            .child(self.render_title_strip(window, cx))
+            .child(self.render_title_strip(window, switcher, cx))
             .child(body)
             // 抽屉 / 对话框层不在这里画：gpui-component 0.7 起由 Root 的插件（gpui_kit::init 里注册）
             // 挂在应用内容之上。通知走我们自己挂的那份（toasts.rs），推迟到对话框之后画

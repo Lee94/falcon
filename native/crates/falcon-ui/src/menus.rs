@@ -433,8 +433,8 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
     let mut items = new_session_items(ws, &project.id, None, cx);
     // 去别处看：px0 审阅、外部编辑器，一组
     let mut elsewhere = Vec::new();
-    // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器——不嵌进
-    // WebView，那得把登录 cookie 塞给它。浏览器没登录过时服务端会送去登录再回来。
+    // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器，不嵌进
+    // WebView。能连上服务就允许使用，浏览器打开这个地址即可。
     // 多仓库项目看的是成员仓库（有没有工作目录都一样），服务端在入口页上让用户挑成员
     // （决定九）；普通项目没有工作目录（未填目录的 SSH 项目）就没有东西可看，不给入口
     let has_multi = project.multi.as_ref().is_some_and(|m| !m.repos.is_empty());
@@ -884,6 +884,22 @@ pub fn host_menu_items(ws: &Entity<Workspace>, host: &SshHost) -> Vec<MenuItemSp
             .sep()
             .danger(),
     ]
+}
+
+/// 「无项目」行没画出来时，把在这台机器上开终端的入口接到机器菜单前面。
+/// 有那一行时不走这里，避免和行尾的 ＋ 各列一份。
+pub fn with_machine_terminal(
+    ws: &Entity<Workspace>,
+    standalone_id: &str,
+    mut items: Vec<MenuItemSpec>,
+    cx: &App,
+) -> Vec<MenuItemSpec> {
+    let mut head = new_session_items(ws, standalone_id, None, cx);
+    if let Some(first) = items.first_mut() {
+        first.separated = true;
+    }
+    head.append(&mut items);
+    head
 }
 
 /// 侧栏第一层：本机 / 未绑定主机的存量 SSH

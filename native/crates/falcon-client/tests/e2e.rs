@@ -13,21 +13,18 @@
 //! `FALCON_E2E_SESSIOND_DIR`，原样转给子服务端的 `FALCON_SESSIOND_DIR`（子服务端的其它
 //! FALCON_* 一律去掉，见 `Server::start_again`）。
 //!
-//! 流程：拉起服务端（空数据目录、4940–4999 的空闲端口）→ 认证状态 → 建本地项目 → 建会话
+//! 流程：拉起服务端（空数据目录、4940–4999 的空闲端口）→ 认证状态（不需要登录）→ 建本地项目 → 建会话
 //! → 开 SessionSocket（连上前就设好外观与尺寸）→ 收到回放与 state active → 敲
 //! `echo falcon-e2e-$((6*7))-<随机数>` 在输出里看到 shell 算出来的 42 → resize 后
-//! `stty size` 对得上 → 设访问密码并登录 → **重启 #1**（socket 先 Detach）：REST 撞 401
-//! 自动重登 → 重新打开 socket，新 socket 强发 resize 触发接回，会话（守护进程）活过了
-//! 后端重启 → **重启 #2**（socket 开着）：socket 撞 4401 自动重登并重连，REST 随后
-//! 不用再登 → Terminate → socket 收到 dead → 清理。
+//! `stty size` 对得上 → **重启 #1**（socket 先 Detach）：REST 不需要登录就能继续
+//! → 重新打开 socket，新 socket 强发 resize 触发接回，会话（守护进程）活过了
+//! 后端重启 → **重启 #2**（socket 开着）：socket 直接重连，不再收到 4401
+//! → Terminate → socket 收到 dead → 清理。
 //!
 //! 几个坑（与 `cargo xtask fixtures` 同一套）：数据目录用短路径（守护进程的 socket 路径 macOS
 //! 上限 104 字节，超了服务端会退到 /tmp 下另起目录，能用但不好查）；绝不碰 4923；启动子服务端
 //! 前去掉环境里的 FALCON_* / MOJITO_*。
 //!
-//! 最近一次跑通是 2026-10-13（macOS 27，Apple Silicon，换成 falcon-sessiond 之后）：本地
-//! 项目（shell 用 /bin/sh，不吃本机 zsh 配置）+ 持久会话，两次重启后同一个会话都接得回来；
-//! 重启 #1 由 REST 的 401 触发重登，重启 #2 由 socket 的 4401 触发重登，各只登了一次。
 //! 回放与 state active 谁先到不固定（快照要等宿主机的 VT 进程导出），两种顺序都收。
 //!
 //! 踩过的坑：会话刚建好就敲命令会丢——shell 起来、开始读终端之前敲的字只被 tty 回显一下，
@@ -39,15 +36,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use falcon_client::{AuthEvent, AuthEvents, FalconClient, SessionEvent, SessionSocket};
+use falcon_client::{FalconClient, SessionEvent, SessionSocket};
 use falcon_proto::{CreateSessionRequest, DeadReason, ProjectInput, ProjectType, SessionState, TermAppearance};
 use futures::executor::block_on;
 
-const PASSWORD: &str = "e2e-pass-1234";
-
 #[test]
 #[ignore = "起真服务端与会话守护进程；FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored"]
-fn session_survives_backend_restarts_with_auto_relogin() {
+fn session_survives_backend_restarts() {
     if std::env::var("FALCON_E2E").as_deref() != Ok("1") {
         eprintln!("跳过：设 FALCON_E2E=1 才跑");
         return;
@@ -124,27 +119,15 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     term.run(&sock, "stty size", "30 100");
     step("回显与 resize 都对得上");
 
-    // ---- 设访问密码并登录；记住密码供自动重登 ----
-    block_on(client.set_password(PASSWORD, None)).unwrap();
-    block_on(client.login(PASSWORD)).unwrap();
-    client.set_relogin_password(Some(PASSWORD.into()));
-    let mut auth = client.subscribe_auth();
-    let token0 = client.token().unwrap();
-    assert!(block_on(client.auth_status()).unwrap().password_set);
-    step("设了密码并登录");
-
-    // ---- 重启 #1：socket 先 Detach，重启后由 REST 撞上 401 ----
+    // ---- 重启 #1：没有登录门禁，REST 直接还能用 ----
     sock.close();
     drop(sock);
     server.restart();
     wait_ready(&client, &mut server);
-    step("重启 #1 完成（服务端内存里的 token 全没了）");
-    let sessions = block_on(client.list_sessions()).expect("REST 应当自动重登后成功");
+    step("重启 #1 完成");
+    let sessions = block_on(client.list_sessions()).expect("重启后不需要登录");
     assert!(sessions.iter().any(|s| s.id == session.id), "会话不见了：{sessions:?}");
-    assert_eq!(drain(&mut auth), vec![AuthEvent::LoggedIn], "REST 触发恰好一次重登");
-    let token1 = client.token().unwrap();
-    assert_ne!(token0, token1);
-    step("REST 撞 401 → 自动重登 → 重放成功");
+    step("REST 在重启后直接成功");
 
     // 新 socket：强发 resize 是持久会话懒惰接回的信号
     let (sink, mut term) = Terminal::new();
@@ -157,26 +140,19 @@ fn session_survives_backend_restarts_with_auto_relogin() {
     term.run(&sock, "stty size", "30 100");
     step("新 socket 接回同一个持久会话");
 
-    // ---- 重启 #2：socket 开着，由它撞上 4401 ----
+    // ---- 重启 #2：socket 开着，重连不再因未登录被关掉 ----
     server.stop();
     term.wait("Disconnected", |e| matches!(e, SessionEvent::Disconnected { .. }));
     server.start_again();
-    wait_ready(&client, &mut server); // auth/status 不需要认证，不会动到 token
+    wait_ready(&client, &mut server);
     step("重启 #2 完成");
     sock.reconnect_now();
-    let ev = term.wait("重连（或未认证）", |e| {
-        matches!(e, SessionEvent::Connected { .. } | SessionEvent::Unauthorized)
-    });
-    assert_eq!(ev, SessionEvent::Connected { reconnected: true }, "socket 应当自己重登后连上");
-    assert_eq!(drain(&mut auth), vec![AuthEvent::LoggedIn], "socket 触发恰好一次重登");
-    let token2 = client.token().unwrap();
-    assert_ne!(token1, token2);
+    let ev = term.wait("重连", |e| matches!(e, SessionEvent::Connected { .. } | SessionEvent::Unauthorized));
+    assert_eq!(ev, SessionEvent::Connected { reconnected: true }, "socket 应当直接重连");
     term.wait("state active", |e| matches!(e, SessionEvent::State { state: SessionState::Active, .. }));
     term.echo(&sock, "重启 #2 之后");
-    step("socket 撞 4401 → 自动重登 → 重连成功，会话还在");
-    block_on(client.list_sessions()).expect("token 已经是新的，REST 不用再登");
-    assert!(drain(&mut auth).is_empty());
-    assert_eq!(client.token().unwrap(), token2);
+    step("socket 重连成功，会话还在");
+    block_on(client.list_sessions()).expect("重启后 REST 不需要登录");
 
     // ---- Terminate ----
     block_on(client.terminate_session(&session.id)).unwrap();
@@ -274,10 +250,6 @@ impl Terminal {
         self.run(sock, &format!("echo falcon-e2e-$((6*7))-{n}"), &format!("falcon-e2e-42-{n}"));
         eprintln!("         回显 OK（{label}）");
     }
-}
-
-fn drain(rx: &mut AuthEvents) -> Vec<AuthEvent> {
-    std::iter::from_fn(|| rx.try_recv().ok()).collect()
 }
 
 fn tail(s: &str) -> String {

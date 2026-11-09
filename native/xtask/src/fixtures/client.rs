@@ -19,7 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tungstenite::{Message, WebSocket};
 
 /// 单个 HTTP 请求最长等多久。脚本里 fetch 不设超时；这里给一个宽裕的上限，免得服务端卡住
-/// 时整条任务挂死（最慢的是 meegle status，要起一次 CLI）
+/// 时整条任务挂死
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct Response {

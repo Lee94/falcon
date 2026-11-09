@@ -1,4 +1,8 @@
-//! `/api/auth/*`：登录态查询、登录、登出、设 / 改访问密码。这一组不经过登录检查。
+//! `/api/auth/*`：登录态查询、登录、登出、设 / 改访问密码。
+//!
+//! 能连上就允许使用，这一组不再挡住其它请求。路由留着，避免旧客户端直接 404：
+//! `required` 恒为 false，`authenticated` 恒为 true。库里若还留着密码哈希，
+//! `password_set` 仍为 true，改密码时仍要带对当前密码。
 
 use axum::Json;
 use axum::extract::{FromRequest, Request, State};

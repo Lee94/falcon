@@ -119,17 +119,17 @@ impl Ui {
     }
 }
 
-/// 圆角阶梯（ADR 0011：`--radius` 12px 减出来的 sm 8 / md 10 / lg 12 / xl 16）
+/// 圆角阶梯（ADR 0011；Rex 式的中等曲率：岛 12、下沉块 10、行与控件 8。
+/// 组件库的按钮 / 输入框吃 `theme.radius`（= SM），菜单与对话框吃 `radius_lg`（= LG），一起变圆）
 pub mod radius {
     use gpui_kit::{Pixels, px};
     pub const SM: Pixels = px(8.);
     pub const MD: Pixels = px(10.);
     pub const LG: Pixels = px(12.);
-    pub const XL: Pixels = px(16.);
 }
 
-/// 岛之间的缝（ADR 0011）
-pub const GAP: gpui_kit::Pixels = px(6.);
+/// 岛之间的缝（ADR 0011；与画布的列间缝 CANVAS_GAP_PX 同为 8，窗口里只有一种缝宽）
+pub const GAP: gpui_kit::Pixels = px(8.);
 
 /// 终端偏好（偏好键 `falcon.term`，沿用 React 版）。
 #[derive(Clone, Debug, PartialEq)]

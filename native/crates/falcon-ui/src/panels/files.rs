@@ -5,9 +5,9 @@
 //! 未跟踪的、被 ignore 的、生成出来的，都在。目录可能有几万项，只能按层拉（`GET /files?path=`）。
 //!
 //! 交互按文件管理器而不是树：顶上路径栏 + 图标工具栏，当前目录平铺成表（复选框 / 名称 /
-//! 大小 / 修改时间）。点目录进去、点文件开查看窗口；多选走复选框和 Shift / ⌘ 点击，右键
-//! 复制路径 / 下载 / 重命名 / 删除。原生上多一件 React 版没有的：从访达把文件 / 文件夹拖进来即上传
-//! （落在目录行上就传进那个目录）。
+//! 大小 / 修改时间）。点目录进去；点文件在这块面板里直接预览（顶上可以回到当前文件夹），
+//! 不在画布上另开查看窗口。多选走复选框和 Shift / ⌘ 点击，右键复制路径 / 下载 / 重命名 / 删除。
+//! 原生上多一件 React 版没有的：从访达把文件 / 文件夹拖进来即上传（落在目录行上就传进那个目录）。
 //!
 //! 宿主机路径一律走 falcon-core 的 file_path（`join_host_path` / `parse_nav_path`），不用
 //! `std::path`：宿主机可能是 Linux / Windows，与这台 Mac 无关。
@@ -35,12 +35,24 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
+use super::file_view::FileView;
 use crate::dialogs::{self, ConfirmItem, ConfirmOpts};
 use crate::menus::{MenuItemSpec, to_popup};
 use crate::theme::{Ui, radius};
 use crate::ui::icon;
 use crate::workspace::{ActiveView, ToastKind, Workspace};
 use crate::zoom::zpx;
+
+/// 预览里还有没存的修改时，确认之后接着做的事。确认回调拿不到 Window，留到下一次渲染。
+#[derive(Clone)]
+enum AfterPreview {
+    /// 回到当前目录的列表
+    Close,
+    /// 换目录，同时收起预览
+    Navigate(String),
+    /// 换一个文件继续预览
+    Show(String),
+}
 
 const ROW_H: f32 = 28.;
 const CHECK_COL: f32 = 24.;
@@ -97,7 +109,7 @@ pub struct FilesPanel {
     ws: Entity<Workspace>,
     project_id: Option<String>,
     working_dir: Option<String>,
-    /// 多文件夹项目的成员入口；只管文件导航，不跟 Git 面板的成员选择互相改动。
+    /// 多文件夹项目的成员入口；只管文件导航，不跟「修改」面板的成员选择互相改动。
     roots: Vec<String>,
     /// 当前目录：优先宿主机绝对路径；旧相对请求仍兼容，`""` 是项目缺省目录。
     cwd: String,
@@ -109,6 +121,11 @@ pub struct FilesPanel {
     /// Esc 取消时紧跟着的失焦不算提交
     ignore_blur: bool,
     listing: Listing,
+    /// 选中文件后就地预览。面板只有 220–420px，左右再劈一刀预览放不下，所以预览占满列表的位置，
+    /// 顶上的「返回文件夹」回到当前目录。
+    preview: Option<Entity<FileView>>,
+    preview_path: Option<String>,
+    pending: Option<AfterPreview>,
     /// 排好序、滤过隐藏文件的当前目录。每帧都要用（表头、工具栏、可见的那几行），而排序
     /// 两千项要上千次小写化比较，所以只在列表 / 排序 / 显隐变化时重算
     rows_cache: RefCell<Option<Rc<Vec<WorkspaceEntry>>>>,
@@ -144,6 +161,9 @@ impl FilesPanel {
             draft: None,
             ignore_blur: false,
             listing: Listing { loading: true, ..Default::default() },
+            preview: None,
+            preview_path: None,
+            pending: None,
             rows_cache: RefCell::new(None),
             generation: 0,
             path_input,
@@ -177,6 +197,11 @@ impl FilesPanel {
             self.selected.clear();
             self.draft = None;
             self.last_clicked = None;
+            self.pending = None;
+            if !self.defer_preview(AfterPreview::Close, cx) {
+                self.preview = None;
+                self.preview_path = None;
+            }
             self.listing = Listing { loading: self.project_id.is_some(), ..Default::default() };
             self.invalidate_rows();
             self.scroll = UniformListScrollHandle::new();
@@ -279,6 +304,15 @@ impl FilesPanel {
     }
 
     fn go_to(&mut self, next: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview.is_some() && self.defer_preview(AfterPreview::Navigate(next.clone()), cx) {
+            return;
+        }
+        self.finish_go_to(next, window, cx);
+    }
+
+    fn finish_go_to(&mut self, next: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview = None;
+        self.preview_path = None;
         self.cwd = next;
         self.selected.clear();
         self.draft = None;
@@ -427,23 +461,109 @@ impl FilesPanel {
         } else if additive {
             self.toggle_one(path, cx);
         } else {
+            let is_file = self.entry(path).is_some_and(|e| e.kind == WorkspaceEntryKind::File);
+            // 预览里还有没存的修改时先问，选中态等真的换过去再改
+            if is_file && self.preview_blocks(path, cx) {
+                self.preview_file(path.to_string(), window, cx);
+                return;
+            }
             self.selected = HashSet::from([path.to_string()]);
             self.last_clicked = Some(path.to_string());
-            cx.notify();
+            if is_file {
+                self.preview_file(path.to_string(), window, cx);
+            } else {
+                cx.notify();
+            }
         }
     }
 
-    /// 点名字 / 双击：目录进去，文件在画布上开查看窗口（预览语义：换内容不新开）
+    /// 点名字 / 双击：目录进去，文件在面板里预览（换文件不新开一份）
     fn activate(&mut self, entry: &WorkspaceEntry, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected = HashSet::from([entry.path.clone()]);
-        self.last_clicked = Some(entry.path.clone());
         if entry.kind == WorkspaceEntryKind::Dir {
+            self.selected = HashSet::from([entry.path.clone()]);
+            self.last_clicked = Some(entry.path.clone());
             self.go_to(entry.path.clone(), window, cx);
-        } else if let Some(pid) = self.project_id.clone() {
-            let path = entry.path.clone();
-            self.ws.update(cx, |w, cx| w.open_file(&pid, &path, cx));
-            cx.notify();
+            return;
         }
+        let path = entry.path.clone();
+        if self.preview_blocks(&path, cx) {
+            self.preview_file(path, window, cx);
+            return;
+        }
+        self.selected = HashSet::from([path.clone()]);
+        self.last_clicked = Some(path.clone());
+        self.preview_file(path, window, cx);
+    }
+
+    /// 要换到另一个文件，而当前预览还有没存的修改
+    fn preview_blocks(&self, path: &str, cx: &App) -> bool {
+        self.preview_path.as_deref() != Some(path) && self.preview.as_ref().is_some_and(|v| v.read(cx).dirty())
+    }
+
+    /// 有没存的修改就先问，确认后的动作留到下一次渲染。问过了返回 true。
+    fn defer_preview(&mut self, action: AfterPreview, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.preview.clone() else { return false };
+        if !view.read(cx).dirty() {
+            return false;
+        }
+        let this = cx.weak_entity();
+        view.update(cx, |v, cx| {
+            v.confirm_if_dirty(
+                Rc::new(move |_, cx| {
+                    this.update(cx, |p, cx| {
+                        p.pending = Some(action.clone());
+                        cx.notify();
+                    })
+                    .ok();
+                }),
+                cx,
+            );
+        });
+        true
+    }
+
+    fn apply_preview_action(&mut self, action: AfterPreview, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            AfterPreview::Close => {
+                self.preview = None;
+                self.preview_path = None;
+                cx.notify();
+            }
+            AfterPreview::Navigate(path) => self.finish_go_to(path, window, cx),
+            AfterPreview::Show(path) => self.mount_preview(path, window, cx),
+        }
+    }
+
+    fn close_preview(&mut self, cx: &mut Context<Self>) {
+        if self.defer_preview(AfterPreview::Close, cx) {
+            return;
+        }
+        self.preview = None;
+        self.preview_path = None;
+        cx.notify();
+    }
+
+    fn preview_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_path.as_deref() == Some(path.as_str()) {
+            cx.notify();
+            return;
+        }
+        if self.defer_preview(AfterPreview::Show(path.clone()), cx) {
+            return;
+        }
+        self.mount_preview(path, window, cx);
+    }
+
+    fn mount_preview(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pid) = self.project_id.clone() else { return };
+        if let Some(view) = &self.preview {
+            view.update(cx, |v, cx| v.set_target(pid, path.clone(), cx));
+        } else {
+            let ws = self.ws.clone();
+            self.preview = Some(cx.new(|cx| FileView::embedded(ws, pid, path.clone(), window, cx)));
+        }
+        self.preview_path = Some(path);
+        cx.notify();
     }
 
     // ---------------- 动作 ----------------
@@ -547,6 +667,15 @@ impl FilesPanel {
                 match result {
                     Ok(res) => {
                         close_matching_file(&ws, &pid, &res.removed, cx);
+                        if let Some(preview) = this.preview_path.clone() {
+                            let root = this.working_dir.as_deref();
+                            let path = join_host_path(root, &preview);
+                            let hit = res.removed.iter().any(|p| path_covers(&join_host_path(root, p), &path));
+                            if hit {
+                                this.preview = None;
+                                this.preview_path = None;
+                            }
+                        }
                         let first_err = res.errors.first().map(|e| e.error.clone());
                         ws.update(cx, |w, cx| {
                             if res.errors.is_empty() {
@@ -679,6 +808,16 @@ impl FilesPanel {
                                 let opened = ws.read(cx).file_tab().filter(|f| {
                                     f.project_id == pid && join_host_path(this.working_dir.as_deref(), &f.path) == join_host_path(this.working_dir.as_deref(), &path)
                                 }).map(|f| f.path.clone());
+                                if this.preview_path.as_deref() == Some(path.as_str()) {
+                                    let next = res.path.clone();
+                                    if let Some(view) = &this.preview {
+                                        view.update(cx, |v, cx| v.rename_to(next.clone(), cx));
+                                    }
+                                    this.preview_path = Some(next.clone());
+                                    if this.selected.remove(&path) {
+                                        this.selected.insert(next);
+                                    }
+                                }
                                 ws.update(cx, |w, cx| {
                                     if let Some(opened) = &opened {
                                         w.follow_file_rename(&pid, opened, &res.path, cx);
@@ -829,6 +968,53 @@ impl FilesPanel {
         bar.child(
             tool_button("files-delete", IconName::Trash, t!("files.delete"), !has_project || selected_all.is_empty(), false, true, false, &ui)
                 .on_click(cx.listener(move |this, _, window, cx| this.remove_paths(selected_all.clone(), window, cx))),
+        )
+    }
+
+    /// 预览占着列表面板时，顶上只留回到当前文件夹和返回上层。改目录的工具要等回到列表再用。
+    fn preview_bar(&self, cx: &mut Context<Self>) -> Div {
+        let ui = Ui::global(cx).clone();
+        let parent = parent_nav_path(&self.host_path());
+        let name = self
+            .preview_path
+            .as_deref()
+            .and_then(|p| p.rsplit(['/', '\\']).next())
+            .unwrap_or("")
+            .to_string();
+        div().mt_1().flex().items_center().gap(zpx(2.)).child(
+            div()
+                .id("files-back-folder")
+                .h(zpx(24.))
+                .px(zpx(6.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(zpx(4.))
+                .rounded(radius::SM)
+                .cursor_pointer()
+                .text_size(zpx(12.))
+                .text_color(ui.foreground)
+                .hover(|s| s.bg(ui.muted))
+                .on_click(cx.listener(|this, _, _, cx| this.close_preview(cx)))
+                .child(icon(IconName::ArrowLeft).size(zpx(14.)).text_color(ui.muted_foreground))
+                .child(t!("files.backToFolder").to_string()),
+        ).child(
+            tool_button("files-preview-parent", IconName::ArrowUp, t!("files.parent"), parent.is_none(), false, false, false, &ui).on_click(
+                cx.listener(move |this, _, window, cx| {
+                    if let Some(p) = parent.clone() {
+                        this.go_to(p, window, cx);
+                    }
+                }),
+            ),
+        ).child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .pl_1()
+                .text_size(zpx(11.5))
+                .text_color(ui.muted_foreground)
+                .child(name),
         )
     }
 
@@ -1126,7 +1312,10 @@ impl Focusable for FilesPanel {
 }
 
 impl Render for FilesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(action) = self.pending.take() {
+            self.apply_preview_action(action, window, cx);
+        }
         let ui = Ui::global(cx).clone();
         let has_project = self.project_id.is_some();
         // 断点按界面缩放折算（React 版的容器查询量的是 CSS px，放大页面同样会先收起列）
@@ -1152,10 +1341,12 @@ impl Render for FilesPanel {
                     }))
                     .child(Input::new(&self.path_input).small().disabled(!has_project)),
             )
-            .child(self.toolbar(cx));
+            .child(if self.preview.is_some() { self.preview_bar(cx) } else { self.toolbar(cx) });
 
-        // ---- 表 ----
-        let body: AnyElement = if !has_project {
+        // ---- 表，或选中文件后的预览 ----
+        let body: AnyElement = if let Some(view) = self.preview.clone() {
+            div().flex_1().min_h_0().overflow_hidden().child(view).into_any_element()
+        } else if !has_project {
             Self::hint(t!("files.noProject").to_string(), None, &ui).into_any_element()
         } else if let (Some(err), None) = (&self.listing.error, &self.listing.entries) {
             Self::hint(t!("files.loadFailed").to_string(), Some(err.clone()), &ui).into_any_element()
@@ -1330,6 +1521,12 @@ fn unique_name(base: &str, taken: &HashSet<String>) -> String {
     (2..).map(|i| format!("{base} {i}")).find(|n| !taken.contains(n)).unwrap_or_else(|| base.to_string())
 }
 
+/// `removed` 是 `path` 自己，或者是它的祖先目录
+fn path_covers(removed: &str, path: &str) -> bool {
+    let sep = if removed.as_bytes().get(1) == Some(&b':') || removed.starts_with("\\\\") { "\\" } else { "/" };
+    path == removed || path.starts_with(&format!("{removed}{sep}"))
+}
+
 /// 删掉的文件如果正开着（或它在被删的目录里），把那扇查看窗口收起来。不再问"有没存的修改"：
 /// 文件已经没了，删之前也确认过
 fn close_matching_file(ws: &Entity<Workspace>, project_id: &str, removed: &[String], cx: &mut App) {
@@ -1338,11 +1535,7 @@ fn close_matching_file(ws: &Entity<Workspace>, project_id: &str, removed: &[Stri
         let root = workspace.project(project_id).and_then(|p| p.working_dir.as_deref());
         workspace.file_tab().is_some_and(|f| {
             let path = join_host_path(root, &f.path);
-            f.project_id == project_id && removed.iter().any(|p| {
-                let removed = join_host_path(root, p);
-                let sep = if removed.as_bytes().get(1) == Some(&b':') || removed.starts_with("\\\\") { "\\" } else { "/" };
-                path == removed || path.starts_with(&format!("{removed}{sep}"))
-            })
+            f.project_id == project_id && removed.iter().any(|p| path_covers(&join_host_path(root, p), &path))
         })
     };
     if hit {

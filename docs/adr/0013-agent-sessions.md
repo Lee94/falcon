@@ -38,4 +38,4 @@
 
 `sessions/agent_detect.rs` 重新解析交互登录 shell 的环境，在 PATH 中检查固定清单里的可执行文件；Unix 检查执行权限，Windows 按 PATHEXT 检查 `.exe` / `.cmd` 等文件。检测不运行 CLI，也不安装软件；符号链接跟随到目标，同名目录、损坏链接和不可执行文件不显示。服务端缓存 30 秒并合并并发探测，客户端登录后立即请求、之后每 30 秒刷新，安装器修改 shell 配置后也能重新发现。
 
-本地与 SSH 项目均只显示目标机器实际检测到的 CLI。`GET /api/agents` 不带参数时检测后端本机，带 `hostId` 或 `projectId` 时经 SSH 在远端的交互登录 shell 中执行 `command -v`（Windows 使用 `Get-Command`），不启动 agent。同一主机的项目共用客户端清单并每 30 秒刷新；检测失败或尚未完成时不显示候选项，不返回完整清单。AI 助手的 ACP 配置（ADR 0021）有独立的适配器要求，不属于开场 CLI 检测。
+本地与 SSH 项目均只显示目标机器实际检测到的 CLI。`GET /api/agents` 不带参数时检测后端本机，带 `hostId` 或 `projectId` 时经 SSH 在远端的交互登录 shell 中执行 `command -v`（Windows 使用 `Get-Command`），不启动 agent。同一主机的项目共用客户端清单并每 30 秒刷新；检测失败或尚未完成时不显示候选项，不返回完整清单。

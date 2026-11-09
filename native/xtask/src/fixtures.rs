@@ -36,8 +36,7 @@
 //!   - 端口只在 4940–4999 里挑，绝不碰 4923（那是日常在用、设了密码的实例）。
 //!   - 从 falcon 终端里跑时环境里会带着父实例的 FALCON_* 变量（FALCON_WEB_DIST 之类），
 //!     启动子服务端前全部去掉。
-//!   - fixture 里不能有机密：飞书项目的登录用户（名字、邮箱、头像）脱敏；飞书的业务数据
-//!     （空间、待办）一律不取。路径、用户名保留。
+//!   - fixture 里不能有机密：系统监控面板里的主机名与正在跑的程序换成固定文本。路径、用户名保留。
 //!
 //! # `cargo xtask compare-fixtures <基准目录> <对照目录>`
 //!
@@ -244,10 +243,7 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     out.save("repo-info", &api.get(&format!("/api/projects/{local_id}/repo"))?)?;
     out.save("repos-multi", &api.get(&format!("/api/projects/{multi_id}/repos"))?)?;
 
-    // ---- Git 面板（在动文件之前取，仓库状态最干净）----
-    out.save("git-snapshot", &api.get(&format!("/api/projects/{local_id}/git"))?)?;
-    out.save("git-snapshot-multi", &api.get(&format!("/api/projects/{multi_id}/git?{}", qs(&[("repo", REPO)])))?)?;
-    out.save("git-snapshot-unavailable", &api.get(&format!("/api/projects/{plain_id}/git"))?)?;
+    // ---- 修改计数与工作区差异（在动文件之前取，仓库状态最干净）----
     out.save("git-changes", &api.get(&format!("/api/projects/{local_id}/git/changes"))?)?;
     out.save(
         "git-changes-batch",
@@ -264,27 +260,6 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     )?;
     out.save("git-working", &api.get(&format!("/api/projects/{local_id}/git/working"))?)?;
     out.save("git-working-unavailable", &api.get(&format!("/api/projects/{plain_id}/git/working"))?)?;
-    let log = api.get(&format!("/api/projects/{local_id}/git/log"))?;
-    out.save("git-log", &log)?;
-    out.save("git-log-unavailable", &api.get(&format!("/api/projects/{plain_id}/git/log"))?)?;
-    out.save("git-refs", &api.get(&format!("/api/projects/{local_id}/git/refs"))?)?;
-    out.save("git-refs-unavailable", &api.get(&format!("/api/projects/{plain_id}/git/refs"))?)?;
-    let sha = log
-        .get("commits")
-        .and_then(|c| c.at(0))
-        .ok_or_else(|| anyhow!("git-log 里没有提交：{}", log.compact()))?
-        .text("sha")
-        .map_err(|e| anyhow!(e))?;
-    out.save("git-commit-detail", &api.get(&format!("/api/projects/{local_id}/git/commit?{}", qs(&[("sha", &sha)])))?)?;
-    out.save(
-        "git-commit-diff",
-        &api.get(&format!("/api/projects/{local_id}/git/commit/diff?{}", qs(&[("sha", &sha), ("path", "README.md")])))?,
-    )?;
-    out.save(
-        "git-op-fetch",
-        &api.call("POST", &format!("/api/projects/{local_id}/git/op"), json!({ "op": "fetch" }))?,
-    )?;
-    out.save("git-push", &api.bare("POST", &format!("/api/projects/{local_id}/git/push"))?)?;
 
     // ---- 文件面板（在 git 之后：会往仓库里写未跟踪文件）----
     out.save("files", &api.get(&format!("/api/projects/{local_id}/files"))?)?;
@@ -447,51 +422,6 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
     // ---- 守护进程部署通道：本地项目已经就位，直接 done；项目不存在是 failed ----
     out.save("ws-install-local", &Js::Arr(ws_collect(api, &format!("/ws/install/{local_id}"), Until::Close)?))?;
     out.save("ws-install-missing", &Js::Arr(ws_collect(api, "/ws/install/no-such-project", Until::Close)?))?;
-
-    // ---- 飞书项目：状态脱敏；业务数据（空间、待办）一律不取；固定列表是 falcon 自己的库 ----
-    let mut meegle = api.get("/api/meegle/status")?;
-    if meegle.get("user").is_some_and(Js::truthy) {
-        meegle.set(
-            "user",
-            Js::obj([
-                ("key", Js::str("user_redacted")),
-                ("name", Js::str("已脱敏")),
-                ("email", Js::str("redacted@example.com")),
-            ]),
-        );
-    }
-    out.save("meegle-status", &meegle)?;
-    let flag = |k: &str| meegle.get(k).is_some_and(Js::truthy);
-    if !flag("installed") || !flag("authenticated") {
-        // 没装 / 没登录时业务接口是 409 + reason，正好是 app 要认的错误体
-        out.save("error-meegle-unavailable", &api.request("GET", "/api/meegle/spaces", Body::None, &[409])?.json)?;
-    }
-    let pin = api.call(
-        "POST",
-        "/api/meegle/pins",
-        json!({
-            "kind": "workitem",
-            "spaceKey": "fixture_space",
-            "spaceName": "Fixture",
-            "targetId": "1001",
-            "typeKey": "story",
-            "label": "登录页",
-            "url": "https://project.feishu.cn/fixture/story/detail/1001",
-        }),
-    )?;
-    out.save("meegle-pin-create", &pin)?;
-    let pin_id = id(&pin)?;
-    api.call(
-        "POST",
-        "/api/meegle/pins",
-        json!({ "kind": "view", "spaceKey": "fixture_space", "targetId": "view_1", "label": "view_1" }),
-    )?;
-    out.save(
-        "meegle-pin-rename",
-        &api.call("PATCH", &format!("/api/meegle/pins/{pin_id}"), json!({ "label": "登录页（改）" }))?,
-    )?;
-    out.save("meegle-pins", &api.get("/api/meegle/pins")?)?;
-    out.save("meegle-pin-delete", &api.bare("DELETE", &format!("/api/meegle/pins/{pin_id}"))?)?;
 
     // ---- 右侧栏插件（ADR 0025）：内置的系统监控 + 数据目录里那个输出确定的命令插件 ----
     out.save("plugins", &api.get("/api/plugins")?)?;
@@ -902,7 +832,7 @@ fn prepare_repo() -> Result<()> {
     Ok(())
 }
 
-/// 固定提交时间：提交 sha 与 git-log 里的时间每次都一样
+/// 固定提交时间：仓库里的提交 sha 每次都一样
 fn commit_at(date: &str, message: &str) -> Result<()> {
     let mut env: Vec<(&str, &OsStr)> = GIT_ENV.iter().map(|(k, v)| (*k, OsStr::new(v))).collect();
     env.push(("GIT_AUTHOR_DATE", OsStr::new(date)));

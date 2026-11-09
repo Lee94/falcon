@@ -1,6 +1,6 @@
 //! 远端主机：已保存的 SSH 连接配置列表 + 检测连接 / 编辑 / 删除 / 添加。旧 React 版的
-//! HostsPane + HostList。表单本身在 `dialogs::host_form`，删除（含"被项目引用时拒绝"）在
-//! `menus::delete_host`。
+//! HostsPane + HostList。表单本身在 `dialogs::host_form`，从 Tailscale 挑一台在
+//! `dialogs::tailscale`，删除（含"被项目引用时拒绝"）在 `menus::delete_host`。
 
 use falcon_core::host_color::ssh_conn;
 use falcon_proto::{HostKind, SshAuthMethod, SshHost, SshProbeResult};
@@ -183,15 +183,21 @@ impl Render for HostsPane {
             table.into_any_element()
         };
         let ws_add = ws.clone();
+        let ws_ts = ws.clone();
         let add = Button::new("host-add")
             .outline()
             .small()
             .label(t!("host.add").to_string())
             .on_click(move |_, window, cx| crate::dialogs::host_form::open(&ws_add, None, None, window, cx));
+        let from_tailscale = Button::new("host-from-tailscale")
+            .outline()
+            .small()
+            .label(t!("host.fromTailscale").to_string())
+            .on_click(move |_, window, cx| crate::dialogs::tailscale::open(&ws_ts, None, window, cx));
         section(
             t!("host.title").to_string(),
-            Some(t!("host.hint").to_string()),
-            vec![body, div().flex().child(add).into_any_element()],
+            None,
+            vec![body, div().flex().gap(zpx(8.)).child(add).child(from_tailscale).into_any_element()],
             cx,
         )
     }

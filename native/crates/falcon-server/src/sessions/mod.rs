@@ -13,8 +13,6 @@ pub mod relay;
 pub mod relay_spec;
 pub mod share;
 pub mod share_spec;
-pub mod shell_integration;
-pub mod shell_marks;
 pub mod ssh;
 pub mod ssh_host;
 pub mod term_size;

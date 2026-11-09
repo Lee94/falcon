@@ -26,11 +26,12 @@ pub fn open_connect_window(cx: &mut App) {
             traffic_light_position: Some(point(px(12.), px(12.))),
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(560.), px(520.)), cx))),
+        window_background: crate::window_background::appearance(cx),
         ..Default::default()
     };
     let _ = cx.open_window(options, |window, cx| {
         let view = cx.new(|cx| ConnectView::new(window, cx));
-        cx.new(|cx| Root::new(view, window, cx))
+        cx.new(|cx| crate::window_background::mount_root(view, window, cx))
     });
 }
 
@@ -165,7 +166,7 @@ impl Render for ConnectView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(ui.app)
+            .bg(crate::window_background::fill(cx))
             .text_color(ui.foreground)
             .font_family(crate::fonts::BERKELEY)
             .text_size(zpx(13.))

@@ -100,21 +100,3 @@ macro_rules! wire_enum {
 }
 
 pub(crate) use wire_enum;
-
-/// `?: T | null` 的三态字段：缺省 / null / 有值，对应 `Option<Option<T>>` 的
-/// `None` / `Some(None)` / `Some(Some(v))`。
-///
-/// serde 默认把 null 与缺省都读成外层 `None`，三态就塌成两态了。这里把 null 读成
-/// `Some(None)`；字段上再配 `default` 与 `skip_serializing_if = "Option::is_none"`，
-/// 写回时缺省仍缺省、null 仍是 null。
-pub(crate) mod double_option {
-    use serde::{Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: Deserialize<'de>,
-    {
-        Option::<T>::deserialize(d).map(Some)
-    }
-}

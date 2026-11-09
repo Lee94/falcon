@@ -4,6 +4,8 @@
 //! 勾选状态**不写 index**，只是"这次要提交哪些"的前端选择。服务端按 pathspec 提交那些路径，
 //! 用户在终端里 `git add` 的暂存内容不受影响（见服务端 git/command.rs 的 commit_args 注释）。
 //!
+//! 点一个文件不在画布上开差异窗口：差异预览占这块面板的下半部分，中间的缝可以上下拖。
+//!
 //! 轮询 4s（比侧栏那条 8s 快：这个面板是用户正盯着看的，改完文件切回来还显示旧列表会让人
 //! 以为坏了），只在面板真的显示着时轮询——右侧栏切走时视图不卸载，但不该还在后台打 git。
 
@@ -14,24 +16,38 @@ use falcon_proto::{GitCommitInput, GitConflictKind, GitOpInput, GitSyncResult, G
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Enter, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, IntoElement, Render, Task, UniformListScrollHandle, Window, div,
-    uniform_list,
+    AnyElement, Context, CursorStyle, Entity, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, Task, UniformListScrollHandle, Window, canvas, div, px, uniform_list,
 };
 use rust_i18n::t;
 
+use super::diff_view::DiffView;
 use super::git::common::{
     self, Check, FileItem, FileListHost, FileRow, build_rows, checkbox, file_view_mode, file_view_toggle, hint,
     porcelain_status, render_file_row, tool_button,
 };
+use super::split_primary;
 use crate::dialogs::{self, ConfirmOpts};
 use crate::theme::Ui;
-use crate::workspace::{RightPanelId, ToastKind, Workspace};
+use crate::workspace::{DiffTabTarget, RightPanelId, ToastKind, Workspace};
 use crate::zoom::zpx;
 
 const POLL: Duration = Duration::from_millis(4000);
+/// 列表和差异之间那道缝（可拖）
+const SPLIT_HANDLE: f32 = 6.;
+/// 上下两截各自至少留这么高，避免拖没
+const PANE_MIN: f32 = 72.;
+const LIST_RATIO: f32 = 0.5;
+
+#[derive(Clone, Copy)]
+struct SplitDrag {
+    start_y: f32,
+    start_ratio: f32,
+}
 
 pub struct ChangesPanel {
     ws: Entity<Workspace>,
@@ -57,6 +73,13 @@ pub struct ChangesPanel {
     visible: bool,
     /// 提交成功后要清空提交信息，但 set_value 要 Window，请求回调里没有——留到下一次渲染做
     pending_clear: bool,
+    /// 点开的差异。不写进工作区的 diff_tab，画布上不会另开一扇
+    diff: Option<Entity<DiffView>>,
+    preview_path: Option<String>,
+    /// 文件列表占分栏区域的比例，剩下的是差异
+    list_ratio: f32,
+    split_h: Pixels,
+    split_drag: Option<SplitDrag>,
     _poll: Task<()>,
 }
 
@@ -105,6 +128,11 @@ impl ChangesPanel {
             in_flight: None,
             visible: false,
             pending_clear: false,
+            diff: None,
+            preview_path: None,
+            list_ratio: LIST_RATIO,
+            split_h: px(0.),
+            split_drag: None,
             _poll: poll,
         };
         this.sync(cx);
@@ -141,6 +169,9 @@ impl ChangesPanel {
             self.collapsed.clear();
             self.amend = false;
             self.busy = false;
+            self.diff = None;
+            self.preview_path = None;
+            self.split_drag = None;
             self.clear_message(cx);
         }
         let appeared = visible && !self.visible;
@@ -191,6 +222,10 @@ impl ChangesPanel {
                             .collect();
                         this.data = Some(next);
                         this.error = None;
+                        if this.preview_path.as_ref().is_some_and(|p| !this.files.iter().any(|f| &f.path == p)) {
+                            this.diff = None;
+                            this.preview_path = None;
+                        }
                     }
                     Err(err) => {
                         this.error = Some(err.to_string());
@@ -428,15 +463,27 @@ impl FileListHost for ChangesPanel {
         let (Some(pid), Some(f)) = (self.project_id(), self.files.get(idx)) else {
             return;
         };
-        let file = falcon_proto::GitFileChange {
-            path: f.path.clone(),
-            orig_path: f.orig_path.clone(),
-            // 差异窗口靠 index == "?" 判断走不走 --no-index 伪 diff
-            index: f.status.clone(),
-            work: " ".into(),
+        let path = f.path.clone();
+        let target = DiffTabTarget {
+            project_id: pid,
+            file: falcon_proto::GitFileChange {
+                path: f.path.clone(),
+                orig_path: f.orig_path.clone(),
+                // 差异窗口靠 index == "?" 判断走不走 --no-index 伪 diff
+                index: f.status.clone(),
+                work: " ".into(),
+            },
+            repo: self.repo(),
         };
-        let repo = self.repo();
-        self.ws.update(cx, |w, cx| w.open_diff(&pid, file, None, repo, cx));
+        if self.diff.is_none() {
+            let ws = self.ws.clone();
+            self.diff = Some(cx.new(|cx| DiffView::new_local(ws, cx)));
+        }
+        self.preview_path = Some(path);
+        if let Some(diff) = &self.diff {
+            diff.update(cx, |v, cx| v.set_local(Some(target), cx));
+        }
+        cx.notify();
     }
 
     fn toggle_dir(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -522,10 +569,17 @@ impl Render for ChangesPanel {
         );
 
         let root = div()
+            .id("changes-panel")
             .size_full()
             .flex()
             .flex_col()
             .text_color(ui.foreground)
+            .on_mouse_move(cx.listener(Self::on_split_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                if this.split_drag.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(header);
 
         let Some(_) = &self.target else {
@@ -633,12 +687,13 @@ impl Render for ChangesPanel {
             ));
         }
         let rows = std::rc::Rc::new(rows);
+        let active = self.preview_path.clone();
         let list = uniform_list(
             "changes-files",
             rows.len(),
             cx.processor(move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
                 range
-                    .map(|i| render_file_row("changes", &rows[i], &this.files, Some(&this.excluded), cx))
+                    .map(|i| render_file_row("changes", &rows[i], &this.files, Some(&this.excluded), active.as_deref(), cx))
                     .collect::<Vec<AnyElement>>()
             }),
         )
@@ -646,7 +701,7 @@ impl Render for ChangesPanel {
         .flex_1()
         .min_h_0()
         .py_1();
-        root = root.child(div().relative().flex_1().min_h_0().flex().flex_col().child(list));
+        root = root.child(self.file_split(list, cx));
 
         // ---- 提交框（冲突进行中时不出：那时该做的是继续 / 中止）----
         if conflict.is_none() {
@@ -734,6 +789,102 @@ impl Render for ChangesPanel {
 }
 
 impl ChangesPanel {
+    fn file_split(&self, list: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity();
+        let mut list_pane = div().min_h_0().overflow_hidden().flex().flex_col().child(list);
+        list_pane = if self.diff.is_some() {
+            list_pane.flex_grow(self.list_ratio).flex_shrink(1.).flex_basis(px(0.))
+        } else {
+            list_pane.flex_1()
+        };
+        let mut split = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(list_pane);
+        if let Some(diff) = self.diff.clone() {
+            split = split.child(self.split_handle(cx)).child(
+                div()
+                    .flex_grow((1. - self.list_ratio).max(0.05))
+                    .flex_shrink(1.)
+                    .flex_basis(px(0.))
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(diff),
+            );
+        }
+        split
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        view.update(cx, |this, cx| {
+                            let new = bounds.size.height;
+                            if (this.split_h.as_f32() - new.as_f32()).abs() > 1. {
+                                this.split_h = new;
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    fn split_handle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ui = Ui::global(cx).clone();
+        let active = self.split_drag.is_some();
+        div()
+            .id("changes-split")
+            .h(zpx(SPLIT_HANDLE))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .cursor(CursorStyle::ResizeUpDown)
+            .child(div().h(px(1.)).w_full().bg(if active { ui.primary } else { ui.border }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                if e.click_count >= 2 {
+                    this.list_ratio = LIST_RATIO;
+                    this.split_drag = None;
+                    cx.notify();
+                    return;
+                }
+                this.split_drag = Some(SplitDrag { start_y: f32::from(e.position.y), start_ratio: this.list_ratio });
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .tooltip(|window, cx| Tooltip::new(t!("changes.resizeSplit").to_string()).build(window, cx))
+            .into_any_element()
+    }
+
+    fn on_split_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.split_drag else { return };
+        if e.pressed_button != Some(MouseButton::Left) {
+            self.split_drag = None;
+            cx.notify();
+            return;
+        }
+        let total = self.split_h.as_f32();
+        if total <= 1. {
+            return;
+        }
+        let handle = zpx(SPLIT_HANDLE).as_f32();
+        let min = zpx(PANE_MIN).as_f32();
+        let available = (total - handle).max(1.);
+        let proposed = (drag.start_ratio + (f32::from(e.position.y) - drag.start_y) / available).clamp(0., 1.);
+        let next = split_primary(total, proposed, handle, min, min) / available;
+        if (next - self.list_ratio).abs() > 0.002 {
+            self.list_ratio = next;
+            cx.notify();
+        }
+    }
+
     fn conflict_bar(&self, kind: GitConflictKind, can_take: bool, empty: bool, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let key = match kind {

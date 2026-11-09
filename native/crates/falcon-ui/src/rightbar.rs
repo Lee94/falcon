@@ -1,10 +1,9 @@
 //! 右侧活动栏（旧 React 版的 `components/RightBar.tsx`）与右面板宿主。
 //!
 //! 活动栏不成岛：图标直接落在窗口底上。点同一格关面板，点另一格切过去。
-//! 面板视图在右侧栏开着时切走不卸载（飞书项目的 CLI 往返 2–6s，切回来要立刻有东西），
-//! 关掉右侧栏才卸——沿用 React 版的规则。
+//! 面板视图在右侧栏开着时切走不卸载（切回来要立刻有东西），关掉右侧栏才卸——沿用 React 版的规则。
 //!
-//! 内置的四格之后隔一道短线是插件（ADR 0025）：服务端列表里启用着、清单没坏的那些，
+//! 内置的两格之后隔一道短线是插件（ADR 0025）：服务端列表里启用着、清单没坏的那些，
 //! 一个插件一格，面板都是 [`PluginPanel`]。
 
 use gpui_kit::assets::IconName;
@@ -12,44 +11,52 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use std::collections::HashMap;
 
-use gpui_kit::{AnyView, App, Context, Entity, IntoElement, Render, SharedString, Stateful, Div, Window, div};
+use gpui_kit::{AnyElement, AnyView, App, Context, Entity, IntoElement, Render, SharedString, Window, div};
 use rust_i18n::t;
 
-use crate::panels::{
-    changes::ChangesPanel, files::FilesPanel, git::GitPanel, meegle::MeeglePanel,
-    plugin::{PluginPanel, plugin_icon},
-};
+use crate::panels::{changes::ChangesPanel, files::FilesPanel, plugin::{PluginPanel, plugin_icon}};
 use crate::theme::Ui;
 use crate::ui::icon;
 use crate::workspace::{RightPanelId, Workspace};
 use crate::zoom::zpx;
 
 /// 转发面板已挪进设置的「中转」页（ADR 0016），这里不再有那一格
-const ITEMS: [(RightPanelId, IconName, &str, &str); 4] = [
+const ITEMS: [(RightPanelId, IconName, &str, &str); 2] = [
     (RightPanelId::Files, IconName::Folder, "files.panel", "toggleFilesPanel"),
     (RightPanelId::Changes, IconName::FileDiff, "changes.panel", "toggleChangesPanel"),
-    (RightPanelId::Git, IconName::GitBranch, "git.panel", "toggleGitPanel"),
-    (RightPanelId::Meegle, IconName::ListTodo, "meegle.panel", "toggleMeeglePanel"),
 ];
 
-/// 活动栏上的一格：28px 的方块，选中用 tint，hover 用灰
-fn bar_button(id: String, glyph: IconName, tip: SharedString, on: bool, ui: &Ui) -> Stateful<Div> {
-    let btn = div()
-        .id(SharedString::from(id))
-        .size(zpx(28.))
+/// 活动栏上的一格：30px 的方块，选中用 tint（淡入），hover 用灰
+fn bar_button(
+    id: String,
+    glyph: IconName,
+    tip: SharedString,
+    on: bool,
+    ui: &Ui,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> AnyElement {
+    let mut btn = div()
+        .id(SharedString::from(id.clone()))
+        .size(zpx(30.))
+        .relative()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(zpx(8.))
+        .rounded(crate::theme::radius::SM)
         .cursor_pointer()
         .text_color(ui.muted_foreground)
-        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-        .child(icon(glyph).size(zpx(14.)));
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+    // 背景块先画（垫在图标下面），hover 的底色淡入淡出、文字色瞬时
+    if !on {
+        btn = btn.child(crate::ui::hover_fade(format!("hover-{id}"), ui.background.opacity(0.6), crate::theme::radius::SM));
+    }
+    let btn = btn.child(icon(glyph).size(zpx(15.))).on_click(on_click);
     if on {
-        btn.bg(ui.tint).text_color(ui.tint_foreground)
+        let tint = ui.tint;
+        crate::ui::selected_fade(format!("sel-{id}"), btn.text_color(ui.tint_foreground), tint).into_any_element()
     } else {
-        let (bg, fg) = (ui.background.opacity(0.6), ui.foreground);
-        btn.hover(move |s| s.bg(bg).text_color(fg))
+        let fg = ui.foreground;
+        btn.hover(move |s| s.text_color(fg)).into_any_element()
     }
 }
 
@@ -80,15 +87,15 @@ impl Render for RightBar {
             .flex()
             .flex_col()
             .items_center()
-            .gap(zpx(2.))
-            .px(zpx(6.))
-            .py(zpx(6.));
+            .gap(zpx(4.))
+            .px(zpx(5.))
+            .py(zpx(8.));
         for (panel, icon_name, label, chord) in ITEMS {
             let on = open && current == panel;
             let ws = self.ws.clone();
             let tip: SharedString = format!("{} · {}", t!(label), crate::ui::chord(chord)).into();
             let id = format!("rb-{}", panel.as_wire());
-            bar = bar.child(bar_button(id, icon_name, tip, on, &ui).on_click(move |_, _, cx| toggle(&ws, panel.clone(), cx)));
+            bar = bar.child(bar_button(id, icon_name, tip, on, &ui, move |_, _, cx| toggle(&ws, panel.clone(), cx)));
         }
         if !plugins.is_empty() {
             bar = bar.child(div().w(zpx(14.)).h(zpx(1.)).my(zpx(4.)).bg(ui.border));
@@ -99,7 +106,7 @@ impl Render for RightBar {
             let ws = self.ws.clone();
             let tip: SharedString = p.name.clone().into();
             let id = format!("rb-{}", panel.as_wire());
-            bar = bar.child(bar_button(id, plugin_icon(&p.icon), tip, on, &ui).on_click(move |_, _, cx| toggle(&ws, panel.clone(), cx)));
+            bar = bar.child(bar_button(id, plugin_icon(&p.icon), tip, on, &ui, move |_, _, cx| toggle(&ws, panel.clone(), cx)));
         }
         bar
     }
@@ -110,8 +117,6 @@ pub struct PanelHost {
     ws: Entity<Workspace>,
     files: Option<Entity<FilesPanel>>,
     changes: Option<Entity<ChangesPanel>>,
-    git: Option<Entity<GitPanel>>,
-    meegle: Option<Entity<MeeglePanel>>,
     /// 插件面板按插件 id 各一扇
     plugins: HashMap<String, Entity<PluginPanel>>,
 }
@@ -123,8 +128,6 @@ impl PanelHost {
             if !ws.read(cx).state.right_open {
                 this.files = None;
                 this.changes = None;
-                this.git = None;
-                this.meegle = None;
                 this.plugins.clear();
             }
             cx.notify();
@@ -134,8 +137,6 @@ impl PanelHost {
             ws,
             files: None,
             changes: None,
-            git: None,
-            meegle: None,
             plugins: HashMap::new(),
         }
     }
@@ -151,16 +152,6 @@ impl PanelHost {
             RightPanelId::Changes => self
                 .changes
                 .get_or_insert_with(|| cx.new(|cx| ChangesPanel::new(ws, window, cx)))
-                .clone()
-                .into(),
-            RightPanelId::Git => self
-                .git
-                .get_or_insert_with(|| cx.new(|cx| GitPanel::new(ws, window, cx)))
-                .clone()
-                .into(),
-            RightPanelId::Meegle => self
-                .meegle
-                .get_or_insert_with(|| cx.new(|cx| MeeglePanel::new(ws, window, cx)))
                 .clone()
                 .into(),
             RightPanelId::Plugin(id) => self

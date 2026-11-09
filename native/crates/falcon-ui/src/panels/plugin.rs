@@ -22,7 +22,7 @@ use gpui_kit::{AnyElement, ClipboardItem, Context, Entity, FontWeight, IntoEleme
 use rust_i18n::t;
 use web_time::Instant;
 
-use super::meegle::widgets::{hint, hint_detail, icon_button};
+use super::widgets::{hint, hint_detail, icon_button};
 use crate::dialogs::{self, ConfirmOpts};
 use crate::theme::Ui;
 use crate::ui::{icon, spinner};

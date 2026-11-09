@@ -1,6 +1,6 @@
 //! REST 方法，按功能域分文件，与旧 React 版的 `packages/web/src/api.ts` 逐条对应（名字是它的
-//! snake_case）。路径、方法、query、请求体以服务端 `packages/server/src/routes.ts`
-//! （飞书项目在 `meegle/routes.ts`）为准，api.ts 有遗漏的地方照服务端补。
+//! snake_case）。路径、方法、query、请求体以服务端 `packages/server/src/routes.ts` 为准，
+//! api.ts 有遗漏的地方照服务端补。
 //!
 //! 所有方法都返回 `impl Future<Output = ApiResult<T>> + MaybeSend + 'static`：参数在调用时
 //! 就拷成自有值、拼好路径，工作在第一次 poll 时才 spawn 到网络运行时（见 crate 文档）。
@@ -9,17 +9,16 @@
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 pub(crate) mod app_icon;
-pub(crate) mod assistant;
 pub(crate) mod auth;
 pub(crate) mod files;
 pub(crate) mod forwards;
 pub(crate) mod git;
 pub(crate) mod hosts;
-pub(crate) mod meegle;
 pub(crate) mod plugins;
 pub(crate) mod projects;
 pub(crate) mod sessions;
 pub(crate) mod system;
+pub(crate) mod tailscale;
 pub(crate) mod transfer;
 
 /// `encodeURIComponent` 不编码的那些字符之外全部百分号编码。
@@ -36,8 +35,8 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
 
 /// 路径里的一段，照 `encodeURIComponent` 编码。
 ///
-/// React 版只给飞书项目的 key 编了码，项目 / 会话 id 直接拼——它们是 UUID，编不编码
-/// 一个样。这里一律编：`/` 出现在段里时必须编掉，否则就换了一条路由。
+/// 项目 / 会话 id 是 UUID，编不编码一个样。这里一律编：`/` 出现在段里时必须编掉，
+/// 否则就换了一条路由。
 pub(crate) fn seg(s: &str) -> String {
     utf8_percent_encode(s, COMPONENT).to_string()
 }

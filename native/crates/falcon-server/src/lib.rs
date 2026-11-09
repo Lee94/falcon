@@ -10,7 +10,6 @@ pub mod api;
 pub mod app_icon;
 pub mod archive;
 pub mod askpass;
-pub mod assistant;
 pub mod auth;
 pub mod cloudflared;
 pub mod config;
@@ -22,9 +21,6 @@ pub mod files;
 pub mod fs;
 pub mod git;
 pub mod host;
-pub mod meegle;
-/// 异地互联：本机的 tsnet / NetBird sidecar（不进引擎线程）
-pub mod mesh;
 pub mod paste;
 /// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
 pub mod plugins;
@@ -36,6 +32,8 @@ pub mod service_cli;
 pub mod sessiond;
 pub mod sessions;
 pub mod shells;
+/// 后端本机的 Tailscale：列出 tailnet 里的设备，用来添加远端主机
+pub mod tailscale;
 pub mod term_env;
 pub mod transfer;
 pub mod virtualdir;

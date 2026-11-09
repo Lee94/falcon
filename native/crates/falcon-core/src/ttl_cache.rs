@@ -1,7 +1,6 @@
 //! 带 TTL 与 in-flight 合并的内存缓存。对应 `packages/shared/src/ttlCache.ts`。
 //!
-//! 飞书项目面板两边共用：服务端挡住重复的 meegle CLI 进程（一次待办 2–4s），客户端挡住
-//! 面板卸载后再挂上的重复 HTTP。同一 key 并发只跑一份 load；load 失败不入库，下次再试。
+//! 同一 key 并发只跑一份 load；load 失败不入库，下次再试。
 //! `fresh` 跳过已有条目，但仍并入正在飞的那一次——刷新时别再起一条请求。
 //!
 //! [`TtlCache::clear`] 会抬 generation：清之前已经在飞的 load 回来后不许写回，免得刚刷新
@@ -13,7 +12,7 @@
 //!   任何一个等待方 poll 都能推动，全都丢掉则 load 停在半路、in-flight 条目留着，直到
 //!   下一次 `clear()`。TS 的 Promise 不管有没有人等都会跑完。
 //! - TS 的缓存是异构的（`peek<T>`）；这里一个缓存一种值类型 `V`，要异构就用
-//!   `Arc<dyn Any + Send + Sync>`（见 [`crate::meegle_cache`]）。
+//!   `Arc<dyn Any + Send + Sync>`。
 //! - load 的错误是 `anyhow::Error`，共享给所有等待方，所以包在 `Arc` 里。
 
 use std::collections::HashMap;

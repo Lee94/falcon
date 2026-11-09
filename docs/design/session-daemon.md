@@ -347,7 +347,7 @@ fn upgrade_vt(&self, _binary: &str) {}
 
 **同一台机器一次只部署一处**。链路按项目开，同一台机器（user@host:port）上的几个项目各一条：升级后重启时它们的会话一起接回、一起要推新版本。`SessionManager::prepare` 按机器排队（已有结论的链路不排），排在后面的拿到锁时，二进制多半已经被前一处推好，只剩"在不在 + 握手"。临时文件名再各不相同，挡住排队管不到的并发（同一台机器换个主机名、另一台机器上的 falcon）。`dir-not-writable` 只认权限不够 / 只读文件系统 / Windows 的拒绝访问，`cannot access` / `cannot stat` / 文件被占用 / Text file busy 都按瞬时故障自动重试——旧的判法按 "access" 一个词归成目录写不了。
 
-**二进制定位**（`bin.rs`，照 `meegle/bin.rs` 的优先级链）：
+**二进制定位**（`bin.rs`，按下面的顺序找）：
 
 1. `FALCON_SESSIOND_DIR`：一个目录，按 `<三元组>/release/falcon-sessiond[.exe]` 或 `<三元组>/falcon-sessiond[.exe]` 放；
 2. 编进发布版的那份：`embed-sessiond` feature，5 个目标各一份 gzip（`cargo xtask server` 准备在 `target-sessiond/embed/`）；

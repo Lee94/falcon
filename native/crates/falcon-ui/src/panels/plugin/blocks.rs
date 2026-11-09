@@ -19,7 +19,7 @@ use rust_i18n::t;
 use super::chart::chart;
 use super::{PluginPanel, plugin_icon};
 use crate::menus::{MenuItemSpec, to_popup};
-use crate::panels::meegle::widgets::{pill, segmented};
+use crate::panels::widgets::{pill, segmented};
 use crate::theme::{TerminalLook, Ui, radius};
 use crate::ui::{icon, sunken};
 use crate::zoom::zpx;

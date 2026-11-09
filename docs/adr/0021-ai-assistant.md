@@ -1,6 +1,6 @@
 # AI 助手：一段对话 = 一个终端 + 一段 AI 上下文，内置 agent 把命令打进那个终端，本地 agent 走 ACP
 
-状态：**已实施**（2026-10-15）。做法与验证记录见 [docs/design/ai-assistant.md](../design/ai-assistant.md)。没在真实的 Claude API 与真实的 ACP 适配器上跑过，只对按协议写的替身跑过；SSH Host 上的对话、浏览器版里的交互都没验证。
+状态：**已删除**。代码已从仓库去掉，下文是 2026-10-15 的决定，只供查阅。做法与验证记录见 [docs/design/ai-assistant.md](../design/ai-assistant.md)。没在真实的 Claude API 与真实的 ACP 适配器上跑过，只对按协议写的替身跑过；SSH Host 上的对话、浏览器版里的交互都没验证。
 
 侧栏「设置」旁边加一个入口，打开一个浮在主区左下角的面板。面板里是一段段对话，一段对话是某台机器上的一个终端加一段 AI 上下文（像 Warp 的一个标签）：你在终端里敲命令，跑完的命令记成时间线上的命令块；⌘⇧I 切到 Agent 输入，把任务交给 AI。AI 可以是 falcon 内置的 agent（直连 Claude API），也可以是经 ACP（Agent Client Protocol）接进来的本地 agent（Claude Code / Codex / Gemini CLI……）。
 

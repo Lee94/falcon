@@ -141,8 +141,6 @@ pub async fn ensure_local(data_dir: &Path) -> Result<Deployed, InstallError> {
         ));
     }
     let root = std::path::absolute(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    publish_local_binary(&root, &path)
-        .map_err(|error| InstallError::new(InstallFailure::DirNotWritable, Some(error.to_string())))?;
     Ok(Deployed {
         kind: if cfg!(windows) { HostKind::Windows } else { HostKind::Posix },
         root: root.to_string_lossy().into_owned(),
@@ -150,36 +148,6 @@ pub async fn ensure_local(data_dir: &Path) -> Result<Deployed, InstallError> {
         target,
         ghostty: ghostty_of(&stdout),
     })
-}
-
-fn publish_local_binary(root: &Path, binary: &Path) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let directory = root.join(falcon_proto::sessiond::SESSIOND_DIR);
-    std::fs::create_dir_all(&directory)?;
-    let target = directory.join(falcon_proto::sessiond::CURRENT_BINARY_FILE);
-    let bytes = serde_json::to_vec(binary)?;
-    if std::fs::read(&target).is_ok_and(|current| current == bytes) { return Ok(()); }
-    let temporary = directory.join(format!(".binary-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    let result = (|| {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        #[cfg(windows)]
-        if target.exists() { std::fs::remove_file(&target)?; }
-        std::fs::rename(&temporary, &target)
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
-    result
 }
 
 /// 远端：在就握手，不在就推，推完再握手。`attempt` 只用于上报阶段

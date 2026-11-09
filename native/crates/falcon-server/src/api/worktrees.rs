@@ -108,9 +108,9 @@ async fn derive(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let src = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
 
     // 禁止二级派生。git 本身允许（从 linked worktree 建的 worktree 仍属同一仓库），
-    // 但侧栏的两级树会变成任意深度、删除级联要递归，而收益是零——从源项目派生
-    // 完全等价。将来若要放开：把 source 取成 `row.source_project_id ?? row.id`
-    // 重新挂到根即可，树仍是两级。多仓库派生行也带 source_project_id，天然被挡。
+    // 但删除级联要递归，而收益是零——从源项目派生完全等价。多仓库派生在侧栏
+    // 与源项目同级，仍带 source_project_id，这里同样挡住。将来若要放开：把 source
+    // 取成 `row.source_project_id ?? row.id` 重新挂到根即可。
     if src.source_project_id.is_some() {
         return Err(ApiError::conflict("附属项目不能再派生，请从它的源项目派生"));
     }

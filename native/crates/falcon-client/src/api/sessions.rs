@@ -7,7 +7,7 @@ use std::future::Future;
 
 use bytes::Bytes;
 use falcon_proto::{
-    CreateSessionRequest, NativeDisplayRefresh, OkResponse, PasteImageResult, Session, SessionForeground,
+    CreateSessionRequest, OkResponse, PasteImageResult, Session, SessionForeground,
     SessionWithProject, SessionAgent,
 };
 use reqwest::Method;
@@ -53,12 +53,6 @@ impl FalconClient {
     /// `POST /api/sessions/:id/reattach`：手动接回。确认已死时照样 200，返回 dead 的行。
     pub fn reattach_session(&self, id: &str) -> impl Future<Output = ApiResult<Session>> + MaybeSend + 'static {
         self.bare(Method::POST, format!("/api/sessions/{}/reattach", seg(id)))
-    }
-
-    /// `POST /api/sessions/:id/reprobe`：让前台 OMP 合作刷新原生显示协商。
-    /// false 表示前台不是 OMP；未连接、Windows、并发刷新或执行失败均返回 API 错误。
-    pub fn reprobe_session(&self, id: &str) -> impl Future<Output = ApiResult<NativeDisplayRefresh>> + MaybeSend + 'static {
-        self.bare(Method::POST, format!("/api/sessions/{}/reprobe", seg(id)))
     }
 
     /// `GET /api/sessions/:id/foreground`：关窗口（Terminate）前问一嘴前台有没有程序在跑。

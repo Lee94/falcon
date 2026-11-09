@@ -35,8 +35,6 @@ pub const PROTO_MAX: u32 = 1;
 /// 打字（motd、echo、`conda activate` 的提示）；服务端读到这一串之前的字节一律丢掉，
 /// 帧流就不会被这些字污染。以 NUL 开头：正常的 shell 输出里不会出现
 pub const BRIDGE_PREAMBLE: &[u8] = b"\0falcon-sessiond-bridge/1\n";
-/// Failed native VT exports use an opaque payload so older holders can relay the error.
-pub const EXPORT_ERROR_PREFIX: &[u8] = b"\0falcon-native-export-error/1\n";
 
 /// `bridge` 的退出码：会话不在了（没有 meta、或进程已死、或已经退出）。其余非零都按链路问题处理
 pub const BRIDGE_EXIT_GONE: i32 = 3;
@@ -637,8 +635,6 @@ pub fn valid_sid(sid: &str) -> bool {
 
 /// 根目录下守护进程的子目录名
 pub const SESSIOND_DIR: &str = "sessiond";
-/// JSON path of the current locally deployed, verified binary, relative to SESSIOND_DIR.
-pub const CURRENT_BINARY_FILE: &str = "binary.json";
 
 /// socket 路径上限：macOS 104 字节、Linux 108 字节，留点余量
 pub const SOCKET_PATH_MAX: usize = 100;

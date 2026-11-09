@@ -36,7 +36,7 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::widgets::section;
-use crate::panels::meegle::widgets::{hint, hint_detail, icon_button, segmented, tiny_button};
+use crate::panels::widgets::{hint, hint_detail, icon_button, segmented, tiny_button};
 use crate::theme::{Ui, radius};
 use crate::ui::icon;
 use crate::workspace::{ToastKind, Workspace};
@@ -933,6 +933,6 @@ impl Render for RelaysPane {
                 out
             }
         };
-        section(t!("forward.title").to_string(), Some(t!("forward.hint").to_string()), children, cx)
+        section(t!("forward.title").to_string(), None, children, cx)
     }
 }

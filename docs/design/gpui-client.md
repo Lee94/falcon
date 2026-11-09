@@ -131,7 +131,7 @@ GPUI 有自己的执行器，不是 tokio。reqwest / tungstenite 跑在一个�
 
 - **服务端配置**（名称 + 基址 URL）存在客户端本地。本机配置自动存在，指向 launchd 托管的服务；远处的配置由用户添加（§4.7）。
 - **一个窗口只连一台 falcon 服务端**，连多台就开多个窗口（GPUI 原生多窗口）。项目 id、会话 id、窗口 key（`lib/paneKey.ts`）都只在一台服务端内唯一，不给它们加服务端前缀，排布模型与持久化格式原样照搬；工作区状态按服务端配置分开存。
-- **本机服务托管**照 `launcher.sh`：Resources 里带 SEA 服务程序，启动时 `service install`（幂等，兼作升级）、等 4923 起来。会话活在 launchd 服务里，**退出 App = 所有窗口 Detach**，永远不会 Terminate。这一段藏在 `LocalService` 接口后面，只有 macOS 实现（SEA 不支持 Windows 目标，见 §4.8）。
+- **本机服务托管**照 `launcher.sh`：Resources 里带 SEA 服务程序，启动时 `service install`（幂等，兼作升级）、等 4923 起来。会话活在 launchd 服务里，**退出 App = 所有窗口 Detach**，永远不会 Terminate。macOS 上关掉窗口不退出进程，菜单栏状态项留下，可以从那里启动、停止、重启服务（ADR 0015 后记）。这一段藏在 `LocalService` 接口后面，只有 macOS 实现（SEA 不支持 Windows 目标，见 §4.8）。
 
 ---
 

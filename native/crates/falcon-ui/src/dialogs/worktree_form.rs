@@ -33,7 +33,7 @@ use crate::zoom::zpx;
 
 #[derive(Clone, Debug, Default)]
 pub struct Preset {
-    /// 飞书项目工作项拖进来时预填的分支名（带了它就是 new-branch 模式，照 React 版的 preset）
+    /// 预填的分支名。多仓库表单带了它就用 new-branch 模式（照 React 版的 preset）
     pub branch: Option<String>,
     /// 预填的项目名
     pub name: Option<String>,
@@ -519,7 +519,7 @@ impl MultiForm {
             project,
             probe: None,
             load_error: None,
-            // 带着预填分支进来（飞书项目拖拽）是 new-branch（照 React 版的 preset.mode）
+            // 带着预填分支进来是 new-branch（照 React 版的 preset.mode）
             mode: if preset.branch.is_some() { MultiWorktreeMode::NewBranch } else { MultiWorktreeMode::Auto },
             branch_text,
             picked_ref: String::new(),

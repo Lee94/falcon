@@ -1,7 +1,9 @@
-//! 登录态与原始字节令牌。移植自 `packages/server/src/auth.ts`。
+//! 原始字节令牌，以及仍留着的登录接口。移植自 `packages/server/src/auth.ts`。
 //!
-//! 登录 token **只存在内存里**，后端一重启全员重新登录（客户端靠存着的密码自动重登）。
-//! 改成持久化属于行为变更，要单独决策（设计文档 §10），这里照旧。
+//! 能连上就允许使用：访问密码和是否绑在回环地址都不再挡请求。`required()` 恒为 false，
+//! `is_authenticated` 恒为 true。登录、登出、设密码的路由还在，避免旧客户端直接 404，
+//! 但设下来的哈希不会把门禁打开。HTML 预览的原始字节令牌与登录无关，继续只授
+//! 「读绑定范围内的文件」。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -63,20 +65,19 @@ struct State {
     /// 同一项目下不同目录绝不重用 / 修改旧 token 的根，logout 时整批作废。
     raw_tokens: HashMap<String, RawEntry>,
     raw_by_scope: HashMap<(String, RawScope), String>,
-    /// password_hash 的内存缓存（None = 还没读过）。每个 HTTP 请求和 WS 建连都要过
-    /// required()，不该每次都打一遍 SQLite；唯一的写入方是 set_password，同步更新缓存即可。
+    /// password_hash 的内存缓存（None = 还没读过）。status、登录和改密码会读它。
+    /// 唯一的写入方是 set_password，同步更新缓存即可。`required()` 不再读它。
     hash_cache: Option<Option<String>>,
 }
 
 pub struct Auth<S: SettingsStore> {
     db: S,
-    loopback: bool,
     state: Mutex<State>,
 }
 
 impl<S: SettingsStore> Auth<S> {
-    pub fn new(db: S, loopback: bool) -> Self {
-        Auth { db, loopback, state: Mutex::new(State::default()) }
+    pub fn new(db: S) -> Self {
+        Auth { db, state: Mutex::new(State::default()) }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -95,9 +96,9 @@ impl<S: SettingsStore> Auth<S> {
         self.password_hash(&mut st).is_some()
     }
 
-    /// 需要认证 = 设置过密码，或对外绑定
+    /// 能连上就允许使用。库里残留的 `password_hash`、非回环绑定都不构成门禁。
     pub fn required(&self) -> bool {
-        self.password_set() || !self.loopback
+        false
     }
 
     pub fn login(&self, password: &str) -> Option<String> {
@@ -227,7 +228,7 @@ mod tests {
 
     #[test]
     fn raw_token_scoped_reused_and_revoked_on_logout() {
-        let auth = Auth::new(FakeDb::default(), true);
+        let auth = Auth::new(FakeDb::default());
         let a = auth.raw_token("p1");
         assert!(a.len() >= 32);
         assert!(auth.raw_token_valid(Some(&a), "p1"));
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn directory_tokens_are_immutable_scoped_expiring_and_revoked() {
-        let auth = Auth::new(FakeDb::default(), true);
+        let auth = Auth::new(FakeDb::default());
         let scope = RawScope::Directory {
             kind: falcon_proto::HostKind::Posix, host: "local".into(), root: "/tmp/a".into(), only_file: None,
         };
@@ -292,33 +293,31 @@ mod tests {
     }
 
     #[test]
-    fn raw_token_is_not_a_login_token() {
-        let auth = Auth::new(FakeDb::default(), true);
+    fn password_and_raw_token_do_not_gate_access() {
+        let auth = Auth::new(FakeDb::default());
+        assert!(!auth.required() && auth.is_authenticated(None));
         assert!(auth.set_password("secret1", None));
-        let raw = auth.raw_token("p1");
-        assert!(!auth.is_authenticated(Some(&raw)));
+        // 设了密码、拿原始字节令牌冒充登录，访问仍然开放
+        assert!(!auth.required());
+        assert!(auth.is_authenticated(None));
+        assert!(auth.is_authenticated(Some(&auth.raw_token("p1"))));
+        let t = auth.login("secret1").unwrap();
+        auth.logout(Some(&t));
+        assert!(auth.is_authenticated(None));
+        assert!(auth.is_authenticated(Some(&t)));
     }
 
     #[test]
-    fn login_flow_and_password_change() {
-        let auth = Auth::new(FakeDb::default(), true);
-        // 回环、没设密码：不需要认证
-        assert!(!auth.required() && auth.is_authenticated(None));
+    fn password_change_still_checks_the_current_password() {
+        let auth = Auth::new(FakeDb::default());
         assert_eq!(auth.login("x"), None);
         assert!(auth.set_password("pw1", None));
-        assert!(auth.required());
-        assert!(!auth.is_authenticated(None));
-        let t = auth.login("pw1").unwrap();
-        assert!(auth.is_authenticated(Some(&t)));
+        assert!(auth.login("pw1").is_some());
         assert_eq!(auth.login("bad"), None);
-        // 改密码要带对当前密码
         assert!(!auth.set_password("pw2", None));
         assert!(!auth.set_password("pw2", Some("bad")));
         assert!(auth.set_password("pw2", Some("pw1")));
         assert!(auth.login("pw2").is_some());
-        auth.logout(Some(&t));
-        assert!(!auth.is_authenticated(Some(&t)));
-        // 对外绑定时即使没密码也要认证
-        assert!(Auth::new(FakeDb::default(), false).required());
+        assert!(auth.is_authenticated(None));
     }
 }

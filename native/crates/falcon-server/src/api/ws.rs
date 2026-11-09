@@ -1,8 +1,9 @@
 //! WebSocket：会话通道 `/ws/sessions/:id` 与守护进程部署通道 `/ws/install/:projectId`。
 //! 移植自 `packages/server/src/ws.ts`。
 //!
-//! 未认证照 Node 版先升级、再以 4401 关闭（客户端认这个关闭码去重新登录，不重连）。
-//! 单帧上限 1MB（@fastify/websocket 的 maxPayload），超过的帧直接断开。
+//! 能连上就允许使用，`authenticated` 恒为 true，下面的 4401 关连接走不到。
+//! 关闭码留着：旧客户端仍把 4401 当成未登录。单帧上限 1MB
+//! （@fastify/websocket 的 maxPayload），超过的帧直接断开。
 
 use std::rc::Rc;
 

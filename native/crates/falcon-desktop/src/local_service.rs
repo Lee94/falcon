@@ -6,14 +6,17 @@
 //!    `--host` / `--port` / `--data-dir`**（从 LaunchAgent plist 里读）：不带参数的 install
 //!    会写默认配置，装过自定义端口 / 数据目录的人一升级，服务就换了个家，会话全看不见了
 //!    （pkg 的 postinstall 与 launcher.sh 用同目录的 `service-args.sh` 做同一件事）；
-//! 2. 等端口起来：launchd 拉起服务要时间，端口起来之前连会被拒；401 也算起来了
-//!    （设过访问密码）。"本机"配置连的端口同样取自 plist（见 [`installed_service_args`]）。
+//! 2. 等端口起来：launchd 拉起服务要时间，端口起来之前 TCP 连会被拒。
+//!    "本机"配置连的端口同样取自 plist（见 [`installed_service_args`]）。
 //!
 //! 会话活在 launchd 服务里，不在 App 进程里——**退出 App = 所有窗口 Detach**，永远不会
-//! Terminate。开发时（不在 .app 里跑）找不到捆绑的服务程序，就假定服务已经在跑
-//! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。
+//! Terminate。关掉窗口不等于退出：macOS 上菜单栏还在，启动 / 停止 / 重启走同一套
+//! `falcon service` 子命令（停止必须 bootout，否则 KeepAlive 会把进程拉起来）。
+//! 开发时（不在 .app 里跑）找不到捆绑的服务程序，就假定服务已经在跑
+//! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。菜单栏这时改用
+//! LaunchAgent 里那份已安装的二进制执行子命令。
 //!
-//! Windows 上没有本机服务（服务本身依赖 POSIX shell，见 README），这一段只有 macOS 实现。
+//! Windows 上没有本机服务（打包与托管只做了 macOS / Linux，见 docs/deploy.md），这一段只有 macOS 实现。
 
 use std::time::Duration;
 
@@ -28,14 +31,27 @@ fn bundled_server() -> Option<std::path::PathBuf> {
     bin.is_file().then_some(bin)
 }
 
-/// 已经注册过的用户级 LaunchAgent（服务端 `service.rs` 的 `com.falcon.server`）的启动参数。
-/// 没装过、读不出来都是 None。用系统自带的 plutil 转 JSON，不为读一个 plist 加依赖
-pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs> {
+/// `~/Library/LaunchAgents/com.falcon.server.plist`。没家目录时是 None
+#[cfg(target_os = "macos")]
+fn launch_agent_plist() -> Option<std::path::PathBuf> {
+    Some(
+        directories::BaseDirs::new()?
+            .home_dir()
+            .join("Library/LaunchAgents/com.falcon.server.plist"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn agent_installed() -> bool {
+    launch_agent_plist().is_some_and(|path| path.is_file())
+}
+
+/// plist 里的 `ProgramArguments`。没装过、读不出来都是 None。用系统自带的 plutil 转 JSON，
+/// 不为读一个 plist 加依赖
+fn program_arguments() -> Option<Vec<String>> {
     #[cfg(target_os = "macos")]
     {
-        let plist = directories::BaseDirs::new()?
-            .home_dir()
-            .join("Library/LaunchAgents/com.falcon.server.plist");
+        let plist = launch_agent_plist()?;
         if !plist.is_file() {
             return None;
         }
@@ -47,11 +63,34 @@ pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs
         if !out.status.success() {
             return None;
         }
-        let argv: Vec<String> = serde_json::from_slice(&out.stdout).ok()?;
-        Some(falcon_core::service_args::parse_service_args(&argv))
+        serde_json::from_slice(&out.stdout).ok()
     }
     #[cfg(not(target_os = "macos"))]
     None
+}
+
+/// 已经注册过的用户级 LaunchAgent（服务端 `service.rs` 的 `com.falcon.server`）的启动参数。
+/// 没装过、读不出来都是 None
+pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs> {
+    program_arguments().map(|argv| falcon_core::service_args::parse_service_args(&argv))
+}
+
+/// LaunchAgent 正在跑的那份服务程序（`<dataDir>/bin/falcon`）。更新前若它带了 `uchg`，
+/// `service install` 换不掉它
+pub(crate) fn installed_program_path() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(program_arguments()?.into_iter().next()?);
+    path.is_file().then_some(path)
+}
+
+/// 菜单栏能拿来执行 `falcon service …` 的程序。App 包里捆的那份优先（和启动时 install
+/// 用同一份）；开发构建没有包，就用 LaunchAgent 正在指着的那份
+#[cfg(target_os = "macos")]
+fn service_program() -> Option<std::path::PathBuf> {
+    if let Some(bin) = bundled_server() {
+        return Some(bin);
+    }
+    let path = std::path::PathBuf::from(program_arguments()?.into_iter().next()?);
+    path.is_file().then_some(path)
 }
 
 /// [`LocalService`] 的原生实现。macOS 上捆着服务程序就先 `service install`，各平台都等端口
@@ -103,6 +142,181 @@ fn wait_for_port(url: &str) -> ServiceStatus {
     ServiceStatus::Unreachable(last_err)
 }
 
+/// 菜单栏上的三个动作
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServiceControl {
+    Start,
+    Stop,
+    Restart,
+}
+
+/// launchd 眼里的本机服务。没装过和装了没在跑要分开：前者「启动」得先 install
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServicePresence {
+    NotInstalled,
+    Stopped,
+    Running { pid: Option<u32> },
+}
+
+#[derive(Debug)]
+pub(crate) enum ServiceControlError {
+    /// 没有可执行的 falcon：开发构建不在 .app 里，也没有已安装的二进制
+    NoProgram,
+    Failed(String),
+}
+
+pub(crate) struct ControlResult {
+    pub presence: ServicePresence,
+    pub error: Option<ServiceControlError>,
+}
+
+/// `falcon service` 实际要跑的 argv。没安装时启动和重启都落成 install，并带上原来的
+/// `--host` / `--port` / `--data-dir`（空则仍走服务端默认值）。停止一个没安装的服务是空操作
+#[derive(Debug, PartialEq, Eq)]
+enum ControlPlan {
+    Nothing,
+    Run(Vec<String>),
+}
+
+fn control_plan(op: ServiceControl, installed: bool, keep: &[String]) -> ControlPlan {
+    match (op, installed) {
+        (ServiceControl::Stop, false) => ControlPlan::Nothing,
+        (ServiceControl::Stop, true) => ControlPlan::Run(vec!["service".into(), "stop".into()]),
+        (ServiceControl::Start, true) => ControlPlan::Run(vec!["service".into(), "start".into()]),
+        (ServiceControl::Restart, true) => ControlPlan::Run(vec!["service".into(), "restart".into()]),
+        (ServiceControl::Start | ServiceControl::Restart, false) => {
+            let mut args = vec!["service".into(), "install".into()];
+            args.extend(keep.iter().cloned());
+            ControlPlan::Run(args)
+        }
+    }
+}
+
+/// `launchctl print` 的 stdout。只认每个键第一次出现：输出里子段落会把 `state` 再写一遍
+fn presence_from_launchd(installed: bool, print_output: &str) -> ServicePresence {
+    if !installed {
+        return ServicePresence::NotInstalled;
+    }
+    let mut state = None;
+    let mut pid = None;
+    for line in print_output.lines() {
+        if state.is_none() {
+            state = field_value(line, "state").map(str::to_string);
+        }
+        if pid.is_none() {
+            pid = field_value(line, "pid").and_then(|value| value.parse().ok());
+        }
+    }
+    if state.as_deref() == Some("running") {
+        ServicePresence::Running { pid }
+    } else {
+        ServicePresence::Stopped
+    }
+}
+
+/// `state = running` / `pid=42`。键名必须到边界，避免 `stated` 被当成 `state`
+fn field_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.trim().strip_prefix(key)?;
+    if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+        return None;
+    }
+    let rest = rest.trim_start().strip_prefix('=')?.trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_target() -> String {
+    let uid = unsafe { libc_getuid() };
+    format!("gui/{uid}/com.falcon.server")
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
+
+/// 问 launchd 现在什么状态。阻塞，放在后台执行器上调
+#[cfg(target_os = "macos")]
+pub(crate) fn query_presence() -> ServicePresence {
+    let installed = agent_installed();
+    if !installed {
+        return ServicePresence::NotInstalled;
+    }
+    // print 在 job 已经被 bootout 时失败，stdout 是空的，那就是「装了但没在跑」
+    let output = std::process::Command::new("launchctl").args(["print", &launchd_target()]).output();
+    let stdout = match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(err) => {
+            log::warn!("launchctl print 起不来：{err}");
+            String::new()
+        }
+    };
+    presence_from_launchd(true, &stdout)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn run_control(op: ServiceControl) -> ControlResult {
+    let installed = agent_installed();
+    let keep = installed_service_args().map(|args| args.to_install_args()).unwrap_or_default();
+    let ran = match control_plan(op, installed, &keep) {
+        ControlPlan::Nothing => Ok(()),
+        ControlPlan::Run(args) => run_service(&args),
+    };
+    let error = ran.err();
+    // bootout 是异步的：stop 的命令已经返回，print 仍可能看见旧的 running。等它真正消失，
+    // 菜单才显示「已停止」。start / restart 的 CLI 自己会等到 bootstrap 成功
+    let presence = if error.is_none() && matches!(op, ServiceControl::Stop) {
+        wait_until_not_running()
+    } else {
+        query_presence()
+    };
+    if let Some(err) = &error {
+        log::warn!("本机服务 {op:?} 失败：{err:?}");
+    }
+    ControlResult { presence, error }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_until_not_running() -> ServicePresence {
+    let mut last = query_presence();
+    for _ in 0..20 {
+        if !matches!(last, ServicePresence::Running { .. }) {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        last = query_presence();
+    }
+    last
+}
+
+#[cfg(target_os = "macos")]
+fn run_service(args: &[String]) -> Result<(), ServiceControlError> {
+    let program = service_program().ok_or(ServiceControlError::NoProgram)?;
+    let out = std::process::Command::new(&program)
+        .args(args)
+        .output()
+        .map_err(|err| ServiceControlError::Failed(err.to_string()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let raw = if !stderr.trim().is_empty() { stderr } else { stdout };
+    let msg = brief(raw.trim()).unwrap_or_else(|| format!("exit {}", out.status));
+    Err(ServiceControlError::Failed(msg))
+}
+
+/// 菜单项按这段文案撑开宽度，只留一行、并且限制长度。空串返回 None，调用方改用退出码
+const MENU_TEXT_LIMIT: usize = 32;
+
+fn brief(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
+    let mut chars = line.chars();
+    let head: String = chars.by_ref().take(MENU_TEXT_LIMIT).collect();
+    if chars.next().is_some() { Some(format!("{head}…")) } else { Some(head) }
+}
+
 #[cfg(test)]
 mod tests {
     /// 装没装过服务都成立：读得出来就必须能拼出一个 http 基址（本机开发时顺便看一眼读到了什么）
@@ -113,5 +327,62 @@ mod tests {
             eprintln!("已安装服务：{args:?} → {url}");
             assert!(url.starts_with("http://"));
         }
+    }
+
+    #[test]
+    fn presence_reads_the_first_state_and_pid() {
+        let text = "\
+    state = running
+    pid = 4242
+        state = waiting
+        pid = 1
+";
+        assert_eq!(
+            super::presence_from_launchd(true, text),
+            super::ServicePresence::Running { pid: Some(4242) }
+        );
+        assert_eq!(super::presence_from_launchd(true, ""), super::ServicePresence::Stopped);
+        assert_eq!(
+            super::presence_from_launchd(false, "state = running\npid = 1"),
+            super::ServicePresence::NotInstalled
+        );
+        assert_eq!(super::presence_from_launchd(true, "stated = running\n"), super::ServicePresence::Stopped);
+    }
+
+    #[test]
+    fn control_plan_installs_with_the_previous_args_when_missing() {
+        use super::{ControlPlan, ServiceControl};
+        let keep = ["--port".to_string(), "6789".to_string()];
+        assert_eq!(
+            super::control_plan(ServiceControl::Start, false, &keep),
+            ControlPlan::Run(vec!["service".into(), "install".into(), "--port".into(), "6789".into()])
+        );
+        assert_eq!(
+            super::control_plan(ServiceControl::Restart, false, &[]),
+            ControlPlan::Run(vec!["service".into(), "install".into()])
+        );
+        assert_eq!(
+            super::control_plan(ServiceControl::Start, true, &keep),
+            ControlPlan::Run(vec!["service".into(), "start".into()])
+        );
+        assert_eq!(
+            super::control_plan(ServiceControl::Restart, true, &keep),
+            ControlPlan::Run(vec!["service".into(), "restart".into()])
+        );
+        assert_eq!(super::control_plan(ServiceControl::Stop, false, &keep), ControlPlan::Nothing);
+        assert_eq!(
+            super::control_plan(ServiceControl::Stop, true, &keep),
+            ControlPlan::Run(vec!["service".into(), "stop".into()])
+        );
+    }
+
+    #[test]
+    fn brief_keeps_one_short_line() {
+        assert_eq!(super::brief("").as_deref(), None);
+        assert_eq!(super::brief("  \n尚未安装\n更多").as_deref(), Some("尚未安装"));
+        let long = "a".repeat(super::MENU_TEXT_LIMIT + 1);
+        let got = super::brief(&long).unwrap();
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), super::MENU_TEXT_LIMIT + 1);
     }
 }

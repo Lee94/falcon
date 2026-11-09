@@ -286,8 +286,7 @@ mod node {
     }
 }
 
-/// 照抄 TS 语义要用到的几处 JavaScript 行为（与 meegle/command.rs 的 `js` 同源；
-/// falcon-server 还没有公共的落脚点，先各带一份）。
+/// 照抄 TS 语义要用到的几处 JavaScript 行为（falcon-server 还没有公共的落脚点，先各带一份）。
 pub(crate) mod js {
     /// ECMAScript 的 WhiteSpace + LineTerminator：`trim()` 与正则 `\s` 用的就是这一套
     pub(super) fn is_ws(c: char) -> bool {

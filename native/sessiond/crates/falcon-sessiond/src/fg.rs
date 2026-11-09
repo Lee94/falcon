@@ -25,12 +25,6 @@ pub fn foreground_info(master: &dyn MasterPty, shell_pid: u32) -> FgInfo {
     imp::foreground_info(master, shell_pid)
 }
 
-/// Read only this process's argv; does not inspect its environment or descendants.
-#[cfg(unix)]
-pub fn process_argv(pid: u32) -> Option<Vec<String>> {
-    imp::argv_of(pid)
-}
-
 /// 前台回到了 shell 自己：进程组就是 shell 的、而且 shell 没有子进程。holder 拿它清程序状态、
 /// 判断终端标题是不是 shell 自己写的。
 ///

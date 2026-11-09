@@ -147,13 +147,6 @@ pub struct SessionForeground {
     pub command: Option<String>,
 }
 
-/// `POST /api/sessions/:id/reprobe` 的返回：前台 OMP 已合作刷新原生显示协商；
-/// `false` 表示前台不是 OMP，没有改动会话。
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NativeDisplayRefresh {
-    pub refreshed: bool,
-}
-
 /// 粘贴图片的大小上限。Retina 全屏截图的 PNG 能到 10 MB 上下，取 20 MB；
 /// 前端超限时不发请求（React 版当初还直接提示，falcon-ui 眼下只记一条日志），
 /// 后端的 bodyLimit 用同一个数兜底。
