@@ -186,6 +186,11 @@ async fn derive(State(state): State<AppState>, Path(id): Path<String>, body: Len
             let mut row = derived_row(&src, name, created, &branch);
             row.worktree_repo_dir = Some(main);
             engine.db.insert_project(&row);
+            if row.project_type == "local" {
+                crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+            } else if let Some(hid) = &row.host_id {
+                engine.sessions.sync_ssh_host_if_connected(hid).await;
+            }
             Ok(Db::to_project(&row))
         })
         .await?;
@@ -260,6 +265,11 @@ async fn derive_multi(
             }
 
             engine.db.insert_project(&row);
+            if row.project_type == "local" {
+                crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+            } else if let Some(hid) = &row.host_id {
+                engine.sessions.sync_ssh_host_if_connected(hid).await;
+            }
             Ok(Db::to_project(&row))
         })
         .await?;
@@ -402,6 +412,11 @@ async fn archive(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
             }
             engine.stop_px0(&id).await;
             engine.db.set_worktree_archived(&id, Some(now_ms()));
+            if row.project_type == "local" {
+                crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+            } else if let Some(hid) = &row.host_id {
+                engine.sessions.sync_ssh_host_if_connected(hid).await;
+            }
             engine.db.get_project(&id).map(|r| Db::to_project(&r))
         })
         .await?;
@@ -415,6 +430,11 @@ async fn restore(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
         return Ok(Json(Db::to_project(&row))); // 幂等
     }
     state.db.set_worktree_archived(&id, None);
+    if row.project_type == "local" {
+        crate::host_projects::sync_local(&state.db, &state.config.data_dir);
+    } else if let Some(hid) = row.host_id.clone() {
+        let _ = state.engine.call(move |e| async move { e.sessions.sync_ssh_host_if_connected(&hid).await }).await;
+    }
     let row = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     Ok(Json(Db::to_project(&row)))
 }

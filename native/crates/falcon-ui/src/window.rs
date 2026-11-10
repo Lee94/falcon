@@ -645,6 +645,12 @@ impl Render for ServerWindow {
                     this.ws.update(cx, |w, cx| w.new_terminal(&pid, None, None, cx));
                 }
             }))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                this.ws.update(cx, |w, cx| w.split_active_terminal(false, cx));
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                this.ws.update(cx, |w, cx| w.split_active_terminal(true, cx));
+            }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
                 let active = this.ws.read(cx).state.active.clone();
                 this.ws.update(cx, |w, cx| match active {

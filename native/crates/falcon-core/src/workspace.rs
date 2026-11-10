@@ -20,8 +20,8 @@ use crate::js::{js_num, js_truthy};
 use crate::layout::{
     CANVAS_GAP_PX, CanvasGroup, ColumnLayout, DropSpot, PaneAt, PaneLayout, apply_drop, assign_canvases, canvas_end,
     canvas_groups, canvas_index, column, find_pane, insert_column, insert_pane, is_pinned, move_to_canvas,
-    order_by_canvas, pane_keys, pin_pane, remove_pane, replace_pane, resolve_spot, set_column_basis, set_pane_basis,
-    sync_columns, unpin_all, visible_columns,
+    new_canvas_id, order_by_canvas, pane_keys, pin_edge, pin_pane, remove_pane, replace_pane, resolve_spot,
+    set_column_basis, set_pane_basis, sync_columns, unpin_all, visible_columns,
 };
 use crate::pane_key::{DIFF_KEY, PaneItem, file_key, parse_pane_key, term_key};
 use crate::panel_width::{PANEL_WIDTH_DEFAULT, clamp_panel_width_default, parse_panel_width};
@@ -145,6 +145,18 @@ pub struct PendingSession {
     /// 这扇窗口开出来会跑什么 CLI；`None` = 普通 shell
     pub agent: Option<SessionAgent>,
     pub error: Option<String>,
+}
+
+/// 新建终端窗口落的位置
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum NewTerminalPlace {
+    /// 默认（⌘T / 侧栏 ＋）：独占一列并新建一块画布，紧跟在当前画布后面
+    #[default]
+    Auto,
+    /// 向右分屏（⌘D / 在右侧新建）：在锚点窗口所在列的右边插一列，留在同一块画布
+    RightOf(String),
+    /// 向下分屏（⌘⇧D / 在下方新建）：在锚点窗口所在列里插到它下面一格
+    Below(String),
 }
 
 // ---------------- 持久化形状 ----------------
@@ -612,8 +624,7 @@ impl WorkspaceState {
 
     /// 新开的一列插在排布的哪个下标：`after` 那扇窗口所在列的右边；没给 `after`（或它在
     /// 固定列里——固定列在排布里永远是最后一列，接在它后面就跑到最后一块画布去了）就接在
-    /// 当前画布的最后一列后面。先往眼前这块里放，排不下 [`assign_canvases`] 会紧跟着它
-    /// 另起一块。当前视图里一扇窗口都没有就接到最右。
+    /// 当前画布的最后一列后面。当前视图里一扇窗口都没有就接到最右。
     fn new_column_at(&self, after: Option<&str>, sessions: &[SessionWithProject]) -> usize {
         if let Some(at) = after.and_then(|k| find_pane(&self.columns, k))
             && !self.columns[at.col].pinned
@@ -741,9 +752,9 @@ impl WorkspaceState {
     }
 
     /// 新建会话的第一步（React 版 `createSessionNow` 发请求之前的 `set`）：先摆一扇 pending
-    /// 窗口。默认独占一列接在当前画布的最右（排不下另起一块，见 [`assign_canvases`]）；
-    /// `after` 给了就插在那扇窗口所在列的右边。开在别的项目里就接到最右——当前画布是
-    /// 这个项目的，与它无关。新开的终端不能建在一个收着的检出里，顺手摊开。返回 pending id。
+    /// 窗口。默认独占一列并新建一块画布，紧跟在当前画布后面；`after` 给了就插在那扇窗口所在列
+    /// 的右边（留在同一块画布）。开在别的项目里就接到最右——当前画布是这个项目的，与它无关。
+    /// 新开的终端不能建在一个收着的检出里，顺手摊开。返回 pending id。
     pub fn begin_pending(
         &mut self,
         project_id: &str,
@@ -751,17 +762,71 @@ impl WorkspaceState {
         after: Option<&str>,
         sessions: &[SessionWithProject],
     ) -> String {
-        // 位置按加 pending 之前的状态算（React 版在同一个 set 里用的也是旧状态）
-        let at = if self.selected_project_id.as_deref() == Some(project_id) || after.is_some() {
-            self.new_column_at(after, sessions)
-        } else {
-            self.columns.len()
+        let place = match after {
+            Some(k) => NewTerminalPlace::RightOf(k.to_string()),
+            None => NewTerminalPlace::Auto,
         };
+        self.begin_pending_at(project_id, agent, place, sessions)
+    }
+
+    /// 按指定位置新建 pending 会话窗口：默认（[`NewTerminalPlace::Auto`]）独占一列并新建一块画布；
+    /// 向右分屏在锚点列右侧插列（留在当前画布），向下分屏在锚点列内插到其下方一格；显式分屏时自动
+    /// 解除单列最大化。
+    pub fn begin_pending_at(
+        &mut self,
+        project_id: &str,
+        agent: Option<SessionAgent>,
+        place: NewTerminalPlace,
+        sessions: &[SessionWithProject],
+    ) -> String {
         self.pending_seq += 1;
         let pending_id = format!("{PENDING_PREFIX}{}", self.pending_seq);
+        let key = term_key(&pending_id);
+        // 位置按加 pending 之前的状态算（React 版在同一个 set 里用的也是旧状态）
+        let next_columns = match &place {
+            NewTerminalPlace::RightOf(anchor) => match find_pane(&self.columns, anchor) {
+                Some(at) => {
+                    self.term_zoomed = false;
+                    let (col_at, canvas) = if !self.columns[at.col].pinned {
+                        (at.col + 1, self.columns[at.col].canvas.clone())
+                    } else {
+                        let canvas = self.current_canvas(sessions);
+                        let end = canvas
+                            .as_deref()
+                            .and_then(|c| canvas_end(&self.columns, c))
+                            .unwrap_or_else(|| pin_edge(&self.columns));
+                        (end, canvas)
+                    };
+                    insert_column(&self.columns, &key, col_at, canvas.as_deref())
+                }
+                None => {
+                    let at = self.new_column_at(None, sessions);
+                    insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
+                }
+            },
+            NewTerminalPlace::Below(anchor) => match find_pane(&self.columns, anchor) {
+                Some(at) => {
+                    self.term_zoomed = false;
+                    let cleared = set_pane_basis(&self.columns, anchor, None);
+                    insert_pane(&cleared, &key, PaneAt { col: at.col, index: at.index + 1 })
+                }
+                None => {
+                    let at = self.new_column_at(None, sessions);
+                    insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
+                }
+            },
+            NewTerminalPlace::Auto => {
+                let at = if self.selected_project_id.as_deref() == Some(project_id) {
+                    self.new_column_at(None, sessions)
+                } else {
+                    self.columns.len()
+                };
+                insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
+            }
+        };
         self.pending.push(PendingSession { id: pending_id.clone(), project_id: project_id.to_string(), agent, error: None });
         self.tabs.push(pending_id.clone());
-        self.columns = insert_column(&self.columns, &term_key(&pending_id), at, None);
+        self.columns = next_columns;
         self.active = ActiveView::Terminal { session_id: pending_id.clone() };
         self.selected_project_id = Some(project_id.to_string());
         self.sessions_open.insert(project_id.to_string(), true);
@@ -1028,7 +1093,7 @@ impl WorkspaceState {
     /// 画布的收尾（React 版挂在 store 订阅上的 `settleCanvases`）——每次会改 columns / active /
     /// 可见性的变更之后都要过一遍，跟 [`sync_columns`] 一样不能漏：
     ///
-    /// 1. 还没分画布的可见列分好（[`assign_canvases`]）：新开的终端、对账补进来的会话、取消
+    /// 1. 还没分画布的可见列分好（[`assign_canvases`]）：查看窗口、对账补进来的会话、取消
     ///    固定的列、旧版本落盘的排布。"当前画布排不下就自动新开一块"就发生在这一步。
     /// 2. 记下正在显示哪块（`canvas_id`）、每块上次停在哪扇窗口（`canvas_focus`）。
     ///
@@ -1453,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn new_terminals_fill_the_current_canvas_before_opening_a_new_one() {
+    fn new_terminals_open_on_a_new_canvas_after_the_current_one() {
         let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
         let mut ws = WorkspaceState::default();
         for id in ["a", "b", "c"] {
@@ -1471,12 +1536,20 @@ mod tests {
             canvases(&ws, &sessions),
             [vec![vec!["t:a".to_string()], vec!["t:b".into()]], vec![vec![pending.clone()]], vec![vec!["t:c".into()]]]
         );
-        // 在第三块（只有 c，放得下）开一个：就落在 c 旁边
+        // 在第三块（只有 c，还放得下）开一个：同样新建一块画布，不主动塞进当前画布
         ws.focus_pane("t:c");
         ws.settle_canvases(&sessions);
         let pid2 = ws.begin_pending("p", None, None, &sessions);
         ws.settle_canvases(&sessions);
-        assert_eq!(canvases(&ws, &sessions)[2], [vec!["t:c".to_string()], vec![format!("t:{pid2}")]]);
+        assert_eq!(
+            canvases(&ws, &sessions),
+            [
+                vec![vec!["t:a".to_string()], vec!["t:b".into()]],
+                vec![vec![pending]],
+                vec![vec!["t:c".into()]],
+                vec![vec![format!("t:{pid2}")]],
+            ]
+        );
     }
 
     #[test]
@@ -1631,5 +1704,35 @@ mod tests {
         assert!(!apply_session_program_status(&mut sessions, "zz", None), "不认识的会话");
         assert!(apply_session_program_status(&mut sessions, "a", None));
         assert_eq!(sessions[0].program_status, None);
+    }
+
+    #[test]
+    fn split_right_and_down_place_pending_on_same_canvas_and_unzoom() {
+        let sessions = vec![session("a", "p", 1), session("b", "p", 2)];
+        let mut ws = WorkspaceState::default();
+        ws.open_session("a", &sessions);
+        ws.open_session("b", &sessions);
+        ws.set_canvas_width(TWO);
+        ws.settle_canvases(&sessions);
+        ws.term_zoomed = true;
+        // 即使画布已经塞满两列，向右分屏仍插在当前画布里并解除最大化
+        let r = ws.begin_pending_at("p", None, NewTerminalPlace::RightOf("t:a".into()), &sessions);
+        ws.settle_canvases(&sessions);
+        assert!(!ws.term_zoomed);
+        assert_eq!(
+            canvases(&ws, &sessions),
+            [vec![vec!["t:a".to_string()], vec![format!("t:{r}")], vec!["t:b".to_string()]]]
+        );
+        // 向下分屏插在锚点所在列的下一格，并清掉锚点上钉死的高度
+        ws.set_pane_height("t:a", Some(400.0));
+        ws.term_zoomed = true;
+        let d = ws.begin_pending_at("p", None, NewTerminalPlace::Below("t:a".into()), &sessions);
+        ws.settle_canvases(&sessions);
+        assert!(!ws.term_zoomed);
+        assert_eq!(ws.columns[0].panes[0].basis, None);
+        assert_eq!(
+            canvases(&ws, &sessions),
+            [vec![vec!["t:a".to_string(), format!("t:{d}")], vec![format!("t:{r}")], vec!["t:b".into()]]]
+        );
     }
 }

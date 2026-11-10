@@ -2228,6 +2228,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "falcon-android"
+version = "0.3.21"
+dependencies = [
+ "falcon-core",
+ "falcon-proto",
+ "falcon-term",
+ "falcon-theme",
+ "jni 0.21.1",
+ "parking_lot",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "falcon-client"
 version = "0.3.21"
 dependencies = [
@@ -11997,6 +12011,7 @@ version = "0.3.21"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "bytes",
  "flate2",
  "hex",
  "icu_collator",
@@ -12006,6 +12021,7 @@ dependencies = [
  "sha2 0.11.0",
  "tar",
  "tungstenite 0.30.0",
+ "woff2-patched",
 ]
 
 [[package]]

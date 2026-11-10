@@ -20,7 +20,7 @@
 
 use std::time::Duration;
 
-use falcon_platform::{LocalService, ServiceStatus};
+use falcon_platform::{LanAccessState, LocalService, ServiceStatus};
 
 /// 捆绑的服务程序：`Falcon.app/Contents/Resources/falcon`
 #[cfg(target_os = "macos")]
@@ -100,6 +100,109 @@ impl LocalService for BundledService {
     fn ensure_running(&self, url: &str) -> ServiceStatus {
         ensure_running(url)
     }
+
+    fn lan_access(&self) -> Option<LanAccessState> {
+        query_lan_access()
+    }
+
+    fn set_lan_access(&self, enabled: bool) -> Result<LanAccessState, String> {
+        apply_lan_access(enabled)
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn query_lan_access() -> Option<LanAccessState> {
+    service_program()?;
+    let args = installed_service_args().unwrap_or_default();
+    let port = args.port.unwrap_or(falcon_core::service_args::DEFAULT_PORT);
+    Some(LanAccessState {
+        enabled: args.is_lan_exposed(),
+        port,
+        urls: lan_ipv4_urls(port),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn query_lan_access() -> Option<LanAccessState> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn apply_lan_access(enabled: bool) -> Result<LanAccessState, String> {
+    let next = installed_service_args().unwrap_or_default().with_lan_exposed(enabled);
+    let mut argv = vec!["service".to_string(), "install".to_string()];
+    argv.extend(next.to_install_args());
+    run_service(&argv).map_err(|err| match err {
+        ServiceControlError::NoProgram => "找不到本机服务程序".to_string(),
+        ServiceControlError::Failed(msg) => msg,
+    })?;
+    let _ = wait_for_port(&next.local_url());
+    query_lan_access().ok_or_else(|| "无法读取本机服务状态".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn apply_lan_access(_enabled: bool) -> Result<LanAccessState, String> {
+    Err("当前平台不支持托管本机服务".to_string())
+}
+
+/// 枚举本机物理/局域网网卡的 IPv4 基址，排除回环、链路本地、TUN 隧道与 Clash Fake-IP 段
+#[cfg(target_os = "macos")]
+fn lan_ipv4_urls(port: u16) -> Vec<String> {
+    let mut primary = Vec::new();
+    let mut secondary = Vec::new();
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            return primary;
+        }
+        let mut cur = ifap;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            let flags = ifa.ifa_flags as i32;
+            if (flags & libc::IFF_UP) == 0 || (flags & libc::IFF_LOOPBACK) != 0 {
+                continue;
+            }
+            if ifa.ifa_addr.is_null() || (*ifa.ifa_addr).sa_family as i32 != libc::AF_INET {
+                continue;
+            }
+            let name = if ifa.ifa_name.is_null() {
+                ""
+            } else {
+                std::ffi::CStr::from_ptr(ifa.ifa_name).to_str().unwrap_or("")
+            };
+            if name.starts_with("utun")
+                || name.starts_with("awdl")
+                || name.starts_with("llw")
+                || name.starts_with("gif")
+                || name.starts_with("stf")
+                || name.starts_with("anpi")
+            {
+                continue;
+            }
+            let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+            let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+            let octets = ip.octets();
+            if ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+            {
+                continue;
+            }
+            let url = format!("http://{ip}:{port}");
+            if name.starts_with("en") {
+                if !primary.contains(&url) && !secondary.contains(&url) {
+                    primary.push(url);
+                }
+            } else if !primary.contains(&url) && !secondary.contains(&url) {
+                secondary.push(url);
+            }
+        }
+        libc::freeifaddrs(ifap);
+    }
+    primary.extend(secondary);
+    primary
 }
 
 /// 阻塞执行，放在后台线程里调。

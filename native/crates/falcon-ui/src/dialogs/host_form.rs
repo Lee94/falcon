@@ -290,10 +290,7 @@ impl HostForm {
                                 None => w.hosts.push(saved2.clone()),
                             }
                             w.refresh_hosts(cx);
-                            // 连接配置会刷回引用它的项目
-                            if editing {
-                                w.refresh_projects(cx);
-                            }
+                            w.refresh_projects(cx);
                             let title = if editing {
                                 t!("host.saved", name = saved2.name.clone())
                             } else {

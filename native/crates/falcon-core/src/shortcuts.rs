@@ -25,6 +25,10 @@ pub enum Command {
     Palette,
     QuickOpen,
     NewTerminal,
+    /// 向右分屏新建终端（在当前窗口右侧插一列）
+    SplitRight,
+    /// 向下分屏新建终端（在当前窗口下方插一格）
+    SplitDown,
     CloseTab,
     ToggleSidebar,
     ToggleChangesPanel,
@@ -45,10 +49,12 @@ pub enum Command {
 
 impl Command {
     /// 固定的那些（不含 `Tab(n)`），React 版的书写顺序
-    pub const FIXED: [Command; 14] = [
+    pub const FIXED: [Command; 16] = [
         Command::Palette,
         Command::QuickOpen,
         Command::NewTerminal,
+        Command::SplitRight,
+        Command::SplitDown,
         Command::CloseTab,
         Command::ToggleSidebar,
         Command::ToggleChangesPanel,
@@ -62,7 +68,7 @@ impl Command {
         Command::PrevCanvas,
     ];
 
-    /// 全部命令：固定的 14 个 + tab1…tab9
+    /// 全部命令：固定的 16 个 + tab1…tab9
     pub fn all() -> Vec<Command> {
         Self::FIXED.into_iter().chain((1..=9).map(Command::Tab)).collect()
     }
@@ -73,6 +79,8 @@ impl Command {
             Command::Palette => "palette".into(),
             Command::QuickOpen => "quickOpen".into(),
             Command::NewTerminal => "newTerminal".into(),
+            Command::SplitRight => "splitRight".into(),
+            Command::SplitDown => "splitDown".into(),
             Command::CloseTab => "closeTab".into(),
             Command::ToggleSidebar => "toggleSidebar".into(),
             Command::ToggleChangesPanel => "toggleChangesPanel".into(),
@@ -128,6 +136,8 @@ pub fn shortcut_defs() -> Vec<ShortcutDef> {
         def(Palette, Some("palette.title"), General),
         def(QuickOpen, Some("palette.goToFile"), General),
         def(NewTerminal, Some("sidebar.newTerminal"), Session),
+        def(SplitRight, Some("tab.newToRight"), Session),
+        def(SplitDown, Some("tab.newBelow"), Session),
         def(CloseTab, Some("tab.close"), Session),
         def(ToggleSidebar, Some("sidebar.collapse"), Panels),
         def(ToggleChangesPanel, Some("changes.panel"), Panels),
@@ -253,6 +263,14 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
             v.insert(1, b(Keystroke::new("`").ctrl().shift(), Secondary));
             v
         }
+        Command::SplitRight => plain("d"),
+        Command::SplitDown => {
+            if mac {
+                vec![b(letter("d").cmd().shift(), Primary), b(letter("d").alt().shift(), BrowserAlias)]
+            } else {
+                vec![b(letter("d").alt().shift(), Primary)]
+            }
+        }
         Command::CloseTab => plain("w"),
         Command::ToggleSidebar => plain("b"),
         Command::Reattach => plain("r"),
@@ -301,6 +319,8 @@ pub fn chord(cmd: Command, mac: bool) -> String {
         // Win 不能绑 Ctrl+P：那是 shell 的上一条历史
         Command::QuickOpen => pick("⌘P", "Alt+P"),
         Command::NewTerminal => pick("⌘T", "Ctrl+Shift+T"),
+        Command::SplitRight => pick("⌘D", "Ctrl+Shift+D"),
+        Command::SplitDown => pick("⌘⇧D", "Alt+Shift+D"),
         Command::CloseTab => pick("⌘W", "Ctrl+Shift+W"),
         Command::ToggleSidebar => pick("⌘B", "Ctrl+Shift+B"),
         Command::ToggleChangesPanel => pick("⌘⇧U", "Ctrl+Shift+U"),
@@ -320,6 +340,8 @@ pub fn chord(cmd: Command, mac: bool) -> String {
 pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
     Some(match cmd {
         Command::NewTerminal => "Alt+T",
+        Command::SplitRight => "Alt+D",
+        Command::SplitDown if mac => "Alt+Shift+D",
         Command::CloseTab => "Alt+W",
         Command::ToggleSidebar => "Alt+B",
         Command::ToggleChangesPanel => "Alt+U",
@@ -339,7 +361,7 @@ pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
         Command::PrevTab => "Alt+[",
         Command::NextCanvas if mac => "Alt+Shift+]",
         Command::PrevCanvas if mac => "Alt+Shift+[",
-        Command::NextCanvas | Command::PrevCanvas | Command::Overview | Command::Tab(_) => return None,
+        Command::SplitDown | Command::NextCanvas | Command::PrevCanvas | Command::Overview | Command::Tab(_) => return None,
     })
 }
 
@@ -360,6 +382,7 @@ pub struct KeyEventLike {
 fn alt_letter(code: &str) -> Option<Command> {
     Some(match code {
         "KeyT" => Command::NewTerminal,
+        "KeyD" => Command::SplitRight,
         "KeyW" => Command::CloseTab,
         "KeyB" => Command::ToggleSidebar,
         "KeyU" => Command::ToggleChangesPanel,
@@ -375,6 +398,7 @@ fn modshift_letter(code: &str) -> Option<Command> {
     Some(match code {
         "KeyP" => Command::Palette,
         "KeyT" => Command::NewTerminal,
+        "KeyD" => Command::SplitRight,
         "KeyW" => Command::CloseTab,
         "KeyB" => Command::ToggleSidebar,
         "KeyU" => Command::ToggleChangesPanel,
@@ -391,6 +415,7 @@ fn mac_mod_letter(code: &str) -> Option<Command> {
         "KeyK" => Command::Palette,
         "KeyP" => Command::QuickOpen,
         "KeyT" => Command::NewTerminal,
+        "KeyD" => Command::SplitRight,
         "KeyW" => Command::CloseTab,
         "KeyB" => Command::ToggleSidebar,
         "KeyR" => Command::Reattach,
@@ -401,6 +426,7 @@ fn mac_mod_letter(code: &str) -> Option<Command> {
 fn mac_modshift_letter(code: &str) -> Option<Command> {
     Some(match code {
         "KeyP" => Command::Palette,
+        "KeyD" => Command::SplitDown,
         "KeyU" => Command::ToggleChangesPanel,
         "KeyF" => Command::OpenRelays,
         "KeyE" => Command::ToggleFilesPanel,
@@ -462,11 +488,12 @@ pub fn match_command(e: &KeyEventLike, mac: bool) -> Option<Command> {
         return Some(Command::NewTerminal);
     }
 
-    // 翻画布：Alt+Shift+] / [ 两平台都认（Win/Linux 的主键位、Mac 的别名）
+    // 翻画布与向下分屏：Alt+Shift+] / [ / D 两平台都认（Win/Linux 的主键位、Mac 的别名）
     if e.alt && e.shift && !e.ctrl && !e.meta {
         return match code.as_str() {
             "BracketRight" => Some(Command::NextCanvas),
             "BracketLeft" => Some(Command::PrevCanvas),
+            "KeyD" => Some(Command::SplitDown),
             _ => None,
         };
     }
@@ -695,21 +722,39 @@ mod tests {
                 let aliases: Vec<Binding> =
                     bindings(cmd, mac).into_iter().filter(|b| b.role == BindingRole::BrowserAlias).collect();
                 for a in &aliases {
-                    // 翻画布的别名是 Alt+Shift（Alt+] / [ 已经是切窗口的别名）
-                    let shift_ok = matches!(cmd, Command::NextCanvas | Command::PrevCanvas) || !a.keystroke.shift;
+                    // 翻画布与向下分屏的别名是 Alt+Shift（Alt+] / [ / D 已经是切窗口与向右分屏的别名）
+                    let shift_ok =
+                        matches!(cmd, Command::SplitDown | Command::NextCanvas | Command::PrevCanvas) || !a.keystroke.shift;
                     assert!(a.keystroke.alt && !a.keystroke.cmd && !a.keystroke.ctrl && shift_ok);
                 }
-                // 主键位本身就是 Alt 的（非 mac 的 quickOpen / overview / tabN / 翻画布）不再另标别名
+                // 主键位本身就是 Alt 的（非 mac 的 quickOpen / overview / tabN / 翻画布 / 向下分屏）不再另标别名
                 if !mac
                     && matches!(
                         cmd,
-                        Command::QuickOpen | Command::Overview | Command::Tab(_) | Command::NextCanvas | Command::PrevCanvas
+                        Command::QuickOpen
+                            | Command::Overview
+                            | Command::Tab(_)
+                            | Command::SplitDown
+                            | Command::NextCanvas
+                            | Command::PrevCanvas
                     )
                 {
                     assert!(aliases.is_empty(), "{}", cmd.id());
                 }
             }
         }
+    }
+
+    #[test]
+    fn split_shortcuts_match_ghostty_style() {
+        assert_eq!(chord(Command::SplitRight, true), "⌘D");
+        assert_eq!(chord(Command::SplitRight, false), "Ctrl+Shift+D");
+        assert_eq!(chord(Command::SplitDown, true), "⌘⇧D");
+        assert_eq!(chord(Command::SplitDown, false), "Alt+Shift+D");
+        assert_eq!(hit(true, "KeyD", META), Some(Command::SplitRight));
+        assert_eq!(hit(false, "KeyD", CTRL_SHIFT), Some(Command::SplitRight));
+        assert_eq!(hit(true, "KeyD", META_SHIFT), Some(Command::SplitDown));
+        assert_eq!(hit(false, "KeyD", Mods { alt: true, shift: true, ..Default::default() }), Some(Command::SplitDown));
     }
 
     #[test]

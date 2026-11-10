@@ -21,6 +21,7 @@ pub mod files;
 pub mod fs;
 pub mod git;
 pub mod host;
+pub mod host_projects;
 pub mod paste;
 /// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
 pub mod plugins;

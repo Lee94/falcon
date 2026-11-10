@@ -340,6 +340,22 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             run: run(move |window, cx| crate::dialogs::install::open(&w, &pid, None, window, cx)),
         });
     }
+    if ws.active_key().is_some() && ws.current_project_id().is_some() {
+        for (label_key, action_id, down) in [
+            ("tab.newToRight", "splitRight", false),
+            ("tab.newBelow", "splitDown", true),
+        ] {
+            let w = ws_entity.clone();
+            actions.push(PickItem {
+                key: format!(">{} split", t!(label_key)),
+                label: t!(label_key).to_string(),
+                meta: Some(chord(action_id).to_string()),
+                icon: icon(IconName::SquareTerminal),
+                tone: None,
+                run: run(move |_, cx| w.update(cx, |w, cx| w.split_active_terminal(down, cx))),
+            });
+        }
+    }
     if let ActiveView::Terminal { session_id: id } = &ws.state.active {
         if let Some(current) = ws.session(id).filter(|s| s.state != SessionState::Dead).cloned() {
             let w = ws_entity.clone();

@@ -12,7 +12,17 @@ pub struct ServerConfig {
 }
 
 pub fn is_loopback(host: &str) -> bool {
-    host == "127.0.0.1" || host == "::1" || host == "localhost"
+    host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost"
+}
+
+/// 本机子进程（如 askpass 包装脚本）回连当前服务端用的主机部分：
+/// 通配地址（`0.0.0.0` / `::`）或空串连 `127.0.0.1`；指定具体网卡 IP 时连该 IP
+pub fn local_connect_host(host: &str) -> String {
+    match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
+        h if h.contains(':') && !h.starts_with('[') => format!("[{h}]"),
+        h => h.to_string(),
+    }
 }
 
 /// 默认数据目录。产品从 Mojito 改名为 Falcon 后根目录是 `~/.falcon`；

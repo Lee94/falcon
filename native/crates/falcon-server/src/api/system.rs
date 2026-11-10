@@ -120,11 +120,14 @@ async fn fs_list(State(state): State<AppState>, uri: Uri) -> ApiResult<Json<FsLi
     let res = state
         .engine
         .call(move |engine| async move {
-            let link = match target {
-                LinkTarget::Project(row) => engine.sessions.get_link(&row),
-                LinkTarget::Host(host) => engine.sessions.get_host_link(&host),
+            let link = match &target {
+                LinkTarget::Project(row) => engine.sessions.get_link(row),
+                LinkTarget::Host(host) => engine.sessions.get_host_link(host),
             };
             let facts = link.host_facts().await.map_err(|e| e.to_string())?;
+            if let LinkTarget::Host(host) = &target {
+                engine.sessions.sync_ssh_host_with_facts(host, &link, &facts).await;
+            }
             list_remote_directories(&*link, facts.kind, &facts.home, p.as_deref()).await.map_err(|e| e.to_string())
         })
         .await?;
@@ -148,11 +151,14 @@ async fn shells(State(state): State<AppState>, uri: Uri) -> ApiResult<Json<Shell
     let res = state
         .engine
         .call(move |engine| async move {
-            let link = match target {
-                LinkTarget::Project(row) => engine.sessions.get_link(&row),
-                LinkTarget::Host(host) => engine.sessions.get_host_link(&host),
+            let link = match &target {
+                LinkTarget::Project(row) => engine.sessions.get_link(row),
+                LinkTarget::Host(host) => engine.sessions.get_host_link(host),
             };
             let facts = link.host_facts().await.map_err(|e| e.to_string())?;
+            if let LinkTarget::Host(host) = &target {
+                engine.sessions.sync_ssh_host_with_facts(host, &link, &facts).await;
+            }
             Ok::<_, String>(detect_shells(&*link, facts.kind, &facts.shell).await)
         })
         .await?;
@@ -169,11 +175,14 @@ pub(super) async fn agents(State(state): State<AppState>, uri: Uri) -> ApiResult
     }
     let target = resolve_link_target(&state, host_id.as_deref(), project_id.as_deref()).map_err(ApiError::bad_request)?;
     let result = state.engine.call(move |engine| async move {
-        let link = match target {
-            LinkTarget::Project(row) => engine.sessions.get_link(&row),
-            LinkTarget::Host(host) => engine.sessions.get_host_link(&host),
+        let link = match &target {
+            LinkTarget::Project(row) => engine.sessions.get_link(row),
+            LinkTarget::Host(host) => engine.sessions.get_host_link(host),
         };
         let facts = link.host_facts().await.map_err(|e| e.to_string())?;
+        if let LinkTarget::Host(host) = &target {
+            engine.sessions.sync_ssh_host_with_facts(host, &link, &facts).await;
+        }
         detect_remote_agents(&*link, facts.kind, &facts.shell).await
     }).await?;
     result.map(Json).map_err(ApiError::bad_request)

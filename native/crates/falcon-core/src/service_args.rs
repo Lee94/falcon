@@ -74,6 +74,24 @@ impl ServiceArgs {
         };
         format!("http://{host}:{port}")
     }
+
+    /// 是否允许本机回环以外的设备连接（`--host 0.0.0.0`、`::` 或具体网卡地址）
+    pub fn is_lan_exposed(&self) -> bool {
+        match self.host.as_deref().map(str::trim) {
+            None | Some("") | Some("127.0.0.1") | Some("::1") | Some("[::1]") | Some("localhost") => false,
+            Some(_) => true,
+        }
+    }
+
+    /// 切换局域网监听开关，保留原有的 `--port` 与 `--data-dir`。
+    /// 开启时写 `--host 0.0.0.0`；关闭时去掉 `--host`，回到服务端默认的 `127.0.0.1`
+    pub fn with_lan_exposed(&self, enabled: bool) -> Self {
+        Self {
+            host: enabled.then(|| "0.0.0.0".to_string()),
+            port: self.port,
+            data_dir: self.data_dir.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -121,5 +139,19 @@ mod tests {
         assert_eq!(url("::1"), "http://[::1]:1");
         assert_eq!(url("192.168.1.2"), "http://192.168.1.2:1");
         assert_eq!(url("localhost"), "http://localhost:1");
+    }
+
+    #[test]
+    fn lan_exposure_toggle_preserves_port_and_data_dir() {
+        let base = ServiceArgs { host: None, port: Some(4950), data_dir: Some("/tmp/d".into()) };
+        assert!(!base.is_lan_exposed());
+        let on = base.with_lan_exposed(true);
+        assert!(on.is_lan_exposed());
+        assert_eq!(on.to_install_args(), argv(&["--host", "0.0.0.0", "--port", "4950", "--data-dir", "/tmp/d"]));
+        let off = on.with_lan_exposed(false);
+        assert!(!off.is_lan_exposed());
+        assert_eq!(off, base);
+        assert!(!ServiceArgs { host: Some("127.0.0.1".into()), ..Default::default() }.is_lan_exposed());
+        assert!(ServiceArgs { host: Some("10.233.21.9".into()), ..Default::default() }.is_lan_exposed());
     }
 }

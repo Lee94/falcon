@@ -99,6 +99,8 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         created_at: now_ms(),
     };
     state.db.insert_host(&row);
+    let host_id = row.id.clone();
+    state.engine.send(move |e| e.sessions.kick_sync_host_projects(&host_id));
     Ok(Json(Db::to_ssh_host(&row, 0)))
 }
 
@@ -137,6 +139,8 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
         let host_id = id.clone();
         state.engine.call(move |e| async move { e.sessions.dispose_host_link(&host_id, true).await }).await?;
     }
+    let host_id = id.clone();
+    state.engine.send(move |e| e.sessions.kick_sync_host_projects(&host_id));
     Ok(Json(Db::to_ssh_host(&row, state.db.count_projects_by_host(&id) as u32)))
 }
 
@@ -205,7 +209,11 @@ async fn probe_host(state: &AppState, host: SshHostRow) -> ApiResult<Json<SshPro
     let res = state
         .engine
         .call(move |e| async move {
-            e.sessions.probe_ssh(&host_as_project(&host)).await.map(|f| (f.kind, f.home)).map_err(|e| e.to_string())
+            let facts = e.sessions.probe_ssh(&host_as_project(&host)).await.map_err(|err| err.to_string())?;
+            if !host.id.starts_with("draft:") {
+                e.sessions.sync_ssh_host(&host.id).await;
+            }
+            Ok::<_, String>((facts.kind, facts.home))
         })
         .await?;
     Ok(Json(match res {

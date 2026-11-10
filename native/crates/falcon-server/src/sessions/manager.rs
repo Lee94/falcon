@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use falcon_proto::term_modes::TermModeTracker;
@@ -375,6 +375,9 @@ pub struct SessionManager {
     /// 机器上几个项目各有一条：升级后重启，它们的会话一起接回、一起推新版本，不排队就会在
     /// 宿主机上踩同一个文件（见 prepare）
     deploying: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    /// 远端主机项目清单（`<falcon 根>/host-projects.json`）的同步锁与最近同步时间（按 host_id）
+    host_project_syncing: RefCell<HashMap<String, Rc<tokio::sync::Mutex<()>>>>,
+    host_project_synced_at: RefCell<HashMap<String, Instant>>,
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
@@ -420,6 +423,8 @@ impl SessionManager {
                 size_flush: RefCell::default(),
                 swept: RefCell::default(),
                 deploying: RefCell::default(),
+                host_project_syncing: RefCell::default(),
+                host_project_synced_at: RefCell::default(),
                 me: me.clone(),
             }
         });
@@ -633,6 +638,14 @@ impl SessionManager {
                 me.handle_link_down(&project_id);
             }
         });
+        if let Some(host_id) = project.host_id.clone() {
+            let me = self.me.clone();
+            link.on_up(move || {
+                if let Some(me) = me.upgrade() {
+                    me.kick_sync_host_projects(&host_id);
+                }
+            });
+        }
         self.links.borrow_mut().insert(project.id.clone(), link.clone());
         link
     }
@@ -700,10 +713,108 @@ impl SessionManager {
                 };
                 me.forwards.on_link_up(&host_id);
                 me.shares.on_link_up(&host_id);
+                me.kick_sync_host_projects(&host_id);
             });
         }
         self.host_links.borrow_mut().insert(host.id.clone(), created.clone());
         created
+    }
+
+    /// 该 SSH 主机当前是否已有建好的连接（主机链路或该主机下任意项目链路）
+    pub fn has_connected_link_for_host(&self, host_id: &str) -> bool {
+        if self.host_links.borrow().get(host_id).is_some_and(|l| l.is_connected()) {
+            return true;
+        }
+        self.links
+            .borrow()
+            .values()
+            .any(|l| l.is_connected() && l.project().host_id.as_deref() == Some(host_id))
+    }
+
+    fn connected_or_host_link(&self, host: &SshHostRow) -> Rc<SshLink> {
+        if let Some(link) = self.host_links.borrow().get(&host.id).filter(|l| l.is_connected()).cloned() {
+            link.update_project(host_as_project(host));
+            return link;
+        }
+        if let Some(link) = self
+            .links
+            .borrow()
+            .values()
+            .find(|l| l.is_connected() && l.project().host_id.as_deref() == Some(host.id.as_str()))
+            .cloned()
+        {
+            return link;
+        }
+        self.get_host_link(host)
+    }
+
+    /// 在拿到远端 HostFacts 后同步该 SSH 主机上的 `<falcon 根>/host-projects.json`
+    pub async fn sync_ssh_host_with_facts(&self, host: &SshHostRow, link: &Rc<SshLink>, facts: &HostFacts) {
+        if host.id.starts_with("draft:") {
+            return;
+        }
+        let lock = self.host_project_syncing.borrow_mut().entry(host.id.clone()).or_default().clone();
+        let _guard = lock.lock().await;
+        crate::host_projects::sync_remote(&self.db, host, link, facts.kind, &facts.root).await;
+        self.host_project_synced_at.borrow_mut().insert(host.id.clone(), Instant::now());
+    }
+
+    /// 同步指定 SSH 主机的项目清单
+    pub async fn sync_ssh_host(&self, host_id: &str) {
+        if host_id.starts_with("draft:") {
+            return;
+        }
+        let Some(host) = self.db.get_host(host_id) else { return };
+        let link = self.connected_or_host_link(&host);
+        let Ok(facts) = link.host_facts().await else { return };
+        let Some(fresh_host) = self.db.get_host(host_id) else { return };
+        self.sync_ssh_host_with_facts(&fresh_host, &link, &facts).await;
+    }
+
+    /// 后台异步触发指定 SSH 主机的项目清单同步
+    pub fn kick_sync_host_projects(&self, host_id: &str) {
+        if host_id.starts_with("draft:") {
+            return;
+        }
+        let me = self.me();
+        let host_id = host_id.to_string();
+        tokio::task::spawn_local(async move {
+            me.sync_ssh_host(&host_id).await;
+        });
+    }
+
+    /// 若该主机已有现成 SSH 连接，等待最多 1.5s 完成同步；否则转入后台异步同步，避免阻塞接口
+    pub async fn sync_ssh_host_if_connected(&self, host_id: &str) {
+        if host_id.starts_with("draft:") {
+            return;
+        }
+        if self.has_connected_link_for_host(host_id) {
+            let _ = tokio::time::timeout(Duration::from_millis(1500), self.sync_ssh_host(host_id)).await;
+        } else {
+            self.kick_sync_host_projects(host_id);
+        }
+    }
+
+    /// `GET /api/projects` 列表查询时的主机同步：
+    /// 已连上的主机若距上次同步超过 5s 则等待同步（上限 1.2s）；未连上的主机按 15s 冷却在后台尝试
+    pub async fn sync_hosts_on_list(&self) {
+        let hosts = self.db.list_host_rows();
+        let now = Instant::now();
+        for host in hosts {
+            let elapsed = self
+                .host_project_synced_at
+                .borrow()
+                .get(&host.id)
+                .map(|t| now.saturating_duration_since(*t));
+            if self.has_connected_link_for_host(&host.id) {
+                if elapsed.is_none_or(|d| d >= Duration::from_secs(5)) {
+                    let _ = tokio::time::timeout(Duration::from_millis(1200), self.sync_ssh_host(&host.id)).await;
+                }
+            } else if elapsed.is_none_or(|d| d >= Duration::from_secs(15)) {
+                self.host_project_synced_at.borrow_mut().insert(host.id.clone(), now);
+                self.kick_sync_host_projects(&host.id);
+            }
+        }
     }
 
     /// 丢掉主机链路（凭据改了 / 主机删了）。先停中转再 dispose——dispose 不发 "down"，

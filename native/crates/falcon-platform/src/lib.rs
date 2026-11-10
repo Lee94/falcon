@@ -45,10 +45,32 @@ pub enum ServiceStatus {
     Unreachable(String),
 }
 
+/// 本机服务的局域网访问状态
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LanAccessState {
+    /// 是否监听非回环地址（如 `0.0.0.0`）允许局域网设备连接
+    pub enabled: bool,
+    /// 当前服务端口
+    pub port: u16,
+    /// 本机局域网网卡对应的可访问基址（如 `http://10.233.21.9:4923`）
+    pub urls: Vec<String>,
+}
+
 /// App 托管的本机服务（原生 macOS：Falcon.app 里捆着服务程序，launchd 托管）
 pub trait LocalService: Send + Sync {
     /// 装好 / 拉起服务并等端口起来。**阻塞**，放在后台执行器上调
     fn ensure_running(&self, url: &str) -> ServiceStatus;
+
+    /// 查询托管服务的局域网监听状态。不支持托管服务的平台返回 `None`。**阻塞**，放在后台执行器上调
+    fn lan_access(&self) -> Option<LanAccessState> {
+        None
+    }
+
+    /// 切换托管服务的局域网监听（`--host 0.0.0.0` vs 默认回环）并重新拉起服务。**阻塞**，放在后台执行器上调
+    fn set_lan_access(&self, enabled: bool) -> Result<LanAccessState, String> {
+        let _ = enabled;
+        Err("当前平台不支持托管本机服务".into())
+    }
 }
 
 /// 压在 GPUI 画面**上面**的网页视图（HTML 预览，ADR 0007）。GPUI 的浮层盖不住它，

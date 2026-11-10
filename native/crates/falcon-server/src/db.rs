@@ -143,6 +143,34 @@ pub struct SessionHostPatch {
     pub verified_durable: Option<Option<i64>>,
 }
 
+/// 带宿主机同步元数据的一行项目
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncProjectRow {
+    pub row: ProjectRow,
+    pub updated_at: i64,
+    pub remote_id: String,
+}
+
+pub fn project_sync_scope(row: &ProjectRow) -> Option<String> {
+    if row.project_type == "local" {
+        return Some("local".to_string());
+    }
+    if row.project_type == "ssh" {
+        return row.host_id.as_deref().filter(|s| !s.is_empty()).map(|id| format!("host:{id}"));
+    }
+    None
+}
+
+fn sync_project_from_row(r: &Row) -> rusqlite::Result<SyncProjectRow> {
+    let row = project_from_row(r)?;
+    let updated_at = r.get::<_, Option<i64>>("updated_at")?.unwrap_or(row.created_at);
+    let remote_id = r
+        .get::<_, Option<String>>("remote_id")?
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| row.id.clone());
+    Ok(SyncProjectRow { row, updated_at, remote_id })
+}
+
 fn project_from_row(r: &Row) -> rusqlite::Result<ProjectRow> {
     Ok(ProjectRow {
         id: r.get("id")?,
@@ -426,6 +454,9 @@ impl Db {
             // 侧栏的拖拽排序（全局一条，侧栏按服务器分组时保留相对顺序）。空 = 没排过，按创建时间
             // 排在排过的后面——新建的项目自然落在末尾；挪一次就把所有行重编成 0..n
             add_column(&conn, "projects", "sort_order", "INTEGER")?;
+            // 宿主机跨端同步（host-projects.json）：updated_at 记最近一次变更时刻，remote_id 记该项目在宿主机上的固定 id
+            add_column(&conn, "projects", "updated_at", "INTEGER")?;
+            add_column(&conn, "projects", "remote_id", "TEXT")?;
 
             // 中转（端口转发 + 公网发布）挂在机器上，不挂项目（ADR 0016）：
             // host_forwards.host_id 是已保存的 SSH Host，host_shares.host_id 为 null 表示后端本机。
@@ -452,6 +483,12 @@ impl Db {
                     dest_port INTEGER NOT NULL,
                     enabled INTEGER NOT NULL,
                     created_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS deleted_projects (
+                    scope TEXT NOT NULL,
+                    remote_id TEXT NOT NULL,
+                    deleted_at INTEGER NOT NULL,
+                    PRIMARY KEY (scope, remote_id)
                 );",
             )?;
         }
@@ -755,11 +792,26 @@ impl Db {
     }
 
     pub fn insert_project(&self, row: &ProjectRow) {
+        let mut updated_at = crate::auth::now_ms().max(row.created_at);
+        if let Some(scope) = project_sync_scope(row) {
+            if let Some(del_ts) = self.query_one(
+                "SELECT deleted_at FROM deleted_projects WHERE scope = ? AND remote_id = ?",
+                params![scope, row.id],
+                |r| r.get::<_, i64>(0),
+            ) {
+                updated_at = updated_at.max(del_ts + 1);
+            }
+            self.clear_deleted_project(&scope, &row.id);
+        }
+        self.insert_synced_project(row, &row.id, updated_at);
+    }
+
+    pub fn insert_synced_project(&self, row: &ProjectRow, remote_id: &str, updated_at: i64) {
         self.exec(
             "INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, default_worktree_branch)
+               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, default_worktree_branch, updated_at, remote_id)
              VALUES (:id, :name, :type, :working_dir, :shell, :ssh_host, :ssh_port, :ssh_username, :ssh_auth_method, :ssh_key_path, :ssh_secret_enc, :host_id, :created_at,
-               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :default_worktree_branch)",
+               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :default_worktree_branch, :updated_at, :remote_id)",
             named_params! {
                 ":id": row.id, ":name": row.name, ":type": row.project_type, ":working_dir": row.working_dir,
                 ":shell": row.shell, ":ssh_host": row.ssh_host, ":ssh_port": row.ssh_port,
@@ -771,6 +823,7 @@ impl Db {
                 ":worktree_created_by_mojito": row.worktree_created_by_mojito,
                 ":worktree_archived_at": row.worktree_archived_at, ":multi_repos": row.multi_repos,
                 ":default_worktree_branch": row.default_worktree_branch,
+                ":updated_at": updated_at, ":remote_id": remote_id,
             },
         );
     }
@@ -784,10 +837,26 @@ impl Db {
     /// multi_repos 在派生行上是删除目标清单，同罪；容器改成员走 update_multi_repos。
     /// default_worktree_branch 不在此列：它只是派生时的默认基点，改了改不了任何路径。
     pub fn update_project(&self, row: &ProjectRow) {
+        let now = crate::auth::now_ms();
+        let old = self.query_one("SELECT * FROM projects WHERE id = ?", [&row.id], sync_project_from_row);
+        let new_scope = project_sync_scope(row);
+        if let Some(old_sp) = &old {
+            let old_scope = project_sync_scope(&old_sp.row);
+            if old_scope != new_scope {
+                if let Some(os) = old_scope {
+                    let del_ts = now.max(old_sp.updated_at + 1);
+                    self.upsert_deleted_project(&os, &old_sp.remote_id, del_ts);
+                }
+                if let Some(ns) = &new_scope {
+                    self.clear_deleted_project(ns, &old_sp.remote_id);
+                }
+            }
+        }
         self.exec(
             "UPDATE projects SET name=:name, working_dir=:working_dir, shell=:shell, ssh_host=:ssh_host, ssh_port=:ssh_port,
              ssh_username=:ssh_username, ssh_auth_method=:ssh_auth_method, ssh_key_path=:ssh_key_path, ssh_secret_enc=:ssh_secret_enc,
-             host_id=:host_id, default_worktree_branch=:default_worktree_branch
+             host_id=:host_id, default_worktree_branch=:default_worktree_branch,
+             updated_at=MAX(COALESCE(updated_at, created_at, 0) + 1, :now)
              WHERE id=:id",
             named_params! {
                 ":id": row.id, ":name": row.name, ":working_dir": row.working_dir, ":shell": row.shell,
@@ -795,8 +864,37 @@ impl Db {
                 ":ssh_auth_method": row.ssh_auth_method, ":ssh_key_path": row.ssh_key_path,
                 ":ssh_secret_enc": row.ssh_secret_enc, ":host_id": row.host_id,
                 ":default_worktree_branch": row.default_worktree_branch,
+                ":now": now,
             },
         );
+    }
+
+    /// 宿主机清单同步过来的更新：同样严守 worktree 四列与派生行 working_dir / multi_repos 只读护栏
+    pub fn update_synced_project(&self, row: &ProjectRow, updated_at: i64) {
+        if row.source_project_id.is_none() {
+            self.exec(
+                "UPDATE projects SET name=:name, working_dir=:working_dir, shell=:shell,
+                   default_worktree_branch=:default_worktree_branch, multi_repos=:multi_repos, updated_at=:updated_at
+                 WHERE id=:id AND source_project_id IS NULL",
+                named_params! {
+                    ":id": row.id, ":name": row.name, ":working_dir": row.working_dir, ":shell": row.shell,
+                    ":default_worktree_branch": row.default_worktree_branch, ":multi_repos": row.multi_repos,
+                    ":updated_at": updated_at,
+                },
+            );
+        } else {
+            self.exec(
+                "UPDATE projects SET name=:name, shell=:shell, worktree_archived_at=:worktree_archived_at,
+                   default_worktree_branch=:default_worktree_branch, updated_at=:updated_at
+                 WHERE id=:id AND source_project_id IS NOT NULL",
+                named_params! {
+                    ":id": row.id, ":name": row.name, ":shell": row.shell,
+                    ":worktree_archived_at": row.worktree_archived_at,
+                    ":default_worktree_branch": row.default_worktree_branch,
+                    ":updated_at": updated_at,
+                },
+            );
+        }
     }
 
     /// 替换多仓库**容器**的成员清单。
@@ -806,7 +904,12 @@ impl Db {
     /// 这条 UPDATE 也够不到派生行（与 update_project 刻意不更新 worktree 四列同理）。
     pub fn update_multi_repos(&self, id: &str, repos: &[MultiRepoMember]) {
         let json = serde_json::to_string(repos).expect("成员清单总能序列化");
-        self.exec("UPDATE projects SET multi_repos = ? WHERE id = ? AND source_project_id IS NULL", params![json, id]);
+        let now = crate::auth::now_ms();
+        self.exec(
+            "UPDATE projects SET multi_repos = ?, updated_at = MAX(COALESCE(updated_at, created_at, 0) + 1, ?)
+             WHERE id = ? AND source_project_id IS NULL",
+            params![json, now, id],
+        );
     }
 
     /// 一行项目贡献给"别删到我"清单（other_dirs）的全部路径：working_dir、
@@ -832,7 +935,11 @@ impl Db {
     /// 只动这一列：worktree 四列仍是删除护栏的只读判据（见 update_project 的注释），
     /// 存档时间不参与任何路径判断，可写不构成攻击面。
     pub fn set_worktree_archived(&self, id: &str, ts: Option<i64>) {
-        self.exec("UPDATE projects SET worktree_archived_at = ? WHERE id = ?", params![ts, id]);
+        let now = crate::auth::now_ms();
+        self.exec(
+            "UPDATE projects SET worktree_archived_at = ?, updated_at = MAX(COALESCE(updated_at, created_at, 0) + 1, ?) WHERE id = ?",
+            params![ts, now, id],
+        );
     }
 
     /// 存档已到期（archived_at ≤ archived_before）的附属项目，供后台清扫
@@ -891,8 +998,50 @@ impl Db {
     }
 
     pub fn delete_project(&self, id: &str) {
+        if let Some(sp) = self.query_one("SELECT * FROM projects WHERE id = ?", [id], sync_project_from_row)
+            && let Some(scope) = project_sync_scope(&sp.row)
+        {
+            let del_ts = crate::auth::now_ms().max(sp.updated_at + 1);
+            self.upsert_deleted_project(&scope, &sp.remote_id, del_ts);
+        }
         self.exec("DELETE FROM sessions WHERE project_id = ?", [id]);
         self.exec("DELETE FROM projects WHERE id = ?", [id]);
+    }
+
+    pub fn delete_synced_project(&self, id: &str, scope: &str, remote_id: &str, deleted_at: i64) {
+        self.upsert_deleted_project(scope, remote_id, deleted_at);
+        self.exec("DELETE FROM sessions WHERE project_id = ?", [id]);
+        self.exec("DELETE FROM projects WHERE id = ?", [id]);
+    }
+
+    pub fn list_sync_projects(&self) -> Vec<SyncProjectRow> {
+        self.query_all(
+            "SELECT * FROM projects ORDER BY sort_order IS NULL, sort_order ASC, created_at ASC, rowid ASC",
+            [],
+            sync_project_from_row,
+        )
+    }
+
+    pub fn list_deleted_projects(&self, scope: &str) -> std::collections::BTreeMap<String, i64> {
+        self.query_all(
+            "SELECT remote_id, deleted_at FROM deleted_projects WHERE scope = ?",
+            [scope],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .into_iter()
+        .collect()
+    }
+
+    pub fn upsert_deleted_project(&self, scope: &str, remote_id: &str, deleted_at: i64) {
+        self.exec(
+            "INSERT INTO deleted_projects (scope, remote_id, deleted_at) VALUES (?, ?, ?)
+             ON CONFLICT(scope, remote_id) DO UPDATE SET deleted_at = MAX(deleted_projects.deleted_at, excluded.deleted_at)",
+            params![scope, remote_id, deleted_at],
+        );
+    }
+
+    pub fn clear_deleted_project(&self, scope: &str, remote_id: &str) {
+        self.exec("DELETE FROM deleted_projects WHERE scope = ? AND remote_id = ?", params![scope, remote_id]);
     }
 
     // ---- 中转：端口转发（挂 SSH Host） ----
@@ -1008,8 +1157,12 @@ impl Db {
         }
     }
 
+    pub fn list_host_rows(&self) -> Vec<SshHostRow> {
+        self.query_all("SELECT * FROM ssh_hosts ORDER BY created_at ASC", [], host_from_row)
+    }
+
     pub fn list_hosts(&self) -> Vec<SshHost> {
-        let rows = self.query_all("SELECT * FROM ssh_hosts ORDER BY created_at ASC", [], host_from_row);
+        let rows = self.list_host_rows();
         let counts: Vec<(String, i64)> = self.query_all(
             "SELECT host_id AS id, COUNT(*) AS n FROM projects WHERE host_id IS NOT NULL GROUP BY host_id",
             [],

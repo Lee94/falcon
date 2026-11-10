@@ -22,12 +22,12 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Sizable, WindowExt};
 use gpui_kit::prelude::*;
-use gpui_kit::{App, Context, Entity, FontWeight, IntoElement, Render, SharedString, Window, div};
+use gpui_kit::{App, ClipboardItem, Context, Entity, FontWeight, IntoElement, Render, SharedString, Window, div};
 use rust_i18n::t;
 
 use crate::theme::{Ui, radius};
 use crate::ui::icon;
-use crate::workspace::Workspace;
+use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
 
 
@@ -142,6 +142,8 @@ struct SettingsView {
     hosts: Entity<hosts::HostsPane>,
     /// 只在停在中转页时存在（见模块注释）
     relays: Option<Entity<relays::RelaysPane>>,
+    lan_access: Option<falcon_platform::LanAccessState>,
+    lan_busy: bool,
 }
 
 impl SettingsView {
@@ -158,9 +160,21 @@ impl SettingsView {
         cx.observe(&updates, |_, _, cx| cx.notify()).detach();
         // 插件目录是用户手动改的：每次打开设置都重新扫一遍，插件页看到的就是现状
         ws.update(cx, |w, cx| w.refresh_plugins(cx));
+        if ws.read(cx).profile.is_loopback()
+            && let Some(svc) = falcon_platform::get(cx).local_service()
+        {
+            cx.spawn(async move |this, cx| {
+                let state = cx.background_executor().spawn(async move { svc.lan_access() }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.lan_access = state;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
-        Self { ws, tab, search, appearance, hosts, relays: None }
+        Self { ws, tab, search, appearance, hosts, relays: None, lan_access: None, lan_busy: false }
     }
 
     /// 按名字 / 分组名 / 关键字（`settings.tab_*_keys`）筛模块
@@ -324,6 +338,47 @@ impl SettingsView {
                     cx,
                 );
             });
+        let mut server_rows = Vec::new();
+        if w.profile.is_loopback()
+            && let Some(lan) = &self.lan_access
+        {
+            let enabled = lan.enabled;
+            let hint = if !enabled {
+                t!("native.settings.lanAccessHintOff", port = lan.port).to_string()
+            } else if lan.urls.is_empty() {
+                t!("native.settings.lanAccessHintOnNoIp", port = lan.port).to_string()
+            } else {
+                t!("native.settings.lanAccessHintOn", urls = lan.urls.join(" / ")).to_string()
+            };
+            let first_url = lan.urls.first().cloned();
+            let copy_ws = self.ws.clone();
+            let toggle = Switch::new("lan-access-switch")
+                .checked(enabled)
+                .disabled(self.lan_busy)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_lan_access(!enabled, cx);
+                }));
+            let mut right = div().flex().items_center().gap_2();
+            if enabled && let Some(url_to_copy) = first_url {
+                right = right.child(
+                    Button::new("copy-lan-url")
+                        .outline()
+                        .small()
+                        .icon(IconName::Copy)
+                        .label(t!("native.settings.lanAccessCopy").to_string())
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(url_to_copy.clone()));
+                            copy_ws.update(cx, |w, cx| {
+                                w.toast(ToastKind::Success, t!("plugin.copied").to_string(), None, cx)
+                            });
+                        }),
+                );
+            }
+            right = right.child(toggle);
+            server_rows.push((t!("native.settings.lanAccess").to_string(), Some(hint), right.into_any_element()));
+        }
+        server_rows.push((t!("settings.restartServer").to_string(), None, restart.into_any_element()));
+
         // React 版这里是"安装应用"（PWA）一行，PWA 已删；换成客户端版本与服务端地址——
         // 原生客户端能连任意一台 falcon 服务端，"版本"指的是连着的那台服务端的
         div()
@@ -367,13 +422,45 @@ impl SettingsView {
             .child(widgets::section(
                 t!("settings.serverTitle").to_string(),
                 None,
-                widgets::rows(
-                    vec![(t!("settings.restartServer").to_string(), None, restart.into_any_element())],
-                    false,
-                    cx,
-                ),
+                widgets::rows(server_rows, false, cx),
                 cx,
             ))
+    }
+
+    fn toggle_lan_access(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.lan_busy {
+            return;
+        }
+        let Some(svc) = falcon_platform::get(cx).local_service() else {
+            return;
+        };
+        self.lan_busy = true;
+        cx.notify();
+        let ws = self.ws.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx.background_executor().spawn(async move { svc.set_lan_access(enabled) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.lan_busy = false;
+                match res {
+                    Ok(state) => {
+                        let msg = if state.enabled {
+                            t!("native.settings.lanAccessEnabled").to_string()
+                        } else {
+                            t!("native.settings.lanAccessDisabled").to_string()
+                        };
+                        this.lan_access = Some(state);
+                        ws.update(cx, |w, cx| w.toast(ToastKind::Success, msg, None, cx));
+                    }
+                    Err(err) => {
+                        ws.update(cx, |w, cx| {
+                            w.toast(ToastKind::Danger, t!("native.settings.lanAccessFailed").to_string(), Some(err), cx)
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 

@@ -77,6 +77,11 @@ async fn sweep_one(engine: &Engine, row: &ProjectRow, other_dirs: &[String]) -> 
     let Some(working_dir) = row.working_dir.as_deref().filter(|d| !d.is_empty()) else {
         engine.sessions.dispose_link(&row.id);
         engine.db.delete_project(&row.id);
+        if row.project_type == "local" {
+            crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+        } else if let Some(hid) = &row.host_id {
+            engine.sessions.sync_ssh_host_if_connected(hid).await;
+        }
         return Ok(());
     };
 
@@ -90,6 +95,11 @@ async fn sweep_one(engine: &Engine, row: &ProjectRow, other_dirs: &[String]) -> 
     }
     engine.sessions.dispose_link(&row.id);
     engine.db.delete_project(&row.id);
+    if row.project_type == "local" {
+        crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+    } else if let Some(hid) = &row.host_id {
+        engine.sessions.sync_ssh_host_if_connected(hid).await;
+    }
     log::info!("已自动删除存档到期的附属项目「{}」（{working_dir}）", row.name);
     Ok(())
 }

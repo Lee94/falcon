@@ -359,13 +359,10 @@ impl Render for Canvas {
         let ui = Ui::global(cx).clone();
         let Shown { groups, columns, .. } = self.shown(cx);
         let frames = layout::layout_frames(&columns, self.viewport(), CANVAS_GAP_PX);
-        let (active_key, show_canvas, pane_count) = {
+        let (active_key, show_canvas) = {
             let ws = self.ws.read(cx);
-            let n: usize = columns.iter().map(|c| c.panes.len()).sum();
-            (ws.active_key(), !matches!(ws.state.active, ActiveView::Overview), n)
+            (ws.active_key(), !matches!(ws.state.active, ActiveView::Overview))
         };
-        // 画布上不止一扇窗口时，才需要给活动的那扇标题栏着色
-        let mark_active = pane_count > 1;
         let shown_keys: Vec<String> = layout::pane_keys(&columns);
         // 画布条的格子每帧重记（prepaint 里填）
         self.targets.borrow_mut().clear();
@@ -424,7 +421,6 @@ impl Render for Canvas {
                     ),
                     round,
                     active_key.as_deref() == Some(pane.key.as_str()),
-                    mark_active,
                     pinned,
                     &shown_keys,
                     place,
@@ -847,7 +843,7 @@ impl Round {
     }
 }
 
-/// 活动窗口的描边（画布上不止一扇时才有，与标题栏的 tint 同一条件）：语义蓝 `tint_strong`。
+/// 活动窗口的描边（与标题栏的 tint 同一条件）：语义蓝 `tint_strong`。
 /// 叠在内容上而不是给窗口加 border——border 占布局，终端会因此少一列 / 一行、换活动窗口就触发 resize。
 /// 不放进圆角裁剪里：裁的是内缘，1px 描边正好压在边上，抗锯齿会被裁掉一半
 fn active_ring(round: Round, ui: &Ui) -> Div {
@@ -939,7 +935,6 @@ impl Canvas {
         frame: Bounds<Pixels>,
         round: Round,
         is_active: bool,
-        mark_active: bool,
         pinned: bool,
         shown_keys: &[String],
         place: CanvasPlace,
@@ -1045,7 +1040,7 @@ impl Canvas {
             .border_color(ui.border)
             .cursor(CursorStyle::OpenHand)
             .text_color(if is_active { ui.foreground } else { ui.muted_foreground })
-            .when(is_active && mark_active, |d| d.bg(ui.tint))
+            .when(is_active, |d| d.bg(ui.tint))
             .tooltip(|window, cx| Tooltip::new(t!("pane.dragHint").to_string()).build(window, cx))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                 if e.click_count >= 2 {
@@ -1129,7 +1124,7 @@ impl Canvas {
         .on_mouse_down(MouseButton::Left, isolate));
         let header = header.context_menu(move |m, _, _| to_popup(m, menu.clone()));
         // 活动窗口的标题栏着色淡入（取消活动立即褪去，不淡出）
-        let header = if is_active && mark_active {
+        let header = if is_active {
             crate::ui::selected_fade(format!("pane-sel-{key}"), header, ui.tint).into_any_element()
         } else {
             header.into_any_element()
@@ -1193,7 +1188,7 @@ impl Canvas {
                             .child(body),
                     ),
             )
-            .when(is_active && mark_active, |d| d.child(active_ring(round, &ui)))
+            .when(is_active, |d| d.child(active_ring(round, &ui)))
             .into_any_element()
     }
 
@@ -1312,15 +1307,30 @@ impl Canvas {
     ) -> Vec<MenuItemSpec> {
         let mut items = Vec::new();
         if let Some(pid) = project_id {
-            let ws = self.ws.clone();
-            let pid = pid.to_string();
-            let after = key.to_string();
-            items.push(
-                MenuItemSpec::new(t!("tab.newToRight").to_string(), move |_, cx| {
-                    ws.update(cx, |w, cx| w.new_terminal(&pid, None, Some(after.clone()), cx))
-                })
-                .kbd(crate::ui::chord("newTerminal")),
-            );
+            {
+                let ws = self.ws.clone();
+                let pid = pid.to_string();
+                let after = key.to_string();
+                items.push(
+                    MenuItemSpec::new(t!("tab.newToRight").to_string(), move |_, cx| {
+                        ws.update(cx, |w, cx| w.new_terminal(&pid, None, Some(after.clone()), cx))
+                    })
+                    .kbd(crate::ui::chord("splitRight")),
+                );
+            }
+            {
+                let ws = self.ws.clone();
+                let pid = pid.to_string();
+                let below = key.to_string();
+                items.push(
+                    MenuItemSpec::new(t!("tab.newBelow").to_string(), move |_, cx| {
+                        ws.update(cx, |w, cx| {
+                            w.new_terminal_at(&pid, None, crate::workspace::NewTerminalPlace::Below(below.clone()), cx)
+                        })
+                    })
+                    .kbd(crate::ui::chord("splitDown")),
+                );
+            }
         }
         {
             let ws = self.ws.clone();

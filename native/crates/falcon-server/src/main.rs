@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use falcon_server::api::{self, AppState};
 use falcon_server::askpass::hub::AskpassHub;
-use falcon_server::config::{is_loopback, parse_args};
+use falcon_server::config::{is_loopback, local_connect_host, parse_args};
 use falcon_server::crypto::SecretBox;
 use falcon_server::db::Db;
 use falcon_server::engine::{self, EngineDeps};
@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let secrets = Arc::new(SecretBox::open(&config.data_dir)?);
 
     let askpass = Arc::new(AskpassHub::new());
-    askpass.set_origin(&format!("http://127.0.0.1:{}", config.port));
+    askpass.set_origin(&format!("http://{}:{}", local_connect_host(&config.host), config.port));
     // 会话引擎：SessionManager 的构造里做启动恢复（上次 active 的会话归类为 unverified / dead）
     let (engine, _engine_thread) = engine::spawn(
         EngineDeps { db: db.clone(), secrets: secrets.clone(), data_dir: config.data_dir.clone(), askpass: askpass.clone() },

@@ -15,7 +15,7 @@ use gpui_kit::Context;
 use rust_i18n::t;
 
 use super::{
-    ActiveView, FileRename, FileTabTarget, RightPanelId, ToastKind, Workspace,
+    ActiveView, FileRename, FileTabTarget, NewTerminalPlace, RightPanelId, ToastKind, Workspace,
     WorkspaceEvent, is_pending_id,
 };
 
@@ -407,6 +407,15 @@ impl Workspace {
     /// 新建终端。SSH 项目首次用时先走授权 + 部署会话守护进程（版本对不上时也走一遍部署，看得见
     /// 进度）；已拒绝过的主机不再打扰，直接建非持久会话
     pub fn new_terminal(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<String>, cx: &mut Context<Self>) {
+        let place = match after {
+            Some(k) => NewTerminalPlace::RightOf(k),
+            None => NewTerminalPlace::Auto,
+        };
+        self.new_terminal_at(project_id, agent, place, cx);
+    }
+
+    /// 按指定位置新建终端（向右分屏 / 向下分屏 / 默认追加列）
+    pub fn new_terminal_at(&mut self, project_id: &str, agent: Option<SessionAgent>, place: NewTerminalPlace, cx: &mut Context<Self>) {
         let Some(project) = self.owner_project(project_id) else {
             return;
         };
@@ -422,7 +431,7 @@ impl Workspace {
                         cx.emit(WorkspaceEvent::NeedsInstall { project_id: pid.clone(), agent });
                     } else {
                         // 查不到主机状态就照常建会话，由后端判定持久性
-                        this.create_session_now(&pid, agent, after.clone(), cx);
+                        this.create_session_at(&pid, agent, place.clone(), cx);
                     }
                 })
                 .ok();
@@ -430,11 +439,32 @@ impl Workspace {
             .detach();
             return;
         }
-        self.create_session_now(project_id, agent, after, cx);
+        self.create_session_at(project_id, agent, place, cx);
+    }
+
+    /// 相对当前活动窗口分屏新建终端（`down = false` 向右插列，`down = true` 向下叠放）
+    pub fn split_active_terminal(&mut self, down: bool, cx: &mut Context<Self>) {
+        let Some(pid) = self.current_project_id() else {
+            return;
+        };
+        let place = match self.active_key() {
+            Some(key) if down => NewTerminalPlace::Below(key),
+            Some(key) => NewTerminalPlace::RightOf(key),
+            None => NewTerminalPlace::Auto,
+        };
+        self.new_terminal_at(&pid, None, place, cx);
     }
 
     pub fn create_session_now(&mut self, project_id: &str, agent: Option<SessionAgent>, after: Option<String>, cx: &mut Context<Self>) {
-        let pending_id = self.state.begin_pending(project_id, agent, after.as_deref(), &self.sessions);
+        let place = match after {
+            Some(k) => NewTerminalPlace::RightOf(k),
+            None => NewTerminalPlace::Auto,
+        };
+        self.create_session_at(project_id, agent, place, cx);
+    }
+
+    pub fn create_session_at(&mut self, project_id: &str, agent: Option<SessionAgent>, place: NewTerminalPlace, cx: &mut Context<Self>) {
+        let pending_id = self.state.begin_pending_at(project_id, agent, place, &self.sessions);
         self.commit(false, cx);
         self.spawn_create(pending_id, project_id.to_string(), agent, cx);
     }

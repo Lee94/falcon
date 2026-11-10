@@ -20,9 +20,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSButton, NSCellImagePosition, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSRunningApplication,
-    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
-    NSWorkspaceApplicationKey, NSWorkspaceDidLaunchApplicationNotification,
+    NSApplication, NSButton, NSCellImagePosition, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSVariableStatusItemLength, NSWorkspace, NSWorkspaceApplicationKey, NSWorkspaceDidLaunchApplicationNotification,
     NSWorkspaceDidTerminateApplicationNotification,
 };
 use objc2_foundation::{MainThreadMarker, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSSize, NSString};
@@ -36,6 +36,7 @@ const TAG_STOP: isize = 4;
 const TAG_RESTART: isize = 5;
 const TAG_UPDATE: isize = 6;
 const TAG_QUIT: isize = 7;
+const TAG_LAN: isize = 8;
 
 enum MenuStatus {
     Querying,
@@ -54,6 +55,7 @@ struct MenuIvars {
     /// 版本标记的延迟重算。新的一次盖掉还没到的旧结果
     identity_epoch: Cell<u64>,
     busy: Cell<bool>,
+    lan_enabled: Cell<Option<bool>>,
     status: RefCell<MenuStatus>,
 }
 
@@ -100,6 +102,7 @@ impl MenuController {
             refresh_id: Cell::new(0),
             identity_epoch: Cell::new(0),
             busy: Cell::new(false),
+            lan_enabled: Cell::new(None),
             status: RefCell::new(MenuStatus::Querying),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -118,6 +121,7 @@ impl MenuController {
         self.add_item(mtm, menu, &text.start, TAG_START, false);
         self.add_item(mtm, menu, &text.stop, TAG_STOP, false);
         self.add_item(mtm, menu, &text.restart, TAG_RESTART, false);
+        self.add_item(mtm, menu, &text.lan_access, TAG_LAN, false);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         let (update, update_enabled) = falcon_ui::app_update_menu_state();
         self.add_item(mtm, menu, &update, TAG_UPDATE, update_enabled);
@@ -148,6 +152,7 @@ impl MenuController {
             TAG_START => self.control(ServiceControl::Start),
             TAG_STOP => self.control(ServiceControl::Stop),
             TAG_RESTART => self.control(ServiceControl::Restart),
+            TAG_LAN => self.toggle_lan(),
             TAG_UPDATE => self.check_update(),
             TAG_QUIT => self.quit(),
             _ => {}
@@ -202,6 +207,31 @@ impl MenuController {
         .detach();
     }
 
+    fn toggle_lan(&self) {
+        if self.ivars().busy.get() {
+            return;
+        }
+        let next = self.ivars().lan_enabled.get() != Some(true);
+        self.ivars().busy.set(true);
+        let epoch = self.ivars().epoch.get() + 1;
+        self.ivars().epoch.set(epoch);
+        *self.ivars().status.borrow_mut() = MenuStatus::Busy(ServiceControl::Restart);
+        self.sync_menu();
+        let app = self.ivars().app.clone();
+        app.spawn(async move |cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    let res = crate::local_service::apply_lan_access(next);
+                    let presence = crate::local_service::query_presence();
+                    (res, presence)
+                })
+                .await;
+            cx.update(move |_| publish_lan_toggle(epoch, outcome));
+        })
+        .detach();
+    }
+
     fn refresh(&self) {
         if self.ivars().busy.get() {
             return;
@@ -211,8 +241,16 @@ impl MenuController {
         self.ivars().refresh_id.set(id);
         let app = self.ivars().app.clone();
         app.spawn(async move |cx| {
-            let presence = cx.background_executor().spawn(async { crate::local_service::query_presence() }).await;
-            cx.update(move |_| publish_presence(epoch, id, presence));
+            let (presence, lan) = cx
+                .background_executor()
+                .spawn(async {
+                    (
+                        crate::local_service::query_presence(),
+                        crate::local_service::query_lan_access().map(|s| s.enabled),
+                    )
+                })
+                .await;
+            cx.update(move |_| publish_presence(epoch, id, presence, lan));
         })
         .detach();
     }
@@ -239,6 +277,15 @@ impl MenuController {
         set_enabled(menu, TAG_START, known && !running);
         set_enabled(menu, TAG_STOP, known && running);
         set_enabled(menu, TAG_RESTART, known && installed);
+        if let Some(item) = menu.itemWithTag(TAG_LAN) {
+            let state = if ivars.lan_enabled.get() == Some(true) {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            };
+            item.setState(state);
+            item.setEnabled(known && ivars.lan_enabled.get().is_some());
+        }
         self.sync_update_item();
         let dimmed = matches!(presence, Some(ServicePresence::Stopped | ServicePresence::NotInstalled));
         if let Some(item) = ivars.item.borrow().as_ref()
@@ -329,14 +376,47 @@ fn set_enabled(menu: &NSMenu, tag: isize, enabled: bool) {
     }
 }
 
-fn publish_presence(epoch: u64, id: u64, presence: ServicePresence) {
+fn publish_presence(epoch: u64, id: u64, presence: ServicePresence, lan: Option<bool>) {
     with_controller(|controller| {
         let apply = {
             let ivars = controller.ivars();
             if ivars.busy.get() || ivars.epoch.get() != epoch || ivars.refresh_id.get() != id {
                 false
             } else {
+                ivars.lan_enabled.set(lan);
                 *ivars.status.borrow_mut() = MenuStatus::Presence(presence);
+                true
+            }
+        };
+        if apply {
+            controller.sync_menu();
+        }
+    });
+}
+
+fn publish_lan_toggle(
+    epoch: u64,
+    outcome: (Result<falcon_platform::LanAccessState, String>, ServicePresence),
+) {
+    with_controller(|controller| {
+        let apply = {
+            let ivars = controller.ivars();
+            if ivars.epoch.get() != epoch {
+                false
+            } else {
+                ivars.busy.set(false);
+                match outcome.0 {
+                    Ok(state) => {
+                        ivars.lan_enabled.set(Some(state.enabled));
+                        *ivars.status.borrow_mut() = MenuStatus::Presence(outcome.1);
+                    }
+                    Err(msg) => {
+                        *ivars.status.borrow_mut() = MenuStatus::Failed {
+                            message: falcon_ui::menu_bar_failed(&msg),
+                            presence: outcome.1,
+                        };
+                    }
+                }
                 true
             }
         };

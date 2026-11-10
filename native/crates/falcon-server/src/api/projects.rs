@@ -175,7 +175,22 @@ fn members_json(repos: &[String]) -> String {
     serde_json::to_string(&members).expect("成员清单总能序列化")
 }
 
+async fn sync_after_project_change(state: &AppState, project_type: &str, host_id: Option<&str>) {
+    if project_type == "local" {
+        crate::host_projects::sync_local(&state.db, &state.config.data_dir);
+    } else if let Some(host_id) = host_id.map(str::to_string) {
+        let _ = state
+            .engine
+            .call(move |e| async move { e.sessions.sync_ssh_host_if_connected(&host_id).await })
+            .await;
+    }
+}
+
 async fn list(State(state): State<AppState>) -> Json<Vec<Project>> {
+    crate::host_projects::sync_local(&state.db, &state.config.data_dir);
+    if !state.db.list_host_rows().is_empty() {
+        let _ = state.engine.call(|e| async move { e.sessions.sync_hosts_on_list().await }).await;
+    }
     Json(state.db.list_projects().iter().map(Db::to_project).collect())
 }
 
@@ -210,6 +225,7 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
     };
     ssh.apply(&mut row);
     state.db.insert_project(&row);
+    sync_after_project_change(&state, &row.project_type, row.host_id.as_deref()).await;
     Ok(Json(Db::to_project(&row)))
 }
 
@@ -295,6 +311,12 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
             tokio::task::spawn_local(async move { engine.stop_px0(&id).await });
         }
     });
+    if existing.host_id != row.host_id
+        && let Some(old_host_id) = existing.host_id.as_deref()
+    {
+        sync_after_project_change(&state, &existing.project_type, Some(old_host_id)).await;
+    }
+    sync_after_project_change(&state, &row.project_type, row.host_id.as_deref()).await;
     Ok(Json(Db::to_project(&row)))
 }
 
@@ -407,6 +429,20 @@ async fn remove(
                 engine.sessions.dispose_link(&row.id);
                 engine.db.delete_project(&row.id);
             }
+            if targets.iter().any(|r| r.project_type == "local") {
+                crate::host_projects::sync_local(&engine.db, engine.sessions.data_dir());
+            }
+            let mut host_ids: Vec<String> = Vec::new();
+            for row in &targets {
+                if let Some(hid) = &row.host_id
+                    && !host_ids.contains(hid)
+                {
+                    host_ids.push(hid.clone());
+                }
+            }
+            for hid in host_ids {
+                engine.sessions.sync_ssh_host_if_connected(&hid).await;
+            }
             warnings
         })
         .await;
@@ -449,5 +485,54 @@ mod tests {
         assert_eq!((status, body), (StatusCode::NOT_FOUND, json!({ "error": "项目不存在" })));
         let (status, body) = mv("a", json!({})).await;
         assert_eq!((status, body), (StatusCode::BAD_REQUEST, json!({ "error": "目标项目不存在" })));
+    }
+
+    #[tokio::test]
+    async fn projects_api_syncs_with_host_projects_manifest() {
+        let app = TestApp::new();
+        let dir = app.root.join("repo-alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_string_lossy().into_owned();
+
+        // 1. POST /api/projects 创建本地项目后，数据目录下自动写出 host-projects.json
+        let (status, created) = json_of(
+            app.post_json("/api/projects", json!({ "name": "Alpha", "type": "local", "workingDir": dir_str })).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let alpha_id = created["id"].as_str().unwrap().to_string();
+
+        let manifest_path = app.state.config.data_dir.join(crate::host_projects::HOST_PROJECTS_FILE);
+        assert!(manifest_path.is_file());
+
+        // 2. 另一台主机经 SSH 在同一宿主机写入了新项目 Beta 到 host-projects.json
+        let mut manifest: crate::host_projects::HostProjectsManifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest.projects.len(), 1);
+        assert_eq!(manifest.projects[0].id, alpha_id);
+        let beta_ts = crate::auth::now_ms() + 1_000;
+        manifest.projects.push(crate::host_projects::HostProjectEntry {
+            id: "ssh-created-beta".into(),
+            name: "BetaFromSsh".into(),
+            working_dir: Some(dir_str.clone()),
+            shell: None,
+            created_at: beta_ts,
+            updated_at: beta_ts,
+            source_project_id: None,
+            worktree_branch: None,
+            worktree_repo_dir: None,
+            worktree_created_by_mojito: None,
+            worktree_archived_at: None,
+            multi_repos: None,
+            default_worktree_branch: None,
+        });
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+        // 3. GET /api/projects 自动从 host-projects.json 合入 BetaFromSsh
+        let (status, list_body) = json_of(app.get("/api/projects").await).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> =
+            list_body.as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Alpha", "BetaFromSsh"]);
     }
 }

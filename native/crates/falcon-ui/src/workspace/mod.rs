@@ -23,7 +23,7 @@ use falcon_core::layout::{self as layout, ColumnLayout};
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_platform::Platform;
 pub use falcon_core::workspace::{
-    ActiveView, DiffTabTarget, FileTabTarget, PendingSession, RightPanelId,
+    ActiveView, DiffTabTarget, FileTabTarget, NewTerminalPlace, PendingSession, RightPanelId,
     WorkspaceState, is_pending_id,
 };
 use falcon_proto::{AppIconState, AuthStatus, PluginList, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
@@ -245,8 +245,12 @@ impl Workspace {
 
     /// 轮询在这里起；认证 / 首次加载由窗口触发 [`Self::init`]（本机服务要先确认起来了）
     fn start(&mut self, cx: &mut Context<Self>) {
-        // 会话列表 5s、askpass 1.5s、侧栏 git 计数 8s：沿用 React 版的节奏
-        self._tasks.push(Self::poll(cx, Duration::from_secs(5), |this, cx| this.refresh_sessions(cx)));
+        // 会话列表与项目/主机列表 5s、askpass 1.5s、侧栏 git 计数 8s：沿用 React 版的节奏
+        self._tasks.push(Self::poll(cx, Duration::from_secs(5), |this, cx| {
+            this.refresh_sessions(cx);
+            this.refresh_projects(cx);
+            this.refresh_hosts(cx);
+        }));
         self._tasks.push(Self::poll(cx, Duration::from_millis(1500), |this, cx| this.pull_askpass(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(30), |this, cx| this.refresh_agents(cx)));
@@ -283,6 +287,8 @@ impl Workspace {
             view.read(cx).reconnect_now();
         }
         if self.auth_phase == AuthPhase::Ready {
+            self.refresh_projects(cx);
+            self.refresh_hosts(cx);
             self.refresh_sessions(cx);
             self.refresh_changes(cx);
         }
@@ -446,6 +452,9 @@ impl Workspace {
     }
 
     fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
+        if self.projects == projects {
+            return;
+        }
         self.state.apply_projects(&projects);
         self.projects = projects;
         self.refresh_remote_agents(cx);
@@ -459,9 +468,11 @@ impl Workspace {
             let result = client.list_hosts().await;
             this.update(cx, |this, cx| match result {
                 Ok(h) => {
-                    this.hosts = h;
-                    this.refresh_remote_agents(cx);
-                    cx.notify();
+                    if this.hosts != h {
+                        this.hosts = h;
+                        this.refresh_remote_agents(cx);
+                        cx.notify();
+                    }
                 }
                 Err(err) => this.handle_error(&err, cx),
             })
@@ -500,11 +511,13 @@ impl Workspace {
             if !self.remote_agents_in_flight.insert(key.clone()) {
                 continue;
             }
+            let is_host_target = matches!(target, ProbeTarget::SshHost(_));
             let fut = self.client.agents(&target);
             cx.spawn(async move |this, cx| {
                 let result = fut.await;
                 this.update(cx, |this, cx| {
                     this.remote_agents_in_flight.remove(&key);
+                    let ok = result.is_ok();
                     let agents: Vec<_> = match result {
                         Ok(agents) => agents.into_iter().filter(|a| *a != SessionAgent::Unknown).collect(),
                         Err(err) => {
@@ -516,6 +529,10 @@ impl Workspace {
                     if this.remote_agents.get(&key) != Some(&agents) {
                         this.remote_agents.insert(key, agents);
                         cx.notify();
+                    }
+                    if is_host_target && ok {
+                        this.refresh_projects(cx);
+                        this.refresh_hosts(cx);
                     }
                 }).ok();
             }).detach();
@@ -912,17 +929,9 @@ impl Workspace {
         falcon_core::workspace::active_key(&self.state.active)
     }
 
-    /// ⌘T / ＋：侧栏选中的项目优先，否则当前会话所属项目，再否则第一个项目
+    /// ⌘T / ⌘D / ＋：侧栏选中的项目优先，否则当前活动窗口所属项目，再否则第一个项目
     pub fn current_project_id(&self) -> Option<String> {
-        if let Some(sel) = &self.state.selected_project_id {
-            return Some(sel.clone());
-        }
-        if let ActiveView::Terminal { session_id } = &self.state.active
-            && let Some(p) = self.tab_project_id(session_id)
-        {
-            return Some(p);
-        }
-        self.projects.first().map(|p| p.id.clone())
+        self.focus_project_id().or_else(|| self.projects.first().map(|p| p.id.clone()))
     }
 
     // ---------------- 终端视图 ----------------

@@ -86,6 +86,7 @@ pub struct MenuBarText {
     pub start: String,
     pub stop: String,
     pub restart: String,
+    pub lan_access: String,
     pub quit: String,
 }
 
@@ -103,6 +104,7 @@ pub fn menu_bar_text() -> MenuBarText {
         start: t!("native.menuBar.start").to_string(),
         stop: t!("native.menuBar.stop").to_string(),
         restart: t!("native.menuBar.restart").to_string(),
+        lan_access: t!("native.menuBar.lanAccess").to_string(),
         quit: t!("native.menu.quit").to_string(),
     }
 }
