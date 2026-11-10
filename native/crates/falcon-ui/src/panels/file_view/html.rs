@@ -36,12 +36,14 @@ enum Surface {
 pub struct HtmlPane {
     surface: Surface,
     shown: bool,
+    /// 本身就处于全局放大预览对话框中：对话框自身不算遮盖它的上层浮层
+    in_dialog: bool,
     _opener: Task<()>,
 }
 
 impl HtmlPane {
     /// `url` 是完整的原始字节地址，`prefix` 是这个项目的 raw 前缀（`基址 + rawBase`）
-    pub fn new(url: String, prefix: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(url: String, prefix: String, in_dialog: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // 平台的导航回调在主线程上同步跑，拿不到 App；要开浏览器的地址经通道交给一个任务
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<String>();
         let open_external = Box::new(move |u: String| {
@@ -60,7 +62,7 @@ impl HtmlPane {
                 cx.update(|cx| cx.open_url(&u));
             }
         });
-        Self { surface, shown: true, _opener: opener }
+        Self { surface, shown: true, in_dialog, _opener: opener }
     }
 
     /// 所在窗口不在画布上时藏起来（元素不画就不会再去摆网页视图的位置，它会留在原处）
@@ -106,7 +108,7 @@ impl Render for HtmlPane {
                 .child(div().mt_1().text_size(zpx(11.)).child(err.clone()))
                 .into_any_element(),
             Surface::View(view) => {
-                let overlay = window.has_active_dialog(cx) || window.has_active_sheet(cx);
+                let overlay = (!self.in_dialog && window.has_active_dialog(cx)) || window.has_active_sheet(cx);
                 HtmlSurface { view: view.clone(), hidden: overlay || !self.shown }.into_any_element()
             }
         }

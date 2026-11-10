@@ -456,6 +456,70 @@ impl ChangesPanel {
         }
         cx.notify();
     }
+
+    fn ensure_diff_view(&mut self, cx: &mut Context<Self>) -> Entity<DiffView> {
+        if let Some(diff) = &self.diff {
+            return diff.clone();
+        }
+        let ws = self.ws.clone();
+        let weak = cx.weak_entity();
+        let view = cx.new(|cx| {
+            let mut v = DiffView::new_local(ws, cx);
+            v.set_on_expand(std::rc::Rc::new(move |window, cx| {
+                weak.update(cx, |this, cx| this.expand_diff(window, cx)).ok();
+            }));
+            v
+        });
+        self.diff = Some(view.clone());
+        view
+    }
+
+    fn expand_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(pid), Some(path)) = (self.project_id(), self.preview_path.as_ref()) else {
+            return;
+        };
+        let Some(f) = self.files.iter().find(|f| &f.path == path) else {
+            return;
+        };
+        let repo = self.repo();
+        let target = DiffTabTarget {
+            project_id: pid.clone(),
+            file: falcon_proto::GitFileChange {
+                path: f.path.clone(),
+                orig_path: f.orig_path.clone(),
+                index: f.status.clone(),
+                work: " ".into(),
+            },
+            repo: repo.clone(),
+        };
+        let weak = cx.weak_entity();
+        dialogs::preview_popup::open_diff(
+            &self.ws,
+            dialogs::preview_popup::DiffPopupInit {
+                project_id: pid,
+                repo,
+                repo_name: self.data.as_ref().and_then(|d| d.repo_name.clone()),
+                initial_files: self.files.clone(),
+                target,
+                on_select: Some(std::rc::Rc::new(move |next_target, cx| {
+                    weak.update(cx, |this, cx| {
+                        if this.project_id().as_deref() != Some(next_target.project_id.as_str())
+                            || this.repo() != next_target.repo
+                        {
+                            return;
+                        }
+                        this.preview_path = Some(next_target.file.path.clone());
+                        let diff = this.ensure_diff_view(cx);
+                        diff.update(cx, |v, cx| v.set_local(Some(next_target.clone()), cx));
+                        cx.notify();
+                    })
+                    .ok();
+                })),
+            },
+            window,
+            cx,
+        );
+    }
 }
 
 impl FileListHost for ChangesPanel {
@@ -475,14 +539,9 @@ impl FileListHost for ChangesPanel {
             },
             repo: self.repo(),
         };
-        if self.diff.is_none() {
-            let ws = self.ws.clone();
-            self.diff = Some(cx.new(|cx| DiffView::new_local(ws, cx)));
-        }
+        let diff = self.ensure_diff_view(cx);
         self.preview_path = Some(path);
-        if let Some(diff) = &self.diff {
-            diff.update(cx, |v, cx| v.set_local(Some(target), cx));
-        }
+        diff.update(cx, |v, cx| v.set_local(Some(target), cx));
         cx.notify();
     }
 

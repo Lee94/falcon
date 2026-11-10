@@ -52,6 +52,8 @@ enum AfterPreview {
     Navigate(String),
     /// 换一个文件继续预览
     Show(String),
+    /// 打开全局放大预览浮层
+    Expand,
 }
 
 const ROW_H: f32 = 28.;
@@ -531,6 +533,13 @@ impl FilesPanel {
             }
             AfterPreview::Navigate(path) => self.finish_go_to(path, window, cx),
             AfterPreview::Show(path) => self.mount_preview(path, window, cx),
+            AfterPreview::Expand => {
+                if let Some(path) = self.preview_path.clone() {
+                    // 放弃修改后先把面板里的预览刷回磁盘状态，再打开放大浮层
+                    self.mount_preview(path, window, cx);
+                }
+                self.open_expanded_preview(window, cx);
+            }
         }
     }
 
@@ -541,6 +550,75 @@ impl FilesPanel {
         self.preview = None;
         self.preview_path = None;
         cx.notify();
+    }
+
+    fn expand_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_preview(AfterPreview::Expand, cx) {
+            return;
+        }
+        self.open_expanded_preview(window, cx);
+    }
+
+    fn open_expanded_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(pid), Some(path)) = (self.project_id.clone(), self.preview_path.clone()) else {
+            return;
+        };
+        let (weak_sel, weak_save) = (cx.weak_entity(), cx.weak_entity());
+        let pid_sel = pid.clone();
+        let pid_save = pid.clone();
+        dialogs::preview_popup::open_file(
+            &self.ws,
+            dialogs::preview_popup::FilePopupInit {
+                project_id: pid,
+                cwd: self.cwd.clone(),
+                show_hidden: self.show_hidden,
+                path,
+                on_select: Some(Rc::new(move |next_cwd, next_path, window, cx| {
+                    weak_sel
+                        .update(cx, |this, cx| {
+                            if this.project_id.as_deref() != Some(pid_sel.as_str()) {
+                                return;
+                            }
+                            if this.preview.as_ref().is_some_and(|v| v.read(cx).dirty()) {
+                                return;
+                            }
+                            if !next_cwd.is_empty() && this.cwd != next_cwd {
+                                this.cwd = next_cwd.to_string();
+                                this.draft = None;
+                                this.scroll = UniformListScrollHandle::new();
+                                this.reload(cx);
+                                this.reset_path_input(window, cx);
+                            }
+                            this.selected = HashSet::from([next_path.to_string()]);
+                            this.last_clicked = Some(next_path.to_string());
+                            this.mount_preview(next_path.to_string(), window, cx);
+                        })
+                        .ok();
+                })),
+                on_saved: Some(Rc::new(move |saved_path, cx| {
+                    weak_save
+                        .update(cx, |this, cx| {
+                            if this.project_id.as_deref() != Some(pid_save.as_str()) {
+                                return;
+                            }
+                            let same = this.preview_path.as_deref().is_some_and(|cur| {
+                                join_host_path(this.working_dir.as_deref(), cur)
+                                    == join_host_path(this.working_dir.as_deref(), saved_path)
+                            });
+                            if same
+                                && let Some(view) = &this.preview
+                                && !view.read(cx).dirty()
+                            {
+                                let path = this.preview_path.clone().unwrap_or_else(|| saved_path.to_string());
+                                view.update(cx, |v, cx| v.set_target(pid_save.clone(), path, cx));
+                            }
+                        })
+                        .ok();
+                })),
+            },
+            window,
+            cx,
+        );
     }
 
     fn preview_file(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -560,7 +638,14 @@ impl FilesPanel {
             view.update(cx, |v, cx| v.set_target(pid, path.clone(), cx));
         } else {
             let ws = self.ws.clone();
-            self.preview = Some(cx.new(|cx| FileView::embedded(ws, pid, path.clone(), window, cx)));
+            let weak = cx.weak_entity();
+            self.preview = Some(cx.new(|cx| {
+                let mut v = FileView::embedded(ws, pid, path.clone(), window, cx);
+                v.set_on_expand(Rc::new(move |window, cx| {
+                    weak.update(cx, |this, cx| this.expand_preview(window, cx)).ok();
+                }));
+                v
+            }));
         }
         self.preview_path = Some(path);
         cx.notify();
@@ -1551,7 +1636,7 @@ const CODE_EXT: &[&str] = &[
     "toml", "ini", "conf", "xml",
 ];
 
-fn icon_for(name: &str) -> IconName {
+pub(crate) fn icon_for(name: &str) -> IconName {
     let ext = match name.rfind('.') {
         Some(i) if i > 0 => name[i + 1..].to_lowercase(),
         _ => String::new(),

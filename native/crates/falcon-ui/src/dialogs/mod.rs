@@ -9,6 +9,7 @@ pub mod folder_picker;
 pub mod host_form;
 pub mod install;
 pub mod overview;
+pub mod preview_popup;
 pub mod project_form;
 pub mod quick_open;
 pub mod rename;

@@ -18,6 +18,7 @@ use std::rc::Rc;
 use falcon_client::GitFileRef;
 use falcon_proto::GitFileDiff;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Disableable;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
@@ -124,8 +125,19 @@ enum Side {
 enum TargetSource {
     /// 画布窗口：跟工作区的 `diff_tab`
     Workspace,
-    /// 右侧「修改」面板：自己的目标，不碰画布
+    /// 右侧「修改」面板或放大预览浮层：自己的目标，不碰画布
     Local(Option<DiffTabTarget>),
+}
+
+/// 全局放大预览浮层挂载到差异工具栏上的控制项
+#[derive(Clone)]
+pub struct DiffPopupChrome {
+    pub sidebar_open: bool,
+    pub has_prev: bool,
+    pub has_next: bool,
+    pub on_toggle_sidebar: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_step: Rc<dyn Fn(isize, &mut Window, &mut App)>,
+    pub on_close: Rc<dyn Fn(&mut Window, &mut App)>,
 }
 
 pub struct DiffView {
@@ -145,6 +157,8 @@ pub struct DiffView {
     wheel_side: Side,
     /// 指针在差异区里（滚动条这时常显，见 [`vscrollbar`]）
     hovered: bool,
+    on_expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    popup_chrome: Option<DiffPopupChrome>,
     _load: Task<()>,
 }
 
@@ -160,7 +174,7 @@ impl DiffView {
         this
     }
 
-    /// 右侧「修改」面板用。不观察 `diff_tab`，目标由 [`Self::set_local`] 推进来。
+    /// 右侧「修改」面板或放大预览浮层用。不观察 `diff_tab`，目标由 [`Self::set_local`] 推进来。
     pub fn new_local(ws: Entity<Workspace>, _cx: &mut Context<Self>) -> Self {
         Self::blank(ws, TargetSource::Local(None))
     }
@@ -169,6 +183,18 @@ impl DiffView {
         self.source = TargetSource::Local(target);
         self.sync_target(false, cx);
         cx.notify();
+    }
+
+    pub fn set_on_expand(&mut self, on_expand: Rc<dyn Fn(&mut Window, &mut App)>) {
+        self.on_expand = Some(on_expand);
+    }
+
+    pub fn set_popup_chrome(&mut self, chrome: DiffPopupChrome) {
+        self.popup_chrome = Some(chrome);
+    }
+
+    pub fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
     }
 
     fn blank(ws: Entity<Workspace>, source: TargetSource) -> Self {
@@ -186,6 +212,8 @@ impl DiffView {
             synced_y: px(0.),
             wheel_side: Side::Right,
             hovered: false,
+            on_expand: None,
+            popup_chrome: None,
             _load: Task::ready(()),
         }
     }
@@ -287,7 +315,38 @@ impl Render for DiffView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let Some(target) = self.current_target(cx) else {
-            return div().size_full().into_any_element();
+            let Some(chrome) = &self.popup_chrome else {
+                return div().size_full().into_any_element();
+            };
+            let (toggle, close) = (chrome.on_toggle_sidebar.clone(), chrome.on_close.clone());
+            let bar = div()
+                .id("diff-bar")
+                .h(zpx(34.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px(zpx(6.))
+                .border_b_1()
+                .border_color(ui.border)
+                .child(
+                    tool_button("diff-popup-sidebar", IconName::PanelLeft, t!("files.toggleFileList").to_string(), chrome.sidebar_open, cx)
+                        .on_click(move |_, window, cx| toggle(window, cx)),
+                )
+                .child(div().flex_1())
+                .child(
+                    tool_button("diff-popup-close", IconName::X, t!("common.close").to_string(), false, cx)
+                        .on_click(move |_, window, cx| close(window, cx)),
+                );
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(ui.background)
+                .text_color(ui.foreground)
+                .child(bar)
+                .child(div().flex_1().min_h_0().child(hint(t!("git.diffEmpty").to_string(), None, cx)))
+                .into_any_element();
         };
         let mode = view_mode(cx);
         let file = &target.file;
@@ -305,10 +364,24 @@ impl Render for DiffView {
             .flex()
             .items_center()
             .gap_2()
-            .pl_3()
+            .pl(if self.popup_chrome.is_some() { zpx(6.) } else { zpx(12.) })
             .pr(zpx(6.))
             .border_b_1()
-            .border_color(ui.border)
+            .border_color(ui.border);
+        if let Some(chrome) = &self.popup_chrome {
+            let toggle = chrome.on_toggle_sidebar.clone();
+            bar = bar.child(
+                tool_button(
+                    "diff-popup-sidebar",
+                    IconName::PanelLeft,
+                    t!("files.toggleFileList").to_string(),
+                    chrome.sidebar_open,
+                    cx,
+                )
+                .on_click(move |_, window, cx| toggle(window, cx)),
+            );
+        }
+        bar = bar
             .child(icon(IconName::FileDiff).size(zpx(14.)).text_color(ui.muted_foreground))
             .child(
                 div()
@@ -341,8 +414,22 @@ impl Render for DiffView {
             );
         }
         let busy = self.busy;
+        bar = bar.child(div().flex_1());
+        if let Some(chrome) = &self.popup_chrome {
+            let (step_prev, step_next) = (chrome.on_step.clone(), chrome.on_step.clone());
+            bar = bar
+                .child(
+                    tool_button("diff-popup-prev", IconName::ChevronUp, t!("git.prevFile").to_string(), false, cx)
+                        .disabled(!chrome.has_prev)
+                        .on_click(move |_, window, cx| step_prev(-1, window, cx)),
+                )
+                .child(
+                    tool_button("diff-popup-next", IconName::ChevronDown, t!("git.nextFile").to_string(), false, cx)
+                        .disabled(!chrome.has_next)
+                        .on_click(move |_, window, cx| step_next(1, window, cx)),
+                );
+        }
         bar = bar
-            .child(div().flex_1())
             .child(
                 tool_button(
                     "diff-split",
@@ -375,6 +462,20 @@ impl Render for DiffView {
                 .loading_icon(IconName::RefreshCw)
                 .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             );
+        if let Some(on_expand) = &self.on_expand {
+            let expand = on_expand.clone();
+            bar = bar.child(
+                tool_button("diff-expand", IconName::Maximize2, t!("git.expandDiff").to_string(), false, cx)
+                    .on_click(move |_, window, cx| expand(window, cx)),
+            );
+        }
+        if let Some(chrome) = &self.popup_chrome {
+            let close = chrome.on_close.clone();
+            bar = bar.child(
+                tool_button("diff-popup-close", IconName::X, t!("common.close").to_string(), false, cx)
+                    .on_click(move |_, window, cx| close(window, cx)),
+            );
+        }
 
         // ---- 内容 ----
         let body: AnyElement = if let Some(err) = &self.error {

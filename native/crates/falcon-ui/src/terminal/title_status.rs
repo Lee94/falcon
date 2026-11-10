@@ -6,8 +6,7 @@
 //! 只在胶囊的悬停提示里：它跑一轮时一直在换，挂在标题栏上一跳一跳，还跟路径抢宽度），
 //! 标题栏底边还有一条细线随状态变：
 //!
-//! - working：胶囊里图标转圈；报了进度时底边是进度线（宽度用弹簧追过去，不跳），没报时一段光
-//!   来回扫；
+//! - working：胶囊里图标转圈；
 //! - blocked：警示色实底胶囊外一圈光晕在呼吸，底边警示线跟着呼吸——在等人，得够醒目；图标进场时
 //!   摇一下；
 //! - done / error：换到这个状态时图标弹一下（done 放大回弹、error 左右抖），底边闪一下就淡掉。
@@ -15,7 +14,7 @@
 //! 一次性的动画（进场、弹、抖、闪）靠**换元素 id** 重新开始：id 里带着状态，状态一变就是新元素、
 //! 新的动画状态。窗口重新出现（切项目、翻画布）时会再播一次，算是"刚看到"，不另外防。
 //!
-//! 动画走 `crate::motion`（不看系统的「减少动态效果」，为什么见那里），持续的动画（转圈、扫光、
+//! 动画走 `crate::motion`（不看系统的「减少动态效果」，为什么见那里），持续的动画（转圈、
 //! 呼吸）限帧到 `motion::FPS`。会动的两块（胶囊、底边线）各是一个小视图（[`StatusSlot`]），
 //! 每帧只重画它们自己，不连累整块画布。
 //!
@@ -30,9 +29,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnimationExt, AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, Render, SharedString, SpringAnimation,
-    SpringConfig, Subscription, Transformation, Window, div, ease_in_out, linear_color_stop, linear_gradient, point, px,
-    relative, size,
+    AnyElement, AnyView, App, Context, Entity, FontWeight, Hsla, Render, SharedString, Subscription, Transformation, Window, div,
+    ease_in_out, point, px, size,
 };
 use rust_i18n::t;
 
@@ -282,49 +280,30 @@ fn back_out(t: f32) -> f32 {
     1. + C3 * x * x * x + C1 * x * x
 }
 
-/// 标题栏底边的线：working 有进度是进度线、没进度是来回扫的一段光；blocked 整条呼吸；
-/// done / error 闪一下淡掉
+/// 标题栏底边的线：working 不画；blocked 整条呼吸；done / error 闪一下淡掉
 fn edge(badge: &ProgramBadge, color: Hsla, tag: &str) -> AnyElement {
-    // 压在标题栏的下边框上（下移 1px），比它粗一点
-    let track = div().absolute().left_0().right_0().bottom(px(-1.)).h(zpx(2.)).overflow_hidden();
     let id = SharedString::from(format!("pane-ps-edge-{tag}"));
-    let line = match (badge.tone, badge.progress) {
-        (BadgeTone::Working, Some(p)) => div()
-            .h_full()
-            .rounded_full()
-            .bg(color)
-            // 弹簧追进度：程序一格一格地报，线是滑过去的；第一次出现从 0 长出来。这一处照 GPUI 的
-            // 规矩跟「减少动态效果」走（开着时直接跳到位）：长度本身就是状态，滑不滑过去无所谓
-            .with_spring(
-                id,
-                SpringAnimation::new(SpringConfig::new(120., 22., 1.)).to(p.min(100) as f32 / 100.).from(0.),
-                |d, v| d.w(relative(v.clamp(0., 1.))),
-            )
-            .into_any_element(),
-        (BadgeTone::Working, None) => {
-            // 一段两头透明、中间实的光：左右各一半渐变拼起来
-            let clear = color.opacity(0.);
-            div()
-                .absolute()
-                .top_0()
-                .h_full()
-                .w(relative(0.3))
-                .flex()
-                .child(div().flex_1().bg(linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(color, 1.))))
-                .child(div().flex_1().bg(linear_gradient(90., linear_color_stop(color, 0.), linear_color_stop(clear, 1.))))
-                .motion(id, Motion::repeat(1600).easing(ease_in_out), |d, t| d.left(relative(-0.3 + 1.3 * t)))
-                .into_any_element()
-        }
-        (BadgeTone::Blocked, _) => div()
+    let line = match badge.tone {
+        BadgeTone::Working => return div().into_any_element(),
+        BadgeTone::Blocked => div()
             .size_full()
             .bg(color)
             .motion(id, Motion::repeat(1800).easing(breathe), |d, t| d.opacity(0.35 + 0.65 * t))
             .into_any_element(),
-        (BadgeTone::Done | BadgeTone::Error, _) => div()
+        BadgeTone::Done | BadgeTone::Error => div()
             .size_full()
             .bg(color)
             .motion(id, Motion::once(1400), |d, t| d.opacity((1. - t).powi(2)))
             .into_any_element(),
     };
-    track.child(line).into_any_element()
+    // 压在标题栏的下边框上（下移 1px），比它粗一点
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(-1.))
+        .h(zpx(2.))
+        .overflow_hidden()
+        .child(line)
+        .into_any_element()
 }

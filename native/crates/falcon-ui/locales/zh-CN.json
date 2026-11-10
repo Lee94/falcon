@@ -201,6 +201,11 @@
     "nFiles": "%{n} 个文件",
     "viewSplit": "分栏显示",
     "viewUnified": "单栏显示",
+    "expandDiff": "放大预览",
+    "filterChangedFiles": "筛选改动文件…",
+    "noMatchingFiles": "没有匹配的改动文件",
+    "prevFile": "上一个文件",
+    "nextFile": "下一个文件",
     "diffLoading": "正在读取差异…",
     "diffFailed": "读不到差异",
     "diffEmpty": "没有可显示的差异",
@@ -322,7 +327,13 @@
     "zoomFit": "适应窗口",
     "zoomActual": "实际大小",
     "zoomReset": "缩放比例，点击恢复适应窗口",
-    "imageDims": "图片尺寸"
+    "imageDims": "图片尺寸",
+    "expandPreview": "放大预览",
+    "toggleFileList": "显示或收起文件栏",
+    "prevFile": "上一个文件",
+    "nextFile": "下一个文件",
+    "filterFiles": "搜索文件…",
+    "noMatchingFiles": "没有匹配的文件"
   },
   "quickOpen": {
     "placeholder": "搜索文件",

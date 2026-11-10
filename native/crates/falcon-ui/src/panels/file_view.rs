@@ -80,6 +80,27 @@ struct EditBase {
     version: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Host {
+    /// 画布上的查看窗口，往工作区的 `file_dirty` 上报脏状态
+    Canvas,
+    /// 右侧「文件」面板里的内嵌预览
+    Panel,
+    /// 全局放大预览浮层
+    Popup,
+}
+
+/// 全局放大预览浮层挂载到工具栏上的控制项
+#[derive(Clone)]
+pub struct FilePopupChrome {
+    pub sidebar_open: bool,
+    pub has_prev: bool,
+    pub has_next: bool,
+    pub on_toggle_sidebar: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_step: Rc<dyn Fn(isize, &mut Window, &mut App)>,
+    pub on_close: Rc<dyn Fn(&mut Window, &mut App)>,
+}
+
 pub struct FileView {
     ws: Entity<Workspace>,
     pub project_id: String,
@@ -101,27 +122,36 @@ pub struct FileView {
     /// 编辑器里的内容与 `base.body` 不同
     dirty: bool,
     saving: bool,
-    /// 嵌在右侧文件面板里。不占用画布上那扇查看窗口，也不往工作区的 `file_dirty` 上报
-    /// （那份是画布窗口换文件 / 关窗口前确认用的）。
-    embedded: bool,
+    /// 所在的宿主位置：右侧栏内嵌与全局浮层都不占用画布查看窗口，也不往工作区 `file_dirty` 上报
+    host: Host,
+    /// 浮层上方又叠了一层确认框时，先把原生网页视图藏起来，避免挡住确认框
+    subdialog: bool,
+    on_expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_saved: Option<Rc<dyn Fn(&str, &mut App)>>,
+    popup_chrome: Option<FilePopupChrome>,
     _subs: Vec<Subscription>,
 }
 
 impl FileView {
     pub fn new(ws: Entity<Workspace>, project_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::create(ws, project_id, path, false, window, cx)
+        Self::create(ws, project_id, path, Host::Canvas, window, cx)
     }
 
     /// 右侧文件面板里的预览。与画布上的查看窗口各持一份内容，脏标记互不占用。
     pub fn embedded(ws: Entity<Workspace>, project_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::create(ws, project_id, path, true, window, cx)
+        Self::create(ws, project_id, path, Host::Panel, window, cx)
+    }
+
+    /// 全局放大预览浮层里的文件视图。
+    pub fn popup(ws: Entity<Workspace>, project_id: String, path: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::create(ws, project_id, path, Host::Popup, window, cx)
     }
 
     fn create(
         ws: Entity<Workspace>,
         project_id: String,
         path: String,
-        embedded: bool,
+        host: Host,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -149,11 +179,35 @@ impl FileView {
             base: None,
             dirty: false,
             saving: false,
-            embedded,
+            host,
+            subdialog: false,
+            on_expand: None,
+            on_saved: None,
+            popup_chrome: None,
             _subs: subs,
         };
         this.load(cx);
         this
+    }
+
+    pub fn set_on_expand(&mut self, on_expand: Rc<dyn Fn(&mut Window, &mut App)>) {
+        self.on_expand = Some(on_expand);
+    }
+
+    pub fn set_on_saved(&mut self, on_saved: Rc<dyn Fn(&str, &mut App)>) {
+        self.on_saved = Some(on_saved);
+    }
+
+    pub fn set_popup_chrome(&mut self, chrome: FilePopupChrome) {
+        self.popup_chrome = Some(chrome);
+    }
+
+    pub fn set_subdialog(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.subdialog != open {
+            self.subdialog = open;
+            self.sync_shown(cx);
+            cx.notify();
+        }
     }
 
     pub(crate) fn dirty(&self) -> bool {
@@ -283,7 +337,7 @@ impl FileView {
             return;
         }
         self.dirty = dirty;
-        if !self.embedded {
+        if self.host == Host::Canvas {
             self.ws.update(cx, |w, _| w.set_file_dirty(dirty));
         }
         cx.notify();
@@ -325,6 +379,10 @@ impl FileView {
                         }
                         // 存的这一会儿里又敲了字的，照样算没存
                         this.recheck_dirty(cx);
+                        if let Some(on_saved) = this.on_saved.clone() {
+                            let saved_path = this.path.clone();
+                            on_saved(&saved_path, cx);
+                        }
                         this.ws.update(cx, |w, cx| w.refresh_changes(cx));
                     }
                     Err(err) if err.is_conflict() => this.confirm_overwrite(err.message, cx),
@@ -403,7 +461,8 @@ impl FileView {
             FilePreview::Text { .. } if previewing && is_html(&self.path) => {
                 // 加载的是磁盘上的字节：没存的修改看不到（工具栏上有一句提示）
                 let (Some(url), Some(prefix)) = (self.raw_absolute(cx), self.raw_prefix(cx)) else { return };
-                Body::Html(cx.new(|cx| HtmlPane::new(url, prefix, window, cx)))
+                let in_dialog = self.host == Host::Popup;
+                Body::Html(cx.new(|cx| HtmlPane::new(url, prefix, in_dialog, window, cx)))
             }
             FilePreview::Text { text, .. } if previewing && is_markdown(&self.path) => {
                 let dir = dir_of(result.raw_path.as_deref().unwrap_or(&self.path)).to_string();
@@ -441,18 +500,22 @@ impl FileView {
     /// 最大化 / 切到了总览）时，GPUI 不再摆它的位置，得明确藏起来
     fn sync_shown(&mut self, cx: &mut Context<Self>) {
         let Body::Html(pane) = &self.body else { return };
-        let shown = if self.embedded {
-            // 网页视图压在画面上，面板切走或右侧栏关上之后 GPUI 不再摆它，必须自己藏
-            let ws = self.ws.read(cx);
-            ws.state.right_open && ws.state.right_panel == RightPanelId::Files
-        } else {
-            let key = falcon_core::workspace::FileTabTarget { project_id: self.project_id.clone(), path: self.path.clone() }.key();
-            let ws = self.ws.read(cx);
-            let visible = ws.visible_columns();
-            let present = falcon_core::layout::find_pane(&visible, &key).is_some();
-            let zoomed_away = ws.state.term_zoomed
-                && ws.active_key().is_some_and(|a| a != key && falcon_core::layout::find_pane(&visible, &a).is_some());
-            present && !zoomed_away && ws.state.active != ActiveView::Overview
+        let shown = match self.host {
+            Host::Panel => {
+                // 网页视图压在画面上，面板切走或右侧栏关上之后 GPUI 不再摆它，必须自己藏
+                let ws = self.ws.read(cx);
+                ws.state.right_open && ws.state.right_panel == RightPanelId::Files
+            }
+            Host::Popup => !self.subdialog,
+            Host::Canvas => {
+                let key = falcon_core::workspace::FileTabTarget { project_id: self.project_id.clone(), path: self.path.clone() }.key();
+                let ws = self.ws.read(cx);
+                let visible = ws.visible_columns();
+                let present = falcon_core::layout::find_pane(&visible, &key).is_some();
+                let zoomed_away = ws.state.term_zoomed
+                    && ws.active_key().is_some_and(|a| a != key && falcon_core::layout::find_pane(&visible, &a).is_some());
+                present && !zoomed_away && ws.state.active != ActiveView::Overview
+            }
         };
         pane.update(cx, |p, cx| p.set_shown(shown, cx));
     }
@@ -471,10 +534,18 @@ impl FileView {
             .flex()
             .items_center()
             .gap_2()
-            .pl_3()
+            .pl(if self.popup_chrome.is_some() { zpx(6.) } else { zpx(12.) })
             .pr(zpx(6.))
             .border_b_1()
-            .border_color(ui.border)
+            .border_color(ui.border);
+        if let Some(chrome) = &self.popup_chrome {
+            let toggle = chrome.on_toggle_sidebar.clone();
+            bar = bar.child(
+                bar_button("fv-popup-sidebar", IconName::PanelLeft, t!("files.toggleFileList"), chrome.sidebar_open, false, false, &ui)
+                    .on_click(move |_, window, cx| toggle(window, cx)),
+            );
+        }
+        bar = bar
             .child(icon(IconName::FileText).size(zpx(14.)).flex_none().text_color(ui.muted_foreground))
             .child(div().min_w_0().truncate().text_xs().child(self.path.clone()))
             // 有没存的修改：路径后面一个实心点（各家编辑器的标签页都这么标）
@@ -505,24 +576,37 @@ impl FileView {
         bar = bar.child(div().flex_1());
         if self.dirty || self.saving {
             bar = bar.child(
-                bar_button("fv-save", IconName::Save, t!("files.save"), false, self.saving, &ui)
+                bar_button("fv-save", IconName::Save, t!("files.save"), false, self.saving, false, &ui)
                     .on_click(cx.listener(|this, _, _, cx| this.save(false, cx))),
             );
+        }
+        if let Some(chrome) = &self.popup_chrome {
+            let (step_prev, step_next) = (chrome.on_step.clone(), chrome.on_step.clone());
+            let (has_prev, has_next) = (chrome.has_prev, chrome.has_next);
+            bar = bar
+                .child(
+                    bar_button("fv-popup-prev", IconName::ChevronUp, t!("files.prevFile"), false, false, !has_prev, &ui)
+                        .when(has_prev, |b| b.on_click(move |_, window, cx| step_prev(-1, window, cx))),
+                )
+                .child(
+                    bar_button("fv-popup-next", IconName::ChevronDown, t!("files.nextFile"), false, false, !has_next, &ui)
+                        .when(has_next, |b| b.on_click(move |_, window, cx| step_next(1, window, cx))),
+                );
         }
         if renderable {
             // 预览 / 源码只对 Markdown 与 HTML 有意义，别的文件类型不摆这两个按钮
             bar = bar
-                .child(bar_button("fv-preview", IconName::Eye, t!("files.preview"), previewing, false, &ui).on_click(
+                .child(bar_button("fv-preview", IconName::Eye, t!("files.preview"), previewing, false, false, &ui).on_click(
                     cx.listener(|this, _, _, cx| this.switch_mode(ViewMode::Preview, cx)),
                 ))
-                .child(bar_button("fv-source", IconName::CodeXml, t!("files.source"), !previewing, false, &ui).on_click(
+                .child(bar_button("fv-source", IconName::CodeXml, t!("files.source"), !previewing, false, false, &ui).on_click(
                     cx.listener(|this, _, _, cx| this.switch_mode(ViewMode::Source, cx)),
                 ));
         }
         if raw {
             // 原始字节地址交给系统浏览器：路由带 CSP sandbox，顶层打开也跑在 opaque origin 里
             bar = bar.child(
-                bar_button("fv-open-raw", IconName::ExternalLink, t!("native.files.openInBrowser"), false, false, &ui)
+                bar_button("fv-open-raw", IconName::ExternalLink, t!("native.files.openInBrowser"), false, false, false, &ui)
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(url) = this.raw_absolute(cx) {
                             cx.open_url(&url);
@@ -530,23 +614,39 @@ impl FileView {
                     })),
             );
         }
-        bar.child(
-            // 二进制 / 超大文件在这里"无法预览"，下载是它们唯一的出路，所以不看预览种类
-            bar_button("fv-download", IconName::Download, t!("files.download"), false, false, &ui).on_click(cx.listener(
-                |this, _, window, cx| {
-                    let (ws, pid, path) = (this.ws.clone(), this.project_id.clone(), this.path.clone());
-                    crate::panels::files::transfer::download(ws, pid, vec![path], window, cx);
-                },
-            )),
-        )
-        .child(
-            bar_button("fv-refresh", IconName::RefreshCw, t!("files.refresh"), false, self.busy, &ui)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.busy {
-                        this.refresh(cx);
-                    }
-                })),
-        )
+        bar = bar
+            .child(
+                // 二进制 / 超大文件在这里"无法预览"，下载是它们唯一的出路，所以不看预览种类
+                bar_button("fv-download", IconName::Download, t!("files.download"), false, false, false, &ui).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        let (ws, pid, path) = (this.ws.clone(), this.project_id.clone(), this.path.clone());
+                        crate::panels::files::transfer::download(ws, pid, vec![path], window, cx);
+                    },
+                )),
+            )
+            .child(
+                bar_button("fv-refresh", IconName::RefreshCw, t!("files.refresh"), false, self.busy, false, &ui)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.busy {
+                            this.refresh(cx);
+                        }
+                    })),
+            );
+        if let Some(on_expand) = &self.on_expand {
+            let expand = on_expand.clone();
+            bar = bar.child(
+                bar_button("fv-expand", IconName::Maximize2, t!("files.expandPreview"), false, false, false, &ui)
+                    .on_click(move |_, window, cx| expand(window, cx)),
+            );
+        }
+        if let Some(chrome) = &self.popup_chrome {
+            let close = chrome.on_close.clone();
+            bar = bar.child(
+                bar_button("fv-popup-close", IconName::X, t!("common.close"), false, false, false, &ui)
+                    .on_click(move |_, window, cx| close(window, cx)),
+            );
+        }
+        bar
     }
 
     fn body(&self, cx: &App) -> AnyElement {
@@ -602,7 +702,15 @@ impl Render for FileView {
 }
 
 /// 工具栏上的小图标按钮（React 版的 ghost icon-xs）；按下态用 muted 底，`spinning` 时图标自己转
-fn bar_button(id: &'static str, name: IconName, label: impl Into<SharedString>, pressed: bool, spinning: bool, ui: &Ui) -> Stateful<Div> {
+fn bar_button(
+    id: &'static str,
+    name: IconName,
+    label: impl Into<SharedString>,
+    pressed: bool,
+    spinning: bool,
+    disabled: bool,
+    ui: &Ui,
+) -> Stateful<Div> {
     let label: SharedString = label.into();
     let fg = ui.foreground;
     let muted = ui.muted;
@@ -611,7 +719,7 @@ fn bar_button(id: &'static str, name: IconName, label: impl Into<SharedString>, 
     } else {
         icon(name).size(zpx(14.)).into_any_element()
     };
-    div()
+    let base = div()
         .id(id)
         .size(zpx(24.))
         .flex_none()
@@ -619,12 +727,14 @@ fn bar_button(id: &'static str, name: IconName, label: impl Into<SharedString>, 
         .items_center()
         .justify_center()
         .rounded(zpx(6.))
-        .cursor_pointer()
         .text_color(if pressed { ui.foreground } else { ui.muted_foreground })
         .when(pressed, |d| d.bg(muted))
-        .hover(move |s| s.bg(muted).text_color(fg))
         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-        .child(glyph)
+        .child(glyph);
+    if disabled {
+        return base.opacity(0.45);
+    }
+    base.cursor_pointer().hover(move |s| s.bg(muted).text_color(fg))
 }
 
 fn is_markdown(path: &str) -> bool {

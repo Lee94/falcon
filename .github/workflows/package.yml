@@ -1,13 +1,15 @@
-# 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）与 macOS（.pkg，原生客户端 +
-# Resources 里的 Rust 服务端）。打法与本机一样，直接跑 cargo xtask win / cargo xtask pkg，xtask 是唯一真相。
+# 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）、macOS（.pkg，原生客户端 +
+# Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI + Gradle 原生安卓客户端）。
+# 打法与本机一样，直接跑 cargo xtask win / pkg / android，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
-# - 推 v* tag：两个包都打完后建 GitHub Release 并挂上；
+# - 推 v* tag：三个包都打完后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
 # - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
 #   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
 #
-# 都没有签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，与本机打的包一样。
+# 都没有正式证书签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，Android 用 debug 签名
+# （手机上允许未知来源即可安装），与本机打的包一样。
 name: package
 
 on:
@@ -122,9 +124,70 @@ jobs:
           path: release/*.pkg
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        run: rm -f native/.cargo/config.toml
+
+      # Gradle 8.9 + AGP 8.7.2，与 android/app/build.gradle.kts 的 jvmTarget = 17 对齐；
+      # xtask 的 android.rs 跑 gradlew --no-daemon，构建完守护进程即退出，不会锁住 ~/.gradle 缓存
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有，而 AGP 8.7.2 默认要
+      # build-tools;34.0.0（镜像里通常只留更新的版本），目录不可写会在构建期直接报错。
+      # 只改顶层条目与 platforms / build-tools / licenses 的属主（不递归几十万文件的 ndk/），
+      # 再以当前用户补齐缺失组件（sudo 会清掉 setup-java 设的 JAVA_HOME）
+      - name: Prepare Android SDK
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          sudo mkdir -p "$SDK/licenses" "$SDK/platforms" "$SDK/build-tools" "$SDK/ndk"
+          sudo find "$SDK" -maxdepth 1 -exec chown "$USER:$USER" {} +
+          sudo chown -R "$USER:$USER" "$SDK/licenses" "$SDK/platforms" "$SDK/build-tools"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
+          MISSING=()
+          [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
+          [ -d "$SDK/build-tools/34.0.0" ] || MISSING+=("build-tools;34.0.0")
+          if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
+            if [ -z "$(ls -A "$SDK/ndk" 2>/dev/null)" ]; then
+              MISSING+=("ndk;27.2.12479018")
+            fi
+          fi
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            (yes || true) | "$SDKMANAGER" --licenses >/dev/null || true
+            (yes || true) | "$SDKMANAGER" --install "${MISSING[@]}"
+          fi
+
+      # xtask/src/android.rs 交叉编 arm64-v8a 与 x86_64 两个 JNI 动态库
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+
+      - name: Build APK
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- android
+
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: falcon-android
+          path: release/*.apk
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos]
+    needs: [windows, macos, android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

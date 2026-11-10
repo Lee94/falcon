@@ -650,7 +650,6 @@ fun TerminalScreen(
             val bottomLineColor = when (programBadge?.tone) {
                 "blocked" -> theme.warning
                 "error" -> theme.destructive
-                "working" -> theme.tintStrong
                 "done" -> theme.success
                 else -> theme.muted
             }

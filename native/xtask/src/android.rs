@@ -181,17 +181,31 @@ fn find_android_sdk() -> Result<PathBuf> {
 }
 
 fn find_ndk_clang_bin(sdk_dir: &Path) -> Result<PathBuf> {
-    let ndk_root = sdk_dir.join("ndk");
-    if !ndk_root.is_dir() {
-        bail!("{} 下没有 ndk 目录", sdk_dir.display());
-    }
-    let mut versions: Vec<PathBuf> = std::fs::read_dir(&ndk_root)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir())
-        .collect();
-    versions.sort();
-    let latest_ndk = versions.pop().context("ndk 目录下没有已安装的 NDK 版本")?;
-    let prebuilt = latest_ndk.join("toolchains/llvm/prebuilt");
+    let env_ndk = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"]
+        .into_iter()
+        .find_map(|key| std::env::var_os(key).map(PathBuf::from));
+    resolve_ndk_clang_bin(sdk_dir, env_ndk.as_deref())
+}
+
+fn resolve_ndk_clang_bin(sdk_dir: &Path, env_ndk: Option<&Path>) -> Result<PathBuf> {
+    // GitHub Actions 等 CI 会预装多个 NDK（含非 LTS 预览版），并用 ANDROID_NDK_HOME 指到默认 LTS 版本；
+    // 优先认环境变量，未设时再按数字版本号取 sdk/ndk/ 下最高的一版（避免字典序把 9.x 排在 27.x 后面）。
+    let ndk_dir = match env_ndk.filter(|p| p.is_dir()) {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            let ndk_root = sdk_dir.join("ndk");
+            if !ndk_root.is_dir() {
+                bail!("{} 下没有 ndk 目录", sdk_dir.display());
+            }
+            let mut versions: Vec<PathBuf> = std::fs::read_dir(&ndk_root)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect();
+            versions.sort_by_key(|p| ndk_version_key(p));
+            versions.pop().context("ndk 目录下没有已安装的 NDK 版本")?
+        }
+    };
+    let prebuilt = ndk_dir.join("toolchains/llvm/prebuilt");
     let mut hosts: Vec<PathBuf> = std::fs::read_dir(&prebuilt)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_dir())
@@ -199,6 +213,15 @@ fn find_ndk_clang_bin(sdk_dir: &Path) -> Result<PathBuf> {
     hosts.sort();
     let host_dir = hosts.pop().context("找不到 NDK llvm prebuilt 目录")?;
     Ok(host_dir.join("bin"))
+}
+
+fn ndk_version_key(path: &Path) -> Vec<u64> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .split('.')
+        .map(|seg| seg.parse::<u64>().unwrap_or(0))
+        .collect()
 }
 
 fn rustup_toolchain_bin() -> Result<PathBuf> {
@@ -231,4 +254,32 @@ fn find_java_home() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ndk_selection_prefers_env_and_sorts_versions_numerically() {
+        let tmp = util::TempDir::new("android-ndk-test").unwrap();
+        let sdk = tmp.path();
+        for ver in ["9.1.0", "27.2.12479018", "26.3.11579264"] {
+            std::fs::create_dir_all(sdk.join(format!("ndk/{ver}/toolchains/llvm/prebuilt/linux-x86_64/bin"))).unwrap();
+        }
+        // 未传环境变量时按数字版本选 27.2，不被字典序的 9.1 盖过
+        let picked = resolve_ndk_clang_bin(sdk, None).unwrap();
+        assert_eq!(
+            picked,
+            sdk.join("ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin")
+        );
+
+        // 传入 ANDROID_NDK_HOME 时优先采用指定目录（如 runner 默认 LTS NDK）
+        let pinned = sdk.join("ndk/26.3.11579264");
+        let picked_env = resolve_ndk_clang_bin(sdk, Some(&pinned)).unwrap();
+        assert_eq!(
+            picked_env,
+            pinned.join("toolchains/llvm/prebuilt/linux-x86_64/bin")
+        );
+    }
 }

@@ -461,8 +461,6 @@ impl ServerWindow {
             main = main
                 .child(self.panel_handle("right-resize", ResizeEdge::Left, cx))
                 .child(div().flex_none().w(right_w).h_full().child(self.panels.clone().cached(full())));
-        } else {
-            main = main.child(div().flex_none().w(GAP));
         }
         main.child(self.rightbar.clone())
     }
