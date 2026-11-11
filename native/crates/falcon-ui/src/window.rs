@@ -192,6 +192,10 @@ pub struct ServerWindow {
     panel_resize: Option<PanelDrag>,
     /// macOS：按下了标题条的空白处，下一记移动才开始拖窗口。缩略图不在这块里，点它不会拖窗口
     title_drag: bool,
+    /// 记录侧栏 / 右面板 / 会话总览的显隐代数：首帧记录现状不播动画，后续手动开合或切面板时才平滑过渡
+    sidebar_anim: Option<(bool, usize)>,
+    right_anim: Option<(bool, RightPanelId, usize, bool)>,
+    overview_anim: Option<(bool, usize)>,
     _subs: Vec<Subscription>,
 }
 
@@ -289,6 +293,9 @@ impl ServerWindow {
             focus: cx.focus_handle(),
             panel_resize: None,
             title_drag: false,
+            sidebar_anim: None,
+            right_anim: None,
+            overview_anim: None,
             _subs: subs,
         }
     }
@@ -425,27 +432,90 @@ impl ServerWindow {
 
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use falcon_core::panel_width::ResizeEdge;
+        use gpui_kit::base::animation::ease_out_cubic;
+        use gpui_kit::{Animation, AnimationExt, SharedString};
+        use std::time::Duration;
         // 窄窗口临时收起侧栏，不写回偏好（沿用 React 版的规则：只影响显示，显式开合会解除它）
         let narrow = window.viewport_size().width < zpx(1024.);
         if self.ws.read(cx).state.sidebar_auto_hidden != narrow {
             self.ws.update(cx, |w, _| w.state.set_sidebar_auto_hidden(narrow));
         }
-        let ws = self.ws.read(cx);
-        let sidebar_w = zpx(ws.state.sidebar_width as f32);
-        let right_w = zpx(ws.state.right_width as f32);
-        let show_sidebar = ws.state.sidebar_visible();
-        let show_right = ws.state.right_open;
-        let overview = ws.state.active == ActiveView::Overview;
+        let (sidebar_w, right_w, show_sidebar, show_right, right_panel, overview) = {
+            let ws = self.ws.read(cx);
+            (
+                zpx(ws.state.sidebar_width as f32),
+                zpx(ws.state.right_width as f32),
+                ws.state.sidebar_visible(),
+                ws.state.right_open,
+                ws.state.right_panel.clone(),
+                ws.state.active == ActiveView::Overview,
+            )
+        };
+
+        let sidebar_gen = match self.sidebar_anim {
+            None => {
+                self.sidebar_anim = Some((show_sidebar, 0));
+                0
+            }
+            Some((prev, g)) if prev != show_sidebar => {
+                let next = g + 1;
+                self.sidebar_anim = Some((show_sidebar, next));
+                next
+            }
+            Some((_, g)) => g,
+        };
+        let (right_gen, right_opened_fresh) = match &self.right_anim {
+            None => {
+                self.right_anim = Some((show_right, right_panel, 0, false));
+                (0, false)
+            }
+            Some((prev_open, prev_panel, g, _)) if *prev_open != show_right || *prev_panel != right_panel => {
+                let next = *g + 1;
+                let fresh = !*prev_open && show_right;
+                self.right_anim = Some((show_right, right_panel, next, fresh));
+                (next, fresh)
+            }
+            Some((_, _, g, fresh)) => (*g, *fresh),
+        };
+        let overview_gen = match self.overview_anim {
+            None => {
+                self.overview_anim = Some((overview, 0));
+                0
+            }
+            Some((prev, g)) if prev != overview => {
+                let next = g + 1;
+                self.overview_anim = Some((overview, next));
+                next
+            }
+            Some((_, g)) => g,
+        };
 
         // 侧栏、右侧面板、图标栏走缓存视图：没被 notify 就复用上一帧的布局与绘制。终端刷屏时
         // 只有终端视图在变，不缓存的话整棵树每帧重排——实测 7 行的侧栏每帧就要 3ms 多，
         // 右侧面板开着再加一截。它们都订阅了工作区（变了会 notify），主题切换走
-        // refresh_windows（无视缓存），所以不会画旧。画布不缓存：终端就在它里面
+        // refresh_windows（无视缓存），所以不会画旧。画布不缓存：终端就在它里面。
+        // 面板开合时布局槽位立即占满目标宽度，使终端 PTY 只收到一次最终尺寸的 resize，视觉上由
+        // 短距离平移 + 淡入完成进场
         let full = || gpui_kit::StyleRefinement::default().size_full();
         let mut main = div().flex().flex_1().min_w_0().min_h_0().pl(GAP).pb(GAP);
         if show_sidebar {
+            let slot = div().flex_none().w(sidebar_w).h_full().child(self.sidebar.clone().cached(full()));
+            let slot: AnyElement = if sidebar_gen > 0 {
+                slot.with_animation(
+                    SharedString::from(format!("sidebar-enter-{sidebar_gen}")),
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
+                    |el, delta| {
+                        el.opacity(delta)
+                            .relative()
+                            .left(zpx(-6. * (1. - delta)))
+                    },
+                )
+                .into_any_element()
+            } else {
+                slot.into_any_element()
+            };
             main = main
-                .child(div().flex_none().w(sidebar_w).h_full().child(self.sidebar.clone().cached(full())))
+                .child(slot)
                 .child(self.panel_handle("sidebar-resize", ResizeEdge::Right, cx));
         }
         main = main.child(
@@ -455,12 +525,45 @@ impl ServerWindow {
                 .min_w_0()
                 .h_full()
                 .child(self.canvas.clone())
-                .when(overview, |d| d.child(div().absolute().inset_0().child(self.overview.clone()))),
+                .when(overview, |d| {
+                    let ov = div().absolute().inset_0().child(self.overview.clone());
+                    let ov: AnyElement = if overview_gen > 0 {
+                        ov.with_animation(
+                            SharedString::from(format!("overview-enter-{overview_gen}")),
+                            Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
+                            |el, delta| el.opacity(delta),
+                        )
+                        .into_any_element()
+                    } else {
+                        ov.into_any_element()
+                    };
+                    d.child(ov)
+                }),
         );
         if show_right {
+            let slot = div().flex_none().w(right_w).h_full().child(self.panels.clone().cached(full()));
+            let slot: AnyElement = if right_gen > 0 {
+                let dur = if right_opened_fresh { 150 } else { 120 };
+                slot.with_animation(
+                    SharedString::from(format!("right-enter-{right_gen}")),
+                    Animation::new(Duration::from_millis(dur)).with_easing(ease_out_cubic),
+                    move |el, delta| {
+                        if right_opened_fresh {
+                            el.opacity(delta)
+                                .relative()
+                                .left(zpx(6. * (1. - delta)))
+                        } else {
+                            el.opacity(0.45 + 0.55 * delta)
+                        }
+                    },
+                )
+                .into_any_element()
+            } else {
+                slot.into_any_element()
+            };
             main = main
                 .child(self.panel_handle("right-resize", ResizeEdge::Left, cx))
-                .child(div().flex_none().w(right_w).h_full().child(self.panels.clone().cached(full())));
+                .child(slot);
         }
         main.child(self.rightbar.clone())
     }
@@ -472,20 +575,28 @@ impl ServerWindow {
         let active = self.panel_resize.as_ref().is_some_and(|d| d.edge == edge);
         div()
             .id(id)
+            .group(id)
             .flex_none()
             .w(GAP)
             .h_full()
             .flex()
+            .items_center()
             .justify_center()
             .cursor(gpui_kit::CursorStyle::ResizeLeftRight)
-            .child(
+            .child(if active {
                 div()
                     .w(zpx(2.))
                     .h_full()
                     .my(zpx(12.))
                     .rounded_full()
-                    .when(active, |d| d.bg(ui.primary)),
-            )
+                    .bg(ui.primary)
+            } else {
+                div()
+                    .w(zpx(2.5))
+                    .h(zpx(36.))
+                    .rounded_full()
+                    .group_hover(id, |s| s.bg(ui.muted_foreground.opacity(0.35)))
+            })
             .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
                 let ws = this.ws.read(cx);
                 if e.click_count >= 2 {

@@ -15,7 +15,7 @@ use super::agent::{launcher_dir, remote_launcher_path, write_remote_launcher_com
 use super::backend::{AttachResult, Backend, BackendCallbacks};
 use super::ssh::SshLink;
 use crate::askpass::hub::AskpassHub;
-use crate::askpass::install::{askpass_bin_dir, posix_write_askpass_command};
+use crate::askpass::install::{askpass_bin_dir, askpass_session_env, posix_write_askpass_command};
 use crate::exec::{Exec as _, ExecResult, Utf8Decoder};
 use crate::host::{
     POSIX_PROBE_LINES, WINDOWS_PROBE_SCRIPT, encode_powershell, legacy_remote_root, migrate_remote_root_command,
@@ -468,6 +468,17 @@ impl SshLink {
         let _ = self.exec(&exec_command(deployed.kind, &kill_argv(&deployed.bin, &deployed.root, sids)), None).await;
     }
 
+    /// 结构化模式不允许脚本准备失败后静默落回真实终端。
+    pub async fn ensure_native_agent_launcher(self: &Rc<Self>, agent: SessionAgent, shell: Option<&str>) -> Option<String> {
+        let probe = self.probe(None, 1).await.ok()?;
+        if probe.kind != HostKind::Posix { return None; }
+        let dir = launcher_dir(probe.kind, &probe.root);
+        let shell = shell.unwrap_or(&probe.shell);
+        let command = super::agent::write_remote_native_launcher_command(probe.kind, &dir, agent, shell);
+        let res = self.exec(&command, None).await.ok()?;
+        res.ok().then(|| super::agent::remote_native_launcher_path(probe.kind, &probe.root, agent))
+    }
+
     // ---- 附着 ----
 
     /// 持久会话：经 bridge 连上宿主机上的 holder（新建时带 `--create`，由它拉起会话）
@@ -484,8 +495,8 @@ impl SshLink {
             // 项目没指定就用探测到的登录 shell，不能不传
             let shell = opts.shell.clone().or_else(|| self.probed_shell()).unwrap_or_else(|| "/bin/sh".into());
             let mut env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance, kind);
-            if opts.askpass_bin.is_some() {
-                env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
+            if let Some(bin) = &opts.askpass_bin {
+                env.extend(askpass_session_env(bin, &opts.session_id));
             }
             env.push(("FALCON_SESSIOND_ID".into(), sid.clone()));
             env.extend(opts.env.iter().cloned());
@@ -505,8 +516,8 @@ impl SshLink {
         let probed_shell = self.probed_shell();
 
         let mut term_env = apply_term_pty_env(Vec::<(String, String)>::new(), opts.appearance, kind);
-        if opts.askpass_bin.is_some() {
-            term_env.push(("FALCON_SESSION_ID".into(), opts.session_id.clone()));
+        if let Some(bin) = &opts.askpass_bin {
+            term_env.extend(askpass_session_env(bin, &opts.session_id));
         }
         term_env.extend(opts.env.iter().cloned());
 

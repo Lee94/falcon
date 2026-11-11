@@ -33,6 +33,7 @@ pub fn open_head(ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
         dialog
             .title(t!("askpass.title").to_string())
             .w(zpx(420.))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             .child(
                 div()
                     .flex()

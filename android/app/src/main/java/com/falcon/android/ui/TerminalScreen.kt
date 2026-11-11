@@ -35,7 +35,8 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -44,7 +45,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,8 +63,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -75,6 +77,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.falcon.android.bridge.FalconNative
+import com.falcon.android.model.AgentViewStateUi
 import com.falcon.android.model.AskpassPromptUi
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.ProgramBadgeUi
@@ -87,6 +90,10 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
+
+private const val TERM_PREFS = "falcon_android_prefs"
+private const val KEY_FONT_SIZE_SP = "term_font_size_sp"
+private const val KEY_EXTRA_KEYS_EXPANDED = "term_extra_keys_expanded"
 
 @Composable
 fun TerminalScreen(
@@ -101,6 +108,14 @@ fun TerminalScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val theme = LocalFalconTheme.current
+    val monoFont = LocalFalconMonoFont.current
+
+    val prefs = remember(context) {
+        context.getSharedPreferences(TERM_PREFS, Context.MODE_PRIVATE)
+    }
+    var extraKeysExpanded by remember {
+        mutableStateOf(prefs.getBoolean(KEY_EXTRA_KEYS_EXPANDED, true))
+    }
 
     var session by remember { mutableStateOf(initialSession) }
     var liveTitle by remember { mutableStateOf(initialSession.title) }
@@ -122,7 +137,7 @@ fun TerminalScreen(
     var shiftLocked by remember { mutableStateOf(false) }
 
     var selectedText by remember { mutableStateOf<String?>(null) }
-    var displayOffset by remember { mutableIntStateOf(0) }
+    var isScrolledUp by remember { mutableStateOf(false) }
     var isSizeOwner by remember { mutableStateOf(true) }
     var gridSize by remember { mutableStateOf(80 to 24) }
 
@@ -132,6 +147,11 @@ fun TerminalScreen(
     var showTerminateDialog by remember { mutableStateOf(false) }
     var busyCommand by remember { mutableStateOf<String?>(null) }
     var uploadingImage by remember { mutableStateOf(false) }
+
+    var agentState by remember { mutableStateOf<AgentViewStateUi?>(null) }
+    // 仅切换 Falcon 对同一结构化会话的绘制样式，不改变 socket 或 CLI 生命周期。
+    var agentTerminalStyle by remember(initialSession.id) { mutableStateOf(false) }
+    val agentComposerFocus = remember(initialSession.id) { androidx.compose.ui.focus.FocusRequester() }
 
     var canvasViewRef by remember { mutableStateOf<TerminalCanvasView?>(null) }
     var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
@@ -197,6 +217,7 @@ fun TerminalScreen(
                 if (h == 0L) return
                 val resultJson = FalconNative.onBinaryFrame(h, bytes.toByteArray())
                 canvasViewRef?.requestRender()
+                if (!resultJson.contains("\"type\"")) return
                 try {
                     val obj = JSONObject(resultJson)
                     val effects = obj.optJSONArray("effects")
@@ -271,6 +292,56 @@ fun TerminalScreen(
                             val owner = obj.optBoolean("owner", true)
                             FalconNative.onServerSize(h, c, r, owner)
                             canvasViewRef?.requestRender()
+                        }
+                        "agentSnapshot" -> {
+                            JsonParsers.parseAgentSnapshot(obj.optJSONObject("state"))?.let { snap ->
+                                agentState = snap
+                            }
+                        }
+                        "agentEntry" -> {
+                            JsonParsers.parseAgentEntry(obj.optJSONObject("entry"))?.let { entry ->
+                                agentState = agentState?.upsertEntry(entry)
+                            }
+                        }
+                        "agentDelta" -> {
+                            val id = obj.optString("id")
+                            val dKind = obj.optString("deltaKind")
+                            val delta = obj.optString("delta")
+                            agentState = agentState?.applyDelta(id, dKind, delta)
+                        }
+                        "agentMeta" -> {
+                            agentState?.let { cur ->
+                                val model = if (obj.has("model") && !obj.isNull("model")) obj.optString("model") else cur.model
+                                val perm = if (obj.has("permissionMode") && !obj.isNull("permissionMode")) obj.optString("permissionMode") else cur.permissionMode
+                                val cwd = if (obj.has("cwd") && !obj.isNull("cwd")) obj.optString("cwd") else cur.cwd
+                                val cmds = if (obj.has("commands") && !obj.isNull("commands")) {
+                                    JsonParsers.parseSlashCommands(obj.optJSONArray("commands"))
+                                } else {
+                                    cur.commands
+                                }
+                                val models = if (obj.has("models") && !obj.isNull("models")) {
+                                    JsonParsers.parseStringList(obj.optJSONArray("models"))
+                                } else {
+                                    cur.models
+                                }
+                                val options = if (obj.has("modelOptions") && !obj.isNull("modelOptions")) {
+                                    JsonParsers.parseModelOptions(obj.optJSONArray("modelOptions"))
+                                } else {
+                                    cur.modelOptions
+                                }
+                                val nextActive = obj.optBoolean("active", cur.active)
+                                agentState = cur.copy(
+                                    active = nextActive,
+                                    status = obj.optString("status", cur.status),
+                                    model = model,
+                                    permissionMode = perm,
+                                    cwd = cwd,
+                                    commands = cmds,
+                                    models = models,
+                                    modelOptions = options,
+                                    reasoningEffort = if (obj.isNull("reasoningEffort")) null else obj.optString("reasoningEffort")
+                                )
+                            }
                         }
                     }
                 } catch (_: Exception) {
@@ -379,6 +450,13 @@ fun TerminalScreen(
         }
     }
 
+    val updateAndSaveFontSize: (Float) -> Unit = { newSp ->
+        canvasViewRef?.let { view ->
+            view.setFontSizeSp(newSp)
+            prefs.edit().putFloat(KEY_FONT_SIZE_SP, view.getFontSizeSp()).apply()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -387,7 +465,7 @@ fun TerminalScreen(
             .navigationBarsPadding()
             .imePadding()
     ) {
-        // 顶部标题栏：严格不随状态增删终端视图行高（程序状态胶囊与连接状态内嵌在固定高度标题栏内）
+        // 顶部单行超紧凑标题栏（34dp + 1.5dp 状态色线）：严格固定高度，不随状态增删终端视图行高
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -396,67 +474,65 @@ fun TerminalScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .height(34.dp)
                     .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                IconButton(onClick = onBackDetach) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "断开视图并返回",
-                        tint = theme.foreground
-                    )
-                }
+                TerminalHeaderIconButton(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "断开视图并返回",
+                    tint = theme.foreground,
+                    onClick = onBackDetach
+                )
 
-                Column(
+                // 状态圆点 + 标题 + 项目名 + 网格/连接状态内联单行排布
+                Row(
                     modifier = Modifier
                         .weight(1f)
-                        .padding(end = 6.dp)
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // 连接与会话状态指示点
-                        val dotColor = when {
-                            sessionState == "dead" -> theme.destructive
-                            !wsConnected || sessionState == "unverified" || sshReconnectAttempt > 0 -> theme.warning
-                            else -> theme.success
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(dotColor)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = effectiveTitle,
-                            color = theme.foreground,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                    val dotColor = when {
+                        sessionState == "dead" -> theme.destructive
+                        !wsConnected || sessionState == "unverified" || sshReconnectAttempt > 0 -> theme.warning
+                        programBadge?.tone == "blocked" -> theme.warning
+                        else -> theme.success
                     }
-                    val subText = buildString {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = effectiveTitle,
+                        color = theme.foreground,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        fontFamily = monoFont,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    val metaText = buildString {
                         append(session.projectName)
-                        if (!isSizeOwner) {
-                            append(" · 跟随尺寸 ${gridSize.first}×${gridSize.second}")
-                        } else if (!wsConnected) {
-                            append(" · 重连中($wsRetryAttempt)")
-                        } else if (sshReconnectAttempt > 0) {
-                            append(" · SSH 重连中($sshReconnectAttempt)")
-                        } else if (sessionState == "unverified") {
-                            append(" · 待接回")
-                        } else if (sessionState == "dead") {
-                            append(" · 已结束")
-                        } else {
-                            append(" · ${gridSize.first}×${gridSize.second}")
+                        when {
+                            !wsConnected -> append(" · 重连($wsRetryAttempt)")
+                            sshReconnectAttempt > 0 -> append(" · SSH($sshReconnectAttempt)")
+                            sessionState == "unverified" -> append(" · 待接回")
+                            sessionState == "dead" -> append(" · 已结束")
+                            !isSizeOwner -> append(" · 跟随 ${gridSize.first}×${gridSize.second}")
+                            else -> append(" · ${gridSize.first}×${gridSize.second}")
                         }
                     }
                     Text(
-                        text = subText,
+                        text = metaText,
                         color = theme.mutedForeground,
-                        fontSize = 11.sp,
+                        fontSize = 10.5.sp,
+                        fontFamily = monoFont,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -470,46 +546,55 @@ fun TerminalScreen(
                         "done" -> theme.success
                         else -> theme.tintStrong
                     }
+                    val badgeLabel = buildString {
+                        append(badge.shortLabel)
+                        if (badge.progress != null) {
+                            append(" ${badge.progress}%")
+                        }
+                    }
                     Box(
                         modifier = Modifier
-                            .padding(end = 4.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(badgeColor.copy(alpha = 0.18f))
-                            .border(1.dp, badgeColor.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .height(19.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(badgeColor.copy(alpha = 0.16f))
+                            .border(0.8.dp, badgeColor.copy(alpha = 0.45f), RoundedCornerShape(5.dp))
+                            .padding(horizontal = 6.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = badge.shortLabel,
+                            text = badgeLabel,
                             color = badgeColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
+                            fontSize = 10.sp,
+                            fontFamily = monoFont,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
                         )
                     }
                 }
 
                 // 若处于历史翻阅状态，提供一键回到底部按钮
-                if (displayOffset > 0) {
-                    IconButton(
+                if (isScrolledUp) {
+                    TerminalHeaderIconButton(
+                        icon = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "回到底部",
+                        tint = theme.tintStrong,
                         onClick = {
                             if (nativeHandle != 0L) {
                                 FalconNative.scrollToBottom(nativeHandle)
                                 canvasViewRef?.requestRender()
                             }
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = "回到底部",
-                            tint = theme.tintStrong
-                        )
-                    }
+                    )
                 }
 
                 // 选区存在时显示复制按钮
                 if (!selectedText.isNullOrEmpty()) {
-                    IconButton(
+                    TerminalHeaderIconButton(
+                        icon = Icons.Default.ContentCopy,
+                        contentDescription = "复制选中内容",
+                        tint = theme.tintStrong,
                         onClick = {
-                            val text = selectedText ?: return@IconButton
+                            val text = selectedText ?: return@TerminalHeaderIconButton
                             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                             cm?.setPrimaryClip(ClipData.newPlainText("Falcon Terminal", text))
                             FalconNative.clearSelection(nativeHandle)
@@ -517,38 +602,65 @@ fun TerminalScreen(
                             canvasViewRef?.requestRender()
                             onToast("已复制选中文本")
                         }
+                    )
+                }
+
+                // 已有结构化会话保留两种显示外观；默认 CLI 会话使用实际终端网格。
+                val hasAgentView = agentState?.active == true
+                if (hasAgentView) {
+                    Box(
+                        modifier = Modifier
+                            .height(22.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(if (!agentTerminalStyle) theme.tint else theme.secondary)
+                            .clickable {
+                                agentTerminalStyle = !agentTerminalStyle
+                                agentComposerFocus.requestFocus()
+                            }
+                            .padding(horizontal = 6.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "复制选中内容",
-                            tint = theme.tintStrong
+                        Text(
+                            text = if (agentTerminalStyle) "紧凑 → 图形" else "图形 → 紧凑",
+                            color = if (!agentTerminalStyle) theme.tintStrong else theme.mutedForeground,
+                            fontSize = 10.sp,
+                            fontFamily = monoFont,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                 }
 
-                // 粘贴图片按钮
-                IconButton(
-                    enabled = !uploadingImage,
-                    onClick = { imagePickerLauncher.launch("image/*") }
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .clickable(enabled = !uploadingImage) {
+                            imagePickerLauncher.launch("image/*")
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
                     if (uploadingImage) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(13.dp),
+                            strokeWidth = 1.6.dp,
                             color = theme.tintStrong
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.Image,
                             contentDescription = "粘贴图片到终端",
-                            tint = theme.foreground
+                            tint = theme.mutedForeground,
+                            modifier = Modifier.size(15.dp)
                         )
                     }
                 }
 
                 // 断线或 unverified 时提供立即重连/接回按钮
                 if (!wsConnected || sessionState == "unverified") {
-                    IconButton(
+                    TerminalHeaderIconButton(
+                        icon = Icons.Default.Refresh,
+                        contentDescription = "立即接回",
+                        tint = theme.warning,
                         onClick = {
                             scope.launch {
                                 if (sessionState == "unverified") {
@@ -557,30 +669,23 @@ fun TerminalScreen(
                                 reconnectTrigger++
                             }
                         }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "立即接回",
-                            tint = theme.warning
-                        )
-                    }
+                    )
                 }
 
                 Box {
-                    IconButton(onClick = { showMoreMenu = true }) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "更多操作",
-                            tint = theme.foreground
-                        )
-                    }
+                    TerminalHeaderIconButton(
+                        icon = Icons.Default.MoreHoriz,
+                        contentDescription = "更多操作",
+                        tint = theme.mutedForeground,
+                        onClick = { showMoreMenu = true }
+                    )
                     DropdownMenu(
                         expanded = showMoreMenu,
                         onDismissRequest = { showMoreMenu = false },
                         modifier = Modifier.background(theme.card)
                     ) {
                         DropdownMenuItem(
-                            text = { Text("粘贴剪贴板文本", color = theme.foreground) },
+                            text = { Text("粘贴剪贴板文本", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -593,21 +698,35 @@ fun TerminalScreen(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("放大字号 (+)", color = theme.foreground) },
+                            text = { Text("放大字号 (+)", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
-                                canvasViewRef?.let { it.setFontSizeSp(it.getFontSizeSp() + 1.5f) }
+                                canvasViewRef?.let { updateAndSaveFontSize(it.getFontSizeSp() + 1.0f) }
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("缩小字号 (−)", color = theme.foreground) },
+                            text = { Text("缩小字号 (−)", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
-                                canvasViewRef?.let { it.setFontSizeSp(it.getFontSizeSp() - 1.5f) }
+                                canvasViewRef?.let { updateAndSaveFontSize(it.getFontSizeSp() - 1.0f) }
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("重命名会话…", color = theme.foreground) },
+                            text = {
+                                Text(
+                                    if (extraKeysExpanded) "切换为单排按键栏" else "展开双排按键栏",
+                                    color = theme.foreground,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                extraKeysExpanded = !extraKeysExpanded
+                                prefs.edit().putBoolean(KEY_EXTRA_KEYS_EXPANDED, extraKeysExpanded).apply()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("重命名会话…", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
                                 renameInput = customName
@@ -615,7 +734,7 @@ fun TerminalScreen(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("重新连接 / 接回", color = theme.foreground) },
+                            text = { Text("重新连接 / 接回", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
                                 scope.launch {
@@ -625,14 +744,14 @@ fun TerminalScreen(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("断开视图（后台保持运行）", color = theme.foreground) },
+                            text = { Text("断开视图（后台保持运行）", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
                                 onBackDetach()
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("终止会话（Terminate）…", color = theme.destructive) },
+                            text = { Text("终止会话（Terminate）…", color = theme.destructive, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
                                 scope.launch {
@@ -646,7 +765,7 @@ fun TerminalScreen(
                 }
             }
 
-            // 标题栏底边状态色线（与桌面端 terminal/title_status.rs 同口径，占固定 2dp）
+            // 标题栏底边状态色线（与桌面端 terminal/title_status.rs 同口径，固定 1.5dp）
             val bottomLineColor = when (programBadge?.tone) {
                 "blocked" -> theme.warning
                 "error" -> theme.destructive
@@ -656,106 +775,173 @@ fun TerminalScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(2.dp)
+                    .height(1.5.dp)
                     .background(bottomLineColor)
             )
         }
 
-        // 中部：终端网格 Canvas 视图
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(theme.terminalBackground)
-        ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    TerminalCanvasView(ctx).apply {
-                        this.sessionHandle = nativeHandle
-                        this.outsideAreaColor = theme.app.toArgb()
-                        this.onSendWsMessages = sendWsMessages
-                        this.onViewportGridChanged = { c, r ->
-                            gridSize = c to r
-                        }
-                        this.onSelectionChanged = { sel ->
-                            selectedText = sel
-                        }
-                        this.onRenderStateUpdated = { offset, _, owner, gCols, gRows ->
-                            displayOffset = offset
-                            isSizeOwner = owner
-                            gridSize = gCols to gRows
-                        }
-                        this.consumeStickyModifiers = {
-                            val current = Triple(ctrlLocked, altLocked, shiftLocked)
-                            if (ctrlLocked || altLocked || shiftLocked) {
-                                ctrlLocked = false
-                                altLocked = false
-                                shiftLocked = false
-                            }
-                            current
-                        }
-                        canvasViewRef = this
-                        post { requestFocus() }
-                    }
+        val hasAgentView = agentState?.active == true
+        if (hasAgentView) {
+            val currentAgentState = agentState!!
+            AgentSessionView(
+                state = currentAgentState,
+                terminalStyle = agentTerminalStyle,
+                available = wsConnected && sessionState == "active" && sshReconnectAttempt == 0,
+                composerFocus = agentComposerFocus,
+                theme = theme,
+                monoFont = monoFont,
+                onSendPrompt = { prompt ->
+                    val payload = JSONObject().apply {
+                        put("type", "agent_prompt")
+                        put("text", prompt)
+                    }.toString()
+                    activeWebSocket?.send(payload)
+                    activeWebSocket?.send("""{"type":"status_seen"}""")
                 },
-                update = { view ->
-                    view.sessionHandle = nativeHandle
-                    view.outsideAreaColor = theme.app.toArgb()
-                    view.onSendWsMessages = sendWsMessages
-                }
+                onInterrupt = {
+                    activeWebSocket?.send("""{"type":"agent_interrupt"}""")
+                },
+                onApprovePermission = { callId, decision ->
+                    val payload = JSONObject().apply {
+                        put("type", "agent_permission")
+                        put("callId", callId)
+                        put("decision", decision)
+                    }.toString()
+                    activeWebSocket?.send(payload)
+                    activeWebSocket?.send("""{"type":"status_seen"}""")
+                },
+                onSelectModel = { model ->
+                    val payload = JSONObject().apply {
+                        put("type", "agent_set_model")
+                        put("model", model)
+                    }.toString()
+                    activeWebSocket?.send(payload)
+                },
+                onSelectReasoningEffort = { effort ->
+                    val payload = JSONObject().apply {
+                        put("type", "agent_set_reasoning_effort")
+                        put("effort", effort ?: JSONObject.NULL)
+                    }.toString()
+                    activeWebSocket?.send(payload)
+                },
+                onToggleStyle = {
+                    agentTerminalStyle = !agentTerminalStyle
+                    agentComposerFocus.requestFocus()
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
             )
-        }
+        } else {
+            // 中部：终端网格 Canvas 视图
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(theme.terminalBackground)
+            ) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        TerminalCanvasView(ctx).apply {
+                            val savedFontSp = prefs.getFloat(KEY_FONT_SIZE_SP, 12.0f)
+                            this.setFontSizeSp(savedFontSp)
+                            this.sessionHandle = nativeHandle
+                            this.outsideAreaColor = theme.app.toArgb()
+                            this.onSendWsMessages = sendWsMessages
+                            this.onViewportGridChanged = { c, r ->
+                                gridSize = c to r
+                            }
+                            this.onFontSizeChanged = { sp ->
+                                prefs.edit().putFloat(KEY_FONT_SIZE_SP, sp).apply()
+                            }
+                            this.onSelectionChanged = { sel ->
+                                selectedText = sel
+                            }
+                            this.onRenderStateUpdated = { scrolledUp, owner, gCols, gRows ->
+                                post {
+                                    isScrolledUp = scrolledUp
+                                    isSizeOwner = owner
+                                    gridSize = gCols to gRows
+                                }
+                            }
+                            this.consumeStickyModifiers = {
+                                val current = Triple(ctrlLocked, altLocked, shiftLocked)
+                                if (ctrlLocked || altLocked || shiftLocked) {
+                                    ctrlLocked = false
+                                    altLocked = false
+                                    shiftLocked = false
+                                }
+                                current
+                            }
+                            canvasViewRef = this
+                            post { requestFocus() }
+                        }
+                    },
+                    update = { view ->
+                        view.sessionHandle = nativeHandle
+                        view.outsideAreaColor = theme.app.toArgb()
+                        view.onSendWsMessages = sendWsMessages
+                    }
+                )
+            }
 
-        // 底部：移动端双排扩展按键栏
-        MobileTerminalKeyBar(
-            theme = theme,
-            ctrlLocked = ctrlLocked,
-            altLocked = altLocked,
-            shiftLocked = shiftLocked,
-            onToggleCtrl = { ctrlLocked = !ctrlLocked },
-            onToggleAlt = { altLocked = !altLocked },
-            onToggleShift = { shiftLocked = !shiftLocked },
-            onSendKey = { key, forceCtrl, forceAlt, forceShift ->
-                val c = forceCtrl || ctrlLocked
-                val a = forceAlt || altLocked
-                val s = forceShift || shiftLocked
-                ctrlLocked = false
-                altLocked = false
-                shiftLocked = false
-                canvasViewRef?.sendKey(key, ctrl = c, alt = a, shift = s)
-            },
-            onSendText = { txt ->
-                if (ctrlLocked || altLocked) {
-                    val c = ctrlLocked
-                    val a = altLocked
-                    val s = shiftLocked
+            // 底部：高密度移动端扩展按键栏（支持单/双排折叠，右侧固定软键盘与折叠开关）
+            MobileTerminalKeyBar(
+                theme = theme,
+                monoFont = monoFont,
+                expanded = extraKeysExpanded,
+                ctrlLocked = ctrlLocked,
+                altLocked = altLocked,
+                shiftLocked = shiftLocked,
+                onToggleExpanded = {
+                    extraKeysExpanded = !extraKeysExpanded
+                    prefs.edit().putBoolean(KEY_EXTRA_KEYS_EXPANDED, extraKeysExpanded).apply()
+                },
+                onToggleCtrl = { ctrlLocked = !ctrlLocked },
+                onToggleAlt = { altLocked = !altLocked },
+                onToggleShift = { shiftLocked = !shiftLocked },
+                onSendKey = { key, forceCtrl, forceAlt, forceShift ->
+                    val c = forceCtrl || ctrlLocked
+                    val a = forceAlt || altLocked
+                    val s = forceShift || shiftLocked
                     ctrlLocked = false
                     altLocked = false
                     shiftLocked = false
-                    canvasViewRef?.sendKey(txt, ctrl = c, alt = a, shift = s)
-                } else {
-                    val h = nativeHandle
-                    if (h != 0L) {
-                        val chunks = FalconNative.encodeText(h, txt)
-                        sendWsMessages(JsonParsers.parseStringArray(chunks))
-                        canvasViewRef?.requestRender()
+                    canvasViewRef?.sendKey(key, ctrl = c, alt = a, shift = s)
+                },
+                onSendText = { txt ->
+                    if (ctrlLocked || altLocked) {
+                        val c = ctrlLocked
+                        val a = altLocked
+                        val s = shiftLocked
+                        ctrlLocked = false
+                        altLocked = false
+                        shiftLocked = false
+                        canvasViewRef?.sendKey(txt, ctrl = c, alt = a, shift = s)
+                    } else {
+                        val h = nativeHandle
+                        if (h != 0L) {
+                            val chunks = FalconNative.encodeText(h, txt)
+                            sendWsMessages(JsonParsers.parseStringArray(chunks))
+                            canvasViewRef?.requestRender()
+                        }
                     }
+                },
+                onPasteClipboard = {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                    if (!text.isNullOrEmpty()) {
+                        canvasViewRef?.sendPaste(text)
+                    } else {
+                        onToast("剪贴板为空")
+                    }
+                },
+                onToggleIme = {
+                    canvasViewRef?.toggleSoftKeyboard()
                 }
-            },
-            onPasteClipboard = {
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-                if (!text.isNullOrEmpty()) {
-                    canvasViewRef?.sendPaste(text)
-                } else {
-                    onToast("剪贴板为空")
-                }
-            },
-            onToggleIme = {
-                canvasViewRef?.toggleSoftKeyboard()
-            }
-        )
+            )
+        }
     }
 
     // Askpass 弹窗（sudo / SSH 密码请求）
@@ -765,21 +951,21 @@ fun TerminalScreen(
             onDismissRequest = {},
             containerColor = theme.card,
             title = {
-                Text("需要密码", color = theme.foreground, fontWeight = FontWeight.SemiBold)
+                Text("需要密码", color = theme.foreground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             },
             text = {
                 Column {
                     Text(
                         text = currentAskpass.prompt,
                         color = theme.mutedForeground,
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace
+                        fontSize = 12.sp,
+                        fontFamily = monoFont
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = askpassPassword,
                         onValueChange = { askpassPassword = it },
-                        label = { Text("密码") },
+                        label = { Text("密码", fontSize = 12.sp) },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
@@ -798,7 +984,7 @@ fun TerminalScreen(
                         }
                     }
                 ) {
-                    Text("确定")
+                    Text("确定", fontSize = 13.sp)
                 }
             },
             dismissButton = {
@@ -812,7 +998,7 @@ fun TerminalScreen(
                         }
                     }
                 ) {
-                    Text("取消", color = theme.mutedForeground)
+                    Text("取消", color = theme.mutedForeground, fontSize = 13.sp)
                 }
             }
         )
@@ -823,12 +1009,12 @@ fun TerminalScreen(
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
             containerColor = theme.card,
-            title = { Text("重命名会话", color = theme.foreground) },
+            title = { Text("重命名会话", color = theme.foreground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) },
             text = {
                 OutlinedTextField(
                     value = renameInput,
                     onValueChange = { renameInput = it },
-                    placeholder = { Text("留空则使用自动标题") },
+                    placeholder = { Text("留空则使用自动标题", fontSize = 12.sp) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -849,12 +1035,12 @@ fun TerminalScreen(
                         }
                     }
                 ) {
-                    Text("保存")
+                    Text("保存", fontSize = 13.sp)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = false }) {
-                    Text("取消", color = theme.mutedForeground)
+                    Text("取消", color = theme.mutedForeground, fontSize = 13.sp)
                 }
             }
         )
@@ -868,22 +1054,24 @@ fun TerminalScreen(
             title = {
                 Text(
                     text = if (busyCommand != null) {
-                        "「$effectiveTitle」里有程序正在运行"
+                        "「$effectiveTitle」正在运行程序"
                     } else {
                         "终止会话「$effectiveTitle」？"
                     },
-                    color = theme.foreground
+                    color = theme.foreground,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
             },
             text = {
                 Text(
                     text = if (busyCommand != null) {
-                        "正在运行「$busyCommand」。终止会话会结束底层 shell 并杀掉正在运行的命令，此操作不可撤销。\n\n若希望会话留在后台继续运行，请点取消并直接返回。"
+                        "正在运行「$busyCommand」。终止会话会结束底层 shell 并杀掉正在运行的命令，不可撤销。\n\n若希望会话留在后台继续运行，请点取消并直接返回。"
                     } else {
                         "该会话底层 shell 及其中正在运行的命令会被结束，此操作不可撤销。"
                     },
                     color = theme.mutedForeground,
-                    fontSize = 13.sp
+                    fontSize = 12.5.sp
                 )
             },
             confirmButton = {
@@ -902,12 +1090,12 @@ fun TerminalScreen(
                         }
                     }
                 ) {
-                    Text("终止会话", color = Color.White)
+                    Text("终止会话", color = Color.White, fontSize = 13.sp)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showTerminateDialog = false }) {
-                    Text("取消", color = theme.mutedForeground)
+                    Text("取消", color = theme.mutedForeground, fontSize = 13.sp)
                 }
             }
         )
@@ -915,11 +1103,37 @@ fun TerminalScreen(
 }
 
 @Composable
+private fun TerminalHeaderIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = Modifier.size(15.dp)
+        )
+    }
+}
+
+@Composable
 private fun MobileTerminalKeyBar(
     theme: FalconThemeTokens,
+    monoFont: FontFamily,
+    expanded: Boolean,
     ctrlLocked: Boolean,
     altLocked: Boolean,
     shiftLocked: Boolean,
+    onToggleExpanded: () -> Unit,
     onToggleCtrl: () -> Unit,
     onToggleAlt: () -> Unit,
     onToggleShift: () -> Unit,
@@ -928,70 +1142,203 @@ private fun MobileTerminalKeyBar(
     onPasteClipboard: () -> Unit,
     onToggleIme: () -> Unit
 ) {
+    val view = LocalView.current
+    val hapticTap = {
+        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(theme.sidebar)
-            .padding(vertical = 4.dp)
     ) {
-        // 第一排：核心控制键与方向键
-        Row(
+        // 顶部分隔细线
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            KeyBarButton("ESC", theme) { onSendKey("escape", false, false, false) }
-            KeyBarButton("TAB", theme) { onSendKey("tab", false, false, false) }
-            KeyBarButton("CTRL", theme, active = ctrlLocked, onClick = onToggleCtrl)
-            KeyBarButton("ALT", theme, active = altLocked, onClick = onToggleAlt)
-            KeyBarButton("SHIFT", theme, active = shiftLocked, onClick = onToggleShift)
-            KeyBarButton("↑", theme) { onSendKey("up", false, false, false) }
-            KeyBarButton("↓", theme) { onSendKey("down", false, false, false) }
-            KeyBarButton("←", theme) { onSendKey("left", false, false, false) }
-            KeyBarButton("→", theme) { onSendKey("right", false, false, false) }
-            KeyBarButton("ENTER", theme) { onSendKey("enter", false, false, false) }
-            KeyBarIconButton(
-                icon = Icons.Default.Keyboard,
-                contentDesc = "切换软键盘",
-                theme = theme,
-                onClick = onToggleIme
-            )
-        }
+                .height(0.8.dp)
+                .background(theme.muted)
+        )
 
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // 第二排：终端高频信号键、跳转键与符号
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 4.dp, vertical = 2.5.dp),
+            verticalArrangement = Arrangement.spacedBy(2.5.dp)
         ) {
-            KeyBarButton("^C", theme) { onSendKey("c", true, false, false) }
-            KeyBarButton("^D", theme) { onSendKey("d", true, false, false) }
-            KeyBarButton("^Z", theme) { onSendKey("z", true, false, false) }
-            KeyBarButton("^L", theme) { onSendKey("l", true, false, false) }
-            KeyBarButton("^R", theme) { onSendKey("r", true, false, false) }
-            KeyBarButton("HOME", theme) { onSendKey("home", false, false, false) }
-            KeyBarButton("END", theme) { onSendKey("end", false, false, false) }
-            KeyBarButton("PGUP", theme) { onSendKey("pageup", false, false, false) }
-            KeyBarButton("PGDN", theme) { onSendKey("pagedown", false, false, false) }
-            KeyBarButton("/", theme) { onSendText("/") }
-            KeyBarButton("-", theme) { onSendText("-") }
-            KeyBarButton("|", theme) { onSendText("|") }
-            KeyBarButton("~", theme) { onSendText("~") }
-            KeyBarButton("_", theme) { onSendText("_") }
-            KeyBarIconButton(
-                icon = Icons.Default.ContentPaste,
-                contentDesc = "粘贴",
-                theme = theme,
-                onClick = onPasteClipboard
-            )
+            // 第一排：左侧高频修饰与方向键滚动区 + 右侧常驻固定软键盘与单/双排切换键
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    KeyBarButton("ESC", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("escape", false, false, false)
+                    }
+                    KeyBarButton("TAB", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("tab", false, false, false)
+                    }
+                    KeyBarButton("CTRL", theme, monoFont, active = ctrlLocked) {
+                        hapticTap()
+                        onToggleCtrl()
+                    }
+                    KeyBarButton("ALT", theme, monoFont, active = altLocked) {
+                        hapticTap()
+                        onToggleAlt()
+                    }
+                    KeyBarButton("SHIFT", theme, monoFont, active = shiftLocked) {
+                        hapticTap()
+                        onToggleShift()
+                    }
+                    KeyBarButton("←", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("left", false, false, false)
+                    }
+                    KeyBarButton("↓", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("down", false, false, false)
+                    }
+                    KeyBarButton("↑", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("up", false, false, false)
+                    }
+                    KeyBarButton("→", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("right", false, false, false)
+                    }
+                    KeyBarButton("⏎", theme, monoFont) {
+                        hapticTap()
+                        onSendKey("enter", false, false, false)
+                    }
+                    if (!expanded) {
+                        KeyBarButton("^C", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("c", true, false, false)
+                        }
+                        KeyBarButton("/", theme, monoFont) {
+                            hapticTap()
+                            onSendText("/")
+                        }
+                        KeyBarButton("-", theme, monoFont) {
+                            hapticTap()
+                            onSendText("-")
+                        }
+                    }
+                }
+
+                // 右侧固定区：折叠/展开第二排 + 调出/收起软键盘（永远不需横向滚动即可触达）
+                KeyBarIconButton(
+                    icon = if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                    contentDesc = if (expanded) "收起扩展行" else "展开扩展行",
+                    theme = theme,
+                    onClick = {
+                        hapticTap()
+                        onToggleExpanded()
+                    }
+                )
+                KeyBarIconButton(
+                    icon = Icons.Default.Keyboard,
+                    contentDesc = "切换软键盘",
+                    theme = theme,
+                    onClick = {
+                        hapticTap()
+                        onToggleIme()
+                    }
+                )
+            }
+
+            // 第二排：终端高频信号键、跳转键与符号（可一键折叠）
+            if (expanded) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        KeyBarButton("^C", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("c", true, false, false)
+                        }
+                        KeyBarButton("^D", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("d", true, false, false)
+                        }
+                        KeyBarButton("^Z", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("z", true, false, false)
+                        }
+                        KeyBarButton("^L", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("l", true, false, false)
+                        }
+                        KeyBarButton("^R", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("r", true, false, false)
+                        }
+                        KeyBarButton("/", theme, monoFont) {
+                            hapticTap()
+                            onSendText("/")
+                        }
+                        KeyBarButton("-", theme, monoFont) {
+                            hapticTap()
+                            onSendText("-")
+                        }
+                        KeyBarButton("|", theme, monoFont) {
+                            hapticTap()
+                            onSendText("|")
+                        }
+                        KeyBarButton("~", theme, monoFont) {
+                            hapticTap()
+                            onSendText("~")
+                        }
+                        KeyBarButton("_", theme, monoFont) {
+                            hapticTap()
+                            onSendText("_")
+                        }
+                        KeyBarButton("HOME", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("home", false, false, false)
+                        }
+                        KeyBarButton("END", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("end", false, false, false)
+                        }
+                        KeyBarButton("PGUP", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("pageup", false, false, false)
+                        }
+                        KeyBarButton("PGDN", theme, monoFont) {
+                            hapticTap()
+                            onSendKey("pagedown", false, false, false)
+                        }
+                    }
+
+                    KeyBarIconButton(
+                        icon = Icons.Default.ContentPaste,
+                        contentDesc = "粘贴",
+                        theme = theme,
+                        onClick = {
+                            hapticTap()
+                            onPasteClipboard()
+                        }
+                    )
+                }
+            }
         }
     }
 }
@@ -1000,6 +1347,7 @@ private fun MobileTerminalKeyBar(
 private fun KeyBarButton(
     label: String,
     theme: FalconThemeTokens,
+    monoFont: FontFamily,
     active: Boolean = false,
     onClick: () -> Unit
 ) {
@@ -1007,44 +1355,45 @@ private fun KeyBarButton(
     val fg = if (active) theme.primaryForeground else theme.foreground
     Box(
         modifier = Modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .height(24.dp)
+            .clip(RoundedCornerShape(4.dp))
             .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = 7.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
             color = fg,
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Medium
+            fontSize = 11.sp,
+            fontFamily = monoFont,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
         )
     }
 }
 
 @Composable
 private fun KeyBarIconButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     contentDesc: String,
     theme: FalconThemeTokens,
     onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .height(24.dp)
+            .clip(RoundedCornerShape(4.dp))
             .background(theme.card)
             .clickable(onClick = onClick)
-            .padding(horizontal = 9.dp),
+            .padding(horizontal = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDesc,
-            tint = theme.foreground,
-            modifier = Modifier.size(16.dp)
+            tint = theme.mutedForeground,
+            modifier = Modifier.size(13.5.dp)
         )
     }
 }

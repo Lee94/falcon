@@ -430,6 +430,8 @@ impl Db {
             add_column(&conn, "sessions", "cols", "INTEGER")?;
             add_column(&conn, "sessions", "rows", "INTEGER")?;
             add_column(&conn, "sessions", "agent", "TEXT")?;
+            // NULL 沿用默认真实终端；显式模式代表用户授权过重启，之后只准续接固定启动 UUID。
+            add_column(&conn, "sessions", "agent_mode", "TEXT")?;
             // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
             conn.execute("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'", [])?;
         }
@@ -1286,6 +1288,16 @@ impl Db {
     /// 原地重开时不能续接的 agent 会话退成普通 shell（manager 的 revive）
     pub fn update_session_agent(&self, id: &str, agent: Option<&str>) {
         self.exec("UPDATE sessions SET agent = ? WHERE id = ?", params![agent, id]);
+    }
+
+    /// NULL/terminal 是官方终端，transcript 仅开启其只读图形镜像；gui 保留旧 stream 协议语义。
+    /// 不能把旧 gui 当镜像直接接回，也不能为了转换它而结束原进程。
+    pub fn session_agent_mode(&self, id: &str) -> Option<String> {
+        self.lock().query_row("SELECT agent_mode FROM sessions WHERE id = ?", [id], |r| r.get(0)).ok().flatten()
+    }
+
+    pub fn update_session_agent_mode(&self, id: &str, mode: &str) {
+        self.exec("UPDATE sessions SET agent_mode = ? WHERE id = ?", params![mode, id]);
     }
 
     pub fn rename_session(&self, id: &str, name: &str) {

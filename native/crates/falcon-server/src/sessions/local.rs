@@ -27,7 +27,7 @@ use super::login_env::{
     merge_base_env, node_platform, parse_login_env, pick_login_probe_shell,
 };
 use super::ssh_host::{AttachOptions, spawn_spec};
-use crate::askpass::install::prepend_path;
+use crate::askpass::install::{askpass_session_env, prepend_path};
 use crate::exec::{LocalBoxFuture, Utf8Decoder, local_exec};
 use crate::host::{encode_powershell, merge_env};
 use crate::sessiond::backend::{ConnectError, SessiondBackend, Transport, connect};
@@ -281,7 +281,7 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
     let cwd = opts.cwd.clone();
     if let Some(bin) = &opts.askpass_bin {
         prepend_path(&mut env, bin);
-        merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
+        merge_env(&mut env, askpass_session_env(bin, &opts.session_id));
     }
     merge_env(&mut env, opts.env.iter().cloned());
 
@@ -453,7 +453,7 @@ pub async fn open_local_sessiond(
         let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
         if let Some(bin) = &opts.askpass_bin {
             prepend_path(&mut env, bin);
-            merge_env(&mut env, [("FALCON_SESSION_ID", opts.session_id.as_str())]);
+            merge_env(&mut env, askpass_session_env(bin, &opts.session_id));
         }
         merge_env(&mut env, [("FALCON_SESSIOND_ID", sid.as_str())]);
         merge_env(&mut env, opts.env.iter().cloned());

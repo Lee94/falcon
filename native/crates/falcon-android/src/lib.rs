@@ -10,7 +10,7 @@ pub mod dashboard;
 pub mod term;
 
 use jni::JNIEnv;
-use jni::objects::{JByteArray, JClass, JString};
+use jni::objects::{JByteArray, JClass, JIntArray, JString};
 use jni::sys::{jboolean, jdouble, jint, jintArray, jlong, jstring};
 
 use crate::dashboard::{build_dashboard_view, export_theme_tokens, list_available_themes};
@@ -176,6 +176,26 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_packRenderSna
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_packRenderSnapshotInto(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    last_seq: jlong,
+    out_array: JIntArray<'_>,
+) -> jlong {
+    let Some(session) = get_session(handle) else {
+        return 0;
+    };
+    let cap = env.get_array_length(&out_array).unwrap_or(0) as usize;
+    session.pack_render_snapshot_cached(last_seq.max(0) as u64, |data| {
+        if cap < data.len() {
+            return false;
+        }
+        env.set_int_array_region(&out_array, 0, data).is_ok()
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_encodeKey(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -253,8 +273,32 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_scrollToBotto
     handle: jlong,
 ) {
     if let Some(session) = get_session(handle) {
-        session.core.scroll_to_bottom();
+        session.scroll_to_bottom();
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_resetScrollGesture(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+) {
+    if let Some(session) = get_session(handle) {
+        session.reset_scroll_gesture();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_scrollToOffset(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    offset: jint,
+) -> jboolean {
+    let changed = get_session(handle)
+        .map(|s| s.scroll_to_offset(offset.max(0) as usize))
+        .unwrap_or(false);
+    jboolean::from(changed)
 }
 
 #[unsafe(no_mangle)]

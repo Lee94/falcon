@@ -18,6 +18,7 @@ mod widgets;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Sizable, WindowExt};
@@ -126,6 +127,7 @@ pub fn open(ws: &Entity<Workspace>, tab: Tab, window: &mut Window, cx: &mut App)
             .h(h)
             .margin_top((vp.height - h) * 0.5)
             .p_0()
+            .entrance(DialogEntrance::FadeSlide)
             // 单行输入框里的回车会冒泡成对话框的"确定"：设置没有确定这回事，别让它把整个设置关掉
             .on_ok(|_, _, _| false)
             .child(div().h(h - zpx(2.)).child(view.clone()))

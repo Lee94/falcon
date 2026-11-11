@@ -94,7 +94,7 @@ pub fn to_popup(mut menu: PopupMenu, items: Vec<MenuItemSpec>) -> PopupMenu {
                         .when_some(icon.clone(), |d, icon| d.child(icon.size(crate::zoom::zpx(14.)).text_color(ui.muted_foreground)))
                         .child(div().when(danger, |d| d.text_color(ui.destructive)).child(label.clone())),
                 )
-                .when_some(kbd.clone(), |d, k| d.child(div().flex_none().text_xs().text_color(ui.muted_foreground).child(k)))
+                .when_some(kbd.clone().filter(|k| !k.is_empty()), |d, k| d.child(crate::ui::kbd_badge(k, cx)))
         })
         .disabled(item.disabled)
             .on_click(move |_, window, cx| handler(window, cx));
@@ -147,7 +147,6 @@ pub fn terminate(ws: &Entity<Workspace>, session: &SessionWithProject, window: &
     let label = session_label(session, &ws.read(cx).projects);
     let ws2 = ws.clone();
     let id = session.id.clone();
-    let label2 = label.clone();
     dialogs::confirm(
         ConfirmOpts {
             title: t!("session.terminateTitle", name = label).to_string(),
@@ -156,7 +155,7 @@ pub fn terminate(ws: &Entity<Workspace>, session: &SessionWithProject, window: &
             danger: true,
             ..Default::default()
         },
-        move |_, cx| ws2.update(cx, |w, cx| w.terminate(&id, &label2, cx)),
+        move |_, cx| ws2.update(cx, |w, cx| w.terminate(&id, cx)),
         window,
         cx,
     );
@@ -198,7 +197,6 @@ pub fn terminate_many(ws: &Entity<Workspace>, ids: Vec<String>, window: &mut Win
                     let _ = client.terminate_session(id).await;
                 }
                 cx.update(|cx| {
-                    toast(&ws3, ToastKind::Danger, t!("toast.terminatedMany", n = n).to_string(), None, cx);
                     // 总览里的勾选跟着清掉（React 版的 setSelected([])），否则剩下的行还勾着
                     ws3.update(cx, |w, cx| {
                         w.selected.clear();

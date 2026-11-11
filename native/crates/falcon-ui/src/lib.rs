@@ -6,6 +6,7 @@
 //! 文案的真相来源，直接改它；平台独有的 key 挂在 `native.<区域>` 下）。
 
 mod actions;
+mod agent_view;
 mod app_icon;
 mod app_update;
 #[cfg(feature = "automation")]

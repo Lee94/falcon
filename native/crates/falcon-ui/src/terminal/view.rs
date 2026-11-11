@@ -28,6 +28,7 @@ use falcon_term::{
 };
 use futures::StreamExt;
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::AppContext as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
@@ -37,6 +38,7 @@ use gpui_kit::{
 };
 
 use super::element::{TerminalElement, TerminalGeometry};
+use crate::agent_view::{AgentPane, AgentPaneEvent};
 use crate::theme::TerminalLook;
 use crate::zoom::zpx;
 
@@ -322,6 +324,13 @@ pub struct TerminalView {
     seen_sent: bool,
     /// 本机 falcon 服务端：拖进来的非图片文件直接粘路径（远端宿主机上没有这些文件）
     local_server: bool,
+    /// 原生结构化 Agent 视图状态与组件
+    agent_state: Option<falcon_proto::AgentViewState>,
+    agent_pane: Option<gpui_kit::Entity<AgentPane>>,
+    /// 只控制同一结构化时间线的绘制样式，不改变 CLI 生命周期，也不随快照重置。
+    agent_terminal_style: bool,
+    /// 运行方式切换会重新启动 CLI；等服务端完成前不接受重复请求。
+    agent_mode_switching: bool,
     _tasks: Vec<Task<()>>,
     /// 焦点进出、外观变化的订阅：随视图一起注销
     _subs: Vec<gpui_kit::Subscription>,
@@ -377,7 +386,10 @@ impl TerminalView {
             tx,
             grid: grid.clone(),
         });
-        let socket = SessionSocket::open(&client, &session_id, sink);
+        let socket = SessionSocket::open_with(&client, &session_id, sink, falcon_client::SocketOptions {
+            terminal_backed_agent_view: true,
+            ..Default::default()
+        });
         // 颜色查询由宿主机的 VT 进程（持久）/ 服务端的 OscColorGate（非持久）按外观回答，
         // 要先拿到外观；socket 连上后先发它
         set_appearance(&socket, &look.appearance);
@@ -438,6 +450,10 @@ impl TerminalView {
             program_status: None,
             seen_sent: false,
             local_server,
+            agent_state: None,
+            agent_pane: None,
+            agent_terminal_style: true,
+            agent_mode_switching: false,
             _tasks: vec![pump],
             _subs: vec![focus_in, focus_out, look_sub],
         };
@@ -460,8 +476,106 @@ impl TerminalView {
         self.grid.follower_of().map(|s| (s.cols, s.rows))
     }
 
-    pub fn focus_handle(&self) -> &FocusHandle {
-        &self.focus
+    /// 结构化 CLI 仍在运行时，两种 Falcon 绘制样式都使用同一个 AgentPane。
+    /// CLI 真正退出后自动展示 shell 的终端网格。
+    pub fn has_agent_view(&self) -> bool {
+        self.agent_state.as_ref().is_some_and(|s| s.active)
+    }
+
+    pub fn is_terminal_backed_agent(&self) -> bool {
+        self.agent_state.as_ref().is_some_and(|s| s.terminal_backed)
+    }
+
+    pub fn is_showing_agent_view(&self) -> bool {
+        // 只读镜像不具备输入与审批通道，不能用它替代完整 GUI。
+        self.has_agent_view() && !self.is_terminal_backed_agent()
+    }
+
+    pub fn is_agent_terminal_style(&self) -> bool {
+        self.agent_terminal_style
+    }
+
+    /// 已有结构化控制通道时只切换本地排版，保留输入草稿、socket 和运行中的 CLI。
+    pub fn toggle_agent_style(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_agent_view() || self.is_terminal_backed_agent() {
+            return;
+        }
+        self.agent_terminal_style = !self.agent_terminal_style;
+        if let Some(pane) = self.ensure_agent_pane(window, cx) {
+            pane.update(cx, |p, cx| p.set_terminal_style(self.agent_terminal_style, cx));
+            window.focus(&pane.read(cx).focus_handle(cx), cx);
+        }
+        cx.emit(TerminalViewEvent::StateChanged);
+        cx.notify();
+    }
+
+    pub fn is_switching_agent_mode(&self) -> bool {
+        self.agent_mode_switching
+    }
+
+    /// 官方交互 CLI 首次进入 GUI 需要更换控制通道，明确确认后才请求服务端转换。
+    /// 已有结构化进程只切换排版，不能为了切换显示而结束当前轮次。
+    pub fn request_agent_mode_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_agent_view() && !self.is_terminal_backed_agent() {
+            self.toggle_agent_style(window, cx);
+            return;
+        }
+        if self.agent_mode_switching || self.conn != ConnState::Active {
+            return;
+        }
+        let view = cx.entity().downgrade();
+        crate::dialogs::confirm(
+            crate::dialogs::ConfirmOpts {
+                title: rust_i18n::t!("agentView.enableGuiTitle").to_string(),
+                body: rust_i18n::t!("agentView.enableGuiBody").to_string(),
+                footnote: Some(rust_i18n::t!("agentView.enableGuiFootnote").to_string()),
+                confirm_label: rust_i18n::t!("agentView.enableGuiConfirm").to_string(),
+                ..Default::default()
+            },
+            move |window, cx| {
+                if let Some(view) = view.upgrade() {
+                    view.update(cx, |view, cx| view.enable_agent_gui(window, cx));
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn enable_agent_gui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent_mode_switching || self.conn != ConnState::Active {
+            return;
+        }
+        self.agent_mode_switching = true;
+        if let Some(pane) = &self.agent_pane {
+            pane.update(cx, |p, cx| p.set_available(false, cx));
+        }
+        let client = self.client.clone();
+        let sid = self.session_id.clone();
+        cx.emit(TerminalViewEvent::StateChanged);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = client.enable_agent_gui(&sid).await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_mode_switching = false;
+                if let Some(pane) = &this.agent_pane {
+                    pane.update(cx, |p, cx| p.set_available(this.conn == ConnState::Active, cx));
+                }
+                // 模式以 WS 快照为准。迟到的 HTTP 响应不能覆盖另一 Viewer 的新状态，
+                // 也不能从随后打开的 askpass 等对话框移走焦点；render 只转交原输入组件的焦点。
+                if let Err(err) = result {
+                    cx.emit(TerminalViewEvent::Toast {
+                        kind: crate::workspace::ToastKind::Danger,
+                        title: rust_i18n::t!("agentView.switchFailed").to_string(),
+                        body: Some(if err.message == "agent_gui_unsupported" {
+                            rust_i18n::t!("agentView.switchUnsupported").to_string()
+                        } else { err.message }),
+                    });
+                }
+                cx.emit(TerminalViewEvent::StateChanged);
+                cx.notify();
+            });
+        }).detach();
     }
 
     /// 系统唤醒 / 网络恢复时由工作区调用，跳过退避立即重连
@@ -609,6 +723,91 @@ impl TerminalView {
                 }
                 cx.notify();
             }
+            SessionEvent::AgentSnapshot(state) => {
+                if self.fit.is_none() {
+                    self.socket.resize(120, 36);
+                }
+                if state.active && !self.has_agent_view() {
+                    self.agent_terminal_style = false;
+                }
+                self.agent_state = Some(state.clone());
+                if let Some(pane) = &self.agent_pane {
+                    pane.update(cx, |p, cx| p.apply_snapshot(state, cx));
+                }
+                cx.emit(TerminalViewEvent::StateChanged);
+                cx.notify();
+            }
+            SessionEvent::AgentEntry(entry) => {
+                if let Some(st) = &mut self.agent_state {
+                    st.upsert_entry(entry.clone());
+                }
+                if let Some(pane) = &self.agent_pane {
+                    pane.update(cx, |p, cx| p.apply_entry(entry, cx));
+                }
+                cx.notify();
+            }
+            SessionEvent::AgentDelta { id, kind, delta } => {
+                if let Some(st) = &mut self.agent_state {
+                    st.apply_delta(&id, kind, &delta);
+                }
+                if let Some(pane) = &self.agent_pane {
+                    pane.update(cx, |p, cx| p.apply_delta(&id, kind, &delta, cx));
+                }
+                cx.notify();
+            }
+            SessionEvent::AgentMeta {
+                active,
+                status,
+                model,
+                permission_mode,
+                cwd,
+                commands,
+                models,
+                model_options,
+                reasoning_effort,
+            } => {
+                if let Some(st) = &mut self.agent_state {
+                    st.active = active;
+                    st.status = status;
+                    if model.is_some() {
+                        st.model = model.clone();
+                    }
+                    if permission_mode.is_some() {
+                        st.permission_mode = permission_mode.clone();
+                    }
+                    if cwd.is_some() {
+                        st.cwd = cwd.clone();
+                    }
+                    if let Some(cmds) = &commands {
+                        st.commands = cmds.clone();
+                    }
+                    if let Some(ms) = &models {
+                        st.models = ms.clone();
+                    }
+                    if let Some(options) = &model_options {
+                        st.model_options = options.clone();
+                    }
+                    st.reasoning_effort = reasoning_effort.clone();
+                }
+                if let Some(pane) = &self.agent_pane {
+                    pane.update(cx, |p, cx| {
+                        p.apply_meta(
+                            active,
+                            status,
+                            model,
+                            permission_mode,
+                            cwd,
+                            commands,
+                            models,
+                            model_options,
+                            reasoning_effort,
+                            cx,
+                        )
+                    });
+                }
+                cx.emit(TerminalViewEvent::StateChanged);
+                cx.notify();
+            }
             SessionEvent::Output(_) | SessionEvent::Replay(_) => {}
         }
     }
@@ -616,6 +815,10 @@ impl TerminalView {
     fn set_conn(&mut self, conn: ConnState, cx: &mut Context<Self>) {
         if self.conn != conn {
             self.conn = conn;
+            if let Some(pane) = &self.agent_pane {
+                let available = self.conn == ConnState::Active && !self.agent_mode_switching;
+                pane.update(cx, |p, cx| p.set_available(available, cx));
+            }
             cx.emit(TerminalViewEvent::StateChanged);
             cx.notify();
         }
@@ -641,6 +844,9 @@ impl TerminalView {
     // ---------- 输入 ----------
 
     fn send(&self, text: impl Into<String>) {
+        if self.agent_mode_switching {
+            return;
+        }
         let text = text.into();
         log::debug!("send_input {} bytes to {}", text.len(), self.session_id);
         if !text.is_empty() {
@@ -662,6 +868,14 @@ impl TerminalView {
     /// 自动化脚本的输入口（等同于键入 / 输入法上屏）
     #[cfg(feature = "automation")]
     pub fn automation_input(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.has_agent_view() && !self.is_terminal_backed_agent() && (text.ends_with('\r') || text.ends_with('\n')) {
+            let prompt = text.trim();
+            if self.conn == ConnState::Active && !prompt.is_empty() {
+                self.mark_seen();
+                self.socket.agent_prompt(prompt.to_string());
+            }
+            return;
+        }
         self.commit_text(text, cx);
     }
 
@@ -788,12 +1002,23 @@ impl TerminalView {
         }
     }
 
-    /// ⌘V：有文本贴文本（Excel / 网页复制常同时带位图，贴文本才对）；只有图片时上传到宿主机
-    /// 再把落盘路径粘进来（CONTEXT.md「Image Paste」）。
+    /// ⌘V：复制的图片文件与纯图片保存到宿主机，再粘贴落盘路径；其余有文本贴文本
+    /// （Excel / 网页复制常同时带位图，贴文本才对，CONTEXT.md「Image Paste」）。
     pub fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else {
             return;
         };
+        // Finder 复制图片时，GPUI 返回 ExternalPaths 和文件名文本，不会返回 Image。
+        // 必须先识别图片文件，否则会只贴文件名，SSH 宿主机上也没有对应的本机文件。
+        // 只取图片路径，避免同时复制的其它文件经本机服务连接被贴成远端不可用的路径。
+        let image_paths: Vec<_> = item.entries().iter().filter_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(paths) => Some(paths.paths()),
+            _ => None,
+        }).flatten().filter(|path| image_mime(path).is_some()).cloned().collect();
+        if !image_paths.is_empty() {
+            self.on_drop_paths(&ExternalPaths(image_paths.into()), cx);
+            return;
+        }
         let mut image = None;
         for entry in item.entries() {
             match entry {
@@ -1422,14 +1647,101 @@ fn set_appearance(socket: &SessionSocket, hint: &falcon_proto::OscColorHint) {
 }
 
 impl Focusable for TerminalView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.is_showing_agent_view() && !self.is_terminal_backed_agent()
+            && let Some(pane) = &self.agent_pane
+        {
+            return pane.read(cx).focus_handle(cx);
+        }
         self.focus.clone()
+    }
+}
+
+impl TerminalView {
+    fn ensure_agent_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Entity<AgentPane>> {
+        if self.is_terminal_backed_agent() {
+            return None;
+        }
+        if let Some(pane) = &self.agent_pane {
+            return Some(pane.clone());
+        }
+        let state = self.agent_state.clone()?;
+        let sid = self.session_id.clone();
+        let terminal_style = !state.terminal_backed && self.agent_terminal_style;
+        let available = self.conn == ConnState::Active && !self.agent_mode_switching;
+        let pane = cx.new(|cx| AgentPane::new(sid, state, terminal_style, available, window, cx));
+        let sub = cx.subscribe_in(&pane, window, |this, _, ev: &AgentPaneEvent, window, cx| match ev {
+            AgentPaneEvent::Prompt(text) => {
+                this.mark_seen();
+                this.socket.agent_prompt(text.clone());
+            }
+            AgentPaneEvent::Interrupt => {
+                this.socket.agent_interrupt();
+            }
+            AgentPaneEvent::Permission {
+                call_id,
+                decision,
+                updated_command,
+            } => {
+                this.mark_seen();
+                this.socket.agent_permission(
+                    call_id.clone(),
+                    *decision,
+                    updated_command.clone(),
+                );
+            }
+            AgentPaneEvent::SetModel(model) => {
+                this.socket.agent_set_model(model.clone());
+            }
+            AgentPaneEvent::SetReasoningEffort(effort) => {
+                this.socket.agent_set_reasoning_effort(effort.clone());
+            }
+            AgentPaneEvent::ToggleStyle => {
+                this.toggle_agent_style(window, cx);
+            }
+            AgentPaneEvent::OpenFile(path) => {
+                if let Some(ctx) = &this.file_context {
+                    cx.emit(TerminalViewEvent::OpenFile {
+                        project_id: ctx.project_id.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+            AgentPaneEvent::FocusChanged(focused) => {
+                this.on_focus_change(*focused, cx);
+            }
+        });
+        self._subs.push(sub);
+        self.agent_pane = Some(pane.clone());
+        Some(pane)
     }
 }
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.visible { self.image_hover = None; }
+        if self.is_showing_agent_view() && !self.is_terminal_backed_agent()
+            && let Some(pane) = self.ensure_agent_pane(window, cx)
+        {
+            // 其它 Viewer 发起的模式切换也会改变当前窗口的输入组件，只在原终端有焦点时转交。
+            if self.focus.is_focused(window) {
+                window.focus(&pane.read(cx).focus_handle(cx), cx);
+            }
+            let banner = self.banner(cx);
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .children(banner)
+                .child(div().flex_1().min_h_0().child(pane));
+        }
+        if self.agent_pane.as_ref().is_some_and(|p| p.read(cx).focus_handle(cx).is_focused(window)) {
+            window.focus(&self.focus, cx);
+        }
         if self.core.take_dirty() {
             self.snapshot = Arc::new(self.core.snapshot());
             // 链接底下的内容变了（滚动、输出把它顶走）：按现在的画面重认
@@ -1463,7 +1775,8 @@ impl Render for TerminalView {
         let scrollbar = self.scrollbar_overlay(cx);
         let items = self.context_items(cx);
         let preview = self.file_preview(cx);
-        let dim = self.conn != ConnState::Active && self.conn != ConnState::Connecting;
+        let dim = self.agent_mode_switching
+            || (self.conn != ConnState::Active && self.conn != ConnState::Connecting);
         use gpui_kit::component::menu::ContextMenuExt;
         let body = div()
             .id(SharedString::from(format!("terminal-{}", self.session_id)))
@@ -1499,7 +1812,8 @@ impl Render for TerminalView {
             .children(scrollbar)
             .children(preview)
             .context_menu(move |menu, _, _| crate::menus::to_popup(menu, items.clone()));
-        div().size_full().flex().flex_col().children(banner).child(div().flex_1().min_h_0().child(body))
+        let content = div().size_full().flex().flex_col().children(banner);
+        content.child(div().flex_1().min_h_0().child(body))
     }
 }
 

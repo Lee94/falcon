@@ -116,6 +116,72 @@ async fn new_session(h: &Harness) -> Session {
     h.mgr.create_session(&h.project, String::new(), OscColorHint::default(), None).await.unwrap()
 }
 
+/// 真 PTY 验证默认开场契约：CLI 直接连接终端，原始输出与按键不经过结构化驱动器。
+/// 替身不发模型请求，只记录 argv、检查终端与环境，再读写真实 PTY。
+#[test]
+fn agents_default_to_their_own_interactive_cli() {
+    run(async {
+        use std::os::unix::fs::PermissionsExt;
+        for agent in [SessionAgent::Claude, SessionAgent::Codex] {
+            let h = harness();
+            let bin = h.dir.path().join("fake-bin");
+            std::fs::create_dir(&bin).unwrap();
+            let executable = |path: &std::path::Path, body: &str| {
+                std::fs::write(path, body).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            executable(&bin.join(agent.as_str()), r#"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_AGENT_ARGS"
+[ -t 0 ] && [ -t 1 ] && [ -z "$FALCON_AGENT_NATIVE" ] || exit 91
+printf '\033[32mCLI_READY\033[0m\n'
+while IFS= read -r line; do
+  [ "$line" = quit-cli ] && exit 0
+  printf 'CLI_INPUT:<%s>\n' "$line"
+done
+"#);
+            let shell = h.dir.path().join("login-sh");
+            executable(&shell, "#!/bin/sh\nif [ \"$3\" = -c ]; then exec /bin/sh -c \"$4\"; fi\nexec /bin/sh\n");
+            let args = h.dir.path().join("agent-args");
+            let mut env = test_env();
+            env[0].1 = format!("{}:{}", bin.display(), env[0].1);
+            env[1].1 = h.dir.path().to_string_lossy().into_owned();
+            env.push(("FAKE_AGENT_ARGS".into(), args.to_string_lossy().into_owned()));
+            h.mgr.local.set_base_env(env);
+            let project = ProjectRow { shell: Some(shell.to_string_lossy().into_owned()), ..h.project.clone() };
+            h.db.insert_project(&project);
+            let session = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(agent)).await.unwrap();
+            let entry = h.mgr.entry(&session.id).unwrap();
+            assert!(entry.s.borrow().agent_driver.is_none());
+            let original_backend = entry.backend().unwrap();
+            let mut first = Peer::new();
+            h.mgr.add_viewer(&session.id, first.viewer.clone());
+            first.wait("CLI 自带终端输出", has_output("CLI_READY")).await;
+            assert!(first.output().contains("\x1b[32mCLI_READY\x1b[0m"));
+            h.mgr.input(&session.id, first.id(), "hello\tworld\n");
+            first.wait("按键直接交给 CLI", has_output("CLI_INPUT:<hello\tworld>")).await;
+            // 多端附着与旧客户端的切换消息不能重新启动 CLI 或启用结构化显示层。
+            h.mgr.agent_switch_terminal(&session.id);
+            assert!(Rc::ptr_eq(&original_backend, &entry.backend().unwrap()));
+            h.mgr.remove_viewer(&session.id, first.id());
+            let mut second = Peer::new();
+            h.mgr.add_viewer(&session.id, second.viewer.clone());
+            second.drain();
+            assert!(second.output().contains("CLI_READY"));
+            assert!(second.msgs("agent_snapshot").is_empty());
+            h.mgr.input(&session.id, second.id(), "another turn\n");
+            second.wait("重新附着后仍可输入", has_output("CLI_INPUT:<another turn>")).await;
+            let expected_args = if agent == SessionAgent::Claude { format!("--session-id {}\n", session.id) } else { "\n".into() };
+            assert_eq!(std::fs::read_to_string(&args).unwrap(), expected_args);
+            h.mgr.input(&session.id, second.id(), "quit-cli\n");
+            second.wait("CLI 退出后回到 shell", has_output("$")).await;
+            h.mgr.input(&session.id, second.id(), "echo shell-$((1+1))-ready\n");
+            second.wait("回落 shell 仍可使用", has_output("shell-2-ready")).await;
+            assert_eq!(h.db.get_session(&session.id).unwrap().state, "active");
+            h.mgr.terminate(&session.id, false).await;
+        }
+    });
+}
+
 #[test]
 fn non_durable_session_round_trip() {
     run(async {
@@ -339,6 +405,8 @@ fn host_rows_become_fake_projects() {
     assert!(p.working_dir.is_none());
 }
 
+mod agent_mode;
+
 // ---------------------------------------------------------------- 守护进程会话（ADR 0020）
 
 /// 本机目标的守护进程在不在（`cargo xtask sessiond` 编出来的，或 FALCON_SESSIOND_DIR）
@@ -553,7 +621,10 @@ fn killed_holder_is_revived_and_resumes_the_agent_conversation() {
         a.wait("待接回", has_state("unverified")).await;
         a.wait("重开后 active", has_state("active")).await;
         a.wait("新的提示符", has_output("$")).await;
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("--session-id {id}\n--resume {id}\n", id = s.id));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            format!("--session-id {id}\n--resume {id}\n", id = s.id),
+        );
         let row = h.db.get_session(&s.id).unwrap();
         assert_eq!((row.state.as_str(), row.agent.as_deref()), ("active", Some("claude")));
         let new = holder(crate::sessions::local::local_list_sessions(&d).await.unwrap()).unwrap();

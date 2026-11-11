@@ -20,7 +20,7 @@ pub mod worktree_form;
 
 use falcon_proto::SessionState;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogEntrance, DialogFooter};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{Sizable, WindowExt};
 use gpui_kit::prelude::*;
@@ -99,6 +99,7 @@ pub fn confirm(
         dialog
             .title(SharedString::from(opts.title.clone()))
             .w(zpx(460.))
+            .entrance(DialogEntrance::FadeSlide)
             .child(body)
             .footer(
                 DialogFooter::new()

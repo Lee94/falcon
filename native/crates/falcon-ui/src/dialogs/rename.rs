@@ -32,6 +32,7 @@ pub fn open(ws: &Entity<Workspace>, session_id: &str, window: &mut Window, cx: &
         dialog
             .title(t!("rename.title").to_string())
             .w(zpx(380.))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             .child(div().child(Input::new(&input)))
             .footer(
                 DialogFooter::new()

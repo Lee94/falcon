@@ -157,6 +157,7 @@ impl Workspace {
     /// 只把窗口摘掉，不碰会话
     pub fn drop_tab(&mut self, id: &str, cx: &mut Context<Self>) {
         self.state.drop_tab(id, &self.sessions);
+        self.dismiss_program_alert(id, cx);
         self.commit(false, cx);
     }
 
@@ -183,18 +184,18 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 let busy = fg.as_ref().is_some_and(|f| f.busy);
                 if !busy {
-                    this.terminate(&sid, &label, cx);
+                    this.terminate(&sid, cx);
                     return;
                 }
                 let command = fg.and_then(|f| f.command).unwrap_or_default();
-                let (sid2, label2) = (sid.clone(), label.clone());
+                let sid2 = sid.clone();
                 cx.emit(WorkspaceEvent::Confirm(ConfirmSpec {
                     title: t!("tab.busyTitle", name = label).to_string(),
                     body: t!("tab.busyBody", command = command).to_string(),
                     footnote: Some(t!("tab.busyFootnote").to_string()),
                     confirm_label: t!("session.terminateConfirm").to_string(),
                     danger: true,
-                    on_confirm: Rc::new(move |ws, cx| ws.terminate(&sid2, &label2, cx)),
+                    on_confirm: Rc::new(move |ws, cx| ws.terminate(&sid2, cx)),
                 }));
             })
             .ok();
@@ -202,19 +203,16 @@ impl Workspace {
         .detach();
     }
 
-    pub fn terminate(&mut self, id: &str, label: &str, cx: &mut Context<Self>) {
+    pub fn terminate(&mut self, id: &str, cx: &mut Context<Self>) {
         self.drop_tab(id, cx);
         let client = self.client.clone();
-        let (id, label) = (id.to_string(), label.to_string());
+        let id = id.to_string();
         cx.spawn(async move |this, cx| {
             let result = client.terminate_session(&id).await;
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(_) => this.toast(ToastKind::Danger, t!("toast.terminated", name = label).to_string(), None, cx),
-                    Err(err) => {
-                        this.handle_error(&err, cx);
-                        this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
-                    }
+                if let Err(err) = result {
+                    this.handle_error(&err, cx);
+                    this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
                 }
                 this.refresh_sessions(cx);
             })
@@ -225,17 +223,7 @@ impl Workspace {
 
     /// Detach：只收起窗口，会话留在后台继续跑（Shift+关闭）
     pub fn detach_tab(&mut self, id: &str, cx: &mut Context<Self>) {
-        let session = if is_pending_id(id) { None } else { self.session(id).cloned() };
         self.drop_tab(id, cx);
-        if let Some(s) = session.filter(|s| s.state != SessionState::Dead) {
-            let label = crate::labels::session_label(&s, &self.projects);
-            self.toast(
-                ToastKind::Info,
-                t!("toast.detachTitle", name = label).to_string(),
-                Some(t!("toast.detachBody").to_string()),
-                cx,
-            );
-        }
     }
 
     /// 关掉一组窗口（关闭其他 / 左 / 右）。文件和差异立刻收起；终端走 Terminate

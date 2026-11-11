@@ -52,6 +52,9 @@ object FalconNative {
     external fun packRenderSnapshot(handle: Long): IntArray
 
     @JvmStatic
+    external fun packRenderSnapshotInto(handle: Long, lastSeq: Long, outArray: IntArray): Long
+
+    @JvmStatic
     external fun encodeKey(
         handle: Long,
         key: String,
@@ -77,6 +80,12 @@ object FalconNative {
 
     @JvmStatic
     external fun scrollToBottom(handle: Long)
+
+    @JvmStatic
+    external fun resetScrollGesture(handle: Long)
+
+    @JvmStatic
+    external fun scrollToOffset(handle: Long, offset: Int): Boolean
 
     @JvmStatic
     external fun onMouseEvent(

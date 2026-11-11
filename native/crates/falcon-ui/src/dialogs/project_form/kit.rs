@@ -7,6 +7,7 @@
 //!   Select 也只认字符串 value，哨兵值（"__auto__" 之类）的写法原样照搬了过来。
 
 use falcon_core::reason::Translate;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::select::{SelectDelegate, SelectItem, SelectState};
 use gpui_kit::prelude::*;
@@ -58,12 +59,18 @@ pub struct SegItem {
     pub on_click: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>,
 }
 
-/// 同一份表单的几种填法（语义是 radiogroup，不是 tab）：凹槽里浮起一块
+/// 同一份表单的几种填法（语义是 radiogroup，不是 tab）：凹槽里由弹簧滑块承托选中项
 pub fn segmented(id: &str, items: Vec<SegItem>, cx: &App) -> Div {
     let ui = Ui::global(cx).clone();
-    let mut d = crate::ui::sunken(cx).flex().gap(zpx(2.)).p(zpx(2.));
+    let slot = crate::ui::seg_bounds_slot(items.len());
+    let mut active = None;
+    let mut row = div().w_full().flex().items_center().gap(zpx(2.)).p(zpx(2.));
     for (i, item) in items.into_iter().enumerate() {
+        if item.on {
+            active = Some(i);
+        }
         let on_click = item.on_click;
+        let seg_slot = slot.clone();
         let mut b = div()
             .id(SharedString::from(format!("{id}-{i}")))
             .flex_1()
@@ -75,19 +82,24 @@ pub fn segmented(id: &str, items: Vec<SegItem>, cx: &App) -> Div {
             .rounded(radius::SM)
             .text_size(zpx(13.))
             .cursor_pointer()
+            .on_prepaint(move |bounds, _, _| {
+                if let Some(cell) = seg_slot.borrow_mut().get_mut(i) {
+                    *cell = Some(bounds);
+                }
+            })
             .on_click(move |e, window, cx| on_click(e, window, cx))
             .child(item.label);
         b = if item.on {
-            b.bg(ui.background).font_weight(FontWeight::MEDIUM).text_color(ui.foreground)
+            b.font_weight(FontWeight::MEDIUM).text_color(ui.foreground)
         } else {
             b.text_color(ui.muted_foreground).hover(|s| s.text_color(ui.foreground))
         };
-        d = d.child(b);
+        row = row.child(b);
     }
-    d
+    div().child(crate::ui::spring_segmented(SharedString::from(format!("seg-{id}")), active, slot, row, cx))
 }
 
-/// 可展开的一段（React 版的 `Disclosure`）：箭头 + 标签，展开后显示内容
+/// 可展开的一段（React 版的 `Disclosure`）：旋转箭头 + 标签，展开后平滑浮现内容
 pub fn disclosure(
     id: &str,
     open: bool,
@@ -96,6 +108,9 @@ pub fn disclosure(
     content: impl IntoElement,
     cx: &App,
 ) -> Div {
+    use gpui_kit::base::animation::ease_out_cubic;
+    use gpui_kit::{Animation, AnimationExt};
+    use std::time::Duration;
     let ui = Ui::global(cx).clone();
     let head = div()
         .id(SharedString::from(id.to_string()))
@@ -108,14 +123,19 @@ pub fn disclosure(
         .cursor_pointer()
         .hover(|s| s.text_color(ui.foreground))
         .on_click(on_toggle)
-        .child(
-            crate::ui::icon(if open { gpui_kit::assets::IconName::ChevronDown } else { gpui_kit::assets::IconName::ChevronRight })
-                .size(zpx(12.)),
-        )
+        .child(crate::ui::disclosure_chevron(SharedString::from(format!("{id}-chev")), open, zpx(12.)))
         .child(label);
     let mut d = div().flex().flex_col().child(head);
     if open {
-        d = d.child(content);
+        d = d.child(
+            div()
+                .child(content)
+                .with_animation(
+                    SharedString::from(format!("{id}-body")),
+                    Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
+                    |el, delta| el.opacity(delta),
+                ),
+        );
     }
     d
 }

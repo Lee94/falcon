@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use falcon_proto::{
     ClientMessage, ServerMessage, TermAppearance, TermFrameKind, WS_MAX_PAYLOAD_BYTES,
@@ -105,6 +105,10 @@ pub struct AndroidTermSession {
     pub local_size: Mutex<(u16, u16)>,
     /// 服务端最近一次广播的 PTY 生效尺寸与 owner 标记（ADR 0022）
     pub server_size: Mutex<Option<ServerGridSize>>,
+    /// 渲染状态序列号：每次终端内容、滚动偏移、选区、尺寸或主题变化时递增
+    pub render_seq: AtomicU64,
+    /// 最近一次打包好的渲染快照缓存 `(seq, data)`，避免重绘时重复分配与逐格拷贝
+    pub snapshot_cache: Mutex<(u64, Vec<i32>)>,
 }
 
 impl AndroidTermSession {
@@ -120,7 +124,13 @@ impl AndroidTermSession {
             mouse: Mutex::new(MouseReporter::new()),
             local_size: Mutex::new((cols, rows)),
             server_size: Mutex::new(None),
+            render_seq: AtomicU64::new(1),
+            snapshot_cache: Mutex::new((0, Vec::new())),
         }
+    }
+
+    pub fn mark_render_dirty(&self) {
+        self.render_seq.fetch_add(1, Ordering::Release);
     }
 
     pub fn set_durable(&self, durable: bool) {
@@ -131,6 +141,7 @@ impl AndroidTermSession {
         let resolved = resolve_theme_by_name(theme_name);
         let msg = appearance_message(&resolved);
         *self.theme.lock() = resolved;
+        self.mark_render_dirty();
         serde_json::to_string(&msg).unwrap_or_default()
     }
 
@@ -163,28 +174,18 @@ impl AndroidTermSession {
     pub fn on_viewport_resize(&self, cols: u16, rows: u16) -> Option<String> {
         let cols = cols.max(2);
         let rows = rows.max(1);
-        let changed = {
-            let mut local = self.local_size.lock();
-            if *local == (cols, rows) {
-                false
-            } else {
-                *local = (cols, rows);
-                true
-            }
-        };
+        *self.local_size.lock() = (cols, rows);
         let is_owner = self
             .server_size
             .lock()
             .map(|s| s.owner)
             .unwrap_or(true);
         if is_owner {
-            self.core.resize(TermSize::new(cols as usize, rows as usize));
+            if self.core.resize(TermSize::new(cols as usize, rows as usize)) {
+                self.mark_render_dirty();
+            }
         }
-        if changed {
-            serde_json::to_string(&ClientMessage::Resize { cols, rows }).ok()
-        } else {
-            None
-        }
+        serde_json::to_string(&ClientMessage::Resize { cols, rows }).ok()
     }
 
     /// 收到服务端的 `ServerMessage::Size`（ADR 0022）：
@@ -201,6 +202,7 @@ impl AndroidTermSession {
         };
         self.core
             .resize(TermSize::new(target_cols as usize, target_rows as usize));
+        self.mark_render_dirty();
     }
 
     /// 处理一条来自 `/ws/sessions/:id` 的二进制帧（`TERM_FRAME_OUTPUT` / `TERM_FRAME_REPLAY`）。
@@ -219,6 +221,7 @@ impl AndroidTermSession {
                 self.core.replace_with_replay(decoded.payload);
             }
         }
+        self.mark_render_dirty();
         let dirty = true;
         let events = self.core.take_events();
         let is_durable = self.durable.load(Ordering::Acquire);
@@ -249,7 +252,7 @@ impl AndroidTermSession {
 
     /// 键盘按键或扩展栏按键 → 编码为 `ClientMessage::Input` JSON 列表。
     pub fn encode_key(&self, key: &str, ctrl: bool, alt: bool, shift: bool) -> Vec<String> {
-        self.core.scroll_to_bottom();
+        self.scroll_to_bottom();
         let mode = self.core.mode();
         let normalized_key = key.to_lowercase();
         let ks = Keystroke {
@@ -298,7 +301,7 @@ impl AndroidTermSession {
         if text.is_empty() {
             return Vec::new();
         }
-        self.core.scroll_to_bottom();
+        self.scroll_to_bottom();
         encode_input_chunks(text)
     }
 
@@ -307,7 +310,7 @@ impl AndroidTermSession {
         if text.is_empty() {
             return Vec::new();
         }
-        self.core.scroll_to_bottom();
+        self.scroll_to_bottom();
         let bracketed = self.core.mode().contains(TermMode::BRACKETED_PASTE);
         let encoded = falcon_term::paste::encode_paste(text, bracketed);
         encode_input_chunks(&encoded)
@@ -325,8 +328,31 @@ impl AndroidTermSession {
         }
     }
 
+    /// 重置触控滚轮累加器的亚行余量（在新触摸手势按下时调用）。
+    pub fn reset_scroll_gesture(&self) {
+        self.wheel.lock().reset();
+    }
+
+    /// 滚回历史最底部。
+    pub fn scroll_to_bottom(&self) {
+        self.core.scroll_to_bottom();
+        self.mark_render_dirty();
+    }
+
+    /// 按绝对历史偏移量滚动（0 = 底部，用于拖动右侧滚动条滑块），返回偏移是否发生变化。
+    pub fn scroll_to_offset(&self, offset: usize) -> bool {
+        let changed = self.core.scroll_to(offset);
+        if changed {
+            self.mark_render_dirty();
+        }
+        changed
+    }
+
     /// 触控滑动手势：按 [`route_wheel`] 决定走鼠标滚轮上报、备用屏方向键还是本地历史回滚。
-    /// 返回需要发给服务端的 `ClientMessage::Input` JSON（若为本地回滚则返回 `None`）。
+    /// 返回：
+    /// - `Some(json)`（以 `{` 开头）：需发给服务端的 `ClientMessage::Input` JSON；
+    /// - `Some("SCROLL")`：本地历史回滚发生了整行位移，视图需重绘；
+    /// - `None`：像素余量尚未凑够整行，无需重绘。
     pub fn on_scroll_gesture(
         &self,
         delta_y_pixels: f64,
@@ -370,6 +396,8 @@ impl AndroidTermSession {
                     .push(DeltaMode::Pixel, delta_y_pixels, cell_height, size.rows);
                 if lines != 0 {
                     self.core.scroll_display(lines);
+                    self.mark_render_dirty();
+                    return Some("SCROLL".to_string());
                 }
                 None
             }
@@ -424,15 +452,18 @@ impl AndroidTermSession {
         };
         let side = if right_half { Side::Right } else { Side::Left };
         self.core.start_selection(ty, row, col, side);
+        self.mark_render_dirty();
     }
 
     pub fn update_selection(&self, row: usize, col: usize, right_half: bool) {
         let side = if right_half { Side::Right } else { Side::Left };
         self.core.update_selection(row, col, side);
+        self.mark_render_dirty();
     }
 
     pub fn clear_selection(&self) {
         self.core.clear_selection();
+        self.mark_render_dirty();
     }
 
     pub fn selection_text(&self) -> Option<String> {
@@ -442,13 +473,50 @@ impl AndroidTermSession {
     /// 导出紧凑的整帧渲染快照：
     /// 前 16 个 `i32` 为头部元数据，后续 `rows * cols * 4` 个 `i32` 为按行优先排列的单元格数据。
     pub fn pack_render_snapshot(&self) -> Vec<i32> {
+        let mut out = Vec::new();
+        self.fill_render_snapshot(&mut out);
+        out
+    }
+
+    /// 带序列号缓存与复用缓冲区的快照打包：
+    /// - 若自 `last_seq` 以来终端无任何变化，直接返回 `last_seq as i64`，不加锁拷贝；
+    /// - 若有变化，复用内部 `Vec<i32>` 刷新快照并调用 `copy_out`；
+    /// - 若调用方提供的数组容量不足（`copy_out` 返回 `false`），返回 `-(所需长度 as i64)`。
+    pub fn pack_render_snapshot_cached(
+        &self,
+        last_seq: u64,
+        copy_out: impl FnOnce(&[i32]) -> bool,
+    ) -> i64 {
+        if self.core.flush_sync_if_expired() | self.core.take_dirty() {
+            self.mark_render_dirty();
+        }
+        let seq = self.render_seq.load(Ordering::Acquire);
+        let mut cache = self.snapshot_cache.lock();
+        if cache.0 != seq || cache.1.is_empty() {
+            self.fill_render_snapshot(&mut cache.1);
+            cache.0 = seq;
+        }
+        if last_seq == seq {
+            return seq as i64;
+        }
+        if !copy_out(&cache.1) {
+            return -(cache.1.len() as i64);
+        }
+        seq as i64
+    }
+
+    fn fill_render_snapshot(&self, out: &mut Vec<i32>) {
         let _ = self.core.flush_sync_if_expired();
         let _ = self.core.take_dirty();
         let snap = self.core.snapshot();
         let theme = self.theme.lock().clone();
         let cols = snap.size.cols;
         let rows = snap.size.rows;
-        let mut out = Vec::with_capacity(SNAPSHOT_HEADER_INTS + rows * cols * SNAPSHOT_CELL_INTS);
+        let needed = SNAPSHOT_HEADER_INTS + rows * cols * SNAPSHOT_CELL_INTS;
+        out.clear();
+        if out.capacity() < needed {
+            out.reserve(needed - out.capacity());
+        }
 
         let (cursor_row, cursor_col, cursor_shape, cursor_wide) = match snap.cursor {
             Some(c) => {
@@ -589,8 +657,6 @@ impl AndroidTermSession {
                 out.push(flags);
             }
         }
-
-        out
     }
 }
 
@@ -827,7 +893,101 @@ pub fn parse_server_control_message(raw_json: &str) -> String {
             "owner": owner,
         })
         .to_string(),
+        ServerMessage::AgentSnapshot { mut state } => {
+            for entry in &mut state.entries {
+                normalize_agent_entry(entry);
+            }
+            serde_json::json!({
+                "kind": "agentSnapshot",
+                "state": state,
+            })
+            .to_string()
+        }
+        ServerMessage::AgentEntry { mut entry } => {
+            normalize_agent_entry(&mut entry);
+            serde_json::json!({
+                "kind": "agentEntry",
+                "entry": entry,
+            })
+            .to_string()
+        }
+        ServerMessage::AgentDelta { id, kind, delta } => serde_json::json!({
+            "kind": "agentDelta",
+            "id": id,
+            "deltaKind": kind.as_str(),
+            "delta": delta,
+        })
+        .to_string(),
+        ServerMessage::AgentMeta {
+            active,
+            status,
+            model,
+            permission_mode,
+            cwd,
+            commands,
+            models,
+            model_options,
+            reasoning_effort,
+        } => serde_json::json!({
+            "kind": "agentMeta",
+            "active": active,
+            "status": status.as_str(),
+            "model": model,
+            "permissionMode": permission_mode,
+            "cwd": cwd,
+            "commands": commands,
+            "models": models,
+            "modelOptions": model_options,
+            "reasoningEffort": reasoning_effort,
+        })
+        .to_string(),
         ServerMessage::Unknown => serde_json::json!({ "kind": "unknown" }).to_string(),
+    }
+}
+
+fn normalize_agent_entry(entry: &mut falcon_proto::AgentEntry) {
+    use falcon_core::agent_output::{DiffKind, line_diff, styled_output, unified_diff_lines};
+    use falcon_proto::{AgentEntry, AgentToolContent};
+
+    if let AgentEntry::ToolCall(tc) = entry {
+        for content in &mut tc.content {
+            match content {
+                AgentToolContent::Text { text } => {
+                    *text = styled_output(text).text;
+                }
+                AgentToolContent::Terminal { output, .. } => {
+                    *output = styled_output(output).text;
+                }
+                AgentToolContent::Diff {
+                    old_text,
+                    new_text,
+                    unified_diff,
+                    ..
+                } => {
+                    let lines = if let Some(patch) = unified_diff.as_deref().filter(|s| !s.is_empty()) {
+                        unified_diff_lines(patch)
+                    } else {
+                        line_diff(
+                            old_text.as_deref().unwrap_or_default(),
+                            new_text.as_deref().unwrap_or_default(),
+                        )
+                    };
+                    let mut formatted = String::new();
+                    for line in lines.into_iter().take(160) {
+                        let prefix = match line.kind {
+                            DiffKind::Insert => "+ ",
+                            DiffKind::Delete => "- ",
+                            DiffKind::Context => "  ",
+                        };
+                        formatted.push_str(prefix);
+                        formatted.push_str(&line.text);
+                        formatted.push('\n');
+                    }
+                    *unified_diff = Some(formatted);
+                }
+                AgentToolContent::Unknown => {}
+            }
+        }
     }
 }
 
@@ -917,5 +1077,69 @@ mod tests {
             pasted,
             vec![r#"{"type":"input","data":"\u001b[200~echo hi\r\u001b[201~"}"#]
         );
+    }
+
+    #[test]
+    fn scroll_gesture_and_cached_snapshot_avoid_redundant_copies() {
+        let session = AndroidTermSession::new(20, 4, true, "Falcon Dark");
+        let lines: String = (0..20).map(|i| format!("line {i}\r\n")).collect();
+        let frame = encode_term_frame(TermFrameKind::Output, lines.as_bytes());
+        session.on_binary_frame(&frame);
+
+        // 容量不足时返回负的所需长度
+        let mut small = vec![0i32; 4];
+        let need = session.pack_render_snapshot_cached(0, |data| {
+            if small.len() < data.len() {
+                return false;
+            }
+            small[..data.len()].copy_from_slice(data);
+            true
+        });
+        assert_eq!(need, -((SNAPSHOT_HEADER_INTS + 20 * 4 * SNAPSHOT_CELL_INTS) as i64));
+
+        // 容量充足时首次拷贝并返回序列号
+        let mut buf = vec![0i32; (-need) as usize];
+        let mut copy_count = 0usize;
+        let seq1 = session.pack_render_snapshot_cached(0, |data| {
+            copy_count += 1;
+            buf.copy_from_slice(data);
+            true
+        });
+        assert!(seq1 > 0);
+        assert_eq!(copy_count, 1);
+
+        // 终端未变化时再次请求同一 seq，零拷贝直接返回
+        let seq_same = session.pack_render_snapshot_cached(seq1 as u64, |_data| {
+            copy_count += 1;
+            true
+        });
+        assert_eq!(seq_same, seq1);
+        assert_eq!(copy_count, 1);
+
+        // 亚行像素滑动（未满 1 行）不触发 SCROLL
+        assert_eq!(session.on_scroll_gesture(-10.0, 30.0, 0, 0), None);
+        // 累计超过 1 行时返回 SCROLL 并推进序列号
+        assert_eq!(
+            session.on_scroll_gesture(-25.0, 30.0, 0, 0),
+            Some("SCROLL".to_string())
+        );
+        let seq2 = session.pack_render_snapshot_cached(seq1 as u64, |data| {
+            copy_count += 1;
+            buf.copy_from_slice(data);
+            true
+        });
+        assert!(seq2 > seq1);
+        assert_eq!(copy_count, 2);
+        assert_eq!(buf[6], 1); // display_offset == 1
+
+        // 绝对偏移跳转与回到底部
+        assert!(session.scroll_to_offset(5));
+        assert!(!session.scroll_to_offset(5));
+        session.scroll_to_bottom();
+        let _ = session.pack_render_snapshot_cached(seq2 as u64, |data| {
+            buf.copy_from_slice(data);
+            true
+        });
+        assert_eq!(buf[6], 0);
     }
 }

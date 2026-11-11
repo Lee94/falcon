@@ -67,6 +67,64 @@ fn agent_detection_uses_the_requested_host_or_project() {
 }
 
 #[test]
+fn agent_mirror_refuses_old_servers_without_sending_a_mode_post() {
+    for status in [200, 404, 405] {
+        let mock = Mock::start(move |req| {
+            assert_eq!(req.method, "GET", "能力未知时绝不能发送可能重启进程的 POST");
+            HttpResp::json(status, json!({"ok": true}))
+        });
+        let error = block_on(mock.client().switch_agent_mode("session", true)).unwrap_err();
+        assert_eq!(error.message, "agent_mirror_unsupported");
+        assert_eq!(mock.requests().len(), 1);
+    }
+}
+
+#[test]
+fn agent_mirror_posts_only_after_the_server_promises_to_preserve_the_process() {
+    let mock = Mock::start(|req| {
+        assert_eq!(req.path_only(), "/api/sessions/session/agent-mode");
+        if req.method == "GET" {
+            HttpResp::json(200, json!({"preservesProcess": true}))
+        } else {
+            assert_eq!(req.method, "POST");
+            assert_eq!(req.json()["mode"], "gui");
+            HttpResp::json(200, json!({"ok": true}))
+        }
+    });
+    assert!(block_on(mock.client().switch_agent_mode("session", true)).unwrap().ok);
+    assert_eq!(mock.requests().iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["GET", "POST"]);
+}
+
+#[test]
+fn interactive_agent_gui_refuses_mirror_only_and_old_servers() {
+    for (status, body) in [(200, json!({"preservesProcess": true})), (404, json!({})), (405, json!({}))] {
+        let mock = Mock::start(move |req| {
+            assert_eq!(req.method, "GET", "镜像能力不能授权控制模式转换");
+            HttpResp::json(status, body.clone())
+        });
+        let error = block_on(mock.client().enable_agent_gui("session")).unwrap_err();
+        assert_eq!(error.message, "agent_gui_unsupported");
+        assert_eq!(mock.requests().len(), 1);
+    }
+}
+
+#[test]
+fn interactive_agent_gui_uses_an_explicit_control_mode() {
+    let mock = Mock::start(|req| {
+        assert_eq!(req.path_only(), "/api/sessions/session/agent-mode");
+        if req.method == "GET" {
+            HttpResp::json(200, json!({"preservesProcess": true, "interactiveGui": true}))
+        } else {
+            assert_eq!(req.method, "POST");
+            assert_eq!(req.json()["mode"], "gui-control");
+            HttpResp::json(200, json!({"ok": true}))
+        }
+    });
+    assert!(block_on(mock.client().enable_agent_gui("session")).unwrap().ok);
+    assert_eq!(mock.requests().len(), 2);
+}
+
+#[test]
 fn error_shape_matches_api_request_error() {
     let mock = Mock::start(|req| match req.path_only() {
         "/api/projects" => HttpResp::json(409, json!({ "error": "项目仍有 2 个未终止的会话" })),

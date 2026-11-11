@@ -22,7 +22,12 @@ pub fn open(ws: &Entity<Workspace>, on_saved: Option<OnSaved>, window: &mut Wind
     let picker = cx.new(|cx| TailscalePicker::new(ws.clone(), on_saved, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
         // 搜索框里的回车会冒泡成对话框的「确定」。这里没有确定，别让它把列表关掉
-        dialog.title(t!("host.tailscaleTitle").to_string()).w(zpx(560.)).on_ok(|_, _, _| false).child(picker.clone())
+        dialog
+            .title(t!("host.tailscaleTitle").to_string())
+            .w(zpx(560.))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
+            .on_ok(|_, _, _| false)
+            .child(picker.clone())
     });
 }
 

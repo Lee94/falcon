@@ -82,3 +82,5 @@ pub mod workspace;
 pub mod service_args;
 /// 应用更新：GitHub Release 的版本比较、安装包选择与换入（ADR 0026）
 pub mod app_update;
+/// 原生 Coding Agent 视图的命令输出 SGR 解析与文件改动行级 Diff
+pub mod agent_output;

@@ -11,6 +11,7 @@
 use falcon_core::file_search::{FILE_SEARCH_LIMIT, basename, dirname, filter_files};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt;
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -36,6 +37,7 @@ pub fn open(ws: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
             .w(zpx(580.))
             .close_button(false)
             .margin_top(zpx(80.))
+            .entrance(DialogEntrance::FadeSlide)
             .on_ok(move |_, _, cx| {
                 confirm.update(cx, |v, cx| v.open_selected(cx));
                 true
@@ -227,7 +229,10 @@ impl Render for QuickOpen {
             .flex_col()
             .gap_2()
             .capture_key_down(cx.listener(Self::on_key))
-            .child(Input::new(&self.input))
+            .child(
+                Input::new(&self.input)
+                    .prefix(icon(IconName::Search).size(zpx(14.)).text_color(ui.muted_foreground)),
+            )
             .child(list);
         if self.truncated && self.paths.is_some() {
             let n = self.paths.as_ref().map_or(0, Vec::len);

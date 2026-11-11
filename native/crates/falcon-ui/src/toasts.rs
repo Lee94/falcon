@@ -78,6 +78,8 @@ fn push(window: &mut Window, key: Option<SharedString>, note: Notification, cx: 
     let Some(toasts) = Toasts::entity(window, cx) else { return };
     let list = toasts.read(cx).list.clone();
     let before: Vec<EntityId> = list.read(cx).notifications().iter().map(|n| n.entity_id()).collect();
+    // 统一缩小卡片留白，普通提示、状态提醒与传输进度都走同一套尺寸。
+    let note = note.py_3().px_3().gap_2();
     list.update(cx, |l, cx| l.push(note, window, cx));
     if let Some(key) = key {
         let pushed = list.read(cx).notifications().into_iter().find(|n| !before.contains(&n.entity_id()));

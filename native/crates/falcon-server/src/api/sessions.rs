@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}/reattach", post(reattach))
         .route("/api/sessions/{id}/foreground", get(foreground))
         .route("/api/sessions/{id}/terminate", post(terminate))
+        .route("/api/sessions/{id}/agent-mode", get(agent_mode_capabilities).post(agent_mode))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
         .route("/api/sessions/{id}/paste-image", post(paste_image))
 }
@@ -186,6 +187,24 @@ async fn terminate(State(state): State<AppState>, Path(id): Path<String>) -> Api
     Ok(ok())
 }
 
+/// 新客户端必须先探测，避免旧服务端把模式请求解释成结束原进程后续接。
+async fn agent_mode_capabilities() -> Json<Value> {
+    Json(json!({ "preservesProcess": true, "interactiveGui": true }))
+}
+
+async fn agent_mode(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<falcon_proto::OkResponse>> {
+    let mode = body.str("mode").filter(|m| matches!(*m, "gui" | "terminal" | "gui-control"))
+        .ok_or_else(|| ApiError::bad_request("mode 必须是 gui、terminal 或 gui-control"))?.to_string();
+    let result = state.engine.call(move |engine| async move {
+        engine.sessions.switch_agent_mode(&id, &mode).await
+    }).await?;
+    result.map_err(|error| match error {
+        crate::sessions::manager::SessionError::NotFound(message) => ApiError::not_found(message),
+        other => ApiError::conflict(other.to_string()),
+    })?;
+    Ok(Json(falcon_proto::OkResponse { ok: true }))
+}
+
 async fn delete_dead(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let deleted = state.engine.call(move |engine| async move { engine.sessions.delete_dead(&id) }).await?;
     if !deleted {
@@ -276,6 +295,35 @@ async fn paste_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_mode_route_validates_mode_missing_session_and_supported_cli() {
+        use crate::api::test_support::{TestApp, json_of};
+        let app = TestApp::new();
+        let (status, capabilities) = json_of(app.get("/api/sessions/missing/agent-mode").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capabilities["preservesProcess"], true);
+        assert_eq!(capabilities["interactiveGui"], true, "新转换必须具有独立能力标记");
+        for body in [json!({}), json!({"mode":true}), json!({"mode":"compact"})] {
+            let (status, value) = json_of(app.post_json("/api/sessions/missing/agent-mode", body).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(value["error"].as_str().unwrap().contains("mode"));
+        }
+        let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":"gui"})).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":"gui-control"})).await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        app.state.db.insert_session(&crate::db::SessionRow {
+            id: "codex".into(), project_id: "p".into(), agent: Some("codex".into()), state: "active".into(), durable: 1,
+            ..Default::default()
+        });
+        let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":"gui"})).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
+        let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":"gui-control"})).await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
+    }
 
     #[test]
     fn js_truthiness() {

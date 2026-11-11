@@ -55,6 +55,52 @@ impl FalconClient {
         self.bare(Method::POST, format!("/api/sessions/{}/reattach", seg(id)))
     }
 
+    /// 开启/关闭真实终端的只读图形镜像，始终保留原进程。
+    /// 先探测新能力，防止旧服务端把同一路径的 POST 解释成 terminate + resume。
+    pub fn switch_agent_mode(&self, id: &str, graphical: bool) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
+        #[derive(Serialize)]
+        struct Body { mode: &'static str }
+        let client = self.clone();
+        let path = format!("/api/sessions/{}/agent-mode", seg(id));
+        async move {
+            let capability: serde_json::Value = match client.get(path.clone()).await {
+                Ok(capability) => capability,
+                Err(error) if matches!(error.status, Some(404 | 405)) => {
+                    return Err(crate::error::ApiError::internal("agent_mirror_unsupported"));
+                }
+                Err(error) => return Err(error),
+            };
+            if capability["preservesProcess"].as_bool() != Some(true) {
+                return Err(crate::error::ApiError::internal("agent_mirror_unsupported"));
+            }
+            client.json(Method::POST, path, json_body(&Body {
+                mode: if graphical { "gui" } else { "terminal" },
+            })).await
+        }
+    }
+
+    /// 启用可交互 GUI。与旧只读镜像使用不同的模式值，旧服务端不能把它解释成镜像或重启。
+    /// 首次转换会续接对话，调用方须先明确确认；后端负责检查当前轮次和进程状态。
+    pub fn enable_agent_gui(&self, id: &str) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
+        #[derive(Serialize)]
+        struct Body { mode: &'static str }
+        let client = self.clone();
+        let path = format!("/api/sessions/{}/agent-mode", seg(id));
+        async move {
+            let capability: serde_json::Value = match client.get(path.clone()).await {
+                Ok(capability) => capability,
+                Err(error) if matches!(error.status, Some(404 | 405)) => {
+                    return Err(crate::error::ApiError::internal("agent_gui_unsupported"));
+                }
+                Err(error) => return Err(error),
+            };
+            if capability["interactiveGui"].as_bool() != Some(true) {
+                return Err(crate::error::ApiError::internal("agent_gui_unsupported"));
+            }
+            client.json(Method::POST, path, json_body(&Body { mode: "gui-control" })).await
+        }
+    }
+
     /// `GET /api/sessions/:id/foreground`：关窗口（Terminate）前问一嘴前台有没有程序在跑。
     /// 侦测不到的场景 busy 恒为 false；会话不存在也答空闲。设计文档 §4.3 要求 app
     /// 给它套 2s 超时——它是道保险，自己卡住不能把关窗口拦下来。

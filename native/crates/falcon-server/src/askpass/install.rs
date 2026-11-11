@@ -46,6 +46,13 @@ pub fn posix_write_askpass_command(dir: &str, hub: &AskpassHub, helper_url: &str
     format!("d={}; mkdir -p \"$d\" && {}", quote_posix(dir), writes.join(" && "))
 }
 
+/// 与 PATH 分开保留包装目录：登录 shell 的 rc 可能重建 PATH，agent 启动前须重新前置。
+pub const ASKPASS_BIN_ENV: &str = "FALCON_ASKPASS_BIN";
+
+pub fn askpass_session_env(bin: &str, session_id: &str) -> [(String, String); 2] {
+    [(ASKPASS_BIN_ENV.into(), bin.into()), ("FALCON_SESSION_ID".into(), session_id.into())]
+}
+
 /// 把 `dir` 插到 PATH 最前面（有序 env 里原位替换，没有就追加在末尾——同 JS 对象展开覆盖同名键）
 pub fn prepend_path(env: &mut Vec<(String, String)>, dir: &str) {
     match env.iter_mut().find(|(k, _)| k == "PATH") {

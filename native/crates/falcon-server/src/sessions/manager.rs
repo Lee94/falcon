@@ -27,6 +27,8 @@ use futures::future::Shared;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::agent::write_local_launcher;
+use super::agent_driver::{AgentDriver, AgentDriverOutput};
 use super::auto_title::{AutoTitle, Probe};
 use super::backend::{Backend, BackendCallbacks, BackendEvent};
 use super::forward::ForwardManager;
@@ -81,6 +83,10 @@ const OUTPUT_FLUSH_MS: u64 = 16;
 const TITLE_PROBE_MS: u64 = 2_500;
 
 const RECONNECT_MAX_DELAY_MS: u64 = 30_000;
+
+mod agent_mode;
+mod transcript_remote;
+use agent_mode::TranscriptMirror;
 
 /// 接回时，宿主机上一次部署失败的判定放多久就不作数、再推一次（[`SshLink::forget_failed_sessiond`]）。
 /// 比重连退避的上限长一档：退避到顶后每两轮重推一次，而不是每轮
@@ -204,6 +210,13 @@ struct EntryState {
     published_size: Option<(TermSize, Option<u64>)>,
     attaching: Option<Shared<LocalBoxFuture<'static, Result<(), SessionError>>>>,
     terminating: bool,
+    backend_epoch: u64,
+    closed_epoch: Option<u64>,
+    /// 只读跟随官方终端的对话记录，不拦截或暂停 PTY 输入输出。
+    transcript_mirror: Option<TranscriptMirror>,
+    transcript_generation: u64,
+    /// 显式转换会短暂退出 CLI；这期间所有 Viewer 的输入都必须停住，不能落进过渡中的 shell。
+    agent_converting: bool,
     /// 持有深浅的那个 Viewer 报的终端深浅；会话的 env 在创建时冻住了，只影响 OSC 答复和新会话
     appearance: Option<TermAppearance>,
     background: Option<String>,
@@ -225,6 +238,8 @@ struct EntryState {
     exit_seen: bool,
     /// SSH 上 bridge 的退出码（连接结束时给）
     bridge_exit: Option<Option<u32>>,
+    /// 保留的结构化 Agent 驱动器；默认 CLI 会话不创建、不拦截真实终端输入输出。
+    agent_driver: Option<AgentDriver>,
 }
 
 struct LiveEntry {
@@ -263,6 +278,11 @@ impl LiveEntry {
                 published_size: None,
                 attaching: None,
                 terminating: false,
+                backend_epoch: 0,
+                closed_epoch: None,
+                transcript_mirror: None,
+                transcript_generation: 0,
+                agent_converting: false,
                 appearance: init.hint.appearance,
                 background: init.hint.background,
                 foreground: init.hint.foreground,
@@ -275,6 +295,7 @@ impl LiveEntry {
                 program_status: Vec::new(),
                 exit_seen: false,
                 bridge_exit: None,
+                agent_driver: None,
             }),
             flush_timer: Rc::default(),
             title_timer: Rc::default(),
@@ -1097,20 +1118,24 @@ impl SessionManager {
     ///
     /// 每次附着都重写一遍脚本（本地一次 fs 写、远端一次往返）：用户删了它、换了登录
     /// shell、falcon 升级换了脚本内容，都能自愈。
-    async fn session_shell(&self, project: &ProjectRow, row: &SessionRow) -> Option<String> {
+    async fn session_shell(&self, project: &ProjectRow, row: &SessionRow) -> Result<Option<String>, SessionError> {
         let shell = project.shell.clone();
         let Some(agent) = row.agent.as_deref().and_then(SessionAgent::from_wire).filter(|a| *a != SessionAgent::Unknown)
         else {
-            return shell;
+            return Ok(shell);
         };
+        let selected = self.db.session_agent_mode(&row.id);
+        if selected.as_deref().is_some_and(|mode| matches!(mode, "gui" | "terminal")) {
+            return self.mode_launcher(project, agent, selected.as_deref() == Some("gui")).await.map(Some);
+        }
         if project.project_type == "local" {
             let login = shell.clone().unwrap_or_else(default_local_shell);
-            return match super::agent::write_local_launcher(&self.data_dir, agent, &login) {
+            return Ok(match write_local_launcher(&self.data_dir, agent, &login) {
                 Ok(p) => Some(p.to_string_lossy().into_owned()),
                 Err(_) => shell,
-            };
+            });
         }
-        self.get_link(project).ensure_agent_launcher(agent, shell.as_deref()).await.or(shell)
+        Ok(self.get_link(project).ensure_agent_launcher(agent, shell.as_deref()).await.or(shell))
     }
 
     async fn attach_backend(
@@ -1124,32 +1149,28 @@ impl SessionManager {
         // 非持久会话：附着返回之前就可能有 OSC 查询要答（OscColorGate），先攒着，backend 到手再写
         let slot: Rc<RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>> =
             Rc::new(RefCell::new((entry.backend(), Vec::new())));
-        let cb = {
-            let me = self.me.clone();
-            let weak = Rc::downgrade(entry);
-            let slot_data = slot.clone();
-            let slot_exit = slot.clone();
-            let me_exit = self.me.clone();
-            let me_event = self.me.clone();
-            let weak_event = Rc::downgrade(entry);
-            let session_id = entry.session_id.clone();
-            BackendCallbacks {
-                on_data: Rc::new(move |data: String| {
-                    let (Some(me), Some(entry)) = (me.upgrade(), weak.upgrade()) else { return };
-                    me.on_backend_data(&entry, &slot_data, &data);
-                }),
-                on_exit: Rc::new(move || {
-                    let Some(me) = me_exit.upgrade() else { return };
-                    let mine = slot_exit.borrow().0.clone();
-                    let session_id = session_id.clone();
-                    tokio::task::spawn_local(async move { me.handle_backend_exit(&session_id, mine).await });
-                }),
-                on_event: Rc::new(move |ev: BackendEvent| {
-                    let (Some(me), Some(entry)) = (me_event.upgrade(), weak_event.upgrade()) else { return };
-                    me.on_backend_event(&entry, ev);
-                }),
+        let graphical = self.db.session_agent_mode(&row.id).as_deref() == Some("gui");
+        let reconnect_output = if graphical {
+            let mut s = entry.s.borrow_mut();
+            if !reattach || s.agent_driver.is_none() {
+                let agent = row.agent.as_deref().and_then(SessionAgent::from_wire)
+                    .filter(|agent| super::agent::supports_native_stream(*agent))
+                    .ok_or_else(|| SessionError::Failed("该 CLI 不支持结构化 Agent 协议".into()))?;
+                let mut driver = AgentDriver::new(agent, project.working_dir.clone());
+                if super::agent::resumable(agent) { driver.pin_session_id(&row.id); }
+                s.agent_driver = Some(driver);
             }
-        };
+            reattach.then(|| s.agent_driver.as_mut().unwrap().reconnect_stream())
+        } else { None };
+        if let Some(out) = reconnect_output {
+            self.apply_agent_output(entry, None, out);
+            return Err(SessionError::Failed("结构化宿主机连接已断开，无法证明原 CLI 仍使用结构化协议；暂不支持自动重附着，请终止会话后按固定启动 UUID 续接".into()));
+        }
+        if graphical {
+            let state = entry.s.borrow().agent_driver.as_ref().unwrap().state.clone();
+            self.broadcast(entry, &ServerMessage::AgentSnapshot { state });
+        }
+        let cb = self.backend_callbacks(entry, &slot);
 
         // 接回时 entry 可能还没有守护进程（后端重启后重建的 entry），重新准备一次。
         //
@@ -1187,11 +1208,16 @@ impl SessionManager {
 
         let size = fallback_term_size(entry.size());
         let hint = entry.color_hint();
+        let shell_opt = if reattach { None } else { self.session_shell(project, row).await? };
+        let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
+        if entry.terminating() { return Err(SessionError::Failed("会话正在关闭，未启动新的 CLI".into())); }
+        // 新建 Agent 会话必须直接运行 CLI 自带的交互界面。结构化协议进程没有官方终端界面，
+        // 不能仅凭 agent 类型就启用驱动器：那会吞掉真实终端输出，并把按键挡在 PTY 之外。
         let opts = AttachOptions {
             session_id: entry.session_id.clone(),
             cwd,
             // 接回时用不上（会话早就起着了），省一次远端往返
-            shell: if reattach { None } else { self.session_shell(project, row).await },
+            shell: shell_opt,
             durable: entry.durable,
             deployed: entry.deployed(),
             reattach,
@@ -1205,8 +1231,14 @@ impl SessionManager {
             env: if reattach {
                 Vec::new()
             } else {
-                let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
-                super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive)
+                let resume = mode == AttachMode::Revive;
+                let mut env = if graphical {
+                    super::agent::native_launch_env(agent, &row.id, resume)
+                } else { super::agent::launch_env(agent, &row.id, resume) };
+                if self.db.session_agent_mode(&row.id).as_deref().is_some_and(|mode| matches!(mode, "gui" | "terminal")) {
+                    env.push((super::agent::AGENT_RESUME_ONLY_ENV.to_string(), "1".to_string()));
+                }
+                env
             },
         };
 
@@ -1249,6 +1281,7 @@ impl SessionManager {
             std::mem::take(&mut slot.1)
         };
         entry.s.borrow_mut().backend = Some(backend.clone());
+        backend.set_appearance(&entry.color_hint());
         for reply in queued {
             backend.write(&reply);
         }
@@ -1256,10 +1289,31 @@ impl SessionManager {
         if let Some(size) = entry.size() {
             backend.resize(size.cols, size.rows);
         }
+        if self.db.session_agent_mode(&row.id).as_deref() == Some("transcript") {
+            // 镜像失败不影响真实终端接回；它的读取与进程生命周期无关。
+            if let Err(error) = self.enable_transcript_mirror(entry, project).await {
+                log::warn!("开启会话图形镜像失败：{error}");
+            }
+        }
         Ok(())
     }
 
     fn on_backend_data(&self, entry: &Rc<LiveEntry>, slot: &RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>, data: &str) {
+        let agent_out = {
+            let mut s = entry.s.borrow_mut();
+            s.agent_driver
+                .as_mut()
+                .filter(|d| d.should_intercept_pty())
+                .map(|d| d.on_data(data))
+        };
+        if let Some(out) = agent_out {
+            self.apply_agent_output(entry, Some(slot), out);
+            return;
+        }
+        self.on_terminal_data(entry, slot, data);
+    }
+
+    fn on_terminal_data(&self, entry: &Rc<LiveEntry>, slot: &RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>, data: &str) {
         if entry.durable {
             // 守护进程会话：终端查询由宿主机的 VT 进程回答，回放用它的快照、2031 由 holder 发，
             // 这里只管转发
@@ -1286,14 +1340,81 @@ impl SessionManager {
         self.queue_output(entry, out.visible);
     }
 
+    fn apply_agent_output(
+        &self,
+        entry: &Rc<LiveEntry>,
+        slot: Option<&RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>>,
+        out: AgentDriverOutput,
+    ) {
+        for line in out.to_pty {
+            if let Some(b) = entry.backend() {
+                b.write(&line);
+            } else if let Some(slot) = slot {
+                let backend = slot.borrow().0.clone();
+                match backend {
+                    Some(b) => b.write(&line),
+                    None => slot.borrow_mut().1.push(line),
+                }
+            }
+        }
+        if let Some(title) = out.title {
+            entry.s.borrow_mut().auto_title.on_program_title(&title);
+            self.publish_title(entry);
+        }
+        if out.status_changed {
+            self.sync_agent_program_status(entry);
+        }
+        for msg in out.messages {
+            self.broadcast(entry, &msg);
+        }
+        if out.exited_native
+            && let (Some(b), Some(size)) = (entry.backend(), entry.size())
+        {
+            b.resize(size.cols, size.rows);
+        }
+        if !out.terminal_passthrough.is_empty() {
+            if let Some(slot) = slot {
+                self.on_terminal_data(entry, slot, &out.terminal_passthrough);
+            } else {
+                self.queue_output(entry, out.terminal_passthrough);
+            }
+        }
+    }
+
+    fn sync_agent_program_status(&self, entry: &Rc<LiveEntry>) {
+        let records = {
+            let mut s = entry.s.borrow_mut();
+            let Some(drv) = s.agent_driver.as_ref() else { return };
+            let next = drv.program_status_records();
+            let old = std::mem::replace(&mut s.program_status, next.clone());
+            s.auto_title.on_status(&old, &next);
+            next
+        };
+        self.broadcast(entry, &ServerMessage::ProgramStatus { records });
+        self.publish_title(entry);
+    }
+
     /// 守护进程会话的事件。按连接上到达的顺序在 LocalSet 上同步调用
     fn on_backend_event(&self, entry: &Rc<LiveEntry>, ev: BackendEvent) {
         match ev {
             BackendEvent::Synced(text) => {
+                // VT 导出会换行、裁剪并可能重复旧 JSON；它只能画终端，不能驱动结构化协议。
+                let still_intercepting = entry
+                    .s
+                    .borrow()
+                    .agent_driver
+                    .as_ref()
+                    .is_some_and(|d| d.should_intercept_pty());
                 // 快照之前到的输出都已含在快照里：先发给已经在看的 Viewer（等回放的那些
                 // flush 时会跳过），再把快照给等回放的，此后它们照常收输出（设计文档 5.5）
                 self.flush_output(entry);
                 entry.s.borrow_mut().sync_in_flight = false;
+                if still_intercepting {
+                    for v in entry.viewers() {
+                        v.syncing.set(false);
+                    }
+                    return;
+                }
                 let frame = encode_term_frame(TERM_FRAME_REPLAY, &text);
                 for v in entry.viewers() {
                     if v.syncing.get() {
@@ -1304,12 +1425,15 @@ impl SessionManager {
                 }
             }
             BackendEvent::ProgramStatus(records) => {
-                {
+                if entry.s.borrow().agent_driver.as_ref().is_some_and(|d| d.is_active()) { return; }
+                let messages = {
                     let mut s = entry.s.borrow_mut();
                     let old = std::mem::replace(&mut s.program_status, records.clone());
                     s.auto_title.on_status(&old, &records);
-                }
+                    s.transcript_mirror.as_mut().map(|mirror| mirror.update_program_status(&records)).unwrap_or_default()
+                };
                 self.broadcast(entry, &ServerMessage::ProgramStatus { records });
+                for message in messages { self.broadcast_transcript(entry, &message); }
                 // 程序报了状态多半是前台换了人（或刚起来）：标题先按它出，再排一次探测认前台
                 self.publish_title(entry);
                 self.schedule_title_probe(entry);
@@ -1391,6 +1515,12 @@ impl SessionManager {
         }
 
         let entry = self.hydrate_entry(&row);
+        if entry.terminating() {
+            return Err(SessionError::Failed("会话正在关闭，请稍后重试".into()));
+        }
+        if entry.s.borrow().agent_converting {
+            return Err(SessionError::Failed("正在转换为图形界面，请稍后重试".into()));
+        }
         if entry.backend().is_some() {
             // PTY 已挂上但 DB 还停在 unverified：点接回必须把状态扳回来
             if row.state != "active" {
@@ -1532,10 +1662,11 @@ impl SessionManager {
             s.title_probing = true;
             s.auto_title.probe_started()
         };
+        let epoch = entry.s.borrow().backend_epoch;
         let probe = self.probe_foreground(&entry.session_id).await;
         entry.s.borrow_mut().title_probing = false;
-        // 探测期间会话可能已被终止，entry 也可能被重建过
-        if !self.is_current(entry) {
+        // 探测期间会话可能已被终止、重建或切换到另一代 CLI。
+        if !self.is_current(entry) || entry.s.borrow().backend_epoch != epoch {
             return;
         }
         entry.s.borrow_mut().auto_title.on_probe(started, probe);
@@ -1557,8 +1688,104 @@ impl SessionManager {
     /// 用户看过了这个会话（窗口获得焦点）：清掉 done / error
     pub fn status_seen(&self, session_id: &str, ids: Vec<String>) {
         let Some(entry) = self.entry(session_id) else { return };
+        let cleared = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .is_some_and(|d| d.clear_seen_status());
+        if cleared {
+            self.sync_agent_program_status(&entry);
+        }
         if let Some(b) = entry.backend() {
             b.status_seen(&ids);
+        }
+    }
+
+    pub fn agent_prompt(&self, session_id: &str, text: &str) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .map(|d| d.send_prompt(text));
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
+            self.touch(session_id, false);
+        }
+    }
+
+    pub fn agent_interrupt(&self, session_id: &str) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .map(|d| d.interrupt());
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
+        }
+    }
+
+    pub fn agent_permission(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        decision: falcon_proto::AgentPermissionDecision,
+        updated_command: Option<String>,
+    ) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .map(|d| d.answer_permission(call_id, decision, updated_command));
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
+            self.touch(session_id, false);
+        }
+    }
+
+    pub fn agent_set_model(&self, session_id: &str, model: &str) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .map(|d| d.set_model(model));
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
+        }
+    }
+
+    pub fn agent_set_reasoning_effort(&self, session_id: &str, effort: Option<&str>) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry.s.borrow_mut().agent_driver.as_mut().map(|d| d.set_reasoning_effort(effort));
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
+        }
+    }
+
+    pub fn agent_switch_terminal(&self, session_id: &str) {
+        let Some(entry) = self.entry(session_id) else { return };
+        if entry.terminating() || entry.s.borrow().agent_converting { return; }
+        let out = entry
+            .s
+            .borrow_mut()
+            .agent_driver
+            .as_mut()
+            .map(|d| d.switch_to_terminal());
+        if let Some(out) = out {
+            self.apply_agent_output(&entry, None, out);
         }
     }
 
@@ -1588,6 +1815,7 @@ impl SessionManager {
         let entry = self.entry(session_id);
         if let Some(e) = &entry {
             e.s.borrow_mut().terminating = true;
+            e.s.borrow_mut().transcript_mirror = None;
         }
 
         if row.durable == 1 {
@@ -1717,6 +1945,7 @@ impl SessionManager {
 
     pub fn input(&self, session_id: &str, viewer_id: u64, data: &str) {
         if let Some(entry) = self.entry(session_id) {
+            if entry.terminating() || entry.s.borrow().agent_converting { return; }
             // 谁在操作尺寸与深浅就跟谁（见 viewer_arbiter.rs）。先改尺寸、翻色再送这次按键：
             // SIGWINCH 与 997 通知排在前面，前台程序对这一键的响应已经按新尺寸、新配色画
             let hint = entry.s.borrow_mut().arbiter.input(&viewer_id, data);
@@ -1724,7 +1953,15 @@ impl SessionManager {
             if let Some(hint) = hint {
                 self.apply_colors(&entry, &hint);
             }
-            if let Some(b) = entry.backend() {
+            let intercepting = entry
+                .s
+                .borrow()
+                .agent_driver
+                .as_ref()
+                .is_some_and(|d| d.should_intercept_pty());
+            if !intercepting
+                && let Some(b) = entry.backend()
+            {
                 b.write(data);
             }
         }
@@ -1742,7 +1979,7 @@ impl SessionManager {
         if entry.backend().is_some() {
             return;
         }
-        if entry.durable && entry.viewer_count() > 0 && !entry.terminating() {
+        if entry.durable && entry.viewer_count() > 0 && !entry.terminating() && !entry.s.borrow().agent_converting {
             let me = self.me();
             let session_id = session_id.to_string();
             tokio::task::spawn_local(async move {
@@ -1944,6 +2181,42 @@ impl SessionManager {
     }
 
     fn send_replay(&self, entry: &LiveEntry, viewer: &Viewer) {
+        let agent_snap = {
+            let s = entry.s.borrow();
+            s.agent_driver
+                .as_ref()
+                .map(|d| (d.state.clone(), !d.is_started()))
+        };
+        let mirror = entry.s.borrow().transcript_mirror.as_ref().map(TranscriptMirror::snapshot);
+        if let Some(state) = mirror {
+            // 图形镜像与终端回放同时发送，Viewer 不会因查看时间线而丢失原终端。
+            if viewer.terminal_backed_agent_view.get() { viewer.send(&ServerMessage::AgentSnapshot { state }); }
+        } else if agent_snap.is_none() && self.db.session_agent_mode(&entry.session_id).as_deref() == Some("terminal") {
+            viewer.send(&ServerMessage::AgentSnapshot { state: falcon_proto::AgentViewState::new(SessionAgent::Claude, false) });
+        }
+        if let Some((state, not_started)) = agent_snap {
+            viewer.send(&ServerMessage::AgentSnapshot {
+                state: state.clone(),
+            });
+            if state.active {
+                let (records, title) = {
+                    let s = entry.s.borrow();
+                    (s.program_status.clone(), s.title.clone())
+                };
+                if !records.is_empty() {
+                    viewer.send(&ServerMessage::ProgramStatus { records });
+                }
+                if let Some(title) = title {
+                    viewer.send(&ServerMessage::Title { title: Some(title) });
+                }
+                if entry.durable && not_started {
+                    viewer.syncing.set(true);
+                    viewer.lagged.set(false);
+                    self.request_sync(entry);
+                }
+                return;
+            }
+        }
         if entry.durable {
             // 守护进程会话：要一份快照，回来之前这个 Viewer 不收输出（on_backend_event）。
             // 还没连上（等接回）时先挂着，接回成功的 mark_active 会再要
@@ -1978,7 +2251,11 @@ impl SessionManager {
     }
 
     fn mark_dead(&self, entry: &LiveEntry, reason: DeadReason) {
-        entry.s.borrow_mut().backend = None;
+        {
+            let mut s = entry.s.borrow_mut();
+            s.backend = None;
+            s.backend_epoch += 1;
+        }
         // 先把还没广播的尾巴发出去（shell 的告别输出），再释放
         self.flush_output(entry);
         // dead 会话不可能再回放（add_viewer 对 dead 行早退），立刻释放 Scrollback
@@ -1997,7 +2274,16 @@ impl SessionManager {
     }
 
     fn mark_unverified(&self, entry: &Rc<LiveEntry>) {
-        entry.s.borrow_mut().backend = None;
+        {
+            let mut s = entry.s.borrow_mut();
+            s.backend = None;
+            s.backend_epoch += 1;
+            s.closed_epoch = None;
+        }
+        if self.db.session_agent_mode(&entry.session_id).as_deref() == Some("gui") {
+            let out = entry.s.borrow_mut().agent_driver.as_mut().map(AgentDriver::reconnect_stream);
+            if let Some(out) = out { self.apply_agent_output(entry, None, out); }
+        }
         self.db.update_session_state(&entry.session_id, SessionState::Unverified, None);
         self.broadcast(entry, &ServerMessage::State { state: SessionState::Unverified, dead_reason: None });
         if !entry.terminating() {
@@ -2007,6 +2293,8 @@ impl SessionManager {
 
     /// 标黄之后自己去接，不再等用户点。SSH 走链路重连，本地直接再 attach。
     fn kick_auto_reattach(&self, entry: &LiveEntry) {
+        // 结构化连接断开后无法证明 CLI 还在 stream-json 模式；只显示明确的恢复错误，不循环重试。
+        if self.db.session_agent_mode(&entry.session_id).as_deref() == Some("gui") { return; }
         if !entry.durable {
             return;
         }
@@ -2022,9 +2310,9 @@ impl SessionManager {
     ///
     /// `ended` 是退出的那个 backend。与 TS 的出入：entry 上已经换成了别的 backend（旧链路
     /// 的 channel 在新附着之后才报关闭）时不理——TS 会把新 backend 一并置空，这是个竞态。
-    async fn handle_backend_exit(&self, session_id: &str, ended: Option<Rc<dyn Backend>>) {
+    async fn handle_backend_exit(&self, session_id: &str, ended: Option<Rc<dyn Backend>>, epoch: u64) {
         let Some(entry) = self.entry(session_id) else { return };
-        if entry.terminating() {
+        if entry.s.borrow().backend_epoch != epoch || entry.terminating() {
             return;
         }
         if let (Some(current), Some(ended)) = (entry.backend(), &ended)
@@ -2102,6 +2390,7 @@ impl SessionManager {
                     && e.durable
                     && e.backend().is_none()
                     && !e.terminating()
+                    && self.db.session_agent_mode(&e.session_id).as_deref() != Some("gui")
                     && self.db.get_session(&e.session_id).is_some_and(|r| r.state == "unverified")
             })
             .collect()

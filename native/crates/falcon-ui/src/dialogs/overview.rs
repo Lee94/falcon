@@ -88,37 +88,51 @@ impl SessionOverview {
         for state in CARD_STATES {
             let count = w.sessions.iter().filter(|s| s.state == state).count();
             let on = filter == Some(state);
-            let hover = ui.tint.opacity(0.6);
-            cards = cards.child(
-                crate::ui::sunken(cx)
-                    .id(SharedString::from(format!("overview-card-{}", state.as_str())))
-                    .w(zpx(176.))
-                    .px(zpx(14.))
-                    .py_3()
-                    .cursor_pointer()
-                    .map(|d| if on { d.bg(ui.tint) } else { d.hover(move |s| s.bg(hover)) })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_filter(if on { None } else { Some(state) }, cx)
-                    }))
-                    .child(
-                        div()
-                            .mb(zpx(6.))
-                            .flex()
-                            .items_center()
-                            .gap(zpx(6.))
-                            .text_xs()
-                            .text_color(ui.muted_foreground)
-                            .child(status_mark(Mark::from(state), zpx(12.), cx))
-                            .child(state_label(state)),
-                    )
-                    .child(
-                        div()
-                            .font_family(crate::fonts::BERKELEY)
-                            .text_size(zpx(22.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(count.to_string()),
-                    ),
-            );
+            let id_str = format!("overview-card-{}", state.as_str());
+            let mut card = crate::ui::sunken(cx)
+                .id(SharedString::from(id_str.clone()))
+                .relative()
+                .w(zpx(176.))
+                .px(zpx(14.))
+                .py_3()
+                .cursor_pointer()
+                .active(|s| s.opacity(0.8))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_filter(if on { None } else { Some(state) }, cx)
+                }));
+            if !on {
+                card = card.child(crate::ui::hover_fade(format!("{id_str}-hover"), ui.tint.opacity(0.55), radius::MD));
+            }
+            card = card
+                .child(
+                    div()
+                        .mb(zpx(6.))
+                        .flex()
+                        .items_center()
+                        .gap(zpx(6.))
+                        .text_xs()
+                        .text_color(if on { ui.foreground } else { ui.muted_foreground })
+                        .child(status_mark(Mark::from(state), zpx(12.), cx))
+                        .child(state_label(state)),
+                )
+                .child(
+                    div()
+                        .font_family(crate::fonts::BERKELEY)
+                        .text_size(zpx(22.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(count.to_string()),
+                );
+            let card_el: AnyElement = if on {
+                crate::ui::selected_fade(
+                    format!("{id_str}-sel"),
+                    card.border_1().border_color(ui.tint_strong.opacity(0.35)),
+                    ui.tint,
+                )
+                .into_any_element()
+            } else {
+                card.into_any_element()
+            };
+            cards = cards.child(card_el);
         }
         cards.into_any_element()
     }

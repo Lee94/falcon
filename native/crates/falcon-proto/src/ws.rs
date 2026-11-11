@@ -19,6 +19,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent_view::{
+    AgentDeltaKind, AgentEntry, AgentPermissionDecision, AgentSlashCommand, AgentTurnStatus,
+    AgentViewState,
+};
 use crate::session::{DeadReason, SessionState};
 use crate::term_env::TermAppearance;
 use crate::install::{InstallStage, NonDurableReason};
@@ -147,6 +151,32 @@ pub enum ClientMessage {
     /// 浏览器版总由同一个服务端二进制托管，不会遇上不认它的旧服务端
     #[serde(rename = "ping")]
     Ping,
+    /// Viewer 能同时绘制只读时间线与真实终端；未声明的旧客户端只接收原终端。
+    #[serde(rename = "agent_view_capabilities")]
+    AgentViewCapabilities { terminal_backed: bool },
+    /// 原生 Agent 视图：发送用户提示词（或斜杠命令、`!cmd`）。
+    #[serde(rename = "agent_prompt")]
+    AgentPrompt { text: String },
+    /// 原生 Agent 视图：中断当前正在执行的轮次。
+    #[serde(rename = "agent_interrupt")]
+    AgentInterrupt,
+    /// 原生 Agent 视图：答复工具调用的权限审批。
+    #[serde(rename = "agent_permission")]
+    AgentPermission {
+        call_id: String,
+        decision: AgentPermissionDecision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        updated_command: Option<String>,
+    },
+    /// 原生 Agent 视图：切换模型。
+    #[serde(rename = "agent_set_model")]
+    AgentSetModel { model: String },
+    /// 修改思考程度；None 恢复模型默认值。
+    #[serde(rename = "agent_set_reasoning_effort")]
+    AgentSetReasoningEffort { effort: Option<String> },
+    /// 旧客户端的退出命令。新客户端切换视图时不发送生命周期命令。
+    #[serde(rename = "agent_switch_terminal")]
+    AgentSwitchTerminal,
 }
 
 /// 服务端 → 客户端（会话通道）的控制消息。output / replay 见 `TERM_FRAME_*` 二进制帧。
@@ -193,6 +223,39 @@ pub enum ServerMessage {
     /// `owner` 的那扇窗口照旧按自己的格子建网格（拖窗不等往返），其余的按这里的尺寸建
     #[serde(rename = "size")]
     Size { cols: u16, rows: u16, owner: bool },
+    /// 原生 Agent 视图：连接建立或重同步时下发完整快照。
+    #[serde(rename = "agent_snapshot")]
+    AgentSnapshot { state: AgentViewState },
+    /// 原生 Agent 视图：新增或整体替换一条时间线条目。
+    #[serde(rename = "agent_entry")]
+    AgentEntry { entry: AgentEntry },
+    /// 原生 Agent 视图：指定条目的流式文本增量。
+    #[serde(rename = "agent_delta")]
+    AgentDelta {
+        id: String,
+        kind: AgentDeltaKind,
+        delta: String,
+    },
+    /// 原生 Agent 视图：运行状态或元信息变化。
+    #[serde(rename = "agent_meta")]
+    AgentMeta {
+        active: bool,
+        status: AgentTurnStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<AgentSlashCommand>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        models: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_options: Option<Vec<crate::AgentModelOption>>,
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+    },
     /// 本版本不认识的控制消息（服务端比客户端新）。只在反序列化时出现，忽略即可。
     #[serde(rename = "unknown", other)]
     Unknown,
@@ -302,6 +365,17 @@ mod tests {
         assert_eq!(roundtrip::<ClientMessage>(r#"{"type":"ping"}"#), ClientMessage::Ping);
         let v = roundtrip::<ClientMessage>(r#"{"type":"visibility","visible":false}"#);
         assert_eq!(v, ClientMessage::Visibility { visible: false });
+    }
+
+    #[test]
+    fn agent_settings_preserve_capabilities_and_explicit_default() {
+        let reset = roundtrip::<ClientMessage>(r#"{"type":"agent_set_reasoning_effort","effort":null}"#);
+        assert_eq!(reset, ClientMessage::AgentSetReasoningEffort { effort: None });
+        roundtrip::<ClientMessage>(r#"{"type":"agent_set_reasoning_effort","effort":"ultra"}"#);
+        let meta = roundtrip::<ServerMessage>(r#"{"type":"agent_meta","active":true,"status":"idle","model":"resolved-a","modelOptions":[{"id":"alias-a","label":"Model A","resolvedModel":"resolved-a","reasoningEfforts":["low","max"],"defaultReasoningEffort":"low"}],"reasoningEffort":null}"#);
+        assert!(matches!(meta, ServerMessage::AgentMeta { model_options: Some(options), reasoning_effort: None, .. } if options[0].reasoning_efforts == ["low", "max"]));
+        let old: ServerMessage = serde_json::from_str(r#"{"type":"agent_meta","active":true,"status":"idle"}"#).unwrap();
+        assert!(matches!(old, ServerMessage::AgentMeta { model_options: None, reasoning_effort: None, .. }));
     }
 
     #[test]

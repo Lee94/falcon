@@ -39,3 +39,15 @@
 `sessions/agent_detect.rs` 重新解析交互登录 shell 的环境，在 PATH 中检查固定清单里的可执行文件；Unix 检查执行权限，Windows 按 PATHEXT 检查 `.exe` / `.cmd` 等文件。检测不运行 CLI，也不安装软件；符号链接跟随到目标，同名目录、损坏链接和不可执行文件不显示。服务端缓存 30 秒并合并并发探测，客户端登录后立即请求、之后每 30 秒刷新，安装器修改 shell 配置后也能重新发现。
 
 本地与 SSH 项目均只显示目标机器实际检测到的 CLI。`GET /api/agents` 不带参数时检测后端本机，带 `hostId` 或 `projectId` 时经 SSH 在远端的交互登录 shell 中执行 `command -v`（Windows 使用 `Get-Command`），不启动 agent。同一主机的项目共用客户端清单并每 30 秒刷新；检测失败或尚未完成时不显示候选项，不返回完整清单。
+
+## 后记（2026-11-11）：完整图形交互
+
+默认仍运行官方交互式 CLI。Claude 会话可在空闲时，经应用内明确确认，退出当前 CLI 并续接同一 UUID 的结构化进程，使用原生 GUI 完成输入、审批、中断、模型与思考程度设置。GUI 不再嵌入原终端作为交互入口；已有结构化进程切换排版不重启。只读对话镜像与完整 GUI 的能力请求分开，具体转换条件、进程边界与兼容规则见 ADR 0027。
+
+## 后记（2026-11-11）：登录配置加载后恢复 sudo 包装的 PATH 顺序
+
+Falcon 在创建会话时将 askpass 的 `bin` 目录前置到 PATH，但 agent 启动脚本还会执行一次交互登录 shell。macOS 的 `/etc/zprofile` 中的 `path_helper`、用户的登录配置都可能重新排列或覆盖 PATH，使 `/usr/bin/sudo` 排在 Falcon 包装之前。Claude Code 的管道子进程因此直接调用系统 sudo，密码请求到不了 Falcon，客户端也就无从弹窗。本机 zsh 与 bash 的交互登录启动均复现了系统目录排到包装之前的情况。
+
+本地 / SSH、持久 / 非持久四条创建路径统一用 `askpass_session_env` 传入 `FALCON_ASKPASS_BIN` 与 `FALCON_SESSION_ID`。普通终端和图形模式的 POSIX agent 启动脚本都在 shell 登录配置加载完成后、运行 CLI 前，用独立保存的目录重新前置 PATH；不修改用户的 shell 配置。没有 askpass 目录的环境不调整 PATH。交互终端里的 sudo、显式 `-n` / `-S` / `-A` 仍遵循原包装规则。
+
+`api::askpass::tests::agent_askpass_survives_login_shell_path_reset` 使用临时服务和替身命令验证两种启动模式：登录 shell 重建 PATH 后，管道命令仍找到 Falcon 包装，真实 Python helper 发出请求，`/api/askpass/pending` 返回提示，答复后命令继续执行。用例不提权、不发送模型请求，旧启动脚本会在发出请求前退出。修改需要更新服务端并新建 agent 会话才会应用；仅重新连接既有持久会话或在其中重新运行 CLI，不会补入新目录环境变量。

@@ -1010,6 +1010,7 @@ pub fn open(ws: &Entity<Workspace>, edit: Option<Project>, preset: Preset, windo
         dialog
             .title(title)
             .w(zpx(if wide { 576. } else { 448. }))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             .overlay_closable(false)
             .close_button(false)
             .child(f.clone())

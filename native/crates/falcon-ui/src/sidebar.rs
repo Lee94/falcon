@@ -819,6 +819,7 @@ fn basename(path: &str) -> String {
 
 fn chevron(id: String, expanded: bool, cx: &App, on_toggle: impl Fn(&mut App) + 'static) -> AnyElement {
     let ui = Ui::global(cx);
+    let chev_id = format!("{id}-chev");
     div()
         .id(SharedString::from(id))
         .flex_none()
@@ -828,7 +829,9 @@ fn chevron(id: String, expanded: bool, cx: &App, on_toggle: impl Fn(&mut App) + 
         .justify_center()
         .rounded(zpx(4.))
         .text_color(ui.muted_foreground)
-        .child(icon(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(zpx(12.)))
+        .hover(|s| s.text_color(ui.foreground))
+        .active(|s| s.opacity(0.7))
+        .child(crate::ui::disclosure_chevron(SharedString::from(chev_id), expanded, zpx(12.)))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_toggle(cx)

@@ -177,7 +177,7 @@ impl Canvas {
         if let Some(PaneItem::Terminal { id, .. }) = parse_pane_key(key)
             && let Some(view) = self.ws.read(cx).terminals.get(&id).cloned()
         {
-            let handle = view.read(cx).focus_handle().clone();
+            let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
             window.focus(&handle, cx);
         }
     }
@@ -439,17 +439,32 @@ impl Render for Canvas {
                 let id = col.id.clone();
                 let id2 = col.id.clone();
                 let width = col.width;
+                let col_dragging = matches!(&self.resize, Some(Resize::Column { id: rid, .. }) if rid == &col.id);
+                let split_id = SharedString::from(format!("col-split-{}", col.id));
                 // 画布不横向滚动，拖宽一列就是挤右边的：右边每列都要留够下限
                 let max = layout::column_max_width(viewport.width, col.x, (ncols - ci - 1) as f64);
                 content = content.child(
                     div()
-                        .id(SharedString::from(format!("col-split-{}", col.id)))
+                        .id(split_id.clone())
+                        .group(split_id.clone())
                         .absolute()
                         .top_0()
                         .bottom_0()
                         .left(px((col.x + col.width) as f32 - HANDLE / 2.))
                         .w(px(CANVAS_GAP_PX as f32 + HANDLE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor(CursorStyle::ResizeLeftRight)
+                        .child(if col_dragging {
+                            div().w(zpx(2.)).h_full().my(zpx(12.)).rounded_full().bg(ui.primary)
+                        } else {
+                            div()
+                                .w(zpx(2.5))
+                                .h(zpx(36.))
+                                .rounded_full()
+                                .group_hover(split_id, |s| s.bg(ui.muted_foreground.opacity(0.35)))
+                        })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                             if e.click_count >= 2 {
                                 // 双击还原成自适应
@@ -470,16 +485,31 @@ impl Render for Canvas {
                 let key = pane.key.clone();
                 let key2 = pane.key.clone();
                 let h = pane.height;
+                let pane_dragging = matches!(&self.resize, Some(Resize::Pane { key: rkey, .. }) if rkey == &pane.key);
+                let split_id = SharedString::from(format!("pane-split-{}", pane.key));
                 let max = layout::pane_max_height(height, pane.y, (np - i - 1) as f64);
                 content = content.child(
                     div()
-                        .id(SharedString::from(format!("pane-split-{}", pane.key)))
+                        .id(split_id.clone())
+                        .group(split_id.clone())
                         .absolute()
                         .left(px(col.x as f32))
                         .w(px(col.width as f32))
                         .top(px((pane.y + pane.height) as f32 - HANDLE / 2.))
                         .h(px(HANDLE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor(CursorStyle::ResizeUpDown)
+                        .child(if pane_dragging {
+                            div().h(zpx(2.)).w_full().mx(zpx(12.)).rounded_full().bg(ui.primary)
+                        } else {
+                            div()
+                                .w(zpx(36.))
+                                .h(zpx(2.5))
+                                .rounded_full()
+                                .group_hover(split_id, |s| s.bg(ui.muted_foreground.opacity(0.35)))
+                        })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                             if e.click_count >= 2 {
                                 this.ws.update(cx, |w, cx| {
@@ -543,10 +573,14 @@ impl Render for Canvas {
                     .px(zpx(10.))
                     .flex()
                     .items_center()
-                    .rounded(radius::SM)
+                    .rounded(radius::MD)
                     .bg(ui.popover)
+                    .text_color(ui.popover_foreground)
+                    .border_1()
+                    .border_color(ui.app_border)
                     .text_xs()
-                    .opacity(0.9)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .opacity(0.95)
                     .shadow_md()
                     .child(drag.label.clone()),
             );
@@ -696,7 +730,7 @@ impl Canvas {
             let id = g.id.clone();
             let ws = self.ws.clone();
             // 外框比图本身大 2px，留出着色底与圆角
-            let mut cell = div()
+            let cell = div()
                 .id(SharedString::from(format!("canvas-thumb-{}", g.id)))
                 .flex_none()
                 .relative()
@@ -708,14 +742,16 @@ impl Canvas {
                 .on_prepaint(self.record_target(&g.id));
             // 拖拽命中时不能带 hover 的底色：指针正压在上面，hover 会盖过高亮。
             // 未选中的格子 hover 底色走背景块的淡入淡出（垫在缩略图下面，先画）
-            cell = if hot {
-                cell.bg(ui.primary)
+            let cell_el: AnyElement = if hot {
+                cell.bg(ui.primary).child(thumb).into_any_element()
             } else if on {
-                cell.bg(ui.tint)
+                crate::ui::selected_fade(format!("thumb-sel-{}", g.id), cell.child(thumb), ui.tint).into_any_element()
             } else {
-                cell.child(crate::ui::hover_fade(format!("thumb-hover-{}", g.id), ui.background.opacity(0.6), zpx(4.)))
+                cell.child(crate::ui::hover_fade(format!("thumb-hover-{}", g.id), ui.background.opacity(0.65), zpx(4.)))
+                    .child(thumb)
+                    .into_any_element()
             };
-            row = row.child(cell.child(thumb));
+            row = row.child(cell_el);
         }
         if st.dragging && st.new_target {
             row = row.child(self.new_canvas_target(st.hot == Some(NEW_CANVAS), size, ui));
@@ -848,6 +884,17 @@ impl Round {
 /// 不放进圆角裁剪里：裁的是内缘，1px 描边正好压在边上，抗锯齿会被裁掉一半
 fn active_ring(round: Round, ui: &Ui) -> Div {
     round.apply(div(), radius::LG).absolute().inset_0().border_1().border_color(ui.tint_strong)
+}
+
+/// 非活动窗格沿列外沿的 `app_border` 细线（同样绝对定位不占布局；同列叠放时顺带在上下窗格交界处留一道细缝）
+fn inactive_ring(round: Round, ui: &Ui) -> Div {
+    let d = round.apply(div(), radius::LG).absolute().inset_0().border_color(ui.app_border);
+    match round {
+        Round::All => d.border_1(),
+        Round::Top => d.border_t_1().border_l_1().border_r_1(),
+        Round::Bottom => d.border_b_1().border_l_1().border_r_1().border_t_1(),
+        Round::None => d.border_l_1().border_r_1().border_t_1(),
+    }
 }
 
 fn drop_indicator(spot: DropSpot, rects: &[ColumnRect], ui: &Ui) -> Option<AnyElement> {
@@ -1082,6 +1129,67 @@ impl Canvas {
         if pinned {
             header = header.child(icon(IconName::Pin).size(zpx(12.)).text_color(ui.muted_foreground));
         }
+        if let PaneItem::Terminal { id, .. } = &item
+            && let Some(term_ent) = ws.terminals.get(id).cloned()
+            && (ws.session(id).is_some_and(|s| s.agent == Some(falcon_proto::SessionAgent::Claude))
+                || term_ent.read(cx).has_agent_view())
+        {
+            // 只有可交互的结构化通道才显示「图形」。官方终端与旧只读镜像需显式转换，
+            // 已有 GUI 则只切换本地排版，不影响执行中的任务。
+            let term = term_ent.read(cx);
+            let switch_mode = ws.session(id).is_some_and(|s| s.agent == Some(falcon_proto::SessionAgent::Claude))
+                && (!term.has_agent_view() || term.is_terminal_backed_agent());
+            let terminal_style = !term.has_agent_view() || term.is_terminal_backed_agent() || term.is_agent_terminal_style();
+            let switching = term_ent.read(cx).is_switching_agent_mode();
+            let switch_label = t!(match (switch_mode, terminal_style) {
+                (true, true) => "agentView.switchToGui",
+                (true, false) => "agentView.switchToTerminal",
+                (false, true) => "agentView.toggleNative",
+                (false, false) => "agentView.toggleTerminal",
+            }).to_string();
+            let toggle_id = SharedString::from(format!("pane-agent-toggle-{key}"));
+            header = header.child(
+                div()
+                    .id(toggle_id.clone())
+                    .relative()
+                    .flex_none()
+                    .px(zpx(7.))
+                    .py(zpx(2.))
+                    .rounded(radius::SM)
+                    .bg(ui.app.opacity(0.6))
+                    .border_1()
+                    .border_color(ui.border)
+                    .text_size(zpx(10.5))
+                    .text_color(ui.muted_foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(ui.foreground))
+                    .active(|s| s.opacity(0.75))
+                    .child(crate::ui::hover_fade(
+                        SharedString::from(format!("pane-agent-toggle-hover-{key}")),
+                        ui.muted,
+                        radius::SM,
+                    ))
+                    .tooltip(move |window, cx| Tooltip::new(switch_label.clone()).build(window, cx))
+                    .on_mouse_down(MouseButton::Left, isolate)
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        term_ent.update(cx, |t, cx| {
+                            if switch_mode {
+                                t.request_agent_mode_switch(window, cx);
+                            } else {
+                                t.toggle_agent_style(window, cx);
+                            }
+                        });
+                    })
+                    .when(switching, |d| d.opacity(0.6))
+                    .child(t!(match (switching, terminal_style, switch_mode) {
+                        (true, _, _) => "agentView.switching",
+                        (false, true, true) => "agentView.modeTerminal",
+                        (false, true, false) => "agentView.styleTerminal",
+                        (false, false, _) => "agentView.styleGui",
+                    }).to_string()),
+            );
+        }
         if zoomable {
             header = header.child(crate::ui::icon_button(
                 SharedString::from(format!("pane-zoom-{key}")),
@@ -1188,7 +1296,11 @@ impl Canvas {
                             .child(body),
                     ),
             )
-            .when(is_active, |d| d.child(active_ring(round, &ui)))
+            .child(if is_active {
+                crate::ui::border_fade(format!("pane-ring-{key}"), active_ring(round, &ui), ui.tint_strong).into_any_element()
+            } else {
+                inactive_ring(round, &ui).into_any_element()
+            })
             .into_any_element()
     }
 

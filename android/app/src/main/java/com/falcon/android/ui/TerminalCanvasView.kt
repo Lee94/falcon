@@ -16,18 +16,24 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import android.widget.OverScroller
 import com.falcon.android.bridge.FalconNative
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class TerminalCanvasView(context: Context) : View(context) {
 
     var sessionHandle: Long = 0L
         set(value) {
-            field = value
-            invalidate()
+            if (field != value) {
+                field = value
+                lastSnapshotSeq = 0L
+                scroller.forceFinished(true)
+                invalidate()
+            }
         }
 
     /** 发出一条或多条已序列化的 ClientMessage JSON 字符串到 WebSocket */
@@ -36,11 +42,14 @@ class TerminalCanvasView(context: Context) : View(context) {
     /** 当视口行列数计算变化时回调 `(cols, rows)` */
     var onViewportGridChanged: ((Int, Int) -> Unit)? = null
 
+    /** 当终端字号变化（如双指缩放）时回调 */
+    var onFontSizeChanged: ((Float) -> Unit)? = null
+
     /** 当存在或清除选区文本时回调 */
     var onSelectionChanged: ((String?) -> Unit)? = null
 
-    /** 当历史滚动偏移量或尺寸跟随状态变化时回调 `(displayOffset, historySize, isOwner, gridCols, gridRows)` */
-    var onRenderStateUpdated: ((Int, Int, Boolean, Int, Int) -> Unit)? = null
+    /** 当是否处于历史回滚状态或尺寸跟随状态变化时回调 `(isScrolledUp, isOwner, gridCols, gridRows)` */
+    var onRenderStateUpdated: ((Boolean, Boolean, Int, Int) -> Unit)? = null
 
     /** 扩展栏上锁定的修饰键查询与消费 */
     var consumeStickyModifiers: (() -> Triple<Boolean, Boolean, Boolean>)? = null
@@ -49,16 +58,16 @@ class TerminalCanvasView(context: Context) : View(context) {
 
     private val density = resources.displayMetrics.density
 
-    private var fontSizeSp: Float = 13.5f
+    private var fontSizeSp: Float = 12.0f
     private var cellWidth: Float = 16f
     private var cellHeight: Float = 32f
     private var fontBaselineOffset: Float = 24f
 
-    private var viewportCols: Int = 80
-    private var viewportRows: Int = 24
+    private var viewportCols: Int = 0
+    private var viewportRows: Int = 0
 
-    private val paddingX = 6f * density
-    private val paddingY = 4f * density
+    private val paddingX = 3f * density
+    private val paddingY = 2f * density
 
     private val regularTypeface: Typeface
     private val boldTypeface: Typeface
@@ -69,9 +78,9 @@ class TerminalCanvasView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
 
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        isSubpixelText = true
-    }
+    private val textPaint = Paint(
+        Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+    )
 
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val scrollbarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -81,10 +90,23 @@ class TerminalCanvasView(context: Context) : View(context) {
 
     private val rectBuffer = RectF()
     private val charBuffer = CharArray(2)
+    private var rowCharBuffer = CharArray(512)
 
-    private var lastSnapshot: IntArray = IntArray(0)
+    private var snapshotBuffer = IntArray(
+        FalconNative.SNAPSHOT_HEADER_INTS + 120 * 60 * FalconNative.SNAPSHOT_CELL_INTS
+    )
+    private var lastSnapshotSeq: Long = 0L
+    private var hasValidSnapshot: Boolean = false
+
+    private val scroller = OverScroller(context)
+    private var lastFlingY: Int = 0
+    private var lastTouchX: Float = 0f
+    private var lastTouchY: Float = 0f
+    private var multiTouchActive: Boolean = false
+    private var isDraggingScrollbar: Boolean = false
+
     private var isSelectingText: Boolean = false
-    private var lastReportedDisplayOffset: Int = -1
+    private var lastReportedScrolledUp: Boolean = false
     private var lastReportedOwner: Boolean = true
     private var lastReportedGridCols: Int = 0
     private var lastReportedGridRows: Int = 0
@@ -93,6 +115,9 @@ class TerminalCanvasView(context: Context) : View(context) {
     private var activeScale: Float = 1f
     private var activePanX: Float = 0f
     private var activePanY: Float = 0f
+
+    private var lastPaintStyle: Int = -1
+    private var lastPaintColor: Int = 0
 
     init {
         isFocusable = true
@@ -118,11 +143,12 @@ class TerminalCanvasView(context: Context) : View(context) {
     }
 
     fun setFontSizeSp(sp: Float) {
-        val clamped = sp.coerceIn(9f, 28f)
+        val clamped = sp.coerceIn(8.5f, 28f)
         if (abs(clamped - fontSizeSp) < 0.1f) return
         fontSizeSp = clamped
         updateFontMetrics()
         recomputeGridFromSize(width, height)
+        onFontSizeChanged?.invoke(fontSizeSp)
         invalidate()
     }
 
@@ -130,6 +156,7 @@ class TerminalCanvasView(context: Context) : View(context) {
 
     private fun updateFontMetrics() {
         textPaint.typeface = regularTypeface
+        lastPaintStyle = 0
         textPaint.textSize = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP,
             fontSizeSp,
@@ -139,6 +166,24 @@ class TerminalCanvasView(context: Context) : View(context) {
         cellWidth = max(1f, textPaint.measureText("M"))
         cellHeight = max(1f, (fm.descent - fm.ascent + fm.leading))
         fontBaselineOffset = -fm.ascent
+    }
+
+    private fun applyTextPaint(styleBits: Int, fgArgb: Int) {
+        if (styleBits != lastPaintStyle) {
+            lastPaintStyle = styleBits
+            val isBold = (styleBits and FalconNative.CELL_FLAG_BOLD) != 0
+            val isItalic = (styleBits and FalconNative.CELL_FLAG_ITALIC) != 0
+            textPaint.typeface = when {
+                isBold && isItalic -> boldItalicTypeface
+                isBold -> boldTypeface
+                isItalic -> italicTypeface
+                else -> regularTypeface
+            }
+        }
+        if (fgArgb != lastPaintColor) {
+            lastPaintColor = fgArgb
+            textPaint.color = fgArgb
+        }
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -165,7 +210,8 @@ class TerminalCanvasView(context: Context) : View(context) {
         }
     }
 
-    fun currentViewportGrid(): Pair<Int, Int> = viewportCols to viewportRows
+    fun currentViewportGrid(): Pair<Int, Int> =
+        if (viewportCols >= 2 && viewportRows >= 1) viewportCols to viewportRows else 80 to 24
 
     fun requestRender() {
         postInvalidateOnAnimation()
@@ -358,6 +404,75 @@ class TerminalCanvasView(context: Context) : View(context) {
         }
     )
 
+    private fun dispatchScrollDelta(
+        deltaY: Float,
+        touchX: Float,
+        touchY: Float,
+        isFling: Boolean = false
+    ): Boolean {
+        val handle = sessionHandle
+        if (handle == 0L) return true
+        val cols = if (hasValidSnapshot) snapshotBuffer[0] else viewportCols
+        val rows = if (hasValidSnapshot) snapshotBuffer[1] else viewportRows
+        if (hasValidSnapshot) {
+            val displayOffset = snapshotBuffer[6]
+            val historySize = snapshotBuffer[7]
+            val modeBits = snapshotBuffer[8]
+            val isLocalScrollback =
+                (modeBits and (FalconNative.MODE_BIT_ALT_SCREEN or FalconNative.MODE_BIT_MOUSE_ACTIVE)) == 0
+            if (isLocalScrollback) {
+                if ((deltaY > 0f && displayOffset <= 0) ||
+                    (deltaY < 0f && displayOffset >= historySize)
+                ) {
+                    return true
+                }
+            } else if (isFling && (modeBits and FalconNative.MODE_BIT_ALT_SCREEN) != 0 &&
+                (modeBits and FalconNative.MODE_BIT_MOUSE_ACTIVE) == 0
+            ) {
+                // 备用屏转上下方向键（如 shell 命令历史 / vim）不执行手指抬起后的惯性连发，避免误触一串 ↑/↓
+                return true
+            }
+        }
+        val (row, col, _) = screenToCell(touchX, touchY, cols, rows)
+        val res = FalconNative.onScrollGesture(
+            handle,
+            deltaY.toDouble(),
+            (cellHeight * activeScale).toDouble(),
+            row,
+            col
+        )
+        if (res == "SCROLL") {
+            postInvalidateOnAnimation()
+        } else if (res.isNotEmpty()) {
+            onSendWsMessages?.invoke(listOf(res))
+        }
+        return false
+    }
+
+    private fun scrollByScrollbarTouch(touchY: Float) {
+        val handle = sessionHandle
+        if (handle == 0L || !hasValidSnapshot) return
+        val rows = snapshotBuffer[1]
+        val historySize = snapshotBuffer[7]
+        if (historySize <= 0 || rows <= 0) return
+
+        val totalLines = (historySize + rows).toFloat()
+        val thumbRatio = (rows.toFloat() / totalLines).coerceIn(0.05f, 1f)
+        val trackH = max(1f, height.toFloat() - paddingY * 2f)
+        val thumbH = max(24f * density, trackH * thumbRatio).coerceAtMost(trackH)
+        val span = trackH - thumbH
+        val targetOffset = if (span <= 0f) {
+            0
+        } else {
+            val topPx = (touchY - paddingY - thumbH * 0.5f).coerceIn(0f, span)
+            val above = ((topPx / span) * historySize.toFloat()).roundToInt().coerceIn(0, historySize)
+            historySize - above
+        }
+        if (FalconNative.scrollToOffset(handle, targetOffset)) {
+            postInvalidateOnAnimation()
+        }
+    }
+
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
@@ -372,10 +487,10 @@ class TerminalCanvasView(context: Context) : View(context) {
                         return true
                     }
                     // 若程序开启了鼠标上报，发送按下与松开报文
-                    if (lastSnapshot.size >= FalconNative.SNAPSHOT_HEADER_INTS) {
-                        val cols = lastSnapshot[0]
-                        val rows = lastSnapshot[1]
-                        val modeBits = lastSnapshot[8]
+                    if (hasValidSnapshot) {
+                        val cols = snapshotBuffer[0]
+                        val rows = snapshotBuffer[1]
+                        val modeBits = snapshotBuffer[8]
                         if ((modeBits and FalconNative.MODE_BIT_MOUSE_ACTIVE) != 0) {
                             val (row, col, _) = screenToCell(e.x, e.y, cols, rows)
                             val px = (e.x - paddingX).toInt().coerceAtLeast(0)
@@ -399,34 +514,63 @@ class TerminalCanvasView(context: Context) : View(context) {
                 distanceX: Float,
                 distanceY: Float
             ): Boolean {
-                if (sessionHandle == 0L || isSelectingText || scaleDetector.isInProgress) {
+                if (sessionHandle == 0L ||
+                    isSelectingText ||
+                    isDraggingScrollbar ||
+                    multiTouchActive ||
+                    scaleDetector.isInProgress
+                ) {
                     return false
                 }
                 if (abs(distanceY) < abs(distanceX)) {
                     return false
                 }
-                val cols = if (lastSnapshot.size >= 2) lastSnapshot[0] else viewportCols
-                val rows = if (lastSnapshot.size >= 2) lastSnapshot[1] else viewportRows
-                val (row, col, _) = screenToCell(e2.x, e2.y, cols, rows)
-                // distanceY > 0 为手指向下拖（画面向上滚），对应 DOM delta_y
-                val wsMsg = FalconNative.onScrollGesture(
-                    sessionHandle,
-                    distanceY.toDouble(),
-                    (cellHeight * activeScale).toDouble(),
-                    row,
-                    col
-                )
-                if (wsMsg.isNotEmpty()) {
-                    onSendWsMessages?.invoke(listOf(wsMsg))
+                parent?.requestDisallowInterceptTouchEvent(true)
+                lastTouchX = e2.x
+                lastTouchY = e2.y
+                // distanceY > 0 为手指向上推（画面向下滚），distanceY < 0 为手指向下拖（向历史方向滚）
+                dispatchScrollDelta(distanceY, e2.x, e2.y, isFling = false)
+                return true
+            }
+
+            override fun onFling(
+                e1: MotionEvent?,
+                e2: MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                if (sessionHandle == 0L ||
+                    isSelectingText ||
+                    isDraggingScrollbar ||
+                    multiTouchActive ||
+                    scaleDetector.isInProgress
+                ) {
+                    return false
                 }
-                invalidate()
+                if (abs(velocityY) <= abs(velocityX)) {
+                    return false
+                }
+                lastFlingY = 0
+                lastTouchX = e2.x
+                lastTouchY = e2.y
+                scroller.fling(
+                    0,
+                    0,
+                    0,
+                    (-velocityY).roundToInt(),
+                    0,
+                    0,
+                    -Int.MAX_VALUE / 4,
+                    Int.MAX_VALUE / 4
+                )
+                postInvalidateOnAnimation()
                 return true
             }
 
             override fun onLongPress(e: MotionEvent) {
-                if (sessionHandle == 0L || lastSnapshot.size < FalconNative.SNAPSHOT_HEADER_INTS) return
-                val cols = lastSnapshot[0]
-                val rows = lastSnapshot[1]
+                if (sessionHandle == 0L || !hasValidSnapshot || isDraggingScrollbar || multiTouchActive) return
+                val cols = snapshotBuffer[0]
+                val rows = snapshotBuffer[1]
                 val (row, col, rightHalf) = screenToCell(e.x, e.y, cols, rows)
                 isSelectingText = true
                 // 长按先按词（Semantic = 1）起选区，拖动时实时扩展
@@ -439,13 +583,87 @@ class TerminalCanvasView(context: Context) : View(context) {
         }
     )
 
+    override fun computeScroll() {
+        super.computeScroll()
+        if (scroller.computeScrollOffset()) {
+            val currY = scroller.currY
+            val dy = (currY - lastFlingY).toFloat()
+            lastFlingY = currY
+            if (dy != 0f && sessionHandle != 0L) {
+                val hitBoundary = dispatchScrollDelta(dy, lastTouchX, lastTouchY, isFling = true)
+                if (hitBoundary) {
+                    scroller.forceFinished(true)
+                    return
+                }
+            }
+            if (!scroller.isFinished) {
+                postInvalidateOnAnimation()
+            }
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                multiTouchActive = false
+                if (!scroller.isFinished) {
+                    scroller.forceFinished(true)
+                }
+                if (sessionHandle != 0L) {
+                    FalconNative.resetScrollGesture(sessionHandle)
+                }
+                lastTouchX = event.x
+                lastTouchY = event.y
+                // 右侧历史滚动条拖拽热区（当处于历史翻阅状态且按在右边缘 28dp 内时可直接拖拽滑块）
+                if (hasValidSnapshot &&
+                    snapshotBuffer[7] > 0 &&
+                    snapshotBuffer[6] > 0 &&
+                    event.x >= width - 28f * density
+                ) {
+                    isDraggingScrollbar = true
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    scrollByScrollbarTouch(event.y)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                multiTouchActive = true
+                isDraggingScrollbar = false
+                scroller.forceFinished(true)
+                if (sessionHandle != 0L) {
+                    FalconNative.resetScrollGesture(sessionHandle)
+                }
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                scroller.forceFinished(true)
+                if (sessionHandle != 0L) {
+                    FalconNative.resetScrollGesture(sessionHandle)
+                }
+                if (event.pointerCount <= 2) {
+                    multiTouchActive = false
+                }
+            }
+        }
+
+        if (isDraggingScrollbar) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    scrollByScrollbarTouch(event.y)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    isDraggingScrollbar = false
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                }
+            }
+            return true
+        }
+
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
 
-        if (isSelectingText && sessionHandle != 0L && lastSnapshot.size >= FalconNative.SNAPSHOT_HEADER_INTS) {
-            val cols = lastSnapshot[0]
-            val rows = lastSnapshot[1]
+        if (isSelectingText && sessionHandle != 0L && hasValidSnapshot) {
+            val cols = snapshotBuffer[0]
+            val rows = snapshotBuffer[1]
             when (event.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
                     val (row, col, rightHalf) = screenToCell(event.x, event.y, cols, rows)
@@ -471,9 +689,16 @@ class TerminalCanvasView(context: Context) : View(context) {
         val handle = sessionHandle
         if (handle == 0L) return
 
-        val snap = FalconNative.packRenderSnapshot(handle)
-        if (snap.size < FalconNative.SNAPSHOT_HEADER_INTS) return
-        lastSnapshot = snap
+        var seqOrNeed = FalconNative.packRenderSnapshotInto(handle, lastSnapshotSeq, snapshotBuffer)
+        if (seqOrNeed < 0L) {
+            val needed = (-seqOrNeed).toInt()
+            snapshotBuffer = IntArray(max(needed, snapshotBuffer.size * 2))
+            seqOrNeed = FalconNative.packRenderSnapshotInto(handle, 0L, snapshotBuffer)
+        }
+        if (seqOrNeed <= 0L) return
+        lastSnapshotSeq = seqOrNeed
+        hasValidSnapshot = true
+        val snap = snapshotBuffer
 
         val cols = snap[0]
         val rows = snap[1]
@@ -488,16 +713,17 @@ class TerminalCanvasView(context: Context) : View(context) {
         val cursorTextArgb = snap[12]
         val isOwner = snap[14] != 0
 
-        if (displayOffset != lastReportedDisplayOffset ||
+        val isScrolledUp = displayOffset > 0
+        if (isScrolledUp != lastReportedScrolledUp ||
             isOwner != lastReportedOwner ||
             cols != lastReportedGridCols ||
             rows != lastReportedGridRows
         ) {
-            lastReportedDisplayOffset = displayOffset
+            lastReportedScrolledUp = isScrolledUp
             lastReportedOwner = isOwner
             lastReportedGridCols = cols
             lastReportedGridRows = rows
-            onRenderStateUpdated?.invoke(displayOffset, historySize, isOwner, cols, rows)
+            onRenderStateUpdated?.invoke(isScrolledUp, isOwner, cols, rows)
         }
 
         // 先铺终端默认底色
@@ -561,8 +787,9 @@ class TerminalCanvasView(context: Context) : View(context) {
             val bottom = top + cellHeight
             var runStartCol = -1
             var runBgColor = 0
+            val rowCellOffset = headerOffset + r * cols * cellStride
             for (c in 0 until cols) {
-                val base = headerOffset + (r * cols + c) * cellStride
+                val base = rowCellOffset + c * cellStride
                 val bg = snap[base + 2]
                 val flags = snap[base + 3]
                 val isDefaultBg = (flags and FalconNative.CELL_FLAG_DEFAULT_BG) != 0
@@ -606,18 +833,37 @@ class TerminalCanvasView(context: Context) : View(context) {
             }
         }
 
-        // 2. 绘制字符、块元素与修饰线
+        if (rowCharBuffer.size < cols * 2) {
+            rowCharBuffer = CharArray(max(cols * 2, 512))
+        }
+        val lineBuf = rowCharBuffer
+        val styleMask = FalconNative.CELL_FLAG_BOLD or FalconNative.CELL_FLAG_ITALIC
+
+        // 2. 绘制字符、块元素与修饰线（同行连续同样式 ASCII 字符合并为单次 drawText 调用）
         for (r in 0 until rows) {
             val top = r * cellHeight
             val baseline = top + fontBaselineOffset
+            val rowCellOffset = headerOffset + r * cols * cellStride
+
+            var asciiRunStartCol = -1
+            var asciiRunLen = 0
+            var asciiRunFg = 0
+            var asciiRunStyle = 0
+            var pendingSpaces = 0
+
             for (c in 0 until cols) {
-                val base = headerOffset + (r * cols + c) * cellStride
+                val base = rowCellOffset + c * cellStride
                 val cp = snap[base]
                 val fg = snap[base + 1]
                 val flags = snap[base + 3]
 
                 if ((flags and FalconNative.CELL_FLAG_WIDE_CHAR_SPACER) != 0) continue
-                if ((flags and FalconNative.CELL_FLAG_HIDDEN) != 0) continue
+                if ((flags and FalconNative.CELL_FLAG_HIDDEN) != 0) {
+                    if (asciiRunStartCol != -1) {
+                        pendingSpaces++
+                    }
+                    continue
+                }
 
                 val left = c * cellWidth
                 val spanCols = if ((flags and FalconNative.CELL_FLAG_WIDE_CHAR) != 0) 2 else 1
@@ -632,28 +878,93 @@ class TerminalCanvasView(context: Context) : View(context) {
                 if ((flags and FalconNative.CELL_FLAG_STRIKEOUT) != 0) {
                     bgPaint.color = fg
                     val sMid = top + cellHeight * 0.5f
-                    canvas.drawRect(left, sMid - max(1f, density * 0.5f), right, sMid + max(1f, density * 0.5f), bgPaint)
+                    canvas.drawRect(
+                        left,
+                        sMid - max(1f, density * 0.5f),
+                        right,
+                        sMid + max(1f, density * 0.5f),
+                        bgPaint
+                    )
                 }
 
-                if (cp <= 32) continue
+                if (cp <= 32) {
+                    if (asciiRunStartCol != -1) {
+                        pendingSpaces++
+                    }
+                    continue
+                }
+
+                val style = flags and styleMask
+                // 可打印 ASCII（0x21..0x7E）：合并同行相邻同样式字符（允许中间夹 <= 4 个空格）
+                if (cp in 0x21..0x7E) {
+                    if (asciiRunStartCol != -1 &&
+                        fg == asciiRunFg &&
+                        style == asciiRunStyle &&
+                        pendingSpaces <= 4
+                    ) {
+                        while (pendingSpaces > 0) {
+                            lineBuf[asciiRunLen++] = ' '
+                            pendingSpaces--
+                        }
+                        lineBuf[asciiRunLen++] = cp.toChar()
+                    } else {
+                        if (asciiRunStartCol != -1) {
+                            applyTextPaint(asciiRunStyle, asciiRunFg)
+                            canvas.drawText(
+                                lineBuf,
+                                0,
+                                asciiRunLen,
+                                asciiRunStartCol * cellWidth,
+                                baseline,
+                                textPaint
+                            )
+                        }
+                        asciiRunStartCol = c
+                        asciiRunLen = 1
+                        asciiRunFg = fg
+                        asciiRunStyle = style
+                        pendingSpaces = 0
+                        lineBuf[0] = cp.toChar()
+                    }
+                    continue
+                }
+
+                // 非 ASCII 字符或块元素：先冲刷已积累的 ASCII 连续段，再按精确列坐标独立绘制
+                if (asciiRunStartCol != -1) {
+                    applyTextPaint(asciiRunStyle, asciiRunFg)
+                    canvas.drawText(
+                        lineBuf,
+                        0,
+                        asciiRunLen,
+                        asciiRunStartCol * cellWidth,
+                        baseline,
+                        textPaint
+                    )
+                    asciiRunStartCol = -1
+                    asciiRunLen = 0
+                    pendingSpaces = 0
+                }
 
                 // 常见块元素字符用几何矩形直接绘制，避免字形留缝
                 if (drawBlockElement(canvas, cp, left, top, cellWidth * spanCols, cellHeight, fg)) {
                     continue
                 }
 
-                val isBold = (flags and FalconNative.CELL_FLAG_BOLD) != 0
-                val isItalic = (flags and FalconNative.CELL_FLAG_ITALIC) != 0
-                textPaint.typeface = when {
-                    isBold && isItalic -> boldItalicTypeface
-                    isBold -> boldTypeface
-                    isItalic -> italicTypeface
-                    else -> regularTypeface
-                }
-                textPaint.color = fg
-
+                applyTextPaint(style, fg)
                 val charCount = Character.toChars(cp, charBuffer, 0)
                 canvas.drawText(charBuffer, 0, charCount, left, baseline, textPaint)
+            }
+
+            if (asciiRunStartCol != -1) {
+                applyTextPaint(asciiRunStyle, asciiRunFg)
+                canvas.drawText(
+                    lineBuf,
+                    0,
+                    asciiRunLen,
+                    asciiRunStartCol * cellWidth,
+                    baseline,
+                    textPaint
+                )
             }
         }
 
@@ -676,8 +987,7 @@ class TerminalCanvasView(context: Context) : View(context) {
                     val base = headerOffset + (cursorRow * cols + cursorCol) * cellStride
                     val cp = snap[base]
                     if (cp > 32) {
-                        textPaint.typeface = regularTypeface
-                        textPaint.color = cursorTextArgb
+                        applyTextPaint(0, cursorTextArgb)
                         val charCount = Character.toChars(cp, charBuffer, 0)
                         canvas.drawText(
                             charBuffer,
@@ -724,7 +1034,7 @@ class TerminalCanvasView(context: Context) : View(context) {
             val progressFromTop =
                 ((historySize - displayOffset).toFloat() / historySize.toFloat()).coerceIn(0f, 1f)
             val thumbTop = paddingY + (trackH - thumbH) * progressFromTop
-            val barW = 3.5f * density
+            val barW = if (isDraggingScrollbar) 5.5f * density else 3.5f * density
             canvas.drawRoundRect(
                 width - barW - 2f * density,
                 thumbTop,

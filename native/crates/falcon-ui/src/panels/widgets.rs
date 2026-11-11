@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -31,7 +32,7 @@ pub(crate) fn hint_detail(text: impl Into<SharedString>, detail: impl Into<Share
     hint(text, cx).child(div().mt_1().text_size(zpx(11.)).child(detail.into()))
 }
 
-/// 分段控件（React 版的 `Segmented dense`）：sunken 槽里一排等宽按钮，选中的那格浮起来（面板底色）。
+/// 分段控件（React 版的 `Segmented dense`）：sunken 槽里一排等宽按钮，选中的那格由弹簧滑块承托浮起。
 /// 窄栏里与 h-7 的输入框对齐，所以按钮是 24px 高。
 pub(crate) fn segmented<T: Copy + PartialEq + 'static>(
     id: &str,
@@ -42,10 +43,16 @@ pub(crate) fn segmented<T: Copy + PartialEq + 'static>(
 ) -> Div {
     let ui = Ui::global(cx).clone();
     let on_change = Rc::new(on_change);
-    let mut bar = div().flex().gap(zpx(2.)).p(zpx(2.)).bg(ui.app).rounded(radius::MD);
+    let slot = crate::ui::seg_bounds_slot(options.len());
+    let mut active = None;
+    let mut row = div().w_full().flex().items_center().gap(zpx(2.)).p(zpx(2.));
     for (i, (v, label)) in options.into_iter().enumerate() {
         let on = v == value;
+        if on {
+            active = Some(i);
+        }
         let cb = on_change.clone();
+        let seg_slot = slot.clone();
         let mut b = div()
             .id(ElementId::Name(format!("{id}-{i}").into()))
             .flex_1()
@@ -58,16 +65,21 @@ pub(crate) fn segmented<T: Copy + PartialEq + 'static>(
             .text_size(zpx(12.))
             .whitespace_nowrap()
             .cursor_pointer()
+            .on_prepaint(move |bounds, _, _| {
+                if let Some(cell) = seg_slot.borrow_mut().get_mut(i) {
+                    *cell = Some(bounds);
+                }
+            })
             .child(label)
             .on_click(move |_, window, cx| cb(v, window, cx));
         b = if on {
-            b.bg(ui.background).font_weight(FontWeight::MEDIUM).text_color(ui.foreground)
+            b.font_weight(FontWeight::MEDIUM).text_color(ui.foreground)
         } else {
             b.text_color(ui.muted_foreground).hover(|s| s.text_color(ui.foreground))
         };
-        bar = bar.child(b);
+        row = row.child(b);
     }
-    bar
+    div().child(crate::ui::spring_segmented(ElementId::Name(format!("seg-{id}").into()), active, slot, row, cx))
 }
 
 /// 圆角小药丸（React 版的 `Pill`）：状态 / 优先级用弱着色底，编号用等宽 muted

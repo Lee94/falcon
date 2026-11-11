@@ -72,6 +72,7 @@ fn open_dialog<V: Render + 'static>(
         // lockOverlay：点遮罩不关
         dialog
             .title(title.clone())
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             .overlay_closable(false)
             .close_button(false)
             .child(form.clone())

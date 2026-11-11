@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, App, Div, FontWeight, SharedString, Window, div};
 
@@ -65,8 +66,8 @@ pub struct SegOption<T> {
     pub icon: Option<IconName>,
 }
 
-/// 分段选择（React 版的 Segmented / ThemeChoice）：凹槽里浮起一块——槽用 sunken，选中项用岛的
-/// 材质，同一套曲率只是小一号。`dense` 是明暗模式那种带图标的小号。
+/// 分段选择（React 版的 Segmented / ThemeChoice）：凹槽里浮起一块滑块——槽用 `app`，选中项由弹簧滑块承托。
+/// `dense` 是明暗模式那种带图标的小号。
 pub fn segmented<T: Copy + PartialEq + 'static>(
     id: &'static str,
     value: T,
@@ -77,11 +78,17 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
 ) -> Div {
     let ui = Ui::global(cx).clone();
     let on_change = Rc::new(on_change);
-    let mut group = crate::ui::sunken(cx).flex().gap(zpx(2.)).p(zpx(2.));
+    let slot = crate::ui::seg_bounds_slot(options.len());
+    let mut active = None;
+    let mut row = div().flex().items_center().gap(zpx(2.)).p(zpx(2.));
     for (i, opt) in options.into_iter().enumerate() {
         let on = opt.value == value;
+        if on {
+            active = Some(i);
+        }
         let f = on_change.clone();
         let v = opt.value;
+        let seg_slot = slot.clone();
         let mut b = div()
             .id((id, i))
             .flex()
@@ -92,24 +99,23 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
             .whitespace_nowrap()
             .rounded(radius::SM)
             .cursor_pointer()
-            .map(|d| if dense { d.h(zpx(24.)).px_2().text_xs() } else { d.h(zpx(28.)).px_3().text_size(zpx(13.)) })
+            .map(|d| if dense { d.h(zpx(24.)).px_2p5().text_xs() } else { d.h(zpx(28.)).px_3().text_size(zpx(13.)) })
+            .on_prepaint(move |bounds, _, _| {
+                if let Some(cell) = seg_slot.borrow_mut().get_mut(i) {
+                    *cell = Some(bounds);
+                }
+            })
             .on_click(move |_, window, cx| f(v, window, cx));
         b = if on {
-            b.bg(ui.background).text_color(ui.foreground).font_weight(FontWeight::MEDIUM)
+            b.text_color(ui.foreground).font_weight(FontWeight::MEDIUM)
         } else {
             let fg = ui.foreground;
             b.text_color(ui.muted_foreground).hover(move |s| s.text_color(fg))
         };
         if let Some(name) = opt.icon {
-            b = b.child(icon(name).size(zpx(14.)));
+            b = b.child(icon(name).size(zpx(13.5)));
         }
-        let b = b.child(opt.label);
-        // 选中的那块从透明淡入到岛的材质，未选中的保持瞬时 hover
-        group = group.child(if on {
-            crate::ui::selected_fade(format!("seg-{id}-{i}"), b, ui.background).into_any_element()
-        } else {
-            b.into_any_element()
-        });
+        row = row.child(b.child(opt.label));
     }
-    group
+    div().child(crate::ui::spring_segmented(id, active, slot, row, cx))
 }

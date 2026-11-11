@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::exec::{LocalBoxFuture, Utf8Decoder};
-use crate::sessions::backend::{Backend, BackendCallbacks, BackendEvent};
+use crate::sessions::backend::{Backend, BackendCallbacks, BackendEvent, ForegroundProcess};
 use crate::sessions::ssh::SshLink;
 
 /// 等 holder 的 Welcome 最多多久。SSH 上带 `--create` 时这段时间里还要起 holder（spawn 自己
@@ -85,7 +85,7 @@ enum Wire {
 pub struct SessiondBackend {
     tx: mpsc::UnboundedSender<Cmd>,
     next_req: Cell<u32>,
-    foreground: Rc<RefCell<HashMap<u32, oneshot::Sender<Option<String>>>>>,
+    foreground: Rc<RefCell<HashMap<u32, oneshot::Sender<ForegroundProcess>>>>,
 }
 
 impl SessiondBackend {
@@ -121,6 +121,11 @@ impl Backend for SessiondBackend {
     }
 
     fn foreground(&self) -> Option<LocalBoxFuture<'static, Option<String>>> {
+        let query = self.foreground_process()?;
+        Some(Box::pin(async move { query.await.name }))
+    }
+
+    fn foreground_process(&self) -> Option<LocalBoxFuture<'static, ForegroundProcess>> {
         let req = self.req();
         let (tx, rx) = oneshot::channel();
         self.foreground.borrow_mut().insert(req, tx);
@@ -129,7 +134,7 @@ impl Backend for SessiondBackend {
         Some(Box::pin(async move {
             let res = tokio::time::timeout(FOREGROUND_TIMEOUT, rx).await;
             waiters.borrow_mut().remove(&req);
-            res.ok().and_then(Result::ok).flatten()
+            res.ok().and_then(Result::ok).unwrap_or_default()
         }))
     }
 
@@ -387,9 +392,9 @@ pub async fn connect(transport: Transport, cb: BackendCallbacks) -> Result<(Rc<S
                         (cb.on_event)(BackendEvent::Synced(replay_text(&snapshot, &continuation, utf8.pending())));
                     }
                     HolderMsg::Status { records } => (cb.on_event)(BackendEvent::ProgramStatus(records)),
-                    HolderMsg::ForegroundIs { req, name, .. } => {
+                    HolderMsg::ForegroundIs { req, name, pid, argv, .. } => {
                         if let Some(tx) = waiters.borrow_mut().remove(&req) {
-                            let _ = tx.send(name);
+                            let _ = tx.send(ForegroundProcess { name, pid, argv });
                         }
                     }
                     HolderMsg::Event(Event::Title { title }) => (cb.on_event)(BackendEvent::Title(title)),

@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use falcon_proto::SessionState;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::{Icon, WindowExt};
 use gpui_kit::prelude::*;
@@ -171,8 +172,12 @@ impl Render for Picker {
                     .on_click(cx.listener(move |this, _, window, cx| this.confirm(i, window, cx)))
                     .child(item.icon.clone().size(zpx(14.)).text_color(item.tone.unwrap_or(ui.muted_foreground)))
                     .child(div().flex_1().min_w_0().truncate().child(item.label.clone()));
-                if let Some(meta) = &item.meta {
-                    row = row.child(div().flex_none().text_size(zpx(11.)).text_color(ui.muted_foreground).child(meta.clone()));
+                if let Some(meta) = item.meta.as_deref().filter(|m| !m.is_empty()) {
+                    if item.key.starts_with('>') {
+                        row = row.child(crate::ui::kbd_badge(meta.to_string(), cx));
+                    } else {
+                        row = row.child(div().flex_none().text_size(zpx(11.)).text_color(ui.muted_foreground).child(meta.to_string()));
+                    }
                 }
                 row = if selected { row.bg(ui.tint).text_color(ui.tint_foreground) } else { row.hover(|s| s.bg(ui.muted)) };
                 list = list.child(row);
@@ -198,7 +203,10 @@ impl Render for Picker {
                 cx.stop_propagation();
                 this.confirm(this.selected, window, cx);
             }))
-            .child(Input::new(&self.input))
+            .child(
+                Input::new(&self.input)
+                    .prefix(icon(IconName::Search).size(zpx(14.)).text_color(ui.muted_foreground)),
+            )
             .child(list)
     }
 }
@@ -207,7 +215,12 @@ pub fn open_picker(placeholder: String, empty_text: String, source: Source, wind
     let picker = cx.new(|cx| Picker::new(placeholder, empty_text, source, window, cx));
     let view = picker.clone();
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.w(zpx(580.)).close_button(false).margin_top(zpx(80.)).child(view.clone())
+        dialog
+            .w(zpx(580.))
+            .close_button(false)
+            .margin_top(zpx(80.))
+            .entrance(DialogEntrance::FadeSlide)
+            .child(view.clone())
     });
     // 打开对话框会把焦点交给对话框自己的容器（Root::open_dialog），输入框得在那之后再要一次，
     // 否则敲的字落回原先聚焦的终端里

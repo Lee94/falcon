@@ -10,7 +10,7 @@ use rust_i18n::t;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct FileLinkContext {
-    project_id: String,
+    pub(super) project_id: String,
     cwd: Option<String>,
     /// 不属于多文件夹容器、也没配置目录时，shell 从宿主机家目录启动。
     use_home: bool,

@@ -900,13 +900,20 @@ impl ChangesPanel {
         let active = self.split_drag.is_some();
         div()
             .id("changes-split")
+            .group("changes-split")
             .h(zpx(SPLIT_HANDLE))
             .w_full()
             .flex_none()
             .flex()
             .items_center()
             .cursor(CursorStyle::ResizeUpDown)
-            .child(div().h(px(1.)).w_full().bg(if active { ui.primary } else { ui.border }))
+            .child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(if active { ui.primary } else { ui.border })
+                    .when(!active, |d| d.group_hover("changes-split", |s| s.bg(ui.muted_foreground.opacity(0.55)))),
+            )
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| {
                 if e.click_count >= 2 {
                     this.list_ratio = LIST_RATIO;

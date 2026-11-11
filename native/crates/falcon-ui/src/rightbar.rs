@@ -45,15 +45,23 @@ fn bar_button(
         .rounded(crate::theme::radius::SM)
         .cursor_pointer()
         .text_color(ui.muted_foreground)
+        .active(|s| s.opacity(0.72))
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
     // 背景块先画（垫在图标下面），hover 的底色淡入淡出、文字色瞬时
     if !on {
-        btn = btn.child(crate::ui::hover_fade(format!("hover-{id}"), ui.background.opacity(0.6), crate::theme::radius::SM));
+        btn = btn.child(crate::ui::hover_fade(format!("hover-{id}"), ui.background.opacity(0.65), crate::theme::radius::SM));
     }
     let btn = btn.child(icon(glyph).size(zpx(15.))).on_click(on_click);
     if on {
         let tint = ui.tint;
-        crate::ui::selected_fade(format!("sel-{id}"), btn.text_color(ui.tint_foreground), tint).into_any_element()
+        crate::ui::selected_fade(
+            format!("sel-{id}"),
+            btn.text_color(ui.tint_foreground)
+                .border_1()
+                .border_color(ui.tint_strong.opacity(0.28)),
+            tint,
+        )
+        .into_any_element()
     } else {
         let fg = ui.foreground;
         btn.hover(move |s| s.text_color(fg)).into_any_element()

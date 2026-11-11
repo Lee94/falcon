@@ -119,6 +119,7 @@ fn open_view(
         dialog
             .title(title)
             .w(zpx(576.))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             // 安装进行中锁住遮罩（React 版的 lockOverlay 只在 installing 时开）
             .overlay_closable(!installing)
             .close_button(!installing)

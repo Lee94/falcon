@@ -11,7 +11,8 @@
 //! | `open:<路径>` | 在当前项目的文件窗口里打开一个文件（工作目录相对路径；有没存的修改时同样先问） |
 //! | `panel:<面板>` | 打开右侧栏的这一格（`files` / `changes` / `plugin:<插件 id>`）；已经开着就不动 |
 //! | `settings[:<页>]` | 打开设置，停在这一页（`plugins`、`relays`…；缺省外观） |
-//! | `type:<文本>` | 往活动终端送输入，支持 `\r` `\n` `\t` `\e` `\xHH` 转义（`;` 写成 `\x3b`） |
+//! | `type:<文本>` | 往活动终端送输入；结构化 Agent 以换行结尾时发送提示词。支持 `\r` `\n` `\t` `\e` `\xHH` 转义（`;` 写成 `\x3b`） |
+//! | `agent-style:<compact\|gui>` | 切换已有结构化 Agent 的显示外观，不改变 CLI 运行方式 |
 //! | `key:<键>` | 派发一次按键（GPUI 写法，如 `cmd-shift-p`、`enter`） |
 //! | `action:<名字>` | 派发动作（如 `falcon::ToggleFilesPanel`） |
 //! | `click:<x>,<y>[,<修饰键>]` / `rclick:<x>,<y>[,<修饰键>]` | 在窗口逻辑坐标处左 / 右击；修饰键用 `-` 连，如 `cmd`、`ctrl-shift` |
@@ -182,6 +183,27 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
         "settings" => {
             let tab = crate::dialogs::settings::Tab::from_id(arg).ok_or_else(|| format!("认不出的设置页：{arg}"))?;
             let _ = window.update(cx, |_, window, cx| crate::dialogs::settings::open(ws, tab, window, cx));
+        }
+        "agent-style" => {
+            let terminal_style = match arg {
+                "compact" => true,
+                "gui" => false,
+                _ => return Err("agent-style 要 compact 或 gui".into()),
+            };
+            let ok = window.update(cx, |_, window, cx| {
+                let view = match &ws.read(cx).state.active {
+                    ActiveView::Terminal { session_id } => ws.read(cx).terminals.get(session_id).cloned(),
+                    _ => None,
+                };
+                view.is_some_and(|view| {
+                    if !view.read(cx).is_showing_agent_view() { return false; }
+                    if view.read(cx).is_agent_terminal_style() != terminal_style {
+                        view.update(cx, |v, cx| v.toggle_agent_style(window, cx));
+                    }
+                    true
+                })
+            }).map_err(|e| e.to_string())?;
+            if !ok { return Err("没有活动的结构化 Agent 会话".into()); }
         }
         "type" => {
             let text = unescape(arg);

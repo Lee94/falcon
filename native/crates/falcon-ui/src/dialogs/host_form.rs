@@ -386,6 +386,7 @@ fn present(form: Entity<HostForm>, window: &mut Window, cx: &mut App) {
         // lockOverlay：填了一半的 SSH 配置手滑点到遮罩就全丢，不可接受
         dialog
             .title(title.to_string())
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             .overlay_closable(false)
             .close_button(false)
             .child(f.clone())

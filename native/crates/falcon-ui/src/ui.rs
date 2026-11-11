@@ -1,6 +1,8 @@
 //! 界面小件：岛、图标按钮、状态记号、主机色条。颜色一律取 [`crate::theme::Ui`] 的语义 token。
 
+use std::cell::RefCell;
 use std::panic::Location;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -8,23 +10,59 @@ use falcon_core::shortcuts::{self, Command};
 use falcon_proto::SessionState;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::animation::ease_out_cubic;
+use gpui_kit::base::motion::{Spring, spring};
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Animation, AnimationExt, App, ClickEvent, Context, Div, Element, ElementId, Entity, GlobalElementId, Hsla,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, Pixels, Render, SharedString, Stateful, Styled,
-    Transformation, Window, div, hsla, percentage,
+    AnyElement, Animation, AnimationExt, App, BorderStyle, Bounds, BoxShadow, ClickEvent, Context,
+    Corners, Div, Edges, Element, ElementId, Entity, FontWeight, GlobalElementId, Hsla,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, Pixels, Render, SharedString,
+    Stateful, Styled, Transformation, Window, black, div, hsla, percentage, point, px, quad,
 };
 
 use crate::theme::{Ui, radius};
 use crate::zoom::zpx;
 
-/// 浮动岛（ADR 0011）：面板底一律 `background`，圆角 LG，不画边框
+/// 浮动岛外沿的 0 偏移 `app_border` 细环与浅色环境投影（ADR 0011：深色靠 `app_border` 提亮外沿，
+/// 浅色叠加柔和投影；走 `box-shadow` 省掉 `border` 的 1px 尺寸账，也不会被 `overflow-hidden` 内容压掉）
+pub fn island_shadows(ui: &Ui) -> Vec<BoxShadow> {
+    let ring = BoxShadow {
+        color: ui.app_border,
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(0.),
+        spread_radius: px(1.),
+        inset: false,
+    };
+    if ui.is_dark {
+        vec![ring]
+    } else {
+        vec![
+            ring,
+            BoxShadow {
+                color: black().opacity(0.055),
+                offset: point(px(0.), px(2.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+            BoxShadow {
+                color: black().opacity(0.03),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(2.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+        ]
+    }
+}
+
+/// 浮动岛（ADR 0011）：面板底一律 `background`，圆角 LG，不画分栏边框，外沿环与投影走 `box-shadow`
 pub fn island(cx: &App) -> Div {
     let ui = Ui::global(cx);
     div()
         .bg(ui.background)
         .rounded(radius::LG)
+        .shadow(island_shadows(ui))
         .overflow_hidden()
 }
 
@@ -55,15 +93,16 @@ impl Render for DragLabel {
         let ui = Ui::global(cx);
         div()
             .max_w(zpx(260.))
-            .px_2()
+            .px_2p5()
             .py_1()
-            .rounded(radius::SM)
+            .rounded(radius::MD)
             .bg(ui.popover)
             .text_color(ui.popover_foreground)
             .border_1()
-            .border_color(ui.border)
+            .border_color(ui.app_border)
             .shadow_md()
             .text_size(zpx(12.))
+            .font_weight(FontWeight::MEDIUM)
             .truncate()
             .child(self.label.clone())
     }
@@ -78,7 +117,17 @@ where
     E: IntoElement + Styled + 'static,
 {
     el.with_animation(id.into(), Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic), move |el, delta| {
-        el.bg(color.opacity(delta))
+        el.bg(color.opacity(color.a * delta))
+    })
+}
+
+/// 选中描边的同步淡入（150ms，与 [`selected_fade`] 同节奏）：用于活动窗格的 1px 焦点环或选中卡片外沿
+pub fn border_fade<E>(id: impl Into<ElementId>, el: E, color: Hsla) -> impl IntoElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    el.with_animation(id.into(), Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic), move |el, delta| {
+        el.border_color(color.opacity(color.a * delta))
     })
 }
 
@@ -218,14 +267,288 @@ pub fn icon_button(
         .rounded(zpx(8.))
         .text_color(ui.muted_foreground)
         .cursor_pointer()
-        // 底色交给背景块淡入淡出，文字色瞬时
+        // 底色交给背景块淡入淡出，文字色瞬时，按下给轻微不透明度回馈
         .hover(|s| s.text_color(ui.foreground))
+        .active(|s| s.opacity(0.72))
         .child(hover_fade((id, "hover"), ui.muted, zpx(8.)))
         .child(icon(name).size(size * 0.6))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
         })
         .on_click(on_click)
+}
+
+/// 折叠三角（0° ↔ 90° 顺滑旋转 160ms）：初次挂载直接落在目标角度，只有点击切换后才播过渡，
+/// 避免列表或对话初次出现时整排箭头一起转一下
+pub fn disclosure_chevron(id: impl Into<ElementId>, expanded: bool, size: Pixels) -> DisclosureChevron {
+    DisclosureChevron { id: id.into(), expanded, size, color: None }
+}
+
+pub struct DisclosureChevron {
+    id: ElementId,
+    expanded: bool,
+    size: Pixels,
+    color: Option<Hsla>,
+}
+
+impl DisclosureChevron {
+    pub fn text_color(mut self, color: Hsla) -> Self {
+        self.color = Some(color);
+        self
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct ChevronState {
+    prev: Option<bool>,
+    animated: bool,
+}
+
+impl IntoElement for DisclosureChevron {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for DisclosureChevron {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let expanded = self.expanded;
+        let size = self.size;
+        let color = self.color;
+        let id = self.id.clone();
+        window.with_element_state(global_id.expect("DisclosureChevron 总有 id"), |state: Option<ChevronState>, window| {
+            let mut state = state.unwrap_or_default();
+            match state.prev {
+                None => state.prev = Some(expanded),
+                Some(prev) if prev != expanded => {
+                    state.prev = Some(expanded);
+                    state.animated = true;
+                }
+                _ => {}
+            }
+            let base = icon(IconName::ChevronRight)
+                .size(size)
+                .when_some(color, |i, c| i.text_color(c));
+            let mut el = if state.animated {
+                base.with_animation(
+                    (id, if expanded { "open" } else { "closed" }),
+                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_cubic),
+                    move |i, delta| {
+                        let turn = if expanded { 0.25 * delta } else { 0.25 * (1. - delta) };
+                        i.transform(Transformation::rotate(percentage(turn)))
+                    },
+                )
+                .into_any_element()
+            } else {
+                base.when(expanded, |i| i.transform(Transformation::rotate(percentage(0.25))))
+                    .into_any_element()
+            };
+            ((el.request_layout(window, cx), el), state)
+        })
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.paint(window, cx);
+    }
+}
+
+pub type SegBoundsSlot = Rc<RefCell<Vec<Option<Bounds<Pixels>>>>>;
+
+pub fn seg_bounds_slot(len: usize) -> SegBoundsSlot {
+    Rc::new(RefCell::new(vec![None; len]))
+}
+
+/// Apple 风格弹簧滑动分段控件（macOS System Settings 的分段槽）：
+/// 底层画无边框凹槽（`app`），中层画跟随时带速度连续性的弹簧滑块（浅色白底微投影、深色提亮浮块 + `app_border`），
+/// 顶层画透明底的各段文字与图标。初次挂载直接停在选中段，切换时滑块位置与宽度平滑过渡，静止时零帧开销
+pub fn spring_segmented(
+    id: impl Into<ElementId>,
+    active: Option<usize>,
+    slot: SegBoundsSlot,
+    row: Div,
+    cx: &App,
+) -> SpringSegmented {
+    let ui = Ui::global(cx);
+    let thumb_bg = if ui.is_dark { ui.popover } else { ui.background };
+    let thumb_shadows = vec![BoxShadow {
+        color: black().opacity(if ui.is_dark { 0.28 } else { 0.08 }),
+        offset: point(px(0.), px(1.)),
+        blur_radius: px(3.),
+        spread_radius: px(0.),
+        inset: false,
+    }];
+    SpringSegmented {
+        id: id.into(),
+        active,
+        slot,
+        row: Some(row),
+        track_bg: ui.app,
+        thumb_bg,
+        thumb_border: ui.app_border,
+        thumb_shadows,
+    }
+}
+
+pub struct SpringSegmented {
+    id: ElementId,
+    active: Option<usize>,
+    slot: SegBoundsSlot,
+    row: Option<Div>,
+    track_bg: Hsla,
+    thumb_bg: Hsla,
+    thumb_border: Hsla,
+    thumb_shadows: Vec<BoxShadow>,
+}
+
+impl IntoElement for SpringSegmented {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for SpringSegmented {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = Option<Bounds<Pixels>>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut el = self.row.take().expect("request_layout 只调一次").into_any_element();
+        (el.request_layout(window, cx), el)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        element.prepaint(window, cx);
+        let idx = self.active?;
+        let seg = self.slot.borrow().get(idx).copied().flatten()?;
+        let rel_x = f32::from(seg.origin.x - bounds.origin.x);
+        let seg_w = f32::from(seg.size.width);
+        let policy = Spring::new(Duration::from_millis(200))
+            .with_damping(0.95)
+            .with_epsilon(0.5);
+        let anim_x = spring((self.id.clone(), "x"), rel_x, policy, window, cx);
+        let anim_w = spring((self.id.clone(), "w"), seg_w, policy, window, cx);
+        Some(Bounds::new(
+            point(bounds.origin.x + px(anim_x), seg.origin.y),
+            gpui_kit::size(px(anim_w.max(0.)), seg.size.height),
+        ))
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        thumb: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let track_radii = Corners::all(radius::MD);
+        window.paint_quad(quad(
+            bounds,
+            track_radii,
+            self.track_bg,
+            Edges::default(),
+            gpui_kit::transparent_black(),
+            BorderStyle::default(),
+        ));
+        if let Some(tb) = *thumb {
+            let thumb_radii = Corners::all(radius::SM);
+            window.paint_drop_shadows(tb, thumb_radii, &self.thumb_shadows);
+            window.paint_quad(quad(
+                tb,
+                thumb_radii,
+                self.thumb_bg,
+                Edges::all(px(1.)),
+                self.thumb_border,
+                BorderStyle::default(),
+            ));
+        }
+        element.paint(window, cx);
+    }
+}
+
+/// 快捷键徽标（命令面板与下拉菜单共用）：紧凑键帽造型，等宽对齐
+pub fn kbd_badge(text: impl Into<SharedString>, cx: &App) -> Div {
+    let ui = Ui::global(cx);
+    div()
+        .flex_none()
+        .h(zpx(18.))
+        .px(zpx(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(zpx(5.))
+        .bg(ui.app)
+        .border_1()
+        .border_color(ui.border)
+        .font_family(crate::fonts::BERKELEY)
+        .text_size(zpx(10.5))
+        .text_color(ui.muted_foreground)
+        .child(text.into())
 }
 
 /// 会话状态记号：形状 + 颜色双编码（旧 React 版的 StatusMark）。creating 是纯前端状态

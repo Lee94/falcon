@@ -23,6 +23,7 @@ fn fast() -> SocketOptions {
         ping_interval: Duration::from_secs(30),
         connect_timeout: Duration::from_secs(5),
         probe_timeout: Duration::from_millis(300),
+        terminal_backed_agent_view: false,
     }
 }
 
@@ -74,6 +75,26 @@ fn every_new_socket_sends_appearance_then_forced_resize() {
     assert_eq!(conn2.recv_json()["type"], "appearance");
     assert_eq!(conn2.recv_json(), json!({ "type": "resize", "cols": 100, "rows": 30 }));
     assert_eq!(accept(&conn2, &events), SessionEvent::Connected { reconnected: true });
+}
+
+#[test]
+fn terminal_mirror_capability_is_opt_in_and_repeated_after_reconnect() {
+    let mock = plain_server();
+    let (sink, events) = Events::new();
+    let sock = SessionSocket::open_with(&mock.client(), "s-1", sink, SocketOptions {
+        terminal_backed_agent_view: true, ..fast()
+    });
+    let conn = mock.next_ws();
+    let capability = json!({"type":"agent_view_capabilities", "terminalBacked":true});
+    assert_eq!(conn.recv_json(), capability);
+    accept(&conn, &events);
+    conn.kill();
+    events.until(|e| matches!(e, SessionEvent::Disconnected { .. }));
+    let conn = mock.next_ws();
+    assert_eq!(conn.recv_json(), capability);
+    accept(&conn, &events);
+    sock.send_input("still-live\r");
+    assert_eq!(conn.recv_json(), json!({"type":"input", "data":"still-live\r"}));
 }
 
 #[test]

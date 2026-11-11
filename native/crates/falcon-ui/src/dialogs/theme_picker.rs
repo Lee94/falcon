@@ -569,6 +569,7 @@ pub fn open_editor(slot: ThemeMode, initial: ThemeChoice, window: &mut Window, c
         dialog
             .title(t!("theme.editorTitle").to_string())
             .w(zpx(672.))
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             // 编辑到一半点到外面就丢了——只认取消 / Esc / 应用（React 版的 lockOverlay）
             .overlay_closable(false)
             .child(editor.clone())

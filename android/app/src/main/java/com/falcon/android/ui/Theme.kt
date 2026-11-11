@@ -1,5 +1,7 @@
 package com.falcon.android.ui
 
+import android.content.Context
+import android.graphics.Typeface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -9,8 +11,11 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import com.falcon.android.bridge.FalconNative
 import org.json.JSONObject
+import kotlin.math.abs
 
 @Immutable
 data class FalconThemeTokens(
@@ -61,6 +66,34 @@ fun parseHexColor(hex: String, fallback: Color = Color(0xFF0A0A0A)): Color {
     }
 }
 
+/**
+ * 与桌面端 `falcon_core::host_color::host_hue` 逐位一致的 FNV-1a UTF-16 哈希，
+ * 确保同一台 SSH 主机在桌面端与安卓端呈现相同的身份色条。
+ */
+private val HOST_HUE_BANDS = intArrayOf(30, 50, 170, 190, 210, 230, 250, 270, 290, 310, 330)
+
+fun hostHue(key: String): Int {
+    if (key.isEmpty()) {
+        return HOST_HUE_BANDS[(2_166_136_261L % HOST_HUE_BANDS.size).toInt()]
+    }
+    var h: Int = 2_166_136_261L.toInt()
+    for (i in 0 until key.length) {
+        h = h xor key[i].code
+        h *= 16_777_619
+    }
+    val absVal = abs(h.toLong())
+    return HOST_HUE_BANDS[(absVal % HOST_HUE_BANDS.size).toInt()]
+}
+
+fun FalconThemeTokens.hostBarColor(kind: String, conn: String?): Color {
+    if (kind == "local") return mutedForeground.copy(alpha = 0.35f)
+    if (conn.isNullOrBlank()) return muted
+    val hue = hostHue(conn).toFloat()
+    val sat = if (isDark) 0.62f else 0.58f
+    val light = if (isDark) 0.62f else 0.46f
+    return Color.hsl(hue, sat, light)
+}
+
 fun loadFalconThemeTokens(themeName: String): FalconThemeTokens {
     val raw = FalconNative.exportThemeTokens(themeName)
     val obj = JSONObject(raw)
@@ -102,12 +135,27 @@ val LocalFalconTheme = staticCompositionLocalOf {
     loadFalconThemeTokens("Falcon Dark")
 }
 
+val LocalFalconMonoFont = staticCompositionLocalOf<FontFamily> {
+    FontFamily.Monospace
+}
+
+private fun loadBerkeleyMonoFontFamily(context: Context): FontFamily {
+    return try {
+        val tf = Typeface.createFromAsset(context.assets, "fonts/TX-02-Regular.ttf")
+        FontFamily(tf)
+    } catch (_: Exception) {
+        FontFamily.Monospace
+    }
+}
+
 @Composable
 fun FalconTheme(
     themeName: String,
     content: @Composable () -> Unit
 ) {
+    val context = LocalContext.current
     val tokens = remember(themeName) { loadFalconThemeTokens(themeName) }
+    val monoFont = remember(context) { loadBerkeleyMonoFontFamily(context) }
     val colorScheme = if (tokens.isDark) {
         darkColorScheme(
             primary = tokens.tintStrong,
@@ -138,7 +186,10 @@ fun FalconTheme(
         )
     }
 
-    CompositionLocalProvider(LocalFalconTheme provides tokens) {
+    CompositionLocalProvider(
+        LocalFalconTheme provides tokens,
+        LocalFalconMonoFont provides monoFont
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
             content = content

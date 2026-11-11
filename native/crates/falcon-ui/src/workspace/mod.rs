@@ -146,6 +146,8 @@ pub struct Workspace {
     pub terminals: HashMap<String, Entity<TerminalView>>,
     /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
     program_alerts: falcon_core::program_status::BlockedAlerts,
+    /// 当前已弹出的提醒：会话回到可视区域或窗口被收起时撤掉，不等程序退出 blocked
+    program_alert_sessions: HashSet<String>,
     /// 「跑完了」提示音的判定（进入 done / error 才响，规则在 falcon-core）
     finish_chimes: falcon_core::program_status::FinishChimes,
     /// 终端标题栏上的计时（已运行 / 已等待 / 用时），时刻是相对 `clock_epoch` 的毫秒
@@ -210,6 +212,7 @@ impl Workspace {
             plugins: None,
             terminals: HashMap::new(),
             program_alerts: Default::default(),
+            program_alert_sessions: HashSet::new(),
             finish_chimes: Default::default(),
             program_clock: Default::default(),
             clock_epoch: web_time::Instant::now(),
@@ -693,16 +696,16 @@ impl Workspace {
             && self.terminals.get(id).is_some_and(|v| v.read(cx).is_focused())
     }
 
-    /// 刚卡住的会话弹一条提醒（人就在那扇窗口里时不弹：徽标就在眼前的标题栏上），不卡了就撤掉
+    /// 刚卡住且不在可视区域的会话才提醒；并排可见但没有键盘焦点的终端也能直接看见徽标。
+    /// 可见性与尺寸仲裁共用当前画布、最大化和窗口遮挡的判断，不能用活动窗口代替。
     fn emit_program_alert(&mut self, id: &str, change: falcon_core::program_status::AlertChange, cx: &mut Context<Self>) {
         use falcon_core::program_status::{AlertChange, badge};
         match change {
             AlertChange::Unchanged => {}
-            AlertChange::Resolved => cx.emit(WorkspaceEvent::ProgramAlert { session_id: id.to_string(), alert: None }),
+            AlertChange::Resolved => self.dismiss_program_alert(id, cx),
             AlertChange::Blocked => {
-                let watching = matches!(&self.state.active, ActiveView::Terminal { session_id } if session_id == id)
-                    && self.terminals.get(id).is_some_and(|v| v.read(cx).is_focused());
-                if watching {
+                if self.visible_terminal_ids().contains(id) {
+                    self.dismiss_program_alert(id, cx);
                     return;
                 }
                 let Some(session) = self.session(id) else { return };
@@ -711,8 +714,15 @@ impl Workspace {
                 let what = rust_i18n::t!(b.label_key).to_string();
                 let title = rust_i18n::t!("programStatus.toastTitle", name = name, what = what).to_string();
                 let alert = ProgramAlertSpec { title, body: b.detail };
+                self.program_alert_sessions.insert(id.to_string());
                 cx.emit(WorkspaceEvent::ProgramAlert { session_id: id.to_string(), alert: Some(alert) });
             }
+        }
+    }
+
+    fn dismiss_program_alert(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.program_alert_sessions.remove(id) {
+            cx.emit(WorkspaceEvent::ProgramAlert { session_id: id.to_string(), alert: None });
         }
     }
 
@@ -842,23 +852,31 @@ impl Workspace {
     /// 窗口本身看得见（没最小化 / 整个被盖住 / 在后台标签页）。看不见的不参与定 PTY 的尺寸
     /// （ADR 0022）。挂在工作区的每次通知上：切画布、开合总览、窗口可见性变化都会经过这里
     pub(crate) fn sync_terminal_visibility(&mut self, cx: &mut Context<Self>) {
-        let shown: HashSet<String> = if self.window_visible && self.state.active != ActiveView::Overview {
-            let (_, _, columns) = self.shown_canvas();
-            columns
-                .iter()
-                .flat_map(|c| c.panes.iter())
-                .filter_map(|p| match parse_pane_key(&p.key) {
-                    Some(PaneItem::Terminal { id, .. }) => Some(id),
-                    _ => None,
-                })
-                .collect()
-        } else {
-            HashSet::new()
-        };
+        let shown = self.visible_terminal_ids();
         for (id, view) in &self.terminals {
             let visible = shown.contains(id);
             view.update(cx, |v, _| v.set_visible(visible));
         }
+        // 切回会话所在画布、退出最大化或重新显示窗口后，已有的「切过去」提醒也不再需要。
+        let seen: Vec<String> = self.program_alert_sessions.intersection(&shown).cloned().collect();
+        for id in seen {
+            self.dismiss_program_alert(&id, cx);
+        }
+    }
+
+    fn visible_terminal_ids(&self) -> HashSet<String> {
+        if !self.window_visible || self.state.active == ActiveView::Overview {
+            return HashSet::new();
+        }
+        let (_, _, columns) = self.shown_canvas();
+        columns
+            .iter()
+            .flat_map(|c| c.panes.iter())
+            .filter_map(|p| match parse_pane_key(&p.key) {
+                Some(PaneItem::Terminal { id, .. }) => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// 某个终端窗口属于哪个项目

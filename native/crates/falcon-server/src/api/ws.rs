@@ -271,6 +271,47 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
             Some("ping") => {
                 let _ = pong_tx.send(());
             }
+            Some("agent_view_capabilities") => {
+                if let Some(terminal_backed) = msg["terminalBacked"].as_bool() {
+                    state.engine.send(move |engine| engine.sessions.set_agent_view_capabilities(&id, viewer_id, terminal_backed));
+                }
+            }
+            Some("agent_prompt") => {
+                if let Some(text) = msg["text"].as_str() {
+                    let text = text.to_string();
+                    state.engine.send(move |engine| engine.sessions.agent_prompt(&id, &text));
+                }
+            }
+            Some("agent_interrupt") => {
+                state.engine.send(move |engine| engine.sessions.agent_interrupt(&id));
+            }
+            Some("agent_permission") => {
+                if let (Some(call_id), Some(dec_str)) = (msg["callId"].as_str(), msg["decision"].as_str())
+                    && let Some(decision) = falcon_proto::AgentPermissionDecision::from_wire(dec_str)
+                {
+                    let call_id = call_id.to_string();
+                    let updated_command = msg["updatedCommand"].as_str().map(str::to_string);
+                    state.engine.send(move |engine| {
+                        engine.sessions.agent_permission(&id, &call_id, decision, updated_command);
+                    });
+                }
+            }
+            Some("agent_set_model") => {
+                if let Some(model) = msg["model"].as_str() {
+                    let model = model.to_string();
+                    state.engine.send(move |engine| engine.sessions.agent_set_model(&id, &model));
+                }
+            }
+            Some("agent_set_reasoning_effort") => {
+                // null 恢复默认值；类型错误不能被当成清除设置。
+                if msg["effort"].is_null() || msg["effort"].is_string() {
+                    let effort = msg["effort"].as_str().map(str::to_string);
+                    state.engine.send(move |engine| engine.sessions.agent_set_reasoning_effort(&id, effort.as_deref()));
+                }
+            }
+            Some("agent_switch_terminal") => {
+                state.engine.send(move |engine| engine.sessions.agent_switch_terminal(&id));
+            }
             _ => {}
         }
     }

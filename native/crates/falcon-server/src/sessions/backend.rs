@@ -10,6 +10,13 @@ use falcon_proto::{OscColorHint, ProgramStatusRecord};
 
 use crate::exec::LocalBoxFuture;
 
+#[derive(Debug, Clone, Default)]
+pub struct ForegroundProcess {
+    pub name: Option<String>,
+    pub pid: Option<u32>,
+    pub argv: Option<Vec<String>>,
+}
+
 pub trait Backend {
     fn write(&self, data: &str);
     fn resize(&self, cols: u16, rows: u16);
@@ -31,6 +38,8 @@ pub trait Backend {
     fn foreground(&self) -> Option<LocalBoxFuture<'static, Option<String>>> {
         None
     }
+    /// 带 pid/argv 的前台身份，供会改变进程的操作核实目标；旧 holder 没给字段时拒绝猜测。
+    fn foreground_process(&self) -> Option<LocalBoxFuture<'static, ForegroundProcess>> { None }
     /// 终端深浅与前景 / 背景色：宿主机的 VT 进程按它回答 OSC 10/11/12 与 `CSI ? 996 n`，
     /// 深浅翻转时由守护进程注入 2031 通知
     fn set_appearance(&self, _hint: &OscColorHint) {}

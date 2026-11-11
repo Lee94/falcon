@@ -65,6 +65,7 @@ fn open_popup_dialog<V: Render + 'static>(
             .margin_top((vp.height - h) * 0.5)
             .p_0()
             .close_button(false)
+            .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
             // 搜索框里的回车用于切换文件，不能把整个预览浮层当成"确定"关掉
             .on_ok(|_, _, _| false)
             .on_cancel(move |_, window, cx| on_cancel(window, cx))
@@ -488,6 +489,7 @@ impl FilePreviewPopup {
             dialog
                 .title(t!("files.discardTitle").to_string())
                 .w(zpx(440.))
+                .entrance(gpui_kit::component::dialog::DialogEntrance::FadeSlide)
                 .child(div().text_sm().text_color(ui.muted_foreground).child(body_text.clone()))
                 .footer(
                     DialogFooter::new()

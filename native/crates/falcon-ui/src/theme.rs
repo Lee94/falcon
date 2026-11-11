@@ -395,9 +395,13 @@ fn apply_kit_theme(ui: &Ui, cx: &mut App) {
     // 正文 13px 显式挂在窗口根上（见 zoom.rs）
     theme.font_size = zpx(16.);
     theme.mono_font_size = zpx(13.);
+    theme.notification.width = zpx(320.);
     theme.radius = radius::SM;
     theme.radius_lg = radius::LG;
     theme.shadow = true;
+    // ADR 0011：焦点是一条 1px 边框（ring），不画外扩光晕——外扩环在窄容器里会被裁切且显得厚重
+    theme.focus_ring = false;
+    theme.motion.spring_move = theme.motion.spring_move.with_damping(0.94);
 
     let c = &mut theme.colors;
     c.background = ui.background;

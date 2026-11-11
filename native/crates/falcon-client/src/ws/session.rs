@@ -13,8 +13,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use falcon_proto::{
-    ClientMessage, DeadReason, ProgramStatusRecord, ServerMessage, SessionState, TermAppearance,
-    TermFrameKind, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES, decode_term_frame,
+    AgentDeltaKind, AgentEntry, AgentPermissionDecision, AgentSlashCommand, AgentTurnStatus,
+    AgentViewState, ClientMessage, DeadReason, ProgramStatusRecord, ServerMessage, SessionState,
+    TermAppearance, TermFrameKind, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES, decode_term_frame,
 };
 use futures::StreamExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -66,6 +67,28 @@ pub enum SessionEvent {
     /// 尺寸建、在本地缩放 / 裁剪着画——**和输出、回放同在网络线程上按顺序处理**：服务端在回放、
     /// 在按新尺寸排的输出之前发它，换到 UI 线程上再改网格就晚了。老服务端不发
     Size { cols: u16, rows: u16, owner: bool },
+    /// 原生 Agent 视图：完整快照。
+    AgentSnapshot(AgentViewState),
+    /// 原生 Agent 视图：新增或替换一条条目。
+    AgentEntry(AgentEntry),
+    /// 原生 Agent 视图：流式增量。
+    AgentDelta {
+        id: String,
+        kind: AgentDeltaKind,
+        delta: String,
+    },
+    /// 原生 Agent 视图：运行状态或元信息变化。
+    AgentMeta {
+        active: bool,
+        status: AgentTurnStatus,
+        model: Option<String>,
+        permission_mode: Option<String>,
+        cwd: Option<String>,
+        commands: Option<Vec<AgentSlashCommand>>,
+        models: Option<Vec<String>>,
+        model_options: Option<Vec<falcon_proto::AgentModelOption>>,
+        reasoning_effort: Option<String>,
+    },
     /// 这条 WS 断了（或者没连上），`retry_in` 之后第 `retry_attempt` 次重连。
     /// 断线期间 `send_input` 的内容会被丢掉（照 React 版：不能把断线时敲的字、
     /// 尤其是密码，攒到重连后一股脑打进一个状态已经变了的终端）。
@@ -111,6 +134,8 @@ pub struct SocketOptions {
     /// 连着的时候调 [`SessionSocket::reconnect_now`]：发一个 ping 探活，这么久没
     /// 回音就当是睡眠前留下的半开连接，断开重连
     pub probe_timeout: Duration,
+    /// 仅能同时显示时间线与真实终端的客户端开启；旧客户端继续只收终端。
+    pub terminal_backed_agent_view: bool,
 }
 
 impl Default for SocketOptions {
@@ -121,6 +146,7 @@ impl Default for SocketOptions {
             ping_interval: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
             probe_timeout: Duration::from_secs(5),
+            terminal_backed_agent_view: false,
         }
     }
 }
@@ -133,6 +159,8 @@ enum Cmd {
     Appearance(String),
     /// 已经序列化好的 status_seen 消息
     StatusSeen(String),
+    /// 已经序列化好的客户端 JSON 控制消息（如原生 Agent 动作）
+    Json(String),
     ReconnectNow,
     Close,
 }
@@ -240,6 +268,65 @@ impl SessionSocket {
         }
     }
 
+    /// 原生 Agent 视图：发送用户提示词。
+    pub fn agent_prompt(&self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.trim().is_empty() {
+            if let Ok(json) = serde_json::to_string(&ClientMessage::AgentPrompt { text }) {
+                let _ = self.cmd.send(Cmd::Json(json));
+            }
+        }
+    }
+
+    /// 原生 Agent 视图：中断当前正在执行的轮次。
+    pub fn agent_interrupt(&self) {
+        if let Ok(json) = serde_json::to_string(&ClientMessage::AgentInterrupt) {
+            let _ = self.cmd.send(Cmd::Json(json));
+        }
+    }
+
+    /// 原生 Agent 视图：答复工具调用的权限审批。
+    pub fn agent_permission(
+        &self,
+        call_id: impl Into<String>,
+        decision: AgentPermissionDecision,
+        updated_command: Option<String>,
+    ) {
+        let msg = ClientMessage::AgentPermission {
+            call_id: call_id.into(),
+            decision,
+            updated_command,
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self.cmd.send(Cmd::Json(json));
+        }
+    }
+
+    /// 原生 Agent 视图：切换模型。
+    pub fn agent_set_model(&self, model: impl Into<String>) {
+        let msg = ClientMessage::AgentSetModel {
+            model: model.into(),
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self.cmd.send(Cmd::Json(json));
+        }
+    }
+
+    /// 修改思考程度；None 使用模型默认值。
+    pub fn agent_set_reasoning_effort(&self, effort: Option<String>) {
+        let msg = ClientMessage::AgentSetReasoningEffort { effort };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = self.cmd.send(Cmd::Json(json));
+        }
+    }
+
+    /// 旧版退出命令；显示样式切换不能调用它。
+    pub fn agent_switch_terminal(&self) {
+        if let Ok(json) = serde_json::to_string(&ClientMessage::AgentSwitchTerminal) {
+            let _ = self.cmd.send(Cmd::Json(json));
+        }
+    }
+
     /// 立即重连并重置退避：系统唤醒、网络恢复、用户点「立即重连」时调。
     ///
     /// 正在等退避 / 停在未认证时马上发起连接；正在连着时发一个 ping 探活（睡眠前的
@@ -330,7 +417,7 @@ impl Driver {
                 Offline::ConnectNow
             }
             // 断线期间的输入丢掉，理由见 SessionEvent::Disconnected；status_seen 理由见方法注释
-            Some(Cmd::Input(_)) | Some(Cmd::StatusSeen(_)) => Offline::Continue,
+            Some(Cmd::Input(_)) | Some(Cmd::StatusSeen(_)) | Some(Cmd::Json(_)) => Offline::Continue,
             Some(Cmd::Resize(c, r)) => {
                 self.size = Some((c, r));
                 Offline::Continue
@@ -458,6 +545,13 @@ impl Driver {
             }
             sent_size = Some((cols, rows));
         }
+        if self.opts.terminal_backed_agent_view {
+            let capability = serde_json::to_string(&ClientMessage::AgentViewCapabilities { terminal_backed: true })
+                .expect("fixed agent-view capability serializes");
+            if ws.send_text(capability).await.is_err() {
+                return self.dropped("发送 agent-view 能力失败");
+            }
+        }
         // 收到服务端第一条消息时才报 Connected（见 SessionEvent::Connected）
         let mut accepted = false;
 
@@ -554,7 +648,7 @@ impl Driver {
                                 ws.send_text(visibility_json(v)).await.is_ok()
                             }
                         }
-                        Cmd::StatusSeen(json) => ws.send_text(json).await.is_ok(),
+                        Cmd::StatusSeen(json) | Cmd::Json(json) => ws.send_text(json).await.is_ok(),
                         Cmd::ReconnectNow => {
                             if !probing {
                                 probing = true;
@@ -607,6 +701,32 @@ impl Driver {
             ServerMessage::Askpass { id, prompt } => SessionEvent::Askpass { id, prompt },
             ServerMessage::ProgramStatus { records } => SessionEvent::ProgramStatus(records),
             ServerMessage::Size { cols, rows, owner } => SessionEvent::Size { cols, rows, owner },
+            ServerMessage::AgentSnapshot { state } => SessionEvent::AgentSnapshot(state),
+            ServerMessage::AgentEntry { entry } => SessionEvent::AgentEntry(entry),
+            ServerMessage::AgentDelta { id, kind, delta } => {
+                SessionEvent::AgentDelta { id, kind, delta }
+            }
+            ServerMessage::AgentMeta {
+                active,
+                status,
+                model,
+                permission_mode,
+                cwd,
+                commands,
+                models,
+                model_options,
+                reasoning_effort,
+            } => SessionEvent::AgentMeta {
+                active,
+                status,
+                model,
+                permission_mode,
+                cwd,
+                commands,
+                models,
+                model_options,
+                reasoning_effort,
+            },
             // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
             // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown
             ServerMessage::Pong | ServerMessage::Unknown => return,
