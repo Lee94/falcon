@@ -3,7 +3,7 @@
 # 打法与本机一样，直接跑 cargo xtask win / pkg / android，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
-# - 推 v* tag：三个包都打完后建 GitHub Release 并挂上；
+# - 推 v* tag：全量编译检查、测试与三个包都通过后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
 # - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
 #   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
@@ -116,6 +116,19 @@ jobs:
       # 没有服务端产物时 pkg 会先走 server（编 5 个目标的会话守护进程、cargo 编服务端）
       - name: Build pkg
         run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- pkg
+
+      # 本地提交与 push 只做局部检查；全量验证放在发版流程，使用 release profile 复用打包依赖。
+      # 先构建 pkg，确保真 PTY 的持久会话测试能找到本机守护进程，避免因缺少二进制而跳过。
+      # Release 依赖 macos job，以下任一步失败都不会发布。
+      # sessiond 是独立工作区：五个目标都做编译检查，测试只在 runner 本机执行。
+      - name: Check and test session daemon
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- sessiond --targets all --check --test
+
+      - name: Check Rust workspace
+        run: cargo check --release --manifest-path native/Cargo.toml --workspace --tests --locked
+
+      - name: Test Rust workspace
+        run: cargo test --release --manifest-path native/Cargo.toml --workspace --locked
 
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
