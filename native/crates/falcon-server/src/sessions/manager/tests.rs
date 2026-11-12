@@ -167,7 +167,12 @@ done
             h.mgr.add_viewer(&session.id, second.viewer.clone());
             second.drain();
             assert!(second.output().contains("CLI_READY"));
-            assert!(second.msgs("agent_snapshot").is_empty());
+            if agent == SessionAgent::Claude {
+                let snapshots = second.msgs("agent_snapshot");
+                assert_eq!(snapshots.len(), 1, "Claude 每次附着都提供权威模式快照");
+                assert_eq!(snapshots[0]["state"]["active"], false);
+                assert_eq!(snapshots[0]["state"]["terminalBacked"], true);
+            } else { assert!(second.msgs("agent_snapshot").is_empty()); }
             h.mgr.input(&session.id, second.id(), "another turn\n");
             second.wait("重新附着后仍可输入", has_output("CLI_INPUT:<another turn>")).await;
             let expected_args = if agent == SessionAgent::Claude { format!("--session-id {}\n", session.id) } else { "\n".into() };

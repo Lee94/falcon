@@ -217,6 +217,8 @@ struct EntryState {
     transcript_generation: u64,
     /// 显式转换会短暂退出 CLI；这期间所有 Viewer 的输入都必须停住，不能落进过渡中的 shell。
     agent_converting: bool,
+    /// 显式转换前核实过的原 shell；旧结构化连接没有这份证据，不能猜测返回目标。
+    agent_terminal_return: Option<(u32, String)>,
     /// 持有深浅的那个 Viewer 报的终端深浅；会话的 env 在创建时冻住了，只影响 OSC 答复和新会话
     appearance: Option<TermAppearance>,
     background: Option<String>,
@@ -283,6 +285,7 @@ impl LiveEntry {
                 transcript_mirror: None,
                 transcript_generation: 0,
                 agent_converting: false,
+                agent_terminal_return: None,
                 appearance: init.hint.appearance,
                 background: init.hint.background,
                 foreground: init.hint.foreground,
@@ -1519,7 +1522,7 @@ impl SessionManager {
             return Err(SessionError::Failed("会话正在关闭，请稍后重试".into()));
         }
         if entry.s.borrow().agent_converting {
-            return Err(SessionError::Failed("正在转换为图形界面，请稍后重试".into()));
+            return Err(SessionError::Failed("正在转换 Agent 运行模式，请稍后重试".into()));
         }
         if entry.backend().is_some() {
             // PTY 已挂上但 DB 还停在 unverified：点接回必须把状态扳回来
@@ -1916,6 +1919,7 @@ impl SessionManager {
                 s => s,
             };
             viewer.send(&ServerMessage::State { state, dead_reason: dead_reason_of(&row) });
+            self.send_agent_mode_snapshot(&entry, &viewer);
             self.flush_askpass(&viewer, session_id);
             return;
         }
@@ -2180,6 +2184,42 @@ impl SessionManager {
         }
     }
 
+    /// 每次附着都提供权威模式，包括默认 TUI、等待尺寸和后端重启后无法核实的 GUI。
+    /// 客户端只凭 socket 已连上不能开放输入；转换期间的新 Viewer 也必须等待 unknown 解除。
+    fn send_agent_mode_snapshot(&self, entry: &LiveEntry, viewer: &Viewer) {
+        let state = {
+            let s = entry.s.borrow();
+            if s.agent_converting {
+                let mut state = s.agent_driver.as_ref().map(|d| d.state.clone())
+                    .unwrap_or_else(|| falcon_proto::AgentViewState::new(SessionAgent::Claude, true));
+                state.active = true;
+                state.terminal_backed = false;
+                state.status = falcon_proto::AgentTurnStatus::Unknown;
+                Some(state)
+            } else if let Some(driver) = &s.agent_driver { Some(driver.state.clone()) }
+            else if viewer.terminal_backed_agent_view.get() && s.transcript_mirror.is_some() {
+                s.transcript_mirror.as_ref().map(TranscriptMirror::snapshot)
+            } else {
+                self.db.get_session(&entry.session_id).filter(|r| r.agent.as_deref() == Some("claude")).map(|_| {
+                    let graphical = self.db.session_agent_mode(&entry.session_id).as_deref() == Some("gui");
+                    let mut state = falcon_proto::AgentViewState::new(SessionAgent::Claude, graphical);
+                    state.terminal_backed = !graphical;
+                    if graphical { state.status = falcon_proto::AgentTurnStatus::Unknown; }
+                    state
+                })
+            }
+        };
+        if let Some(mut state) = state {
+            if !state.active { state.terminal_backed = true; }
+            viewer.send(&ServerMessage::AgentSnapshot { state });
+        }
+    }
+
+    fn broadcast_agent_mode_snapshot(&self, entry: &LiveEntry) {
+        self.flush_output(entry);
+        for viewer in entry.viewers() { self.send_agent_mode_snapshot(entry, &viewer); }
+    }
+
     fn send_replay(&self, entry: &LiveEntry, viewer: &Viewer) {
         let agent_snap = {
             let s = entry.s.borrow();
@@ -2187,17 +2227,8 @@ impl SessionManager {
                 .as_ref()
                 .map(|d| (d.state.clone(), !d.is_started()))
         };
-        let mirror = entry.s.borrow().transcript_mirror.as_ref().map(TranscriptMirror::snapshot);
-        if let Some(state) = mirror {
-            // 图形镜像与终端回放同时发送，Viewer 不会因查看时间线而丢失原终端。
-            if viewer.terminal_backed_agent_view.get() { viewer.send(&ServerMessage::AgentSnapshot { state }); }
-        } else if agent_snap.is_none() && self.db.session_agent_mode(&entry.session_id).as_deref() == Some("terminal") {
-            viewer.send(&ServerMessage::AgentSnapshot { state: falcon_proto::AgentViewState::new(SessionAgent::Claude, false) });
-        }
+        self.send_agent_mode_snapshot(entry, viewer);
         if let Some((state, not_started)) = agent_snap {
-            viewer.send(&ServerMessage::AgentSnapshot {
-                state: state.clone(),
-            });
             if state.active {
                 let (records, title) = {
                     let s = entry.s.borrow();

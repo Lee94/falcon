@@ -20,15 +20,18 @@ cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（
 
 xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、curl（Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
 
-### 门禁：零警告编译 + 单元测试
+### 验证：本地局部检查，GitHub 发版执行全量检查
 
-没有 clippy / rustfmt 要求，但保持零警告：
+本地提交与 push 只执行和改动相关的局部测试或编译检查，不要求运行全工作区的 `cargo check` / `cargo test`，也不默认打三端安装包。Rust 按修改的 crate / 模块检查；Android 改动可运行 `:app:compileDebugKotlin`；仅修改文档或工作流时检查差异格式与工作流语法。用户明确要求全量验证，或局部检查发现需要扩大排查的问题时，再执行额外检查。
+
+全量编译检查与单元测试由 `.github/workflows/package.yml` 在 GitHub 发版流程中执行，失败则禁止发布 GitHub Release；手动触发与定时运行同样执行。主工作区检查使用 release profile，与安装包构建共用依赖缓存；独立的 sessiond 工作区经 xtask 检查全部五个目标并在 runner 本机执行测试。没有 clippy / rustfmt 要求，源码保持零警告。
 
 ```bash
 cd native
-cargo check --workspace --tests
-cargo test --workspace     # 与单独 -p 跑都要绿：GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序
-cargo test -p falcon-server --lib sessions::manager   # 单个模块；--test-name-pattern 那套换成 cargo 的名字过滤
+cargo check -p falcon-server --tests                # 本地：检查改动涉及的 crate
+cargo test -p falcon-server --lib sessions::manager   # 本地：只测试相关模块；--test-name-pattern 那套换成 cargo 的名字过滤
+cargo check --release --workspace --tests --locked  # GitHub 发版：全量编译检查
+cargo test --release --workspace --locked           # GitHub 发版：全量测试；GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序
 ```
 
 服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例（持久会话的那几个起真的守护进程，没跑过 `cargo xtask sessiond` 时跳过）、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。守护进程自己的测试在它的工作区里（`cargo xtask sessiond --test`：真 PTY 的 holder 用例、VT 进程崩溃 / 降级 / 热升级、接回比对语料 `tests/corpus/`）。真机链路另有几道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + 守护进程，不设访问密码，两次重启后接回）；SSH 上的守护进程会话对**隔离的** sshd 容器跑 `FALCON_SSH_TEST=host:port:user:key cargo test -p falcon-server --lib ssh_durable -- --ignored --test-threads=1`（设计文档 `docs/design/session-daemon.md` 第 15 节）；`cargo xtask fixtures` 重生协议 fixture（配 `cargo xtask compare-fixtures` 可在改服务端前后比形状）。Windows 远端、浏览器里的真实交互（IME、剪贴板、拖放）没有自动化测试，改动那些要在真机上验。

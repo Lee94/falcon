@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -76,12 +77,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.falcon.android.R
 import com.falcon.android.bridge.FalconNative
+import com.falcon.android.model.AgentModeTransition
 import com.falcon.android.model.AgentViewStateUi
 import com.falcon.android.model.AskpassPromptUi
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.ProgramBadgeUi
 import com.falcon.android.model.SessionUi
+import com.falcon.android.net.AgentModeUnsupportedException
 import com.falcon.android.net.FalconApiClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -149,9 +153,33 @@ fun TerminalScreen(
     var uploadingImage by remember { mutableStateOf(false) }
 
     var agentState by remember { mutableStateOf<AgentViewStateUi?>(null) }
-    // 仅切换 Falcon 对同一结构化会话的绘制样式，不改变 socket 或 CLI 生命周期。
+    // 紧凑/图形只改变排版；GUI/TUI 转换走服务端并以 WS 快照为准，不能靠本地标记隐藏 CLI。
     var agentTerminalStyle by remember(initialSession.id) { mutableStateOf(false) }
+    var pendingAgentMode by remember(initialSession.id) { mutableStateOf<Boolean?>(null) }
+    var agentTransition by remember(initialSession.id) { mutableStateOf(AgentModeTransition()) }
+    var agentDraft by remember(initialSession.id) { mutableStateOf("") }
+    val transitionLock = remember(initialSession.id) { Any() }
+    // WS 回调与 HTTP 完成位于不同线程，原子更新避免快照与响应互相覆盖转换进度。
+    fun updateAgentTransition(update: (AgentModeTransition) -> AgentModeTransition) {
+        synchronized(transitionLock) { agentTransition = update(agentTransition) }
+    }
+    val agentModeSwitching = agentTransition.switching
     val agentComposerFocus = remember(initialSession.id) { androidx.compose.ui.focus.FocusRequester() }
+    val hasAgentView = agentState?.interactive == true
+    val sessionAvailable = wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0
+    val canSwitchAgentMode = session.agent == "claude" && sessionAvailable && !agentModeSwitching &&
+        (!hasAgentView || agentState?.status == "idle" || agentState?.status == "error")
+
+    // 另一 Viewer 改变模式时撤销旧确认；迟到的 HTTP 响应不覆盖新的 WS 状态。
+    LaunchedEffect(hasAgentView) {
+        pendingAgentMode = null
+        if (hasAgentView) agentTerminalStyle = false
+    }
+    LaunchedEffect(hasAgentView, agentModeSwitching, sessionAvailable, agentState?.status == "unknown") {
+        if (hasAgentView && !agentModeSwitching && sessionAvailable && agentState?.status != "unknown") {
+            agentComposerFocus.requestFocus()
+        }
+    }
 
     var canvasViewRef by remember { mutableStateOf<TerminalCanvasView?>(null) }
     var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
@@ -184,10 +212,25 @@ fun TerminalScreen(
         { msgs ->
             val ws = activeWebSocket
             if (ws != null) {
+                val inputAllowed = wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0 &&
+                    !agentTransition.switching && agentState?.interactive != true
                 for (m in msgs) {
-                    ws.send(m)
+                    // 转换期间保留尺寸与外观上报，但键盘、粘贴及终端查询回复不能进入控制通道。
+                    if (inputAllowed || JSONObject(m).optString("type") != "input") ws.send(m)
                 }
             }
+        }
+    }
+    val sendAgentMessage: (JSONObject) -> Boolean = remember {
+        { payload ->
+            val current = agentState
+            val configuring = payload.optString("type") in listOf("agent_set_model", "agent_set_reasoning_effort")
+            val allowed = wsConnected && agentTransition.synchronized && sessionState == "active" &&
+                sshReconnectAttempt == 0 && !agentTransition.switching && current?.interactive == true &&
+                current.status != "unknown" && (!configuring || current.status == "idle" || current.status == "error")
+            val sent = allowed && activeWebSocket?.send(payload.toString()) == true
+            if (sent) activeWebSocket?.send("""{"type":"status_seen"}""")
+            sent
         }
     }
 
@@ -195,11 +238,29 @@ fun TerminalScreen(
     LaunchedEffect(initialSession.id, reconnectTrigger, nativeHandle) {
         if (nativeHandle == 0L) return@LaunchedEffect
 
+        wsConnected = false
+        updateAgentTransition { it.disconnected() }
+        if (agentState?.interactive == true) agentState = agentState?.copy(status = "unknown")
+        val requiresModeSnapshot = if (initialSession.agent == "claude") {
+            FalconApiClient.agentModeSnapshotSupported(baseUrl, initialSession.id).getOrElse { error ->
+                onToast(context.getString(R.string.agent_mode_sync_failed, error.message.orEmpty()))
+                delay(1000)
+                reconnectTrigger++
+                return@LaunchedEffect
+            } || agentState?.interactive == true
+        } else {
+            agentState?.interactive == true
+        }
         var currentWs: WebSocket? = null
         var closedByEffect = false
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (closedByEffect) {
+                    webSocket.close(1000, "Effect disposed")
+                    return
+                }
+                updateAgentTransition { it.connected(requiresModeSnapshot) }
                 wsConnected = true
                 wsRetryAttempt = 0
                 sshReconnectAttempt = 0
@@ -213,6 +274,7 @@ fun TerminalScreen(
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (closedByEffect) return
                 val h = nativeHandle
                 if (h == 0L) return
                 val resultJson = FalconNative.onBinaryFrame(h, bytes.toByteArray())
@@ -227,7 +289,7 @@ fun TerminalScreen(
                             when (eff.optString("type")) {
                                 "sendWs" -> {
                                     val json = eff.optString("json")
-                                    if (json.isNotEmpty()) webSocket.send(json)
+                                    if (json.isNotEmpty()) sendWsMessages(listOf(json))
                                 }
                                 "clipboard" -> {
                                     val text = eff.optString("text")
@@ -247,6 +309,7 @@ fun TerminalScreen(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (closedByEffect) return
                 val h = nativeHandle
                 if (h == 0L) return
                 val parsedStr = FalconNative.parseServerMessage(text)
@@ -296,6 +359,10 @@ fun TerminalScreen(
                         "agentSnapshot" -> {
                             JsonParsers.parseAgentSnapshot(obj.optJSONObject("state"))?.let { snap ->
                                 agentState = snap
+                                updateAgentTransition { it.snapshot(
+                                    graphical = snap.interactive,
+                                    ready = !snap.active || snap.terminalBacked || snap.status != "unknown"
+                                ) }
                             }
                         }
                         "agentEntry" -> {
@@ -330,7 +397,7 @@ fun TerminalScreen(
                                     cur.modelOptions
                                 }
                                 val nextActive = obj.optBoolean("active", cur.active)
-                                agentState = cur.copy(
+                                val next = cur.copy(
                                     active = nextActive,
                                     status = obj.optString("status", cur.status),
                                     model = model,
@@ -341,6 +408,13 @@ fun TerminalScreen(
                                     modelOptions = options,
                                     reasoningEffort = if (obj.isNull("reasoningEffort")) null else obj.optString("reasoningEffort")
                                 )
+                                agentState = next
+                                if (agentTransition.synchronized) {
+                                    updateAgentTransition { it.snapshot(
+                                        graphical = next.interactive,
+                                        ready = !next.active || next.terminalBacked || next.status != "unknown"
+                                    ) }
+                                }
                             }
                         }
                     }
@@ -353,7 +427,9 @@ fun TerminalScreen(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (closedByEffect) return
                 wsConnected = false
+                updateAgentTransition { it.disconnected() }
                 if (!closedByEffect && sessionState != "dead" && code != 4401) {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
@@ -368,7 +444,9 @@ fun TerminalScreen(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (closedByEffect) return
                 wsConnected = false
+                updateAgentTransition { it.disconnected() }
                 if (!closedByEffect && sessionState != "dead") {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
@@ -391,6 +469,14 @@ fun TerminalScreen(
         } finally {
             closedByEffect = true
             currentWs.close(1000, "Effect disposed")
+        }
+    }
+
+    // 成功响应迟于/早于 WS 都不能放开旧模式。缺少目标快照时重连以重新取得权威状态，不超时解锁。
+    LaunchedEffect(agentTransition.awaitingSnapshot, wsConnected) {
+        if (agentTransition.awaitingSnapshot && wsConnected) {
+            delay(5000)
+            if (agentTransition.awaitingSnapshot) reconnectTrigger++
         }
     }
 
@@ -605,24 +691,25 @@ fun TerminalScreen(
                     )
                 }
 
-                // 已有结构化会话保留两种显示外观；默认 CLI 会话使用实际终端网格。
-                val hasAgentView = agentState?.active == true
-                if (hasAgentView) {
+                if (session.agent == "claude") {
                     Box(
                         modifier = Modifier
                             .height(22.dp)
                             .clip(RoundedCornerShape(5.dp))
-                            .background(if (!agentTerminalStyle) theme.tint else theme.secondary)
-                            .clickable {
-                                agentTerminalStyle = !agentTerminalStyle
-                                agentComposerFocus.requestFocus()
-                            }
+                            .background(if (hasAgentView) theme.tint else theme.secondary)
+                            .clickable(enabled = canSwitchAgentMode) { pendingAgentMode = !hasAgentView }
                             .padding(horizontal = 6.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (agentTerminalStyle) "紧凑 → 图形" else "图形 → 紧凑",
-                            color = if (!agentTerminalStyle) theme.tintStrong else theme.mutedForeground,
+                            text = stringResource(
+                                when {
+                                    agentModeSwitching -> R.string.agent_mode_switching
+                                    hasAgentView -> R.string.agent_mode_to_tui
+                                    else -> R.string.agent_mode_to_gui
+                                }
+                            ),
+                            color = if (canSwitchAgentMode) theme.tintStrong else theme.mutedForeground,
                             fontSize = 10.sp,
                             fontFamily = monoFont,
                             fontWeight = FontWeight.SemiBold
@@ -634,7 +721,7 @@ fun TerminalScreen(
                     modifier = Modifier
                         .size(26.dp)
                         .clip(RoundedCornerShape(5.dp))
-                        .clickable(enabled = !uploadingImage) {
+                        .clickable(enabled = !uploadingImage && !hasAgentView && sessionAvailable && !agentModeSwitching) {
                             imagePickerLauncher.launch("image/*")
                         },
                     contentAlignment = Alignment.Center
@@ -780,49 +867,48 @@ fun TerminalScreen(
             )
         }
 
-        val hasAgentView = agentState?.active == true
         if (hasAgentView) {
             val currentAgentState = agentState!!
             AgentSessionView(
                 state = currentAgentState,
                 terminalStyle = agentTerminalStyle,
-                available = wsConnected && sessionState == "active" && sshReconnectAttempt == 0,
+                available = sessionAvailable && !agentModeSwitching,
                 composerFocus = agentComposerFocus,
                 theme = theme,
                 monoFont = monoFont,
+                inputText = agentDraft,
+                onInputChange = { agentDraft = it },
                 onSendPrompt = { prompt ->
                     val payload = JSONObject().apply {
                         put("type", "agent_prompt")
                         put("text", prompt)
-                    }.toString()
-                    activeWebSocket?.send(payload)
-                    activeWebSocket?.send("""{"type":"status_seen"}""")
+                    }
+                    sendAgentMessage(payload)
                 },
                 onInterrupt = {
-                    activeWebSocket?.send("""{"type":"agent_interrupt"}""")
+                    sendAgentMessage(JSONObject().put("type", "agent_interrupt"))
                 },
                 onApprovePermission = { callId, decision ->
                     val payload = JSONObject().apply {
                         put("type", "agent_permission")
                         put("callId", callId)
                         put("decision", decision)
-                    }.toString()
-                    activeWebSocket?.send(payload)
-                    activeWebSocket?.send("""{"type":"status_seen"}""")
+                    }
+                    sendAgentMessage(payload)
                 },
                 onSelectModel = { model ->
                     val payload = JSONObject().apply {
                         put("type", "agent_set_model")
                         put("model", model)
-                    }.toString()
-                    activeWebSocket?.send(payload)
+                    }
+                    sendAgentMessage(payload)
                 },
                 onSelectReasoningEffort = { effort ->
                     val payload = JSONObject().apply {
                         put("type", "agent_set_reasoning_effort")
                         put("effort", effort ?: JSONObject.NULL)
-                    }.toString()
-                    activeWebSocket?.send(payload)
+                    }
+                    sendAgentMessage(payload)
                 },
                 onToggleStyle = {
                     agentTerminalStyle = !agentTerminalStyle
@@ -882,6 +968,10 @@ fun TerminalScreen(
                         view.sessionHandle = nativeHandle
                         view.outsideAreaColor = theme.app.toArgb()
                         view.onSendWsMessages = sendWsMessages
+                    },
+                    onRelease = { view ->
+                        view.onSendWsMessages = null
+                        if (canvasViewRef === view) canvasViewRef = null
                     }
                 )
             }
@@ -942,6 +1032,67 @@ fun TerminalScreen(
                 }
             )
         }
+    }
+
+    val targetAgentMode = pendingAgentMode
+    if (targetAgentMode != null && askpassQueue.isEmpty()) {
+        AlertDialog(
+            onDismissRequest = { pendingAgentMode = null },
+            containerColor = theme.card,
+            title = {
+                Text(
+                    stringResource(if (targetAgentMode) R.string.agent_mode_gui_title else R.string.agent_mode_tui_title),
+                    color = theme.foreground,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        stringResource(if (targetAgentMode) R.string.agent_mode_gui_body else R.string.agent_mode_tui_body),
+                        color = theme.foreground,
+                        fontSize = 13.sp
+                    )
+                    Text(stringResource(R.string.agent_mode_conditions), color = theme.mutedForeground, fontSize = 12.sp)
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = canSwitchAgentMode,
+                    onClick = {
+                        pendingAgentMode = null
+                        if (!canSwitchAgentMode || agentTransition.switching || targetAgentMode == hasAgentView) return@Button
+                        updateAgentTransition { it.start(targetAgentMode) }
+                        scope.launch {
+                            var succeeded = false
+                            try {
+                                val result = FalconApiClient.switchAgentMode(baseUrl, session.id, targetAgentMode)
+                                succeeded = result.isSuccess
+                                result.onFailure { error ->
+                                        val message = if (error is AgentModeUnsupportedException) {
+                                            context.getString(R.string.agent_mode_unsupported)
+                                        } else {
+                                            error.message.orEmpty()
+                                        }
+                                        onToast(context.getString(R.string.agent_mode_failed, message))
+                                        reconnectTrigger++
+                                    }
+                            } finally {
+                                updateAgentTransition { it.finish(succeeded) }
+                            }
+                        }
+                    }
+                ) {
+                    Text(stringResource(R.string.agent_mode_confirm), fontSize = 13.sp)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAgentMode = null }) {
+                    Text(stringResource(R.string.agent_mode_cancel), color = theme.mutedForeground, fontSize = 13.sp)
+                }
+            }
+        )
     }
 
     // Askpass 弹窗（sudo / SSH 密码请求）

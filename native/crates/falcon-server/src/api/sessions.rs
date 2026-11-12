@@ -189,12 +189,12 @@ async fn terminate(State(state): State<AppState>, Path(id): Path<String>) -> Api
 
 /// 新客户端必须先探测，避免旧服务端把模式请求解释成结束原进程后续接。
 async fn agent_mode_capabilities() -> Json<Value> {
-    Json(json!({ "preservesProcess": true, "interactiveGui": true }))
+    Json(json!({ "preservesProcess": true, "interactiveGui": true, "interactiveTerminal": true, "agentModeSnapshot": true }))
 }
 
 async fn agent_mode(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<falcon_proto::OkResponse>> {
-    let mode = body.str("mode").filter(|m| matches!(*m, "gui" | "terminal" | "gui-control"))
-        .ok_or_else(|| ApiError::bad_request("mode 必须是 gui、terminal 或 gui-control"))?.to_string();
+    let mode = body.str("mode").filter(|m| matches!(*m, "gui" | "terminal" | "gui-control" | "terminal-control"))
+        .ok_or_else(|| ApiError::bad_request("mode 必须是 gui、terminal、gui-control 或 terminal-control"))?.to_string();
     let result = state.engine.call(move |engine| async move {
         engine.sessions.switch_agent_mode(&id, &mode).await
     }).await?;
@@ -304,6 +304,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(capabilities["preservesProcess"], true);
         assert_eq!(capabilities["interactiveGui"], true, "新转换必须具有独立能力标记");
+        assert_eq!(capabilities["interactiveTerminal"], true, "返回官方 CLI 必须独立协商能力");
+        assert_eq!(capabilities["agentModeSnapshot"], true, "每次连接均提供权威模式快照");
         for body in [json!({}), json!({"mode":true}), json!({"mode":"compact"})] {
             let (status, value) = json_of(app.post_json("/api/sessions/missing/agent-mode", body).await).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -311,8 +313,10 @@ mod tests {
         }
         let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":"gui"})).await).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":"gui-control"})).await).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        for mode in ["gui-control", "terminal-control"] {
+            let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":mode})).await).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
         app.state.db.insert_session(&crate::db::SessionRow {
             id: "codex".into(), project_id: "p".into(), agent: Some("codex".into()), state: "active".into(), durable: 1,
             ..Default::default()
@@ -320,9 +324,18 @@ mod tests {
         let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":"gui"})).await).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
-        let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":"gui-control"})).await).await;
+        for mode in ["gui-control", "terminal-control"] {
+            let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":mode})).await).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
+        }
+        app.state.db.insert_session(&crate::db::SessionRow {
+            id: "disconnected-claude".into(), project_id: "p".into(), agent: Some("claude".into()), state: "unverified".into(), durable: 1,
+            ..Default::default()
+        });
+        let (status, value) = json_of(app.post_json("/api/sessions/disconnected-claude/agent-mode", json!({"mode":"terminal-control"})).await).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
+        assert!(value["error"].as_str().unwrap().contains("连接"));
     }
 
     #[test]

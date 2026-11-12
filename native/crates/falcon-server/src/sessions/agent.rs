@@ -41,6 +41,10 @@ pub const AGENT_RESUME_ENV: &str = "FALCON_AGENT_RESUME";
 pub const AGENT_RESUME_ONLY_ENV: &str = "FALCON_AGENT_RESUME_ONLY";
 /// 原生结构化双向流模式开关与流控哨兵。
 pub const AGENT_NATIVE_ENV: &str = "FALCON_AGENT_NATIVE";
+/// 同 PTY 转换由现有 shell 调用；CLI 退出后返回调用者，不能再嵌一层登录 shell。
+pub const AGENT_RETURN_ENV: &str = "FALCON_AGENT_RETURN";
+/// 实时启动脚本提供实际 CLI pid；前台进程组通常属于包装 shell，不能拿它当 CLI 结束。
+pub const AGENT_PROCESS_SENTINEL_PREFIX: &str = "__FALCON_AGENT_PROCESS__:";
 pub const AGENT_START_SENTINEL_PREFIX: &str = "__FALCON_AGENT_START__:";
 pub const AGENT_EXIT_SENTINEL: &str = "__FALCON_AGENT_EXIT__";
 /// 新启动脚本退出 CLI 后先清理协议输入，再等服务端确认，防止迟到 JSON 被回落 shell 执行。
@@ -302,6 +306,7 @@ fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
            cat <&3 > \"$_fifo\" & \
            _cat_pid=$!; \
            exec 3<&-; \
+           printf '\\n{AGENT_PROCESS_SENTINEL_PREFIX}%s\\n' \"$_cli_pid\"; \
            printf '\\n{AGENT_START_SENTINEL_PREFIX}{bin}:guarded\\n'; \
            wait \"$_cli_pid\" 2>/dev/null; \
            _rc=$?; \
@@ -324,6 +329,7 @@ fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
          else \
            printf '%s\\n' {} >&2; \
          fi; \
+         if [ -n \"${AGENT_RETURN_ENV}\" ]; then exit; fi; \
          unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV} {AGENT_RESUME_ONLY_ENV} {AGENT_NATIVE_ENV}; \
          exec {} -i -l",
         quote_posix(&sh_body),
