@@ -4,6 +4,16 @@
 
 给代理与贡献者的模块约定、测试命令与架构说明在仓库根的 [CLAUDE.md](../CLAUDE.md)。
 
+## Amp orb 环境
+
+`.agents/setup` 为 x86_64 Debian orb 安装 Rust stable、会话守护进程的交叉编译工具、Linux 原生库与资源生成工具，以及 Android 的 Java 17、SDK 35、build-tools 34.0.0 和 platform-tools。Rust 额外目标只预装本机的 linux-musl 与两个 Android 目标；其余发行目标按需安装，发版 CI 仍负责完整的五目标工具链。它按 Cargo 锁文件预取依赖，经 `cargo xtask sessiond` 准备本机守护进程（Zig / Ghostty 的下载与校验仍由 xtask 管），并预编译 Android 的 Kotlin 与单元测试代码以缓存 Gradle 依赖，不打安装包。
+
+冷启动先补下载工具与 Java，再并行准备 Rust / 原生库与 Android，等两组都成功后才退出。NDK 的冷下载太大，可能拖过 Amp 的 20 分钟 setup 时限，故不自动安装；需要 `cargo xtask android` 打 JNI / APK 时，先用 `sdkmanager 'ndk;27.2.12479018'` 按需补齐。Kotlin 编译与 JVM 单元测试不需要 NDK。
+
+工具链路径与 Android 环境写入 orb 的登录 shell 配置，后续 Amp 命令与 supervised services 都能使用。`.agents/resume` 只做快速工具检查，不联网安装、不启动服务。无需数据库服务或额外密钥；SQLite 由 Rust 依赖内嵌。开发服务端仍须显式使用隔离的端口与数据目录，不能把 `~/.falcon` 当测试数据。
+
+setup 可重复运行，已有系统包、Rust 目标、SDK 组件与 xtask / Gradle 缓存会复用；日志输出各步骤耗时。Amp 只有在这些脚本进入项目的默认分支后，才会用它们刷新并复用新 orb 的环境快照。macOS / Windows 安装包仍需相应平台，orb 不安装 Android 模拟器。
+
 ## 结构
 
 ```

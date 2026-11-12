@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$repo_root"
+if [[ "$(uname -sm)" != 'Linux x86_64' ]]; then
+    printf 'Falcon orb setup requires x86_64 Linux.\n' >&2
+    exit 1
+fi
+setup_started=$SECONDS
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+
+step() {
+    local label=$1 started=$SECONDS
+    shift
+    printf '\n==> %s\n' "$label"
+    "$@"
+    printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+system_dependencies() {
+    local package
+    local missing=()
+    for package in "$@"; do
+        if [[ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != installed ]]; then
+            missing+=("$package")
+        fi
+    done
+    if ((${#missing[@]})); then
+        sudo apt-get update -qq
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+    fi
+}
+
+rust_toolchain() {
+    export PATH="$HOME/.cargo/bin:$PATH"
+    if ! command -v rustup >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$scratch/rustup.sh"
+        bash "$scratch/rustup.sh" -y --profile minimal --default-toolchain stable --no-modify-path
+    elif ! rustup run stable rustc --version >/dev/null 2>&1; then
+        rustup toolchain install stable --profile minimal
+    fi
+    # 与 CI 一样使用 stable；已装好的 snapshot 不追逐每日更新。
+    rustup default stable
+    local host
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    # 发版才需要其余目标；别让 macOS / Windows 标准库下载拖慢 Linux orb 启动。
+    rustup target add --toolchain stable \
+        x86_64-unknown-linux-musl aarch64-linux-android x86_64-linux-android
+
+    # 发布的二进制避免在每个冷启动里 cargo install 编译工具本身。
+    local zigbuild_version=0.24.1
+    if [[ "$(cargo-zigbuild --version 2>/dev/null || true)" != "cargo-zigbuild $zigbuild_version" ]]; then
+        curl -fsSL --retry 3 "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$zigbuild_version/cargo-zigbuild-$host.tar.xz" -o "$scratch/zigbuild.tar.xz"
+        printf '%s  %s\n' 32581c8e13f27a807bb244aaaac870522f5b51263c766cf77b1a99771ce9fa5c "$scratch/zigbuild.tar.xz" | sha256sum --check
+        tar -xJf "$scratch/zigbuild.tar.xz" -C "$scratch"
+        install -m 755 "$scratch/cargo-zigbuild-$host/cargo-zigbuild" "$HOME/.cargo/bin/cargo-zigbuild"
+    fi
+
+    # Amp 和 supervised services 使用非交互登录 shell，不能只改当前 setup 的 PATH。
+    # 环境文件每次重写，旧 snapshot 的登录 hook 也能取到更新后的配置。
+    mkdir -p -- "$HOME/.config/amp"
+    cat > "$HOME/.config/amp/falcon-orb-env.sh" <<'PROFILE'
+if [[ -f "$HOME/.cargo/env" ]]; then
+    . "$HOME/.cargo/env"
+fi
+JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$(dpkg --print-architecture)"
+export JAVA_HOME
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+for bin_dir in "$JAVA_HOME/bin" "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/cmdline-tools/19.0/bin"; do
+    case ":$PATH:" in
+        *:"$bin_dir":*) ;;
+        *) PATH="$bin_dir:$PATH" ;;
+    esac
+done
+export PATH
+unset bin_dir
+PROFILE
+    local marker='# Falcon orb toolchains'
+    if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+        cat >> "$HOME/.bash_profile" <<'PROFILE'
+
+# Falcon orb toolchains
+if [[ -f "$HOME/.config/amp/falcon-orb-env.sh" ]]; then
+    . "$HOME/.config/amp/falcon-orb-env.sh"
+fi
+PROFILE
+    fi
+}
+
+rust_dependencies() {
+    cd -- "$repo_root/native"
+    local host
+    host="$(rustc -vV | sed -n 's/^host: //p')"
+    cargo fetch --locked --target "$host" --target aarch64-linux-android --target x86_64-linux-android
+    cargo fetch --locked --manifest-path sessiond/Cargo.toml --target x86_64-unknown-linux-musl
+    # xtask 按仓库 pin 下载并校验 Zig / Ghostty；保留其原生缓存，避免另造缓存键。
+    cargo xtask sessiond
+    cd -- "$repo_root"
+}
+
+android_dependencies() {
+    JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$(dpkg --print-architecture)"
+    export JAVA_HOME
+    export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+    export ANDROID_SDK_ROOT="$ANDROID_HOME"
+    local tools="$ANDROID_HOME/cmdline-tools/19.0"
+    if [[ ! -x "$tools/bin/sdkmanager" ]]; then
+        curl -fsSL --retry 3 https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip -o "$scratch/android-tools.zip"
+        printf '%s  %s\n' 7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee "$scratch/android-tools.zip" | sha256sum --check
+        unzip -q "$scratch/android-tools.zip" -d "$scratch/android-tools"
+        mkdir -p -- "$ANDROID_HOME/cmdline-tools"
+        mv -- "$scratch/android-tools/cmdline-tools" "$tools"
+    fi
+    local missing=()
+    [[ -f "$ANDROID_HOME/platforms/android-35/package.xml" ]] || missing+=("platforms;android-35")
+    [[ -f "$ANDROID_HOME/build-tools/34.0.0/package.xml" ]] || missing+=("build-tools;34.0.0")
+    [[ -f "$ANDROID_HOME/platform-tools/package.xml" ]] || missing+=("platform-tools")
+    if ((${#missing[@]})); then
+        # yes 在 sdkmanager 关 stdin 后会收 SIGPIPE，别让 pipefail 把成功接受许可判成失败。
+        (yes || true) | "$tools/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses > "$scratch/android-licenses.log"
+        "$tools/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "${missing[@]}"
+    fi
+    printf 'Android SDK ready; warming Gradle and Kotlin dependencies.\n'
+    # NDK 只供 cargo xtask android 打 JNI / APK 时使用，按需装；冷下载可能超过 setup 时限。
+    # dependencies 只取 POM；编译任务才会下载实际 JAR / AAR，包括局部测试要用的依赖。
+    # 单元测试的 runtime-only JAR 不在编译 classpath 里，也要取到，才能离线运行 JVM 测试。
+    cat > "$scratch/gradle-cache.gradle" <<'GRADLE'
+gradle.projectsEvaluated {
+    gradle.rootProject.project(':app').configurations.getByName('debugUnitTestRuntimeClasspath').resolve()
+}
+GRADLE
+    # Gradle 与 Kotlin 编译器都不留下后台 daemon。
+    bash "$repo_root/android/gradlew" -p "$repo_root/android" --no-daemon --console=plain -I "$scratch/gradle-cache.gradle" -Pkotlin.compiler.execution.strategy=in-process :app:compileDebugKotlin :app:compileDebugUnitTestKotlin > "$scratch/gradle-dependencies.log" 2>&1 || {
+        cat "$scratch/gradle-dependencies.log" >&2
+        return 1
+    }
+    tail -n 4 "$scratch/gradle-dependencies.log"
+}
+
+step 'Download tools and Java 17' system_dependencies curl ca-certificates unzip openjdk-17-jdk-headless
+# 两组有限任务互不依赖；全部 wait 完才退出，不能把未完成的下载或编译留给 snapshot。
+(
+    step 'Native system dependencies' system_dependencies \
+        build-essential pkg-config patch xz-utils clang libclang-dev cmake libssl-dev \
+        libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+        libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libxcb-imdkit-dev \
+        libvulkan-dev libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-bin libharfbuzz-bin woff2
+    step 'Rust toolchain and login environment' rust_toolchain
+    step 'Rust dependencies and local session daemon' rust_dependencies
+) &
+rust_pid=$!
+(step 'Android SDK and Gradle dependencies' android_dependencies) &
+android_pid=$!
+# 子进程已经继承 errexit；只在父进程收集两个结果时关闭，确保失败也会等另一组结束。
+set +e
+wait "$rust_pid"
+rust_status=$?
+wait "$android_pid"
+android_status=$?
+set -e
+if ((rust_status || android_status)); then
+    printf 'Setup failed (Rust: %s, Android: %s).\n' "$rust_status" "$android_status" >&2
+    exit 1
+fi
+printf '\nFalcon orb setup ready (%ss).\n' "$((SECONDS - setup_started))"

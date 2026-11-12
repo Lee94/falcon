@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 无常驻服务或线程身份需要恢复；只检查 snapshot 里的工具链，不在唤醒时联网安装。
+for tool in cargo rustc cargo-zigbuild java javac sdkmanager; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'Missing %s; run .agents/setup to repair the orb.\n' "$tool" >&2
+        exit 1
+    fi
+done
+printf 'Falcon orb toolchains ready.\n'
