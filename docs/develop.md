@@ -14,6 +14,14 @@
 
 setup 可重复运行，已有系统包、Rust 目标、SDK 组件与 xtask / Gradle 缓存会复用；日志输出各步骤耗时。Amp 只有在这些脚本进入项目的默认分支后，才会用它们刷新并复用新 orb 的环境快照。macOS / Windows 安装包仍需相应平台，orb 不安装 Android 模拟器。
 
+### 国内网络
+
+setup 的 Debian 包使用中科大镜像，保留 Debian 签名校验，仅对本次 apt 调用生效，不覆盖机器已有的源。Rust 工具链与 rustup 安装器使用 rsproxy；Cargo 继续复用 `native/.cargo/config.toml` 的 rsproxy 配置。cargo-zigbuild 优先取官方预编译包，下载超时或失败时，改用 rsproxy 编译同一锁定版本；哈希校验失败则直接报错，不降级绕过校验。
+
+Android 命令行工具与 sdkmanager 的仓库基址使用 Google 官方国内域名 `https://googledownloads.cn/android/repository/`。Gradle wrapper 改从华为云镜像下载同一 8.9 版本，并按 Gradle 官方公布的 SHA-256 校验；Android 的插件与 Maven 依赖优先从阿里云镜像取，缺包时仍保留官方仓库兜底。这两项 Gradle 仓库配置也用于普通 Android 开发与 CI，不只用于 setup。
+
+`RUSTUP_DIST_SERVER`、`RUSTUP_UPDATE_ROOT`、`SDK_TEST_BASE_URL` 会写入 orb 登录环境，已有显式配置优先；覆盖 SDK 基址时须保留末尾 `/`。Zig 仍从 ziglang.org 下载，Ghostty 源码直连 GitHub 官方 codeload，二者继续校验仓库钉死的哈希；没有引入第三方 GitHub 代理。如果这些官方域名也被阻断，仍需 orb 的网络提供可用的 HTTPS 出口。下载器增加了连接超时、低速检测与重试，但不能保证任意国内线路都能完成全新环境安装。
+
 ## 结构
 
 ```

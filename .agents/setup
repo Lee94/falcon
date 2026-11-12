@@ -11,12 +11,23 @@ setup_started=$SECONDS
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 
+# 下载器与后续登录 shell 共用国内源；保留项目环境里显式指定的地址。
+export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
+export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
+export SDK_TEST_BASE_URL="${SDK_TEST_BASE_URL:-https://googledownloads.cn/android/repository/}"
+
 step() {
     local label=$1 started=$SECONDS
     shift
     printf '\n==> %s\n' "$label"
     "$@"
     printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+download() {
+    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 \
+        --max-time 180 --speed-limit 1024 --speed-time 30 --retry 2 --retry-max-time 120 \
+        "$1" -o "$2"
 }
 
 system_dependencies() {
@@ -28,15 +39,34 @@ system_dependencies() {
         fi
     done
     if ((${#missing[@]})); then
-        sudo apt-get update -qq
-        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+        # 只为本次 apt 调用换源，不覆盖 orb 上的 Docker / Chrome 等其它源。
+        local codename
+        # shellcheck disable=SC1091
+        codename="$(. /etc/os-release; printf '%s' "$VERSION_CODENAME")"
+        cat > "$scratch/debian.sources" <<APT
+Types: deb
+URIs: https://mirrors.ustc.edu.cn/debian
+Suites: $codename $codename-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: https://mirrors.ustc.edu.cn/debian-security
+Suites: $codename-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+APT
+        local apt_options=(-o "Dir::Etc::sourcelist=$scratch/debian.sources" -o Dir::Etc::sourceparts=-
+            -o Acquire::Retries=2 -o Acquire::https::Timeout=30 -o APT::Update::Error-Mode=any)
+        sudo apt-get "${apt_options[@]}" update -qq
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y --no-install-recommends "${missing[@]}"
     fi
 }
 
 rust_toolchain() {
     export PATH="$HOME/.cargo/bin:$PATH"
     if ! command -v rustup >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$scratch/rustup.sh"
+        download https://rsproxy.cn/rustup-init.sh "$scratch/rustup.sh"
         bash "$scratch/rustup.sh" -y --profile minimal --default-toolchain stable --no-modify-path
     elif ! rustup run stable rustc --version >/dev/null 2>&1; then
         rustup toolchain install stable --profile minimal
@@ -52,10 +82,16 @@ rust_toolchain() {
     # 发布的二进制避免在每个冷启动里 cargo install 编译工具本身。
     local zigbuild_version=0.24.1
     if [[ "$(cargo-zigbuild --version 2>/dev/null || true)" != "cargo-zigbuild $zigbuild_version" ]]; then
-        curl -fsSL --retry 3 "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$zigbuild_version/cargo-zigbuild-$host.tar.xz" -o "$scratch/zigbuild.tar.xz"
-        printf '%s  %s\n' 32581c8e13f27a807bb244aaaac870522f5b51263c766cf77b1a99771ce9fa5c "$scratch/zigbuild.tar.xz" | sha256sum --check
-        tar -xJf "$scratch/zigbuild.tar.xz" -C "$scratch"
-        install -m 755 "$scratch/cargo-zigbuild-$host/cargo-zigbuild" "$HOME/.cargo/bin/cargo-zigbuild"
+        # GitHub 不通时从已有 rsproxy 配置编译同一版本，不借用不明二进制代理。
+        # 校验失败直接退出，不把内容损坏当成网络失败。
+        if download "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$zigbuild_version/cargo-zigbuild-$host.tar.xz" "$scratch/zigbuild.tar.xz"; then
+            printf '%s  %s\n' 32581c8e13f27a807bb244aaaac870522f5b51263c766cf77b1a99771ce9fa5c "$scratch/zigbuild.tar.xz" | sha256sum --check
+            tar -xJf "$scratch/zigbuild.tar.xz" -C "$scratch"
+            install -m 755 "$scratch/cargo-zigbuild-$host/cargo-zigbuild" "$HOME/.cargo/bin/cargo-zigbuild"
+        else
+            printf 'GitHub download failed; building cargo-zigbuild via rsproxy.\n' >&2
+            cargo --config "$repo_root/native/.cargo/config.toml" install cargo-zigbuild --version "$zigbuild_version" --locked
+        fi
     fi
 
     # Amp 和 supervised services 使用非交互登录 shell，不能只改当前 setup 的 PATH。
@@ -65,6 +101,9 @@ rust_toolchain() {
 if [[ -f "$HOME/.cargo/env" ]]; then
     . "$HOME/.cargo/env"
 fi
+export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
+export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
+export SDK_TEST_BASE_URL="${SDK_TEST_BASE_URL:-https://googledownloads.cn/android/repository/}"
 JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$(dpkg --print-architecture)"
 export JAVA_HOME
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
@@ -108,7 +147,7 @@ android_dependencies() {
     export ANDROID_SDK_ROOT="$ANDROID_HOME"
     local tools="$ANDROID_HOME/cmdline-tools/19.0"
     if [[ ! -x "$tools/bin/sdkmanager" ]]; then
-        curl -fsSL --retry 3 https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip -o "$scratch/android-tools.zip"
+        download "${SDK_TEST_BASE_URL%/}/commandlinetools-linux-13114758_latest.zip" "$scratch/android-tools.zip"
         printf '%s  %s\n' 7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee "$scratch/android-tools.zip" | sha256sum --check
         unzip -q "$scratch/android-tools.zip" -d "$scratch/android-tools"
         mkdir -p -- "$ANDROID_HOME/cmdline-tools"

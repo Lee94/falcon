@@ -159,7 +159,8 @@ fn ensure_ghostty_src(pin: &Pin) -> Result<PathBuf> {
     }
     let tarball = cache().join("ghostty").join(format!("{}.tar.gz", pin.commit));
     if !tarball.is_file() || sha256_hex(&tarball)? != pin.sha256 {
-        download(&format!("https://github.com/ghostty-org/ghostty/archive/{}.tar.gz", pin.commit), &tarball)?;
+        // archive 最终也重定向到 codeload；直连同一官方产物，少经过 github.com。
+        download(&format!("https://codeload.github.com/ghostty-org/ghostty/tar.gz/{}", pin.commit), &tarball)?;
     }
     let got = sha256_hex(&tarball)?;
     if got != pin.sha256 {

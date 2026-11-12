@@ -136,6 +136,13 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
         "curl",
         [
             OsStr::new("-fsSL"),
+            // 断连或长期低速时重试，避免国内网络把 setup 卡在一次连接上。
+            OsStr::new("--connect-timeout"),
+            OsStr::new("15"),
+            OsStr::new("--speed-limit"),
+            OsStr::new("1024"),
+            OsStr::new("--speed-time"),
+            OsStr::new("30"),
             OsStr::new("--retry"),
             OsStr::new("3"),
             OsStr::new("-A"),
