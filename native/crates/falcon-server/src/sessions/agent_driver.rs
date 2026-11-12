@@ -11,7 +11,7 @@ use falcon_proto::{
 };
 use serde_json::{Value, json};
 
-use super::agent::{AGENT_CONNECT_SENTINEL, AGENT_EXIT_ACK, AGENT_EXIT_SENTINEL, AGENT_READY_SENTINEL, AGENT_START_SENTINEL_PREFIX};
+use super::agent::{AGENT_CONNECT_SENTINEL, AGENT_EXIT_ACK, AGENT_EXIT_SENTINEL, AGENT_PROCESS_SENTINEL_PREFIX, AGENT_READY_SENTINEL, AGENT_START_SENTINEL_PREFIX};
 use crate::auth::now_ms;
 
 /// 单次处理输出或用户操作后的副产物，由 `SessionManager` 负责写回 PTY 与广播给 Viewer。
@@ -60,6 +60,9 @@ pub struct AgentDriver {
     line_buf: String,
     started: bool,
     guarded_exit: bool,
+    native_cli_pid: Option<u32>,
+    stopping_for_terminal: bool,
+    terminal_exit_received: bool,
     initialized: bool,
     next_seq: u64,
     pending_prompts: Vec<String>,
@@ -94,6 +97,9 @@ impl AgentDriver {
             line_buf: String::new(),
             started: false,
             guarded_exit: false,
+            native_cli_pid: None,
+            stopping_for_terminal: false,
+            terminal_exit_received: false,
             initialized: false,
             next_seq: 10,
             pending_prompts: Vec::new(),
@@ -131,6 +137,20 @@ impl AgentDriver {
             && !self.state.entries.iter().any(|e| matches!(e, AgentEntry::ToolCall(tc) if tc.permission_pending))
     }
 
+    /// 只有当前脚本的实时 pid 与 guarded EXIT/ACK 同时存在时，才具备退出 CLI 的生命周期证据。
+    pub fn terminal_cli_pid(&self, session_id: &str) -> Option<u32> {
+        (self.ready_to_switch() && self.guarded_exit && self.expected_session_id.as_deref() == Some(session_id))
+            .then_some(self.native_cli_pid).flatten()
+    }
+
+    /// 结束 CLI 之后禁止迟到控制响应触发后续 JSON；EXIT/ACK 仍必须继续解析。
+    pub fn begin_terminal_conversion(&mut self) -> AgentDriverOutput {
+        self.stopping_for_terminal = true;
+        self.transport_uncertain = true;
+        self.state.status = AgentTurnStatus::Unknown;
+        AgentDriverOutput { messages: vec![ServerMessage::AgentSnapshot { state: self.state.clone() }], ..Default::default() }
+    }
+
     pub fn is_initialized(&self) -> bool { self.initialized }
 
     pub fn control_ready(&self) -> bool {
@@ -163,16 +183,16 @@ impl AgentDriver {
     }
 
     pub fn is_active(&self) -> bool {
-        self.state.active
+        self.state.active && !self.terminal_exit_received
     }
 
     pub fn is_started(&self) -> bool {
         self.started
     }
 
-    /// 两种显示样式共享结构化流，只有 CLI 自行退出才恢复原始终端字节。
+    /// EXIT 后恢复原始字节；显式返回 TUI 期间，Viewer 仍保持 unknown，直到服务端确认新 CLI 可用。
     pub fn should_intercept_pty(&self) -> bool {
-        self.state.active
+        self.is_active()
     }
 
     fn alloc_id(&mut self, prefix: &str) -> String {
@@ -182,7 +202,7 @@ impl AgentDriver {
 
     /// 合成供侧栏徽标、通知横幅与提示音使用的 [`ProgramStatusRecord`]。
     pub fn program_status_records(&self) -> Vec<ProgramStatusRecord> {
-        if !self.state.active {
+        if !self.is_active() {
             return Vec::new();
         }
         let app = match self.state.agent {
@@ -652,6 +672,14 @@ impl AgentDriver {
             return;
         }
 
+        if self.stopping_for_terminal && trimmed != AGENT_EXIT_SENTINEL { return; }
+        if !self.started && self.state.active
+            && let Some(pid) = trimmed.strip_prefix(AGENT_PROCESS_SENTINEL_PREFIX)
+        {
+            self.native_cli_pid = pid.parse::<u32>().ok().filter(|p| *p > 1);
+            return;
+        }
+
         if trimmed == AGENT_READY_SENTINEL && self.state.active && !self.started {
             out.to_pty.push(format!("{AGENT_CONNECT_SENTINEL}\n"));
             return;
@@ -695,8 +723,11 @@ impl AgentDriver {
 
         if trimmed == AGENT_EXIT_SENTINEL {
             let was_active = self.state.active;
-            self.state.active = false;
-            self.state.status = AgentTurnStatus::Idle;
+            self.terminal_exit_received = self.stopping_for_terminal;
+            if !self.stopping_for_terminal {
+                self.state.active = false;
+                self.state.status = AgentTurnStatus::Idle;
+            }
             self.last_finished_state = None;
             out.exited_native = true;
             // START 和失败 EXIT 可能在同一块输出里；此前排队的 initialize 不能在 shell 中执行。
@@ -704,7 +735,7 @@ impl AgentDriver {
             if self.guarded_exit { out.to_pty.push(format!("{AGENT_EXIT_ACK}\n")); }
             if was_active {
                 out.status_changed = true;
-                out.messages.push(self.meta_message(false));
+                if !self.stopping_for_terminal { out.messages.push(self.meta_message(false)); }
             }
             return;
         }
@@ -2337,7 +2368,7 @@ mod tests {
 
     fn ready_claude() -> AgentDriver {
         let mut drv = AgentDriver::new(SessionAgent::Claude, None);
-        drv.on_data("__FALCON_AGENT_START__:claude\n");
+        drv.on_data("__FALCON_AGENT_PROCESS__:12345\n__FALCON_AGENT_START__:claude:guarded\n");
         let out = drv.on_data(concat!(
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"models":[{"value":"sonnet","resolvedModel":"claude-sonnet-5-5","displayName":"Sonnet","supportsEffort":true,"supportedEffortLevels":["low","high","max"]},{"value":"plain","supportsEffort":false}]}}}"#,
             "\n"
@@ -2348,6 +2379,27 @@ mod tests {
                 "response":{"applied":{"model":"claude-sonnet-5-5","effort":"high"}} }
         })));
         drv
+    }
+
+    #[test]
+    fn terminal_conversion_requires_live_process_evidence_and_keeps_viewers_blocked_until_manager_confirms_cli() {
+        let mut drv = ready_claude();
+        assert!(drv.terminal_cli_pid("fixed-id").is_none(), "没有绑定 UUID 不能退出 CLI");
+        drv.pin_session_id("fixed-id");
+        assert_eq!(drv.terminal_cli_pid("fixed-id"), Some(12345));
+        drv.on_data("__FALCON_AGENT_PROCESS__:99999\n");
+        assert_eq!(drv.terminal_cli_pid("fixed-id"), Some(12345), "启动后的普通输出不得改写 CLI 身份");
+        let out = drv.begin_terminal_conversion();
+        assert!(matches!(&out.messages[0], ServerMessage::AgentSnapshot { state } if state.active && state.status == AgentTurnStatus::Unknown));
+        let late = drv.on_data("{\"type\":\"control_request\",\"request_id\":\"late\",\"request\":{\"subtype\":\"unsupported\"}}\n");
+        assert!(late.to_pty.is_empty(), "退出中的 CLI 不得触发迟到 JSON 回复");
+        let out = drv.on_data("__FALCON_AGENT_EXIT__\n");
+        assert_eq!(out.to_pty, vec![format!("{AGENT_EXIT_ACK}\n")]);
+        assert!(out.messages.is_empty(), "EXIT 不能提前广播 active:false");
+        assert!(!drv.is_active() && !drv.should_intercept_pty());
+        assert!(drv.state.active && drv.state.status == AgentTurnStatus::Unknown, "新 Viewer 必须继续禁用输入");
+        assert_eq!(drv.on_data("official terminal bytes").terminal_passthrough, "official terminal bytes");
+        assert!(drv.send_prompt("late prompt").to_pty.is_empty());
     }
 
     #[test]

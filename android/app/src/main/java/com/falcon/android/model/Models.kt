@@ -146,8 +146,12 @@ data class AgentViewStateUi(
     val models: List<String>,
     val entries: List<AgentEntryUi>,
     val modelOptions: List<AgentModelOptionUi> = emptyList(),
-    val reasoningEffort: String? = null
+    val reasoningEffort: String? = null,
+    val terminalBacked: Boolean = false
 ) {
+    // 旧镜像只有历史内容，不能把它当成可交互 GUI 并隐藏真实终端。
+    val interactive: Boolean get() = active && !terminalBacked
+
     // 旧服务端只提供模型名称时保留选择能力，思考程度仍以真实能力目录为准。
     fun modelChoices(): List<AgentModelOptionUi> = modelOptions.ifEmpty {
         models.filter { it.isNotBlank() }.map {
@@ -534,6 +538,7 @@ object JsonParsers {
             models = parseStringList(obj.optJSONArray("models")),
             modelOptions = parseModelOptions(obj.optJSONArray("modelOptions")),
             reasoningEffort = if (obj.isNull("reasoningEffort")) null else obj.optString("reasoningEffort"),
+            terminalBacked = obj.optBoolean("terminalBacked", false),
             entries = entries
         )
     }

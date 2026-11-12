@@ -72,7 +72,9 @@ fun AgentSessionView(
     composerFocus: FocusRequester,
     theme: FalconThemeTokens,
     monoFont: FontFamily,
-    onSendPrompt: (String) -> Unit,
+    inputText: String,
+    onInputChange: (String) -> Unit,
+    onSendPrompt: (String) -> Boolean,
     onInterrupt: () -> Unit,
     onApprovePermission: (callId: String, decision: String) -> Unit,
     onSelectModel: (String) -> Unit,
@@ -80,12 +82,11 @@ fun AgentSessionView(
     onToggleStyle: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var inputText by remember { mutableStateOf("") }
     val foldedMap = remember { mutableStateMapOf<String, Boolean>() }
     val listState = rememberLazyListState()
 
     val isRunning = state.status == "running" || state.status == "awaiting_permission"
-    val enabled = available && state.active && state.status != "unknown"
+    val enabled = available && state.interactive && state.status != "unknown"
     val canConfigure = enabled && !isRunning
     val selectedModel = state.selectedModelOption()
     val modelChoices = state.modelChoices()
@@ -227,7 +228,7 @@ fun AgentSessionView(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(5.dp))
-                            .clickable { inputText = "/${cmd.name} " }
+                            .clickable(enabled = enabled) { onInputChange("/${cmd.name} ") }
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -350,7 +351,7 @@ fun AgentSessionView(
                     }
                     BasicTextField(
                         value = inputText,
-                        onValueChange = { inputText = it },
+                        onValueChange = onInputChange,
                         enabled = enabled,
                         textStyle = TextStyle(
                             color = theme.foreground,
@@ -389,9 +390,8 @@ fun AgentSessionView(
                             .background(if (canSend) theme.primary else theme.secondary)
                             .clickable(enabled = canSend) {
                                 val prompt = inputText.trim()
-                                if (prompt.isNotEmpty()) {
-                                    inputText = ""
-                                    onSendPrompt(prompt)
+                                if (prompt.isNotEmpty() && onSendPrompt(prompt)) {
+                                    onInputChange("")
                                 }
                             },
                         contentAlignment = Alignment.Center

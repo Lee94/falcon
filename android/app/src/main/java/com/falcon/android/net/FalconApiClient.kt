@@ -25,6 +25,8 @@ import java.net.NetworkInterface
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+class AgentModeUnsupportedException : Exception("agent_mode_unsupported")
+
 object FalconApiClient {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -140,6 +142,51 @@ object FalconApiClient {
             }
         }
     }
+
+    suspend fun agentModeSnapshotSupported(baseUrl: String, sessionId: String): Result<Boolean> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val encodedId = URLEncoder.encode(sessionId, "UTF-8")
+                val request = Request.Builder()
+                    .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId/agent-mode")
+                    .get().build()
+                httpClient.newCall(request).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    when {
+                        resp.code == 404 || resp.code == 405 -> false
+                        !resp.isSuccessful -> throw RuntimeException(extractErrorMessage(body, resp.code))
+                        else -> JSONObject(body).opt("agentModeSnapshot") == true
+                    }
+                }
+            }
+        }
+
+    // 每次转换重新探测对应能力，避免旧服务端把同一路径的请求解释成只读镜像或结束整个会话。
+    // 调用方先确认草稿与 CLI 重启的影响；当前模式始终由 WebSocket 快照决定。
+    suspend fun switchAgentMode(baseUrl: String, sessionId: String, graphical: Boolean): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val encodedId = URLEncoder.encode(sessionId, "UTF-8")
+                val url = "${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId/agent-mode"
+                val capabilityRequest = Request.Builder().url(url).get().build()
+                httpClient.newCall(capabilityRequest).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.code == 404 || resp.code == 405) throw AgentModeUnsupportedException()
+                    if (!resp.isSuccessful) throw RuntimeException(extractErrorMessage(body, resp.code))
+                    val capability = if (graphical) "interactiveGui" else "interactiveTerminal"
+                    if (JSONObject(body).opt(capability) != true) throw AgentModeUnsupportedException()
+                }
+                val payload = JSONObject().put("mode", if (graphical) "gui-control" else "terminal-control")
+                val request = Request.Builder()
+                    .url(url)
+                    .post(payload.toString().toRequestBody(jsonMediaType))
+                    .build()
+                httpClient.newCall(request).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) throw RuntimeException(extractErrorMessage(body, resp.code))
+                }
+            }
+        }
 
     suspend fun reattachSession(baseUrl: String, sessionId: String): Result<SessionUi> =
         withContext(Dispatchers.IO) {

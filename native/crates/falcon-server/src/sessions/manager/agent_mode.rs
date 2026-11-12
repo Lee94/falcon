@@ -1,10 +1,10 @@
-//! 官方终端的只读图形镜像。显示切换不替换 Backend、PTY 或 CLI，也不向它们发送控制字节。
+//! 官方终端的只读镜像与显式 GUI/TUI 转换。镜像不改变进程；控制模式只退出已核实的 CLI，保留 Backend、PTY 与原 shell。
 
 use super::*;
 use falcon_proto::{AgentEntry, AgentNoticeLevel, AgentViewState, ProgramState};
 use crate::host::quote_posix;
 use super::super::backend::ForegroundProcess;
-use super::super::agent::{AGENT_NATIVE_ENV, AGENT_RESUME_ENV, AGENT_RESUME_ONLY_ENV, AGENT_SESSION_ENV};
+use super::super::agent::{AGENT_NATIVE_ENV, AGENT_RESUME_ENV, AGENT_RESUME_ONLY_ENV, AGENT_RETURN_ENV, AGENT_SESSION_ENV};
 use super::super::agent_transcript::{ClaudeTranscript, LocalTranscriptSource, TranscriptCursor};
 use super::transcript_remote::{RemoteTranscriptCursor, RemoteTranscriptSource};
 
@@ -123,22 +123,25 @@ impl SessionManager {
         path.ok_or_else(|| SessionError::Failed("无法准备 Agent 启动脚本".into()))
     }
 
-    /// 保留旧客户端调用的入口，但彻底删除 terminate/resume 转换路径。
-    /// 两个模式请求都只能改变镜像；旧流协议不能变成官方 TUI，明确拒绝而不结束它。
+    /// gui/terminal 继续只改变镜像；显式 control 模式才允许退出核实过的 CLI。
+    /// 两条转换路径始终使用原 Backend，绝不 terminate/resume 整个会话。
     pub async fn switch_agent_mode(&self, session_id: &str, mode: &str) -> Result<(), SessionError> {
-        if !matches!(mode, "gui" | "terminal" | "gui-control") { return Err(SessionError::Failed("mode 必须是 gui、terminal 或 gui-control".into())); }
+        if !matches!(mode, "gui" | "terminal" | "gui-control" | "terminal-control") { return Err(SessionError::Failed("mode 必须是 gui、terminal、gui-control 或 terminal-control".into())); }
         let row = self.db.get_session(session_id).ok_or_else(|| SessionError::NotFound("会话不存在".into()))?;
         if row.agent.as_deref() != Some("claude") {
-            return Err(SessionError::Failed("目前仅 Claude Code 支持图形对话镜像".into()));
+            return Err(SessionError::Failed("目前仅 Claude Code 支持图形对话镜像及 GUI/TUI 模式转换".into()));
         }
         let entry = self.entry(session_id).ok_or_else(|| SessionError::Failed("会话尚未连接".into()))?;
         if row.state != "active" || entry.backend().is_none() || entry.terminating() {
             return Err(SessionError::Failed("请先接回 Claude 会话".into()));
         }
-        if entry.s.borrow().agent_converting { return Err(SessionError::Failed("正在转换为图形界面，请稍后重试".into())); }
-        if mode == "gui-control" {
+        if entry.s.borrow().agent_converting { return Err(SessionError::Failed("正在转换 Agent 运行模式，请稍后重试".into())); }
+        if matches!(mode, "gui-control" | "terminal-control") {
             let project = owner_row(&self.db, &row.project_id).ok_or_else(|| SessionError::NotFound("项目不存在".into()))?;
-            return self.enable_interactive_gui(&entry, &project).await;
+            let result = if mode == "gui-control" { self.enable_interactive_gui(&entry, &project).await }
+                else { self.enable_interactive_terminal(&entry, &project).await };
+            if result.is_err() && self.is_current(&entry) { self.broadcast_agent_mode_snapshot(&entry); }
+            return result;
         }
         if entry.s.borrow().agent_driver.is_some() || self.db.session_agent_mode(session_id).as_deref() == Some("gui") {
             return Err(SessionError::Failed("此会话使用旧结构化协议，只能切换紧凑/图形样式；为保留 shell 和后台任务，不再重启为官方终端".into()));
@@ -169,6 +172,7 @@ impl SessionManager {
         require_idle(entry)?;
         entry.s.borrow_mut().agent_converting = true;
         let _guard = GuiConversionGuard(entry.clone());
+        self.broadcast_agent_mode_snapshot(entry);
         let epoch = entry.s.borrow().backend_epoch;
         let backend = entry.backend().ok_or_else(|| SessionError::Failed("会话尚未连接".into()))?;
         let source = self.prepare_transcript_source(entry, project).await?;
@@ -214,6 +218,13 @@ impl SessionManager {
         if foreground.pid != Some(parent) || !verified_idle_shell(&foreground, project.shell.as_deref()) {
             return Err(SessionError::Failed("原 shell 的前台身份发生变化，未注入启动命令".into()));
         }
+        let shell_identity = self.gui_host_command(project, &process_identity_command(parent)).await?.trim().to_string();
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        let foreground = query_foreground(&backend).await?;
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        if foreground.pid != Some(parent) || !verified_idle_shell(&foreground, project.shell.as_deref()) {
+            return Err(SessionError::Failed("核实 shell 启动时间后前台发生变化，未注入图形启动命令".into()));
+        }
         let mut driver = AgentDriver::new(SessionAgent::Claude, project.working_dir.clone());
         driver.pin_session_id(&entry.session_id);
         driver.state.entries = history;
@@ -225,12 +236,13 @@ impl SessionManager {
             s.transcript_generation += 1;
             s.transcript_mirror = None;
             s.agent_driver = Some(driver);
+            s.agent_terminal_return = Some((parent, shell_identity));
         }
         self.db.update_session_agent_mode(&entry.session_id, "gui");
         self.flush_output(entry);
         self.broadcast(entry, &ServerMessage::AgentSnapshot { state: snapshot });
         let resume = if fresh { "" } else { "1" };
-        backend.write(&format!("{AGENT_SESSION_ENV}={} {AGENT_RESUME_ENV}={} {AGENT_RESUME_ONLY_ENV}=1 {AGENT_NATIVE_ENV}=1 {}\n",
+        backend.write(&format!("{AGENT_SESSION_ENV}={} {AGENT_RESUME_ENV}={} {AGENT_RESUME_ONLY_ENV}=1 {AGENT_NATIVE_ENV}=1 {AGENT_RETURN_ENV}=1 {}\n",
             quote_posix(&entry.session_id), quote_posix(resume), quote_posix(&launcher)));
         // 新脚本 READY → CONNECT → START 后才允许 JSON 握手；启动失败也要经过 EXIT/ACK 后才回 shell。
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -264,6 +276,119 @@ impl SessionManager {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    /// 从已核实的结构化进程返回官方交互 CLI。START 的实时 pid、原 shell 身份与完整对话历史缺一不可。
+    async fn enable_interactive_terminal(&self, entry: &Rc<LiveEntry>, project: &ProjectRow) -> Result<(), SessionError> {
+        if !entry.durable { return Err(SessionError::Failed("无法核实非持久会话的前台进程，未转换官方终端".into())); }
+        let (pid, return_shell, shell_identity) = {
+            let s = entry.s.borrow();
+            let driver = s.agent_driver.as_ref().filter(|d| d.is_active())
+                .ok_or_else(|| SessionError::Failed("当前没有可核实的图形控制进程；官方终端无需转换".into()))?;
+            if !driver.ready_to_switch() {
+                return Err(SessionError::Failed("仅能在已核实 Claude 空闲时转换；执行中、等待审批、参数确认中或状态未知时请先完成当前操作".into()));
+            }
+            let pid = driver.terminal_cli_pid(&entry.session_id)
+                .ok_or_else(|| SessionError::Failed("图形启动脚本没有提供当前 CLI 的退出证据；请先更新服务端并重新进入图形模式".into()))?;
+            let (shell, identity) = s.agent_terminal_return.clone()
+                .ok_or_else(|| SessionError::Failed("无法证明图形进程可以返回原 shell，未结束任何进程".into()))?;
+            (pid, shell, identity)
+        };
+        entry.s.borrow_mut().agent_converting = true;
+        let _guard = GuiConversionGuard(entry.clone());
+        self.broadcast_agent_mode_snapshot(entry);
+        let epoch = entry.s.borrow().backend_epoch;
+        let backend = entry.backend().ok_or_else(|| SessionError::Failed("会话尚未连接".into()))?;
+        let source = self.prepare_transcript_source(entry, project).await?;
+        let (_, fresh) = read_gui_history(source, &entry.session_id, project.working_dir.clone()).await?;
+        if fresh && entry.s.borrow().agent_driver.as_ref().unwrap().state.entries.iter().any(|e| matches!(e, AgentEntry::User { .. })) {
+            return Err(SessionError::Failed("已提交的图形对话尚无完整历史，无法安全续接官方终端".into()));
+        }
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        let foreground = query_foreground(&backend).await?;
+        let fg_pid = foreground.pid.filter(|p| *p > 1).ok_or_else(|| SessionError::Failed("无法核实图形进程所在的前台进程组".into()))?;
+        let inspect = native_process_command(pid, fg_pid, return_shell, &shell_identity, &entry.session_id, fresh);
+        let identity = self.gui_host_command(project, &inspect).await?.trim().to_string();
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        let current = query_foreground(&backend).await?;
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        if current.pid != foreground.pid || current.name != foreground.name || current.argv != foreground.argv {
+            return Err(SessionError::Failed("图形进程的真实前台已经改变，未结束任何进程".into()));
+        }
+        if entry.s.borrow().agent_driver.as_ref().and_then(|d| d.terminal_cli_pid(&entry.session_id)) != Some(pid) {
+            return Err(SessionError::Failed("图形进程已不再空闲或身份发生变化，未结束任何进程".into()));
+        }
+        let out = entry.s.borrow_mut().agent_driver.as_mut().unwrap().begin_terminal_conversion();
+        self.apply_agent_output(entry, None, out);
+        // 同一次宿主机命令再次核实 pid、启动时间、前台组和祖先链，再只向 CLI 单进程发 TERM。
+        let signal = format!("_expected={}; _actual=$({inspect}) || exit 75; [ \"$_actual\" = \"$_expected\" ] || exit 75; kill -TERM {pid}", quote_posix(&identity));
+        self.gui_host_command(project, &signal).await?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.check_gui_conversion(entry, &backend, epoch)?;
+            let foreground = query_foreground(&backend).await?;
+            self.check_gui_conversion(entry, &backend, epoch)?;
+            let exited = entry.s.borrow().agent_driver.as_ref().is_some_and(|d| !d.is_active());
+            if exited && foreground.pid == Some(return_shell) && verified_idle_shell(&foreground, project.shell.as_deref()) { break; }
+            if Instant::now() >= deadline {
+                return Err(SessionError::Failed("等待图形 CLI 退出并返回原 shell 超时；未启动官方终端，原 PTY 和独立后台任务仍然保留".into()));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let actual_shell = self.gui_host_command(project, &process_identity_command(return_shell)).await?;
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        let foreground = query_foreground(&backend).await?;
+        self.check_gui_conversion(entry, &backend, epoch)?;
+        if actual_shell.trim() != shell_identity || foreground.pid != Some(return_shell) || !verified_idle_shell(&foreground, project.shell.as_deref()) {
+            return Err(SessionError::Failed("原 shell 的身份发生变化，未注入官方终端启动命令".into()));
+        }
+        self.db.update_session_agent_mode(&entry.session_id, "terminal");
+        // 在确认 EXIT/ACK、stty 恢复和原 shell 前台之后，才允许注入普通终端启动命令。
+        // 原 shell 直接运行官方 CLI，不再套登录启动脚本，否则下一次转换只能回到额外嵌套的 shell。
+        // resume 失败直接返回原 shell；从未提交过提示词且完整扫描为空时才使用固定 session-id。
+        backend.write(&format!("command claude {} {}\n", if fresh { "--session-id" } else { "--resume" }, quote_posix(&entry.session_id)));
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            self.check_gui_conversion(entry, &backend, epoch)?;
+            let foreground = query_foreground(&backend).await?;
+            self.check_gui_conversion(entry, &backend, epoch)?;
+            if verified_claude_pid(&foreground, &entry.session_id, fresh).is_ok() && require_idle(entry).is_ok() {
+                self.complete_terminal_conversion(entry);
+                return Ok(());
+            }
+            if foreground.pid == Some(return_shell) && verified_idle_shell(&foreground, project.shell.as_deref())
+                && Instant::now() + Duration::from_secs(7) > deadline {
+                let identity = self.gui_host_command(project, &process_identity_command(return_shell)).await?;
+                self.check_gui_conversion(entry, &backend, epoch)?;
+                let current = query_foreground(&backend).await?;
+                self.check_gui_conversion(entry, &backend, epoch)?;
+                if identity.trim() == shell_identity && current.pid == Some(return_shell) && verified_idle_shell(&current, project.shell.as_deref()) {
+                    // 结构化 CLI 已退出、官方 resume 也已返回原 shell：释放 GUI 才能让所有 Viewer 继续操作原 shell。
+                    self.complete_terminal_conversion(entry);
+                    return Err(SessionError::Failed("官方终端启动或续接失败；未自动新建对话，已返回原 shell，独立后台任务仍然保留".into()));
+                }
+                return Err(SessionError::Failed("官方终端未能确认启动，且无法核实原 shell 的身份；未继续注入输入".into()));
+            }
+            if Instant::now() >= deadline {
+                return Err(SessionError::Failed("等待官方终端启动确认超时；未继续注入输入，原 PTY 和独立后台任务仍然保留".into()));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn complete_terminal_conversion(&self, entry: &LiveEntry) {
+        self.db.update_session_agent_mode(&entry.session_id, "terminal");
+        let mut state = AgentViewState::new(SessionAgent::Claude, false);
+        state.terminal_backed = true;
+        {
+            let mut s = entry.s.borrow_mut();
+            s.agent_driver = None;
+            s.agent_terminal_return = None;
+            s.agent_converting = false;
+        }
+        self.broadcast(entry, &ServerMessage::AgentSnapshot { state });
+        for viewer in entry.viewers() { viewer.syncing.set(true); }
+        self.request_sync(entry);
     }
 
     fn check_gui_conversion(&self, entry: &Rc<LiveEntry>, backend: &Rc<dyn Backend>, epoch: u64) -> Result<(), SessionError> {
@@ -446,6 +571,38 @@ fn verified_idle_shell(process: &ForegroundProcess, shell: Option<&str>) -> bool
     let Some(argv) = process.argv.as_ref().filter(|v| !v.is_empty() && !v[0].is_empty()) else { return false };
     process.name.as_ref().is_some_and(|name| !name.is_empty() && is_shell_command(name, shell))
         && is_shell_command(&argv.join(" "), shell)
+}
+
+/// ps 输出只用于逐字段核实，不 eval、不把宿主机返回的命令参数当作 shell 源码。
+/// CLI 必须仍在 holder 报告的前台组内，并且其祖先链穿过该组长和转换前的原 shell。
+fn native_process_command(pid: u32, foreground: u32, shell: u32, shell_identity: &str, session_id: &str, fresh: bool) -> String {
+    // 首次启动的 --session-id 不会随首轮历史生成而变成 --resume；已有历史时两种启动方式都合法。
+    // 历史为空时仍只接受 --session-id，不能把无法续接的 --resume 当成新建对话的证据。
+    let id_flag = if fresh { "--session-id" } else { "--resume" };
+    format!(
+        "_shell=$({shell_command}) || exit 74; [ \"$_shell\" = {shell_identity} ] || exit 75; \
+         set -- $(ps -p {pid} -o ppid= -o pgid= -o lstart=); [ \"$#\" -eq 7 ] || exit 74; \
+         [ \"$2\" = {foreground} ] || exit 75; _identity=\"$*\"; _p={pid}; _seen=0; _depth=0; \
+         while [ \"$_p\" != {shell} ]; do \
+           [ \"$_p\" = {foreground} ] && _seen=1; \
+           _depth=$((_depth + 1)); [ \"$_depth\" -le 16 ] || exit 75; \
+           set -- $(ps -p \"$_p\" -o ppid=); [ \"$#\" -eq 1 ] && [ \"$1\" -gt 1 ] || exit 75; _p=$1; \
+         done; \
+         [ {foreground} = {shell} ] && _seen=1; [ \"$_seen\" = 1 ] || exit 75; \
+         set -f; set -- $(ps -ww -p {pid} -o command=); \
+         [ \"${{1##*/}}\" = claude ] || exit 75; \
+         _prev=; _print=0; _input=0; _output=0; _id=0; \
+         for _arg do \
+           [ \"$_arg\" = '-p' ] && _print=1; \
+           [ \"$_prev:$_arg\" = '--input-format:stream-json' ] && _input=1; \
+           [ \"$_prev:$_arg\" = '--output-format:stream-json' ] && _output=1; \
+           if [ \"$_prev:$_arg\" = {id_pair} ] || [ \"$_prev:$_arg\" = {new_id_pair} ]; then _id=1; fi; _prev=$_arg; \
+         done; \
+         [ \"$_print:$_input:$_output:$_id\" = '1:1:1:1' ] || exit 75; printf '%s\\n' \"$_identity\"",
+        shell_command = process_identity_command(shell), shell_identity = quote_posix(shell_identity),
+        id_pair = quote_posix(&format!("{id_flag}:{session_id}")),
+        new_id_pair = quote_posix(&format!("--session-id:{session_id}")),
+    )
 }
 
 fn process_identity_setup(pid: u32) -> String {
