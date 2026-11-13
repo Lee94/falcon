@@ -12,8 +12,8 @@ android {
         applicationId = "com.falcon.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 326
-        versionName = "0.3.26"
+        versionCode = 327
+        versionName = "0.3.27"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
