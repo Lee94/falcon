@@ -23,3 +23,4 @@ icu_locale_core = "2.3.0"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 woff2 = { package = "woff2-patched", version = "0.4" }
 bytes.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }

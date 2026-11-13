@@ -49,17 +49,10 @@ pub fn run(args: &[String]) -> Result<()> {
         bail!("找不到 {}，先去掉 --skip-cargo 跑一遍", rel(&exe));
     }
 
-    // 安装包自己的图标用 build.rs 编进 exe 的同一份 .ico（在 OUT_DIR 里，目录名带哈希；
-    // 换过构建配置会留下好几个，取最新的那个）
-    let build_dir = native().join("target/release/build");
-    let icon = std::fs::read_dir(&build_dir)?
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("falcon-desktop-"))
-        .map(|e| e.path().join("out/falcon.ico"))
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, p)| p)
-        .context("target/release/build/falcon-desktop-*/out/ 里没有 falcon.ico，build.rs 没走 Windows 资源那一段？")?;
+    // Cargo 1.100 起调整了内部 build-dir 布局，不再从 target/release/build/*/out/ 捞私有产物；
+    // 直接由同一份 assets/icon-512.png 生成安装包用的 .ico（--skip-cargo 下同样可用）
+    let icon = native().join("target/release/falcon.ico");
+    write_windows_ico(&native().join("crates/falcon-desktop/assets/icon-512.png"), &icon)?;
 
     // 版本跟原生客户端走（exe 版本信息里也是这个，同一个工作区版本）
     let ver = version();
@@ -102,4 +95,41 @@ fn find_iscc() -> Option<PathBuf> {
     }
     // PATH 兜底
     util::which("ISCC.exe")
+}
+
+fn write_windows_ico(src: &std::path::Path, ico: &std::path::Path) -> Result<()> {
+    use image::codecs::ico::{IcoEncoder, IcoFrame};
+    use image::imageops::FilterType;
+
+    let img = image::open(src)
+        .with_context(|| format!("读不到 {}，请先运行 cargo xtask icons", src.display()))?
+        .into_rgba8();
+    let frames: Vec<IcoFrame> = [16u32, 20, 24, 32, 40, 48, 64, 128, 256]
+        .iter()
+        .map(|&s| {
+            let scaled = image::imageops::resize(&img, s, s, FilterType::Lanczos3);
+            IcoFrame::as_png(scaled.as_raw(), s, s, image::ExtendedColorType::Rgba8)
+                .map_err(anyhow::Error::from)
+        })
+        .collect::<Result<_>>()?;
+    if let Some(parent) = ico.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    IcoEncoder::new(std::fs::File::create(ico)?).encode_images(&frames)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generates_valid_installer_ico_from_app_icon() {
+        let out = std::env::temp_dir().join(format!("falcon-xtask-win-test-{}.ico", std::process::id()));
+        let src = native().join("crates/falcon-desktop/assets/icon-512.png");
+        write_windows_ico(&src, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(&bytes[..6], &[0, 0, 1, 0, 9, 0]);
+    }
 }

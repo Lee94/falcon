@@ -829,30 +829,38 @@ async fn destination(
     };
     if let Some(index) = resource_index.filter(|i| *i < segments.len()) {
         let id = segments[index].clone();
-        if let Some((node_id, raw)) = split_resource(&id) {
-            remote = Some(state.nodes.by_node(state, node_id).await?);
-            segments[index] = raw;
-        } else if let Some(host) = id.strip_prefix("standalone:host:") {
-            remote = Some(state.nodes.remote(state, host).await?);
-            segments[index] = "standalone:local".into();
-        } else if let Some((node_id, raw)) = state.db.migrated_project_target(&id)? {
-            remote = Some(state.nodes.by_node(state, &node_id).await?);
-            segments[index] = raw;
-        } else if let Some(project) = state
-            .db
-            .get_project(&id)
-            .filter(|p| p.project_type == "ssh")
-        {
-            let host = project.host_id.ok_or_else(|| {
-                anyhow::anyhow!("旧 SSH 项目尚未绑定主机，请先在主机设置中保存连接")
-            })?;
-            let node = state.nodes.remote(state, &host).await?;
-            segments[index] = state
+        // 本机签发的作用域 raw 令牌由本机 raw_core 核验宿主机身份与目录范围（宿主机变更时直接回 401，不触发 SSH）。
+        let local_raw_token = segments.get(2).is_some_and(|s| s == "projects")
+            && segments.get(4).is_some_and(|s| s == "raw")
+            && segments
+                .get(5)
+                .is_some_and(|token| state.auth.raw_scope(Some(token), &id).is_some());
+        if !local_raw_token {
+            if let Some((node_id, raw)) = split_resource(&id) {
+                remote = Some(state.nodes.by_node(state, node_id).await?);
+                segments[index] = raw;
+            } else if let Some(host) = id.strip_prefix("standalone:host:") {
+                remote = Some(state.nodes.remote(state, host).await?);
+                segments[index] = "standalone:local".into();
+            } else if let Some((node_id, raw)) = state.db.migrated_project_target(&id)? {
+                remote = Some(state.nodes.by_node(state, &node_id).await?);
+                segments[index] = raw;
+            } else if let Some(project) = state
                 .db
-                .migrated_project_target(&id)?
-                .map(|(_, id)| id)
-                .unwrap_or(id);
-            remote = Some(node);
+                .get_project(&id)
+                .filter(|p| p.project_type == "ssh")
+            {
+                let host = project.host_id.ok_or_else(|| {
+                    anyhow::anyhow!("旧 SSH 项目尚未绑定主机，请先在主机设置中保存连接")
+                })?;
+                let node = state.nodes.remote(state, &host).await?;
+                segments[index] = state
+                    .db
+                    .migrated_project_target(&id)?
+                    .map(|(_, id)| id)
+                    .unwrap_or(id);
+                remote = Some(node);
+            }
         }
     }
     let mut pairs = query_pairs(uri);
@@ -890,8 +898,10 @@ async fn destination(
                     .iter()
                     .find(|(k, _)| k == "hostId")
                     .map(|(_, v)| v.clone())
-            });
-        if let Some(host) = host {
+            })
+            .filter(|h| !h.is_empty());
+        // 空串或本地库不存在的 hostId 交给原有路由校验，保留 400（"主机不存在"）而非 502。
+        if let Some(host) = host.filter(|h| state.db.get_host(h).is_some()) {
             remote = Some(state.nodes.remote(state, &host).await?);
         }
     }

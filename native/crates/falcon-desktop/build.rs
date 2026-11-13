@@ -10,7 +10,7 @@ fn main() {
 }
 
 /// Windows：把应用图标与版本信息编进 exe 的资源段。资源只能编进最终的可执行文件，所以在这个
-/// bin crate 里做（`cargo xtask win` 也从这里的 OUT_DIR 取同一份 .ico 给安装包用）。
+/// bin crate 里做（`cargo xtask win` 也由同一份 `assets/icon-512.png` 生成安装包的 `.ico`）。
 ///
 /// GPUI 建窗口时按资源 ID 1 取图标（gpui-pre-windows `load_icon`），没有就是系统默认的空白
 /// 窗口图标；资源管理器、任务栏、安装包的快捷方式也都读这一份。winresource 的 `set_icon`

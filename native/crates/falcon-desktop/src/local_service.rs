@@ -77,6 +77,7 @@ pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs
 
 /// LaunchAgent 正在跑的那份服务程序（`<dataDir>/bin/falcon`）。更新前若它带了 `uchg`，
 /// `service install` 换不掉它
+#[cfg(target_os = "macos")]
 pub(crate) fn installed_program_path() -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(program_arguments()?.into_iter().next()?);
     path.is_file().then_some(path)
@@ -246,6 +247,7 @@ fn wait_for_port(url: &str) -> ServiceStatus {
 }
 
 /// 菜单栏上的三个动作
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ServiceControl {
     Start,
@@ -254,6 +256,7 @@ pub(crate) enum ServiceControl {
 }
 
 /// launchd 眼里的本机服务。没装过和装了没在跑要分开：前者「启动」得先 install
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ServicePresence {
     NotInstalled,
@@ -261,6 +264,7 @@ pub(crate) enum ServicePresence {
     Running { pid: Option<u32> },
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub(crate) enum ServiceControlError {
     /// 没有可执行的 falcon：开发构建不在 .app 里，也没有已安装的二进制
@@ -268,6 +272,7 @@ pub(crate) enum ServiceControlError {
     Failed(String),
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) struct ControlResult {
     pub presence: ServicePresence,
     pub error: Option<ServiceControlError>,
@@ -275,12 +280,14 @@ pub(crate) struct ControlResult {
 
 /// `falcon service` 实际要跑的 argv。没安装时启动和重启都落成 install，并带上原来的
 /// `--host` / `--port` / `--data-dir`（空则仍走服务端默认值）。停止一个没安装的服务是空操作
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum ControlPlan {
     Nothing,
     Run(Vec<String>),
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn control_plan(op: ServiceControl, installed: bool, keep: &[String]) -> ControlPlan {
     match (op, installed) {
         (ServiceControl::Stop, false) => ControlPlan::Nothing,
@@ -296,6 +303,7 @@ fn control_plan(op: ServiceControl, installed: bool, keep: &[String]) -> Control
 }
 
 /// `launchctl print` 的 stdout。只认每个键第一次出现：输出里子段落会把 `state` 再写一遍
+#[cfg(any(target_os = "macos", test))]
 fn presence_from_launchd(installed: bool, print_output: &str) -> ServicePresence {
     if !installed {
         return ServicePresence::NotInstalled;
@@ -318,6 +326,7 @@ fn presence_from_launchd(installed: bool, print_output: &str) -> ServicePresence
 }
 
 /// `state = running` / `pid=42`。键名必须到边界，避免 `stated` 被当成 `state`
+#[cfg(any(target_os = "macos", test))]
 fn field_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let rest = line.trim().strip_prefix(key)?;
     if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
@@ -411,8 +420,10 @@ fn run_service(args: &[String]) -> Result<(), ServiceControlError> {
 }
 
 /// 菜单项按这段文案撑开宽度，只留一行、并且限制长度。空串返回 None，调用方改用退出码
+#[cfg(any(target_os = "macos", test))]
 const MENU_TEXT_LIMIT: usize = 32;
 
+#[cfg(any(target_os = "macos", test))]
 fn brief(text: &str) -> Option<String> {
     let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
     let mut chars = line.chars();
