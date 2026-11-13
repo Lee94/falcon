@@ -1,5 +1,7 @@
 package com.falcon.android.net
 
+import androidx.compose.ui.graphics.Color
+import com.falcon.android.ui.FalconThemeTokens
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -27,6 +29,88 @@ class AgentModeTest {
 
     private fun switch(graphical: Boolean) = runBlocking {
         FalconApiClient.switchAgentMode(server.url("/").toString(), "test-session", graphical)
+    }
+
+    private val creationTheme = FalconThemeTokens(
+        name = "Test", isDark = true, appearance = "dark",
+        backgroundHex = "#102030", foregroundHex = "#abcdef",
+        app = Color.Unspecified, background = Color.Unspecified, foreground = Color.Unspecified,
+        card = Color.Unspecified, cardForeground = Color.Unspecified,
+        primary = Color.Unspecified, primaryForeground = Color.Unspecified,
+        secondary = Color.Unspecified, secondaryForeground = Color.Unspecified,
+        muted = Color.Unspecified, mutedForeground = Color.Unspecified,
+        accent = Color.Unspecified, accentForeground = Color.Unspecified,
+        tint = Color.Unspecified, tintForeground = Color.Unspecified, tintStrong = Color.Unspecified,
+        destructive = Color.Unspecified, success = Color.Unspecified, warning = Color.Unspecified,
+        sidebar = Color.Unspecified, sidebarForeground = Color.Unspecified,
+        terminalBackground = Color.Unspecified, terminalForeground = Color.Unspecified
+    )
+
+    @Test
+    fun detectedAgentsUseTheServerArrayAndProjectScope() = runBlocking {
+        server.enqueue(MockResponse().setBody("""["codex","claude","omp"]"""))
+        assertEquals(listOf("codex", "claude", "omp"),
+            FalconApiClient.fetchDetectedAgents(server.url("/").toString(), "node:remote/project").getOrThrow())
+        assertEquals("node:remote/project", server.takeRequest().requestUrl!!.queryParameter("projectId"))
+        server.enqueue(MockResponse().setBody("[]"))
+        assertTrue(FalconApiClient.fetchDetectedAgents(server.url("/").toString(), "standalone:local").getOrThrow().isEmpty())
+    }
+
+    @Test
+    fun claudeAndCodexDefaultToGuiWhileShellAndOtherCliKeepTerminal() = runBlocking {
+        for (agent in listOf("claude", "codex", "grok", null)) {
+            val graphical = agent == "claude" || agent == "codex"
+            if (graphical) server.enqueue(MockResponse().setBody("""{"createGui":true}"""))
+            // 同时验证创建被拒绝时不丢失错误；不需要在 JVM 测试中加载 Android JNI。
+            server.enqueue(MockResponse().setResponseCode(502).setBody("""{"error":"isolated creation rejected"}"""))
+            val result = FalconApiClient.createSession(server.url("/").toString(), "node:remote/project", "  task  ", agent, creationTheme)
+            assertEquals("isolated creation rejected", result.exceptionOrNull()?.message)
+            if (graphical) {
+                val probe = server.takeRequest()
+                assertEquals("GET", probe.method)
+                assertEquals("/api/projects/node%3Aremote%2Fproject/sessions", probe.path)
+            }
+            val request = server.takeRequest()
+            assertEquals("POST", request.method)
+            assertEquals("/api/projects/node%3Aremote%2Fproject/sessions", request.path)
+            assertTrue(!request.getHeader("Idempotency-Key").isNullOrBlank())
+            val body = JSONObject(request.body.readUtf8())
+            assertEquals("task", body.getString("name"))
+            assertEquals(agent, body.opt("agent"))
+            assertEquals(if (graphical) "gui" else null, body.opt("agentMode"))
+            assertEquals("dark", body.getString("appearance"))
+            assertEquals("#102030", body.getString("background"))
+            assertEquals("#abcdef", body.getString("foreground"))
+        }
+        assertEquals(6, server.requestCount)
+    }
+
+    @Test
+    fun legacyServerCannotSilentlyCreateTerminalInsteadOfGui() = runBlocking {
+        for (response in listOf(
+            MockResponse().setBody(capabilities),
+            MockResponse().setBody("""{"createGui":"true"}"""),
+            MockResponse().setResponseCode(404),
+            MockResponse().setResponseCode(405)
+        )) {
+            server.enqueue(response)
+            val result = FalconApiClient.createSession(server.url("/").toString(), "standalone:local", "", "claude", creationTheme)
+            assertTrue(result.exceptionOrNull() is AgentModeUnsupportedException)
+            assertEquals("GET", server.takeRequest().method)
+        }
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test
+    fun codexWaitsForModeSnapshotOnlyOnServersThatProvideIt() = runBlocking {
+        for ((body, expected) in listOf(
+            """{"agentModeSnapshot":true}""" to false,
+            """{"agentModeSnapshot":true,"createGui":true}""" to true
+        )) {
+            server.enqueue(MockResponse().setBody(body))
+            assertEquals(expected, FalconApiClient.agentModeSnapshotSupported(
+                server.url("/").toString(), "codex-session", "codex").getOrThrow())
+        }
     }
 
     @Test

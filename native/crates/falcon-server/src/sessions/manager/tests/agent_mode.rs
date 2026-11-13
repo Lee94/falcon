@@ -123,7 +123,7 @@ async fn mode_harness(tag: &str) -> (Harness, Session, Peer, PathBuf) {
     h.mgr.local.set_base_env(env);
     h.project.shell = Some(shell.to_string_lossy().into_owned());
     h.db.insert_project(&h.project);
-    let session = h.mgr.create_session(&h.project, String::new(), OscColorHint::default(), Some(SessionAgent::Claude)).await.unwrap();
+    let session = h.mgr.create_session(&h.project, String::new(), OscColorHint::default(), Some(SessionAgent::Claude), false).await.unwrap();
     let mut peer = mirror_peer();
     h.mgr.add_viewer(&session.id, peer.viewer.clone());
     h.mgr.resize(&session.id, peer.id(), 100, 30);

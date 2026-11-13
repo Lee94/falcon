@@ -11,7 +11,7 @@ Claude Code 2.1.322 的公开 `--input-format stream-json` 与 `--output-format 
 ## 决定
 
 1. **图形模式完整接管交互。** 使用现有 `AgentDriver` 的结构化双向通道。GUI 显示 Markdown、思考、工具结果、文件差异和计划；原生输入框负责发送，工具卡片负责审批，按钮负责中断，模型及思考程度菜单使用 CLI 返回的真实能力目录。图形模式不渲染原终端网格，也不提示用户到终端操作。
-2. **默认启动仍遵循 ADR 0013。** 新建 Agent 会话默认运行官方交互式 CLI。已有结构化会话直接使用完整 GUI；其“紧凑 / 图形”仅为本地排版，不改变输入协议或 CLI 生命周期，运行中也可切换。
+2. **未指定运行模式时仍遵循 ADR 0013。** 新建 Agent 会话默认运行官方交互式 CLI。Android 新建 Claude Code / Codex 时明确发送 `agentMode:"gui"`，直接启动对应的结构化进程并使用完整 GUI，不先启动 TUI 再转换；其它 CLI 仍使用终端。创建前通过 `GET /api/projects/:id/sessions` 的 `createGui:true` 检查所属节点能力，旧服务端不支持时提示更新，不悄悄退成 TUI。桌面端不指定该字段，默认不变。已有结构化会话直接使用完整 GUI；其“紧凑 / 图形”仅为本地排版，不改变输入协议或 CLI 生命周期，运行中也可切换。
 3. **首次进入 GUI 是明确的运行模式转换。** Claude 官方终端与旧 `terminalBacked` 镜像点击进入 GUI 时，应用先说明将退出当前 CLI 并续接同一段对话，未发送的终端草稿不会转入图形输入框。用户在应用内确认后才请求转换。不能把这一转换描述为同进程切换。
 4. **转换不终止整个会话。** 服务端必须取得真实的空闲程序状态、前台 Claude 进程与固定 UUID 历史证据；首次提示词前，只有完整扫描能证明该 UUID 尚无记录且前台使用相同的 `--session-id` 时，才允许直接新建同 UUID 的图形对话。执行、等待审批、状态未知或证据不足时拒绝转换。转换期间禁止其它输入与并发转换。仅结束核实过的 CLI，等待原 Backend 的前台返回已知 shell，再在同一 PTY 内启动带 `--resume` 的结构化脚本，保留原 shell 与独立于 CLI 的后台任务。超时、前台变化或续接失败必须明确报错，不能把 JSON 注入未知进程。握手期间向全部 Viewer 发布不可交互状态，确认控制通道可用并解除转换锁后，再发布空闲快照；桌面与 Android 在未知状态下均禁用输入和控制，避免其它窗口提交后丢失提示词。
 5. **新旧协议明确区分。** 保留 `POST /api/sessions/:id/agent-mode` 的旧 `gui` / `terminal` 镜像语义，避免旧客户端意外触发转换。完整 GUI 使用 `gui-control`，返回官方 TUI 使用 `terminal-control`；每次转换前分别检查 GET 能力的 `interactiveGui:true` 或 `interactiveTerminal:true`，能力不足时提示更新服务端且不发送 POST。原 `preservesProcess:true` 只描述旧镜像语义，不代表新的转换保留 CLI 进程。

@@ -472,6 +472,7 @@ impl Workspace {
             let request = falcon_proto::CreateSessionRequest {
                 name: None,
                 agent,
+                agent_mode: None,
                 appearance: hint.appearance,
                 background: hint.background.clone(),
                 foreground: hint.foreground.clone(),

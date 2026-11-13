@@ -435,6 +435,7 @@
     "omp": "Oh My Pi"
   },
   "session": {
+    "createFailed": "创建会话失败",
     "state_active": "运行中",
     "state_unverified": "待接回",
     "state_dead": "已丢失",
@@ -1008,6 +1009,7 @@
     "switching": "正在加载…",
     "switchFailed": "切换显示方式失败",
     "switchUnsupported": "请先更新服务端以支持可交互的完整图形界面。",
+    "createGuiUnsupported": "请先更新服务端，以支持新建图形 Agent 会话。",
     "transcriptEmptyTitle": "尚无已保存的对话记录",
     "transcriptEmptyHint": "可继续在下方终端操作；图形时间线随 Claude 保存记录后更新。",
     "model": "模型",

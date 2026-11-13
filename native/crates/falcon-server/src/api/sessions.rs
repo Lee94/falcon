@@ -32,7 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/projects/{id}/host", get(host_status).post(host_update))
         .route("/api/sessions", get(list))
         .route("/api/agents", get(super::system::agents))
-        .route("/api/projects/{id}/sessions", post(create))
+        .route("/api/projects/{id}/sessions", get(agent_mode_capabilities).post(create))
         .route("/api/sessions/{id}/reattach", post(reattach))
         .route("/api/sessions/{id}/foreground", get(foreground))
         .route("/api/sessions/{id}/terminate", post(terminate))
@@ -152,13 +152,21 @@ async fn create(State(state): State<AppState>, Path(id): Path<String>, body: Len
     }
     // 认不出的 agent 一律当普通终端：宁可开出一个 shell，也不要 400 一个新会话
     let agent = body.str("agent").and_then(SessionAgent::from_wire).filter(|a| *a != SessionAgent::Unknown);
+    let graphical = match body.str("agentMode") {
+        None | Some("terminal") => false,
+        Some("gui") => true,
+        _ => return Err(ApiError::bad_request("agentMode 必须是 gui 或 terminal")),
+    };
+    if graphical && !agent.is_some_and(crate::sessions::agent::supports_native_stream) {
+        return Err(ApiError::bad_request("该 CLI 不支持结构化 Agent 协议"));
+    }
     // 不起名（空串）是常态：UI 显示的是前台命令 / agent / 工作目录，
     // 编号名（"Terminal 3"）既没信息量，序号还会随删除重号
     let name = js::trim(body.str("name").unwrap_or("")).to_string();
     let hint = sanitize_color_hint(&body.0);
     let res = state
         .engine
-        .call(move |engine| async move { engine.sessions.create_session(&project, name, hint, agent).await })
+        .call(move |engine| async move { engine.sessions.create_session(&project, name, hint, agent, graphical).await })
         .await?;
     res.map(Json).map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("创建会话失败：{e}")))
 }
@@ -189,7 +197,7 @@ async fn terminate(State(state): State<AppState>, Path(id): Path<String>) -> Api
 
 /// 新客户端必须先探测，避免旧服务端把模式请求解释成结束原进程后续接。
 async fn agent_mode_capabilities() -> Json<Value> {
-    Json(json!({ "preservesProcess": true, "interactiveGui": true, "interactiveTerminal": true, "agentModeSnapshot": true }))
+    Json(json!({ "preservesProcess": true, "interactiveGui": true, "interactiveTerminal": true, "agentModeSnapshot": true, "createGui": true }))
 }
 
 async fn agent_mode(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<falcon_proto::OkResponse>> {
@@ -306,6 +314,20 @@ mod tests {
         assert_eq!(capabilities["interactiveGui"], true, "新转换必须具有独立能力标记");
         assert_eq!(capabilities["interactiveTerminal"], true, "返回官方 CLI 必须独立协商能力");
         assert_eq!(capabilities["agentModeSnapshot"], true, "每次连接均提供权威模式快照");
+        assert_eq!(capabilities["createGui"], true);
+        app.local_project("create-agent");
+        let (status, capabilities) = json_of(app.get("/api/projects/create-agent/sessions").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(capabilities["createGui"], true, "新建能力按项目路由到所属节点");
+        for body in [
+            json!({"agent":"grok","agentMode":"gui"}),
+            json!({"agentMode":"gui"}),
+            json!({"agent":"claude","agentMode":"compact"}),
+        ] {
+            let (status, _) = json_of(app.post_json("/api/projects/create-agent/sessions", body).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(app.state.db.list_sessions().is_empty(), "非法模式不能留下会话");
+        }
         for body in [json!({}), json!({"mode":true}), json!({"mode":"compact"})] {
             let (status, value) = json_of(app.post_json("/api/sessions/missing/agent-mode", body).await).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);

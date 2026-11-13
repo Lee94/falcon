@@ -52,6 +52,8 @@ pub const AGENT_EXIT_ACK: &str = "__FALCON_AGENT_EXIT_ACK__";
 /// 显式 GUI 启动先等后端连好再起 CLI，确保 START/EXIT 都是实时协议，绝不从 VT 截图补读。
 pub const AGENT_CONNECT_SENTINEL: &str = "__FALCON_AGENT_CONNECT__";
 pub const AGENT_READY_SENTINEL: &str = "__FALCON_AGENT_READY__";
+/// 新建 GUI 的 READY 可能早于 holder 订阅；由创建方在连接完成后主动放行。
+pub const AGENT_CREATE_GUI_ENV: &str = "FALCON_AGENT_CREATE_GUI";
 
 /// 是否支持基于结构化双向流（`stream-json` / `app-server`）的原生画布视图。
 pub fn supports_native_stream(agent: SessionAgent) -> bool {
@@ -268,7 +270,7 @@ pub fn native_launcher_name(agent: SessionAgent, kind: HostKind) -> String {
 /// 通过 FIFO 将 PTY 输入转发给 CLI 的非 TTY 标准输入（规避 `claude -p` 对 `stdin.isTTY` 的拦截，
 /// 同时配合 `stty -echo -icanon -opost` 消除回显与 POSIX 1024 字节行长上限）。
 /// CLI 自行退出后先等服务端确认已停止发送 JSON，再恢复 `stty` 并回到登录 shell。
-/// 显式 GUI 转换与已有结构化会话使用这份脚本；默认新建仍运行官方交互式 CLI。
+/// 显式 GUI 创建/转换与已有结构化会话使用这份脚本；未指定运行模式的新建仍运行官方 CLI。
 fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
     if !supports_native_stream(agent) {
         return posix_launcher_body(agent, shell);
@@ -294,7 +296,7 @@ fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
         "_stty=$(stty -g 2>/dev/null || true); \
          stty -echo -icanon -opost 2>/dev/null || true; \
          if [ -n \"${AGENT_RESUME_ONLY_ENV}\" ]; then \
-           printf '\\n{AGENT_READY_SENTINEL}\\n'; \
+           if [ -z \"${AGENT_CREATE_GUI_ENV}\" ]; then printf '\\n{AGENT_READY_SENTINEL}\\n'; fi; \
            IFS= read -r _connect; [ \"$_connect\" = '{AGENT_CONNECT_SENTINEL}' ] || exit 1; \
          fi; \
          _falcon_run() {{ \
@@ -330,7 +332,7 @@ fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
            printf '%s\\n' {} >&2; \
          fi; \
          if [ -n \"${AGENT_RETURN_ENV}\" ]; then exit; fi; \
-         unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV} {AGENT_RESUME_ONLY_ENV} {AGENT_NATIVE_ENV}; \
+         unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV} {AGENT_RESUME_ONLY_ENV} {AGENT_NATIVE_ENV} {AGENT_CREATE_GUI_ENV}; \
          exec {} -i -l",
         quote_posix(&sh_body),
         quote_posix(&format!("falcon: PATH 里找不到 {bin}，先装好它再开这种会话。")),

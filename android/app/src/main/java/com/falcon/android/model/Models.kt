@@ -235,6 +235,8 @@ object AgentCatalog {
     )
 
     fun labelFor(agentId: String): String = LABELS[agentId] ?: agentId
+
+    fun supportsGui(agentId: String?): Boolean = agentId == "claude" || agentId == "codex"
 }
 
 object JsonParsers {

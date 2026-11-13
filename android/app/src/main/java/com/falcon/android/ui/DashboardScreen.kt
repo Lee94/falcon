@@ -74,6 +74,7 @@ import com.falcon.android.model.ProjectUi
 import com.falcon.android.model.ServerGroupUi
 import com.falcon.android.model.ServerProfile
 import com.falcon.android.model.SessionUi
+import com.falcon.android.net.AgentModeUnsupportedException
 import com.falcon.android.net.FalconApiClient
 import kotlinx.coroutines.launch
 
@@ -96,6 +97,11 @@ fun DashboardScreen(
     val theme = LocalFalconTheme.current
     val monoFont = LocalFalconMonoFont.current
     val scope = rememberCoroutineScope()
+    val guiUnsupported = t("agentView.createGuiUnsupported")
+    val createFailed = t("session.createFailed")
+    val onCreateFailure: (Throwable) -> Unit = { error ->
+        onToast(if (error is AgentModeUnsupportedException) guiUnsupported else "$createFailed：${error.message}")
+    }
 
     var currentTab by remember { mutableIntStateOf(0) } // 0 = 项目树, 1 = 全部会话
     var sessionFilter by remember { mutableStateOf("all") } // all / active / unverified / dead
@@ -469,7 +475,7 @@ fun DashboardScreen(
                             scope = scope,
                             onOpenSession = onOpenSession,
                             onRefresh = onRefresh,
-                            onToast = onToast
+                            onCreateFailure = onCreateFailure
                         )
                     },
                     onRenameSession = { s ->
@@ -505,7 +511,7 @@ fun DashboardScreen(
                             scope = scope,
                             onOpenSession = onOpenSession,
                             onRefresh = onRefresh,
-                            onToast = onToast
+                            onCreateFailure = onCreateFailure
                         )
                     },
                     onRenameSession = { s ->
@@ -653,7 +659,7 @@ fun DashboardScreen(
                                 onRefresh()
                                 onOpenSession(newSession)
                             }.onFailure { e ->
-                                onToast("创建会话失败：${e.message}")
+                                onCreateFailure(e)
                             }
                         }
                     }
@@ -1068,7 +1074,7 @@ private fun handleSessionClick(
     scope: kotlinx.coroutines.CoroutineScope,
     onOpenSession: (SessionUi) -> Unit,
     onRefresh: () -> Unit,
-    onToast: (String) -> Unit
+    onCreateFailure: (Throwable) -> Unit
 ) {
     when (session.state) {
         "dead" -> {
@@ -1083,7 +1089,7 @@ private fun handleSessionClick(
                     onRefresh()
                     onOpenSession(created)
                 }.onFailure { e ->
-                    onToast("新建会话失败：${e.message}")
+                    onCreateFailure(e)
                 }
             }
         }

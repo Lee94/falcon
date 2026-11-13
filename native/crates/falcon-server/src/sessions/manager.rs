@@ -149,11 +149,13 @@ pub struct DurableState {
 /// 孤儿清理的宽限：建会话时 holder 先起来、会话行后落库，刚起来的 holder 在库里还查不到
 const ORPHAN_GRACE_MS: i64 = 3600 * 1000;
 
-/// attach_backend 的三种开法
+/// attach_backend 的开法
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttachMode {
     /// 新建：在宿主机上起一个新会话
     Create,
+    /// 新建时直接使用结构化协议，不先启动官方 TUI 再转换
+    CreateGui,
     /// 接回：只连已经在跑的那个，不隐式新建
     Reattach,
     /// 原地重开：宿主机上的会话确实没了，用同一个会话 id 再起一个（revive）
@@ -1052,7 +1054,11 @@ impl SessionManager {
         name: String,
         hint: OscColorHint,
         agent: Option<SessionAgent>,
+        graphical: bool,
     ) -> Result<Session, SessionError> {
+        if graphical && !agent.is_some_and(super::agent::supports_native_stream) {
+            return Err(SessionError::Failed("该 CLI 不支持结构化 Agent 协议".into()));
+        }
         let id = uuid_v4();
         let now = now_ms();
 
@@ -1083,7 +1089,8 @@ impl SessionManager {
         });
         self.entries.borrow_mut().insert(id.clone(), entry.clone());
 
-        match self.attach_backend(&entry, project, &row, AttachMode::Create).await {
+        let mode = if graphical { AttachMode::CreateGui } else { AttachMode::Create };
+        match self.attach_backend(&entry, project, &row, mode).await {
             Ok(()) => {}
             Err(e) if prep.durable => {
                 // 守护进程拉不起来（Windows 的 Job 不让脱离、WMI 也被禁了……）：按 ADR 0001 退成
@@ -1102,7 +1109,7 @@ impl SessionManager {
                     hint,
                 });
                 self.entries.borrow_mut().insert(id.clone(), entry.clone());
-                if let Err(e) = self.attach_backend(&entry, project, &row, AttachMode::Create).await {
+                if let Err(e) = self.attach_backend(&entry, project, &row, mode).await {
                     self.entries.borrow_mut().remove(&id);
                     return Err(e);
                 }
@@ -1114,6 +1121,7 @@ impl SessionManager {
         }
 
         self.db.insert_session(&row);
+        if graphical { self.db.update_session_agent_mode(&id, "gui"); }
         Ok(Db::to_session(&row))
     }
 
@@ -1125,15 +1133,15 @@ impl SessionManager {
     ///
     /// 每次附着都重写一遍脚本（本地一次 fs 写、远端一次往返）：用户删了它、换了登录
     /// shell、falcon 升级换了脚本内容，都能自愈。
-    async fn session_shell(&self, project: &ProjectRow, row: &SessionRow) -> Result<Option<String>, SessionError> {
+    async fn session_shell(&self, project: &ProjectRow, row: &SessionRow, graphical: bool) -> Result<Option<String>, SessionError> {
         let shell = project.shell.clone();
         let Some(agent) = row.agent.as_deref().and_then(SessionAgent::from_wire).filter(|a| *a != SessionAgent::Unknown)
         else {
             return Ok(shell);
         };
         let selected = self.db.session_agent_mode(&row.id);
-        if selected.as_deref().is_some_and(|mode| matches!(mode, "gui" | "terminal")) {
-            return self.mode_launcher(project, agent, selected.as_deref() == Some("gui")).await.map(Some);
+        if graphical || selected.as_deref() == Some("terminal") {
+            return self.mode_launcher(project, agent, graphical).await.map(Some);
         }
         if project.project_type == "local" {
             let login = shell.clone().unwrap_or_else(default_local_shell);
@@ -1156,7 +1164,7 @@ impl SessionManager {
         // 非持久会话：附着返回之前就可能有 OSC 查询要答（OscColorGate），先攒着，backend 到手再写
         let slot: Rc<RefCell<(Option<Rc<dyn Backend>>, Vec<String>)>> =
             Rc::new(RefCell::new((entry.backend(), Vec::new())));
-        let graphical = self.db.session_agent_mode(&row.id).as_deref() == Some("gui");
+        let graphical = mode == AttachMode::CreateGui || self.db.session_agent_mode(&row.id).as_deref() == Some("gui");
         let reconnect_output = if graphical {
             let mut s = entry.s.borrow_mut();
             if !reattach || s.agent_driver.is_none() {
@@ -1215,11 +1223,11 @@ impl SessionManager {
 
         let size = fallback_term_size(entry.size());
         let hint = entry.color_hint();
-        let shell_opt = if reattach { None } else { self.session_shell(project, row).await? };
+        let shell_opt = if reattach { None } else { self.session_shell(project, row, graphical).await? };
         let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
         if entry.terminating() { return Err(SessionError::Failed("会话正在关闭，未启动新的 CLI".into())); }
-        // 新建 Agent 会话必须直接运行 CLI 自带的交互界面。结构化协议进程没有官方终端界面，
-        // 不能仅凭 agent 类型就启用驱动器：那会吞掉真实终端输出，并把按键挡在 PTY 之外。
+        // 只有创建时明确选择 GUI 或接回已有 GUI 才启用结构化驱动，不能仅凭 agent 类型
+        // 吞掉官方终端的输出。新建 GUI 在落库前就选择匹配的启动脚本与控制协议。
         let opts = AttachOptions {
             session_id: entry.session_id.clone(),
             cwd,
@@ -1242,8 +1250,11 @@ impl SessionManager {
                 let mut env = if graphical {
                     super::agent::native_launch_env(agent, &row.id, resume)
                 } else { super::agent::launch_env(agent, &row.id, resume) };
-                if self.db.session_agent_mode(&row.id).as_deref().is_some_and(|mode| matches!(mode, "gui" | "terminal")) {
+                if graphical || self.db.session_agent_mode(&row.id).as_deref() == Some("terminal") {
                     env.push((super::agent::AGENT_RESUME_ONLY_ENV.to_string(), "1".to_string()));
+                }
+                if mode == AttachMode::CreateGui {
+                    env.push((super::agent::AGENT_CREATE_GUI_ENV.to_string(), "1".to_string()));
                 }
                 env
             },
@@ -1289,6 +1300,10 @@ impl SessionManager {
         };
         entry.s.borrow_mut().backend = Some(backend.clone());
         backend.set_appearance(&entry.color_hint());
+        if mode == AttachMode::CreateGui {
+            // holder 建好后才接入输出流，不能依赖创建阶段可能已经丢失的 READY。
+            backend.write(&format!("{}\n", super::agent::AGENT_CONNECT_SENTINEL));
+        }
         for reply in queued {
             backend.write(&reply);
         }
@@ -2204,9 +2219,11 @@ impl SessionManager {
             else if viewer.terminal_backed_agent_view.get() && s.transcript_mirror.is_some() {
                 s.transcript_mirror.as_ref().map(TranscriptMirror::snapshot)
             } else {
-                self.db.get_session(&entry.session_id).filter(|r| r.agent.as_deref() == Some("claude")).map(|_| {
+                self.db.get_session(&entry.session_id)
+                    .and_then(|r| r.agent.as_deref().and_then(SessionAgent::from_wire))
+                    .filter(|agent| super::agent::supports_native_stream(*agent)).map(|agent| {
                     let graphical = self.db.session_agent_mode(&entry.session_id).as_deref() == Some("gui");
-                    let mut state = falcon_proto::AgentViewState::new(SessionAgent::Claude, graphical);
+                    let mut state = falcon_proto::AgentViewState::new(agent, graphical);
                     state.terminal_backed = !graphical;
                     if graphical { state.status = falcon_proto::AgentTurnStatus::Unknown; }
                     state

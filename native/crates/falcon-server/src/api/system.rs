@@ -173,7 +173,17 @@ pub(super) async fn agents(State(state): State<AppState>, uri: Uri) -> ApiResult
     if host_id.is_none() && project_id.is_none() {
         return Ok(Json(detect_local_agents().await));
     }
-    let target = resolve_link_target(&state, host_id.as_deref(), project_id.as_deref()).map_err(ApiError::bad_request)?;
+    // Android 按项目探测；节点所属项目和本机独立会话都应检测本机，而非再走 SSH。
+    let target = if let Some(id) = project_id.as_deref() {
+        let project = crate::sessions::machine::owner_row(&state.db, id)
+            .ok_or_else(|| ApiError::bad_request("项目不存在"))?;
+        if project.project_type == "local" {
+            return Ok(Json(detect_local_agents().await));
+        }
+        LinkTarget::Project(project)
+    } else {
+        resolve_link_target(&state, host_id.as_deref(), None).map_err(ApiError::bad_request)?
+    };
     let result = state.engine.call(move |engine| async move {
         let link = match &target {
             LinkTarget::Project(row) => engine.sessions.get_link(row),
@@ -197,11 +207,24 @@ mod tests {
     #[tokio::test]
     async fn agents_validate_the_requested_machine() {
         let app = TestApp::new();
-        app.local_project("local-agent-test");
-        for path in ["/api/agents?hostId=missing", "/api/agents?projectId=missing", "/api/agents?projectId=local-agent-test"] {
+        for path in ["/api/agents?hostId=missing", "/api/agents?projectId=missing"] {
             let (status, body) = json_of(app.get(path).await).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(body["error"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_detect_on_local_project_and_standalone_owner() {
+        let app = TestApp::new();
+        app.local_project("local-agent-test");
+        let (status, local) = json_of(app.get("/api/agents").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(local.is_array());
+        for project in ["local-agent-test", "standalone:local"] {
+            let (status, body) = json_of(app.get(&format!("/api/agents?projectId={project}")).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, local, "本机项目与独立会话应使用同一份检测结果");
         }
     }
 

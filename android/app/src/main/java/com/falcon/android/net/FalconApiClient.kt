@@ -1,6 +1,7 @@
 package com.falcon.android.net
 
 import com.falcon.android.bridge.FalconNative
+import com.falcon.android.model.AgentCatalog
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.SessionUi
@@ -157,8 +158,7 @@ object FalconApiClient {
             runCatching {
                 val encodedId = URLEncoder.encode(projectId, "UTF-8")
                 val raw = getRaw(baseUrl, "/api/agents?projectId=$encodedId")
-                val obj = JSONObject(raw)
-                val arr = obj.optJSONArray("agents") ?: JSONArray()
+                val arr = JSONArray(raw)
                 val out = ArrayList<String>(arr.length())
                 for (i in 0 until arr.length()) {
                     out.add(arr.getString(i))
@@ -176,15 +176,29 @@ object FalconApiClient {
     ): Result<SessionUi> = withContext(Dispatchers.IO) {
         runCatching {
             val encodedId = URLEncoder.encode(projectId, "UTF-8")
+            val url = "${normalizeBaseUrl(baseUrl)}/api/projects/$encodedId/sessions"
+            val graphical = AgentCatalog.supportsGui(agent)
+            if (graphical) {
+                // 旧服务端会忽略未知创建字段，必须先确认，不能把 TUI 冒充默认 GUI。
+                // 探测项目所属节点，而非入口服务，避免 SSH 节点仍是旧版本时悄悄创建 TUI。
+                val probe = Request.Builder().url(url).get().build()
+                httpClient.newCall(probe).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (resp.code == 404 || resp.code == 405) throw AgentModeUnsupportedException()
+                    if (!resp.isSuccessful) throw RuntimeException(extractErrorMessage(body, resp.code))
+                    if (JSONObject(body).opt("createGui") != true) throw AgentModeUnsupportedException()
+                }
+            }
             val payload = JSONObject().apply {
                 if (name.isNotBlank()) put("name", name.trim())
                 if (!agent.isNullOrBlank()) put("agent", agent)
+                if (graphical) put("agentMode", "gui")
                 put("appearance", theme.appearance)
                 put("background", theme.backgroundHex)
                 put("foreground", theme.foregroundHex)
             }
             val req = Request.Builder()
-                .url("${normalizeBaseUrl(baseUrl)}/api/projects/$encodedId/sessions")
+                .url(url)
                 // 在逻辑请求构建时生成；OkHttp 内部重试复用同一个 Request 和请求头。
                 .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
                 .post(payload.toString().toRequestBody(jsonMediaType))
@@ -205,7 +219,7 @@ object FalconApiClient {
         }
     }
 
-    suspend fun agentModeSnapshotSupported(baseUrl: String, sessionId: String): Result<Boolean> =
+    suspend fun agentModeSnapshotSupported(baseUrl: String, sessionId: String, agent: String? = null): Result<Boolean> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val encodedId = URLEncoder.encode(sessionId, "UTF-8")
@@ -217,7 +231,11 @@ object FalconApiClient {
                     when {
                         resp.code == 404 || resp.code == 405 -> false
                         !resp.isSuccessful -> throw RuntimeException(extractErrorMessage(body, resp.code))
-                        else -> JSONObject(body).opt("agentModeSnapshot") == true
+                        else -> {
+                            val capability = JSONObject(body)
+                            capability.opt("agentModeSnapshot") == true &&
+                                (agent != "codex" || capability.opt("createGui") == true)
+                        }
                     }
                 }
             }

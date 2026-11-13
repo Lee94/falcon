@@ -79,6 +79,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.falcon.android.R
 import com.falcon.android.bridge.FalconNative
+import com.falcon.android.model.AgentCatalog
 import com.falcon.android.model.AgentModeTransition
 import com.falcon.android.model.AgentViewStateUi
 import com.falcon.android.model.AskpassPromptUi
@@ -241,8 +242,8 @@ fun TerminalScreen(
         wsConnected = false
         updateAgentTransition { it.disconnected() }
         if (agentState?.interactive == true) agentState = agentState?.copy(status = "unknown")
-        val requiresModeSnapshot = if (initialSession.agent == "claude") {
-            FalconApiClient.agentModeSnapshotSupported(baseUrl, initialSession.id).getOrElse { error ->
+        val requiresModeSnapshot = if (AgentCatalog.supportsGui(initialSession.agent)) {
+            FalconApiClient.agentModeSnapshotSupported(baseUrl, initialSession.id, initialSession.agent).getOrElse { error ->
                 onToast(context.getString(R.string.agent_mode_sync_failed, error.message.orEmpty()))
                 delay(1000)
                 reconnectTrigger++

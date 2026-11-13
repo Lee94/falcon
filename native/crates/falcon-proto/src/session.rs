@@ -172,6 +172,10 @@ pub struct CreateSessionRequest {
     /// 服务端认不出的一律当普通终端，不 400。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SessionAgent>,
+    /// 新建时明确选择运行协议：gui = 结构化交互，terminal / 缺省 = 官方 CLI。
+    /// GUI 仅适用于服务端支持结构化协议的 CLI；与已有会话的模式转换不同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appearance: Option<TermAppearance>,
     /// #rrggbb，给 OSC 11 用；缺省按 appearance 给黑 / 白
@@ -266,9 +270,10 @@ mod tests {
     fn create_request() {
         roundtrip::<CreateSessionRequest>("{}");
         let r = roundtrip::<CreateSessionRequest>(
-            r##"{"agent":"codex","appearance":"light","background":"#ffffff","foreground":"#171717"}"##,
+            r##"{"agent":"codex","agentMode":"gui","appearance":"light","background":"#ffffff","foreground":"#171717"}"##,
         );
         assert_eq!(r.appearance, Some(TermAppearance::Light));
+        assert_eq!(r.agent_mode.as_deref(), Some("gui"));
         roundtrip::<CreateSessionRequest>(r#"{"name":"deploy"}"#);
     }
 }
