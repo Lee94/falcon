@@ -12,8 +12,8 @@ android {
         applicationId = "com.falcon.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 325
-        versionName = "0.3.25"
+        versionCode = 326
+        versionName = "0.3.26"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -44,6 +44,9 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // 与桌面共用文案源，Kotlin 直接读取同一份语言文件，不维护第二份升级文案。
+    sourceSets.getByName("main").assets.srcDir("../../native/crates/falcon-ui/locales")
 
     packaging {
         jniLibs {

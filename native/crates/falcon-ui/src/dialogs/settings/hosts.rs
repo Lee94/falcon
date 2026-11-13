@@ -101,7 +101,7 @@ impl Render for HostsPane {
                     .child(head(t!("host.name").to_string()))
                     .child(head(t!("host.conn").to_string()))
                     .child(head(t!("host.auth").to_string()))
-                    .child(div().w(zpx(224.))),
+                    .child(div().w(zpx(288.)).flex_none()),
             );
             let n = hosts.len();
             for (i, host) in hosts.into_iter().enumerate() {
@@ -111,7 +111,8 @@ impl Render for HostsPane {
                 } else {
                     t!("host.unused").to_string()
                 };
-                let (h_test, h_edit, h_del) = (host.clone(), host.clone(), host.clone());
+                let (h_test, h_edit, h_del, h_update) = (host.clone(), host.clone(), host.clone(), host.clone());
+                let ws_update = ws.clone();
                 let (ws_edit, ws_del) = (ws.clone(), ws.clone());
                 table = table.child(
                     div()
@@ -149,10 +150,16 @@ impl Render for HostsPane {
                         )
                         .child(
                             div()
-                                .w(zpx(224.))
+                                .w(zpx(288.))
+                                .flex_none()
                                 .flex()
                                 .justify_end()
                                 .gap(zpx(6.))
+                                .child(
+                                    Button::new(SharedString::from(format!("host-update-{}", host.id)))
+                                        .ghost().small().label(t!("serverUpdate.node").to_string())
+                                        .on_click(move |_, window, cx| crate::dialogs::server_update::open(&ws_update, Some(&h_update), window, cx)),
+                                )
                                 .child(
                                     Button::new(SharedString::from(format!("host-test-{}", host.id)))
                                         .ghost()

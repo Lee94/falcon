@@ -379,6 +379,10 @@ impl SettingsView {
             right = right.child(toggle);
             server_rows.push((t!("native.settings.lanAccess").to_string(), Some(hint), right.into_any_element()));
         }
+        let ws_update = self.ws.clone();
+        server_rows.push((t!("serverUpdate.title").to_string(), Some(w.profile.url.clone()),
+            Button::new("server-update-open").outline().small().label(t!("serverUpdate.open").to_string())
+                .on_click(move |_, window, cx| crate::dialogs::server_update::open(&ws_update, None, window, cx)).into_any_element()));
         server_rows.push((t!("settings.restartServer").to_string(), None, restart.into_any_element()));
 
         // React 版这里是"安装应用"（PWA）一行，PWA 已删；换成客户端版本与服务端地址——

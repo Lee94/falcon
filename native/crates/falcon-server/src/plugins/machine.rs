@@ -80,7 +80,8 @@ pub fn resolve(db: &Db, params: &BTreeMap<String, String>, project_id: Option<&s
     }
     // auto（以及选过的主机后来被删了）：跟着焦点项目
     let value = "auto".to_string();
-    let project = project_id.and_then(|id| db.get_project(id)).filter(|p| p.project_type == "ssh");
+    let project = project_id.and_then(|id| db.get_project(id).or_else(|| crate::nodes::cached_project(db, id)))
+        .filter(|p| p.project_type == "ssh");
     let Some(project) = project else { return local(value, options) };
     let bound = project.host_id.as_deref().and_then(|id| db.get_host(id));
     let conn = format!(

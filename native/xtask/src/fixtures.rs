@@ -80,6 +80,12 @@ fn png() -> Vec<u8> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
+    // 新节点/升级协议可单独生成，避免局部修改需要启动旧工具链中的全部历史场景。
+    if args == ["--node-updates-only"] {
+        let bin = env_path("FALCON_FIXTURE_SERVER_BIN").map(std::path::absolute).transpose()?.unwrap_or(default_server_bin()?);
+        let out = env_path("FALCON_FIXTURE_OUT").map(std::path::absolute).transpose()?.unwrap_or_else(||util::native().join("crates/falcon-proto/tests/fixtures"));
+        return capture_node_updates(&bin,&out);
+    }
     if let Some(arg) = args.first() {
         bail!(
             "fixtures 不带参数（收到 {arg}）：换服务端 / 输出目录用环境变量 \
@@ -145,6 +151,36 @@ fn generate(server_bin: &Path, out_dir: &Path, server: &mut Option<Child>) -> Re
     let shown = out_dir.strip_prefix(util::root()).unwrap_or(out_dir);
     println!("写了 {} 个 fixture 到 {}/", out.written, shown.display());
     Ok(())
+}
+
+fn capture_node_updates(bin:&Path,out_dir:&Path)->Result<()> {
+    let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    let data=env::temp_dir().join(format!("falcon-node-fixture-{}-{nonce}",std::process::id()));
+    fs::create_dir(&data)?;
+    let port=free_port(4940,4999)?;
+    let log=fs::File::create(data.join("server.log"))?;
+    let mut command=Command::new(bin);
+    command.args(["--host","127.0.0.1","--port",&port.to_string(),"--data-dir"]).arg(&data);
+    for (key,_) in env::vars_os() {
+        if key.to_str().is_some_and(|k|k.starts_with("FALCON_")||k.starts_with("MOJITO_")){command.env_remove(key);}
+    }
+    command.env("HOME",&data).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    let mut child=command.spawn().with_context(||format!("起不来 {}",bin.display()))?;
+    let result=(|| {
+        let api=Api {port,cookie:None};
+        wait_ready(&api,&mut child)?;
+        fs::create_dir_all(out_dir)?;
+        let mut out=Out {dir:out_dir.to_path_buf(),written:0};
+        out.save("node-info",&api.get("/api/node")?)?;
+        out.save("nodes",&api.get("/api/nodes")?)?;
+        out.save("server-update-status",&api.get("/api/system/update/status")?)?;
+        out.save("server-update-check",&api.get("/api/system/update")?)?;
+        println!("写了 {} 个节点与升级 fixture 到 {}",out.written,out_dir.display());
+        Ok(())
+    })();
+    stop_server(Some(child));
+    fs::remove_dir_all(&data)?;
+    result
 }
 
 fn capture(api: &mut Api, out: &mut Out) -> Result<()> {

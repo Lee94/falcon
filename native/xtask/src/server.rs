@@ -12,43 +12,58 @@ use anyhow::{Context, Result, bail};
 
 use crate::util::{ host_platform, native, root, run_env, version};
 
-/// 平台名 → Rust 目标三元组。Windows 不做本机服务（服务的打包与托管只做了 macOS / Linux）
-const TRIPLES: [(&str, &str); 4] = [
+/// 平台名 → Rust 目标三元组。Windows 发布可独立运行的服务端；系统服务托管仍由部署方负责。
+const TRIPLES: [(&str, &str); 5] = [
     ("darwin-arm64", "aarch64-apple-darwin"),
     ("darwin-x64", "x86_64-apple-darwin"),
     ("linux-x64", "x86_64-unknown-linux-gnu"),
     ("linux-arm64", "aarch64-unknown-linux-gnu"),
+    ("win32-x64", "x86_64-pc-windows-msvc"),
 ];
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut target = host_platform();
+    let mut skip_sessiond = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--target" => target = it.next().context("--target 后面缺平台名")?.clone(),
+            "--skip-sessiond" => skip_sessiond = true,
             other => bail!("未知参数：{other}"),
         }
     }
-    build(&target).map(|_| ())
+    build_with_sessiond(&target, skip_sessiond).map(|_| ())
 }
 
 /// 构建并返回产物路径
 pub fn build(target: &str) -> Result<PathBuf> {
+    build_with_sessiond(target, false)
+}
+
+fn build_with_sessiond(target: &str, skip_sessiond: bool) -> Result<PathBuf> {
     let Some((_, triple)) = TRIPLES.iter().find(|(p, _)| *p == target) else {
         bail!("不支持的目标：{target}（可选：{}）", TRIPLES.map(|(p, _)| p).join(", "));
     };
     let cross = target != host_platform();
 
     // ---- 1. 5 个目标的会话守护进程（要 Zig 与 cargo-zigbuild，见 sessiond.rs）----
-    println!("== 构建会话守护进程（cargo xtask sessiond --targets all） ==");
-    crate::sessiond::build(&crate::sessiond::TARGETS, false, false)?;
     let embed_dir = native().join("target-sessiond/embed");
-    std::fs::create_dir_all(&embed_dir)?;
-    for (t, _) in crate::sessiond::TARGETS {
-        let bytes = std::fs::read(crate::sessiond::artifact(t))?;
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-        std::io::Write::write_all(&mut gz, &bytes)?;
-        std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
+    if skip_sessiond {
+        // CI 在 macOS 构建一次五目标守护进程，其他 runner 只消费同一次 workflow 的压缩产物。
+        for (t, _) in crate::sessiond::TARGETS {
+            let path = embed_dir.join(format!("{t}.gz"));
+            if !path.is_file() { bail!("--skip-sessiond 缺少 {}", path.display()); }
+        }
+    } else {
+        println!("== 构建会话守护进程（cargo xtask sessiond --targets all） ==");
+        crate::sessiond::build(&crate::sessiond::TARGETS, false, false)?;
+        std::fs::create_dir_all(&embed_dir)?;
+        for (t, _) in crate::sessiond::TARGETS {
+            let bytes = std::fs::read(crate::sessiond::artifact(t))?;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            std::io::Write::write_all(&mut gz, &bytes)?;
+            std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
+        }
     }
 
     // ---- 2. cargo ----
@@ -85,15 +100,20 @@ pub fn build(target: &str) -> Result<PathBuf> {
         &[("FALCON_EMBED_SESSIOND_DIR", embed_dir.as_os_str())],
     )?;
 
-    let built = if cross { target_dir.join(triple) } else { target_dir }.join("release/falcon-server");
+    let suffix = if target.starts_with("win32-") { ".exe" } else { "" };
+    let built = if cross { target_dir.join(triple) } else { target_dir }.join(format!("release/falcon-server{suffix}"));
     let release = root().join("release");
     std::fs::create_dir_all(&release)?;
-    let out = release.join(format!("falcon-v{}-{target}", version()));
+    let out = release.join(format!("falcon-v{}-{target}{suffix}", version()));
     // 先删再拷：覆盖一个正在跑的同名文件时，macOS 会因改了已映射的签名文件把它 SIGKILL
     let _ = std::fs::remove_file(&out);
     std::fs::copy(&built, &out).with_context(|| format!("拷贝 {} 失败", built.display()))?;
-    if !cross {
+    if !cross && !target.starts_with("win32-") {
         crate::util::run("strip", [out.as_os_str()], None)?;
+    }
+    if target.starts_with("darwin-") && cfg!(target_os = "macos") {
+        // strip 后重新签名；独立服务端不会再经过 pkg 的整个应用签名流程。
+        crate::util::run("codesign", ["--force".as_ref(), "--sign".as_ref(), "-".as_ref(), out.as_os_str()], None)?;
     }
     #[cfg(unix)]
     {

@@ -167,6 +167,8 @@ pub(crate) struct Req {
     pub body: ReqBody,
     /// 401 时要不要自动重登再重放。只有登录请求本身不要——它的 401 就是"密码错误"。
     pub relogin: bool,
+    /// 构建逻辑请求时生成，重登或传输重试时复用；不放进每次发送的 build()。
+    idempotency_key: Option<String>,
 }
 
 pub(crate) enum ReqBody {
@@ -179,7 +181,15 @@ pub(crate) enum ReqBody {
 
 impl Req {
     pub(crate) fn new(method: Method, path: String, body: ReqBody) -> Self {
-        Req { method, path, body, relogin: true }
+        let create = method == Method::POST && (path == "/api/projects"
+            || (path.starts_with("/api/projects/") && (path.ends_with("/sessions") || path.ends_with("/worktrees"))));
+        let idempotency_key = create.then(|| {
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let time = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+            let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("falcon-{:x}-{time:x}-{sequence:x}", std::process::id())
+        });
+        Req { method, path, body, relogin: true, idempotency_key }
     }
 }
 
@@ -274,9 +284,9 @@ impl FalconClient {
     where
         T: DeserializeOwned + MaybeSend + 'static,
     {
+        let req = body.map(|body| Req::new(method, path, body));
         self.call(move |inner| async move {
-            let req = Req::new(method, path, body?);
-            inner.fetch_json(&req).await
+            inner.fetch_json(&req?).await
         })
     }
 
@@ -337,6 +347,9 @@ impl Inner {
 
     async fn build(&self, req: &Req) -> ApiResult<reqwest::RequestBuilder> {
         let mut rb = self.http()?.request(req.method.clone(), format!("{}{}", self.base, req.path));
+        if let Some(key) = &req.idempotency_key {
+            rb = rb.header("Idempotency-Key", key);
+        }
         if let Some(cookie) = self.auth.cookie_header() {
             rb = rb.header(COOKIE, cookie);
         }
@@ -443,6 +456,7 @@ impl Inner {
             path: "/api/auth/login".to_owned(),
             body: ReqBody::Json(Bytes::from(body)),
             relogin: false,
+            idempotency_key: None,
         };
         let resp = self.send_once(&req).await?;
         let status = resp.status().as_u16();
@@ -521,6 +535,23 @@ mod tests {
         let c = FalconClient::new(Url::parse("http://127.0.0.1:4923").unwrap());
         assert_eq!(c.base_url(), "http://127.0.0.1:4923");
         assert_eq!(c.inner.ws_url("/ws/x"), "ws://127.0.0.1:4923/ws/x");
+    }
+
+    #[test]
+    fn create_requests_reuse_idempotency_header_when_built_again() {
+        let client = FalconClient::new(Url::parse("http://127.0.0.1:4941").unwrap());
+        for path in ["/api/projects", "/api/projects/p/sessions", "/api/projects/p/worktrees"] {
+            let req = Req::new(Method::POST, path.into(), ReqBody::Json(Bytes::from_static(b"{}")));
+            let build = || crate::runtime::runtime().block_on(client.inner.build(&req)).unwrap().build().unwrap();
+            let first = build();
+            let replay = build();
+            let key = first.headers().get("Idempotency-Key").expect("create requires an idempotency key");
+            assert_eq!(Some(key), replay.headers().get("Idempotency-Key"));
+            let another = Req::new(Method::POST, path.into(), ReqBody::Empty);
+            assert_ne!(req.idempotency_key, another.idempotency_key);
+        }
+        assert!(Req::new(Method::GET, "/api/projects".into(), ReqBody::Empty).idempotency_key.is_none());
+        assert!(Req::new(Method::POST, "/api/system/restart".into(), ReqBody::Empty).idempotency_key.is_none());
     }
 
     #[test]

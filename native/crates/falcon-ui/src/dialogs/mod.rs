@@ -14,6 +14,7 @@ pub mod project_form;
 pub mod quick_open;
 pub mod rename;
 pub mod settings;
+pub mod server_update;
 pub mod tailscale;
 pub mod theme_picker;
 pub mod worktree_form;

@@ -58,6 +58,7 @@ pub mod agent_view;
 pub mod files;
 pub mod forward;
 pub mod git;
+pub mod node;
 /// 右侧栏插件：清单、面板文档、动作、给命令插件的请求（ADR 0025）
 pub mod plugin;
 pub mod program_status;
@@ -66,6 +67,7 @@ pub mod session;
 /// falcon-server 与宿主机上会话守护进程（falcon-sessiond）之间的帧协议（ADR 0020）
 pub mod sessiond;
 pub mod system;
+pub mod server_update;
 pub mod tailscale;
 pub mod term_env;
 /// VT 模式跟踪：服务端拼回放前缀、客户端合成鼠标报文共用一个跟踪器（shared/termModes.ts）
@@ -79,11 +81,13 @@ pub use agent_view::*;
 pub use files::*;
 pub use forward::*;
 pub use git::*;
+pub use node::*;
 pub use plugin::*;
 pub use program_status::*;
 pub use project::*;
 pub use session::*;
 pub use system::*;
+pub use server_update::*;
 pub use tailscale::*;
 pub use term_env::*;
 pub use worktree::*;

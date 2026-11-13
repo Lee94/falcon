@@ -107,6 +107,10 @@ fun DashboardScreen(
 
     var showThemeDialog by remember { mutableStateOf(false) }
     var themeSearchQuery by remember { mutableStateOf("") }
+    var showSettingsMenu by remember { mutableStateOf(false) }
+    var showAbout by remember(activeServer.url) { mutableStateOf(false) }
+    var showNodeSettings by remember(activeServer.url) { mutableStateOf(false) }
+    var updateTarget by remember { mutableStateOf<UpdateTarget?>(null) }
 
     // 折叠状态（默认全部展开，点击可收起）
     val collapsedServers = remember { mutableStateMapOf<String, Boolean>() }
@@ -235,6 +239,26 @@ fun DashboardScreen(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
                     )
+                }
+
+                Box {
+                    CompactIconBox(
+                        icon = Icons.Default.MoreHoriz,
+                        contentDescription = t("serverUpdate.settings"),
+                        tint = theme.mutedForeground,
+                        bgColor = theme.app,
+                        onClick = { showSettingsMenu = true }
+                    )
+                    DropdownMenu(expanded = showSettingsMenu, onDismissRequest = { showSettingsMenu = false }) {
+                        DropdownMenuItem(text = { Text(t("settings.aboutTitle")) }, onClick = {
+                            showSettingsMenu = false
+                            showAbout = true
+                        })
+                        DropdownMenuItem(text = { Text(t("settings.tab_hosts")) }, onClick = {
+                            showSettingsMenu = false
+                            showNodeSettings = true
+                        })
+                    }
                 }
 
                 // 主题按钮（紧凑 28dp，避免 Material IconButton 默认 48dp 撑高）
@@ -647,6 +671,14 @@ fun DashboardScreen(
             }
         )
     }
+
+    if (showAbout) {
+        ServerAboutDialog(activeServer, onDismiss = { showAbout = false }, onUpdate = { updateTarget = it })
+    }
+    if (showNodeSettings) {
+        NodeSettingsDialog(activeServer, onDismiss = { showNodeSettings = false }, onUpdate = { updateTarget = it })
+    }
+    updateTarget?.let { target -> ServerUpdateDialog(target, onDismiss = { updateTarget = null }) }
 
     // 服务器地址管理弹窗
     if (showServerDialog) {

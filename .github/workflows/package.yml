@@ -1,9 +1,10 @@
 # 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）、macOS（.pkg，原生客户端 +
 # Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI + Gradle 原生安卓客户端）。
-# 打法与本机一样，直接跑 cargo xtask win / pkg / android，xtask 是唯一真相。
+# 同时发布 Linux / macOS x64、arm64 与 Windows x64 独立服务端，以及汇总的 SHA256SUMS。
+# 打法与本机一样，直接跑 cargo xtask win / pkg / android / server，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
-# - 推 v* tag：全量编译检查、测试与三个包都通过后建 GitHub Release 并挂上；
+# - 推 v* tag：全量编译检查、测试、三个安装包与五平台服务端都通过后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
 # - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
 #   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
@@ -134,7 +135,54 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: falcon-macos
-          path: release/*.pkg
+          path: |
+            release/*.pkg
+            release/falcon-v*-darwin-arm64
+          if-no-files-found: error
+
+      # 五平台服务端共用这一批守护进程，Windows runner 不需要自行构建 Zig / Ghostty。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed/*.gz
+          if-no-files-found: error
+
+  servers:
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform: darwin-x64
+          - runner: ubuntu-22.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: windows-latest
+            platform: win32-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Drop crates.io mirror
+        shell: bash
+        run: rm -f native/.cargo/config.toml
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed
+      - name: 构建独立服务端
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target ${{ matrix.platform }} --skip-sessiond
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: falcon-server-${{ matrix.platform }}
+          path: release/falcon-v*-${{ matrix.platform }}*
           if-no-files-found: error
 
   android:
@@ -200,7 +248,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, android]
+    needs: [windows, macos, android, servers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -208,7 +256,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: falcon-*
           merge-multiple: true
+
+      # 内嵌资源仅用于工作流内部，不作为 Release 资产。清单对最终签名后的独立服务端求和。
+      - name: 核对服务端平台并生成 SHA256SUMS
+        shell: bash
+        run: |
+          rm -f dist/*.gz
+          cd dist
+          for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64.exe; do
+            test -f "falcon-${GITHUB_REF_NAME}-${platform}"
+          done
+          sha256sum falcon-v*-darwin-* falcon-v*-linux-* falcon-v*-win32-x64.exe > SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:

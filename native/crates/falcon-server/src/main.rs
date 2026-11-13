@@ -25,10 +25,27 @@ fn main() -> anyhow::Result<()> {
     if argv.first().map(String::as_str) == Some("respawn") {
         std::process::exit(falcon_server::restart::run_respawn_cli(&argv[1..]));
     }
-    let config = parse_args(&argv, |k| std::env::var(k).ok())?;
+    if argv.first().map(String::as_str) == Some("node") {
+        std::process::exit(falcon_server::nodes::bootstrap::run_node_cli(&argv[1..]));
+    }
+    if argv.first().map(String::as_str) == Some("update-helper") {
+        std::process::exit(falcon_server::server_update::run_helper_cli(&argv[1..]));
+    }
+    // 版本探测不能落入普通启动路径，更不能隐式打开默认用户数据目录。
+    if matches!(argv.first().map(String::as_str), Some("version" | "--version")) {
+        println!("{}", serde_json::json!({"version":env!("CARGO_PKG_VERSION"),
+            "protocolVersion":falcon_server::nodes::PROTOCOL_VERSION,
+            "platform":std::env::consts::OS,"arch":std::env::consts::ARCH}));
+        return Ok(());
+    }
+    let mut config = parse_args(&argv, |k| std::env::var(k).ok())?;
+    let _node_process_lock = falcon_server::nodes::bootstrap::lock_node_process(&config.data_dir)?;
+    falcon_server::server_update::startup_gate(&mut config)?;
     let loopback = is_loopback(&config.host);
 
     let db = Arc::new(Db::open(&config.data_dir)?);
+    falcon_server::nodes::migration::migrate_local(&db, &config.data_dir)?;
+    falcon_server::nodes::migration::bind_legacy_hosts(&db)?;
     let secrets = Arc::new(SecretBox::open(&config.data_dir)?);
 
     let askpass = Arc::new(AskpassHub::new());
@@ -65,6 +82,10 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async move {
         let addr = format!("{}:{}", config.host, config.port);
         let listener = tokio::net::TcpListener::bind(&addr).await.with_context(|| format!("监听 {addr} 失败"))?;
+        let actual_port = listener.local_addr()?.port();
+        falcon_server::server_update::record_listener(&state.config, actual_port);
+        falcon_server::nodes::bootstrap::publish(&config, actual_port, &state.db)?;
+        state.askpass.set_origin(&format!("http://{}:{}", local_connect_host(&config.host), actual_port));
         log::info!(
             "falcon 已启动: http://{}:{}（数据目录 {}）",
             if loopback { "localhost" } else { &config.host },

@@ -4,6 +4,10 @@ import com.falcon.android.bridge.FalconNative
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.SessionUi
+import com.falcon.android.model.ServerUpdateCheck
+import com.falcon.android.model.ServerUpdateTask
+import com.falcon.android.model.NodeUpdateTarget
+import com.falcon.android.model.NodeStatus
 import com.falcon.android.ui.FalconThemeTokens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -82,6 +86,62 @@ object FalconApiClient {
         }
     }
 
+    private fun updatePath(hostId: String?): String = if (hostId == null) "/api/system/update"
+        else "/api/hosts/${URLEncoder.encode(hostId, "UTF-8")}/node/system/update"
+
+    suspend fun checkServerUpdate(baseUrl: String, hostId: String?): Result<ServerUpdateCheck> =
+        withContext(Dispatchers.IO) {
+            runCatching { ServerUpdateCheck.parse(JSONObject(getRaw(baseUrl, updatePath(hostId)))) }
+        }
+
+    suspend fun serverUpdateStatus(baseUrl: String, hostId: String?): Result<ServerUpdateTask> =
+        withContext(Dispatchers.IO) {
+            runCatching { ServerUpdateTask.parse(JSONObject(getRaw(baseUrl, "${updatePath(hostId)}/status"))) }
+        }
+
+    class UpdateRejectedException(message: String) : Exception(message)
+
+    suspend fun startServerUpdate(baseUrl: String, hostId: String?, version: String): Result<ServerUpdateTask> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder().url("${normalizeBaseUrl(baseUrl)}${updatePath(hostId)}")
+                    .post(JSONObject().put("version", version).toString().toRequestBody(jsonMediaType)).build()
+                // 升级 POST 只发送一次；重启丢失应答时由调用方查询状态，不能由传输层重发。
+                httpClient.newBuilder().retryOnConnectionFailure(false).build().newCall(req).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        val message = extractErrorMessage(body, resp.code)
+                        if (resp.code in 400..499 && resp.code != 409) throw UpdateRejectedException(message)
+                        throw RuntimeException(message)
+                    }
+                    ServerUpdateTask.parse(JSONObject(body))
+                }
+            }
+        }
+
+    suspend fun fetchUpdateHosts(baseUrl: String): Result<List<NodeUpdateTarget>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val list = JSONArray(getRaw(baseUrl, "/api/hosts"))
+            (0 until list.length()).map { i ->
+                val host = list.getJSONObject(i)
+                NodeUpdateTarget(host.getString("id"), host.getString("name"),
+                    "${host.optString("username")}@${host.optString("host")}:${host.optInt("port", 22)}")
+            }
+        }
+    }
+
+    suspend fun fetchNodeStatus(baseUrl: String): Result<List<NodeStatus>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val list = JSONArray(getRaw(baseUrl, "/api/nodes"))
+            (0 until list.length()).map { i ->
+                val node = list.getJSONObject(i)
+                NodeStatus(if (node.isNull("hostId")) null else node.optString("hostId"),
+                    if (node.isNull("version")) null else node.optString("version"), node.optBoolean("online"),
+                    if (node.isNull("error")) null else node.optString("error"))
+            }
+        }
+    }
+
     suspend fun fetchDashboard(baseUrl: String): Result<DashboardData> = withContext(Dispatchers.IO) {
         runCatching {
             val projectsJson = getRaw(baseUrl, "/api/projects")
@@ -125,6 +185,8 @@ object FalconApiClient {
             }
             val req = Request.Builder()
                 .url("${normalizeBaseUrl(baseUrl)}/api/projects/$encodedId/sessions")
+                // 在逻辑请求构建时生成；OkHttp 内部重试复用同一个 Request 和请求头。
+                .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
             httpClient.newCall(req).execute().use { resp ->

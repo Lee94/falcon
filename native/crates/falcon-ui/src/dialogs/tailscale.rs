@@ -151,7 +151,7 @@ fn device_list(devices: &[TailscaleDevice], hosts: &[SshHost], cx: &mut Context<
         table = table.child(
             div()
                 .id(SharedString::from(format!("ts-row-{i}")))
-                .min_h(zpx(52.))
+                .min_h(zpx(36.))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -163,43 +163,28 @@ fn device_list(devices: &[TailscaleDevice], hosts: &[SshHost], cx: &mut Context<
                     div()
                         .flex_1()
                         .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(zpx(2.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(device.name.clone()),
-                                )
-                                .when(added, |d| {
-                                    d.child(div().flex_none().text_xs().text_color(ui.muted_foreground).child(t!("host.tailscaleAdded").to_string()))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .font_family(crate::fonts::BERKELEY)
-                                .text_xs()
-                                .text_color(ui.muted_foreground)
-                                .child(address_line(device)),
-                        )
-                        .child(div().truncate().text_xs().text_color(ui.muted_foreground).child(meta_line(device))),
+                        .truncate()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(device.name.clone()),
                 )
+                // 只有名称可缩短，其余信息和按钮保持一行；地址仍用于搜索和表单预填。
+                .when_some(device.os.clone().filter(|os| !os.is_empty()), |d, os| {
+                    d.child(div().flex_none().whitespace_nowrap().text_xs().text_color(ui.muted_foreground).child(os))
+                })
                 .child(
-                    Button::new(SharedString::from(format!("ts-add-{i}")))
+                    div().flex_none().whitespace_nowrap().text_xs().text_color(if device.online { ui.success } else { ui.muted_foreground })
+                        .child(if device.online { t!("host.tailscaleOnline") } else { t!("host.tailscaleOffline") }.to_string()),
+                )
+                .when(added, |d| {
+                    d.child(div().flex_none().whitespace_nowrap().text_xs().text_color(ui.muted_foreground).child(t!("host.tailscaleAdded").to_string()))
+                })
+                .child(
+                    div().flex_none().child(Button::new(SharedString::from(format!("ts-add-{i}")))
                         .ghost()
                         .small()
                         .label(t!("host.tailscaleAdd").to_string())
-                        .on_click(cx.listener(move |this, _, window, cx| this.pick(&click, window, cx))),
+                        .on_click(cx.listener(move |this, _, window, cx| this.pick(&click, window, cx)))),
                 ),
         );
     }
@@ -217,25 +202,6 @@ fn problem_text(list: &TailscaleDevices) -> String {
         Some(message) if matches!(list.reason, Some(TailscaleUnavailable::Failed) | None) => format!("{base} {message}"),
         _ => base.to_string(),
     }
-}
-
-fn address_line(device: &TailscaleDevice) -> String {
-    match &device.ipv4 {
-        Some(ip) if ip != &device.host => format!("{} · {ip}", device.host),
-        _ => device.host.clone(),
-    }
-}
-
-fn meta_line(device: &TailscaleDevice) -> String {
-    let mut parts = Vec::new();
-    if let Some(os) = device.os.as_deref().filter(|s| !s.is_empty()) {
-        parts.push(os.to_string());
-    }
-    parts.push(if device.online { t!("host.tailscaleOnline") } else { t!("host.tailscaleOffline") }.to_string());
-    if let Some(owner) = device.owner.as_deref().filter(|s| !s.is_empty()) {
-        parts.push(owner.to_string());
-    }
-    parts.join(" · ")
 }
 
 fn matches_query(device: &TailscaleDevice, query: &str) -> bool {

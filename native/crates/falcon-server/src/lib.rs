@@ -22,6 +22,8 @@ pub mod fs;
 pub mod git;
 pub mod host;
 pub mod host_projects;
+/// 宿主机节点：SSH 部署、项目迁移与按资源归属转发。
+pub mod nodes;
 pub mod paste;
 /// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
 pub mod plugins;
@@ -30,6 +32,7 @@ pub mod restart;
 pub mod ringbuffer;
 pub mod service;
 pub mod service_cli;
+pub mod server_update;
 pub mod sessiond;
 pub mod sessions;
 pub mod shells;

@@ -149,7 +149,14 @@ pub struct SyncProjectRow {
     pub row: ProjectRow,
     pub updated_at: i64,
     pub remote_id: String,
+    pub sort_order: Option<i64>,
 }
+
+/// 节点创建请求只能重放已完成结果。pending 代表曾开始过副作用、但结果未知，
+/// 不能因客户端重试就再创建一份；HTTP 调用方将这类冲突映射为 409。
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct NodeRequestConflict(pub String);
 
 pub fn project_sync_scope(row: &ProjectRow) -> Option<String> {
     if row.project_type == "local" {
@@ -168,7 +175,8 @@ fn sync_project_from_row(r: &Row) -> rusqlite::Result<SyncProjectRow> {
         .get::<_, Option<String>>("remote_id")?
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| row.id.clone());
-    Ok(SyncProjectRow { row, updated_at, remote_id })
+    let sort_order = r.get("sort_order")?;
+    Ok(SyncProjectRow { row, updated_at, remote_id, sort_order })
 }
 
 fn project_from_row(r: &Row) -> rusqlite::Result<ProjectRow> {
@@ -491,6 +499,27 @@ impl Db {
                     remote_id TEXT NOT NULL,
                     deleted_at INTEGER NOT NULL,
                     PRIMARY KEY (scope, remote_id)
+                );
+                CREATE TABLE IF NOT EXISTS node_migrated_hosts (
+                    host_id TEXT PRIMARY KEY,
+                    node_id TEXT NOT NULL,
+                    migrated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS node_migrated_projects (
+                    project_id TEXT PRIMARY KEY,
+                    host_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    remote_id TEXT NOT NULL,
+                    migrated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS node_requests (
+                    scope TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'done')),
+                    status INTEGER,
+                    body TEXT,
+                    PRIMARY KEY (scope, request_key)
                 );",
             )?;
         }
@@ -944,11 +973,12 @@ impl Db {
         );
     }
 
-    /// 存档已到期（archived_at ≤ archived_before）的附属项目，供后台清扫
+    /// 只清扫本节点的本地附属项目。旧 SSH 行是网关缓存，即使尚未迁移也不能被启动清扫
+    /// 终止会话或删除目录；成功导入后由宿主节点对其 local 项目执行原有存档策略。
     pub fn list_archived_expired(&self, archived_before: i64) -> Vec<ProjectRow> {
         self.query_all(
             "SELECT * FROM projects
-             WHERE source_project_id IS NOT NULL AND worktree_archived_at IS NOT NULL
+             WHERE type = 'local' AND source_project_id IS NOT NULL AND worktree_archived_at IS NOT NULL
                AND worktree_archived_at <= ?
              ORDER BY worktree_archived_at ASC",
             [archived_before],
@@ -1044,6 +1074,225 @@ impl Db {
 
     pub fn clear_deleted_project(&self, scope: &str, remote_id: &str) {
         self.exec("DELETE FROM deleted_projects WHERE scope = ? AND remote_id = ?", params![scope, remote_id]);
+    }
+
+    // ---- 节点迁移：独立 Result 方法，不能使用吞掉 SQL 错误的普通 CRUD ----
+
+    pub(crate) fn node_migration_projects(&self) -> anyhow::Result<Vec<SyncProjectRow>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT * FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, rowid")?;
+        Ok(stmt.query_map([], sync_project_from_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn node_local_projects_migrated(&self) -> anyhow::Result<bool> {
+        let conn = self.lock();
+        Ok(conn.query_row("SELECT 1 FROM settings WHERE key = 'migration.nodes.local-projects.v1'", [], |_| Ok(()))
+            .optional()?.is_some())
+    }
+
+    pub(crate) fn node_migrate_local_projects_once(
+        &self, data_dir: &Path, manifest: &crate::host_projects::HostProjectsManifest,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.lock();
+        if conn.query_row("SELECT 1 FROM settings WHERE key = 'migration.nodes.local-projects.v1'", [], |_| Ok(()))
+            .optional()?.is_some()
+        {
+            return Ok(());
+        }
+        let backup = backup_before_node_migration(&conn, data_dir)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // 另一条 SQLite 连接可能在备份期间完成迁移。取得数据库写锁后再查一次，
+        // 不能把已经完成的首次导入重复执行，也不能因重复插入标记而误报失败。
+        if tx.query_row("SELECT 1 FROM settings WHERE key = 'migration.nodes.local-projects.v1'", [], |_| Ok(()))
+            .optional()?.is_some()
+        {
+            tx.commit()?;
+            return Ok(());
+        }
+        import_node_project_rows(&tx, manifest)?;
+        // 与项目插入同一事务；失败不会留下成功标记，下次仍可用原清单重试。
+        tx.execute("INSERT INTO settings (key, value) VALUES ('migration.nodes.local-projects.v1', ?)",
+            [backup.to_string_lossy().as_ref()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn node_import_projects(&self, manifest: &crate::host_projects::HostProjectsManifest) -> anyhow::Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        import_node_project_rows(&tx, manifest)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 为没有 host_id 的旧 SSH 项目补已保存主机。只改 host_id，其他字段（包括密文、
+    /// remote_id、source、时间戳、排序与 worktree 删除判据）原样保留，不能复用普通 update_project。
+    pub(crate) fn node_bind_legacy_hosts(&self) -> anyhow::Result<()> {
+        let mut conn = self.lock();
+        let pending: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE type = 'ssh' AND (host_id IS NULL OR host_id = ''))",
+            [], |r| r.get(0))?;
+        if !pending { return Ok(()); }
+        let data_dir = conn.path().filter(|p| !p.is_empty()).map(PathBuf::from)
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .context("旧 SSH 项目迁移需要可备份的磁盘数据库")?;
+        backup_before_node_migration(&conn, &data_dir)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let projects = {
+            let mut stmt = tx.prepare("SELECT * FROM projects WHERE type = 'ssh' ORDER BY source_project_id IS NOT NULL, created_at, rowid")?;
+            stmt.query_map([], project_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut hosts = {
+            let mut stmt = tx.prepare("SELECT * FROM ssh_hosts ORDER BY created_at, id")?;
+            stmt.query_map([], host_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut created = Vec::new();
+        let mut bindings = std::collections::HashMap::<String, String>::new();
+        for row in projects.iter().filter(|p| p.host_id.as_deref().is_none_or(str::is_empty)) {
+            let candidate = legacy_host_from_project(row)?;
+            // 同一派生关系中已有绑定的源项目/附属项目优先；否则在同连接的别名主机中
+            // 随便选一个，会把源项目与附属项目分到不同 export_host scope，导致关系无法导入。
+            let source_id = row.source_project_id.as_deref().unwrap_or(&row.id);
+            let mut preferred = std::collections::BTreeSet::new();
+            for related in projects.iter().filter(|p| p.id == source_id || p.source_project_id.as_deref() == Some(source_id)) {
+                if !project_matches_ssh_host(related, &candidate) { continue; }
+                if let Some(id) = related.host_id.as_deref().filter(|id| !id.is_empty()).or_else(|| bindings.get(&related.id).map(String::as_str)) {
+                    let saved = hosts.iter().find(|h| h.id == id)
+                        .with_context(|| format!("旧 SSH 项目 {} 引用的主机不存在：{id}", related.id))?;
+                    anyhow::ensure!(same_ssh_connection(saved, &candidate), "旧 SSH 项目 {} 的主机绑定与连接字段不一致", related.id);
+                    preferred.insert(id.to_string());
+                }
+            }
+            anyhow::ensure!(preferred.len() <= 1, "旧 SSH 项目 {} 的同连接派生项目绑定了不同主机，请先统一主机绑定", row.id);
+            let host_id = if let Some(id) = preferred.into_iter().next() { id }
+            else if let Some(saved) = hosts.iter().find(|h| same_ssh_connection(h, &candidate)) { saved.id.clone() }
+            else {
+                let mut host = candidate;
+                let base = host.name.clone();
+                let mut suffix = 2;
+                while hosts.iter().any(|h| h.name.eq_ignore_ascii_case(&host.name)) {
+                    host.name = format!("{base} ({suffix})");
+                    suffix += 1;
+                }
+                let id = host.id.clone();
+                hosts.push(host.clone());
+                created.push(host);
+                id
+            };
+            bindings.insert(row.id.clone(), host_id);
+        }
+        // 全部校验完才执行写操作，且一笔事务提交；磁盘或后续语句失败也不会只绑定一半。
+        for h in created {
+            tx.execute("INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![h.id, h.name, h.host, h.port, h.username, h.auth_method, h.key_path, h.secret_enc, h.created_at])?;
+        }
+        for (project, host) in bindings {
+            tx.execute("UPDATE projects SET host_id = ? WHERE id = ? AND type = 'ssh' AND (host_id IS NULL OR host_id = '')",
+                params![host, project])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 宿主 ID 与该节点数据库主键可能不同。只在本地项目中找，重复映射视为损坏并报错。
+    pub fn local_project_id(&self, remote_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT id FROM projects WHERE type = 'local' AND COALESCE(NULLIF(remote_id, ''), id) = ?")?;
+        let ids = stmt.query_map([remote_id], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(ids.len() <= 1, "宿主项目 ID 对应多条本地记录：{remote_id}");
+        Ok(ids.into_iter().next())
+    }
+
+    pub fn is_host_migrated(&self, host_id: &str) -> anyhow::Result<bool> {
+        Ok(self.lock().query_row("SELECT 1 FROM node_migrated_hosts WHERE host_id = ?", [host_id], |_| Ok(()))
+            .optional()?.is_some())
+    }
+
+    /// 网关旧 project ID -> (节点 ID, 宿主 project ID)。保留主键与旧终端，绝不移动或终止会话。
+    pub fn migrated_project_target(&self, id: &str) -> anyhow::Result<Option<(String, String)>> {
+        Ok(self.lock().query_row("SELECT node_id, remote_id FROM node_migrated_projects WHERE project_id = ?", [id],
+            |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+
+    pub(crate) fn node_host_project_mapping(&self, host_id: &str) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT p.id, COALESCE(mp.remote_id, NULLIF(p.remote_id, ''), p.id)
+            FROM projects p LEFT JOIN node_migrated_projects mp ON mp.project_id = p.id
+            WHERE p.type = 'ssh' AND p.host_id = ?")?;
+        Ok(stmt.query_map([host_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub(crate) fn node_mark_host_migrated(&self, host_id: &str, node_id: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!host_id.is_empty() && !node_id.is_empty(), "迁移的主机与节点 ID 不能为空");
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        anyhow::ensure!(tx.query_row("SELECT 1 FROM ssh_hosts WHERE id = ?", [host_id], |_| Ok(())).optional()?.is_some(),
+            "远端主机不存在：{host_id}");
+        let previous = tx.query_row("SELECT node_id FROM node_migrated_hosts WHERE host_id = ?", [host_id],
+            |r| r.get::<_, String>(0)).optional()?;
+        anyhow::ensure!(previous.as_deref().is_none_or(|old| old == node_id), "远端主机已迁移到其他节点：{host_id}");
+        let mappings: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, COALESCE(NULLIF(remote_id, ''), id) FROM projects WHERE type = 'ssh' AND host_id = ?")?;
+            stmt.query_map([host_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let now = crate::auth::now_ms();
+        tx.execute("INSERT OR IGNORE INTO node_migrated_hosts (host_id, node_id, migrated_at) VALUES (?, ?, ?)",
+            params![host_id, node_id, now])?;
+        for (id, remote_id) in mappings {
+            let old = tx.query_row("SELECT host_id, node_id, remote_id FROM node_migrated_projects WHERE project_id = ?", [&id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).optional()?;
+            anyhow::ensure!(old.as_ref().is_none_or(|(h, n, r)| h == host_id && n == node_id && r == &remote_id),
+                "项目的旧 ID 映射已被其他迁移占用：{id}");
+            tx.execute("INSERT OR IGNORE INTO node_migrated_projects (project_id, host_id, node_id, remote_id, migrated_at)
+                VALUES (?, ?, ?, ?, ?)", params![id, host_id, node_id, remote_id, now])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// middleware 在执行任何副作用前调用。仅新键返回 None；已完成键原样重放，pending 或
+    /// 指纹变化返回 NodeRequestConflict（HTTP 409）。连接锁不跨 await，进程内排队由 nodes 负责。
+    pub fn begin_node_request(&self, scope: &str, key: &str, fingerprint: &str) -> anyhow::Result<Option<(u16, String)>> {
+        anyhow::ensure!(!scope.is_empty() && !key.is_empty() && !fingerprint.is_empty(), "幂等请求的 scope、key、fingerprint 不能为空");
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous = tx.query_row("SELECT fingerprint, state, status, body FROM node_requests WHERE scope = ? AND request_key = ?",
+            params![scope, key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<u16>>(2)?, r.get::<_, Option<String>>(3)?)))
+            .optional()?;
+        if let Some((old, state, status, body)) = previous {
+            if old != fingerprint {
+                anyhow::bail!(NodeRequestConflict("同一个幂等请求键对应不同请求内容".into()));
+            }
+            if state != "done" {
+                anyhow::bail!(NodeRequestConflict("此前的创建请求结果未知，请刷新列表确认；不会再次创建".into()));
+            }
+            let response = (status.context("幂等请求缺少响应状态")?, body.context("幂等请求缺少响应正文")?);
+            tx.commit()?;
+            return Ok(Some(response));
+        }
+        tx.execute("INSERT INTO node_requests (scope, request_key, fingerprint, state) VALUES (?, ?, ?, 'pending')",
+            params![scope, key, fingerprint])?;
+        tx.commit()?;
+        Ok(None)
+    }
+
+    pub fn finish_node_request(&self, scope: &str, key: &str, status: u16, body: &str) -> anyhow::Result<()> {
+        anyhow::ensure!((100..=599).contains(&status), "无效的 HTTP 状态码：{status}");
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous = tx.query_row("SELECT state, status, body FROM node_requests WHERE scope = ? AND request_key = ?",
+            params![scope, key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<u16>>(1)?, r.get::<_, Option<String>>(2)?))).optional()?;
+        let (state, old_status, old_body) = previous.context("幂等请求尚未开始")?;
+        if state == "done" {
+            anyhow::ensure!(old_status == Some(status) && old_body.as_deref() == Some(body),
+                "幂等请求已经完成，不能改写原响应");
+        } else {
+            tx.execute("UPDATE node_requests SET state = 'done', status = ?, body = ? WHERE scope = ? AND request_key = ? AND state = 'pending'",
+                params![status, body, scope, key])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- 中转：端口转发（挂 SSH Host） ----
@@ -1405,6 +1654,100 @@ impl SettingsStore for std::sync::Arc<Db> {
     }
 }
 
+/// 只校验已有 SSH 输入约定，不连远端、不读取密钥文件、不解密/改写密文。
+fn legacy_host_from_project(row: &ProjectRow) -> anyhow::Result<SshHostRow> {
+    let required = |value: Option<&str>, field: &str| -> anyhow::Result<String> {
+        let value = value.filter(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
+            .with_context(|| format!("旧 SSH 项目 {} 的 {field} 缺失或无效，项目记录已保留", row.id))?;
+        Ok(value.to_string())
+    };
+    let host = required(row.ssh_host.as_deref(), "host")?;
+    let username = required(row.ssh_username.as_deref(), "username")?;
+    let port = row.ssh_port.filter(|p| (1..=65535).contains(p))
+        .with_context(|| format!("旧 SSH 项目 {} 的 port 缺失或无效，项目记录已保留", row.id))?;
+    let method = required(row.ssh_auth_method.as_deref(), "authMethod")?;
+    anyhow::ensure!(matches!(method.as_str(), "agent" | "key" | "password"),
+        "旧 SSH 项目 {} 的 authMethod 无效，项目记录已保留", row.id);
+    if method == "key" { required(row.ssh_key_path.as_deref(), "keyPath")?; }
+    Ok(SshHostRow { id: crate::askpass::hub::uuid_v4(), name: host.clone(), host, port, username,
+        auth_method: method, key_path: row.ssh_key_path.clone(), secret_enc: row.ssh_secret_enc.clone(),
+        created_at: crate::auth::now_ms() })
+}
+
+fn same_ssh_connection(a: &SshHostRow, b: &SshHostRow) -> bool {
+    a.host == b.host && a.port == b.port && a.username == b.username && a.auth_method == b.auth_method
+        && a.key_path == b.key_path && a.secret_enc == b.secret_enc
+}
+
+fn project_matches_ssh_host(p: &ProjectRow, h: &SshHostRow) -> bool {
+    p.ssh_host.as_deref() == Some(h.host.as_str()) && p.ssh_port == Some(h.port)
+        && p.ssh_username.as_deref() == Some(h.username.as_str()) && p.ssh_auth_method.as_deref() == Some(h.auth_method.as_str())
+        && p.ssh_key_path == h.key_path && p.ssh_secret_enc == h.secret_enc
+}
+
+/// 在一笔专用事务内完成预检与全部插入。常规 insert_project/exec 会吞掉错误，不能用于迁移。
+/// 插入的 ownership 与 worktree 元数据只来自受保护的迁移入口；普通 HTTP 编辑 SQL 保持原护栏。
+fn import_node_project_rows(
+    tx: &rusqlite::Transaction<'_>, manifest: &crate::host_projects::HostProjectsManifest,
+) -> anyhow::Result<()> {
+    let existing = {
+        let mut stmt = tx.prepare("SELECT * FROM projects")?;
+        stmt.query_map([], sync_project_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let additions = crate::host_projects::merge_import(&existing, manifest)?;
+    for sp in additions {
+        anyhow::ensure!(
+            tx.query_row("SELECT 1 FROM deleted_projects WHERE scope = 'local' AND remote_id = ?", [&sp.remote_id], |_| Ok(()))
+                .optional()?.is_none(),
+            "项目 {} 在本节点已有删除记录，拒绝从旧元数据恢复", sp.remote_id
+        );
+        let r = sp.row;
+        tx.execute("INSERT INTO projects (id, name, type, working_dir, shell, created_at, source_project_id,
+            worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos,
+            default_worktree_branch, updated_at, remote_id, sort_order)
+            VALUES (:id, :name, 'local', :working_dir, :shell, :created_at, :source_project_id,
+            :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos,
+            :default_worktree_branch, :updated_at, :remote_id, :sort_order)", named_params! {
+                ":id": r.id, ":name": r.name, ":working_dir": r.working_dir, ":shell": r.shell,
+                ":created_at": r.created_at, ":source_project_id": r.source_project_id,
+                ":worktree_branch": r.worktree_branch, ":worktree_repo_dir": r.worktree_repo_dir,
+                ":worktree_created_by_mojito": r.worktree_created_by_mojito, ":worktree_archived_at": r.worktree_archived_at,
+                ":multi_repos": r.multi_repos, ":default_worktree_branch": r.default_worktree_branch,
+                ":updated_at": sp.updated_at, ":remote_id": sp.remote_id, ":sort_order": sp.sort_order,
+            })?;
+    }
+    Ok(())
+}
+
+/// 迁移前备份必须经 SQLite 的 backup API，不能复制 falcon.db：最新页可能仍在 WAL 里。
+/// 调用方始终持有 Db 的连接锁，而且尚未开始写事务。保留失败时的备份文件，便于检查现场；
+/// UUID + create_new 保证重试不会覆盖上一次已完成的备份，也不会误打开已有符号链接。
+fn backup_before_node_migration(conn: &Connection, data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let path = data_dir.join(format!("falcon.db.before-node-migration.{}.bak", crate::askpass::hub::uuid_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).with_context(|| format!("创建迁移备份 {} 失败", path.display()))?;
+    let mut backup_conn = Connection::open(&path)?;
+    {
+        let backup = rusqlite::backup::Backup::new(conn, &mut backup_conn)?;
+        // 数据库仅有项目配置等小量记录，一次复制全部页。BUSY/LOCKED 直接报错留待重试，
+        // 不在持锁期间无限等待另一个进程，也绝不在备份未完成时继续迁移。
+        anyhow::ensure!(
+            backup.step(-1)? == rusqlite::backup::StepResult::Done,
+            "迁移备份 {} 未完成，数据库正在被其他进程使用",
+            path.display()
+        );
+    }
+    backup_conn.close().map_err(|(_, e)| e)?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 /// session_hosts / known_hosts / ssh_hosts 几张表的注释见上；这里是 `ALTER TABLE ADD COLUMN` 的幂等版
 fn add_column(conn: &Connection, table: &str, column: &str, ty: &str) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -1438,6 +1781,74 @@ mod tests {
 
     fn members(json: &str) -> Option<Vec<MultiRepoMember>> {
         Db::parse_multi_repos(Some(json))
+    }
+
+    #[test]
+    fn node_archive_only_returns_local_projects_even_before_ssh_migration() {
+        let (_dir, db) = tmp_db();
+        for (id, kind, host) in [("local-child", "local", None), ("unbound-ssh", "ssh", None),
+            ("bound-ssh", "ssh", Some("not-yet-migrated"))] {
+            db.insert_project(&ProjectRow { id: id.into(), project_type: kind.into(), host_id: host.map(Into::into),
+                source_project_id: Some("source".into()), worktree_created_by_mojito: Some(1),
+                worktree_archived_at: Some(1), ..project_row() });
+        }
+        assert!(!db.is_host_migrated("not-yet-migrated").unwrap());
+        assert_eq!(db.list_archived_expired(2).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["local-child"]);
+        assert_eq!(db.list_projects().len(), 3);
+    }
+
+    #[test]
+    fn node_requests_replay_completed_results_and_keep_pending_across_restarts() {
+        let (dir, db) = tmp_db();
+        assert_eq!(db.begin_node_request("projects", "key", "fingerprint").unwrap(), None);
+        let pending = db.begin_node_request("projects", "key", "fingerprint").unwrap_err();
+        assert!(pending.downcast_ref::<NodeRequestConflict>().is_some());
+        assert!(db.begin_node_request("projects", "key", "changed").is_err());
+        let body = r#"{"id":"created-once"}"#;
+        db.finish_node_request("projects", "key", 201, body).unwrap();
+        db.finish_node_request("projects", "key", 201, body).unwrap();
+        assert!(db.finish_node_request("projects", "key", 200, "{}").is_err());
+        assert_eq!(db.begin_node_request("projects", "key", "fingerprint").unwrap(), Some((201, body.into())));
+        assert_eq!(db.begin_node_request("sessions", "key", "fingerprint").unwrap(), None);
+        assert!(db.finish_node_request("sessions", "absent", 200, "{}").is_err());
+        drop(db);
+        let db = Db::open(dir.path()).unwrap();
+        assert_eq!(db.begin_node_request("projects", "key", "fingerprint").unwrap(), Some((201, body.into())));
+        let pending = db.begin_node_request("sessions", "key", "fingerprint").unwrap_err();
+        assert!(pending.downcast_ref::<NodeRequestConflict>().is_some());
+        assert!(db.list_projects().is_empty() && db.list_sessions().is_empty());
+    }
+
+    #[test]
+    fn node_import_rolls_back_every_insert_on_sql_failure() {
+        let (_dir, db) = tmp_db();
+        let manifest = serde_json::from_value(serde_json::json!({ "version": 1, "projects": [
+            { "id": "root", "name": "root", "createdAt": 1 },
+            { "id": "child", "name": "child", "createdAt": 2, "sourceProjectId": "root" }
+        ] })).unwrap();
+        db.lock().execute_batch("CREATE TRIGGER reject_child BEFORE INSERT ON projects WHEN NEW.id = 'child'
+            BEGIN SELECT RAISE(ABORT, 'simulated database failure'); END").unwrap();
+        assert!(db.node_import_projects(&manifest).is_err());
+        assert!(db.list_projects().is_empty(), "源项目先插入后也必须随失败事务回滚");
+        db.lock().execute_batch("DROP TRIGGER reject_child").unwrap();
+        db.node_import_projects(&manifest).unwrap();
+        db.node_import_projects(&manifest).unwrap();
+        assert_eq!(db.list_projects().len(), 2);
+    }
+
+    #[test]
+    fn node_import_preserves_order_and_refuses_to_resurrect_locally_deleted_projects() {
+        let (_dir, db) = tmp_db();
+        let manifest = serde_json::from_value(serde_json::json!({ "version": 1, "projects": [
+            { "id": "first", "name": "first", "createdAt": 100, "sortOrder": 1 },
+            { "id": "second", "name": "second", "createdAt": 200, "sortOrder": 0 }
+        ] })).unwrap();
+        db.node_import_projects(&manifest).unwrap();
+        assert_eq!(db.list_projects().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["second", "first"]);
+        db.delete_project("first");
+        assert!(db.node_import_projects(&manifest).is_err());
+        assert!(db.get_project("first").is_none());
+        assert!(db.get_project("second").is_some());
     }
 
     #[test]

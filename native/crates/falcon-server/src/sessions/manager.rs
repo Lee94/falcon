@@ -498,6 +498,10 @@ impl SessionManager {
             if row.state != "unverified" || row.durable != 1 || is_machine_owner(&row.project_id) {
                 continue;
             }
+            // 旧 SSH 会话无需迁移；入口重启不能再替远端节点接回或原地重开它们。
+            if owner_row(&self.db, &row.project_id).is_some_and(|p| p.project_type == "ssh") {
+                continue;
+            }
             let entry = self.hydrate_entry(&row);
             self.kick_auto_reattach(&entry);
         }

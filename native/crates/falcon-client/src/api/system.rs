@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use falcon_proto::{FsListing, FsValidateResult, OkResponse, ShellsInfo, SystemInfo};
+use falcon_proto::{FsListing, FsValidateResult, OkResponse, ServerUpdateCheck, ServerUpdateTask, ShellsInfo, SystemInfo};
 use reqwest::Method;
 use serde::Serialize;
 
@@ -10,6 +10,13 @@ use super::Query;
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
 use crate::runtime::MaybeSend;
+
+fn update_path(host_id: Option<&str>) -> String {
+    match host_id {
+        Some(id) => format!("/api/hosts/{}/node/system/update", super::seg(id)),
+        None => "/api/system/update".to_owned(),
+    }
+}
 
 /// 目录浏览 / shell 侦测在哪台机器上做。
 ///
@@ -46,6 +53,21 @@ impl FalconClient {
     /// 自带帮手按同一 argv 重开；返回后连接就会断，靠自动重连 / 重登接回。
     pub fn restart_server(&self) -> impl Future<Output = ApiResult<OkResponse>> + MaybeSend + 'static {
         self.bare(Method::POST, "/api/system/restart".to_owned())
+    }
+
+    /// 当前连接的服务端，或经网关代理的 SSH 节点。host_id 不作为 query，必须走节点路由。
+    pub fn check_server_update(&self, host_id: Option<&str>) -> impl Future<Output = ApiResult<ServerUpdateCheck>> + MaybeSend + 'static {
+        self.get(update_path(host_id))
+    }
+
+    pub fn start_server_update(&self, host_id: Option<&str>, version: &str) -> impl Future<Output = ApiResult<ServerUpdateTask>> + MaybeSend + 'static {
+        #[derive(Serialize)]
+        struct Body<'a> { version: &'a str }
+        self.json(Method::POST, update_path(host_id), json_body(&Body { version }))
+    }
+
+    pub fn server_update_status(&self, host_id: Option<&str>) -> impl Future<Output = ApiResult<ServerUpdateTask>> + MaybeSend + 'static {
+        self.get(format!("{}/status", update_path(host_id)))
     }
 
     /// `POST /api/fs/validate`：后端本机上这个路径是不是一个能进的文件夹。

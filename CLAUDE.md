@@ -46,6 +46,16 @@ cargo test --release --workspace --locked           # GitHub 发版：全量测�
 
 WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TERM_FRAME_OUTPUT` / `TERM_FRAME_REPLAY` + UTF-8 载荷），state / reconnecting / error 等控制消息走 JSON 文本帧。REST（`/api/*`）只管项目、主机、git、转发、会话的增删改查。
 
+### 宿主机节点（ADR 0027）
+
+项目与新终端会话由**所属宿主机的节点数据库与会话引擎**管理。A、C 经 SSH 连接 B 时，A/C 只聚合列表和转发业务，B 保存项目与会话；客户端布局仍按设备保存。`falcon-server/src/nodes/` 包含节点引导、SSH 部署、项目迁移和请求网关，节点身份是数据库的 `instance_id`，远端资源 ID 为 `node:<nodeId>:<base64url原ID>`。普通 REST、文件、Git 与终端 WebSocket 经网关交给所属节点，B 只把这些资源当本地项目执行；原有 SSH 执行器仍用于探测、端口转发和过渡路径。
+
+`host-projects.json` 只在首次迁移时导入，不再双向同步。迁移先备份、保持全部项目属性与附属关系；旧 terminal 不要求迁移但不能借迁移主动结束仍在运行的任务。旧 SSH 项目保留为迁移缓存，存档清扫不能再拿这些缓存删除远端目录。含 worktree 元数据的导入端点只接受 SSH 可读取的节点令牌，普通项目编辑仍不可写删除护栏字段。
+
+`falcon node ensure --data-dir <绝对目录>` 按需启动并复用回环节点；常规启动在打开数据库前取得节点进程锁，bind 后写 `node.json`。节点数据目录必须隔离，测试不得探测或部署到真实家目录。`falcon version --json` / `--version` 只打印版本与协议，不启动服务。
+
+服务端升级是 `/api/system/update` 与 `/api/system/update/status`，桌面应用更新仍按 ADR 0026。SSH 节点允许由入口下载、校验后传入节点；独立帮手完成替换与健康确认。候选服务先在维护状态完成迁移，开放业务写入之后不得恢复旧数据库覆盖新写入。项目创建、会话创建与派生请求的 `Idempotency-Key` 在节点持久化；执行中断留下 pending 时返回结果未确认，不重复执行。
+
 ### server（`native/crates/falcon-server`，路径都相对 `src/`）
 
 由 Node 版逐文件移植（ADR 与注释里提到的 `*.ts` 都在提交 `fd9022a` 的 `packages/server/src/` 里，Rust 文件名换成 snake_case），方案与实测记录在 `docs/design/rust-unification.md` §11。

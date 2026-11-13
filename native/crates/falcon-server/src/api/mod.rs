@@ -22,6 +22,7 @@ pub mod px0;
 pub mod relays;
 pub mod sessions;
 pub mod system;
+pub mod server_update;
 pub mod tailscale;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -65,6 +66,8 @@ pub struct Inner {
     pub askpass: Arc<AskpassHub>,
     /// 会话引擎（LocalSet 上的 SessionManager 等），见 engine.rs
     pub engine: EngineHandle,
+    /// 只缓存节点连接与列表；项目与会话的权威数据仍在所属节点。
+    pub nodes: crate::nodes::Gateway,
     /// 右侧栏插件（命令插件只在后端本机起进程；系统监控看远端时才借引擎拿链路）
     pub plugins: PluginHost,
     /// `POST /api/system/restart` 要的关停信号：主循环拿它走与 SIGTERM 同一条退出路径
@@ -100,6 +103,7 @@ impl AppState {
                 secrets,
                 askpass,
                 engine,
+                nodes: crate::nodes::Gateway::default(),
                 plugins,
                 shutdown: Arc::new(tokio::sync::Notify::new()),
                 restarting: AtomicBool::new(false),
@@ -132,6 +136,8 @@ pub fn app(state: AppState) -> Router {
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)))
         .fallback(not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), crate::nodes::middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), server_update::maintenance))
         .with_state(state)
 }
 
@@ -154,6 +160,8 @@ fn protected_router() -> Router<AppState> {
         .merge(sessions::router())
         .merge(askpass::router())
         .merge(system::router())
+        .merge(server_update::router())
+        .merge(crate::nodes::router())
         .merge(files::router())
         .merge(app_icon::router())
         .merge(hosts::router())

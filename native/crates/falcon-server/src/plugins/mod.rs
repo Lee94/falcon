@@ -202,7 +202,8 @@ fn check_params(params: &BTreeMap<String, String>) -> Result<(), PluginError> {
 
 /// 焦点项目 → 插件看得到的那部分（不含凭据）
 fn project_context(db: &Db, project_id: Option<&str>) -> Option<PluginProject> {
-    let row = db.get_project(project_id?)?;
+    let id = project_id?;
+    let row = db.get_project(id).or_else(|| crate::nodes::cached_project(db, id))?;
     let ssh = (row.project_type == "ssh").then(|| {
         format!(
             "{}@{}:{}",

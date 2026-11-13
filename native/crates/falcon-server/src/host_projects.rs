@@ -1,32 +1,24 @@
-//! 宿主机项目清单（`<falcon 根>/host-projects.json`）：跨「本机 Server 访问」与「远端 SSH 连接」同步项目。
+//! 旧宿主机项目清单（`<falcon 根>/host-projects.json`）的一次性迁移格式。
 //!
-//! 为什么在宿主机 `<falcon 根>`（`~/.falcon`）落一份 `host-projects.json`：
-//! - 主机 A 通过 SSH 连接主机 C 并创建项目后，主机 B 无论通过 SSH 连接主机 C、还是直接连接主机 C
-//!   上的 `falcon-server`，本质上访问的都是主机 C 这台宿主机；
-//! - 主机 C 上不一定装有 `falcon-server` 或系统 `sqlite3` 命令行，但一定有 `<falcon 根>` 目录
-//!   （`SshLink::probe` 探测出的 `facts.root` 与 `falcon-server` 默认的 `data_dir` 都是 `~/.falcon`）；
-//! - 清单只存宿主机维度的项目属性（名称、宿主机上的工作目录、shell、worktree 与多仓库元数据）与删除墓碑，
-//!   **绝不写入任何 SSH 凭据或本机 `host_id`**：
-//!   - 主机 C 本地的 `falcon-server` 将其映射为 `type = "local"` 项目；
-//!   - 主机 A / B 通过 SSH 连接主机 C 时，将其映射为绑定各自 `SshHost` 的 `type = "ssh"` 项目。
+//! 项目由宿主机节点保存，网关经节点访问；清单不再参与正常请求的双向同步。
+//! `merge_import` 只根据值规划新增行，不写数据库、不删除项目、不写回清单。
+//! 迁移的备份、事务与完成标记由 nodes::migration 和 Db 的专用方法负责。
+//! 清单只含宿主机属性，永不携带 SSH 凭据或网关自己的 host_id。
+//!
+//! `merge_scope` 及远端命令构造暂留供旧调用清理时参考；迁移不调用旧的双向合并。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
-
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::askpass::hub::uuid_v4;
 use crate::db::{Db, ProjectRow, SshHostRow, SyncProjectRow};
-use crate::exec::Exec as _;
 use crate::git::path::join_path;
 use crate::host::{HostKind, encode_powershell, quote_posix, quote_powershell};
 use crate::sessions::ssh::SshLink;
 
 pub const HOST_PROJECTS_FILE: &str = "host-projects.json";
-
-static LOCAL_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +46,8 @@ pub struct HostProjectEntry {
     pub multi_repos: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_worktree_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,7 +134,7 @@ pub fn remote_write_projects_command(kind: HostKind, root: &str, json: &str) -> 
     (cmd, json.as_bytes().to_vec())
 }
 
-fn parse_manifest(raw: &str) -> Result<HostProjectsManifest, serde_json::Error> {
+pub(crate) fn parse_manifest(raw: &str) -> Result<HostProjectsManifest, serde_json::Error> {
     if raw.trim().is_empty() {
         return Ok(HostProjectsManifest::default());
     }
@@ -307,6 +301,7 @@ pub fn merge_scope(db: &Db, scope: SyncScope<'_>, remote: &HostProjectsManifest)
                 worktree_archived_at: r.worktree_archived_at,
                 multi_repos: r.multi_repos,
                 default_worktree_branch: r.default_worktree_branch,
+                sort_order: sp.sort_order,
             }
         })
         .collect();
@@ -326,76 +321,104 @@ pub fn merge_scope(db: &Db, scope: SyncScope<'_>, remote: &HostProjectsManifest)
     (next != normalized_remote).then_some(next)
 }
 
-/// 同步本机 `data_dir/host-projects.json` 与 `db` 中的本地项目（`type = "local"`）
-pub fn sync_local(db: &Db, data_dir: &Path) {
-    let _guard = LOCAL_SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = data_dir.join(HOST_PROJECTS_FILE);
-    let remote = match std::fs::read_to_string(&path) {
-        Ok(raw) => match parse_manifest(&raw) {
-            Ok(m) => m,
-            Err(e) => {
-                log::warn!("解析本机 {} 失败，跳过同步以免覆盖：{}", path.display(), e);
-                return;
+/// 迁移纯函数：只规划新增的本地项目。同宿主 ID 已存在时元数据必须相同；
+/// 绝不采用 last-write-wins 去覆盖 working_dir、worktree 或多仓库删除目标。
+/// `remote.deleted` 只阻止清单中已删除项目被首次导入，不删除任何既有数据库记录。
+pub fn merge_import(existing: &[SyncProjectRow], remote: &HostProjectsManifest) -> anyhow::Result<Vec<SyncProjectRow>> {
+    anyhow::ensure!(remote.version <= 1, "不支持项目清单版本 {}", remote.version);
+    let by_id: HashMap<&str, &SyncProjectRow> = existing.iter().map(|p| (p.row.id.as_str(), p)).collect();
+    let mut remote_to_local = HashMap::<String, String>::new();
+    for p in existing.iter().filter(|p| p.row.project_type == "local") {
+        anyhow::ensure!(
+            remote_to_local.insert(p.remote_id.clone(), p.row.id.clone()).is_none(),
+            "本地项目的宿主 ID 重复：{}", p.remote_id
+        );
+    }
+    let mut entries = BTreeMap::<String, &HostProjectEntry>::new();
+    for p in &remote.projects {
+        anyhow::ensure!(!p.id.is_empty(), "项目 ID 为空");
+        if let Some(previous) = entries.insert(p.id.clone(), p) {
+            // 同一批内重复也必须逐字段相同。时间戳不代表项目属性，旧网关的时钟可能不同。
+            let mut normalized = previous.clone();
+            normalized.updated_at = p.updated_at;
+            normalized.sort_order = p.sort_order;
+            if same_multi_metadata(normalized.multi_repos.as_deref(), p.multi_repos.as_deref()) {
+                normalized.multi_repos = p.multi_repos.clone();
             }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HostProjectsManifest::default(),
-        Err(e) => {
-            log::warn!("读取本机 {} 失败：{}", path.display(), e);
-            return;
+            anyhow::ensure!(normalized == *p, "导入清单有同 ID 的不同项目：{}", p.id);
+            if previous.updated_at > p.updated_at {
+                entries.insert(p.id.clone(), previous);
+            }
         }
-    };
-
-    let Some(next) = merge_scope(db, SyncScope::Local, &remote) else {
-        return;
-    };
-    if next.projects.is_empty() && next.deleted.is_empty() && !path.exists() {
-        return;
     }
-    let Ok(json) = serde_json::to_string_pretty(&next) else { return };
-    let tmp = data_dir.join(format!("{HOST_PROJECTS_FILE}.tmp.{}", uuid_v4()));
-    if let Err(e) = std::fs::write(&tmp, format!("{json}\n")).and_then(|()| std::fs::rename(&tmp, &path)) {
-        let _ = std::fs::remove_file(&tmp);
-        log::warn!("写入本机 {} 失败：{}", path.display(), e);
+    entries.retain(|id, p| !remote.deleted.get(id).is_some_and(|ts| *ts > p.updated_at.max(p.created_at)));
+    for p in entries.values() {
+        if !remote_to_local.contains_key(&p.id) {
+            anyhow::ensure!(!by_id.contains_key(p.id.as_str()), "项目 ID 已被其他项目占用：{}", p.id);
+            remote_to_local.insert(p.id.clone(), p.id.clone());
+        }
+    }
+    let mut added = Vec::new();
+    for p in entries.values() {
+        let id = remote_to_local[&p.id].clone();
+        let source_project_id = p.source_project_id.as_ref().map(|source| {
+            anyhow::ensure!(!source.is_empty() && source != &p.id, "项目 {} 的源项目无效", p.id);
+            remote_to_local.get(source).cloned().ok_or_else(|| anyhow::anyhow!("项目 {} 的源项目不存在：{}", p.id, source))
+        }).transpose()?;
+        let row = ProjectRow {
+            id: id.clone(), name: p.name.clone(), project_type: "local".into(),
+            working_dir: p.working_dir.clone(), shell: p.shell.clone(), created_at: p.created_at,
+            source_project_id, worktree_branch: p.worktree_branch.clone(),
+            worktree_repo_dir: p.worktree_repo_dir.clone(), worktree_created_by_mojito: p.worktree_created_by_mojito,
+            worktree_archived_at: p.worktree_archived_at, multi_repos: p.multi_repos.clone(),
+            default_worktree_branch: p.default_worktree_branch.clone(), ..Default::default()
+        };
+        if let Some(stored) = by_id.get(id.as_str()) {
+            // updated_at 是各网关的修改时钟，sort_order 是各自列表的位置；相同宿主项目
+            // 在 A/C 的这两项可能不同。已有 B 记录的时钟和排序原样保留，新增记录才复制它们。
+            let mut comparable = row;
+            if same_multi_metadata(stored.row.multi_repos.as_deref(), comparable.multi_repos.as_deref()) {
+                comparable.multi_repos = stored.row.multi_repos.clone();
+            }
+            anyhow::ensure!(stored.row == comparable, "项目 {} 的元数据与本地记录冲突，原记录未修改", p.id);
+        } else {
+            added.push(SyncProjectRow {
+                row, remote_id: p.id.clone(), updated_at: p.updated_at.max(p.created_at), sort_order: p.sort_order,
+            });
+        }
+    }
+    // ADR 0002 只允许派生一层；不能把缺失的源项目静默改成普通项目或接到另一台机器上。
+    for p in &added {
+        if let Some(source) = p.row.source_project_id.as_deref() {
+            let src = added.iter().find(|p| p.row.id == source)
+                .or_else(|| by_id.get(source).copied())
+                .ok_or_else(|| anyhow::anyhow!("项目 {} 的源项目不存在：{source}", p.row.id))?;
+            anyhow::ensure!(src.row.project_type == "local" && src.row.source_project_id.is_none(),
+                "项目 {} 不能从附属项目派生", p.row.id);
+        }
+    }
+    added.sort_by(|a, b| a.row.source_project_id.is_some().cmp(&b.row.source_project_id.is_some())
+        .then_with(|| a.row.created_at.cmp(&b.row.created_at)).then_with(|| a.row.id.cmp(&b.row.id)));
+    Ok(added)
+}
+
+/// multi_repos 的空白和对象键顺序不改变成员与删除目标；仅比较 JSON 值，绝不改写保存的原文。
+/// 损坏 JSON 只有原文完全相同时才算重复，保留既有删除侧 veto 的行为。
+fn same_multi_metadata(a: Option<&str>, b: Option<&str>) -> bool {
+    if a == b { return true; }
+    match (a.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+           b.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
     }
 }
 
-/// 经 SSH 链路同步远端 `<root>/host-projects.json` 与 `db` 中绑定该 `host` 的 SSH 项目
-pub async fn sync_remote(db: &Db, host: &SshHostRow, link: &SshLink, kind: HostKind, root: &str) {
-    let read_cmd = remote_read_projects_command(kind, root);
-    let Ok(res) = link.exec(&read_cmd, None).await else {
-        return;
-    };
-    if !res.ok() {
-        log::debug!("读取远端 {} 的 {} 失败（code={:?}）：{}", host.name, HOST_PROJECTS_FILE, res.code, res.stderr.trim());
-        return;
-    }
-    let remote = match parse_manifest(&res.stdout) {
-        Ok(m) => m,
-        Err(e) => {
-            log::warn!("解析远端 {} 的 {} 失败，跳过同步以免覆盖：{e}", host.name, HOST_PROJECTS_FILE);
-            return;
-        }
-    };
+/// 过渡兼容入口：清单不再参与正常请求。唯一导入入口为 nodes::migration::migrate_local。
+/// 保留签名直到旧调用全部移除，避免残留调用重新写文件或传播墓碑。
+pub fn sync_local(_db: &Db, _data_dir: &Path) {}
 
-    let Some(next) = merge_scope(db, SyncScope::SshHost(host), &remote) else {
-        return;
-    };
-    if next.projects.is_empty() && next.deleted.is_empty() && res.stdout.trim().is_empty() {
-        return;
-    }
-    let Ok(json) = serde_json::to_string_pretty(&next) else { return };
-    let payload = format!("{json}\n");
-    let (write_cmd, stdin_bytes) = remote_write_projects_command(kind, root, &payload);
-    match link.exec_with_input(&write_cmd, &stdin_bytes).await {
-        Ok(w) if !w.ok() => {
-            log::warn!("写入远端 {} 的 {} 失败（code={:?}）：{}", host.name, HOST_PROJECTS_FILE, w.code, w.stderr.trim());
-        }
-        Err(e) => {
-            log::debug!("写入远端 {} 的 {} 链路中断：{e}", host.name, HOST_PROJECTS_FILE);
-        }
-        Ok(_) => {}
-    }
-}
+/// 远端项目改由宿主机节点保存；旧调用既不执行 SSH，也不写回清单。
+pub async fn sync_remote(_db: &Db, _host: &SshHostRow, _link: &SshLink, _kind: HostKind, _root: &str) {}
 
 #[cfg(test)]
 mod tests {
@@ -407,106 +430,60 @@ mod tests {
         (dir, db)
     }
 
-    fn host_row(id: &str, name: &str) -> SshHostRow {
-        SshHostRow {
-            id: id.into(),
-            name: name.into(),
-            host: "10.0.0.9".into(),
-            port: 22,
-            username: "fay".into(),
-            auth_method: "agent".into(),
-            created_at: 1,
-            ..Default::default()
-        }
+    fn entry(id: &str, source: Option<&str>) -> HostProjectEntry {
+        HostProjectEntry { id: id.into(), name: id.into(), working_dir: Some(format!("/home/fay/{id}")),
+            shell: None, created_at: 100, updated_at: 200, source_project_id: source.map(Into::into),
+            worktree_branch: source.map(|_| "feature".into()), worktree_repo_dir: source.map(|_| "/home/fay/root".into()),
+            worktree_created_by_mojito: source.map(|_| 1), worktree_archived_at: None,
+            multi_repos: None, default_worktree_branch: None, sort_order: None }
     }
 
     #[test]
-    fn ssh_host_a_to_host_c_to_ssh_host_b_and_local_server_c() {
-        // 模拟三台机器各自的 falcon.db，共享主机 C 上的同一个 host-projects.json 目录
-        let (_dir_a, db_a) = tmp_db();
-        let (_dir_b, db_b) = tmp_db();
-        let (dir_c, db_c) = tmp_db();
+    fn import_plan_is_pure_and_resolves_sources_before_inserting() {
+        let (_dir, db) = tmp_db();
+        let manifest = HostProjectsManifest { projects: vec![entry("child", Some("root")), entry("root", None)], ..Default::default() };
+        let planned = merge_import(&[], &manifest).unwrap();
+        assert_eq!(planned.iter().map(|p| p.row.id.as_str()).collect::<Vec<_>>(), ["root", "child"]);
+        assert_eq!(planned[1].row.source_project_id.as_deref(), Some("root"));
+        assert!(planned.iter().all(|p| p.row.project_type == "local" && p.row.ssh_secret_enc.is_none()));
+        assert!(db.list_projects().is_empty());
+        assert!(merge_import(&planned, &manifest).unwrap().is_empty());
+        let mut other_gateway = manifest.clone();
+        for p in &mut other_gateway.projects {
+            p.updated_at += 50_000;
+            p.sort_order = Some(42);
+        }
+        assert!(merge_import(&planned, &other_gateway).unwrap().is_empty(), "网关自己的排序/时钟不能覆盖节点记录");
+    }
 
-        let host_c_on_a = host_row("host-c-a", "HostC-from-A");
-        let host_c_on_b = host_row("host-c-b", "HostC-from-B");
-        db_a.insert_host(&host_c_on_a);
-        db_b.insert_host(&host_c_on_b);
+    #[test]
+    fn import_plan_rejects_collision_missing_source_and_second_level_derivation() {
+        let root = entry("root", None);
+        let manifest = HostProjectsManifest { projects: vec![root.clone()], ..Default::default() };
+        let planned = merge_import(&[], &manifest).unwrap();
+        let mut conflict = root.clone();
+        conflict.working_dir = Some("/another/path".into());
+        assert!(merge_import(&planned, &HostProjectsManifest { projects: vec![conflict], ..Default::default() }).is_err());
+        let missing = HostProjectsManifest { projects: vec![entry("child", Some("missing"))], ..Default::default() };
+        assert!(merge_import(&[], &missing).is_err());
+        let nested = HostProjectsManifest { projects: vec![root, entry("child", Some("root")), entry("nested", Some("child"))], ..Default::default() };
+        assert!(merge_import(&[], &nested).is_err());
+    }
 
-        // 1. 主机 A 连接主机 C 并创建 SSH 项目 p1
-        db_a.insert_project(&ProjectRow {
-            id: "p1".into(),
-            name: "Alpha".into(),
-            project_type: "ssh".into(),
-            working_dir: Some("/home/fay/alpha".into()),
-            host_id: Some(host_c_on_a.id.clone()),
-            ssh_host: Some(host_c_on_a.host.clone()),
-            ssh_port: Some(host_c_on_a.port),
-            ssh_username: Some(host_c_on_a.username.clone()),
-            ssh_auth_method: Some(host_c_on_a.auth_method.clone()),
-            created_at: 100,
-            ..Default::default()
-        });
-
-        // 主机 A 将项目同步到主机 C 的清单
-        let manifest_after_a = merge_scope(&db_a, SyncScope::SshHost(&host_c_on_a), &HostProjectsManifest::default())
-            .expect("主机 A 新建项目后应产出清单");
-        std::fs::write(
-            dir_c.path().join(HOST_PROJECTS_FILE),
-            serde_json::to_string_pretty(&manifest_after_a).unwrap(),
-        )
-        .unwrap();
-
-        // 2. 主机 B 通过 SSH 连接主机 C 后，能够读到主机 A 创建的项目 p1，并绑定到主机 B 自己的 host_id
-        let next_b = merge_scope(&db_b, SyncScope::SshHost(&host_c_on_b), &manifest_after_a);
-        assert_eq!(next_b, None, "主机 B 只读入且无本地新增时无需回写清单");
-        let b_projects = db_b.list_projects();
-        assert_eq!(b_projects.len(), 1);
-        assert_eq!(b_projects[0].id, "p1");
-        assert_eq!(b_projects[0].name, "Alpha");
-        assert_eq!(b_projects[0].project_type, "ssh");
-        assert_eq!(b_projects[0].host_id.as_deref(), Some("host-c-b"));
-        assert_eq!(b_projects[0].working_dir.as_deref(), Some("/home/fay/alpha"));
-
-        // 3. 直接通过 Server 访问主机 C 时，主机 C 的 falcon-server 也能读到 p1（作为本地项目）
-        sync_local(&db_c, dir_c.path());
-        let c_projects = db_c.list_projects();
-        assert_eq!(c_projects.len(), 1);
-        assert_eq!(c_projects[0].id, "p1");
-        assert_eq!(c_projects[0].name, "Alpha");
-        assert_eq!(c_projects[0].project_type, "local");
-        assert_eq!(c_projects[0].working_dir.as_deref(), Some("/home/fay/alpha"));
-
-        // 4. 在主机 C 的 Server 上新建本地项目 p2，主机 A 和主机 B 通过 SSH 同步后也能读到 p2
-        db_c.insert_project(&ProjectRow {
-            id: "p2".into(),
-            name: "Beta".into(),
-            project_type: "local".into(),
-            working_dir: Some("/home/fay/beta".into()),
-            created_at: 200,
-            ..Default::default()
-        });
-        sync_local(&db_c, dir_c.path());
-        let manifest_from_c: HostProjectsManifest =
-            serde_json::from_str(&std::fs::read_to_string(dir_c.path().join(HOST_PROJECTS_FILE)).unwrap()).unwrap();
-        assert_eq!(manifest_from_c.projects.len(), 2);
-
-        merge_scope(&db_a, SyncScope::SshHost(&host_c_on_a), &manifest_from_c);
-        merge_scope(&db_b, SyncScope::SshHost(&host_c_on_b), &manifest_from_c);
-        assert_eq!(db_a.list_projects().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p1", "p2"]);
-        assert_eq!(db_b.list_projects().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p1", "p2"]);
-
-        // 5. 在主机 B 上删除 p1，同步后主机 A 与主机 C 的 p1 一并删除
-        db_b.delete_project("p1");
-        let manifest_after_del = merge_scope(&db_b, SyncScope::SshHost(&host_c_on_b), &manifest_from_c)
-            .expect("删除项目后应产出带墓碑的新清单");
-        std::fs::write(
-            dir_c.path().join(HOST_PROJECTS_FILE),
-            serde_json::to_string_pretty(&manifest_after_del).unwrap(),
-        )
-        .unwrap();
-        merge_scope(&db_a, SyncScope::SshHost(&host_c_on_a), &manifest_after_del);
-        sync_local(&db_c, dir_c.path());
-        assert_eq!(db_a.list_projects().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p2"]);
-        assert_eq!(db_c.list_projects().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p2"]);
+    #[test]
+    fn tombstones_do_not_delete_existing_projects_and_compatibility_sync_never_writes() {
+        let (dir, db) = tmp_db();
+        db.insert_project(&ProjectRow { id: "root".into(), name: "root".into(), project_type: "local".into(), created_at: 100,
+            working_dir: Some("/home/fay/root".into()), ..Default::default() });
+        let manifest = HostProjectsManifest { projects: vec![entry("root", None), entry("deleted", None)],
+            deleted: [("root".into(), 500), ("deleted".into(), 500)].into(), ..Default::default() };
+        let raw = serde_json::to_string(&manifest).unwrap();
+        let path = dir.path().join(HOST_PROJECTS_FILE);
+        std::fs::write(&path, &raw).unwrap();
+        let before = db.list_projects();
+        assert!(merge_import(&db.list_sync_projects(), &manifest).unwrap().is_empty());
+        sync_local(&db, dir.path());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+        assert_eq!(db.list_projects(), before);
     }
 }

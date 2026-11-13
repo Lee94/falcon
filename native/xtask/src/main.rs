@@ -22,7 +22,7 @@ mod win;
 const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
-  server [--target <平台>]               服务端发布单文件（内嵌 5 个目标的会话守护进程），产物 release/falcon-v<版本>-<平台>
+  server [--target <平台>] [--skip-sessiond] 服务端发布单文件（内嵌 5 个目标守护进程）；跳过构建时须已有 target-sessiond/embed/*.gz
   pkg [--skip-bin]                       macOS 安装包（Falcon.app = 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，只有原生客户端）
   android [--jni-only]                   Android 安装包（Rust JNI + Gradle，产物 release/falcon-v<版本>-android.apk）
@@ -38,10 +38,10 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
   vendor-themes [--from <目录> | --github]
 
 协议 fixture
-  fixtures                               起真服务端，把各接口的响应落盘到 falcon-proto/tests/fixtures/
+  fixtures [--node-updates-only]         起真服务端生成协议样本；可只更新节点与升级接口
   compare-fixtures <基准目录> <对照目录>  比两套 fixture 的形状
 
-平台名：darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64（与 release 产物的后缀一致）。";
+平台名：darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64 / win32-x64（Windows 产物加 .exe）。";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
