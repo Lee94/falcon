@@ -1010,14 +1010,14 @@ impl SessionManager {
         self.virtual_dirs.borrow_mut().remove(project_id);
     }
 
-    /// 删容器时清理虚拟目录。克制：只删 falcon 写的固定文件 + 非递归 rmdir——
-    /// 它是会话 cwd，agent/用户可能落了别的文件，非空整目录保留。
+    /// 删容器时递归清理 Falcon 数据根下的虚拟目录及其额外文件。
+    /// 目标始终按项目 id 计算，不取成员目录或自定义 working_dir。
     /// 返回 warning 文本或 None；链路故障往上抛，调用方决定要不要打扰用户。
     pub async fn remove_virtual_dir(&self, project: &ProjectRow) -> anyhow::Result<Option<String>> {
         self.virtual_dirs.borrow_mut().remove(&project.id);
         let (dir, left) = if project.project_type == "local" {
             let dir = self.local_virtual_dir(&project.id);
-            let left = !remove_local_virtual_dir(&dir);
+            let left = !remove_local_virtual_dir(&dir).await;
             (dir.to_string_lossy().into_owned(), left)
         } else {
             let link = self.get_link(project);
@@ -1030,7 +1030,7 @@ impl SessionManager {
             let left = crate::term_env::js::trim(&res.stdout) == "left";
             (dir, left)
         };
-        Ok(left.then(|| format!("虚拟项目目录未删除（内有其他文件）：{dir}")))
+        Ok(left.then(|| format!("虚拟项目目录清理失败，请手动清理：{dir}")))
     }
 
     /// 主机删掉了：它上面的「无项目」独立会话跟着终止，链路拆掉（主机的行没了，断线重连也找不到它）。

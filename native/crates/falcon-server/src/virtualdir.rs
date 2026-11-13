@@ -70,7 +70,7 @@ pub struct WindowsManifestWrite {
     pub stdin_base64: String,
 }
 
-/// 容器虚拟目录的固定文件清单——删除侧只认这三个名字，多一个都不碰
+/// 容器虚拟目录的固定生成文件清单
 const VIRTUAL_DIR_FILES: [&[&str]; 3] = [&["AGENTS.md"], &["CLAUDE.md"], &[".claude", "settings.json"]];
 
 /// 虚拟目录：<falcon 根>/projects/<projectId>。root = 本地 dataDir 或远端 ~/.falcon
@@ -189,16 +189,11 @@ pub fn write_local_manifest(dir: &Path, files: &[ManifestFile]) -> std::io::Resu
     Ok(())
 }
 
-/// 本地清理，口径同 [`posix_remove_virtual_dir_command`]：只删固定文件 + 非递归 rmdir。
-/// 返回 true = 目录已不在；false = 还在（内有其他文件）
-pub fn remove_local_virtual_dir(dir: &Path) -> bool {
-    for rel in VIRTUAL_DIR_FILES {
-        // ENOENT = 本来就没有；其他错误留给下面的 rmdir 去失败
-        let _ = std::fs::remove_file(rel.iter().fold(dir.to_path_buf(), |p, seg| p.join(seg)));
-    }
-    // 不存在或非空都不要紧，只影响最外层 rmdir 的结果
-    let _ = std::fs::remove_dir(dir.join(".claude"));
-    match std::fs::remove_dir(dir) {
+/// 只用于 Falcon 数据根下的虚拟目录：额外文件随项目一并清理，成员仓库在目录外。
+/// remove_dir_all 不跟随符号链接；递归放到阻塞线程池，避免卡住会话引擎。
+/// 返回 true = 目录已不在；false = 文件系统清理失败。
+pub async fn remove_local_virtual_dir(dir: &Path) -> bool {
+    match tokio::fs::remove_dir_all(dir).await {
         Ok(()) => true,
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
     }
@@ -256,36 +251,29 @@ pub fn windows_write_manifest_commands(dir: &str, files: &[ManifestFile]) -> Vec
 
 // ---------------- 容器虚拟目录清理 ----------------
 // 虚拟目录住在 falcon 根下，属 falcon 自有目录，参照 paste.ts 自行清理，
-// 不进 remove.ts（那里管的是用户可见路径）。但删除动作同样克制：只删固定
-// 文件名 + 非递归 rmdir——虚拟目录是会话 cwd，agent/用户可能在里面落了
-// 别的文件，非空就整目录保留，stdout 报 left 让上层给 warning。
+// 不进 git/remove.rs（那里管的是 worktree）。删除容器时连同 agent/用户
+// 在虚拟目录内留下的文件递归删除；绝不能用成员路径或自定义 working_dir 替代它。
 
-/// stdout 协议：gone = 目录已不在；left = 目录还在（内有其他文件）
+/// stdout 协议：gone = 目录已不在；left = 清理失败。
 pub fn posix_remove_virtual_dir_command(dir: &str) -> String {
-    let files = VIRTUAL_DIR_FILES.iter().map(|rel| format!("\"$d\"/{}", rel.join("/"))).collect::<Vec<_>>().join(" ");
     format!(
-        "d={}; rm -f -- {files}; \
-         rmdir -- \"$d\"/.claude 2>/dev/null; \
-         if [ ! -e \"$d\" ]; then printf gone; \
-         elif rmdir -- \"$d\" 2>/dev/null; then printf gone; else printf left; fi",
+        "d={}; if rm -rf -- \"$d\" && [ ! -e \"$d\" ] && [ ! -L \"$d\" ]; \
+         then printf gone; else printf left; fi",
         quote_posix(dir)
     )
 }
 
-/// Windows：[IO.File]::Delete / [IO.Directory]::Delete($p, $false) 吃字面量且
-/// 非递归——不用 Remove-Item（-Path 的通配陷阱见 install.ts 的 cleanup 注释）。
-/// File.Delete 对不存在的文件不抛，但父目录不存在时抛 DirectoryNotFound，
-/// 所以每条都包 try/catch：删不掉的后果只是 rmdir 失败 → left，方向安全。
+/// Windows：.NET 的递归删除吃字面量且不穿越子目录 junction，
+/// 不用 PowerShell 5.1 的 Remove-Item -Recurse（会走进 junction 的目标）。
+/// 顶层 reparse point 不递归，避免把虚拟目录之外的内容当作清理目标。
 pub fn windows_remove_virtual_dir_command(dir: &str) -> String {
-    let mut script = vec![
+    let script = [
         format!("$d = {}", quote_powershell(dir)),
         "if (-not (Test-Path -LiteralPath $d)) { 'gone'; exit 0 }".to_string(),
+        "try { $i = Get-Item -LiteralPath $d -Force -ErrorAction Stop; \
+         if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { 'left'; exit 0 }; \
+         [IO.Directory]::Delete($d, $true); 'gone' } catch { 'left' }".to_string(),
     ];
-    script.extend(VIRTUAL_DIR_FILES.iter().map(|rel| {
-        format!("try {{ [IO.File]::Delete((Join-Path $d {})) }} catch {{}}", quote_powershell(&rel.join("\\")))
-    }));
-    script.push("try { [IO.Directory]::Delete((Join-Path $d '.claude'), $false) } catch {}".to_string());
-    script.push("try { [IO.Directory]::Delete($d, $false); 'gone' } catch { 'left' }".to_string());
     encode_powershell(&script.join("; "))
 }
 
@@ -692,24 +680,22 @@ mod tests {
             posix_remove_virtual_dir_command("/home/u/.falcon/projects/id")
         }
 
-        /// it("removes only the three fixed files, then rmdirs non-recursively")
         #[test]
-        fn removes_only_the_three_fixed_files() {
+        fn removes_the_entire_virtual_directory() {
             let cmd = cmd();
-            assert!(cmd.contains(r#"rm -f -- "$d"/AGENTS.md "$d"/CLAUDE.md "$d"/.claude/settings.json; "#));
-            assert!(cmd.contains(r#"rmdir -- "$d"/.claude"#));
-            assert!(!cmd.contains("rm -r"));
+            assert!(cmd.contains(r#"rm -rf -- "$d""#));
+            assert!(!cmd.contains("rmdir"));
         }
 
         /// it("reports gone|left on stdout, and gone when the dir never existed")
         #[test]
         fn reports_gone_or_left() {
             let cmd = cmd();
-            assert!(cmd.contains(r#"if [ ! -e "$d" ]; then printf gone; "#));
+            assert!(cmd.contains(r#"&& [ ! -e "$d" ] && [ ! -L "$d" ]; "#));
             assert!(cmd.contains("then printf gone; else printf left; fi"));
         }
 
-        /// Rust 侧补充：用 sh 真跑——只剩清单时 gone，有别的文件时 left 且别的文件还在，目录不在时 gone
+        /// 真跑远端脚本：额外文件与嵌套目录一并清理，不跟随符号链接；重复删除幂等。
         #[cfg(unix)]
         #[test]
         fn runs_in_sh() {
@@ -737,9 +723,17 @@ mod tests {
             assert_eq!(run(&dir), "gone");
             write_all(&dir);
             std::fs::write(dir.join("notes.txt"), "x").unwrap();
-            assert_eq!(run(&dir), "left");
-            assert!(dir.join("notes.txt").exists());
-            assert!(!dir.join("AGENTS.md").exists() && !dir.join(".claude").exists());
+            std::fs::create_dir_all(dir.join(".claude/notes/nested")).unwrap();
+            std::fs::write(dir.join(".claude/notes/nested/result.txt"), "output").unwrap();
+            let member = tmp.path().join("member[1]");
+            std::fs::create_dir_all(&member).unwrap();
+            std::fs::write(member.join("keep.txt"), "member data").unwrap();
+            std::os::unix::fs::symlink(&member, dir.join("member-link")).unwrap();
+            std::os::unix::fs::symlink(tmp.path().join("missing"), dir.join("broken-link")).unwrap();
+            assert_eq!(run(&dir), "gone");
+            assert!(!dir.exists());
+            assert_eq!(std::fs::read_to_string(member.join("keep.txt")).unwrap(), "member data");
+            assert_eq!(run(&dir), "gone");
         }
     }
 
@@ -751,15 +745,14 @@ mod tests {
             decode(&windows_remove_virtual_dir_command("C:\\u\\.falcon\\projects\\a[1]b"))
         }
 
-        /// it("uses literal-path IO.File/IO.Directory deletes, never Remove-Item or -Recurse")
+        /// 递归删除只作用于字面路径，顶层链接不进入；不用会穿越 junction 的 Remove-Item。
         #[test]
         fn uses_literal_path_deletes() {
             let script = script();
-            assert_match(&script, r"\[IO\.File\]::Delete\(\(Join-Path \$d 'AGENTS\.md'\)\)");
-            assert_match(&script, r"\[IO\.File\]::Delete\(\(Join-Path \$d 'CLAUDE\.md'\)\)");
-            assert_match(&script, r"\[IO\.File\]::Delete\(\(Join-Path \$d '\.claude\\settings\.json'\)\)");
-            assert_match(&script, r"\[IO\.Directory\]::Delete\(\(Join-Path \$d '\.claude'\), \$false\)");
-            assert_match(&script, r"\[IO\.Directory\]::Delete\(\$d, \$false\); 'gone'");
+            assert!(script.contains("Get-Item -LiteralPath $d -Force -ErrorAction Stop"));
+            assert!(script.contains("[IO.FileAttributes]::ReparsePoint) { 'left'; exit 0 }"));
+            assert_match(&script, r"\[IO\.Directory\]::Delete\(\$d, \$true\); 'gone'");
+            assert!(script.contains("catch { 'left' }"));
             assert!(!script.contains("Remove-Item"));
             assert!(!script.contains("-Recurse"));
         }

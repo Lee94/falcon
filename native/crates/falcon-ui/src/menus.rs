@@ -583,7 +583,9 @@ pub fn delete_project(ws: &Entity<Workspace>, project: &Project, window: &mut Wi
     if !kids.is_empty() {
         foot.push(t!("worktree.cascadeFootnote", n = kids.len()).to_string());
     }
-    if project.project_type == falcon_proto::ProjectType::Ssh {
+    if project.multi.is_some() && project.worktree.is_none() {
+        foot.push(t!("multi.deleteVirtualDirFootnote").to_string());
+    } else if project.project_type == falcon_proto::ProjectType::Ssh {
         foot.push(t!("project.deleteFootnote").to_string());
     }
     let n_live = live.len();
@@ -612,7 +614,12 @@ pub fn delete_project(ws: &Entity<Workspace>, project: &Project, window: &mut Wi
                 cx.update(|cx| {
                     match result {
                         Ok(res) => {
-                            toast(&ws3, ToastKind::Danger, t!("project.deleted", name = p.name.clone()).to_string(), Some(t!("project.deletedBody", n = n_live).to_string()), cx);
+                            let body = if p.multi.is_some() && p.worktree.is_none() {
+                                None
+                            } else {
+                                Some(t!("project.deletedBody", n = n_live).to_string())
+                            };
+                            toast(&ws3, ToastKind::Danger, t!("project.deleted", name = p.name.clone()).to_string(), body, cx);
                             report_leftovers(&ws3, res.warnings, cx);
                         }
                         Err(err) => fail(&ws3, &err, cx),

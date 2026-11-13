@@ -17,6 +17,7 @@ use falcon_client::{FalconClient, ProbeTarget};
 use falcon_proto::FsListing;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Backspace, Enter, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_kit::component::Disableable;
 use gpui_kit::prelude::*;
@@ -27,7 +28,7 @@ use crate::dialogs::project_form::kit::error_line;
 use crate::theme::{Ui, radius};
 use crate::zoom::zpx;
 
-pub type OnSelect = Rc<dyn Fn(String, &mut Window, &mut App)>;
+pub type OnSelect = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
 pub type OnClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub struct FolderPicker {
@@ -35,6 +36,9 @@ pub struct FolderPicker {
     target: ProbeTarget,
     /// 列的是 SSH 远端：加载中文案说"正在连接远端"
     remote: bool,
+    multiple: bool,
+    /// 用绝对路径记选择，筛选或进入别的目录不会丢失；顺序就是添加成员的顺序。
+    selected: Vec<String>,
     listing: Option<FsListing>,
     /// 路径框（可手敲再跳转）
     draft: Entity<InputState>,
@@ -55,6 +59,7 @@ impl FolderPicker {
         client: FalconClient,
         target: ProbeTarget,
         remote: bool,
+        multiple: bool,
         initial_path: &str,
         on_select: OnSelect,
         on_close: OnClose,
@@ -75,6 +80,8 @@ impl FolderPicker {
             client,
             target,
             remote,
+            multiple,
+            selected: Vec::new(),
             listing: None,
             draft,
             filter,
@@ -195,16 +202,21 @@ impl FolderPicker {
     }
 
     fn select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.listing.as_ref().map(|l| l.path.clone()).filter(|p| !p.is_empty()) else {
-            return;
+        let paths = if self.multiple && !self.selected.is_empty() {
+            self.selected.clone()
+        } else {
+            let Some(path) = self.listing.as_ref().map(|l| l.path.clone()).filter(|p| !p.is_empty()) else {
+                return;
+            };
+            vec![path]
         };
-        if self.confirming {
+        if self.busy || self.confirming {
             return;
         }
         // 回调会回头改外面的表单（表单又会改这个视图的 confirming）：推迟到这次更新结束，
         // 免得同一个实体被重入更新
         let f = self.on_select.clone();
-        window.defer(cx, move |window, cx| f(path, window, cx));
+        window.defer(cx, move |window, cx| f(paths, window, cx));
     }
 }
 
@@ -213,7 +225,7 @@ impl Render for FolderPicker {
         let ui = Ui::global(cx).clone();
         let has_listing = self.listing.is_some();
         let has_parent = self.listing.as_ref().is_some_and(|l| l.parent.is_some());
-        let can_select = self.listing.as_ref().is_some_and(|l| !l.path.is_empty());
+        let can_select = !self.selected.is_empty() || self.listing.as_ref().is_some_and(|l| !l.path.is_empty());
         let busy = self.busy;
 
         let tool = |id: &'static str, icon: IconName, tip: String, enabled: bool| {
@@ -314,6 +326,8 @@ impl Render for FolderPicker {
                 let on = i == self.highlight;
                 let hidden = entry.name.starts_with('.');
                 let path = entry.path.clone();
+                let toggle_path = path.clone();
+                let checked = self.selected.contains(&path);
                 let mut row = div()
                     .id(SharedString::from(format!("fp-row-{i}")))
                     .flex_none()
@@ -332,6 +346,28 @@ impl Render for FolderPicker {
                         }
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| this.enter(path.clone(), window, cx)))
+                    .when(self.multiple, |row| {
+                        row.child(
+                            div()
+                                .id(SharedString::from(format!("fp-check-wrap-{i}")))
+                                .flex_none()
+                                // 复选框只勾选，不能同时触发行点击进入目录。
+                                .on_click(|_, _, cx| cx.stop_propagation())
+                                .child(
+                                    Checkbox::new(SharedString::from(format!("fp-check-{i}")))
+                                        .checked(checked)
+                                        .disabled(busy || self.confirming)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(at) = this.selected.iter().position(|p| p == &toggle_path) {
+                                                this.selected.remove(at);
+                                            } else {
+                                                this.selected.push(toggle_path.clone());
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    })
                     .child(crate::ui::icon(IconName::Folder).size(zpx(14.)).flex_none().text_color(ui.muted_foreground))
                     .child(div().min_w_0().truncate().child(entry.name.clone()));
                 row = if on {
@@ -345,13 +381,22 @@ impl Render for FolderPicker {
             }
         }
 
-        let select_label = if self.confirming { t!("project.creating") } else { t!("project.pickSelect") };
+        let select_label = if self.confirming {
+            t!("project.creating")
+        } else if self.multiple && !self.selected.is_empty() {
+            t!("project.pickSelected", n = self.selected.len())
+        } else {
+            t!("project.pickSelect")
+        };
         div()
             .flex()
             .flex_col()
             .gap_3()
             .child(toolbar)
             .child(filter)
+            .when(self.multiple, |d| {
+                d.child(div().text_xs().text_color(ui.muted_foreground).child(t!("project.pickMultipleHint").to_string()))
+            })
             .child(list)
             .when_some(self.error.clone(), |d, e| d.child(error_line(e, cx)))
             .child(
@@ -373,7 +418,7 @@ impl Render for FolderPicker {
                         Button::new("fp-select")
                             .primary()
                             .label(select_label.to_string())
-                            .disabled(!can_select || self.confirming)
+                            .disabled(!can_select || busy || self.confirming)
                             .on_click(cx.listener(|this, _, window, cx| this.select(window, cx))),
                     ),
             )

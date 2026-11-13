@@ -414,8 +414,8 @@ async fn remove(
                         )),
                     }
                 } else if row.multi_repos.is_some() {
-                    // 容器：清 falcon 根下的虚拟项目目录（克制删除，非空保留 + warning，
-                    // 见 manager.remove_virtual_dir）。它在 falcon 自己的数据根里，链路都
+                    // 容器：递归清理 falcon 根下的虚拟项目目录及其中的额外文件。
+                    // 它在 falcon 自己的数据根里，链路都
                     // 连不上时连目录在不在都不知道，只记日志不打扰用户
                     match engine.sessions.remove_virtual_dir(row).await {
                         Ok(Some(w)) => warnings.push(w),
@@ -450,8 +450,48 @@ async fn remove(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::{TestApp, json_of};
+    use axum::body::Body;
+    use axum::http::Request;
     use axum::http::StatusCode;
     use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn deleting_multi_project_removes_nonempty_virtual_directory_but_keeps_member_repos() {
+        let app = TestApp::new();
+        let member = app.local_project("member");
+        std::fs::write(member.join("keep.txt"), "member data").unwrap();
+        let (status, created) = json_of(app.post_json("/api/projects", json!({
+            "name": "Multi", "type": "local", "repos": [member.to_string_lossy()]
+        })).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["id"].as_str().unwrap();
+        // 文件面板首次打开会生成真正的会话 cwd 与清单。
+        assert_eq!(app.get(&format!("/api/projects/{id}/files")).await.status(), StatusCode::OK);
+        let dir = app.data_dir.join("projects").join(id);
+        assert!(dir.join("AGENTS.md").exists());
+        // 后来改用自定义 cwd，删除时仍只能清原来的虚拟目录。
+        let (status, _) = json_of(app.put_json(&format!("/api/projects/{id}"), json!({
+            "name": "Multi", "type": "local", "workingDir": member.to_string_lossy()
+        })).await).await;
+        assert_eq!(status, StatusCode::OK);
+        std::fs::create_dir_all(dir.join(".claude/notes/nested")).unwrap();
+        std::fs::write(dir.join(".claude/notes/nested/result.txt"), "agent output").unwrap();
+        std::fs::write(dir.join("user-notes.txt"), "notes").unwrap();
+        // 清理不能递归穿过链接删到真实成员，也不能碰到其他虚拟目录。
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&member, dir.join("member-link")).unwrap();
+        let neighbor = app.data_dir.join("projects/neighbor");
+        std::fs::create_dir_all(&neighbor).unwrap();
+        std::fs::write(neighbor.join("keep.txt"), "neighbor data").unwrap();
+
+        let (status, body) = json_of(app.send(Request::delete(format!("/api/projects/{id}"))
+            .body(Body::empty()).unwrap()).await).await;
+        assert_eq!((status, body), (StatusCode::OK, json!({"ok": true})));
+        assert!(app.state.db.get_project(id).is_none());
+        assert!(!dir.exists());
+        assert_eq!(std::fs::read_to_string(member.join("keep.txt")).unwrap(), "member data");
+        assert_eq!(std::fs::read_to_string(neighbor.join("keep.txt")).unwrap(), "neighbor data");
+    }
 
     fn ids(body: &Value) -> Vec<&str> {
         body.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect()

@@ -490,12 +490,12 @@ impl ProjectForm {
     fn make_picker(&mut self, initial: String, for_repo: bool, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let (this_sel, this_close) = (this.clone(), this);
-        let on_select: crate::dialogs::folder_picker::OnSelect = std::rc::Rc::new(move |dir, window, cx| {
+        let on_select: crate::dialogs::folder_picker::OnSelect = std::rc::Rc::new(move |dirs, window, cx| {
             this_sel
                 .update(cx, |f, cx| {
                     if for_repo {
-                        f.pick_repo_folder(dir, window, cx)
-                    } else {
+                        f.pick_repo_folders(dirs, window, cx)
+                    } else if let Some(dir) = dirs.into_iter().next() {
                         f.pick_folder(dir, window, cx)
                     }
                 })
@@ -513,7 +513,7 @@ impl ProjectForm {
         let client = self.ws.read(cx).client.clone();
         let target = self.probe_target();
         let remote = self.project_type() == ProjectType::Ssh;
-        let picker = cx.new(|cx| FolderPicker::new(client, target, remote, &initial, on_select, on_close, window, cx));
+        let picker = cx.new(|cx| FolderPicker::new(client, target, remote, for_repo, &initial, on_select, on_close, window, cx));
         picker.update(cx, |p, cx| p.focus(window, cx));
         self.picker = Some(picker);
     }
@@ -562,14 +562,16 @@ impl ProjectForm {
         self.leave_picker(window, cx);
     }
 
-    /// 多仓库档「添加仓库」：选中即追加，不关外层表单；重复选中静默去重
-    fn pick_repo_folder(&mut self, dir: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// 多仓库档「添加仓库」：一次追加全部选中目录，不关外层表单；重复选中静默去重
+    fn pick_repo_folders(&mut self, dirs: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
-        if !self.repos.iter().any(|r| r.read(cx).value().as_ref() == dir) {
-            let input = cx.new(|cx| InputState::new(window, cx).default_value(dir));
-            self.repos.push(input);
+        for dir in dirs {
+            if !self.repos.iter().any(|r| r.read(cx).value().as_ref() == dir) {
+                let input = cx.new(|cx| InputState::new(window, cx).default_value(dir));
+                self.repos.push(input);
+            }
         }
         self.leave_picker(window, cx);
     }
