@@ -18,7 +18,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::{
     Bounds, Context, CursorStyle, Image, ImageFormat, ImageSource, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, PinchEvent, Pixels, Point, Render, RenderImage,
-    ScrollWheelEvent, SharedString, Window, canvas, checkerboard, div, img, px,
+    ScrollEvent, SharedString, Window, canvas, checkerboard, div, img, px,
 };
 use rust_i18n::t;
 
@@ -197,7 +197,7 @@ impl ImagePane {
         self.zoom_to(Zoom::Scale(g.scale(self.zoom) * factor), at, cx);
     }
 
-    fn on_wheel(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, e: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(g) = self.geometry() else { return };
         // 鼠标滚轮一格是一"行"，照 React 版在浏览器里一格约 100px 折算；触控板给的是像素
         let delta = e.delta.pixel_delta(px(100.));
@@ -294,7 +294,7 @@ impl Render for ImagePane {
             .relative()
             .overflow_hidden()
             .when(overflowing, |d| d.cursor(if dragging { CursorStyle::ClosedHand } else { CursorStyle::OpenHand }))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .on_pinch(cx.listener(Self::on_pinch))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
             .on_mouse_move(cx.listener(Self::on_move))
@@ -362,7 +362,7 @@ impl ImagePane {
                 .text_color(ui.muted_foreground)
                 // 条上的点击别漏到底下的画布（双击会切缩放、按下会开始拖）
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_scroll(|_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .id("image-dims")

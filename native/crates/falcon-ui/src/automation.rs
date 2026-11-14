@@ -328,7 +328,7 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                     cx,
                 );
                 window.dispatch_event(
-                    PlatformInput::ScrollWheel(gpui_kit::ScrollWheelEvent {
+                    PlatformInput::ScrollWheel(gpui_kit::ScrollEvent {
                         position,
                         delta: gpui_kit::ScrollDelta::Pixels(Point::new(px(v[2]), px(v[3]))),
                         modifiers: Modifiers::default(),

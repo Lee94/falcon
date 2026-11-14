@@ -24,7 +24,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ListHorizontalSizingBehavior, ListSizingBehavior,
-    Pixels, Render, ScrollDelta, ScrollWheelEvent, SharedString, Task, UniformListScrollHandle, Window, div, point, px,
+    Pixels, Render, ScrollDelta, ScrollEvent, SharedString, Task, UniformListScrollHandle, Window, div, point, px,
     uniform_list,
 };
 use rust_i18n::t;
@@ -526,7 +526,7 @@ fn vscrollbar(handle: &UniformListScrollHandle, hovered: bool) -> impl IntoEleme
 /// 了这一下的 delta、还没夹回范围：落点仍在 [-max, 0] 里就是接住了，调用方据此 stop_propagation，
 /// 否则画布会跟着一起横滚（React 版的 innerTakesWheel：窗口内部还能沿手势方向滚时让给内部）。
 /// 一下滚过头的那次算没接住，最多与画布重叠一次，换来不用去猜 Lines 滚轮在 list 里的行高
-fn list_took_x(handle: &UniformListScrollHandle, e: &ScrollWheelEvent) -> bool {
+fn list_took_x(handle: &UniformListScrollHandle, e: &ScrollEvent) -> bool {
     let (dx, dy) = match e.delta {
         ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
         ScrollDelta::Lines(l) => (l.x, l.y),
@@ -700,7 +700,7 @@ impl DiffView {
             .relative()
             .size_full()
             .on_hover(cx.listener(Self::set_hovered))
-            .on_scroll_wheel(move |e: &ScrollWheelEvent, _, cx| {
+            .on_scroll(move |e: &ScrollEvent, _, cx| {
                 if list_took_x(&h, e) {
                     cx.stop_propagation();
                 }
@@ -751,7 +751,7 @@ impl DiffView {
                 .h_full()
                 // 横向跟着滚：list 自己的滚轮处理先跑（子元素后注册、冒泡时先执行），这里把
                 // 它刚得到的位置抄给另一栏；纵向在 render 里再对齐一次（拖滚动条也要跟）
-                .on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+                .on_scroll(cx.listener(move |this, e: &ScrollEvent, _, cx| {
                     this.wheel_side = side;
                     let p = me.0.borrow().base_handle.offset();
                     other.0.borrow().base_handle.set_offset(p);

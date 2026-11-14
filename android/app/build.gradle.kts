@@ -1,17 +1,16 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "com.falcon.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.falcon.android"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 328
         versionName = "0.3.28"
 
