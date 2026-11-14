@@ -348,10 +348,12 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
     let tn = schtasks_name();
     match cmd {
         "install" => {
+            let existing = existing_task_args();
             // 没带启动参数时保留已装任务的原参数（升级场景：任务 XML 里的 Command+Arguments）
             let keep: Vec<String> = if server_args.is_empty() {
-                existing_task_args()
-                    .map(|argv| falcon_core::service_args::parse_service_args(&argv).to_install_args())
+                existing
+                    .as_ref()
+                    .map(|argv| falcon_core::service_args::parse_service_args(argv).to_install_args())
                     .unwrap_or_default()
             } else {
                 Vec::new()
@@ -362,7 +364,13 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
             // 且 /Create /F + /Run 只是换定义，旧实例会继续跑旧二进制
             if task_installed() {
                 schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
-                wait_service_stopped(&service_bin_path(&config.data_dir))?;
+                // 显式换 --data-dir 时新路径还没拷贝，按它等会空等；旧实例的真实路径是任务 XML 的 Command
+                let wait_bin = existing
+                    .as_ref()
+                    .and_then(|argv| argv.first())
+                    .map(|s| PathBuf::from(s.as_str()))
+                    .unwrap_or_else(|| service_bin_path(&config.data_dir));
+                wait_service_stopped(&wait_bin)?;
             }
             let args = install_program_arguments(effective)?;
             let xml = schtasks_xml(&args, current_user_principal().as_deref());
@@ -389,14 +397,12 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
                 return Ok(1);
             }
             if cmd == "restart" {
+                // 旧进程没退完 /Run 会被 IgnoreNew 吞掉，留服务停着：等它真退。
+                // 任务 XML 的 Command 就是它正在跑的二进制，比从参数反推 data-dir 更准
+                let command = existing_task_args().and_then(|argv| argv.into_iter().next()).map(PathBuf::from);
                 schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
-                // 旧进程没退完 /Run 会被 IgnoreNew 吞掉，留服务停着：等它真退
-                let data_dir = existing_task_args()
-                    .and_then(|argv| falcon_core::service_args::parse_service_args(&argv).data_dir)
-                    .map(PathBuf::from)
-                    .or_else(|| server_config(server_args).ok().map(|c| c.data_dir));
-                if let Some(d) = data_dir {
-                    wait_service_stopped(&service_bin_path(&d))?;
+                if let Some(bin) = command {
+                    wait_service_stopped(&bin)?;
                 }
             }
             schtasks_exec(&["/Run", "/TN", tn.as_str()], false)?;
