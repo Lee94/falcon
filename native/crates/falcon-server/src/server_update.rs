@@ -911,7 +911,8 @@ mod tests {
         let source = crate::db::db_file(dir.path());
         let backup = dir.path().join("backup.db");
         let conn = rusqlite::Connection::open(&source).unwrap();
-        conn.backup(rusqlite::MAIN_DB, &backup, None).unwrap();
+        conn.backup(rusqlite::MAIN_DB, &backup, None::<fn(rusqlite::backup::Progress)>)
+            .unwrap();
         let copied = Db::with_connection(rusqlite::Connection::open(backup).unwrap()).unwrap();
         assert_eq!(copied.instance_id(), id);
         assert_eq!(copied.get_setting("accepted-write").as_deref(), Some("must-survive"));
