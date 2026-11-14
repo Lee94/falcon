@@ -34,7 +34,7 @@ use gpui_kit::{
     App, Bounds, ClipboardEntry, ClipboardItem, Context, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
+    ScrollEvent, SharedString, StatefulInteractiveElement, Styled, Task, Window, canvas, div, px,
 };
 
 use super::element::{TerminalElement, TerminalGeometry};
@@ -1289,7 +1289,7 @@ impl TerminalView {
         }
     }
 
-    fn scroll_wheel(&mut self, e: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_wheel(&mut self, e: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.image_hover.take().is_some() { cx.notify(); }
         let Some(geo) = self.geometry else {
             return;
@@ -1800,7 +1800,7 @@ impl Render for TerminalView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_scroll(cx.listener(Self::scroll_wheel))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.on_drop_paths(paths, cx)))
             .on_action(cx.listener(|this, _: &crate::actions::term::Copy, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &crate::actions::term::Paste, _, cx| this.paste(cx)))

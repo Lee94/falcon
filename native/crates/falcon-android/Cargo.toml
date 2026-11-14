@@ -16,4 +16,4 @@ falcon-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true
-jni = "0.21"
+jni = "0.22"

@@ -480,8 +480,9 @@ fn sha_file(path: &Path) -> Result<String> {
 fn pid_alive(pid: u32) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, System};
     let pid = Pid::from_u32(pid);
-    let mut system = System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    let mut system = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()))
+        .expect("sysinfo System");
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     system.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie)
 }
 
@@ -578,7 +579,7 @@ fn backup_databases(plan: &mut Plan) -> Result<()> {
         let backup = plan.work().join(format!("{name}.backup"));
         let connection = rusqlite::Connection::open(&source)?;
         connection.busy_timeout(Duration::from_secs(10))?;
-        connection.backup(rusqlite::MAIN_DB, &backup, None)?;
+        connection.backup(rusqlite::MAIN_DB, &backup, None::<fn(rusqlite::backup::Progress)>)?;
         std::fs::File::open(&backup)?.sync_all()?;
         plan.databases.push(name.into());
     }

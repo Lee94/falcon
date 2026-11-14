@@ -31,7 +31,7 @@ use gpui_kit::component::ElementExt;
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Bounds, Context, CursorStyle, Div, Entity, FontWeight, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollEvent,
     SharedString, Window, div, px,
 };
 use rust_i18n::t;
@@ -317,7 +317,7 @@ impl Canvas {
     /// stop_propagation，冒泡到这里；文件 / 差异是 GPUI 的滚动容器，它们的滚动监听也不拦，这里
     /// 拿不到"内部还能不能横滚"（React 版是查 DOM 的 overflow），按指针在不在文件 / 差异窗口上保守
     /// 处理：在上面就整段手势都不翻，免得横着看长行时把画布翻走。
-    fn on_scroll_wheel(&mut self, e: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, e: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // GPUI 的 delta 与 DOM 反号（正 = 内容往下 / 右移），换成 DOM 的口径：正 = 往右翻
         let (dx, dy) = match e.delta {
             ScrollDelta::Pixels(p) => (-f32::from(p.x) as f64, -f32::from(p.y) as f64),
@@ -556,7 +556,7 @@ impl Render for Canvas {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel));
+            .on_scroll(cx.listener(Self::on_scroll));
         if !show_canvas {
             root = root.invisible();
         }

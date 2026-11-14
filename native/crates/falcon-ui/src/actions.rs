@@ -7,8 +7,10 @@
 //! 约束照旧：终端聚焦时 Ctrl+字母全是 shell 语义，全局键不能用裸 Ctrl+字母；mac 上用 ⌘ 系列，
 //! 其它平台用 Ctrl+Shift 系列。Esc 永远归终端，只有浮层打开时由浮层自己接。
 
+use std::rc::Rc;
+
 use falcon_core::shortcuts::{self, BindingRole, Command};
-use gpui_kit::{App, KeyBinding, Menu, MenuItem, NoAction, actions};
+use gpui_kit::{Action, App, KeyBinding, KeyBindingContextPredicate, Menu, MenuItem, NoAction, actions};
 
 actions!(
     falcon,
@@ -62,65 +64,74 @@ pub mod term {
     actions!(terminal, [Copy, Paste, SelectAll, Clear]);
 }
 
+/// 运行时字符串的键位（gpui 0.3.12 起 `KeyBinding::new` 只接 `&'static`，动态键走 `load`）
+fn dyn_binding<A: Action>(keys: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
+    let pred = context
+        .map(|c| KeyBindingContextPredicate::parse(c).unwrap())
+        .map(Rc::new);
+    KeyBinding::load(keys, Box::new(action), pred, false, None, cx).unwrap()
+}
+
 /// 全局命令 → 它的 GPUI 动作
-fn bind(cmd: Command, keys: &str) -> KeyBinding {
+fn bind(cmd: Command, keys: &str, cx: &App) -> KeyBinding {
     match cmd {
-        Command::Palette => KeyBinding::new(keys, Palette, None),
-        Command::QuickOpen => KeyBinding::new(keys, QuickOpen, None),
-        Command::NewTerminal => KeyBinding::new(keys, NewTerminal, None),
-        Command::SplitRight => KeyBinding::new(keys, SplitRight, None),
-        Command::SplitDown => KeyBinding::new(keys, SplitDown, None),
-        Command::CloseTab => KeyBinding::new(keys, CloseTab, None),
-        Command::ToggleSidebar => KeyBinding::new(keys, ToggleSidebar, None),
-        Command::ToggleChangesPanel => KeyBinding::new(keys, ToggleChangesPanel, None),
+        Command::Palette => dyn_binding(keys, Palette, None, cx),
+        Command::QuickOpen => dyn_binding(keys, QuickOpen, None, cx),
+        Command::NewTerminal => dyn_binding(keys, NewTerminal, None, cx),
+        Command::SplitRight => dyn_binding(keys, SplitRight, None, cx),
+        Command::SplitDown => dyn_binding(keys, SplitDown, None, cx),
+        Command::CloseTab => dyn_binding(keys, CloseTab, None, cx),
+        Command::ToggleSidebar => dyn_binding(keys, ToggleSidebar, None, cx),
+        Command::ToggleChangesPanel => dyn_binding(keys, ToggleChangesPanel, None, cx),
         // 原来转发面板的键位：中转挪进设置后（ADR 0016）打开设置的「中转」页
-        Command::OpenRelays => KeyBinding::new(keys, OpenRelays, None),
-        Command::ToggleFilesPanel => KeyBinding::new(keys, ToggleFilesPanel, None),
-        Command::Reattach => KeyBinding::new(keys, Reattach, None),
-        Command::Overview => KeyBinding::new(keys, Overview, None),
-        Command::NextTab => KeyBinding::new(keys, NextTab, None),
-        Command::PrevTab => KeyBinding::new(keys, PrevTab, None),
-        Command::NextCanvas => KeyBinding::new(keys, NextCanvas, None),
-        Command::PrevCanvas => KeyBinding::new(keys, PrevCanvas, None),
-        Command::Tab(1) => KeyBinding::new(keys, Tab1, None),
-        Command::Tab(2) => KeyBinding::new(keys, Tab2, None),
-        Command::Tab(3) => KeyBinding::new(keys, Tab3, None),
-        Command::Tab(4) => KeyBinding::new(keys, Tab4, None),
-        Command::Tab(5) => KeyBinding::new(keys, Tab5, None),
-        Command::Tab(6) => KeyBinding::new(keys, Tab6, None),
-        Command::Tab(7) => KeyBinding::new(keys, Tab7, None),
-        Command::Tab(8) => KeyBinding::new(keys, Tab8, None),
-        Command::Tab(_) => KeyBinding::new(keys, Tab9, None),
+        Command::OpenRelays => dyn_binding(keys, OpenRelays, None, cx),
+        Command::ToggleFilesPanel => dyn_binding(keys, ToggleFilesPanel, None, cx),
+        Command::Reattach => dyn_binding(keys, Reattach, None, cx),
+        Command::Overview => dyn_binding(keys, Overview, None, cx),
+        Command::NextTab => dyn_binding(keys, NextTab, None, cx),
+        Command::PrevTab => dyn_binding(keys, PrevTab, None, cx),
+        Command::NextCanvas => dyn_binding(keys, NextCanvas, None, cx),
+        Command::PrevCanvas => dyn_binding(keys, PrevCanvas, None, cx),
+        Command::Tab(1) => dyn_binding(keys, Tab1, None, cx),
+        Command::Tab(2) => dyn_binding(keys, Tab2, None, cx),
+        Command::Tab(3) => dyn_binding(keys, Tab3, None, cx),
+        Command::Tab(4) => dyn_binding(keys, Tab4, None, cx),
+        Command::Tab(5) => dyn_binding(keys, Tab5, None, cx),
+        Command::Tab(6) => dyn_binding(keys, Tab6, None, cx),
+        Command::Tab(7) => dyn_binding(keys, Tab7, None, cx),
+        Command::Tab(8) => dyn_binding(keys, Tab8, None, cx),
+        Command::Tab(_) => dyn_binding(keys, Tab9, None, cx),
     }
 }
 
 pub fn init(cx: &mut App) {
     let info = falcon_platform::get(cx).info();
     crate::ui::set_mac_keys(info.mac);
+    let app: &App = cx;
     let mut bindings: Vec<KeyBinding> = Command::all()
         .into_iter()
         .flat_map(|cmd| {
             shortcuts::bindings(cmd, info.mac)
                 .into_iter()
                 .filter(|b| b.role != BindingRole::BrowserAlias)
-                .map(move |b| bind(cmd, &b.keystroke.gpui()))
+                .map(move |b| bind(cmd, &b.keystroke.gpui(), app))
         })
         .collect();
 
     // 表外的：设置、界面缩放、退出、终端里的剪贴板。mac 是 ⌘，其余 Ctrl+Shift
     let m = if info.mac { "cmd" } else { "ctrl-shift" };
     bindings.extend([
-        KeyBinding::new(&format!("{m}-,"), OpenSettings, None),
+        dyn_binding(&format!("{m}-,"), OpenSettings, None, app),
         // 界面缩放（⌘+ / ⌘−）：= 与 + 同一个键，带不带 Shift 都认。⌘0 已经是会话总览，
         // 「实际大小」只放在菜单与设置里
-        KeyBinding::new(&format!("{m}-="), ZoomIn, None),
-        KeyBinding::new(&format!("{m}-+"), ZoomIn, None),
-        KeyBinding::new(&format!("{m}--"), ZoomOut, None),
+        dyn_binding(&format!("{m}-="), ZoomIn, None, app),
+        dyn_binding(&format!("{m}-+"), ZoomIn, None, app),
+        dyn_binding(&format!("{m}--"), ZoomOut, None, app),
         KeyBinding::new("cmd-q", Quit, None),
         // 终端里的剪贴板 / 全选（只在终端聚焦时生效）
-        KeyBinding::new(&format!("{m}-c"), term::Copy, Some("Terminal")),
-        KeyBinding::new(&format!("{m}-v"), term::Paste, Some("Terminal")),
-        KeyBinding::new(&format!("{m}-a"), term::SelectAll, Some("Terminal")),
+        dyn_binding(&format!("{m}-c"), term::Copy, Some("Terminal"), app),
+        dyn_binding(&format!("{m}-v"), term::Paste, Some("Terminal"), app),
+        dyn_binding(&format!("{m}-a"), term::SelectAll, Some("Terminal"), app),
         // gpui-component 的 Root 把 Tab / Shift+Tab 绑成了焦点轮转（context "Root"），终端在它
         // 下面，keymap 先于 key_down 匹配，不压掉的话 Tab 永远到不了 shell（补全失灵）。
         // NoAction 在更深的 context 上屏蔽掉它，按键落回终端自己的 key_down 编码。

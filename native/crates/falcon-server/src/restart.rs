@@ -151,8 +151,9 @@ fn respawn(argv: &[String]) -> anyhow::Result<()> {
 fn pid_alive(pid: u32) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, System};
     let pid = Pid::from_u32(pid);
-    let mut sys = System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+    let mut sys = System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()))
+        .expect("sysinfo System");
+    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     sys.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie)
 }
 

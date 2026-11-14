@@ -9,23 +9,24 @@
 pub mod dashboard;
 pub mod term;
 
-use jni::JNIEnv;
+use jni::errors::{Result as JniResult, ThrowRuntimeExAndDefault};
 use jni::objects::{JByteArray, JClass, JIntArray, JString};
 use jni::sys::{jboolean, jdouble, jint, jintArray, jlong, jstring};
+use jni::{Env, EnvUnowned};
 
 use crate::dashboard::{build_dashboard_view, export_theme_tokens, list_available_themes};
 use crate::term::{
     create_session, destroy_session, get_session, parse_server_control_message,
 };
 
-fn jstr_to_string(env: &mut JNIEnv<'_>, s: &JString<'_>) -> String {
+fn jstr_to_string(env: &mut Env<'_>, s: &JString<'_>) -> String {
     if s.is_null() {
         return String::new();
     }
-    env.get_string(s).map(Into::into).unwrap_or_default()
+    s.mutf8_chars(env).map(Into::into).unwrap_or_default()
 }
 
-fn string_to_jstr(env: &mut JNIEnv<'_>, s: &str) -> jstring {
+fn string_to_jstr(env: &mut Env<'_>, s: &str) -> jstring {
     env.new_string(s)
         .map(|o| o.into_raw())
         .unwrap_or(std::ptr::null_mut())
@@ -33,25 +34,28 @@ fn string_to_jstr(env: &mut JNIEnv<'_>, s: &str) -> jstring {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_createSession(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     cols: jint,
     rows: jint,
     durable: jboolean,
     theme_name: JString<'_>,
 ) -> jlong {
-    let theme = jstr_to_string(&mut env, &theme_name);
-    create_session(
-        cols.clamp(2, 500) as u16,
-        rows.clamp(1, 300) as u16,
-        durable != 0,
-        &theme,
-    )
+    env.with_env(|env| -> JniResult<jlong> {
+        let theme = jstr_to_string(env, &theme_name);
+        Ok(create_session(
+            cols.clamp(2, 500) as u16,
+            rows.clamp(1, 300) as u16,
+            durable,
+            &theme,
+        ))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_destroySession(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) {
@@ -60,71 +64,80 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_destroySessio
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_setSessionDurable(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     durable: jboolean,
 ) {
     if let Some(session) = get_session(handle) {
-        session.set_durable(durable != 0);
+        session.set_durable(durable);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_setSessionTheme(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     theme_name: JString<'_>,
 ) -> jstring {
-    let theme = jstr_to_string(&mut env, &theme_name);
-    let out = get_session(handle)
-        .map(|s| s.set_theme(&theme))
-        .unwrap_or_default();
-    string_to_jstr(&mut env, &out)
+    env.with_env(|env| -> JniResult<jstring> {
+        let theme = jstr_to_string(env, &theme_name);
+        let out = get_session(handle)
+            .map(|s| s.set_theme(&theme))
+            .unwrap_or_default();
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_handshakeMessages(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     cols: jint,
     rows: jint,
     visible: jboolean,
 ) -> jstring {
-    let msgs = get_session(handle)
-        .map(|s| {
-            s.handshake_messages(
-                cols.clamp(2, 500) as u16,
-                rows.clamp(1, 300) as u16,
-                visible != 0,
-            )
-        })
-        .unwrap_or_default();
-    let json = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
-    string_to_jstr(&mut env, &json)
+    env.with_env(|env| -> JniResult<jstring> {
+        let msgs = get_session(handle)
+            .map(|s| {
+                s.handshake_messages(
+                    cols.clamp(2, 500) as u16,
+                    rows.clamp(1, 300) as u16,
+                    visible,
+                )
+            })
+            .unwrap_or_default();
+        let json = serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".to_string());
+        Ok(string_to_jstr(env, &json))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onViewportResize(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     cols: jint,
     rows: jint,
 ) -> jstring {
-    let msg = get_session(handle)
-        .and_then(|s| {
-            s.on_viewport_resize(cols.clamp(2, 500) as u16, rows.clamp(1, 300) as u16)
-        })
-        .unwrap_or_default();
-    string_to_jstr(&mut env, &msg)
+    env.with_env(|env| -> JniResult<jstring> {
+        let msg = get_session(handle)
+            .and_then(|s| {
+                s.on_viewport_resize(cols.clamp(2, 500) as u16, rows.clamp(1, 300) as u16)
+            })
+            .unwrap_or_default();
+        Ok(string_to_jstr(env, &msg))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onServerSize(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     cols: jint,
@@ -135,69 +148,78 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onServerSize(
         session.on_server_size(
             cols.clamp(2, 500) as u16,
             rows.clamp(1, 300) as u16,
-            owner != 0,
+            owner,
         );
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onBinaryFrame(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     frame: JByteArray<'_>,
 ) -> jstring {
-    let bytes = env.convert_byte_array(&frame).unwrap_or_default();
-    let Some(session) = get_session(handle) else {
-        return string_to_jstr(&mut env, r#"{"dirty":false,"effects":[]}"#);
-    };
-    let result = session.on_binary_frame(&bytes);
-    let json = serde_json::to_string(&result)
-        .unwrap_or_else(|_| r#"{"dirty":false,"effects":[]}"#.to_string());
-    string_to_jstr(&mut env, &json)
+    env.with_env(|env| -> JniResult<jstring> {
+        let bytes = env.convert_byte_array(&frame).unwrap_or_default();
+        let Some(session) = get_session(handle) else {
+            return Ok(string_to_jstr(env, r#"{"dirty":false,"effects":[]}"#));
+        };
+        let result = session.on_binary_frame(&bytes);
+        let json = serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"dirty":false,"effects":[]}"#.to_string());
+        Ok(string_to_jstr(env, &json))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_packRenderSnapshot(
-    env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) -> jintArray {
-    let data = get_session(handle)
-        .map(|s| s.pack_render_snapshot())
-        .unwrap_or_default();
-    match env.new_int_array(data.len() as i32) {
-        Ok(arr) => {
-            let _ = env.set_int_array_region(&arr, 0, &data);
-            arr.into_raw()
+    env.with_env(|env| -> JniResult<jintArray> {
+        let data = get_session(handle)
+            .map(|s| s.pack_render_snapshot())
+            .unwrap_or_default();
+        match env.new_int_array(data.len()) {
+            Ok(arr) => {
+                let _ = arr.set_region(env, 0, &data);
+                Ok(arr.into_raw())
+            }
+            Err(_) => Ok(std::ptr::null_mut()),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_packRenderSnapshotInto(
-    env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     last_seq: jlong,
     out_array: JIntArray<'_>,
 ) -> jlong {
-    let Some(session) = get_session(handle) else {
-        return 0;
-    };
-    let cap = env.get_array_length(&out_array).unwrap_or(0) as usize;
-    session.pack_render_snapshot_cached(last_seq.max(0) as u64, |data| {
-        if cap < data.len() {
-            return false;
-        }
-        env.set_int_array_region(&out_array, 0, data).is_ok()
+    env.with_env(|env| -> JniResult<jlong> {
+        let Some(session) = get_session(handle) else {
+            return Ok(0);
+        };
+        let cap = out_array.len(env).unwrap_or(0);
+        Ok(session.pack_render_snapshot_cached(last_seq.max(0) as u64, |data| {
+            if cap < data.len() {
+                return false;
+            }
+            out_array.set_region(env, 0, data).is_ok()
+        }))
     })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_encodeKey(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     key: JString<'_>,
@@ -205,47 +227,56 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_encodeKey(
     alt: jboolean,
     shift: jboolean,
 ) -> jstring {
-    let key_str = jstr_to_string(&mut env, &key);
-    let chunks = get_session(handle)
-        .map(|s| s.encode_key(&key_str, ctrl != 0, alt != 0, shift != 0))
-        .unwrap_or_default();
-    let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
-    string_to_jstr(&mut env, &json)
+    env.with_env(|env| -> JniResult<jstring> {
+        let key_str = jstr_to_string(env, &key);
+        let chunks = get_session(handle)
+            .map(|s| s.encode_key(&key_str, ctrl, alt, shift))
+            .unwrap_or_default();
+        let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
+        Ok(string_to_jstr(env, &json))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_encodeText(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     text: JString<'_>,
 ) -> jstring {
-    let text_str = jstr_to_string(&mut env, &text);
-    let chunks = get_session(handle)
-        .map(|s| s.encode_text(&text_str))
-        .unwrap_or_default();
-    let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
-    string_to_jstr(&mut env, &json)
+    env.with_env(|env| -> JniResult<jstring> {
+        let text_str = jstr_to_string(env, &text);
+        let chunks = get_session(handle)
+            .map(|s| s.encode_text(&text_str))
+            .unwrap_or_default();
+        let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
+        Ok(string_to_jstr(env, &json))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_encodePaste(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     text: JString<'_>,
 ) -> jstring {
-    let text_str = jstr_to_string(&mut env, &text);
-    let chunks = get_session(handle)
-        .map(|s| s.encode_paste(&text_str))
-        .unwrap_or_default();
-    let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
-    string_to_jstr(&mut env, &json)
+    env.with_env(|env| -> JniResult<jstring> {
+        let text_str = jstr_to_string(env, &text);
+        let chunks = get_session(handle)
+            .map(|s| s.encode_paste(&text_str))
+            .unwrap_or_default();
+        let json = serde_json::to_string(&chunks).unwrap_or_else(|_| "[]".to_string());
+        Ok(string_to_jstr(env, &json))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onScrollGesture(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     delta_y_pixels: jdouble,
@@ -253,22 +284,25 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onScrollGestu
     row: jint,
     col: jint,
 ) -> jstring {
-    let msg = get_session(handle)
-        .and_then(|s| {
-            s.on_scroll_gesture(
-                delta_y_pixels,
-                cell_height,
-                row.max(0) as usize,
-                col.max(0) as usize,
-            )
-        })
-        .unwrap_or_default();
-    string_to_jstr(&mut env, &msg)
+    env.with_env(|env| -> JniResult<jstring> {
+        let msg = get_session(handle)
+            .and_then(|s| {
+                s.on_scroll_gesture(
+                    delta_y_pixels,
+                    cell_height,
+                    row.max(0) as usize,
+                    col.max(0) as usize,
+                )
+            })
+            .unwrap_or_default();
+        Ok(string_to_jstr(env, &msg))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_scrollToBottom(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) {
@@ -279,7 +313,7 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_scrollToBotto
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_resetScrollGesture(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) {
@@ -290,20 +324,19 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_resetScrollGe
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_scrollToOffset(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     offset: jint,
 ) -> jboolean {
-    let changed = get_session(handle)
+    get_session(handle)
         .map(|s| s.scroll_to_offset(offset.max(0) as usize))
-        .unwrap_or(false);
-    jboolean::from(changed)
+        .unwrap_or(false)
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onMouseEvent(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     action: jint,
@@ -312,15 +345,18 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_onMouseEvent(
     pixel_x: jint,
     pixel_y: jint,
 ) -> jstring {
-    let msg = get_session(handle)
-        .and_then(|s| s.on_mouse_event(action, row, col, pixel_x, pixel_y))
-        .unwrap_or_default();
-    string_to_jstr(&mut env, &msg)
+    env.with_env(|env| -> JniResult<jstring> {
+        let msg = get_session(handle)
+            .and_then(|s| s.on_mouse_event(action, row, col, pixel_x, pixel_y))
+            .unwrap_or_default();
+        Ok(string_to_jstr(env, &msg))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_startSelection(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     kind: jint,
@@ -329,13 +365,13 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_startSelectio
     right_half: jboolean,
 ) {
     if let Some(session) = get_session(handle) {
-        session.start_selection(kind, row.max(0) as usize, col.max(0) as usize, right_half != 0);
+        session.start_selection(kind, row.max(0) as usize, col.max(0) as usize, right_half);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_updateSelection(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
     row: jint,
@@ -343,13 +379,13 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_updateSelecti
     right_half: jboolean,
 ) {
     if let Some(session) = get_session(handle) {
-        session.update_selection(row.max(0) as usize, col.max(0) as usize, right_half != 0);
+        session.update_selection(row.max(0) as usize, col.max(0) as usize, right_half);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_clearSelection(
-    _env: JNIEnv<'_>,
+    _env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) {
@@ -360,60 +396,75 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_clearSelectio
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_selectionText(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) -> jstring {
-    let text = get_session(handle)
-        .and_then(|s| s.selection_text())
-        .unwrap_or_default();
-    string_to_jstr(&mut env, &text)
+    env.with_env(|env| -> JniResult<jstring> {
+        let text = get_session(handle)
+            .and_then(|s| s.selection_text())
+            .unwrap_or_default();
+        Ok(string_to_jstr(env, &text))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_parseServerMessage(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     raw_json: JString<'_>,
 ) -> jstring {
-    let s = jstr_to_string(&mut env, &raw_json);
-    let out = parse_server_control_message(&s);
-    string_to_jstr(&mut env, &out)
+    env.with_env(|env| -> JniResult<jstring> {
+        let s = jstr_to_string(env, &raw_json);
+        let out = parse_server_control_message(&s);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_buildDashboardView(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     projects_json: JString<'_>,
     sessions_json: JString<'_>,
     hosts_json: JString<'_>,
 ) -> jstring {
-    let p = jstr_to_string(&mut env, &projects_json);
-    let s = jstr_to_string(&mut env, &sessions_json);
-    let h = jstr_to_string(&mut env, &hosts_json);
-    let out = build_dashboard_view(&p, &s, &h);
-    string_to_jstr(&mut env, &out)
+    env.with_env(|env| -> JniResult<jstring> {
+        let p = jstr_to_string(env, &projects_json);
+        let s = jstr_to_string(env, &sessions_json);
+        let h = jstr_to_string(env, &hosts_json);
+        let out = build_dashboard_view(&p, &s, &h);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_exportThemeTokens(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     theme_name: JString<'_>,
 ) -> jstring {
-    let name = jstr_to_string(&mut env, &theme_name);
-    let out = export_theme_tokens(&name);
-    string_to_jstr(&mut env, &out)
+    env.with_env(|env| -> JniResult<jstring> {
+        let name = jstr_to_string(env, &theme_name);
+        let out = export_theme_tokens(&name);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_listAvailableThemes(
-    mut env: JNIEnv<'_>,
+    mut env: EnvUnowned<'_>,
     _class: JClass<'_>,
     query: JString<'_>,
 ) -> jstring {
-    let q = jstr_to_string(&mut env, &query);
-    let out = list_available_themes(&q);
-    string_to_jstr(&mut env, &out)
+    env.with_env(|env| -> JniResult<jstring> {
+        let q = jstr_to_string(env, &query);
+        let out = list_available_themes(&q);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
