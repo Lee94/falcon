@@ -33,9 +33,14 @@ falcon-ui = { path = "crates/falcon-ui" }
 #
 # `gpui-fast`：核心、平台层与各层组件换成 Longbridge 的 GPUI Fast（Zed GPUI 的 fork，
 # 渲染与布局的性能优化），`gpui_kit::*` 的路径不变。上游 gpui-pre 一族照样是 gpui-kit 的
-# 非可选依赖、照样参与编译，只是不再导出。浏览器版因此跑在 gpui-fast-web 上，IME 补丁
-# 在 vendor/gpui-fast-web；gpui-fast 本身也带了一处补丁（见文件末尾的 [patch]）。
-gpui-kit = { version = "=0.7.3", features = ["gpui-fast"] }
+# 非可选依赖、照样参与编译，只是不再导出。浏览器版因此跑在 gpui-fast-web 上。
+#
+# Windows 例外：gpui-fast-windows 0.1.7 的文字 / 图标（monochrome / polychrome sprite）
+# 渲染是坏的——窗口只剩 quad（底板、边框），文字和图标全看不见。gpui-pre 同版没这个问题。
+# 所以 gpui-fast feature 不进 workspace 声明，由各成员 crate 只给非 Windows target 打开，
+# Windows 回到 gpui-pre 渲染。等上游修好再收回来（gpui-kit 0.9.x 对应 fast-windows 0.1.15，
+# 修复情况待验证）。
+gpui-kit = "=0.7.3"
 # zed@93d7456（gpui-pre 0.3.9 的快照点；与上一版 279fe07 锁的是同一个 rev）锁的 alacritty fork。抄来的 Zed 终端
 # 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
 # 实际编的是 vendor/alacritty_terminal（见文件末尾的 [patch]）：加了 `tty` 开关，falcon-term

@@ -25,7 +25,6 @@ falcon-term.workspace = true
 falcon-theme.workspace = true
 falcon-core.workspace = true
 falcon-platform.workspace = true
-gpui-kit = { workspace = true, features = ["tree-sitter-languages"] }
 anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
@@ -40,3 +39,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # 自定义应用图标的缩放 / 编码 / 套 Dock 版式（app_icon.rs，ADR 0018）；调试截图也用它编 PNG。
 # 解码上传的图走 GPUI（它自带各格式解码与 SVG 光栅化），这里只要 PNG
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# gpui-fast 只在非 Windows target 打开（原因见 workspace 里 gpui-kit 的注释：
+# fast-windows 0.1.7 渲染不出文字和图标）
+[target.'cfg(windows)'.dependencies]
+gpui-kit = { workspace = true, features = ["tree-sitter-languages"] }
+
+[target.'cfg(not(windows))'.dependencies]
+gpui-kit = { workspace = true, features = ["gpui-fast", "tree-sitter-languages"] }

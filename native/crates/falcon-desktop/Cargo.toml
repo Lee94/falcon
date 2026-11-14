@@ -29,7 +29,6 @@ falcon-ui.workspace = true
 falcon-platform.workspace = true
 falcon-client.workspace = true
 falcon-core.workspace = true
-gpui-kit.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde_json.workspace = true
@@ -74,3 +73,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 libc = "0.2.190"
+
+# gpui-fast 只在非 Windows target 打开（原因见 workspace 里 gpui-kit 的注释：
+# fast-windows 0.1.7 渲染不出文字和图标）
+[target.'cfg(windows)'.dependencies]
+gpui-kit.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+gpui-kit = { workspace = true, features = ["gpui-fast"] }

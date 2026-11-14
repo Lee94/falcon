@@ -7,4 +7,11 @@ publish.workspace = true
 description = "Falcon 客户端的平台能力接口：falcon-ui 只认这里的 trait，由 falcon-desktop 实现"
 
 [dependencies]
+
+# gpui-fast 只在非 Windows target 打开（原因见 workspace 里 gpui-kit 的注释：
+# fast-windows 0.1.7 渲染不出文字和图标）
+[target.'cfg(windows)'.dependencies]
 gpui-kit.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+gpui-kit = { workspace = true, features = ["gpui-fast"] }
