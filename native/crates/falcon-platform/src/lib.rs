@@ -72,10 +72,37 @@ pub struct LanAccessState {
     pub urls: Vec<String>,
 }
 
+/// 本机托管服务的运行状态（供 macOS 菜单栏状态项与设置页查询）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServicePresence {
+    NotInstalled,
+    Stopped,
+    Running { pid: Option<u32> },
+}
+
+/// 对本机托管服务的启停控制动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceControl {
+    Start,
+    Stop,
+    Restart,
+}
+
 /// App 托管的本机服务（原生 macOS：Falcon.app 里捆着服务程序，launchd 托管）
 pub trait LocalService: Send + Sync {
     /// 装好 / 拉起服务并等端口起来。**阻塞**，放在后台执行器上调
     fn ensure_running(&self, url: &str) -> ServiceStatus;
+
+    /// 查询托管服务在 launchd / 计划任务中的运行状态。不支持的平台返回 `None`。**阻塞**，放在后台执行器上调
+    fn presence(&self) -> Option<ServicePresence> {
+        None
+    }
+
+    /// 对托管服务执行启动 / 停止 / 重启。**阻塞**，放在后台执行器上调
+    fn control(&self, op: ServiceControl) -> Result<ServicePresence, String> {
+        let _ = op;
+        Err("当前平台不支持托管本机服务".into())
+    }
 
     /// 查询托管服务的局域网监听状态。不支持托管服务的平台返回 `None`。**阻塞**，放在后台执行器上调
     fn lan_access(&self) -> Option<LanAccessState> {
@@ -191,6 +218,11 @@ pub trait Platform {
     fn schedule_relaunch(&self, bundle: &Path) -> Result<(), String> {
         let _ = bundle;
         Err("这个平台不会在退出后重新打开应用".into())
+    }
+
+    /// 同时运行多份客户端时的短区分标记（例如 `"v0.3.20 09:52"`）；只有一份时返回空串
+    fn instance_mark(&self) -> String {
+        String::new()
     }
 }
 

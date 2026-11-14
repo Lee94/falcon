@@ -11,8 +11,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(not(target_arch = "wasm32"))]
 use falcon_client::{FalconClient, SessionEvent, SessionSink, SessionSocket, SocketOptions};
-use falcon_proto::{DeadReason, ProgramStatusRecord, SessionState, TermAppearance};
+#[cfg(not(target_arch = "wasm32"))]
+use falcon_proto::TermAppearance;
+use falcon_proto::{DeadReason, ProgramStatusRecord, SessionState};
 use falcon_term::{
     DeltaMode, MouseMode, MouseReportEvent, MouseReporter, Snapshot, TermCore, TermEvent,
     TermOptions, TermSize, WheelAccumulator, WheelRoute, arrow_for_wheel, route_wheel,
@@ -71,6 +74,7 @@ pub struct TerminalSession {
     session_id: String,
     durable: AtomicBool,
     core: Arc<TermCore>,
+    #[cfg(not(target_arch = "wasm32"))]
     socket: Mutex<Option<SessionSocket>>,
     effective_grid: Mutex<EffectiveGrid>,
     measured_grid: Mutex<Option<(u16, u16)>>,
@@ -88,6 +92,7 @@ impl TerminalSession {
             session_id: session_id.into(),
             durable: AtomicBool::new(durable),
             core: Arc::new(TermCore::new(size, TermOptions::default())),
+            #[cfg(not(target_arch = "wasm32"))]
             socket: Mutex::new(None),
             effective_grid: Mutex::new(EffectiveGrid {
                 cols: size.cols as u16,
@@ -103,6 +108,7 @@ impl TerminalSession {
     }
 
     /// 绑定在线 `FalconClient`，按 ADR 0015 先置入 `appearance` 再建连。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn connect(
         self: &Arc<Self>,
         client: &FalconClient,
@@ -184,6 +190,7 @@ impl TerminalSession {
 
     /// 同步当前主题深浅线索给服务端（ADR 0015）。
     pub fn sync_appearance(&self, resolved: &ResolvedTheme) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(sock) = self.socket.lock().as_ref() {
             let app = if resolved.is_dark {
                 TermAppearance::Dark
@@ -194,6 +201,8 @@ impl TerminalSession {
             let fg = resolved.terminal.foreground.to_hex();
             sock.set_appearance(app, Some(&bg), Some(&fg));
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = resolved;
     }
 
     /// 视图量出真实像素并折算成 `(cols, rows)` 后调用：非法极小值直接忽略，绝不把 0×0 或 1×0 发给 PTY。
@@ -214,6 +223,7 @@ impl TerminalSession {
                 self.bump_frame();
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(sock) = self.socket.lock().as_ref() {
             sock.resize(cols_u16, rows_u16);
         }
@@ -221,9 +231,12 @@ impl TerminalSession {
 
     /// 报告该终端窗口是否处于当前可见画布上（ADR 0022）。
     pub fn set_visible(&self, visible: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(sock) = self.socket.lock().as_ref() {
             sock.set_visible(visible);
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = visible;
     }
 
     /// 键盘 / IME 上屏 / 粘贴向会话输入字符串。
@@ -231,13 +244,14 @@ impl TerminalSession {
         if text.is_empty() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(sock) = self.socket.lock().as_ref() {
             sock.send_input(text);
-        } else {
-            // 离线演示模式下回显至本地网格，便于无服务端交互验证与 TUI 直通回归测试
-            let echoed = text.replace('\r', "\r\n");
-            self.feed_output(echoed.as_bytes());
+            return;
         }
+        // 离线演示与纯静态预览模式下回显至本地网格，便于无服务端交互验证与 TUI 直通回归测试
+        let echoed = text.replace('\r', "\r\n");
+        self.feed_output(echoed.as_bytes());
     }
 
     /// 粘贴文本：若当前终端开启了 Bracketed Paste（`?2004h`），自动包裹转义序列并清洗嵌套结束符。
@@ -321,7 +335,10 @@ impl TerminalSession {
 
     /// 关闭 WebSocket 仅代表 **Detach**（收起窗口），后台会话继续运行（CONTEXT.md）。
     pub fn detach_socket(&self) {
-        *self.socket.lock() = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.socket.lock() = None;
+        }
     }
 
     fn drain_term_events(&self) {
@@ -330,11 +347,14 @@ impl TerminalSession {
             match ev {
                 TermEvent::PtyWrite(reply) => {
                     // ADR 0020 决定五：持久会话绝不从客户端重复回答终端查询
+                    #[cfg(not(target_arch = "wasm32"))]
                     if !durable {
                         if let Some(sock) = self.socket.lock().as_ref() {
                             sock.send_input(reply);
                         }
                     }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = (durable, reply);
                 }
                 TermEvent::ClipboardStore(text) => {
                     self.meta.lock().clipboard_pending = Some(text);
@@ -355,6 +375,7 @@ impl TerminalSession {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SessionSink for TerminalSession {
     fn on_event(&self, ev: SessionEvent) {
         match ev {

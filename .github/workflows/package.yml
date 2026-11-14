@@ -1,12 +1,14 @@
-# 自动打安装包：Windows（Inno Setup 的 setup.exe，原生客户端 + 同目录的 Rust 服务端）、
-# macOS（.pkg，原生客户端 + Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI +
-# Gradle 原生安卓客户端）。同时发布 Linux / macOS x64、arm64 独立服务端
-# （Windows 那份由 windows job 出，打进安装包），Linux 服务端另有安装文件
-# （.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
-# 打法与本机一样，直接跑 cargo xtask win / pkg / android / server / linux，xtask 是唯一真相。
+# 自动打安装包（NSH 六端统一客户端 ADR 0028 + 五平台独立服务端）：
+# - Windows（Inno Setup 的 setup.exe，falcon-app 原生客户端 + 同目录的 Rust 服务端）
+# - macOS（.pkg，falcon-app 原生客户端 + Resources 里的 Rust 服务端，含 TUI 模式）
+# - Linux 桌面与 Web（Falcon-v*-linux-x64.deb/.tar.gz GTK4 桌面端 + Falcon-v*-web.tar.gz 纯 Rust WASM 站点）
+# - Android（.apk，纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）
+# 同时发布 Linux / macOS x64、arm64 独立服务端（Windows 那份由 windows job 出，打进安装包），
+# Linux 服务端另有安装文件（.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
+# 打法与本机一样，直接跑 cargo xtask win / pkg / linux-desktop / web / android / server / linux，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
-# - 推 v* tag：全量编译检查、测试、三个安装包与五平台服务端都通过后建 GitHub Release 并挂上；
+# - 推 v* tag：全量编译检查、测试、各端安装包与五平台服务端都通过后建 GitHub Release 并挂上；
 # - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
 # - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
 #   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
@@ -64,7 +66,7 @@ jobs:
         run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target win32-x64 --skip-sessiond
 
       # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具。
-      # xtask 也用 --release 跑，与 falcon-desktop 共用 target/release 的依赖，不再单独编一份 debug
+      # xtask 也用 --release 跑，与 falcon-app 共用 target/release 的依赖，不再单独编一份 debug
       - name: Build installer
         run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- win
 
@@ -203,6 +205,46 @@ jobs:
           path: release/falcon-v*-${{ matrix.platform }}*
           if-no-files-found: error
 
+  web-linux:
+    # nsh-platform-linux 要求 GTK 4.14+（Ubuntu 24.04 自带），独立于 servers 的 ubuntu-22.04（保持服务端 glibc 2.35 兼容）；
+    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包。
+    needs: macos
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        run: rm -f native/.cargo/config.toml
+
+      - name: Install GTK4 and GStreamer build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+
+      - name: Build Linux GTK4 desktop client
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- linux-desktop --target linux-x64
+
+      - name: Build pure-Rust Web client
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- web
+
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: falcon-web-linux
+          path: |
+            release/Falcon-v*-linux-x64*
+            release/Falcon-v*-web.tar.gz
+          if-no-files-found: error
+
   android:
     runs-on: ubuntu-latest
     steps:
@@ -211,18 +253,15 @@ jobs:
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
 
-      # Gradle 8.9 + AGP 8.7.2，与 android/app/build.gradle.kts 的 jvmTarget = 17 对齐；
-      # xtask 的 android.rs 跑 gradlew --no-daemon，构建完守护进程即退出，不会锁住 ~/.gradle 缓存
+      # xtask/src/android.rs 直接调用 JDK 17 的 javac / jar / keytool 与 Android SDK 的 d8 / aapt2 / zipalign / apksigner，
+      # 仓库内已无 Gradle / Kotlin 工程，不再挂载 gradle 缓存。
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有，而 AGP 8.7.2 默认要
-      # build-tools;34.0.0（镜像里通常只留更新的版本），目录不可写会在构建期直接报错。
-      # 只改顶层条目与 platforms / build-tools / licenses 的属主（不递归几十万文件的 ndk/），
-      # 再以当前用户补齐缺失组件（sudo 会清掉 setup-java 设的 JAVA_HOME）
+      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有；只改顶层条目与 platforms / build-tools / licenses
+      # 的属主（不递归几十万文件的 ndk/），再以当前用户补齐 android-35 与 build-tools 35.0.0。
       - name: Prepare Android SDK
         run: |
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
@@ -233,7 +272,7 @@ jobs:
           [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
           MISSING=()
           [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
-          [ -d "$SDK/build-tools/34.0.0" ] || MISSING+=("build-tools;34.0.0")
+          [ -d "$SDK/build-tools/35.0.0" ] || MISSING+=("build-tools;35.0.0")
           if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
             if [ -z "$(ls -A "$SDK/ndk" 2>/dev/null)" ]; then
               MISSING+=("ndk;27.2.12479018")
@@ -244,7 +283,7 @@ jobs:
             (yes || true) | "$SDKMANAGER" --install "${MISSING[@]}"
           fi
 
-      # xtask/src/android.rs 交叉编 arm64-v8a 与 x86_64 两个 JNI 动态库
+      # xtask/src/android.rs 交叉编 arm64-v8a 与 x86_64 两个 NSH 动态库（libnsh.so）
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
@@ -266,7 +305,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, android, servers]
+    needs: [windows, macos, android, servers, web-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -277,11 +316,11 @@ jobs:
           pattern: falcon-*
           merge-multiple: true
 
-      # 内嵌资源仅用于工作流内部，不作为 Release 资产。清单对最终签名后的独立服务端求和。
+      # 内嵌资源仅用于工作流内部，不作为 Release 资产（仅剔除 <triple>.gz，保留客户端 *.tar.gz）。清单对最终签名后的独立服务端求和。
       - name: 核对服务端平台并生成 SHA256SUMS
         shell: bash
         run: |
-          rm -f dist/*.gz
+          find dist -maxdepth 1 -name '*.gz' ! -name '*.tar.gz' -delete
           cd dist
           for platform in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64.exe; do
             test -f "falcon-${GITHUB_REF_NAME}-${platform}"

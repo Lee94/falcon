@@ -7,7 +7,6 @@ publish.workspace = true
 
 [dependencies]
 falcon-proto.workspace = true
-falcon-client.workspace = true
 falcon-term.workspace = true
 falcon-theme.workspace = true
 falcon-core.workspace = true
@@ -27,6 +26,9 @@ serde_json.workspace = true
 url.workspace = true
 web-time.workspace = true
 unicode-width = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+falcon-client.workspace = true
 
 [dev-dependencies]
 nsh-testing.workspace = true

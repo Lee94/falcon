@@ -6,8 +6,8 @@
 
 ## 只更新客户端
 
-- 正式构建：在 `native/` 执行 `cargo build --release -p falcon-desktop`，不启用 `snapshot` 或 `automation`。
-- 已安装应用位于 `/Applications/Falcon.app`。先用 `ditto` 复制为同一目录下的临时应用，再替换 `Contents/MacOS/Falcon`，按工作区版本更新 `Info.plist`，执行 `codesign --force --deep --sign - <临时应用>`，并用 `codesign --verify --deep --strict <临时应用>` 验证。
+- 正式构建：在 `native/` 执行 `cargo build --release -p falcon-app`（产物 `native/target/release/falcon-app`）。
+- 已安装应用位于 `/Applications/Falcon.app`。先用 `ditto` 复制为同一目录下的临时应用，再以 `falcon-app` 替换 `Contents/MacOS/Falcon`，按工作区版本更新 `Info.plist`，执行 `codesign --force --deep --sign - <临时应用>`，并用 `codesign --verify --deep --strict <临时应用>` 验证。
 - 应用启动可能用 `Contents/Resources/falcon` 重新安装本机服务。先读取 `~/Library/LaunchAgents/com.falcon.server.plist` 的 `ProgramArguments`，把当前安装的服务端程序复制进临时应用，避免旧应用捆绑的服务端覆盖当前服务端。核对两份服务端程序的 SHA-256，保留原 `--host`、`--port` 和 `--data-dir`。
 - `/Applications` 对当前管理员用户可写时，可以先把旧应用改名备份，再把临时应用改名为 `Falcon.app`，无需修改原应用内 root 所有的文件。替换失败时把备份改回原名。不要强制终止用户客户端，以免丢失文件编辑内容；退出须经过正常退出流程。
 - 启动后核对应用版本、签名、进程路径、客户端到原端口的连接；`dwarfdump --uuid` 可核对安装的客户端是否来自本次构建，重新签名不改变该 UUID。
@@ -20,7 +20,7 @@
 
 ## 客户端与服务端同时更新
 
-- 运行 `cargo build --release -p falcon-desktop` 与 `cargo xtask server`；服务端发布产物包含 meegle、全部目标的 sessiond 和本平台 mesh sidecar。临时应用的 `Contents/Resources/falcon` 必须替换为本次服务端产物，再签名、校验并切换应用。
+- 运行 `cargo build --release -p falcon-app` 与 `cargo xtask server`；服务端发布产物包含全部目标的 sessiond。临时应用的 `Contents/Resources/falcon` 必须替换为本次服务端产物，再签名、校验并切换应用。
 - 2026-11-08 已清掉旧数据并重装。当前 LaunchAgent 只写了程序路径 `/Users/fay/.falcon/bin/falcon`，没有额外的 `--host` / `--port` / `--data-dir`，因此是 `127.0.0.1:4923` 与 `~/.falcon`。数据库是新建的 `falcon.db`，访问密码未设置。`~/.mojito` 已删除。每次更新仍应读取 LaunchAgent 的实际配置，不固定使用这些参数。
 - 更早的安装用过 `mojito.db`。备份数据库前按 `db::db_file` 和实际文件选择路径，使用 SQLite backup API，不能假定总是 `falcon.db`。
 - 旧的 `/Users/fay/.mojito/bin/falcon` 曾带 `uchg`（不可修改）标记，会使应用启动时的 `service install` 失败且继续连接旧服务。当前 `~/.falcon/bin/falcon` 没有该标记。若标记再次出现，更新前先 `chflags nouchg`，用新服务端执行带原参数的 `service install`。

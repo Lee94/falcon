@@ -14,7 +14,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use falcon_client::FalconClient;
+#[cfg(not(target_arch = "wasm32"))]
+use falcon_client::{FalconClient, raw_url};
 use falcon_core::agent_mode::{AgentDisplayStyle, AgentModeTransition};
 use falcon_core::file_text::{TextShape, for_disk, for_editor};
 use falcon_core::layout::{
@@ -22,17 +23,27 @@ use falcon_core::layout::{
 };
 use falcon_core::pane_key::{DIFF_KEY, file_key, parse_pane_key, term_key};
 use falcon_core::profiles::{ProfilesFile, ServerProfile};
+use falcon_core::program_status::detail_text;
+#[cfg(not(target_arch = "wasm32"))]
+use falcon_core::program_status::FinishChimes;
 use falcon_core::term::TermPref;
+#[cfg(not(target_arch = "wasm32"))]
 use falcon_proto::{
-    PluginActionInput, PluginBlock, PluginInfo, PluginKind, PluginList, PluginOption,
-    PluginPackageInfo, PluginRenderInput, PluginScope, PluginSeries, PluginStat, PluginTone,
-    PluginView, ProgramState, SessionState,
+    CreateSessionRequest, FilePreview, ForwardKind, PluginActionInput, PluginRenderInput,
+    WorkspaceEntryKind,
+};
+use falcon_proto::{
+    PluginBlock, PluginInfo, PluginKind, PluginList, PluginOption, PluginPackageInfo, PluginScope,
+    PluginSeries, PluginStat, PluginTone, PluginView, ProgramState, SessionState,
 };
 use nsh_core::prelude::{Signal, provide_context, signal, spawn, use_context};
 use parking_lot::Mutex;
 
 use crate::terminal::TerminalSession;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::theme::use_theme;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::views::ClientPluginVerifier;
 
 /// 右侧栏可切换的功能面板（ADR 0025：插件持久化为 `plugin:<id>`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,7 +306,12 @@ pub struct FalconLaunchOptions {
 
 struct SharedTerminals {
     map: Mutex<HashMap<String, Arc<TerminalSession>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     client: Mutex<Option<FalconClient>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    chimes: Mutex<FinishChimes>,
+    #[cfg(not(target_arch = "wasm32"))]
+    verifier: Mutex<ClientPluginVerifier>,
 }
 
 /// 跨组件共享的响应式工作区状态句柄（`Copy`，底层全部由 NSH `Signal` 与 `Rc` 承载）。
@@ -738,7 +754,12 @@ impl WorkspaceStore {
 
         let terminals = Rc::new(SharedTerminals {
             map: Mutex::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             client: Mutex::new(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            chimes: Mutex::new(FinishChimes::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            verifier: Mutex::new(ClientPluginVerifier::new_in_memory()),
         });
 
         // 预热主终端演示输出（含真彩 ANSI + 盒线 + 中文宽字符）
@@ -761,7 +782,10 @@ impl WorkspaceStore {
             guard.insert("sess-agent".into(), t_agent);
         }
 
-        let mut profiles = ProfilesFile::load_with_local(None, &url);
+        let persisted_profiles = (!opts.offline_demo)
+            .then(|| falcon_platform::shared().load_profiles())
+            .flatten();
+        let mut profiles = ProfilesFile::load_with_local(persisted_profiles.as_deref(), &url);
         if let Some(custom) = &opts.server_url {
             profiles.upsert(ServerProfile {
                 id: "active".into(),
@@ -817,7 +841,8 @@ impl WorkspaceStore {
         store
     }
 
-    /// 异步尝试连接真实 `falcon-server`，拉取项目、会话、远端主机与插件列表；连不上时保持可交互不崩。
+    /// 异步尝试连接真实 `falcon-server`，拉取项目、会话、远端主机、中转、文件/Git 与双轨插件；连不上时保持可交互不崩。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_live_server(&self, url: &str) {
         let Ok(parsed_url) = url.parse() else {
             return;
@@ -835,37 +860,332 @@ impl WorkspaceStore {
             .is_insecure(),
         );
 
+        let target_url = url.to_string();
         let store = self.clone();
         spawn(async move {
+            // 若连接的是本机默认服务端且平台托管了本机服务（如 macOS LaunchAgent），先按需拉起
+            let is_local = target_url.trim_end_matches('/')
+                == falcon_platform::shared()
+                    .local_server_url()
+                    .trim_end_matches('/');
+            if is_local && falcon_platform::shared().local_service().is_some() {
+                let ensure_url = target_url.clone();
+                let _ = nsh_core::prelude::blocking(move || {
+                    if let Some(svc) = falcon_platform::shared().local_service() {
+                        let _ = svc.ensure_running(&ensure_url);
+                    }
+                })
+                .await;
+            }
+
+            let mut proj_paths: HashMap<String, String> = HashMap::new();
+            let mut first_proj_id: Option<String> = None;
+
             if let Ok(projects) = client.list_projects().await {
                 store.server_connected.set(true);
-                if !projects.is_empty() {
-                    let mapped: Vec<ProjectRecord> = projects
-                        .into_iter()
-                        .map(|p| {
-                            let host_name = p.ssh.as_ref().map(|s| s.host.clone());
-                            let (derived_from, branch) = match p.worktree {
-                                Some(wt) => (Some(wt.source_project_id), Some(wt.branch)),
-                                None => (None, None),
-                            };
-                            ProjectRecord {
-                                id: p.id,
-                                name: p.name,
-                                path: p.working_dir.unwrap_or_default(),
-                                host_id: p.host_id,
-                                host_name,
-                                derived_from,
-                                branch,
-                            }
-                        })
-                        .collect();
-                    if let Some(first) = mapped.first() {
-                        store.active_project_id.set(first.id.clone());
-                    }
+                let mapped: Vec<ProjectRecord> = projects
+                    .into_iter()
+                    .map(|p| {
+                        let path = p.working_dir.unwrap_or_default();
+                        proj_paths.insert(p.id.clone(), path.clone());
+                        let host_name = p.ssh.as_ref().map(|s| s.host.clone());
+                        let (derived_from, branch) = match p.worktree {
+                            Some(wt) => (Some(wt.source_project_id), Some(wt.branch)),
+                            None => (None, None),
+                        };
+                        ProjectRecord {
+                            id: p.id,
+                            name: p.name,
+                            path,
+                            host_id: p.host_id,
+                            host_name,
+                            derived_from,
+                            branch,
+                        }
+                    })
+                    .collect();
+                if let Some(first) = mapped.first() {
+                    first_proj_id = Some(first.id.clone());
+                    store.active_project_id.set(first.id.clone());
+                }
+                if !mapped.is_empty() {
                     store.projects.set(mapped);
                 }
             }
+
+            if let Ok(sessions) = client.list_sessions().await {
+                let chimed = store.terminals.chimes.lock().observe_all(
+                    sessions
+                        .iter()
+                        .map(|s| (s.id.as_str(), s.program_status.as_ref())),
+                );
+                if !chimed.is_empty() {
+                    falcon_platform::shared().play_chime();
+                }
+
+                let mapped_sessions: Vec<SessionRecord> = sessions
+                    .into_iter()
+                    .map(|s| {
+                        let ps = s.program_status.as_ref().map(|sum| {
+                            (sum.state, detail_text(sum, 80).unwrap_or_default())
+                        });
+                        let cwd = proj_paths
+                            .get(&s.project_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        SessionRecord {
+                            id: s.id.clone(),
+                            project_id: s.project_id.clone(),
+                            name: s.name.clone(),
+                            auto_title: s.title.clone().unwrap_or_default(),
+                            cwd,
+                            durable: s.durable,
+                            state: s.state,
+                            agent: s.agent.as_ref().map(|a| a.as_str().to_string()),
+                            program_status: ps,
+                            foreground_cmd: s.title.clone(),
+                        }
+                    })
+                    .collect();
+
+                if !mapped_sessions.is_empty() {
+                    let cid = store.active_canvas_id.get();
+                    let first_sid = mapped_sessions[0].id.clone();
+                    let mut col = column([term_key(&first_sid)], None);
+                    col.canvas = Some(cid);
+                    store.columns.set(vec![col]);
+                    store.focused_pane_key.set(term_key(&first_sid));
+                }
+                store.sessions.set(mapped_sessions);
+            }
+
+            if let Ok(hosts) = client.list_hosts().await {
+                let mapped_hosts: Vec<HostRecord> = hosts
+                    .into_iter()
+                    .map(|h| HostRecord {
+                        id: h.id,
+                        name: h.name,
+                        destination: format!("{}@{}:{}", h.username, h.host, h.port),
+                        os_label: "SSH".into(),
+                        connected: true,
+                    })
+                    .collect();
+                store.hosts.set(mapped_hosts);
+            }
+
+            if let Ok(relays) = client.list_relays().await {
+                let mut list = Vec::new();
+                for f in relays.forwards {
+                    let kind_label = match f.kind {
+                        ForwardKind::Local => "L → R",
+                        ForwardKind::Remote => "R → L",
+                    };
+                    list.push(RelayRecord {
+                        id: f.id,
+                        machine_label: f.host_id,
+                        kind_label: kind_label.into(),
+                        local_port: f.bind_port,
+                        target: format!("{}:{}", f.dest_host, f.dest_port),
+                        public_url: None,
+                        enabled: f.enabled,
+                        same_port_conflict: false,
+                    });
+                }
+                for sh in relays.shares {
+                    list.push(RelayRecord {
+                        id: sh.id,
+                        machine_label: sh.host_id.unwrap_or_else(|| "local".into()),
+                        kind_label: "Quick Tunnel".into(),
+                        local_port: sh.dest_port,
+                        target: format!("http://{}:{}", sh.dest_host, sh.dest_port),
+                        public_url: sh.public_url,
+                        enabled: sh.enabled,
+                        same_port_conflict: false,
+                    });
+                }
+                store.relays.set(list);
+            }
+
+            if let Ok(agents) = client.local_agents().await {
+                store.detected_agents.set(
+                    agents
+                        .into_iter()
+                        .map(|a| a.as_str().to_string())
+                        .collect(),
+                );
+            }
+
             if let Ok(plugins) = client.list_plugins().await {
+                let trust_root = if let Some(root) = plugins.trust_root.clone() {
+                    Some(root)
+                } else {
+                    client.plugin_trust().await.ok().map(|t| t.root_public_key)
+                };
+
+                for p in &plugins.plugins {
+                    if !p.enabled {
+                        continue;
+                    }
+                    if p.kind == PluginKind::Package {
+                        if let (Some(root_b64), Ok(pkg_bytes)) =
+                            (trust_root.as_deref(), client.plugin_package(&p.id).await)
+                        {
+                            let expected_app_id = p.package.as_ref().map(|m| m.app_id.as_str());
+                            let status = store.terminals.verifier.lock().verify_and_accept(
+                                root_b64,
+                                expected_app_id,
+                                &pkg_bytes,
+                            );
+                            let pid = p.id.clone();
+                            store.plugin_states.update(|map| {
+                                let entry =
+                                    map.entry(pid).or_insert_with(|| PluginPanelState {
+                                        view: None,
+                                        params: BTreeMap::new(),
+                                        package_status: None,
+                                        loading: false,
+                                        error: None,
+                                    });
+                                entry.package_status = Some(status);
+                            });
+                        }
+                    } else if p.id == "sysmon" {
+                        store.dispatch_plugin_action(&p.id, None, None);
+                    }
+                }
+                store.plugin_list.set(plugins);
+            }
+
+            if let Some(proj_id) = first_proj_id {
+                if let Ok(listing) = client.list_files(&proj_id, None).await {
+                    let entries: Vec<FileEntryItem> = listing
+                        .entries
+                        .into_iter()
+                        .map(|e| {
+                            let is_html = e.path.ends_with(".html") || e.path.ends_with(".htm");
+                            FileEntryItem {
+                                name: e.name,
+                                path: e.path,
+                                is_dir: e.kind == WorkspaceEntryKind::Dir,
+                                size_bytes: e.size.unwrap_or(0),
+                                is_html,
+                            }
+                        })
+                        .collect();
+                    store.file_entries.set(entries);
+                }
+
+                if let Ok(git_w) = client.git_working(&proj_id, None).await
+                    && git_w.available
+                {
+                    let changes: Vec<GitChangeItem> = git_w
+                        .files
+                        .into_iter()
+                        .map(|f| {
+                            let staged = !f.index.trim().is_empty() && f.index != "?";
+                            let status = if !f.work.trim().is_empty() {
+                                f.work.clone()
+                            } else {
+                                f.index.clone()
+                            };
+                            GitChangeItem {
+                                path: f.path.clone(),
+                                status,
+                                staged,
+                                additions: f.added.unwrap_or(0) as u32,
+                                deletions: f.deleted.unwrap_or(0) as u32,
+                                old_text: String::new(),
+                                new_text: String::new(),
+                            }
+                        })
+                        .collect();
+                    store.git_changes.set(changes);
+                }
+            }
+        });
+    }
+
+    /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
+    #[cfg(target_arch = "wasm32")]
+    pub fn connect_live_server(&self, url: &str) {
+        let base = url.trim_end_matches('/').to_string();
+        self.server_url.set(url.to_string());
+        self.plaintext_warning.set(
+            ServerProfile {
+                id: "probe".into(),
+                name: String::new(),
+                url: url.to_string(),
+                plaintext_ok: false,
+            }
+            .is_insecure(),
+        );
+
+        let store = self.clone();
+        spawn(async move {
+            use nsh_core::prelude::{HttpRequest, fetch};
+
+            if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await
+                && resp.ok()
+                && let Ok(projects) = serde_json::from_slice::<Vec<falcon_proto::Project>>(&resp.body)
+            {
+                store.server_connected.set(true);
+                let mapped: Vec<ProjectRecord> = projects
+                    .into_iter()
+                    .map(|p| {
+                        let host_name = p.ssh.as_ref().map(|s| s.host.clone());
+                        let (derived_from, branch) = match p.worktree {
+                            Some(wt) => (Some(wt.source_project_id), Some(wt.branch)),
+                            None => (None, None),
+                        };
+                        ProjectRecord {
+                            id: p.id,
+                            name: p.name,
+                            path: p.working_dir.unwrap_or_default(),
+                            host_id: p.host_id,
+                            host_name,
+                            derived_from,
+                            branch,
+                        }
+                    })
+                    .collect();
+                if let Some(first) = mapped.first() {
+                    store.active_project_id.set(first.id.clone());
+                }
+                if !mapped.is_empty() {
+                    store.projects.set(mapped);
+                }
+            }
+
+            if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/sessions"))).await
+                && resp.ok()
+                && let Ok(sessions) =
+                    serde_json::from_slice::<Vec<falcon_proto::SessionWithProject>>(&resp.body)
+            {
+                let mapped: Vec<SessionRecord> = sessions
+                    .into_iter()
+                    .map(|s| SessionRecord {
+                        id: s.id.clone(),
+                        project_id: s.project_id.clone(),
+                        name: s.name.clone(),
+                        auto_title: s.title.clone().unwrap_or_default(),
+                        cwd: String::new(),
+                        durable: s.durable,
+                        state: s.state,
+                        agent: s.agent.as_ref().map(|a| a.as_str().to_string()),
+                        program_status: s
+                            .program_status
+                            .as_ref()
+                            .map(|ps| (ps.state, detail_text(ps, 80).unwrap_or_default())),
+                        foreground_cmd: s.title.clone(),
+                    })
+                    .collect();
+                store.sessions.set(mapped);
+            }
+
+            if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/plugins"))).await
+                && resp.ok()
+                && let Ok(plugins) = serde_json::from_slice::<PluginList>(&resp.body)
+            {
                 store.plugin_list.set(plugins);
             }
         });
@@ -887,6 +1207,7 @@ impl WorkspaceStore {
             .find(|s| s.id == session_id)
             .map_or(true, |s| s.durable);
         let created = TerminalSession::new_offline(session_id.to_string(), 80, 24, durable);
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.terminals.client.lock().clone() {
             let resolved = use_theme().resolved();
             created.connect(&client, &resolved, false);
@@ -936,6 +1257,37 @@ impl WorkspaceStore {
             .into_iter()
             .find(|p| p.id == proj_id)
             .map_or_else(|| "/workspace".to_string(), |p| p.path);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.terminals.client.lock().clone() {
+            let store = self.clone();
+            let pid = proj_id.clone();
+            let ppath = proj_path.clone();
+            spawn(async move {
+                if let Ok(created) = client
+                    .create_session(&pid, &CreateSessionRequest::default())
+                    .await
+                {
+                    let sid = created.id.clone();
+                    let rec = SessionRecord {
+                        id: sid.clone(),
+                        project_id: created.project_id,
+                        name: created.name,
+                        auto_title: created.title.unwrap_or_default(),
+                        cwd: ppath,
+                        durable: created.durable,
+                        state: created.state,
+                        agent: created.agent.map(|a| a.as_str().to_string()),
+                        program_status: None,
+                        foreground_cmd: None,
+                    };
+                    store.sessions.update(|v| v.push(rec));
+                    store.focus_session(&sid);
+                }
+            });
+            return String::new();
+        }
+
         let idx = self.sessions.get().len() + 1;
         let id = format!("sess-{idx}");
         let rec = SessionRecord {
@@ -997,6 +1349,7 @@ impl WorkspaceStore {
         self.terminals.map.lock().remove(session_id);
         self.active_dialog.set(ActiveDialog::None);
 
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.terminals.client.lock().clone() {
             let sid = session_id.to_string();
             spawn(async move {
@@ -1011,7 +1364,7 @@ impl WorkspaceStore {
         let mut map = self.open_files.get();
         if !map.contains_key(&key) {
             let is_html = path.ends_with(".html") || path.ends_with(".htm");
-            let raw_url = is_html.then(|| {
+            let fallback_raw = is_html.then(|| {
                 format!(
                     "{}/api/projects/{project_id}/raw/scoped_readonly/{path}",
                     self.server_url.get().trim_end_matches('/')
@@ -1024,10 +1377,52 @@ impl WorkspaceStore {
                     path,
                     &format!("// {path}\n"),
                     "sha256:initial",
-                    raw_url,
+                    fallback_raw,
                 ),
             );
             self.open_files.set(map);
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(client) = self.terminals.client.lock().clone() {
+                let store = self.clone();
+                let pid = project_id.to_string();
+                let fpath = path.to_string();
+                let fkey = key.clone();
+                let base_url = self.server_url.get();
+                spawn(async move {
+                    if let Ok(wf) = client.read_file(&pid, &fpath).await
+                        && let FilePreview::Text { text, version, .. } = wf.preview
+                    {
+                        let rel = wf.raw_path.as_deref().unwrap_or(&fpath);
+                        let scoped_path = raw_url(&wf.raw_base, rel);
+                        let full_raw = if is_html {
+                            if scoped_path.starts_with("http://")
+                                || scoped_path.starts_with("https://")
+                            {
+                                Some(scoped_path)
+                            } else {
+                                Some(format!(
+                                    "{}/{}",
+                                    base_url.trim_end_matches('/'),
+                                    scoped_path.trim_start_matches('/')
+                                ))
+                            }
+                        } else {
+                            None
+                        };
+                        let buf = OpenFileBuffer::from_disk_text(
+                            &pid,
+                            &fpath,
+                            &text,
+                            version.unwrap_or_default(),
+                            full_raw,
+                        );
+                        store.open_files.update(|m| {
+                            m.insert(fkey, buf);
+                        });
+                    }
+                });
+            }
         }
         let cols = self.columns.get();
         if find_pane(&cols, &key).is_none() {
@@ -1052,16 +1447,63 @@ impl WorkspaceStore {
     /// 保存文件修改（ADR 0023：还原原文件 CRLF/LF 与末尾换行，校验 `disk_hash` 冲突）。
     pub fn save_file_buffer(&self, file_pane_key: &str) -> bool {
         let mut ok = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut pending_save: Option<(String, String, String, Option<String>)> = None;
+
         self.open_files.update(|map| {
             if let Some(buf) = map.get_mut(file_pane_key) {
                 if buf.remote_changed_conflict {
                     return;
                 }
-                let _disk_payload = buf.encoded_for_disk();
+                let disk_payload = buf.encoded_for_disk();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let base = (!buf.disk_hash.is_empty() && buf.disk_hash != "sha256:initial")
+                        .then(|| buf.disk_hash.clone());
+                    pending_save = Some((
+                        buf.project_id.clone(),
+                        buf.path.clone(),
+                        disk_payload,
+                        base,
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = disk_payload;
                 buf.clean_body = buf.current_body.clone();
                 ok = true;
             }
         });
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(client), Some((pid, path, payload, base))) =
+            (self.terminals.client.lock().clone(), pending_save)
+        {
+            let store = self.clone();
+            let key = file_pane_key.to_string();
+            spawn(async move {
+                match client
+                    .save_file(&pid, &path, payload.into_bytes(), base.as_deref())
+                    .await
+                {
+                    Ok(saved) => {
+                        store.open_files.update(|m| {
+                            if let Some(buf) = m.get_mut(&key) {
+                                buf.disk_hash = saved.version;
+                                buf.remote_changed_conflict = false;
+                            }
+                        });
+                    }
+                    Err(err) if err.is_conflict() => {
+                        store.open_files.update(|m| {
+                            if let Some(buf) = m.get_mut(&key) {
+                                buf.remote_changed_conflict = true;
+                            }
+                        });
+                    }
+                    Err(_) => {}
+                }
+            });
+        }
         ok
     }
 
@@ -1072,56 +1514,65 @@ impl WorkspaceStore {
         action_id: Option<&str>,
         value: Option<String>,
     ) {
-        let project_id = Some(self.active_project_id.get());
-        let params = self
-            .plugin_states
-            .get()
-            .get(plugin_id)
-            .map(|s| s.params.clone())
-            .unwrap_or_default();
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (plugin_id, action_id, value);
+        }
 
-        if let Some(client) = self.terminals.client.lock().clone() {
-            let pid = plugin_id.to_string();
-            let act = action_id.map(str::to_owned);
-            let store = self.clone();
-            spawn(async move {
-                let res = if let Some(action) = act {
-                    client
-                        .plugin_action(
-                            &pid,
-                            &PluginActionInput {
-                                project_id,
-                                params,
-                                action,
-                                value,
-                            },
-                        )
-                        .await
-                } else {
-                    client
-                        .plugin_render(&pid, &PluginRenderInput { project_id, params })
-                        .await
-                };
-                if let Ok(view) = res {
-                    store.plugin_states.update(|map| {
-                        let entry = map.entry(pid.clone()).or_insert_with(|| PluginPanelState {
-                            view: None,
-                            params: BTreeMap::new(),
-                            package_status: None,
-                            loading: false,
-                            error: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let project_id = Some(self.active_project_id.get());
+            let params = self
+                .plugin_states
+                .get()
+                .get(plugin_id)
+                .map(|s| s.params.clone())
+                .unwrap_or_default();
+
+            if let Some(client) = self.terminals.client.lock().clone() {
+                let pid = plugin_id.to_string();
+                let act = action_id.map(str::to_owned);
+                let store = self.clone();
+                spawn(async move {
+                    let res = if let Some(action) = act {
+                        client
+                            .plugin_action(
+                                &pid,
+                                &PluginActionInput {
+                                    project_id,
+                                    params,
+                                    action,
+                                    value,
+                                },
+                            )
+                            .await
+                    } else {
+                        client
+                            .plugin_render(&pid, &PluginRenderInput { project_id, params })
+                            .await
+                    };
+                    if let Ok(view) = res {
+                        store.plugin_states.update(|map| {
+                            let entry =
+                                map.entry(pid.clone()).or_insert_with(|| PluginPanelState {
+                                    view: None,
+                                    params: BTreeMap::new(),
+                                    package_status: None,
+                                    loading: false,
+                                    error: None,
+                                });
+                            for (k, v) in &view.params {
+                                entry.params.insert(k.clone(), v.clone());
+                            }
+                            if let Some(toast) = &view.toast {
+                                store.toast_banner.set(Some(toast.title.clone()));
+                            }
+                            entry.view = Some(view);
+                            entry.error = None;
                         });
-                        for (k, v) in &view.params {
-                            entry.params.insert(k.clone(), v.clone());
-                        }
-                        if let Some(toast) = &view.toast {
-                            store.toast_banner.set(Some(toast.title.clone()));
-                        }
-                        entry.view = Some(view);
-                        entry.error = None;
-                    });
-                }
-            });
+                    }
+                });
+            }
         }
     }
 

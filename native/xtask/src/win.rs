@@ -1,18 +1,18 @@
 //! Windows 安装包（Inno Setup 的 setup.exe，原 scripts/build-windows-installer.mjs）：
-//! 原生客户端（GPUI）+ 同目录的服务端单文件 falcon-server.exe。
+//! 原生客户端（NSH `falcon-app`）+ 同目录的服务端单文件 falcon-server.exe。
 //!
 //! 与 macOS pkg 一样把服务端捆进安装包：Inno Setup 装完就用它跑 `falcon service install`
 //! 注册登录自启的计划任务（schtasks，免管理员）。没有服务端产物时先 `cargo xtask server`。
 //!
 //! ```text
 //! cargo xtask win                 # cargo build --release，再编安装包
-//! cargo xtask win --skip-cargo    # 只用已有的 native/target/release/falcon-desktop.exe
+//! cargo xtask win --skip-cargo    # 只用已有的 native/target/release/falcon-app.exe
 //! ```
 //!
 //! 产物 release/Falcon-v<版本>-win32-x64-setup.exe。没有代码签名证书，别人机器上
 //! SmartScreen 会拦，「更多信息 → 仍要运行」即可。
 //!
-//! 必须在 Windows 上跑：exe 的图标与版本信息由 falcon-desktop 的 build.rs 经 rc.exe 编进去
+//! 必须在 Windows 上跑：exe 的图标与版本信息由 falcon-app 的 build.rs 经 rc.exe 编进去
 //! （Windows SDK，随 VS 生成工具装）；安装包要 Inno Setup 6 的 ISCC.exe——
 //! `winget install JRSoftware.InnoSetup --scope user`，或用 FALCON_ISCC 指到它。
 //! 安装脚本在 native/xtask/assets/windows-installer/Falcon.iss。
@@ -41,10 +41,10 @@ pub fn run(args: &[String]) -> Result<()> {
 
     if !skip_cargo {
         // crates.io 走 native/.cargo/config.toml 里的镜像配置
-        println!("== cargo build --release -p falcon-desktop ==");
-        util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
+        println!("== cargo build --release -p falcon-app ==");
+        util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
     }
-    let exe = native().join("target/release/falcon-desktop.exe");
+    let exe = native().join("target/release/falcon-app.exe");
     if !exe.is_file() {
         bail!("找不到 {}，先去掉 --skip-cargo 跑一遍", rel(&exe));
     }
@@ -52,7 +52,7 @@ pub fn run(args: &[String]) -> Result<()> {
     // Cargo 1.100 起调整了内部 build-dir 布局，不再从 target/release/build/*/out/ 捞私有产物；
     // 直接由同一份 assets/icon-512.png 生成安装包用的 .ico（--skip-cargo 下同样可用）
     let icon = native().join("target/release/falcon.ico");
-    write_windows_ico(&native().join("crates/falcon-desktop/assets/icon-512.png"), &icon)?;
+    write_windows_ico(&native().join("crates/falcon-app/assets/icon-512.png"), &icon)?;
 
     // 版本跟原生客户端走（exe 版本信息里也是这个，同一个工作区版本）
     let ver = version();
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn generates_valid_installer_ico_from_app_icon() {
         let out = std::env::temp_dir().join(format!("falcon-xtask-win-test-{}.ico", std::process::id()));
-        let src = native().join("crates/falcon-desktop/assets/icon-512.png");
+        let src = native().join("crates/falcon-app/assets/icon-512.png");
         write_windows_ico(&src, &out).unwrap();
         let bytes = std::fs::read(&out).unwrap();
         let _ = std::fs::remove_file(&out);

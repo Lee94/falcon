@@ -2,7 +2,7 @@
 //! postinstall 以当前登录用户跑 `falcon service install`（用户级 LaunchAgent，不能用 root
 //! 的 guid），装过服务的话带上原 plist 里的 --host / --port / --data-dir。
 //!
-//! App 的可执行文件是原生客户端（GPUI，设计见 docs/design/gpui-client.md）：
+//! App 的可执行文件是原生客户端（NSH `falcon-app`，ADR 0028）：
 //! 它启动时自己做 `service install` → 等端口，然后直接连本机服务。
 //!
 //! ```text
@@ -90,9 +90,9 @@ fn build(skip_bin: bool) -> Result<()> {
 
     let exe = macos_dir.join("Falcon");
     // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
-    println!("== cargo build --release -p falcon-desktop ==");
-    util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
-    copy_exec(&native().join("target/release/falcon-desktop"), &exe)?;
+    println!("== cargo build --release -p falcon-app ==");
+    util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
+    copy_exec(&native().join("target/release/falcon-app"), &exe)?;
 
     let plist = std::fs::read_to_string(templates.join("Info.plist"))?.replace("__VERSION__", ver);
     std::fs::write(contents.join("Info.plist"), plist)?;

@@ -4,26 +4,31 @@ This file provides guidance to Codex (claude.ai/code) when working with code in 
 
 ## 命令
 
-整个仓库只剩 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端（界面 `falcon-ui`，原生入口 `falcon-desktop`）都在里面。构建 / 打包 / 资源生成任务在 `native/xtask`（`cargo xtask`，别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），仓库里没有 Node / JS 依赖。
+整个仓库只剩纯 Rust：`native/` 是一个 Cargo workspace，服务端 `falcon-server` 与客户端（NSH 跨端界面 `falcon-nsh`，六端统一入口 `falcon-app`：macOS / Windows / Linux GTK4 / Android / Web WASM / TUI）都在里面。构建 / 打包 / 资源生成任务在 `native/xtask`（`cargo xtask`，别名在 `native/.cargo/config.toml`；不在 `native/` 下就 `cargo run --manifest-path native/Cargo.toml -p xtask -- <命令>`），仓库里没有 Node / JS / Gradle / Kotlin 依赖。
 
 ```bash
 cd native
 cargo xtask --help          # 全部任务
 cargo run -p falcon-server  # 开发服务端（4923，默认数据目录 ~/.falcon——那是日常在用的实例，开发另起要带 --port / --data-dir）
 cargo xtask server          # 服务端发布单文件（把 sessiond 编进去），产物 release/falcon-v<版本>-<平台>
-cargo build --release -p falcon-desktop   # 原生客户端 release 构建
-cargo xtask pkg             # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
-cargo xtask win             # Windows 安装包（Inno Setup）：原生客户端 + 同目录服务端（装好注册计划任务）；须在 Windows 上打
+cargo build --release -p falcon-app       # 原生客户端 release 构建（macOS / Windows / TUI；Linux 桌面加 --features linux-desktop）
+cargo xtask tui             # 在当前终端启动 falcon-app TUI 工作台（nsh-platform-tui）
+cargo xtask pkg             # macOS 安装包：Falcon.app = NSH 原生客户端 + Resources 里的服务端
+cargo xtask win             # Windows 安装包（Inno Setup）：NSH 原生客户端 + 同目录服务端（装好注册计划任务）；须在 Windows 上打
 cargo xtask linux           # Linux 服务端安装文件：.deb / .rpm / install.sh（只含服务端 + systemd 服务）
+cargo xtask linux-desktop   # Linux GTK4 原生桌面客户端安装包：Falcon-v<版本>-<平台>.deb / .tar.gz
+cargo xtask android         # Android 安装包（纯 Rust NSH + Android SDK d8/aapt2/apksigner，零 Gradle）
+cargo xtask web             # Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/）
+cargo xtask nsh-check       # 局部检查 falcon-nsh 与 falcon-app（含测试目标）
 cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 5 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试
 cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（sessiond 会自动调），源码先打上 `native/sessiond/ghostty-patches/` 的补丁（改补丁要同步 ghostty.pin 的 patches=）；`ghostty-bindgen` 只在升 ghostty 的 pin 时跑
 ```
 
-xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、curl（Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
+xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、Android SDK 的 javac / d8 / aapt2 / zipalign / apksigner、curl（Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
 
 ### 验证：本地局部检查，GitHub 发版执行全量检查
 
-本地提交与 push 只执行和改动相关的局部测试或编译检查，不要求运行全工作区的 `cargo check` / `cargo test`，也不默认打三端安装包。Rust 按修改的 crate / 模块检查；Android 改动可运行 `:app:compileDebugKotlin`；仅修改文档或工作流时检查差异格式与工作流语法。用户明确要求全量验证，或局部检查发现需要扩大排查的问题时，再执行额外检查。
+本地提交与 push 只执行和改动相关的局部测试或编译检查，不要求运行全工作区的 `cargo check` / `cargo test`，也不默认打各端安装包。Rust 按修改的 crate / 模块检查（客户端改动可运行 `cargo xtask nsh-check` 与 `cargo test -p falcon-nsh` / `cargo test -p falcon-app`）；仅修改文档或工作流时检查差异格式与工作流语法。用户明确要求全量验证，或局部检查发现需要扩大排查的问题时，再执行额外检查。
 
 全量编译检查与单元测试由 `.github/workflows/package.yml` 在 GitHub 发版流程中执行，失败则禁止发布 GitHub Release；手动触发与定时运行同样执行。主工作区检查使用 release profile，与安装包构建共用依赖缓存；独立的 sessiond 工作区经 xtask 检查全部五个目标并在 runner 本机执行测试。没有 clippy / rustfmt 要求，源码保持零警告。
 
@@ -32,7 +37,7 @@ cd native
 cargo check -p falcon-server --tests                # 本地：检查改动涉及的 crate
 cargo test -p falcon-server --lib sessions::manager   # 本地：只测试相关模块；--test-name-pattern 那套换成 cargo 的名字过滤
 cargo check --release --workspace --tests --locked  # GitHub 发版：全量编译检查
-cargo test --release --workspace --locked           # GitHub 发版：全量测试；GPUI 会经 feature 合并打开 serde_json 的 preserve_order，别断言 Map 的遍历顺序
+cargo test --release --workspace --locked           # GitHub 发版：全量测试；别断言 serde_json::Map 的遍历顺序
 ```
 
 服务端的测试除了纯函数层（命令构造、路径运算、模式跟踪、DB 行合并），还有用真 PTY 跑的 SessionManager 用例（持久会话的那几个起真的守护进程，没跑过 `cargo xtask sessiond` 时跳过）、`oneshot` 打进 axum 的路由用例、进程内 russh 服务端上的传输用例。守护进程自己的测试在它的工作区里（`cargo xtask sessiond --test`：真 PTY 的 holder 用例、VT 进程崩溃 / 降级 / 热升级、接回比对语料 `tests/corpus/`）。真机链路另有几道：`FALCON_E2E=1 cargo test -p falcon-client --test e2e -- --ignored`（起真服务端 + 守护进程，不设访问密码，两次重启后接回）；SSH 上的守护进程会话对**隔离的** sshd 容器跑 `FALCON_SSH_TEST=host:port:user:key cargo test -p falcon-server --lib ssh_durable -- --ignored --test-threads=1`（设计文档 `docs/design/session-daemon.md` 第 15 节）；`cargo xtask fixtures` 重生协议 fixture（配 `cargo xtask compare-fixtures` 可在改服务端前后比形状）。Windows 远端、浏览器里的真实交互（IME、剪贴板、拖放）没有自动化测试，改动那些要在真机上验。
@@ -83,34 +88,33 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 - Windows 远端的所有命令走 `powershell -EncodedCommand`（UTF-16LE + base64）。
 - 测 SSH 只用隔离的 sshd（Docker 容器、或 `SetEnv HOME=` 指到临时短路径），别对自己真实的家目录跑 probe / 部署；开发实例端口用 4940–4999、数据目录用短路径（守护进程的 socket 上限 104 字节，超了会落到 `/tmp/falcon-sd-<uid>-<哈希>/`），从 falcon 终端里起要 `env -u FALCON_SESSION_ID`。开发构建的服务端用 `native/target-sessiond` 里的守护进程：改了守护进程要重跑 `cargo xtask sessiond`（远端用的那几个目标加 `--targets all`），否则宿主机上跑的还是旧的（同版本号不会触发重推，文件名按内容哈希，所以新编的会被当成新文件推上去）。
 
-### client（`native/crates/falcon-ui` / `falcon-platform` / `falcon-desktop` 及其下层 crate）
+### client（`native/crates/falcon-nsh` / `falcon-platform` / `falcon-app` 及其下层 crate）
 
-Rust + GPUI 写的客户端，连 falcon 服务端（REST + `/ws/sessions/:id`）。能连上就允许使用，没有登录页。界面全在 `falcon-ui`，**不写 target cfg**——凡是"这台机器上有没有 / 怎么做"的事（偏好与工作区存哪儿、本机服务地址、本机服务、下载目录、HTML 预览视图、应用图标、是不是 mac 键位、应用更新）都问 `falcon-platform` 的 `Platform` trait（`falcon_platform::get(cx)`）；平台实现与入口在 `falcon-desktop`（数据目录 JSON、launchd 托管、wry、AppKit Dock、Windows 资源）。新的平台差异先加进 trait，别在 falcon-ui 里写 `cfg(target_family/target_os)`。定下来的做法与踩过的坑在 ADR 0015，提案原文在 `docs/design/gpui-client.md`，改动前先读。别把访问密码或登录页加回去。应用更新见 ADR 0026：设置「关于」与菜单栏检查 `Lee94/falcon` 的 GitHub Release；macOS 替换 `Falcon.app` 后按原参数 `service install`，再经正常退出重新打开新版本（没保存的文件修改会先问）。版本比较与换入在 `falcon-core` 的 `app_update.rs`。
+纯 Rust + **Native Shell (NSH, `longbridge/nsh`)** 写的六端统一客户端（ADR 0028：macOS AppKit、Windows Direct2D、Linux GTK4、Android 原生视图、Web WASM、终端 TUI），连 falcon 服务端（REST + `/ws/sessions/:id`）。能连上就允许使用，没有登录页。界面全在 `falcon-nsh`，平台宿主能力（偏好与工作区持久化、本机服务地址与 launchd / schtasks 生命周期、钥匙串 / 凭据管理器密码、应用图标、提示音、深链 `falcon://`、应用内更新）通过无框架依赖的 `falcon-platform` `Platform` trait（`falcon_platform::current()`）提供；平台实现与各端编译入口在 `falcon-app`（含旧版 Android `falcon_android_prefs.xml` 首启无损迁移）。别把访问密码或登录页加回去。应用更新见 ADR 0026：设置「关于」与菜单栏检查 `Lee94/falcon` 的 GitHub Release；macOS 替换 `Falcon.app` 后按原参数 `service install`，再经正常退出重新打开新版本（没保存的文件修改会先问）。版本比较与换入在 `falcon-core` 的 `app_update.rs`。
 
 ```bash
 cd native
-cargo run -p falcon-desktop                     # 连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
+cargo run -p falcon-app                         # 桌面端连本机服务（按已装 LaunchAgent 的端口，没装是 4923）；FALCON_LOCAL_URL 可改指别的实例
+cargo xtask tui                                 # 在当前终端以 TUI 模式启动同一套工作台
 ```
 
 - **crates.io 走 `native/.cargo/config.toml` 里的 rsproxy 镜像**：这台机器上 Clash 的 fake-ip 把 index.crates.io 解析坏了。网络正常的机器删掉那一段即可。
-- 分层：`falcon-proto`（协议类型）→ `falcon-client`（REST / WS，与执行器无关的 future，自带 tokio 运行时）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + 鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（主题系统：Ghostty 主题文件即数据模型、浅深双槽位、整套界面色由一套主题派生，ADR 0006 / 0011）→ `falcon-core`（与 GPUI 无关的纯逻辑：列式工作区排布 `layout.rs`、窗口 key `pane_key.rs`、会话标题 `session_title.rs`、快捷键、文件路径 / 搜索 / 树、git 图等；`tests/vectors/` 是回归向量）→ `falcon-platform` / `falcon-ui` / `falcon-desktop`（只有这三个依赖 GPUI）。**纯逻辑一律放下层 crate**，GPUI 升级只波及这一层。
-- GPUI 走 `gpui-kit` 总包（`=` 精确锁版本）；Zed 的终端代码按文件抄（`terminal/element.rs`、`falcon-term/src/keys.rs`，文件头注明出处 commit），不按 crate 依赖——会带进第二份 gpui。`native/` 因此是 GPL-3.0-or-later。gpui-kit 开着 `gpui-fast`（Longbridge 的 GPUI Fast：保留式视图 / 布局 / 文字排版，`gpui_kit::*` 导出的是它；上游 gpui-pre 一族照样参与编译）。`native/vendor/alacritty_terminal` 是裁掉 46MB 测试数据的入库副本。
-- 文案：`t!("key")`，**界面上不允许硬编码中文**。文案只有 `falcon-ui/locales/zh-CN.json` 一份（v1 只有中文，直接改它），原生 / 平台独有的挂在 `native.<区域>` 下。
+- 分层：`falcon-proto`（协议类型）→ `falcon-client`（REST / WS，与执行器无关的 future，自带 tokio 运行时）→ `falcon-term`（alacritty_terminal + 从 Zed 抄的按键编码 + 鼠标 / 滚轮 / 模式跟踪）→ `falcon-theme`（主题系统：Ghostty 主题文件即数据模型、浅深双槽位、整套界面色由一套主题派生，ADR 0006 / 0011）→ `falcon-core`（与 UI 框架无关的纯逻辑：列式工作区排布 `layout.rs`、窗口 key `pane_key.rs`、会话标题 `session_title.rs`、快捷键、文件路径 / 搜索 / 树、git 图等；`tests/vectors/` 是回归向量）→ `falcon-platform`（零 UI 依赖的宿主服务抽象）→ `falcon-nsh` / `falcon-app`（只有这两个依赖 NSH）。**纯逻辑一律放下层 crate**，渲染层升级只波及最外两层。
+- 主应用全纯 Rust（`nsh-engine` 关闭 `js-core`，主路径零 QuickJS 开销）；Zed 的终端按键编码（`falcon-term/src/keys.rs`）与 `native/vendor/alacritty_terminal`（裁掉 46MB 测试数据的入库副本，关闭 `tty` 支持 `wasm32`）保留原样，`native/` 因此是 GPL-3.0-or-later。
+- 文案：`t!("key")`，**界面上不允许硬编码中文**。文案统一在 `falcon-nsh/locales/zh-CN.json` 一份（v1 只有中文，直接改它），原生 / 平台独有的挂在 `native.<区域>` 下。
 - 界面色**只准用 falcon-theme 派生出的语义 token**，不许写死颜色；新增语义色去 `falcon-theme/src/derive.rs` 加。派生规则有冻结的金标准 fixture（`tests/derive_golden.rs`），有意改规则要连 fixture 一起改并写清楚。**深浅按主题底色亮度切，不按系统明暗**。内置主题 = Falcon 两套 + Ghostty 全部 463 套（`falcon-theme/data/`，`cargo xtask vendor-themes` 从本机 Ghostty.app 或 GitHub 重新生成）。
-- 界面骨架是**浮动岛**（ADR 0011）：窗口底上浮着侧栏 / 主区 / 右面板几块圆角面板，之间只有一道缝，**不要加分栏边框**；岛里再嵌一块用"借窗口底色"的下沉块，也不要用边框。主区是**列式工作区**（ADR 0012）：窗口排成列、每列可叠多扇、列分在一块块画布上、不横向滚动，排布与拖拽落点的纯函数在 `falcon-core/src/layout.rs`，改之前先读 ADR 0012。
+- 界面骨架：桌面端与大屏是**浮动岛**（ADR 0011：窗口底上浮着侧栏 / 主区 / 右面板几块圆角面板，之间只有一道缝，**不要加分栏边框**；岛里再嵌一块用"借窗口底色"的下沉块，也不要用边框）+ **列式工作区**（ADR 0012：窗口排成列、每列可叠多扇、列分在一块块画布上、不横向滚动，排布与拖拽落点的纯函数在 `falcon-core/src/layout.rs`，改之前先读 ADR 0012）；手机端按 `ViewportLayout::Mobile` 自适应为移动导航栈与单键直达的扩展按键栏（`Esc` / `Tab` / `Ctrl` / `Alt` / 方向键等）；TUI 端按终端字符网格自适应渲染。
 - 会话**默认不起名**（`name` 空串），界面显示的是自动标题：手起的名字 → 前台命令 → agent 的 CLI 名 → shell 命令名（`falcon-core/src/session_title.rs`）。列表里各处必须叫同一个名字；窗口标题栏例外——它右边就是完整工作目录，没标题时那一格空着，别编占位名。自动标题由服务端拼好经 WS 的 `{type:"title"}` 推来（`sessions/auto_title.rs`）：报了 OSC 7501 的程序用它设的终端标题（OSC 0/2，守护进程只收前台不是 shell 时写的）、再是它自报的 `app`，其余程序是探到的前台命令；没人看着也探，但只跟着输出 / 程序状态 / 程序标题点火、2.5s 节流。
-- 字体：`falcon-ui/build.rs` 把 `native/assets/fonts/` 里的 woff2（`cargo xtask vendor-fonts <berkeley|ioskeley|maple|nerd>` 从官方发行包生成、已进仓库；要 woff2_compress 与 hb-subset）解成 TTF 嵌进二进制（GPUI 不认 WOFF2）。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
-- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `native/xtask/src/icons.rs`，`cargo xtask icons` 出 `falcon-ui/assets/app-icons/` 与 `falcon-desktop/assets/icon-512.png`；增删图标要同时改 `xtask/src/icons.rs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，falcon-ui 有测试对账）。
-- **验证界面靠 Metal 回读截图**（锁屏 / 远程也能用）：`cargo build -p falcon-desktop --features snapshot`，再用 `FALCON_AUTOMATE="ready;select:<项目>;new-terminal;type:ls\r;wait:1000;snap:/tmp/a.png;quit"` 驱动（步骤全表见 `falcon-ui/src/automation.rs`，`type:` 里的 `;` 写成 `\x3b`），配 `FALCON_NATIVE_DATA_DIR=<临时目录>`（别写进用户真实的 ~/Library/Application Support/Falcon）与 `FALCON_LOCAL_URL`（指向测试服务端，别用 4923）。点击坐标是窗口逻辑像素（截图 PNG 是 2 倍）。锁屏时显示链路不走，`snap` 自己会先画两帧，别把"截图是空的 / 旧的"当成界面 bug。
-- **压测用 `--features automation --release`**（不带 snapshot 的 test-support）：`frames:<ms>` 以 60Hz 手动画并打印帧耗时 p50 / p95，`frames:<ms>:refresh` 无视视图缓存。侧栏与右侧面板是 `cached` 视图（ADR 0015），新加的大块视图照此办理。
-- HTML 预览：界面只管摆位置，网页视图由平台给（`Platform::html_view`）；默认开启 `falcon-desktop` 的 `webview` feature（wry，`--no-default-features` 退成"在浏览器中打开"）；字节一律走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007），沙箱不给 allow-same-origin、凭据是只能读该项目文件的作用域令牌，别为了"方便"放宽。
-- 程序状态（OSC 7501，ADR 0020）在客户端的几处出口：侧栏 / 标题栏徽标、blocked 的 toast、进入 done / error 的提示音（`chime.rs`，判定在 falcon-core 的 `FinishChimes`，声音是 `Platform::play_chime`）、终端窗口标题栏上展开的状态胶囊与底边线（`terminal/title_status.rs`，计时是 falcon-core 的 `StateClock`）。**别再往终端窗口里加随状态出没的行**（原先底部的状态栏就是为此常驻、后来并进了标题栏）：一出一没终端就差一行，PTY 跟着 resize，正在干活的 TUI 整屏重画。动画分两类：**持续的状态指示**（转圈、呼吸）走 `motion.rs`（不看系统的「减少动态效果」：GPUI 的 `with_animation` 遇到它，循环动画停在起始帧，状态指示会定住；持续动画限 30 帧）；**一次性的过渡**（选中态淡入 `ui::selected_fade`、按钮 hover 底色的 `ui::hover_fade`——只给按钮类控件，别给列表行；组件库自带的浮层进入）用 `with_animation`——oneshot 在减少动态效果下直接落完成帧，不丢状态。标题栏里会动的两块是独立小视图（`StatusSlot`），别挪回画布里画——动画逐帧重画的是发起它的整个视图。
-- 右侧栏插件（ADR 0025）：`RightPanelId::Plugin(id)`，持久化成 `plugin:<id>`；面板是 `panels/plugin.rs`（一个插件一扇，只在露着时按插件的 refresh 重画），块的画法在 `panels/plugin/blocks.rs`——**插件只给色调，这里映射到语义 token**，新块先加进 falcon-proto 的词汇再在这里画，认不出的块不画。插件列表挂在 `Workspace::plugins`（`workspace/plugins.rs`），设置有「插件」页。自动化脚本的 `panel:<面板>`（如 `panel:plugin:sysmon`）与 `settings:<页>` 用来截插件面板与设置页。
-- **通知一律走 `falcon-ui/src/toasts.rs` 的 `ToastExt`**，不用组件库的 `push_notification`（它的通知层会被对话框盖住，见 ADR 0015）。
-- **界面尺寸写 `zoom::zpx(..)`，不写 `px(..)`**：界面缩放（⌘+ / ⌘−）= rem 与 zpx 一起乘倍数；`px` 只留给画布几何、终端画面、窗口外框这类真实像素（`zoom.rs` 顶部有清单）。`theme.font_size` 就是 rem，必须是 16 × 倍数，别再拿它当正文字号。
+- 字体：`falcon-nsh/build.rs` 把 `native/assets/fonts/` 里的 woff2（`cargo xtask vendor-fonts <berkeley|ioskeley|maple|nerd>` 从官方发行包生成、已进仓库；要 woff2_compress 与 hb-subset）解成 TTF 嵌进二进制。正文是 Berkeley Mono TX-02（商业字体，zip 不进仓库），缺的拉丁 / 盒线落到 Ioskeley，中文落到 Maple，图标落到 Symbols Nerd Font Mono。
+- 应用图标（ADR 0018）：选择存在服务端 settings 表；内置图标的图形在 `native/xtask/src/icons.rs`，`cargo xtask icons` 出 `falcon-nsh/assets/app-icons/` 与 `falcon-app/assets/icon-512.png`；增删图标要同时改 `xtask/src/icons.rs` 与 falcon-core 的 `APP_ICON_IDS`（服务端与客户端都用它，`falcon-nsh` 有测试对账）。
+- **组件与端到端界面回归测试**：直接使用 `nsh-testing` 的 `Headless` 测试平台驱动桌面 / 移动 / TUI 三套布局与终端画布（`cargo test --release -p falcon-nsh`）；30 万行高吞吐帧耗时基准使用 `cargo xtask nsh-bench`（门禁 p95 < 4.0ms）。
+- HTML 预览：网页预览使用 NSH 原生 `web_view(url)`（沙箱隔离）；字节一律走原始字节路由 `/api/projects/:id/raw/<token>/<path>`（ADR 0007），沙箱不给 allow-same-origin、凭据是只能读该项目文件的作用域令牌，别为了"方便"放宽。
+- 程序状态（OSC 7501，ADR 0020）在客户端的几处出口：侧栏 / 标题栏徽标、blocked 的 toast、进入 done / error 的提示音（判定在 falcon-core 的 `FinishChimes`，声音是 `Platform::play_chime`）、终端窗口标题栏上展开的状态胶囊与底边线（计时是 falcon-core 的 `StateClock`）。**别再往终端窗口里加随状态出没的行**（原先底部的状态栏就是为此常驻、后来并进了标题栏）：一出一没终端就差一行，PTY 跟着 resize，正在干活的 TUI 整屏重画。
+- 右侧栏插件（ADR 0025 + ADR 0028 双轨）：`RightPanelId::Plugin(id)`，持久化成 `plugin:<id>`。第一轨保留 `falcon-proto::plugin` 的声明式 `PluginView`（在 `falcon-nsh/src/plugins.rs` 用语义色调渲染）；第二轨支持经宿主机 `falcon-server` Ed25519 根公钥签名校验（`nsh-package` `.nshpkg`，信任根来自 `/api/plugins/trust`，包字节来自 `/api/plugins/:id/package`）的受控富交互插件包。
+- **界面尺寸写 `zoom::zpx(..)`**：界面缩放（⌘+ / ⌘−）= rem 与 zpx 一起乘倍数；真实像素只留给画布几何、终端画面、窗口外框。
 
 ## 约定
 
 - 术语以 [CONTEXT.md](./CONTEXT.md) 为准，包括 _Avoid_ 列表——那里写的不只是命名偏好，Detach/Terminate、源项目/附属项目、宿主机/远端主机这些区分直接对应代码里的分支。
 - 注释解释的是"为什么"和踩过的坑（多半是实测出来、文档里查不到的），密度偏高是刻意的；改动附近代码时保持同样的说明力度，注释与代码不符时先修注释。
-- 架构决策写在 `docs/adr/`：0001 是持久会话的语义与当初为什么选 Zellij（已被 0020 取代，后记写了哪些结论仍有效），0002 是附属项目与删除护栏，0003 是多仓库项目与批量派生（含回滚与包围盒断言），0005 是 rio 引擎的自持装配层与 WebGPU 渲染器（已随 React 前端删除，只剩历史参考；后记写了哪些输入口径移植进了 falcon-term），0006 是主题系统（Ghostty 主题格式、双槽位、界面色派生规则、首帧策略），0007 是原始字节路由与 HTML / 图片预览沙箱（路径形状路由、作用域令牌、响应头护栏、图片缩放模型），0008 是文件下载 / 上传（流式 exec 通道、Windows 的 base64 行协议、临时文件 + 字节数核对的落盘规则），0009 是文件面板目录浏览器（平铺当前目录、mkdir / rename / remove、文件夹上传），0010 是飞书项目面板（已删除；历史决定见该 ADR），0011 是浮动岛骨架（窗口底与圆角面板、圆角阶梯、窗口底只压亮度不洗色度与色域收缩、哪些地方刻意没改），0012 是列式工作区（列 → 窗口的排布模型、为什么必须绝对定位、落点坐标的两套下标、把手与持久化、多画布与自动另起一块），0013 是 agent 会话（开场 CLI 的启动脚本、为什么不能读 $SHELL、CLI 缺失时的退路），0014 是公网发布（Cloudflare Quick Tunnel、只在后端本机跑 cloudflared、远端经 SSH 桥），0015 是原生客户端（GPUI 薄客户端、crate 分层、Zed 代码按文件抄、appearance 先于 resize、一台服务端一个窗口、测量数据与踩坑清单），0016 是中转按机器挂（端口转发与公网发布从项目 / 右侧栏搬到主机 / 设置页、同端口互斥的槽位口径、旧规则迁移与删主机级联），0017 是用 px0 审阅（宿主机上跑 px0、同源反代的代价与前提、二进制钉哈希后由后端推到远端、pty 收尸、Origin 改写），0018 是应用图标（按服务端存的选择、公开的取图路由、客户端规整自定义图、一份定义出四种形状、原生运行时换 Dock 图标及其限制），0019 是终端滚动条（已随 Zellij 退役，只剩历史参考），0021 是 AI 助手（已删除；历史决定见该 ADR 与 `docs/design/ai-assistant.md`），0022 是多客户端的终端尺寸（取代「所有 Viewer 取最小」：跟最近真操作过的、看得见的那扇窗口，后台画布 / 收起的面板 / 最小化或被盖住的窗口不算、都看不见时退回全部；生效尺寸经 WS 的 `size` 推给每扇窗口，不定尺寸的按它建网格，放不下先缩字到一半再裁剪跟光标，比窗口小就露窗口底并在标题栏提示），0023 是文件窗口的编辑（只有未截断的合法 UTF-8 文本能改、`PUT …/file` 带内容哈希判冲突、原地覆盖保住权限位与链接、换行与末尾换行跟原文件走、换文件 / 关窗口 / 退出 / 关标签页前拦没存的修改），0024 是宿主机上的会话没了就原地重开（holder 被杀 / 宿主机重启时接回判 Gone，用同一个会话 id 再起一个而不是记 dead；Codex / grok 开场钉对话 id = 会话 id、重开时 `--resume`，codex 等退成普通 shell；exited 不重开），0025 是右侧栏插件（插件交声明式面板文档、客户端用语义色画；命令插件只在后端本机跑、不经 shell、不经 API 安装；输出逐块解析并裁剪；交互只有参数与动作（`setParam` 进出详情、文档的 `params` 改写参数、列表行的「⋯」菜单）、状态在插件那边；系统监控与 Docker 是走同一条路的内置插件：系统监控本机 sysinfo、Linux 远端 /proc 探测，Docker 跑那台机器上的 docker 命令行；`RightPanelId::Plugin` 持久化成 `plugin:<id>`），0026 是应用内更新（检查 GitHub Release，macOS 替换 Falcon.app 后按原参数 service install，再经正常退出重新打开；没保存的文件修改会先问），0020 是自研会话守护进程 falcon-sessiond（已实施，取代 0001 的 Zellij：holder 持 PTY + libghostty-vt 的 VT 进程两进程模型、自维护绑定与钉死的 ghostty、带偏移的帧协议与快照、终端查询由 VT 进程一处代答、OSC 7501 程序状态、一个版本里整体替换 Zellij、不兼容旧会话、不设回退开关；详细设计在 `docs/design/session-daemon.md`）。做相关改动前先读对应 ADR。
+- 架构决策写在 `docs/adr/`：0001 是持久会话的语义与当初为什么选 Zellij（已被 0020 取代，后记写了哪些结论仍有效），0002 是附属项目与删除护栏，0003 是多仓库项目与批量派生（含回滚与包围盒断言），0005 是 rio 引擎的自持装配层与 WebGPU 渲染器（已随 React 前端删除，只剩历史参考；后记写了哪些输入口径移植进了 falcon-term），0006 是主题系统（Ghostty 主题格式、双槽位、界面色派生规则、首帧策略），0007 是原始字节路由与 HTML / 图片预览沙箱（路径形状路由、作用域令牌、响应头护栏、图片缩放模型），0008 是文件下载 / 上传（流式 exec 通道、Windows 的 base64 行协议、临时文件 + 字节数核对的落盘规则），0009 是文件面板目录浏览器（平铺当前目录、mkdir / rename / remove、文件夹上传），0010 是飞书项目面板（已删除；历史决定见该 ADR），0011 是浮动岛骨架（窗口底与圆角面板、圆角阶梯、窗口底只压亮度不洗色度与色域收缩、哪些地方刻意没改），0012 是列式工作区（列 → 窗口的排布模型、为什么必须绝对定位、落点坐标的两套下标、把手与持久化、多画布与自动另起一块），0013 是 agent 会话（开场 CLI 的启动脚本、为什么不能读 $SHELL、CLI 缺失时的退路），0014 是公网发布（Cloudflare Quick Tunnel、只在后端本机跑 cloudflared、远端经 SSH 桥），0015 是旧版 GPUI 原生客户端（渲染层已被 ADR 0028 的 NSH 六端统一架构取代，其中 crate 分层、appearance 先于 resize、一台服务端一个窗口等经验仍保留在 `falcon-nsh` / `falcon-app`），0016 是中转按机器挂（端口转发与公网发布从项目 / 右侧栏搬到主机 / 设置页、同端口互斥的槽位口径、旧规则迁移与删主机级联），0017 是用 px0 审阅（宿主机上跑 px0、同源反代的代价与前提、二进制钉哈希后由后端推到远端、pty 收尸、Origin 改写），0018 是应用图标（按服务端存的选择、公开的取图路由、客户端规整自定义图、一份定义出四种形状、原生运行时换 Dock 图标及其限制），0019 是终端滚动条（已随 Zellij 退役，只剩历史参考），0021 是 AI 助手（已删除；历史决定见该 ADR 与 `docs/design/ai-assistant.md`），0022 是多客户端的终端尺寸（取代「所有 Viewer 取最小」：跟最近真操作过的、看得见的那扇窗口，后台画布 / 收起的面板 / 最小化或被盖住的窗口不算、都看不见时退回全部；生效尺寸经 WS 的 `size` 推给每扇窗口，不定尺寸的按它建网格，放不下先缩字到一半再裁剪跟光标，比窗口小就露窗口底并在标题栏提示），0023 是文件窗口的编辑（只有未截断的合法 UTF-8 文本能改、`PUT …/file` 带内容哈希判冲突、原地覆盖保住权限位与链接、换行与末尾换行跟原文件走、换文件 / 关窗口 / 退出 / 关标签页前拦没存的修改），0024 是宿主机上的会话没了就原地重开（holder 被杀 / 宿主机重启时接回判 Gone，用同一个会话 id 再起一个而不是记 dead；Codex / grok 开场钉对话 id = 会话 id、重开时 `--resume`，codex 等退成普通 shell；exited 不重开），0025 是右侧栏插件（插件交声明式面板文档、客户端用语义色画；命令插件只在后端本机跑、不经 shell、不经 API 安装；输出逐块解析并裁剪；交互只有参数与动作（`setParam` 进出详情、文档的 `params` 改写参数、列表行的「⋯」菜单）、状态在插件那边；系统监控与 Docker 是走同一条路的内置插件：系统监控本机 sysinfo、Linux 远端 /proc 探测，Docker 跑那台机器上的 docker 命令行；`RightPanelId::Plugin` 持久化成 `plugin:<id>`），0026 是应用内更新（检查 GitHub Release，macOS 替换 Falcon.app 后按原参数 service install，再经正常退出重新打开；没保存的文件修改会先问），0020 是自研会话守护进程 falcon-sessiond（已实施，取代 0001 的 Zellij：holder 持 PTY + libghostty-vt 的 VT 进程两进程模型、自维护绑定与钉死的 ghostty、带偏移的帧协议与快照、终端查询由 VT 进程一处代答、OSC 7501 程序状态、一个版本里整体替换 Zellij、不兼容旧会话、不设回退开关；详细设计在 `docs/design/session-daemon.md`），0028 是 Native Shell（NSH）六端客户端渲染统一（`falcon-nsh` + `falcon-app` 统一 macOS / Windows / Linux GTK4 / Android / Web WASM / TUI，淘汰 GPUI 与 Android Gradle/Kotlin，双轨插件支持宿主机 Ed25519 自签发 `.nshpkg`）。做相关改动前先读对应 ADR。

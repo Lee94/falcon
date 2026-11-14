@@ -960,5 +960,7 @@ mod tests {
         assert_eq!(&args[..4], ["--host", "127.0.0.1", "--port", "0"]);
         assert!(!is_server_name("falcon-server-aabbccdd"));
         assert!(!is_server_name("falcon-desktop"));
+        assert!(!is_server_name("falcon-app"));
+        assert!(!is_server_name("falcon-app.exe"));
     }
 }

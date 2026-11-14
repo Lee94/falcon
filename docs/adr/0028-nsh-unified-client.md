@@ -60,6 +60,6 @@ NSH 默认按操作系统明暗切换静态 `theme.json` 的 `light` / `dark` �
 2. **新增 `.nshpkg` 签名沙箱轨道**：当插件清单声明已签名的 `.nshpkg` 包时，客户端仅在该插件面板打开期间挂载隔离的子 `AppView`（限制 QuickJS 堆上限与调用预算，默认禁止任意网络与本地文件访问），注入当前 Ghostty 派生 `Tokens`，并通过受控宿主通道与服务端白名单动作交互。
 3. **自托管信任模型**：为避免中心化私钥阻碍自托管用户编写本地插件，`falcon-server` 在 `<数据目录>/plugins/.keys/`（`0600`）按需生成本实例的 Ed25519 插件根密钥与签发证书（或对放入插件目录的包执行 `nsh_package::resign`），经 `GET /api/plugins` 下发本实例根公钥，客户端使用 `nsh_package::TrustStore` 强制验签与防降级校验后再加载。
 
-## 迁移策略
+## 迁移策略与后记
 
-采用特性分支分阶段推进，在完成桌面宿主集成（macOS 菜单栏 `NSStatusItem`、关最后一扇窗口切 `Accessory` 保活、LaunchAgent 原参数 `service install`、应用更新未保存拦截与 `.app` 备份回滚、Windows 计划任务与凭据库）及全功能对齐后，一次性退役 `falcon-ui`、`falcon-android`、`android/` 与 `gpui-kit` / `lb-wry` 依赖。
+采用特性分支分阶段推进，在完成桌面宿主集成（macOS 菜单栏状态项与多实例标记、关最后一扇窗口保活、LaunchAgent 原参数 `service install`、应用更新未保存拦截与 `.app` 备份回滚、Windows 计划任务与凭据库、Android 旧版 `falcon_android_prefs.xml` 首启自动迁移）、真服务端 REST + `/ws/sessions/:id` 实时接线与 `xtask` 六端打包（`pkg` / `win` / `linux-desktop` / `android` / `web` / `tui`）后，已完整退役 `falcon-ui`、`falcon-desktop`、`falcon-android`、`android/` 与 `gpui-kit` / `lb-wry` 依赖。

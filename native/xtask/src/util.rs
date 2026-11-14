@@ -198,3 +198,27 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// 通过 `cargo metadata --format-version 1` 定位工作区锁定的依赖包源码目录（如 `nsh-platform-android` / `nsh-platform-web`）。
+pub fn cargo_package_dir(pkg_name: &str) -> Result<PathBuf> {
+    let raw = output("cargo", ["metadata", "--format-version", "1"], Some(&native()))?;
+    let meta: serde_json::Value = serde_json::from_str(&raw).context("解析 cargo metadata JSON 失败")?;
+    let packages = meta
+        .get("packages")
+        .and_then(|v| v.as_array())
+        .context("cargo metadata 缺少 packages 数组")?;
+    for pkg in packages {
+        if pkg.get("name").and_then(|v| v.as_str()) == Some(pkg_name) {
+            let manifest = pkg
+                .get("manifest_path")
+                .and_then(|v| v.as_str())
+                .with_context(|| format!("{pkg_name} 缺少 manifest_path"))?;
+            let dir = Path::new(manifest)
+                .parent()
+                .with_context(|| format!("{pkg_name} manifest_path 无父目录"))?
+                .to_path_buf();
+            return Ok(dir);
+        }
+    }
+    bail!("cargo metadata 中未找到依赖包 {pkg_name}")
+}

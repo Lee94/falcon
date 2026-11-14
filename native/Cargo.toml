@@ -1,16 +1,15 @@
-# Falcon 的 Cargo workspace：服务端（falcon-server）、原生客户端（falcon-desktop，
-# 界面在 falcon-ui）与构建任务（xtask）。客户端设计见 docs/design/gpui-client.md。
+# Falcon 的 Cargo workspace：服务端（falcon-server）、NSH 跨端统一客户端（falcon-app，
+# 界面在 falcon-nsh，覆盖 macOS / Windows / Linux GTK4 / Android / Web WASM / TUI）与构建任务（xtask）。
 #
-# 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。GPUI 只出现在客户端的
-# falcon-platform / falcon-ui / falcon-desktop 三个 crate，其余 crate 不依赖 GPUI——
-# GPUI 每次破坏性升级只波及这一层。
+# 仓库里唯一的构建系统（服务端、客户端与构建任务 xtask 都在这里）。NSH 只出现在客户端的
+# falcon-nsh / falcon-app 两个 crate，其余 crate 不依赖 NSH——框架升级只波及这一层。
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask"]
 # 会话守护进程（ADR 0020）是独立的工作区：它链 libghostty-vt 的静态库（要 Zig 编），
 # 放进来的话 `cargo test --workspace` 就离不开 Zig 了
 exclude = ["sessiond"]
-default-members = ["crates/falcon-desktop"]
+default-members = ["crates/falcon-app"]
 
 [workspace.package]
 version = "0.3.28"
@@ -25,7 +24,6 @@ falcon-term = { path = "crates/falcon-term" }
 falcon-theme = { path = "crates/falcon-theme" }
 falcon-core = { path = "crates/falcon-core" }
 falcon-platform = { path = "crates/falcon-platform" }
-falcon-ui = { path = "crates/falcon-ui" }
 falcon-nsh = { path = "crates/falcon-nsh" }
 
 # Native Shell (NSH) 跨端统一界面层（ADR 0028）：纯 Rust 主应用与声明式/签名插件双轨，主路径零 QuickJS 开销。
@@ -36,17 +34,8 @@ nsh-package = "0.5.1"
 nsh-testing = { version = "0.5.1", default-features = false }
 nsh-platform-tui = { version = "0.5.1", default-features = false, features = ["run-app"] }
 
-# GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
-# gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同
-# gpui-wry），并按新快照对应的 zed commit 重新比对从 Zed 抄来的文件。
-#
-# `gpui-fast`：核心、平台层与各层组件换成 Longbridge 的 GPUI Fast（Zed GPUI 的 fork，
-# 渲染与布局的性能优化），`gpui_kit::*` 的路径不变。上游 gpui-pre 一族照样是 gpui-kit 的
-# 非可选依赖、照样参与编译，只是不再导出。浏览器版因此跑在 gpui-fast-web 上，IME 补丁
-# 在 vendor/gpui-fast-web；gpui-fast 本身也带了一处补丁（见文件末尾的 [patch]）。
-gpui-kit = { version = "=0.9.1", features = ["gpui-fast"] }
-# zed@93d7456（gpui-pre 0.3.9 的快照点；与上一版 279fe07 锁的是同一个 rev）锁的 alacritty fork。抄来的 Zed 终端
-# 代码依赖这个 fork 的 API，别换成 crates.io 上的 alacritty_terminal。
+# zed@93d7456 锁定的 alacritty fork。抄来的 Zed 终端按键/模式代码依赖这个 fork 的 API，
+# 别换成 crates.io 上的 alacritty_terminal。
 # 实际编的是 vendor/alacritty_terminal（见文件末尾的 [patch]）：加了 `tty` 开关，falcon-term
 # 关掉它才编得到 wasm。Falcon 只用 Term / grid / vte，PTY 在服务端。
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f", default-features = false, features = ["serde"] }
@@ -67,7 +56,7 @@ web-time = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
 
 [profile.dev]
-# GPUI 在纯 debug 下帧时间很难看，依赖开一点优化，自己的代码保持可调试。
+# 渲染与终端网格依赖在纯 debug 下帧时间偏慢，依赖开一点优化，自己的代码保持可调试。
 [profile.dev.package."*"]
 opt-level = 1
 

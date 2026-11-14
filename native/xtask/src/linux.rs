@@ -33,7 +33,7 @@ const PREUN: &str = include_str!("../assets/linux/preun.sh");
 const INSTALL_HEAD: &str = include_str!("../assets/linux/install.sh");
 
 /// linux-<arch> 平台名 → dpkg / rpm 的架构名
-const DEB_ARCH: [(&str, &str); 2] = [("linux-x64", "amd64"), ("linux-arm64", "arm64")];
+pub(crate) const DEB_ARCH: [(&str, &str); 2] = [("linux-x64", "amd64"), ("linux-arm64", "arm64")];
 const RPM_ARCH: [(&str, &str); 2] = [("linux-x64", "x86_64"), ("linux-arm64", "aarch64")];
 
 pub fn run(args: &[String]) -> Result<()> {
@@ -114,7 +114,7 @@ fn build_deb(bin: &Path, ver: &str, target: &str, out: &Path) -> Result<()> {
 }
 
 /// gzip 的 tar 成员（文件名、内容、权限位）
-fn tar_gz(entries: &[(&str, &[u8], u32)]) -> Result<Vec<u8>> {
+pub(crate) fn tar_gz(entries: &[(&str, &[u8], u32)]) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let enc = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::best());
     let mut b = tar::Builder::new(enc);
@@ -133,7 +133,7 @@ fn tar_gz(entries: &[(&str, &[u8], u32)]) -> Result<Vec<u8>> {
 }
 
 /// GNU ar：!<arch>\n + 成员（名字带尾斜杠，头 60 字节，奇数长度补 \n）
-fn ar(members: &[(&str, &[u8])]) -> Vec<u8> {
+pub(crate) fn ar(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = b"!<arch>\n".to_vec();
     for (name, data) in members {
         let header = format!("{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", 0, 0, 0, 100644, data.len());

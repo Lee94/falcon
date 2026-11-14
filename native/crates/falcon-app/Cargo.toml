@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Falcon 六端统一原生宿主启动器（macOS / Windows / Linux / Android / Web / TUI，ADR 0028）"
 
 [lib]
 name = "falcon_app"
@@ -20,6 +21,11 @@ tui = ["dep:nsh-platform-tui", "dep:ratatui-core"]
 # Linux GTK4 桌面后端：需要系统安装 libgtk-4-dev（GitHub Release 打包环境开启；无头环境默认走 TUI）
 linux-desktop = ["dep:nsh-platform-linux"]
 
+# Windows：exe 自带图标与版本信息（build.rs 的 windows_resources）
+[target.'cfg(windows)'.build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+winresource = "0.1"
+
 [dependencies]
 falcon-nsh.workspace = true
 falcon-platform.workspace = true
@@ -31,16 +37,24 @@ nsh-engine.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde_json.workspace = true
+url.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories = "6"
 nsh-platform-tui = { workspace = true, optional = true }
 ratatui-core = { version = "0.1.2", default-features = false, features = ["std", "layout-cache", "underline-color"], optional = true }
+
+# 记住的访问密码（src/host/passwords.rs）：macOS 与 Android 写受控目录内的 0600 私有文件，
+# 其余桌面平台（Windows / Linux）走系统凭据库
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "android"), not(target_arch = "wasm32")))'.dependencies]
+keyring = "4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSSound"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }

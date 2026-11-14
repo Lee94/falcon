@@ -5,21 +5,30 @@
 //! - **macOS**：`nsh-platform-macos`
 //! - **Windows**：`nsh-platform-windows`
 //! - **Linux Desktop**：`nsh-platform-linux`（GTK 4 + Pango，由 `linux-desktop` feature 开启）
-//! - **Android**：`nsh-platform-android`（`cdylib` JNI 导出 `ui_sets!` + `root!`）
+//! - **Android**：`nsh-platform-android`（`cdylib` JNI 导出 `ui_sets!` + `root!` + `main!`）
 //! - **Web**：`nsh-platform-web`（`wasm32` 纯 Rust 导出 `rust_app!`，主路径零 JS 虚拟机开销）
 //! - **TUI**：`nsh-platform-tui`（`--tui` / `FALCON_TUI=1`，或未开启 `linux-desktop` 时的终端工作台）
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod host;
 
 use falcon_nsh::{FalconLaunchOptions, falcon_root_with_options};
 use nsh_core::element::{Registry, Root};
 
-/// 初始化 `falcon-platform` 默认平台实例并返回 Falcon 所需的 NSH 组件集（`nsh/base` + `falcon/ui`）。
+/// 初始化 `falcon-platform` 平台实例并返回 Falcon 所需的 NSH 组件集（`nsh/base` + `falcon/ui`）。
 pub fn init_ui_sets() -> Vec<Registry> {
+    #[cfg(target_os = "android")]
+    host::install_once();
     let _ = falcon_platform::shared();
     vec![nsh_base::registry(), falcon_nsh::registry()]
 }
 
 /// 按给定启动配置初始化平台层并创建 Falcon NSH `Root`。
 pub fn build_root(options: FalconLaunchOptions) -> Root {
+    #[cfg(not(target_arch = "wasm32"))]
+    if !options.offline_demo {
+        host::install_once();
+    }
     let _ = falcon_platform::shared();
     falcon_root_with_options(options)
 }
@@ -30,6 +39,9 @@ nsh_platform_android::ui_sets!(init_ui_sets());
 
 #[cfg(target_os = "android")]
 nsh_platform_android::root!(build_root(FalconLaunchOptions::default()));
+
+#[cfg(target_os = "android")]
+nsh_platform_android::main!(build_root(FalconLaunchOptions::default()));
 
 // ── Web (WASM) 纯 Rust 宿主导出 ────────────────────────────────────────
 #[cfg(target_arch = "wasm32")]
@@ -122,6 +134,8 @@ pub fn run_cli() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    host::install_once();
+
     let force_tui = cli.force_tui;
     let launch_opts = cli.into_launch_options();
 
@@ -130,7 +144,14 @@ pub fn run_cli() -> anyhow::Result<()> {
         return tui_host::run_tui(launch_opts);
     }
 
-    #[cfg(all(not(feature = "tui"), not(any(target_os = "macos", target_os = "windows", all(target_os = "linux", feature = "linux-desktop")))))]
+    #[cfg(all(
+        not(feature = "tui"),
+        not(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", feature = "linux-desktop")
+        ))
+    ))]
     if force_tui {
         anyhow::bail!("TUI backend is not enabled in this build (enable feature `tui`)");
     }
@@ -148,10 +169,11 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     use nsh_platform_macos::{AppOptions, AppSource, run_app, set_ui_sets};
     set_ui_sets(init_ui_sets());
     let mut opts = AppOptions::default();
-    opts.app_id = "dev.falcon.app".into();
+    opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
     opts.size = (1360, 860);
-    opts.schemes = vec!["falcon".into()];
+    // macOS 关掉最后一扇窗口时保留引擎与菜单栏状态项（自动化运行除外）
+    opts.keep_alive_on_close = std::env::var_os("FALCON_AUTOMATE").is_none();
     opts.limits = nsh_engine::Limits::standalone();
     run_app(AppSource::Rust(build_root(launch_opts)), opts);
     Ok(())
@@ -162,7 +184,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     use nsh_platform_windows::{AppOptions, AppSource, run_app, set_ui_sets};
     set_ui_sets(init_ui_sets());
     let mut opts = AppOptions::default();
-    opts.app_id = "dev.falcon.app".into();
+    opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
     opts.size = (1360, 860);
     opts.schemes = vec!["falcon".into()];
@@ -176,7 +198,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     use nsh_platform_linux::{AppOptions, AppSource, run_app, set_ui_sets};
     set_ui_sets(init_ui_sets());
     let mut opts = AppOptions::default();
-    opts.app_id = "dev.falcon.app".into();
+    opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
     opts.size = (1360, 860);
     opts.schemes = vec!["falcon".into()];
@@ -642,12 +664,12 @@ pub mod tui_host {
                 }
                 0x1b => {
                     if i + 2 < bytes.len() && bytes[i + 1] == b'[' {
-                        if bytes[i + 2] == b'<' {
-                            if let Some((consumed, ev)) = parse_sgr_mouse(&bytes[i..]) {
-                                out.push_back(ev);
-                                i += consumed;
-                                continue;
-                            }
+                        if bytes[i + 2] == b'<'
+                            && let Some((consumed, ev)) = parse_sgr_mouse(&bytes[i..])
+                        {
+                            out.push_back(ev);
+                            i += consumed;
+                            continue;
                         }
                         let (consumed, key_opt) = match bytes[i + 2] {
                             b'A' => (3, Some(("ArrowUp", Modifiers::default()))),
@@ -708,7 +730,6 @@ pub mod tui_host {
     }
 
     fn parse_sgr_mouse(slice: &[u8]) -> Option<(usize, RunEvent)> {
-        // \x1b[<btn;col;rowM 或 m
         let end_rel = slice
             .iter()
             .skip(3)

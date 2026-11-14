@@ -331,7 +331,7 @@ fn legacy_probe_command(kind: HostKind, root: &str) -> String {
     // 不同 HOME；更完整的进程环境判断由新二进制的本机 ensure 在拿锁后执行。
     let script = format!(
         "r={}; ps -ax -o command= | while IFS= read -r c; do \
-         case \"$c\" in *' node ensure '*|*' service '*|*' respawn '*|*'ps -ax -o command='*|*'falcon-sessiond'*|*'falcon-desktop'*) continue;; esac; \
+         case \"$c\" in *' node ensure '*|*' service '*|*' respawn '*|*'ps -ax -o command='*|*'falcon-sessiond'*|*'falcon-desktop'*|*'falcon-app'*) continue;; esac; \
          x=${{c%% *}}; e=${{x##*/}}; marker=FALCON_NODE_LEGACY; case \"$e\" in falcon-node-*) marker=FALCON_NODE_STARTING;; esac; \
          case \"$e\" in falcon|falcon-server|falcon-v*|falcon-node-*) \
          case \"$c\" in *'--data-dir '*) d=${{c##*--data-dir }}; case \"$d\" in \"$r\"|\"$r \"*) printf '%s\\n' \"$marker\";; esac;; \
@@ -362,7 +362,7 @@ async fn binary_for(target: SessiondTarget) -> anyhow::Result<Vec<u8>> {
         return Ok(bytes);
     }
     // 本机正在跑的 server 就是可信开发产物；只认明确的服务端文件名，test harness 与
-    // falcon-desktop 即使链接了本 crate，也不能被推到宿主机执行。
+    // falcon-app / falcon-desktop 即使链接了本 crate，也不能被推到宿主机执行。
     if command::local_target() == Some(target) {
         let exe = std::env::current_exe()?;
         if current_server(&exe) {
@@ -440,6 +440,7 @@ mod tests {
             "/tmp/target/debug/deps/falcon_server-aabbccdd"
         )));
         assert!(!current_server(Path::new("/tmp/falcon-desktop")));
+        assert!(!current_server(Path::new("/tmp/falcon-app")));
         assert!(current_server(Path::new("/tmp/target/debug/falcon-server")));
         assert!(current_server(Path::new("/tmp/falcon-v0.3.24-linux-x64")));
     }

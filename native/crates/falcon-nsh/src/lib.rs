@@ -20,8 +20,10 @@ pub mod zoom;
 use std::sync::Arc;
 
 use falcon_core::pane_key::parse_pane_key;
+use falcon_platform::{ServiceControl, ServicePresence};
 use falcon_theme::{ThemeSettings, derive_theme, load_theme_settings, resolve_theme_mode};
-use nsh_core::desktop::MainWindowOptions;
+use nsh_core::desktop::{MainWindowOptions, TrayTitleRun};
+use nsh_core::element::desktop::{MenuItem, main_window, quit, set_tray, tray};
 use nsh_core::element::{Registry, Root};
 use nsh_core::platform::Idiom;
 use nsh_core::prelude::*;
@@ -129,6 +131,11 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         });
     }
 
+    // macOS 常驻菜单栏状态项（托管 LaunchAgent 启停、局域网开关、多实例标记与检查更新）
+    if os() == nsh_core::platform::Os::MacOs && !props.offline_demo {
+        install_macos_tray(store.clone());
+    }
+
     view()
         .size_full()
         .relative()
@@ -141,6 +148,188 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         }))
         .child(toast_overlay())
         .child(modal_layer())
+}
+
+fn install_macos_tray(store: WorkspaceStore) {
+    let presence_sig: Signal<Option<ServicePresence>> = signal(None);
+    let lan_sig = signal(false);
+    let busy_sig: Signal<Option<ServiceControl>> = signal(None);
+    let mark_sig = signal(String::new());
+    let err_sig: Signal<Option<String>> = signal(None);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let refresh = move || {
+            spawn(async move {
+                if let Ok((pres, lan, mark)) = nsh_core::prelude::blocking(|| {
+                    let plat = falcon_platform::shared();
+                    let (pres, lan) = match plat.local_service() {
+                        Some(svc) => (
+                            svc.presence(),
+                            svc.lan_access().map(|s| s.enabled).unwrap_or(false),
+                        ),
+                        None => (None, false),
+                    };
+                    (pres, lan, plat.instance_mark())
+                })
+                .await
+                {
+                    presence_sig.set(pres);
+                    lan_sig.set(lan);
+                    mark_sig.set(mark);
+                }
+            });
+        };
+        refresh();
+        set_interval(std::time::Duration::from_secs(5), refresh);
+    }
+
+    effect(move || {
+        let mut items = Vec::new();
+        items.push(MenuItem::new(t!("native.menuBar.open")).on_select(|| {
+            main_window().show();
+            main_window().focus();
+        }));
+
+        if falcon_platform::shared().local_service().is_some() {
+            items.push(MenuItem::separator());
+            let busy = busy_sig.get();
+            let pres = presence_sig.get();
+            let status_label = if let Some(ctrl) = busy {
+                match ctrl {
+                    ServiceControl::Start => t!("native.menuBar.busyStart"),
+                    ServiceControl::Stop => t!("native.menuBar.busyStop"),
+                    ServiceControl::Restart => t!("native.menuBar.busyRestart"),
+                }
+            } else if let Some(err) = err_sig.get() {
+                t!("native.menuBar.failed", error = err)
+            } else {
+                match pres {
+                    None => t!("native.menuBar.querying"),
+                    Some(ServicePresence::NotInstalled) => t!("native.menuBar.missing"),
+                    Some(ServicePresence::Stopped) => t!("native.menuBar.stopped"),
+                    Some(ServicePresence::Running { pid: Some(pid) }) => {
+                        t!("native.menuBar.runningPid", pid = pid.to_string())
+                    }
+                    Some(ServicePresence::Running { pid: None }) => t!("native.menuBar.running"),
+                }
+            };
+            items.push(MenuItem::new(status_label).disabled(true));
+
+            let is_running = matches!(pres, Some(ServicePresence::Running { .. }));
+            let is_installed = !matches!(pres, Some(ServicePresence::NotInstalled));
+
+            let run_ctrl = move |ctrl: ServiceControl| {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    busy_sig.set(Some(ctrl));
+                    err_sig.set(None);
+                    spawn(async move {
+                        let outcome = nsh_core::prelude::blocking(move || {
+                            let plat = falcon_platform::shared();
+                            match plat.local_service() {
+                                Some(svc) => match svc.control(ctrl) {
+                                    Ok(next_pres) => (Ok(()), Some(next_pres)),
+                                    Err(err) => (Err(err), svc.presence()),
+                                },
+                                None => (Ok(()), None),
+                            }
+                        })
+                        .await;
+                        busy_sig.set(None);
+                        if let Ok((res, next_pres)) = outcome {
+                            presence_sig.set(next_pres);
+                            if let Err(e) = res {
+                                err_sig.set(Some(e));
+                            }
+                        }
+                    });
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = ctrl;
+            };
+
+            items.push(
+                MenuItem::new(t!("native.menuBar.start"))
+                    .disabled(busy.is_some() || is_running)
+                    .on_select(move || run_ctrl(ServiceControl::Start)),
+            );
+            items.push(
+                MenuItem::new(t!("native.menuBar.stop"))
+                    .disabled(busy.is_some() || !is_running)
+                    .on_select(move || run_ctrl(ServiceControl::Stop)),
+            );
+            items.push(
+                MenuItem::new(t!("native.menuBar.restart"))
+                    .disabled(busy.is_some() || !is_installed)
+                    .on_select(move || run_ctrl(ServiceControl::Restart)),
+            );
+
+            let lan_now = lan_sig.get();
+            items.push(
+                MenuItem::new(t!("native.menuBar.lanAccess"))
+                    .checked(lan_now)
+                    .disabled(busy.is_some())
+                    .on_select(move || {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let target = !lan_now;
+                            err_sig.set(None);
+                            spawn(async move {
+                                if let Ok((res, cur)) = nsh_core::prelude::blocking(move || {
+                                    let plat = falcon_platform::shared();
+                                    match plat.local_service() {
+                                        Some(svc) => match svc.set_lan_access(target) {
+                                            Ok(state) => (Ok(()), state.enabled),
+                                            Err(err) => (
+                                                Err(err),
+                                                svc.lan_access().map(|s| s.enabled).unwrap_or(false),
+                                            ),
+                                        },
+                                        None => (Ok(()), false),
+                                    }
+                                })
+                                .await
+                                {
+                                    lan_sig.set(cur);
+                                    if let Err(e) = res {
+                                        err_sig.set(Some(e));
+                                    }
+                                }
+                            });
+                        }
+                    }),
+            );
+        }
+
+        if falcon_platform::shared().app_updater().is_some() {
+            items.push(MenuItem::separator());
+            let st_upd = store.clone();
+            items.push(
+                MenuItem::new(t!("native.menuBar.checkUpdate")).on_select(move || {
+                    main_window().show();
+                    main_window().focus();
+                    st_upd
+                        .active_dialog
+                        .set(ActiveDialog::Settings(SettingsTab::About));
+                }),
+            );
+        }
+
+        items.push(MenuItem::separator());
+        items.push(
+            MenuItem::new(t!("native.menu.quit"))
+                .shortcut("mod+q")
+                .on_select(quit),
+        );
+
+        let mark = mark_sig.get();
+        let mut t_item = tray().tooltip("Falcon").menu(items);
+        if !mark.is_empty() {
+            t_item = t_item.title([TrayTitleRun::new(mark)]);
+        }
+        set_tray(t_item);
+    });
 }
 
 #[component]
@@ -203,7 +392,7 @@ pub fn falcon_root_with_options(options: FalconLaunchOptions) -> Root {
         server_url: server_url.clone(),
         initial_theme_json: initial_theme_json.clone(),
     })
-    .app_id("dev.falcon.app")
+    .app_id("com.falcon.app")
     .url_schemes(["falcon"])
     .translations(i18n::translations())
     .tokens(tokens_from_resolved(&initial_resolved))
@@ -568,5 +757,15 @@ mod tests {
             p95 < 50.0,
             "Debug p95 frame time {p95:.3}ms unexpectedly slow"
         );
+    }
+
+    /// ADR 0018 对账回归：`falcon-core::app_icon::APP_ICON_IDS` 中全部内置图标均已在 `assets/app-icons/` 下就位。
+    #[test]
+    fn app_icons_match_core_app_icon_ids() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/app-icons");
+        for id in falcon_core::app_icon::APP_ICON_IDS {
+            let path = dir.join(format!("{id}.png"));
+            assert!(path.is_file(), "missing builtin app icon asset: {}", path.display());
+        }
     }
 }
