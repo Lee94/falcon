@@ -236,7 +236,7 @@ pub fn run(args: &[String]) -> Result<()> {
         None,
     )?;
 
-    // 以 STORE（0 压缩）把 classes.dex 与 lib/<abi>/libnsh.so 写入 APK，配合 zipalign -p 4 支持系统直接 mmap
+    // 以 STORE（0 压缩）把 classes.dex 与 lib/<abi>/libnsh.so 写入 APK，配合 zipalign 16 KB 页对齐支持系统直接 mmap
     util::run(
         &jar_bin,
         [
@@ -254,17 +254,16 @@ pub fn run(args: &[String]) -> Result<()> {
 
     let zipalign_bin = sdk_tool(&build_tools, "zipalign")?;
     let aligned_apk = stage.path().join("aligned.apk");
-    util::run(
-        &zipalign_bin,
-        [
-            OsStr::new("-f"),
-            OsStr::new("-p"),
-            OsStr::new("4"),
-            unaligned_apk.as_os_str(),
-            aligned_apk.as_os_str(),
-        ],
-        None,
-    )?;
+    let mut zipalign_args: Vec<&OsStr> = vec![OsStr::new("-f")];
+    for flag in zipalign_page_flags(&build_tools) {
+        zipalign_args.push(OsStr::new(flag));
+    }
+    zipalign_args.extend([
+        OsStr::new("4"),
+        unaligned_apk.as_os_str(),
+        aligned_apk.as_os_str(),
+    ]);
+    util::run(&zipalign_bin, zipalign_args, None)?;
 
     let release_dir = root.join("release");
     std::fs::create_dir_all(&release_dir)?;
@@ -661,9 +660,26 @@ fn ndk_tool(ndk_bin: &Path, name: &str) -> Result<PathBuf> {
     bail!("找不到 NDK 工具：{}", ndk_bin.join(name).display())
 }
 
+/// build-tools 35+ 支持 `-P 16`（把未压缩 `.so` 按 16 KiB 边界对齐，兼顾 16 KB 与 4 KB 页设备）；
+/// 旧版 build-tools 不认 `-P`，退回 `-p`。
+fn zipalign_page_flags(build_tools_dir: &Path) -> &'static [&'static str] {
+    if ndk_version_key(build_tools_dir).first().copied().unwrap_or(0) >= 35 {
+        &["-P", "16"]
+    } else {
+        &["-p"]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zipalign_uses_16kb_page_flag_on_build_tools_35_plus() {
+        assert_eq!(zipalign_page_flags(Path::new("/sdk/build-tools/35.0.0")), &["-P", "16"]);
+        assert_eq!(zipalign_page_flags(Path::new("/sdk/build-tools/36.0.0")), &["-P", "16"]);
+        assert_eq!(zipalign_page_flags(Path::new("/sdk/build-tools/34.0.0")), &["-p"]);
+    }
 
     #[test]
     fn ndk_selection_prefers_env_and_sorts_versions_numerically() {

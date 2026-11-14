@@ -175,7 +175,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     // macOS 关掉最后一扇窗口时保留引擎与菜单栏状态项（自动化运行除外）
     opts.keep_alive_on_close = std::env::var_os("FALCON_AUTOMATE").is_none();
     opts.limits = nsh_engine::Limits::standalone();
-    run_app(AppSource::Rust(build_root(launch_opts)), opts);
+    let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);
     Ok(())
 }
 
@@ -189,7 +189,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     opts.size = (1360, 860);
     opts.schemes = vec!["falcon".into()];
     opts.limits = nsh_engine::Limits::standalone();
-    run_app(AppSource::Rust(build_root(launch_opts)), opts);
+    let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);
     Ok(())
 }
 
@@ -203,7 +203,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     opts.size = (1360, 860);
     opts.schemes = vec!["falcon".into()];
     opts.limits = nsh_engine::Limits::standalone();
-    run_app(AppSource::Rust(build_root(launch_opts)), opts);
+    let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);
     Ok(())
 }
 

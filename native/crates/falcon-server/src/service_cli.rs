@@ -6,7 +6,9 @@
 //! `<dataDir>/bin/falcon` 再写配置，进程名就叫 falcon，升级也只是覆盖同一路径。
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(target_os = "linux", windows))]
+use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::process::Command;
 #[cfg(target_os = "macos")]

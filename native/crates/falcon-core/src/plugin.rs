@@ -92,6 +92,7 @@ mod tests {
             enabled: true,
             error: None,
             dir: None,
+            package: None,
         }
     }
 
