@@ -12,7 +12,7 @@ exclude = ["sessiond"]
 default-members = ["crates/falcon-app"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
