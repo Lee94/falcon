@@ -48,12 +48,16 @@ cargo xtask pkg --skip-bin     # 只用已有的 release/falcon-v*-darwin-*
 
 ## Windows 安装包
 
-Windows 安装包只有原生客户端。服务端的打包与系统服务只做了 macOS 与 Linux。装好后在客户端里连别处的 falcon 服务。
+安装包里是原生客户端 + 同目录的服务端 `falcon-server.exe`。装完安装包会用它跑
+`falcon service install`，注册当前用户登录自启的计划任务（schtasks），默认
+http://127.0.0.1:4923；卸载时对应 `service uninstall`。客户端启动时也会用捆绑的
+服务端补装 / 升级服务——升级不带参数，沿用已装任务原来的 `--host` / `--port` /
+`--data-dir`（从任务 XML 的 Exec 段读回）。
 
 ```bash
 cd native
-cargo xtask win                # cargo build --release，再编安装包
-cargo xtask win --skip-cargo   # 只用已有的 native/target/release/falcon-desktop.exe
+cargo xtask win                # cargo build --release；没有 release/falcon-v*-win32-x64.exe 就先 cargo xtask server
+cargo xtask win --skip-cargo   # 只用已有的 falcon-desktop.exe + 服务端发布产物
 ```
 
 产物 `release/Falcon-v<版本>-win32-x64-setup.exe`，默认按当前用户安装，不需要管理员。必须在 Windows 上打：需要 VS 生成工具（rc.exe 给 exe 编图标与版本信息）和 Inno Setup 6（`winget install JRSoftware.InnoSetup --scope user`，或用 `FALCON_ISCC` 指到 ISCC.exe）。没有代码签名，别人机器上 SmartScreen 会拦，选择「更多信息 → 仍要运行」即可。
@@ -71,7 +75,7 @@ cargo xtask win --skip-cargo   # 只用已有的 native/target/release/falcon-de
 
 `service` 的子命令还有 `start`、`stop`、`restart`、`uninstall`。启动参数只在 `install` 时生效，并原样写进服务配置。
 
-`service install` 把 falcon 注册成系统服务：macOS 用 launchd（用户级 LaunchAgent），Linux 用 systemd（root 装 system 级，普通用户装 user 级）。崩溃自动拉起，开机自启。单文件发布时会先把当前二进制拷到 `<dataDir>/bin/falcon`，服务永远跑这个固定路径。活动监视器与 `ps` 里的进程名是 `falcon`。
+`service install` 把 falcon 注册成系统服务：macOS 用 launchd（用户级 LaunchAgent），Linux 用 systemd（root 装 system 级，普通用户装 user 级），Windows 用计划任务（schtasks，当前用户登录自启，免管理员）。崩溃自动拉起，开机自启。单文件发布时会先把当前二进制拷到 `<dataDir>/bin/falcon`，服务永远跑这个固定路径。活动监视器与 `ps` 里的进程名是 `falcon`。
 
 - 日志：Linux 看 `journalctl -u falcon -f`（user 级加 `--user`）。macOS 在 `<dataDir>/logs/falcon.log`。
 - Linux 普通用户安装后需执行一次 `sudo loginctl enable-linger <用户名>`，否则登出即停、开机不起。

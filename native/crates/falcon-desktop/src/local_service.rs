@@ -16,7 +16,10 @@
 //! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。菜单栏这时改用
 //! LaunchAgent 里那份已安装的二进制执行子命令。
 //!
-//! Windows 上没有本机服务（打包与托管只做了 macOS / Linux，见 docs/deploy.md），这一段只有 macOS 实现。
+//! Windows 的本机服务是计划任务（schtasks）：安装包把 falcon-server.exe 装在客户端同目录，
+//! `falcon service` 在 Windows 上注册登录自启 + 失败重启的任务（见 service.rs）。客户端读回
+//! 启动参数的方式与 macOS 对应：`schtasks /Query /XML` 的任务 XML 里取 `<Command>` 与
+//! `<Arguments>`（拆词在 falcon_core::schtasks）。
 
 use std::time::Duration;
 
@@ -28,6 +31,14 @@ fn bundled_server() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let contents = exe.parent()?.parent()?;
     let bin = contents.join("Resources").join("falcon");
+    bin.is_file().then_some(bin)
+}
+
+/// 捆绑的服务程序：Windows 安装包里与 Falcon.exe 同目录的 falcon-server.exe
+#[cfg(windows)]
+fn bundled_server() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bin = exe.parent()?.join("falcon-server.exe");
     bin.is_file().then_some(bin)
 }
 
@@ -65,7 +76,21 @@ fn program_arguments() -> Option<Vec<String>> {
         }
         serde_json::from_slice(&out.stdout).ok()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // 任务 XML 的 <Command> + <Arguments>（`schtasks /Query /XML` 输出编码不定，走解码兜底）
+        let out = std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", falcon_core::schtasks::SCHTASKS_NAME, "/XML"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let xml = falcon_core::schtasks::decode_task_xml(&out.stdout)?;
+        falcon_core::schtasks::schtasks_xml_actions(&xml)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     None
 }
 
@@ -75,8 +100,8 @@ pub fn installed_service_args() -> Option<falcon_core::service_args::ServiceArgs
     program_arguments().map(|argv| falcon_core::service_args::parse_service_args(&argv))
 }
 
-/// LaunchAgent 正在跑的那份服务程序（`<dataDir>/bin/falcon`）。更新前若它带了 `uchg`，
-/// `service install` 换不掉它
+/// LaunchAgent 正在跑的那份服务程序（`<dataDir>/bin/falcon`）。更新前若
+/// 它带了 `uchg`，`service install` 换不掉它
 #[cfg(target_os = "macos")]
 pub(crate) fn installed_program_path() -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(program_arguments()?.into_iter().next()?);
@@ -85,7 +110,7 @@ pub(crate) fn installed_program_path() -> Option<std::path::PathBuf> {
 
 /// 菜单栏能拿来执行 `falcon service …` 的程序。App 包里捆的那份优先（和启动时 install
 /// 用同一份）；开发构建没有包，就用 LaunchAgent 正在指着的那份
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn service_program() -> Option<std::path::PathBuf> {
     if let Some(bin) = bundled_server() {
         return Some(bin);
@@ -111,7 +136,7 @@ impl LocalService for BundledService {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn query_lan_access() -> Option<LanAccessState> {
     service_program()?;
     let args = installed_service_args().unwrap_or_default();
@@ -123,12 +148,12 @@ pub(crate) fn query_lan_access() -> Option<LanAccessState> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn query_lan_access() -> Option<LanAccessState> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn apply_lan_access(enabled: bool) -> Result<LanAccessState, String> {
     let next = installed_service_args().unwrap_or_default().with_lan_exposed(enabled);
     let mut argv = vec!["service".to_string(), "install".to_string()];
@@ -141,7 +166,7 @@ pub(crate) fn apply_lan_access(enabled: bool) -> Result<LanAccessState, String> 
     query_lan_access().ok_or_else(|| "无法读取本机服务状态".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub(crate) fn apply_lan_access(_enabled: bool) -> Result<LanAccessState, String> {
     Err("当前平台不支持托管本机服务".to_string())
 }
@@ -206,9 +231,56 @@ fn lan_ipv4_urls(port: u16) -> Vec<String> {
     primary
 }
 
+/// Windows 上枚举本机物理 / 局域网网卡的 IPv4，走 PowerShell 的 Get-NetIPAddress；
+/// 回环 / 链路本地 / Clash Fake-IP 段与虚拟交换机在 Rust 侧滤掉，以太网 / Wi-Fi 排前面
+#[cfg(windows)]
+fn lan_ipv4_urls(port: u16) -> Vec<String> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { \"$($_.IPAddress)|$($_.InterfaceAlias)\" }",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut primary = Vec::new();
+    let mut secondary = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((ip, alias)) = line.trim().split_once('|') else {
+            continue;
+        };
+        let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else {
+            continue;
+        };
+        let o = ip.octets();
+        if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) {
+            continue;
+        }
+        if alias.starts_with("vEthernet") || alias.starts_with("Teredo") || alias.starts_with("isatap") {
+            continue;
+        }
+        let url = format!("http://{ip}:{port}");
+        if alias.starts_with("Ethernet") || alias.starts_with("WLAN") || alias.starts_with("Wi-Fi") {
+            if !primary.contains(&url) && !secondary.contains(&url) {
+                primary.push(url);
+            }
+        } else if !primary.contains(&url) && !secondary.contains(&url) {
+            secondary.push(url);
+        }
+    }
+    primary.extend(secondary);
+    primary
+}
+
 /// 阻塞执行，放在后台线程里调。
 fn ensure_running(url: &str) -> ServiceStatus {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if let Some(bin) = bundled_server() {
         let keep = installed_service_args().map(|a| a.to_install_args()).unwrap_or_default();
         match std::process::Command::new(&bin).args(["service", "install"]).args(&keep).output() {
@@ -255,7 +327,7 @@ pub(crate) enum ServiceControl {
     Restart,
 }
 
-/// launchd 眼里的本机服务。没装过和装了没在跑要分开：前者「启动」得先 install
+/// launchd / 计划任务眼里的本机服务。没装过和装了没在跑要分开：前者「启动」得先 install
 #[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ServicePresence {
@@ -264,7 +336,7 @@ pub(crate) enum ServicePresence {
     Running { pid: Option<u32> },
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[derive(Debug)]
 pub(crate) enum ServiceControlError {
     /// 没有可执行的 falcon：开发构建不在 .app 里，也没有已安装的二进制
@@ -402,7 +474,7 @@ fn wait_until_not_running() -> ServicePresence {
     last
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn run_service(args: &[String]) -> Result<(), ServiceControlError> {
     let program = service_program().ok_or(ServiceControlError::NoProgram)?;
     let out = std::process::Command::new(&program)
@@ -420,10 +492,10 @@ fn run_service(args: &[String]) -> Result<(), ServiceControlError> {
 }
 
 /// 菜单项按这段文案撑开宽度，只留一行、并且限制长度。空串返回 None，调用方改用退出码
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 const MENU_TEXT_LIMIT: usize = 32;
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn brief(text: &str) -> Option<String> {
     let line = text.lines().find(|line| !line.trim().is_empty())?.trim();
     let mut chars = line.chars();

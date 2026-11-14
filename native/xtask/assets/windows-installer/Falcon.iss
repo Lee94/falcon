@@ -1,8 +1,10 @@
-; Falcon 原生客户端的 Windows 安装包（Inno Setup 6）。由 cargo xtask win（native/xtask/src/win.rs）
-; 传入下面这几个 /D 定义后编译，不要直接拿 ISCC 跑。
+; Falcon 的 Windows 安装包（Inno Setup 6）：原生客户端 + 同目录的服务端单文件
+; falcon-server.exe。由 cargo xtask win（native/xtask/src/win.rs）传入下面这几个
+; /D 定义后编译，不要直接拿 ISCC 跑。
 ;
-; 只装原生客户端：服务端的打包与系统服务只做了 macOS / Linux（docs/deploy.md），装好后
-; 在客户端里连别处的 falcon 服务端。所以这里也没有 macOS pkg 那种 postinstall 注册服务。
+; 装完立刻跑 falcon-server.exe service install：注册当前用户登录自启的计划任务
+; （schtasks，免管理员），升级重装时它不带参数 = 沿用已装任务的原参数。卸载时对应
+; service uninstall（UninstallRun 在删文件之前跑）。
 ;
 ; 默认按当前用户装（不要管理员，装到 %LOCALAPPDATA%\Programs\Falcon），向导里可以改成
 ; 为所有用户安装。卸载不动用户数据：服务端连接与偏好在 %APPDATA%\falcon\Falcon\data
@@ -14,6 +16,9 @@
 #endif
 #ifndef SourceExe
   #error 缺 /DSourceExe
+#endif
+#ifndef SourceServer
+  #error 缺 /DSourceServer
 #endif
 #ifndef SourceIcon
   #error 缺 /DSourceIcon
@@ -62,10 +67,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "Falcon.exe"; Flags: ignoreversion
+Source: "{#SourceServer}"; DestDir: "{app}"; DestName: "falcon-server.exe"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Falcon"; Filename: "{app}\Falcon.exe"
 Name: "{autodesktop}\Falcon"; Filename: "{app}\Falcon.exe"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\falcon-server.exe"; Parameters: "service install"; Flags: runhidden waituntilterminated; StatusMsg: "正在注册本机服务…"
 Filename: "{app}\Falcon.exe"; Description: "{cm:LaunchProgram,Falcon}"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+Filename: "{app}\falcon-server.exe"; Parameters: "service uninstall"; Flags: runhidden waituntilterminated
