@@ -34,13 +34,11 @@ pub struct LocalSampler {
 
 impl LocalSampler {
     pub fn new() -> Self {
-        // Linux 上 sysinfo 默认给每个进程开着 /proc/<pid>/stat 不关（省下次 open），常驻的服务进程
-        // 跟着就攥上几百个 fd；采样两秒一次，这点 open 不值得
-        sysinfo::set_open_files_limit(0);
+        // sysinfo 0.34 起不再给进程句柄做 fd 缓存，不用像以前一样 set_open_files_limit(0) 了
         LocalSampler {
-            sys: System::new(),
-            nets: Networks::new_with_refreshed_list(),
-            disks: Disks::new(),
+            sys: System::new().expect("sysinfo System"),
+            nets: Networks::new_with_refreshed_list().expect("sysinfo Networks"),
+            disks: Disks::new().expect("sysinfo Disks"),
             last: None,
             disks_listed: None,
             nets_listed: Instant::now(),
@@ -51,19 +49,19 @@ impl LocalSampler {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         // 进程只要 CPU 与内存：默认的 refresh_processes 还会去读每个进程的磁盘 IO 与可执行文件路径
-        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new().with_cpu().with_memory());
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
         if self.nets_listed.elapsed() >= NET_RELIST {
-            self.nets.refresh_list();
+            self.nets.refresh(true);
             self.nets_listed = Instant::now();
         } else {
-            self.nets.refresh();
+            self.nets.refresh(false);
         }
     }
 
     pub fn sample(&mut self) -> Snapshot {
         if self.last.is_none() {
             // 见模块注释：进程表要多刷一遍
-            self.sys.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new().with_cpu().with_memory());
+            self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
             self.refresh();
             self.last = Some(Instant::now());
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.max(Duration::from_millis(250)));
@@ -74,12 +72,12 @@ impl LocalSampler {
         self.last = Some(now);
 
         if self.disks_listed.is_none_or(|t| t.elapsed() >= DISK_RELIST) {
-            self.disks.refresh_list();
+            self.disks.refresh(true);
             self.disks_listed = Some(now);
         } else {
-            self.disks.refresh();
+            self.disks.refresh(false);
         }
-        let disks = tidy_disks(self.disks.list().iter().map(|d| {
+        let disks = tidy_disks(self.disks.iter().map(|d| {
             (
                 DiskUse {
                     mount: d.mount_point().to_string_lossy().into_owned(),
@@ -93,9 +91,8 @@ impl LocalSampler {
         let net = (secs > 0.0).then(|| {
             let (rx, tx) = self
                 .nets
-                .list()
                 .iter()
-                .filter(|(name, _)| counts_toward_total(name))
+                .filter(|(name, _)| name.to_str().is_some_and(counts_toward_total))
                 .fold((0u64, 0u64), |(rx, tx), (_, n)| (rx + n.received(), tx + n.transmitted()));
             (rx as f64 / secs, tx as f64 / secs)
         });
@@ -114,11 +111,11 @@ impl LocalSampler {
         // sysinfo 拿不到"可用"（给 0），退回它自己的 used
         let available = self.sys.available_memory();
         let mem_used = if available > 0 && available <= total { total - available } else { self.sys.used_memory() };
-        let load = System::load_average();
+        let load = System::load_average().unwrap_or_default();
         Snapshot {
-            host: System::host_name(),
-            os: System::long_os_version().map(|v| os_name(&v)),
-            uptime: Some(System::uptime()),
+            host: System::host_name().ok(),
+            os: System::long_os_version().ok().map(|v| os_name(&v)),
+            uptime: System::uptime().ok(),
             cores: self.sys.cpus().len(),
             cpu: Some(self.sys.global_cpu_usage() as f64),
             // Windows 没有负载均值，sysinfo 给全零

@@ -177,7 +177,7 @@ impl Px0Lease {
 impl Drop for Px0Lease {
     fn drop(&mut self) {
         // Math.max(0, inflight - 1)
-        let _ = self.usage.inflight.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)));
+        let _ = self.usage.inflight.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)));
         self.usage.touch();
     }
 }

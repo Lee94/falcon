@@ -454,8 +454,9 @@ fn process_alive(pid: u32) -> bool {
     }
     let pid = Pid::from_u32(pid);
     let mut system =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]));
+        System::new_with_specifics(RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()))
+            .expect("sysinfo System");
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
     system
         .process(pid)
         .is_some_and(|p| !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead))
@@ -465,16 +466,18 @@ fn process_alive(pid: u32) -> bool {
 /// sessiond、桌面客户端和 node/service/respawn 帮手；显式目录优先，默认目录才看 HOME。
 fn legacy_server(root: &Path) -> Option<(u32, bool)> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
-    let mut system = System::new_with_specifics(
-        RefreshKind::new().with_processes(
-            ProcessRefreshKind::new()
+    let Ok(mut system) = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
                 .with_cmd(UpdateKind::Always)
                 .with_exe(UpdateKind::Always)
                 .with_environ(UpdateKind::Always)
                 .with_cwd(UpdateKind::Always),
         ),
-    );
-    system.refresh_processes(ProcessesToUpdate::All);
+    ) else {
+        return None;
+    };
+    system.refresh_processes(ProcessesToUpdate::All, true);
     system.processes().iter().find_map(|(pid, p)| {
         if pid.as_u32() == std::process::id() {
             return None;

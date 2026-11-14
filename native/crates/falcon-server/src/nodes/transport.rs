@@ -399,6 +399,7 @@ impl DownloadDir {
             "falcon-node-download-{}",
             hex::encode(rand::random::<[u8; 16]>())
         ));
+        #[allow(unused_mut)]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
