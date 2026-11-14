@@ -56,7 +56,7 @@ http://127.0.0.1:4923；卸载时对应 `service uninstall`。客户端启动时
 
 ```bash
 cd native
-cargo xtask win                # cargo build --release；没有 release/falcon-v*-win32-x64.exe 就先 cargo xtask server
+cargo xtask win                # cargo build --release；没有 release/falcon-v*-win32-x64.exe 就先 cargo xtask server --skip-sessiond（守护进程不在 Windows 构建，embed 取 CI 的 falcon-sessiond-embed）
 cargo xtask win --skip-cargo   # 只用已有的 falcon-desktop.exe + 服务端发布产物
 ```
 

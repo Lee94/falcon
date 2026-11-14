@@ -40,6 +40,12 @@ pub fn build(target: &str) -> Result<PathBuf> {
     build_with_sessiond(target, false)
 }
 
+/// 复用已有 target-sessiond/embed 的构建（Windows 上编不了守护进程——Zig 不在 Windows
+/// 构建，embed 得从 macOS / Linux 侧拿）。xtask win 的自动补建走这条路
+pub fn build_skipping_sessiond(target: &str) -> Result<PathBuf> {
+    build_with_sessiond(target, true)
+}
+
 fn build_with_sessiond(target: &str, skip_sessiond: bool) -> Result<PathBuf> {
     let Some((_, triple)) = TRIPLES.iter().find(|(p, _)| *p == target) else {
         bail!("不支持的目标：{target}（可选：{}）", TRIPLES.map(|(p, _)| p).join(", "));

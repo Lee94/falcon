@@ -59,15 +59,18 @@ pub fn run(args: &[String]) -> Result<()> {
     let release = root().join("release");
 
     // 捆绑的服务端单文件（发布产物，不是 target 里那份——它内嵌了守护进程）。
-    // 本地没有就先编一份；CI 的 windows job 已经用 --skip-sessiond 打过
+    // 守护进程不在 Windows 上构建（zig_host 只认 macOS / Linux），本地补建只能
+    // --skip-sessiond 复用 native/target-sessiond/embed；CI 的 windows job 就是先拿
+    // falcon-sessiond-embed artifact 再 server --skip-sessiond
     let platform = host_platform();
     let server = release.join(format!("falcon-v{ver}-{platform}.exe"));
     if !server.is_file() {
         if skip_cargo {
-            bail!("找不到 {}，先 cargo xtask server", rel(&server));
+            bail!("找不到 {}，先 cargo xtask server --skip-sessiond（embed 取自 CI artifact falcon-sessiond-embed）", rel(&server));
         }
-        println!("== 没有服务端产物，先 cargo xtask server ==");
-        crate::server::build(&platform)?;
+        println!("== 没有服务端产物，先 cargo xtask server --skip-sessiond ==");
+        crate::server::build_skipping_sessiond(&platform)
+            .context("Windows 上编不了会话守护进程：把 CI 的 falcon-sessiond-embed 解到 native/target-sessiond/embed，再跑 cargo xtask server --skip-sessiond")?;
     }
     if !server.is_file() {
         bail!("cargo xtask server 之后仍没有 {}", rel(&server));
