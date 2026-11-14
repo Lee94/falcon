@@ -14,7 +14,6 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use sha2::Digest as _;
@@ -341,17 +340,6 @@ pub fn bindgen(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// rustup 的 stable 工具链目录。这台机器 PATH 上排前面的是 Homebrew 的 rustc，它没有
-/// musl / Windows 的标准库（同 build-web.sh 里的处理）
-fn rustup_toolchain_bin() -> Result<PathBuf> {
-    let out = Command::new("rustup").args(["which", "--toolchain", "stable", "cargo"]).output().context("起不来 rustup（装了吗？）")?;
-    if !out.status.success() {
-        bail!("rustup which cargo 失败：{}", String::from_utf8_lossy(&out.stderr));
-    }
-    let cargo = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    Ok(cargo.parent().context("cargo 的目录")?.to_path_buf())
-}
-
 fn cargo_home_bin() -> Option<PathBuf> {
     std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
@@ -365,19 +353,49 @@ pub fn artifact(triple: &str) -> PathBuf {
     native().join("target-sessiond").join(triple).join("release").join(exe)
 }
 
-/// `cargo xtask sessiond [--targets …] [--check] [--test]`
+/// 将全部 5 个目标的守护进程压缩为 `native/target-sessiond/embed/<三元组>.gz`，供 `falcon-server`
+/// `embed-sessiond` 特性内嵌与 CI 跨 runner 传递。
+pub fn pack_embed() -> Result<PathBuf> {
+    let embed_dir = native().join("target-sessiond/embed");
+    std::fs::create_dir_all(&embed_dir)?;
+    for (t, _) in TARGETS {
+        let path = artifact(t);
+        let bytes = std::fs::read(&path).with_context(|| {
+            format!(
+                "缺少守护进程产物 {}，请先运行 cargo xtask sessiond --targets all",
+                path.display()
+            )
+        })?;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut gz, &bytes)?;
+        std::fs::write(embed_dir.join(format!("{t}.gz")), gz.finish()?)?;
+    }
+    Ok(embed_dir)
+}
+
+/// `cargo xtask sessiond [--targets …] [--pack-embed] [--check] [--test]`
 pub fn run(args: &[String]) -> Result<()> {
     let (targets, rest) = parse_targets(args)?;
+    let mut pack = false;
     let mut check = false;
     let mut test = false;
     for a in &rest {
         match a.as_str() {
+            "--pack-embed" => pack = true,
             "--check" => check = true,
             "--test" => test = true,
             other => bail!("未知参数：{other}"),
         }
     }
-    build(&targets, check, test)
+    if pack && (check || test) {
+        bail!("--pack-embed 只在构建守护进程二进制时使用，不能与 --check / --test 同传");
+    }
+    build(&targets, check, test)?;
+    if pack {
+        let dir = pack_embed()?;
+        println!("已打包内嵌守护进程：{}/*.gz", dir.display());
+    }
+    Ok(())
 }
 
 /// 编守护进程（服务端发布构建也走这里）
@@ -388,7 +406,7 @@ pub fn build(targets: &[(&'static str, &'static str)], check: bool, test: bool) 
         build_lib(&zig, &pin, triple, zt, false)?;
     }
     let (host_triple, _) = host_target()?;
-    let tc = rustup_toolchain_bin()?;
+    let tc = crate::util::rustup_toolchain_bin()?;
     let mut path_dirs: Vec<&Path> = vec![tc.as_path(), zig.parent().expect("zig 目录")];
     let cargo_bin = cargo_home_bin();
     if let Some(b) = &cargo_bin {

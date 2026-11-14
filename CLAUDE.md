@@ -17,7 +17,7 @@ cargo xtask pkg             # macOS 安装包：Falcon.app = NSH 原生客户端
 cargo xtask win             # Windows 安装包（Inno Setup）：NSH 原生客户端 + 同目录服务端（装好注册计划任务）；须在 Windows 上打
 cargo xtask linux           # Linux 服务端安装文件：.deb / .rpm / install.sh（只含服务端 + systemd 服务）
 cargo xtask linux-desktop   # Linux GTK4 原生桌面客户端安装包：Falcon-v<版本>-<平台>-desktop.deb / .tar.gz
-cargo xtask android         # Android 安装包（纯 Rust NSH + Android SDK d8/aapt2/apksigner，零 Gradle）
+cargo xtask android         # Android 安装包（默认 arm64-v8a，模拟器加 --abis all；纯 Rust NSH + Android SDK，零 Gradle）
 cargo xtask web             # Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/）
 cargo xtask nsh-check       # 局部检查 falcon-nsh 与 falcon-app（含测试目标）
 cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 5 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试

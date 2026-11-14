@@ -1,9 +1,9 @@
 //! `cargo xtask android`：构建 Falcon 安卓客户端（纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）。
 //!
 //! 流程（ADR 0028）：
-//! 1. 使用 Android NDK 的 LLVM clang 交叉编译 `falcon-app`（`--lib`）的 `aarch64-linux-android`
-//!    （`arm64-v8a`）与 `x86_64-linux-android`（`x86_64`）动态库，按 `nsh-platform-android` 的
-//!    `AppActivity` 约定命名为 `lib/<abi>/libnsh.so`（终端字体已由 `falcon-nsh/build.rs` 内嵌）；
+//! 1. 使用 Android NDK 的 LLVM clang 交叉编译 `falcon-app`（`--lib`）动态库（默认仅打真机主流架构
+//!    `arm64-v8a` / `aarch64-linux-android`；本地模拟器联调可传 `--abis x86_64` 或 `--abis all`），
+//!    按 `nsh-platform-android` 的 `AppActivity` 约定命名为 `lib/<abi>/libnsh.so`（终端字体已由 `falcon-nsh/build.rs` 内嵌）；
 //! 2. 通过 `cargo metadata` 定位 `nsh-platform-android` 的纯 Java 宿主层源码，直接调用 JDK `javac` 与
 //!    Android SDK `build-tools` 的 `d8` 编译为 `classes.dex`；
 //! 3. 生成 `com.falcon.android` 的 `AndroidManifest.xml`，用 `aapt2` 编译资源并链接基础 APK，经 `jar uf0`
@@ -12,13 +12,14 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::util::{self, TempDir};
 
-const TARGETS: &[(&str, &str, &str, &str)] = &[
+type AndroidTarget = (&'static str, &'static str, &'static str, &'static str);
+
+const ALL_TARGETS: &[AndroidTarget] = &[
     (
         "aarch64-linux-android",
         "arm64-v8a",
@@ -33,14 +34,43 @@ const TARGETS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+pub(crate) fn resolve_targets(abis_arg: Option<&str>) -> Result<Vec<AndroidTarget>> {
+    let Some(raw) = abis_arg else {
+        return Ok(vec![ALL_TARGETS[0]]);
+    };
+    if raw == "all" {
+        return Ok(ALL_TARGETS.to_vec());
+    }
+    let mut out: Vec<AndroidTarget> = Vec::new();
+    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some(&entry) = ALL_TARGETS
+            .iter()
+            .find(|(triple, abi, _, _)| *abi == item || *triple == item)
+        else {
+            bail!("不支持的 Android ABI：{item}（可选：arm64-v8a, x86_64, all）");
+        };
+        if !out.iter().any(|(_, abi, _, _)| *abi == entry.1) {
+            out.push(entry);
+        }
+    }
+    if out.is_empty() {
+        bail!("--abis 不能为空（可选：arm64-v8a, x86_64, all）");
+    }
+    Ok(out)
+}
+
 pub fn run(args: &[String]) -> Result<()> {
     let mut jni_only = false;
-    for a in args {
+    let mut abis_arg: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--jni-only" => jni_only = true,
+            "--abis" => abis_arg = Some(it.next().context("--abis 后面缺 ABI 名称")?.clone()),
             other => bail!("未知参数：{other}"),
         }
     }
+    let targets = resolve_targets(abis_arg.as_deref())?;
 
     let root = util::root();
     let native_dir = util::native();
@@ -51,8 +81,12 @@ pub fn run(args: &[String]) -> Result<()> {
     let apk_extra = stage.path().join("apk-extra");
     std::fs::create_dir_all(&apk_extra)?;
 
-    println!("==> 1/3 交叉编译 falcon-app NSH 动态库（arm64-v8a, x86_64 -> libnsh.so）");
-    let tc = rustup_toolchain_bin()?;
+    let abi_names: Vec<&str> = targets.iter().map(|(_, abi, _, _)| *abi).collect();
+    println!(
+        "==> 1/3 交叉编译 falcon-app NSH 动态库（{} -> libnsh.so）",
+        abi_names.join(", ")
+    );
+    let tc = util::rustup_toolchain_bin()?;
     let cargo_bin = tc.join("cargo");
     let rustc_bin = tc.join("rustc");
     let mut path_entries = vec![tc.clone(), ndk_bin.clone()];
@@ -67,7 +101,7 @@ pub fn run(args: &[String]) -> Result<()> {
         .into_os_string();
 
     let strip_bin = ndk_bin.join(if cfg!(windows) { "llvm-strip.exe" } else { "llvm-strip" });
-    for (rust_target, abi, linker_env, clang_name) in TARGETS {
+    for (rust_target, abi, linker_env, clang_name) in &targets {
         let target_tools = ndk_target_env(&ndk_bin, rust_target, linker_env, clang_name)?;
         let mut build_env: Vec<(&str, &OsStr)> = vec![
             ("PATH", joined_path.as_os_str()),
@@ -581,21 +615,6 @@ fn ndk_version_key(path: &Path) -> Vec<u64> {
         .collect()
 }
 
-fn rustup_toolchain_bin() -> Result<PathBuf> {
-    let out = Command::new("rustup")
-        .args(["which", "--toolchain", "stable", "cargo"])
-        .output()
-        .context("起不来 rustup（装了吗？）")?;
-    if !out.status.success() {
-        bail!(
-            "rustup which cargo 失败：{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let cargo = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    Ok(cargo.parent().context("cargo 的目录")?.to_path_buf())
-}
-
 fn find_java_home() -> Option<PathBuf> {
     if let Some(jh) = std::env::var_os("JAVA_HOME") {
         let p = PathBuf::from(jh);
@@ -720,7 +739,7 @@ mod tests {
             std::fs::write(bin.join(tool), b"").unwrap();
         }
 
-        for (rust_target, _abi, linker_env, clang_name) in TARGETS {
+        for (rust_target, _abi, linker_env, clang_name) in ALL_TARGETS {
             let envs = ndk_target_env(bin, rust_target, linker_env, clang_name).unwrap();
             let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
             let lower = rust_target.replace('-', "_");
@@ -734,6 +753,32 @@ mod tests {
             assert!(!keys.contains(&"CC"));
             assert!(!keys.contains(&"AR"));
         }
+    }
+
+    #[test]
+    fn default_targets_selects_only_arm64_v8a_and_supports_all_override() {
+        let default_abis: Vec<&str> = resolve_targets(None)
+            .unwrap()
+            .into_iter()
+            .map(|(_, abi, _, _)| abi)
+            .collect();
+        assert_eq!(default_abis, vec!["arm64-v8a"]);
+
+        let all_abis: Vec<&str> = resolve_targets(Some("all"))
+            .unwrap()
+            .into_iter()
+            .map(|(_, abi, _, _)| abi)
+            .collect();
+        assert_eq!(all_abis, vec!["arm64-v8a", "x86_64"]);
+
+        let emu_abis: Vec<&str> = resolve_targets(Some("x86_64"))
+            .unwrap()
+            .into_iter()
+            .map(|(_, abi, _, _)| abi)
+            .collect();
+        assert_eq!(emu_abis, vec!["x86_64"]);
+
+        assert!(resolve_targets(Some("armeabi-v7a")).is_err());
     }
 
     #[test]

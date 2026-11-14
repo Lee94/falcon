@@ -1,17 +1,22 @@
 # 自动打安装包（NSH 六端统一客户端 ADR 0028 + 五平台独立服务端）：
 # - Windows（Inno Setup 的 setup.exe，falcon-app 原生客户端 + 同目录的 Rust 服务端）
-# - macOS（.pkg，falcon-app 原生客户端 + Resources 里的 Rust 服务端，含 TUI 模式）
+# - macOS（.pkg，falcon-app 原生客户端 + Resources 里的 Rust 服务端，含 TUI 模式；顺带交叉编出 darwin-x64 独立服务端）
 # - Linux 桌面与 Web（Falcon-v*-linux-x64-desktop.deb/.tar.gz GTK4 桌面端 + Falcon-v*-web.tar.gz 纯 Rust WASM 站点）
-# - Android（.apk，纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）
-# 同时发布 Linux / macOS x64、arm64 独立服务端（Windows 那份由 windows job 出，打进安装包），
+# - Android（.apk，默认 arm64-v8a，纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）
+# 同时发布 Linux / macOS x64、arm64 独立服务端（Windows 那份由 windows job 出并捆进安装包），
 # Linux 服务端另有安装文件（.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
-# 打法与本机一样，直接跑 cargo xtask win / pkg / linux-desktop / web / android / server / linux，xtask 是唯一真相。
-# 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
+# 打法与本机一样，直接调 xtask（win / pkg / linux-desktop / web / android / server / linux），xtask 是唯一真相。
 #
-# - 推 v* tag：全量编译检查、测试、各端安装包与五平台服务端都通过后建 GitHub Release 并挂上；
-# - 手动触发（Actions 页 Run workflow）：只出构建产物（Artifacts），不发版；
-# - 定时触发（每周一次在默认分支 main 上跑）：刷新 main 分支上的编译缓存——GitHub Actions
-#   规定 refs/tags/v* 只能读取默认分支（main）的缓存、不能跨 tag 互读，且 7 天未访问会被淘汰。
+# 流水线并行拓扑：
+# - 第一阶段（t=0 立即并发）：`sessiond`（五目标守护进程构建 + 零警告检查 + 测试）、`web-linux`、`android`；
+# - 第二阶段（拿到 `falcon-sessiond-embed` 后并发）：`test`（全工作区测试与 30 万行帧耗时门禁）、
+#   `macos`（一次统一编译服务端+客户端并顺带交叉编 `darwin-x64`，省去慢速 Intel macOS runner）、
+#   `windows`（一次统一编译服务端+客户端，消除 tokio/reqwest 特性并集不一致导致的二次重编）、`servers`（Linux x64/arm64）；
+# - 第三阶段：`release` 汇总全部产物与 SHA256SUMS，校验大小写无重名冲突后创建 GitHub Release。
+#
+# 缓存策略：
+# - GitHub Actions 规定 `refs/tags/v*` 只能读默认分支（`refs/heads/main`）的缓存、不能跨 tag 互读；
+# - 因此缓存只在 `refs/heads/main`（每周定时或手动 Run workflow）写入（`save-if`），tag 发版只读不写，省去每个 job 末尾数分钟无效上传。
 #
 # 都没有正式证书签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，Android 用 debug 签名
 # （手机上允许未知来源即可安装），与本机打的包一样。
@@ -29,85 +34,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows:
-    # 安装包里要捆服务端单文件：falcon-v*-win32-x64.exe 在 windows job 里编（守护进程
-    # 内嵌资源复用 macos job 的那批）
-    needs: macos
-    runs-on: windows-latest
+  sessiond:
+    # 独立产出五目标会话守护进程（ADR 0020），一完成即同时解锁 test / macos / windows / servers
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       # native/.cargo/config.toml 把 crates.io 换成 rsproxy 镜像，是给开发机绕 Clash fake-ip 的；
       # runner 网络正常，直连 crates.io 更稳
       - name: Drop crates.io mirror
-        shell: bash
         run: rm -f native/.cargo/config.toml
 
-      # Windows 包不编浏览器版，不用 wasm target
-      - uses: dtolnay/rust-toolchain@stable
-
-      # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: native
-          cache-workspace-crates: true
-
-      # 与 servers job 同一批内嵌守护进程（跨 OS 复用，避免在 Windows runner 装 Zig）
-      - uses: actions/download-artifact@v4
-        with:
-          name: falcon-sessiond-embed
-          path: native/target-sessiond/embed
-
-      # 服务端发布单文件，win.rs 把它捆进安装包
-      - name: Build server
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target win32-x64 --skip-sessiond
-
-      # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具。
-      # xtask 也用 --release 跑，与 falcon-app 共用 target/release 的依赖，不再单独编一份 debug
-      - name: Build installer
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- win
-
-      - if: github.event_name != 'schedule'
-        uses: actions/upload-artifact@v4
-        with:
-          name: falcon-windows
-          path: release/*.exe
-          if-no-files-found: error
-
-  macos:
-    # Apple Silicon；Intel 机器的包要另起一个 macos-13 的 job
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Drop crates.io mirror
-        run: rm -f native/.cargo/config.toml
-
-      # 会话守护进程（cargo xtask sessiond，服务端发布构建会调）要 5 个目标
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
 
-      # 守护进程的交叉编译用 cargo-zigbuild（Zig 本身由 xtask 按锁定版本下载、校验）
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
 
-      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
-      - name: Install librsvg
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: 1
-          HOMEBREW_NO_INSTALL_CLEANUP: 1
-        run: brew install librsvg
-
       # Zig 工具链、zig-global（musl / mingw C 运行库缓存）与 5 个目标的 libghostty-vt 静态库
-      # 只随 ghostty.pin / 补丁 / sessiond.rs 变动，单独缓存后跨版本永久命中，省掉约 11.5 分钟的
-      # Zig 编译；排除 900MB+ 的 ghostty 源码与 .zig-cache 中间目录以及原始压缩包
-      - name: Cache Zig and libghostty-vt
-        uses: actions/cache@v4
+      # 只随 ghostty.pin / 补丁 / sessiond.rs 变动，单独缓存后跨版本命中，省掉约 10.5 分钟 Zig 编译
+      - name: Restore Zig and libghostty-vt cache
+        id: cache-zig-ghostty
+        uses: actions/cache/restore@v4
         with:
           path: |
             native/.cache/zig/zig-*
@@ -121,32 +71,118 @@ jobs:
           restore-keys: |
             zig-ghostty-${{ runner.os }}-${{ runner.arch }}-
 
-      # 服务端与客户端共用 native/target；守护进程是独立工作区 native/sessiond（产物在
-      # native/target-sessiond），按 workspace -> target 语法交给 rust-cache 统一管理并保留
-      # 工作区内部 lib crate 缓存。不开启 cache-on-failure，避免前置步骤偶发失败时写入空缓存
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             native
             native/sessiond -> ../target-sessiond
           cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # 没有服务端产物时 pkg 会先走 server（编 5 个目标的会话守护进程、cargo 编服务端）
-      - name: Build pkg
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- pkg
+      - name: Build, check and test session daemon
+        run: |
+          cargo build --release --manifest-path native/Cargo.toml --locked -p xtask --no-default-features
+          ./native/target/release/xtask sessiond --targets all --pack-embed
+          ./native/target/release/xtask sessiond --targets all --check --test
 
-      # 本地提交与 push 只做局部检查；全量验证放在发版流程，使用 release profile 复用打包依赖。
-      # 先构建 pkg，确保真 PTY 的持久会话测试能找到本机守护进程，避免因缺少二进制而跳过。
-      # Release 依赖 macos job，以下任一步失败都不会发布。
-      # sessiond 是独立工作区：五个目标都做编译检查，测试只在 runner 本机执行。
-      - name: Check and test session daemon
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- sessiond --targets all --check --test
+      - name: Save Zig and libghostty-vt cache
+        if: github.ref == 'refs/heads/main' && steps.cache-zig-ghostty.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            native/.cache/zig/zig-*
+            !native/.cache/zig/*.tar.xz
+            native/.cache/zig-global
+            native/.cache/ghostty/*/out-*/include
+            native/.cache/ghostty/*/*-linux-musl
+            native/.cache/ghostty/*/*-apple-darwin
+            native/.cache/ghostty/*/*-windows-gnu
+          key: ${{ steps.cache-zig-ghostty.outputs.cache-primary-key }}
 
-      - name: Check Rust workspace
-        run: cargo check --release --manifest-path native/Cargo.toml --workspace --tests --locked
+      # 五平台服务端与工作区真 PTY 持久会话测试共用这一批守护进程（定时任务也要传给下游 job）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed/*.gz
+          if-no-files-found: error
+
+  test:
+    # 全工作区单元测试、Headless 界面回归与 FalconTerminal 30 万行 Release 帧耗时门禁（p95 < 4.0ms），
+    # 在 4 核 x64 Ubuntu runner 上与 macos / windows 完全并行，不再挤占 macOS 打包关键路径
+    needs: sessiond
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        run: rm -f native/.cargo/config.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed
+
+      # 解出本机 x86_64-unknown-linux-musl 守护进程，确保 falcon-server 的真 PTY 持久会话测试完整运行、不跳过
+      - name: Unpack host session daemon
+        run: |
+          mkdir -p native/target-sessiond/x86_64-unknown-linux-musl
+          gzip -dc native/target-sessiond/embed/x86_64-unknown-linux-musl.gz > native/target-sessiond/x86_64-unknown-linux-musl/falcon-sessiond
+          chmod +x native/target-sessiond/x86_64-unknown-linux-musl/falcon-sessiond
 
       - name: Test Rust workspace
         run: cargo test --release --manifest-path native/Cargo.toml --workspace --locked
+
+  macos:
+    # Apple Silicon：一次统一构建本机服务端与原生客户端以打 .pkg，并同机交叉编出 darwin-x64 独立服务端
+    needs: sessiond
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        run: rm -f native/.cargo/config.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      # xtask 的 icons.rs 用 rsvg-convert 现画 AppIcon 的各档尺寸
+      - name: Install librsvg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: brew install librsvg
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed
+
+      # 一次 cargo build 同时编译 xtask + falcon-server + falcon-app，让 tokio / reqwest / log 等公共依赖
+      # 统一特性只编一遍；随后打 darwin-arm64 单文件与 .pkg，再交叉编译纯 Rust 的 darwin-x64 服务端并检查 macOS 专属测试代码
+      - name: Build macOS pkg, arm64 & x64 servers, and check macOS tests
+        run: |
+          export FALCON_EMBED_SESSIOND_DIR="$PWD/native/target-sessiond/embed"
+          cargo build --release --manifest-path native/Cargo.toml --locked -p xtask -p falcon-server --features falcon-server/embed-sessiond -p falcon-app
+          ./native/target/release/xtask server --target darwin-arm64 --skip-sessiond --skip-cargo
+          ./native/target/release/xtask pkg --skip-bin --skip-cargo
+          ./native/target/release/xtask server --target darwin-x64 --skip-sessiond
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --tests
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-server --features embed-sessiond --tests
 
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
@@ -155,23 +191,67 @@ jobs:
           path: |
             release/*.pkg
             release/falcon-v*-darwin-arm64
+            release/falcon-v*-darwin-x64
           if-no-files-found: error
 
-      # 五平台服务端共用这一批守护进程，Windows runner 不需要自行构建 Zig / Ghostty。
-      - uses: actions/upload-artifact@v4
+  windows:
+    # 安装包里捆服务端单文件：falcon-v*-win32-x64.exe 与客户端在同一次 cargo build 中编出
+    needs: sessiond
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Drop crates.io mirror
+        shell: bash
+        run: rm -f native/.cargo/config.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/download-artifact@v4
         with:
           name: falcon-sessiond-embed
-          path: native/target-sessiond/embed/*.gz
+          path: native/target-sessiond/embed
+
+      # 注意保持原生 PowerShell（不要切 bash）：rustc.exe 在编译期展开 include_bytes!(env!("FALCON_EMBED_SESSIOND_DIR"))
+      # 时只认原生 Win32 盘符路径，不认 MSYS2 的 /d/a/... 路径
+      - name: Build Windows server, installer, and check Windows tests
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:FALCON_EMBED_SESSIOND_DIR = (Resolve-Path "native\target-sessiond\embed").Path
+          cargo build --release --manifest-path native/Cargo.toml --locked -p xtask -p falcon-server --features falcon-server/embed-sessiond -p falcon-app
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\native\target\release\xtask.exe server --target win32-x64 --skip-sessiond --skip-cargo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\native\target\release\xtask.exe win --skip-cargo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-server --features embed-sessiond --tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
+        with:
+          name: falcon-windows
+          path: release/*.exe
           if-no-files-found: error
 
   servers:
-    needs: macos
+    needs: sessiond
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-intel
-            platform: darwin-x64
           - runner: ubuntu-22.04
             platform: linux-x64
           - runner: ubuntu-24.04-arm
@@ -179,25 +259,32 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
       - name: Drop crates.io mirror
         shell: bash
         run: rm -f native/.cargo/config.toml
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
           cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: actions/download-artifact@v4
         with:
           name: falcon-sessiond-embed
           path: native/target-sessiond/embed
-      - name: 构建独立服务端
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target ${{ matrix.platform }} --skip-sessiond
-      # Linux 安装文件（.deb / .rpm / install.sh）只含服务端；文件名后缀是平台名，
-      # falcon-v*-<平台>* 的 artifact glob 已经覆盖
-      - name: 打 Linux 安装文件
-        if: startsWith(matrix.platform, 'linux-')
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- linux --target ${{ matrix.platform }}
+
+      # Linux 安装文件（.deb / .rpm / install.sh）只含服务端；关掉 xtask 默认离线工具特性省去 ICU 依赖编译
+      - name: Build Linux server and packages
+        run: |
+          export FALCON_EMBED_SESSIOND_DIR="$PWD/native/target-sessiond/embed"
+          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond
+          ./native/target/release/xtask server --target ${{ matrix.platform }} --skip-sessiond --skip-cargo
+          ./native/target/release/xtask linux --target ${{ matrix.platform }}
+
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
         with:
@@ -207,7 +294,7 @@ jobs:
 
   web-linux:
     # nsh-platform-linux 要求 GTK 4.14+（Ubuntu 24.04 自带），独立于 servers 的 ubuntu-22.04（保持服务端 glibc 2.35 兼容）；
-    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包，不依赖 sessiond 内嵌产物，直接与 macos / android 并行。
+    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包，不依赖 sessiond 内嵌产物，t=0 立即并发启动
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -228,12 +315,14 @@ jobs:
         with:
           workspaces: native
           cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build Linux GTK4 desktop client
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- linux-desktop --target linux-x64
-
-      - name: Build pure-Rust Web client
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- web
+      - name: Build Linux GTK4 desktop and pure-Rust Web clients
+        run: |
+          cargo build --release --manifest-path native/Cargo.toml --locked -p xtask -p falcon-app --features falcon-app/linux-desktop
+          ./native/target/release/xtask linux-desktop --skip-cargo --target linux-x64
+          ./native/target/release/xtask web
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --features linux-desktop --tests
 
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
@@ -245,6 +334,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    # 不依赖 sessiond 内嵌产物，t=0 立即并发启动；仅打真机主流 arm64-v8a 架构
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -282,18 +372,19 @@ jobs:
             (yes || true) | "$SDKMANAGER" --install "${MISSING[@]}"
           fi
 
-      # xtask/src/android.rs 交叉编 arm64-v8a 与 x86_64 两个 NSH 动态库（libnsh.so）
+      # xtask/src/android.rs 默认仅交叉编译 arm64-v8a NSH 动态库（libnsh.so）
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
           cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build APK
-        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- android
+        run: cargo run --release --manifest-path native/Cargo.toml --locked -p xtask --no-default-features -- android
 
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
@@ -304,7 +395,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos, android, servers, web-linux]
+    needs: [sessiond, test, windows, macos, android, servers, web-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write

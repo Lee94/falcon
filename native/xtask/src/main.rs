@@ -9,6 +9,7 @@
 //! Google 的 woff2_compress；下载走 curl。缺哪个就报哪个，并说怎么装。
 
 mod android;
+#[cfg(feature = "offline-tools")]
 mod fixtures;
 mod fonts;
 mod icons;
@@ -17,6 +18,7 @@ mod nsh;
 mod pkg;
 mod server;
 mod sessiond;
+#[cfg(feature = "offline-tools")]
 mod themes;
 mod util;
 mod win;
@@ -24,12 +26,12 @@ mod win;
 const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
-  server [--target <平台>] [--skip-sessiond] 服务端发布单文件（内嵌 5 个目标守护进程）；跳过构建时须已有 target-sessiond/embed/*.gz
-  pkg [--skip-bin]                       macOS 安装包（Falcon.app = NSH 原生客户端 + Resources 里的服务端）
+  server [--target <平台>] [--skip-sessiond] [--skip-cargo]  服务端发布单文件（内嵌 5 个目标守护进程）
+  pkg [--skip-bin] [--skip-cargo]        macOS 安装包（Falcon.app = NSH 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，NSH 原生客户端 + 同目录服务端）
   linux [--target <平台>] [--server <路径>] [--deb-only]  Linux 服务端安装文件：.deb / .rpm / install.sh
   linux-desktop [--skip-cargo] [--target <平台>]          Linux GTK4 桌面客户端安装包：Falcon-v<版本>-<平台>-desktop.deb / .tar.gz
-  android [--jni-only]                   Android 安装包（纯 Rust NSH + Android SDK，零 Gradle，产物 release/falcon-v<版本>-android.apk）
+  android [--abis <arm64-v8a|x86_64|all>] [--jni-only]    Android 安装包（默认 arm64-v8a，纯 Rust NSH + Android SDK，零 Gradle）
   web [--skip-cargo]                     Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/ 与 Falcon-v<版本>-web.tar.gz）
 
 NSH 六端统一客户端开发与验证（ADR 0028）
@@ -40,7 +42,7 @@ NSH 六端统一客户端开发与验证（ADR 0028）
 会话守护进程（ADR 0020；目标：host（默认）/ all / 逗号分隔的 Rust 三元组）
   ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库（先打 sessiond/ghostty-patches/ 的补丁），落在 native/.cache/ghostty/
   ghostty-bindgen                        从钉死 commit 的头文件重新生成 ghostty-vt-sys 的绑定（升 pin 时跑）
-  sessiond [--targets …] [--check|--test] 编 falcon-sessiond（cargo-zigbuild 交叉编），产物 native/target-sessiond/
+  sessiond [--targets …] [--pack-embed] [--check|--test]  编 falcon-sessiond（cargo-zigbuild 交叉编），产物 native/target-sessiond/
 
 资源（产物都已进仓库，只在要换时跑）
   icons                                  生成全部内置应用图标（原生 Dock 图标与 Windows exe 图标）
@@ -76,9 +78,16 @@ fn main() {
         "sessiond" => sessiond::run(&args),
         "icons" => icons::run(&args),
         "vendor-fonts" => fonts::run(&args),
+        #[cfg(feature = "offline-tools")]
         "vendor-themes" => themes::run(&args),
+        #[cfg(feature = "offline-tools")]
         "fixtures" => fixtures::run(&args),
+        #[cfg(feature = "offline-tools")]
         "compare-fixtures" => fixtures::compare(&args),
+        #[cfg(not(feature = "offline-tools"))]
+        "vendor-themes" | "fixtures" | "compare-fixtures" => {
+            Err(anyhow::anyhow!("{cmd} 需要 xtask 默认特性（去掉 --no-default-features）"))
+        }
         other => {
             eprintln!("未知命令：{other}\n\n{USAGE}");
             std::process::exit(1);

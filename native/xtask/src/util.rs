@@ -226,3 +226,20 @@ pub fn cargo_package_dir(pkg_name: &str) -> Result<PathBuf> {
     }
     bail!("cargo metadata 中未找到依赖包 {pkg_name}")
 }
+
+/// 定位 `rustup` 的 `stable` 工具链 `bin` 目录。开发机 `PATH` 上若 Homebrew 的 `rustc` 排在前面，
+/// 它不带交叉目标标准库（`x86_64-apple-darwin`、musl、Android 等）；显式取 `rustup` 的 `cargo` / `rustc` 可绕开。
+pub fn rustup_toolchain_bin() -> Result<PathBuf> {
+    let out = Command::new("rustup")
+        .args(["which", "--toolchain", "stable", "cargo"])
+        .output()
+        .context("起不来 rustup（装了吗？）")?;
+    if !out.status.success() {
+        bail!(
+            "rustup which cargo 失败：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let cargo = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    Ok(cargo.parent().context("cargo 的目录")?.to_path_buf())
+}

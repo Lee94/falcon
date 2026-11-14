@@ -6,8 +6,9 @@
 //! 它启动时自己做 `service install` → 等端口，然后直接连本机服务。
 //!
 //! ```text
-//! cargo xtask pkg                 # 没有当前平台的服务端产物就先 cargo xtask server
-//! cargo xtask pkg --skip-bin      # 必须已有 release/falcon-v*-darwin-*
+//! cargo xtask pkg                            # 没有当前平台的服务端产物就先 cargo xtask server
+//! cargo xtask pkg --skip-bin                 # 必须已有 release/falcon-v*-darwin-*
+//! cargo xtask pkg --skip-bin --skip-cargo    # 同时复用已编好的 native/target/release/falcon-app
 //! ```
 //!
 //! 产物 release/Falcon-v<版本>-darwin-<arch>.pkg。无开发者证书，只做 ad-hoc
@@ -21,7 +22,7 @@ use anyhow::{Result, bail};
 
 use crate::util::{self, TempDir, host_platform, native, root, version};
 
-fn build(skip_bin: bool) -> Result<()> {
+fn build(skip_bin: bool, skip_cargo: bool) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("macOS 安装包只能在 macOS 上打（需要 pkgbuild / iconutil / codesign）");
     }
@@ -89,10 +90,16 @@ fn build(skip_bin: bool) -> Result<()> {
     std::fs::copy(templates.join("service-args.sh"), resources.join("service-args.sh"))?;
 
     let exe = macos_dir.join("Falcon");
-    // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
-    println!("== cargo build --release -p falcon-app ==");
-    util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
-    copy_exec(&native().join("target/release/falcon-app"), &exe)?;
+    if !skip_cargo {
+        // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
+        println!("== cargo build --release -p falcon-app ==");
+        util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
+    }
+    let built_app = native().join("target/release/falcon-app");
+    if !built_app.is_file() {
+        bail!("找不到 {}，先去掉 --skip-cargo 跑一遍", rel(&built_app));
+    }
+    copy_exec(&built_app, &exe)?;
 
     let plist = std::fs::read_to_string(templates.join("Info.plist"))?.replace("__VERSION__", ver);
     std::fs::write(contents.join("Info.plist"), plist)?;
@@ -131,13 +138,15 @@ fn build(skip_bin: bool) -> Result<()> {
 
 pub fn run(args: &[String]) -> Result<()> {
     let mut skip_bin = false;
+    let mut skip_cargo = false;
     for a in args {
         match a.as_str() {
             "--skip-bin" => skip_bin = true,
+            "--skip-cargo" => skip_cargo = true,
             other => bail!("未知参数：{other}"),
         }
     }
-    build(skip_bin)
+    build(skip_bin, skip_cargo)
 }
 
 /// 拷贝并设成可执行
