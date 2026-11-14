@@ -13,7 +13,7 @@ cargo run -p falcon-server  # 开发服务端（4923，默认数据目录 ~/.fal
 cargo xtask server          # 服务端发布单文件（把 sessiond 编进去），产物 release/falcon-v<版本>-<平台>
 cargo build --release -p falcon-desktop   # 原生客户端 release 构建
 cargo xtask pkg             # macOS 安装包：Falcon.app = 原生客户端 + Resources 里的服务端
-cargo xtask win             # Windows 安装包（Inno Setup）：只有原生客户端，没有本机服务；须在 Windows 上打
+cargo xtask win             # Windows 安装包（Inno Setup）：原生客户端 + 同目录服务端（装好注册计划任务）；须在 Windows 上打
 cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 5 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试
 cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（sessiond 会自动调），源码先打上 `native/sessiond/ghostty-patches/` 的补丁（改补丁要同步 ghostty.pin 的 patches=）；`ghostty-bindgen` 只在升 ghostty 的 pin 时跑
 ```

@@ -1,8 +1,8 @@
 //! Windows 安装包（Inno Setup 的 setup.exe，原 scripts/build-windows-installer.mjs）：
-//! 只装原生客户端（GPUI）。
+//! 原生客户端（GPUI）+ 同目录的服务端单文件 falcon-server.exe。
 //!
-//! 与 macOS pkg 不同，这里没有捆绑服务端——服务的打包与托管只做了 macOS / Linux（见 docs/deploy.md），
-//! 装好后在客户端里连别处的 falcon 服务。
+//! 与 macOS pkg 一样把服务端捆进安装包：Inno Setup 装完就用它跑 `falcon service install`
+//! 注册登录自启的计划任务（schtasks，免管理员）。没有服务端产物时先 `cargo xtask server`。
 //!
 //! ```text
 //! cargo xtask win                 # cargo build --release，再编安装包
@@ -57,6 +57,24 @@ pub fn run(args: &[String]) -> Result<()> {
     // 版本跟原生客户端走（exe 版本信息里也是这个，同一个工作区版本）
     let ver = version();
     let release = root().join("release");
+
+    // 捆绑的服务端单文件（发布产物，不是 target 里那份——它内嵌了守护进程）。
+    // 守护进程不在 Windows 上构建（zig_host 只认 macOS / Linux），本地补建只能
+    // --skip-sessiond 复用 native/target-sessiond/embed；CI 的 windows job 就是先拿
+    // falcon-sessiond-embed artifact 再 server --skip-sessiond
+    let platform = host_platform();
+    let server = release.join(format!("falcon-v{ver}-{platform}.exe"));
+    if !server.is_file() {
+        if skip_cargo {
+            bail!("找不到 {}，先 cargo xtask server --skip-sessiond（embed 取自 CI artifact falcon-sessiond-embed）", rel(&server));
+        }
+        println!("== 没有服务端产物，先 cargo xtask server --skip-sessiond ==");
+        crate::server::build_skipping_sessiond(&platform)
+            .context("Windows 上编不了会话守护进程：把 CI 的 falcon-sessiond-embed 解到 native/target-sessiond/embed，再跑 cargo xtask server --skip-sessiond")?;
+    }
+    if !server.is_file() {
+        bail!("cargo xtask server 之后仍没有 {}", rel(&server));
+    }
     std::fs::create_dir_all(&release)?;
     let base = format!("Falcon-v{ver}-{}-setup", host_platform());
     let iss = native().join("xtask/assets/windows-installer/Falcon.iss");
@@ -67,6 +85,7 @@ pub fn run(args: &[String]) -> Result<()> {
             "/Qp".to_string(),
             format!("/DAppVersion={ver}"),
             format!("/DSourceExe={}", exe.display()),
+            format!("/DSourceServer={}", server.display()),
             format!("/DSourceIcon={}", icon.display()),
             format!("/DOutputDir={}", release.display()),
             format!("/DOutputBaseFilename={base}"),

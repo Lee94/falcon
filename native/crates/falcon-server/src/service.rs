@@ -1,9 +1,10 @@
 //! `falcon service <install|uninstall|start|stop|status>` —— 把 falcon 注册成系统服务，
 //! 由 init 守护：崩溃自动拉起、登出不退、开机自启。移植自 `packages/server/src/service.ts`
 //! 的纯函数部分（参数判定、服务配置渲染、路径、`launchctl print` 的摘取）与
-//! `installServiceBinary`（有测试，文件系统用例走 tempfile）。
+//! `installServiceBinary`（有测试，文件系统用例走 tempfile）。Windows 的托管用计划任务
+//! （schtasks，纲要 1.2 的任务 XML），渲染与拆词在 `falcon_core::schtasks`。
 //!
-//! 刻意不自己写守护父进程：launchd / systemd 在这件事上比任何应用内实现都可靠
+//! 刻意不自己写守护父进程：launchd / systemd / 计划任务在这件事上比任何应用内实现都可靠
 //! （自身不会挂、接管日志、处理开机时序），我们只负责生成配置并调用它们。
 //!
 //! install 之后的启动参数（--host / --port / --data-dir）原样写进服务配置，
@@ -22,7 +23,8 @@ use crate::term_env::js;
 
 pub const LAUNCHD_LABEL: &str = "com.falcon.server";
 pub const SYSTEMD_NAME: &str = "falcon";
-pub const SERVICE_BIN_NAME: &str = "falcon";
+/// 服务进程的固定名。Windows 上得带扩展名才叫得起来
+pub const SERVICE_BIN_NAME: &str = if cfg!(windows) { "falcon.exe" } else { "falcon" };
 
 /// `falcon service` 认的子命令
 pub const SERVICE_COMMANDS: [&str; 6] = ["install", "uninstall", "start", "stop", "restart", "status"];

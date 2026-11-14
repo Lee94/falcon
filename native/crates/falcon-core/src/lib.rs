@@ -80,6 +80,7 @@ pub mod workspace;
 
 /// 已安装本机服务的启动参数：升级时原样带上、"本机"配置按它的端口连
 pub mod service_args;
+pub mod schtasks;
 /// 应用更新：GitHub Release 的版本比较、安装包选择与换入（ADR 0026）
 pub mod app_update;
 /// 原生 Coding Agent 视图的命令输出 SGR 解析与文件改动行级 Diff

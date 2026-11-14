@@ -1,6 +1,7 @@
-# 自动打安装包：Windows（Inno Setup 的 setup.exe，只有原生客户端）、macOS（.pkg，原生客户端 +
-# Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI + Gradle 原生安卓客户端）。
-# 同时发布 Linux / macOS x64、arm64 与 Windows x64 独立服务端，以及汇总的 SHA256SUMS。
+# 自动打安装包：Windows（Inno Setup 的 setup.exe，原生客户端 + 同目录的 Rust 服务端）、
+# macOS（.pkg，原生客户端 + Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI +
+# Gradle 原生安卓客户端）。同时发布 Linux / macOS x64、arm64 独立服务端
+# （Windows 那份由 windows job 出，打进安装包），以及汇总的 SHA256SUMS。
 # 打法与本机一样，直接跑 cargo xtask win / pkg / android / server，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
@@ -26,6 +27,9 @@ concurrency:
 
 jobs:
   windows:
+    # 安装包里要捆服务端单文件：falcon-v*-win32-x64.exe 在 windows job 里编（守护进程
+    # 内嵌资源复用 macos job 的那批）
+    needs: macos
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +40,7 @@ jobs:
         shell: bash
         run: rm -f native/.cargo/config.toml
 
-      # Windows 包里只有原生客户端，不编浏览器版，不用 wasm target
+      # Windows 包不编浏览器版，不用 wasm target
       - uses: dtolnay/rust-toolchain@stable
 
       # xtask 的 win.rs 会在 Program Files (x86)\Inno Setup 6 找 ISCC.exe
@@ -47,6 +51,16 @@ jobs:
         with:
           workspaces: native
           cache-workspace-crates: true
+
+      # 与 servers job 同一批内嵌守护进程（跨 OS 复用，避免在 Windows runner 装 Zig）
+      - uses: actions/download-artifact@v4
+        with:
+          name: falcon-sessiond-embed
+          path: native/target-sessiond/embed
+
+      # 服务端发布单文件，win.rs 把它捆进安装包
+      - name: Build server
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target win32-x64 --skip-sessiond
 
       # exe 的图标 / 字体取自仓库里已生成的文件；rc.exe 来自 runner 自带的 VS 生成工具。
       # xtask 也用 --release 跑，与 falcon-desktop 共用 target/release 的依赖，不再单独编一份 debug
@@ -159,8 +173,6 @@ jobs:
             platform: linux-x64
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
-          - runner: windows-latest
-            platform: win32-x64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
