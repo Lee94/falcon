@@ -219,11 +219,23 @@ fn systemd(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
 
     match cmd {
         "install" => {
-            let config = server_config(server_args)?;
+            // 没带启动参数时保留已装 unit 的原参数（升级场景：现有 ExecStart 里的三个开关），
+            // 与安装包 postinst 脚本的升级路径同一口径
+            let keep: Vec<String> = if server_args.is_empty() {
+                std::fs::read_to_string(&unit_path)
+                    .ok()
+                    .and_then(|text| crate::service::systemd_exec_args(&text))
+                    .map(|argv| falcon_core::service_args::parse_service_args(&argv).to_install_args())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let effective = if keep.is_empty() { server_args } else { &keep };
+            let config = server_config(effective)?;
             if let Some(parent) = unit_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&unit_path, systemd_unit(&install_program_arguments(server_args)?, root_mode))?;
+            std::fs::write(&unit_path, systemd_unit(&install_program_arguments(effective)?, root_mode))?;
             systemctl(root_mode, &["daemon-reload"], false)?;
             systemctl(root_mode, &["enable", SYSTEMD_NAME], false)?;
             // 不用 enable --now：它对已在运行的服务是 no-op，升级重装时会继续跑旧二进制。
