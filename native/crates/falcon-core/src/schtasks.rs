@@ -9,8 +9,40 @@
 //! `schtasks /Create /XML` 只认 UTF-16 的 XML 文件（[`utf16le_bytes`]）；`schtasks /Query /XML`
 //! 的输出编码不定（BOM、UTF-16、本地代码页都见过），用 [`decode_task_xml`] 兜底。
 
-/// 计划任务名。任务只在安装它的用户登录时启动（XML 里的 UserId）
+/// 计划任务名的前缀。任务库不区分用户——名在机器上全局唯一，实际名字走 [`schtasks_name`]
 pub const SCHTASKS_NAME: &str = "falcon";
+
+/// 本用户的计划任务名：`falcon-<用户名>`。不加用户名的裸 `falcon` 在多人机器上会撞：
+/// 第二个用户 /Create /F 要么覆盖第一个用户的任务、要么权限不够直接失败
+pub fn schtasks_name() -> String {
+    schtasks_name_for(&std::env::var("USERNAME").unwrap_or_default())
+}
+
+/// 任务名规则：ASCII 用户名原样；清掉非法字符后有损失（如纯中文名）就补一小段
+/// 用户名哈希防撞名；USERNAME 取不到退回裸 `falcon`（单用户机器不受影响）
+fn schtasks_name_for(user: &str) -> String {
+    let cleaned: String = user.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
+    if cleaned == user {
+        if user.is_empty() {
+            SCHTASKS_NAME.to_string()
+        } else {
+            format!("{SCHTASKS_NAME}-{cleaned}")
+        }
+    } else if cleaned.is_empty() {
+        format!("{SCHTASKS_NAME}-{:06x}", name_hash(user))
+    } else {
+        format!("{SCHTASKS_NAME}-{cleaned}-{:06x}", name_hash(user))
+    }
+}
+
+/// FNV-1a 的低 24 位：非 ASCII 用户名的防撞名后缀
+fn name_hash(s: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in s.as_bytes() {
+        h = (h ^ *b as u32).wrapping_mul(0x01000193);
+    }
+    h & 0xFF_FFFF
+}
 
 /// XML 元素文本的转义：只转 `&` `<` `>`（引号都在元素内容里，不转）
 pub fn xml_escape(s: &str) -> String {
@@ -101,8 +133,8 @@ pub fn win_split(line: &str) -> Vec<String> {
 
 /// 计划任务 XML 全文（Task Scheduler 1.2 纲要）。`program_args` 是被守护进程的完整 argv
 /// （程序路径 + 启动参数）：首项进 `<Command>`，其余按 [`win_quote`] 拼进 `<Arguments>`。
-/// `user`（`主机\用户` 或 `域\用户`，一般取 `whoami`）限定任务只在该用户登录时启动；
-/// 拿不到就不写 `<UserId>`，任何用户登录都会拉起来
+/// `user`（`主机\用户` 或 `域\用户`）限定任务只在该用户登录时启动；
+/// 拿不到就不写 `<UserId>`，schtasks 会默认绑注册任务的当前用户
 pub fn schtasks_xml(program_args: &[String], user: Option<&str>) -> String {
     let command = program_args.first().map(String::as_str).unwrap_or("");
     let arguments = program_args.get(1..).unwrap_or(&[]).iter().map(|a| win_quote(a)).collect::<Vec<_>>().join(" ");
@@ -279,6 +311,19 @@ mod tests {
         let xml = schtasks_xml(&args, None);
         assert_eq!(schtasks_xml_actions(&xml).unwrap(), args);
         assert!(schtasks_xml_actions("<Task/>").is_none());
+    }
+
+    #[test]
+    fn schtasks_name_scopes_per_user() {
+        assert_eq!(schtasks_name_for(""), "falcon");
+        assert_eq!(schtasks_name_for("alice"), "falcon-alice");
+        assert_eq!(schtasks_name_for("a-b_c.d"), "falcon-a-b_c.d");
+        // 非 ASCII / 带分隔符的名字清完要补哈希，两个中文名不撞
+        let a = schtasks_name_for("李雷");
+        let b = schtasks_name_for("韩梅");
+        assert_ne!(a, b);
+        assert!(a.starts_with("falcon-"));
+        assert!(schtasks_name_for("a b").starts_with("falcon-ab-"));
     }
 
     #[test]

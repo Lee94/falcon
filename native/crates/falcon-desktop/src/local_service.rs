@@ -80,7 +80,7 @@ fn program_arguments() -> Option<Vec<String>> {
     {
         // 任务 XML 的 <Command> + <Arguments>（`schtasks /Query /XML` 输出编码不定，走解码兜底）
         let out = std::process::Command::new("schtasks")
-            .args(["/Query", "/TN", falcon_core::schtasks::SCHTASKS_NAME, "/XML"])
+            .args(["/Query", "/TN", falcon_core::schtasks::schtasks_name().as_str(), "/XML"])
             .stdin(std::process::Stdio::null())
             .output()
             .ok()?;
