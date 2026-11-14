@@ -16,8 +16,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use falcon_platform::HtmlView;
-use gpui_kit::{Bounds, Pixels, Window};
+use falcon_platform::{HtmlView, LogicalRect, RawWindow};
+use raw_window_handle::HasWindowHandle;
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebViewBuilder, dpi};
 
 struct WryView(wry::WebView);
@@ -27,10 +27,10 @@ impl HtmlView for WryView {
         let _ = self.0.set_visible(visible);
     }
 
-    fn set_bounds(&self, b: Bounds<Pixels>) {
+    fn set_bounds(&self, b: LogicalRect) {
         let _ = self.0.set_bounds(Rect {
-            size: dpi::Size::Logical(dpi::LogicalSize::new(b.size.width.into(), b.size.height.into())),
-            position: dpi::Position::Logical(dpi::LogicalPosition::new(b.origin.x.into(), b.origin.y.into())),
+            size: dpi::Size::Logical(dpi::LogicalSize::new(b.width, b.height)),
+            position: dpi::Position::Logical(dpi::LogicalPosition::new(b.x, b.y)),
         });
     }
 
@@ -45,12 +45,13 @@ pub fn create(
     url: &str,
     prefix: &str,
     open_external: Box<dyn Fn(String) + Send + Sync>,
-    window: &mut Window,
+    window: &dyn HasWindowHandle,
 ) -> Result<Rc<dyn HtmlView>, String> {
     let open_external: Arc<dyn Fn(String) + Send + Sync> = Arc::from(open_external);
     let loaded = Rc::new(Cell::new(false));
     let prefix = prefix.to_string();
     let (open_nav, loaded_nav) = (open_external.clone(), loaded.clone());
+    let raw_win = RawWindow(window);
     WebViewBuilder::new()
         .with_url(url)
         .with_incognito(true)
@@ -75,7 +76,7 @@ pub fn create(
             NewWindowResponse::Deny
         })
         .with_download_started_handler(|_, _| false)
-        .build_as_child(window)
+        .build_as_child(&raw_win)
         .map(|w| Rc::new(WryView(w)) as Rc<dyn HtmlView>)
         .map_err(|err| err.to_string())
 }

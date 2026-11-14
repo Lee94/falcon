@@ -400,7 +400,14 @@ pub fn open_in_editor(ws: &Entity<Workspace>, project_id: &str, editor: Editor, 
 }
 
 fn hand_to_editor(ws: &Entity<Workspace>, editor: Editor, url: &str, cx: &mut App) {
-    if !falcon_platform::get(cx).open_app_link(url, cx) {
+    let handled = match falcon_platform::get(cx).open_app_link(url) {
+        Some(ok) => ok,
+        None => {
+            cx.open_url(url);
+            true
+        }
+    };
+    if !handled {
         toast(
             ws,
             ToastKind::Warning,

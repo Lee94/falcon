@@ -166,7 +166,12 @@ impl Element for HtmlSurface {
             self.view.set_visible(false);
             return None;
         }
-        self.view.set_bounds(visible);
+        self.view.set_bounds(falcon_platform::LogicalRect {
+            x: visible.origin.x.into(),
+            y: visible.origin.y.into(),
+            width: visible.size.width.into(),
+            height: visible.size.height.into(),
+        });
         self.view.set_visible(true);
         Some(visible)
     }

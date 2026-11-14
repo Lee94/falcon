@@ -85,3 +85,9 @@ pub mod schtasks;
 pub mod app_update;
 /// 原生 Coding Agent 视图的命令输出 SGR 解析与文件改动行级 Diff
 pub mod agent_output;
+/// Agent 会话 TUI ↔ GUI 双向转换状态机与交互门控（ADR 0027 / 0028）
+pub mod agent_mode;
+/// 服务端配置表（`profiles.json`）模型与回环/明文判定（ADR 0015 / 0028）
+pub mod profiles;
+/// 界面缩放档位运算（`falcon.native.zoom`）
+pub mod zoom;

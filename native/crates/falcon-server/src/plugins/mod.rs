@@ -18,6 +18,7 @@ pub mod docker;
 pub mod fmt;
 pub mod machine;
 pub mod manifest;
+pub mod nshpkg;
 pub mod runner;
 pub mod sysmon;
 pub mod tokens;
@@ -29,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use falcon_proto::{
     PLUGIN_API, PluginActionInput, PluginEvent, PluginInfo, PluginKind, PluginList, PluginProject, PluginRenderInput,
-    PluginRequest, PluginView,
+    PluginRequest, PluginTrustInfo, PluginView,
 };
 use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
@@ -70,11 +71,12 @@ impl PluginError {
 type RunFuture = Shared<BoxFuture<'static, Result<PluginView, PluginError>>>;
 
 struct Inner {
-    /// `<数据目录>/plugins`：命令插件放这里
+    /// `<数据目录>/plugins`：命令插件与 `.nshpkg` 包插件放这里
     dir: PathBuf,
     /// `<数据目录>/plugin-data`：每个插件一个子目录，插件自己存状态（`FALCON_PLUGIN_DATA`）
     data: PathBuf,
     base_env: BaseEnvFn,
+    keyring: nshpkg::PluginKeyring,
     sysmon: sysmon::Sysmon,
     docker: docker::Docker,
     tokens: tokens::Tokens,
@@ -97,13 +99,22 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// 找到的一个插件
 enum Found {
     Builtin(PluginInfo),
-    Command { info: PluginInfo, manifest: Option<Manifest>, dir: PathBuf },
+    Command {
+        info: PluginInfo,
+        manifest: Option<Manifest>,
+        dir: PathBuf,
+        signed_pkg: Option<nshpkg::SignedPackage>,
+    },
+    Package {
+        info: PluginInfo,
+        signed_pkg: Option<nshpkg::SignedPackage>,
+    },
 }
 
 impl Found {
     fn info(&self) -> &PluginInfo {
         match self {
-            Found::Builtin(info) | Found::Command { info, .. } => info,
+            Found::Builtin(info) | Found::Command { info, .. } | Found::Package { info, .. } => info,
         }
     }
 }
@@ -138,8 +149,13 @@ pub fn set_enabled(db: &Db, id: &str, enabled: bool) {
     db.set_setting(DISABLED_KEY, &serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()));
 }
 
-/// 读一个命令插件的目录：清单坏了照样回一条 info（带 error），设置页要把原因列出来
-fn read_command_plugin(dir: &Path, id: &str, enabled: bool) -> (PluginInfo, Option<Manifest>) {
+/// 读一个命令插件（或带 `package` 的目录插件）：清单坏了照样回一条 info（带 error），设置页要把原因列出来
+fn read_command_plugin(
+    dir: &Path,
+    id: &str,
+    enabled: bool,
+    keyring: &nshpkg::PluginKeyring,
+) -> (PluginInfo, Option<Manifest>, Option<nshpkg::SignedPackage>) {
     let mut info = PluginInfo {
         id: id.to_string(),
         name: id.to_string(),
@@ -151,10 +167,11 @@ fn read_command_plugin(dir: &Path, id: &str, enabled: bool) -> (PluginInfo, Opti
         enabled,
         error: None,
         dir: Some(dir.to_string_lossy().into_owned()),
+        package: None,
     };
     let fail = |mut info: PluginInfo, error: String| {
         info.error = Some(error);
-        (info, None)
+        (info, None, None)
     };
     if !valid_id(id) {
         return fail(info, "目录名只能用小写字母、数字、- 与 _（最长 48 个字符），它就是插件的 id".into());
@@ -179,9 +196,65 @@ fn read_command_plugin(dir: &Path, id: &str, enabled: bool) -> (PluginInfo, Opti
             info.icon = m.icon.clone();
             info.scope = m.scope;
             info.refresh = m.refresh;
-            (info, Some(m))
+            if m.command.is_empty() {
+                info.kind = PluginKind::Package;
+            }
+            let signed_pkg = match &m.package {
+                Some(rel) => match keyring.load_signed(&dir.join(rel)) {
+                    Ok(signed) => {
+                        info.package = Some(signed.meta.clone());
+                        Some(signed)
+                    }
+                    Err(err) => return fail(info, err),
+                },
+                None => None,
+            };
+            (info, Some(m), signed_pkg)
         }
         Err(e) => fail(info, e),
+    }
+}
+
+/// 读 `<数据目录>/plugins/<id>.nshpkg` 单文件沙盒面板包。
+fn read_standalone_package(
+    file: &Path,
+    id: &str,
+    enabled: bool,
+    keyring: &nshpkg::PluginKeyring,
+) -> (PluginInfo, Option<nshpkg::SignedPackage>) {
+    let mut info = PluginInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        icon: "puzzle".into(),
+        kind: PluginKind::Package,
+        scope: falcon_proto::PluginScope::Project,
+        refresh: None,
+        enabled,
+        error: None,
+        dir: file.parent().map(|p| p.to_string_lossy().into_owned()),
+        package: None,
+    };
+    if !valid_id(id) {
+        info.error = Some("包文件名（去掉 .nshpkg 后）只能用小写字母、数字、- 与 _（最长 48 个字符）".into());
+        return (info, None);
+    }
+    if BUILTIN_IDS.contains(&id) {
+        info.error = Some("与内置插件重名，换个文件名".into());
+        return (info, None);
+    }
+    match keyring.load_signed(file) {
+        Ok(signed) => {
+            if !signed.app_name.trim().is_empty() {
+                info.name = signed.app_name.clone();
+            }
+            info.package = Some(signed.meta.clone());
+            (info, Some(signed))
+        }
+        Err(err) => {
+            info.error = Some(err);
+            (info, None)
+        }
     }
 }
 
@@ -217,10 +290,12 @@ fn project_context(db: &Db, project_id: Option<&str>) -> Option<PluginProject> {
 
 impl PluginHost {
     pub fn new(data_dir: &Path, base_env: BaseEnvFn) -> Self {
+        let dir = data_dir.join("plugins");
         let data = data_dir.join("plugin-data");
         PluginHost {
             inner: Arc::new(Inner {
-                dir: data_dir.join("plugins"),
+                keyring: nshpkg::PluginKeyring::new(&dir),
+                dir,
                 docker: docker::Docker::new(base_env.clone(), data.join(docker::ID)),
                 tokens: tokens::Tokens::new(base_env.clone()),
                 data,
@@ -236,26 +311,67 @@ impl PluginHost {
         &self.inner.dir
     }
 
-    /// 列出全部插件：内置的在前，命令插件按 id 排。同步 I/O（读目录与清单），调用方放 spawn_blocking。
+    /// 本实例的 `.nshpkg` 签名信任根公钥（同步文件读取 / 首次懒生成，调用方放 `spawn_blocking`）。
+    pub fn trust_info(&self) -> Result<PluginTrustInfo, PluginError> {
+        let root_public_key = self
+            .inner
+            .keyring
+            .root_public_key_base64()
+            .map_err(PluginError::Failed)?;
+        Ok(PluginTrustInfo { root_public_key })
+    }
+
+    /// 列出全部插件：内置的在前，命令与包插件按 id 排。同步 I/O（读目录与清单），调用方放 spawn_blocking。
     /// 目录还不存在就顺手建出来：设置页告诉用户"放到这里"，那里得真有个文件夹
     pub fn scan(&self, disabled: &HashSet<String>) -> PluginList {
         let mut plugins = builtin_infos(disabled);
         let _ = std::fs::create_dir_all(&self.inner.dir);
-        let mut dirs: Vec<(String, PathBuf)> = std::fs::read_dir(&self.inner.dir)
-            .map(|rd| {
-                rd.filter_map(Result::ok)
-                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir() || t.is_symlink()) && e.path().is_dir())
-                    .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
-                    // 隐藏目录（.git、.DS_Store 所在的那种）不是插件
-                    .filter(|(name, _)| !name.starts_with('.'))
-                    .collect()
-            })
-            .unwrap_or_default();
-        dirs.sort();
-        for (id, dir) in dirs.into_iter().take(MAX_PLUGINS) {
-            plugins.push(read_command_plugin(&dir, &id, !disabled.contains(&id)).0);
+        let mut entries: Vec<(String, PathBuf, bool)> = Vec::new();
+        let mut seen_dirs: HashSet<String> = HashSet::new();
+        if let Ok(rd) = std::fs::read_dir(&self.inner.dir) {
+            let mut raw: Vec<(String, PathBuf)> = rd
+                .filter_map(Result::ok)
+                .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
+                // 隐藏条目（.git、.DS_Store、.keys）不是插件
+                .filter(|(name, _)| !name.starts_with('.'))
+                .collect();
+            for (name, path) in &raw {
+                if path.is_dir() {
+                    seen_dirs.insert(name.clone());
+                    entries.push((name.clone(), path.clone(), true));
+                }
+            }
+            for (name, path) in raw.drain(..) {
+                if let Some(stem) = name.strip_suffix(".nshpkg")
+                    && path.is_file()
+                    && !seen_dirs.contains(stem)
+                {
+                    entries.push((stem.to_string(), path, false));
+                }
+            }
         }
-        PluginList { dir: self.inner.dir.to_string_lossy().into_owned(), plugins }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, path, is_dir) in entries.into_iter().take(MAX_PLUGINS) {
+            let enabled = !disabled.contains(&id);
+            if is_dir {
+                plugins.push(read_command_plugin(&path, &id, enabled, &self.inner.keyring).0);
+            } else {
+                plugins.push(read_standalone_package(&path, &id, enabled, &self.inner.keyring).0);
+            }
+        }
+        let has_package = plugins
+            .iter()
+            .any(|p| p.kind == PluginKind::Package || p.package.is_some());
+        let trust_root = if has_package {
+            self.inner.keyring.root_public_key_base64().ok()
+        } else {
+            None
+        };
+        PluginList {
+            dir: self.inner.dir.to_string_lossy().into_owned(),
+            plugins,
+            trust_root,
+        }
     }
 
     fn find(&self, id: &str, disabled: &HashSet<String>) -> Option<Found> {
@@ -268,11 +384,21 @@ impl PluginHost {
             return None;
         }
         let dir = self.inner.dir.join(id);
-        if !dir.is_dir() {
-            return None;
+        if dir.is_dir() {
+            let (info, manifest, signed_pkg) = read_command_plugin(&dir, id, enabled, &self.inner.keyring);
+            return Some(Found::Command {
+                info,
+                manifest,
+                dir,
+                signed_pkg,
+            });
         }
-        let (info, manifest) = read_command_plugin(&dir, id, enabled);
-        Some(Found::Command { info, manifest, dir })
+        let pkg_file = self.inner.dir.join(format!("{id}.nshpkg"));
+        if pkg_file.is_file() {
+            let (info, signed_pkg) = read_standalone_package(&pkg_file, id, enabled, &self.inner.keyring);
+            return Some(Found::Package { info, signed_pkg });
+        }
+        None
     }
 
     /// 找插件并确认它能用（存在、启用、清单没坏）
@@ -294,6 +420,16 @@ impl PluginHost {
         Ok(found)
     }
 
+    /// 获取已重签名的 `.nshpkg` 字节流（`GET /api/plugins/:id/package`）。
+    pub async fn package_bytes(&self, db: &Db, id: &str) -> Result<Vec<u8>, PluginError> {
+        match self.usable(db, id).await? {
+            Found::Command { signed_pkg: Some(pkg), .. } | Found::Package { signed_pkg: Some(pkg), .. } => Ok(pkg.bytes),
+            Found::Builtin(info) | Found::Command { info, .. } | Found::Package { info, .. } => {
+                Err(PluginError::NotFound(format!("插件「{}」没有提供 .nshpkg 面板包", info.name)))
+            }
+        }
+    }
+
     /// 画一次面板
     pub async fn render(
         &self,
@@ -312,8 +448,18 @@ impl PluginHost {
                 };
                 Ok(view::sanitize(view))
             }
-            Found::Command { manifest, dir, .. } => {
+            Found::Package { info, .. } => Err(PluginError::BadInput(format!(
+                "插件「{}」是客户端 .nshpkg 沙盒面板包，请从 /api/plugins/{}/package 拉取",
+                info.name, info.id
+            ))),
+            Found::Command { info, manifest, dir, .. } => {
                 let manifest = manifest.expect("usable 已经挡掉了清单坏的");
+                if manifest.command.is_empty() {
+                    return Err(PluginError::BadInput(format!(
+                        "插件「{}」是客户端 .nshpkg 沙盒面板包，请从 /api/plugins/{}/package 拉取",
+                        info.name, info.id
+                    )));
+                }
                 let req = PluginRequest {
                     api: PLUGIN_API,
                     event: PluginEvent::Render,
@@ -347,8 +493,18 @@ impl PluginHost {
                 Ok(view::sanitize(self.inner.docker.action(db, engine, &input).await?))
             }
             Found::Builtin(info) => Err(PluginError::BadInput(format!("「{}」没有动作 {}", info.name, input.action))),
-            Found::Command { manifest, dir, .. } => {
+            Found::Package { info, .. } => Err(PluginError::BadInput(format!(
+                "插件「{}」是纯客户端 .nshpkg 面板包，没有服务端动作",
+                info.name
+            ))),
+            Found::Command { info, manifest, dir, .. } => {
                 let manifest = manifest.expect("usable 已经挡掉了清单坏的");
+                if manifest.command.is_empty() {
+                    return Err(PluginError::BadInput(format!(
+                        "插件「{}」是纯客户端 .nshpkg 面板包，没有服务端动作",
+                        info.name
+                    )));
+                }
                 if manifest.output == Output::Text {
                     return Err(PluginError::BadInput("纯文字输出的插件没有动作".into()));
                 }

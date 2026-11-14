@@ -1,0 +1,21 @@
+{
+  "name": "Falcon",
+  "id": "com.falcon.android",
+  "version": "0.3.28",
+  "rust": ".",
+  "root": "FalconApp",
+  "schemes": ["falcon"],
+  "window": {
+    "title": "Falcon",
+    "width": 1440,
+    "height": 900,
+    "minWidth": 720,
+    "minHeight": 480
+  },
+  "capabilities": {
+    "network": ["*"],
+    "clipboard": true,
+    "openUrl": ["http", "https", "vscode", "zed", "cursor"],
+    "webview": true
+  }
+}

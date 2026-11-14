@@ -62,6 +62,7 @@ pub fn info(enabled: bool) -> PluginInfo {
         enabled,
         error: None,
         dir: None,
+        package: None,
     }
 }
 

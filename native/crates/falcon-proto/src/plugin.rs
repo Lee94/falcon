@@ -27,10 +27,12 @@ pub const PLUGIN_API: u32 = 1;
 
 wire_enum! {
     /// 插件从哪来。`builtin` 是 falcon-server 自己实现的（系统监控）；`command` 是用户放进
-    /// `<数据目录>/plugins/<id>/` 的、由服务端起进程跑的。
+    /// `<数据目录>/plugins/<id>/` 的、由服务端起进程跑的；`package` 是经服务端 Ed25519 签名分发的
+    /// `.nshpkg` 沙盒面板包（ADR 0028）。
     pub enum PluginKind open {
         Builtin => "builtin",
         Command => "command",
+        Package => "package",
     }
 }
 
@@ -72,6 +74,25 @@ wire_enum! {
     }
 }
 
+/// `.nshpkg` 签名面板包的包头摘要（ADR 0028）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPackageInfo {
+    pub app_id: String,
+    pub version: String,
+    pub build: u64,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// `GET /api/plugins/trust`：自托管 `falcon-server` 实例的插件签名信任根公钥（ADR 0028）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTrustInfo {
+    /// `nsh_package::PublicKey` 编码的 32 字节 Ed25519 根公钥。
+    pub root_public_key: String,
+}
+
 /// `GET /api/plugins` 的一项：装了哪些插件（含停用的与清单写坏的——设置页要列出来说清原因，
 /// 右侧栏只放 `enabled && error == null` 的）。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -94,6 +115,9 @@ pub struct PluginInfo {
     /// 命令插件所在的目录（后端那台机器上的绝对路径）；内置插件没有
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
+    /// `.nshpkg` 沙盒面板包元数据；声明式面板插件不带此字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PluginPackageInfo>,
 }
 
 /// `GET /api/plugins`
@@ -103,6 +127,9 @@ pub struct PluginList {
     /// 命令插件放在哪（后端那台机器上的绝对路径）：设置页照着告诉用户往哪放
     pub dir: String,
     pub plugins: Vec<PluginInfo>,
+    /// 存在 `.nshpkg` 插件时顺带返回本实例的 Ed25519 信任根公钥（无包插件时省略，保持存量 fixture 零字节差异）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_root: Option<String>,
 }
 
 /// `POST /api/plugins/:id/render`
@@ -446,6 +473,22 @@ mod tests {
         );
         assert_eq!(list.plugins[0].kind, PluginKind::Builtin);
         assert_eq!(list.plugins[1].refresh, None);
+        assert_eq!(list.trust_root, None);
+    }
+
+    #[test]
+    fn plugin_list_with_package_and_trust_root() {
+        let list = roundtrip::<PluginList>(
+            r#"{"dir":"/var/lib/falcon/plugins","plugins":[
+                {"id":"metrics","name":"指标沙盒","icon":"gauge","kind":"package","scope":"project",
+                 "refresh":null,"enabled":true,"error":null,"dir":"/var/lib/falcon/plugins/metrics",
+                 "package":{"appId":"com.falcon.plugin.metrics","version":"0.1.0","build":3,"sha256":"abcdef01","size":4096}}
+            ],"trustRoot":"nsh-ed25519-root"}"#,
+        );
+        assert_eq!(list.plugins[0].kind, PluginKind::Package);
+        assert_eq!(list.plugins[0].package.as_ref().map(|p| p.build), Some(3));
+        assert_eq!(list.trust_root.as_deref(), Some("nsh-ed25519-root"));
+        roundtrip::<PluginTrustInfo>(r#"{"rootPublicKey":"nsh-ed25519-root"}"#);
     }
 
     #[test]

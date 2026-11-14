@@ -10,11 +10,13 @@
 
 use std::collections::BTreeMap;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{Response, StatusCode};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use falcon_proto::{PluginActionInput, PluginList, PluginRenderInput, PluginView};
+use falcon_proto::{PluginActionInput, PluginList, PluginRenderInput, PluginTrustInfo, PluginView};
 use serde_json::Value;
 
 use super::AppState;
@@ -26,6 +28,8 @@ use crate::plugins::{PluginError, disabled_set, set_enabled};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/plugins", get(list))
+        .route("/api/plugins/trust", get(trust))
+        .route("/api/plugins/{id}/package", get(package))
         .route("/api/plugins/{id}/render", post(render))
         .route("/api/plugins/{id}/action", post(action))
         .route("/api/plugins/{id}/enabled", put(enabled))
@@ -50,6 +54,24 @@ async fn scan(state: &AppState) -> ApiResult<PluginList> {
 
 async fn list(State(state): State<AppState>) -> ApiResult<Json<PluginList>> {
     scan(&state).await.map(Json)
+}
+
+async fn trust(State(state): State<AppState>) -> ApiResult<Json<PluginTrustInfo>> {
+    let plugins = state.plugins.clone();
+    let info = tokio::task::spawn_blocking(move || plugins.trust_info())
+        .await
+        .map_err(ApiError::internal)??;
+    Ok(Json(info))
+}
+
+async fn package(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response<Body>> {
+    let bytes = state.plugins.package_bytes(&state.db, &id).await?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .map_err(ApiError::internal)
 }
 
 /// `params`：对象里的字符串值（别的类型的值丢掉，按 JS 口径不让整条请求 400）
@@ -95,7 +117,61 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::super::test_support::{TestApp, json_of};
+    use super::super::test_support::{TestApp, body_bytes, json_of};
+
+    #[tokio::test]
+    async fn nshpkg_plugin_is_resigned_listed_and_verified_by_client_trust_store() {
+        let app = TestApp::new();
+        let ext_root = nsh_package::SecretKey::generate().unwrap();
+        let ext_rel = nsh_package::SecretKey::generate().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cert = nsh_package::certify(&ext_root, &ext_rel.public(), &["*".into()], now.saturating_sub(60), now + 3600);
+        let raw_pkg = nsh_package::build(
+            &nsh_package::Contents {
+                app: nsh_package::App {
+                    id: "com.falcon.plugin.metrics".into(),
+                    name: "指标沙盒".into(),
+                    version: "0.2.0".into(),
+                    build: 7,
+                },
+                capabilities: None,
+                source: "export default function Metrics() { return 'metrics'; }\n".into(),
+                bytecode: None,
+                source_map: None,
+                assets: Vec::new(),
+                min_runtime: None,
+            },
+            &ext_rel,
+            &cert,
+        )
+        .unwrap();
+        std::fs::create_dir_all(app.data_dir.join("plugins")).unwrap();
+        std::fs::write(app.data_dir.join("plugins/metrics.nshpkg"), &raw_pkg).unwrap();
+
+        let (status, list) = json_of(app.get("/api/plugins").await).await;
+        assert_eq!(status, StatusCode::OK);
+        let root_b64 = list["trustRoot"].as_str().expect("有 .nshpkg 时应返回 trustRoot").to_string();
+        let item = list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == "metrics").unwrap();
+        assert_eq!(item["kind"], "package");
+        assert_eq!(item["name"], "指标沙盒");
+        assert_eq!(item["package"]["build"], 7);
+
+        let (status, trust) = json_of(app.get("/api/plugins/trust").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(trust["rootPublicKey"], root_b64);
+
+        let res = app.get("/api/plugins/metrics/package").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let pkg_bytes = body_bytes(res).await;
+        let mut store = nsh_package::TrustStore::new();
+        store.add_root(nsh_package::PublicKey::from_base64(&root_b64).unwrap());
+        let verified = store.verify(&pkg_bytes, "").unwrap();
+        assert_eq!(verified.app.id, "com.falcon.plugin.metrics");
+        assert_eq!(verified.app.build, 7);
+    }
 
     #[tokio::test]
     async fn builtin_sysmon_is_listed_and_toggles() {

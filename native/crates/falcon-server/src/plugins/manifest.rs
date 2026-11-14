@@ -38,8 +38,10 @@ pub struct Manifest {
     pub name: String,
     pub description: Option<String>,
     pub icon: String,
-    /// argv，不经 shell。`[0]` 是相对路径（含路径分隔符）时相对插件目录，裸名字走 PATH
+    /// argv，不经 shell。`[0]` 是相对路径（含路径分隔符）时相对插件目录，裸名字走 PATH；纯 `.nshpkg` 包插件可为空
     pub command: Vec<String>,
+    /// 可选的 `.nshpkg` 沙盒面板包文件名（相对插件目录，不容许越出目录）
+    pub package: Option<String>,
     pub output: Output,
     pub scope: PluginScope,
     pub refresh: Option<f64>,
@@ -86,6 +88,14 @@ fn non_empty(v: Option<&Value>) -> Option<String> {
     v.and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
+fn valid_package_relpath(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel.ends_with(".nshpkg")
+        && !rel.starts_with('/')
+        && !rel.contains(['\\', ':', '\0'])
+        && rel.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// 解析清单。`id` 只用来给 `name` 兜底
 pub fn parse_manifest(id: &str, text: &str) -> Result<Manifest, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("plugin.json 不是合法的 JSON：{e}"))?;
@@ -95,6 +105,11 @@ pub fn parse_manifest(id: &str, text: &str) -> Result<Manifest, String> {
     {
         return Err(format!("插件要求协议 v{api}，这版 falcon 只认 v{PLUGIN_API}，先升级 falcon"));
     }
+    let package = match non_empty(m.get("package").or_else(|| m.get("ui"))) {
+        Some(rel) if valid_package_relpath(&rel) => Some(rel),
+        Some(rel) => return Err(format!("package 必须是目录内的 .nshpkg 相对路径，写的是 {rel}")),
+        None => None,
+    };
     // command 可以是数组（argv），也可以是一个字符串——那是**一个**程序，不按空格拆：
     // 拆了就得管引号，管引号就是在实现半个 shell
     let command: Vec<String> = match m.get("command") {
@@ -108,6 +123,7 @@ pub fn parse_manifest(id: &str, text: &str) -> Result<Manifest, String> {
             }
         }
         Some(_) => return Err("command 要么是字符串，要么是字符串数组".into()),
+        None if package.is_some() => Vec::new(),
         None => return Err("plugin.json 缺少 command（要跑的程序）".into()),
     };
     let output = match m.get("output").and_then(Value::as_str) {
@@ -129,6 +145,7 @@ pub fn parse_manifest(id: &str, text: &str) -> Result<Manifest, String> {
         description: non_empty(m.get("description")),
         icon,
         command,
+        package,
         output,
         scope,
         refresh: m.get("refresh").and_then(Value::as_f64).and_then(clamp_refresh),

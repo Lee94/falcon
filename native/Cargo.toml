@@ -26,6 +26,15 @@ falcon-theme = { path = "crates/falcon-theme" }
 falcon-core = { path = "crates/falcon-core" }
 falcon-platform = { path = "crates/falcon-platform" }
 falcon-ui = { path = "crates/falcon-ui" }
+falcon-nsh = { path = "crates/falcon-nsh" }
+
+# Native Shell (NSH) 跨端统一界面层（ADR 0028）：纯 Rust 主应用与声明式/签名插件双轨，主路径零 QuickJS 开销。
+nsh-core = "0.5.1"
+nsh-base = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }
+nsh-engine = { version = "0.5.1", default-features = false }
+nsh-package = "0.5.1"
+nsh-testing = { version = "0.5.1", default-features = false }
+nsh-platform-tui = { version = "0.5.1", default-features = false, features = ["run-app"] }
 
 # GPUI 走 gpui-kit 总包：它把 gpui-pre / gpui-pre-platform / gpui-base /
 # gpui-component / 默认资源锁在同一版本上。升级 GPUI 就是升级这一行（连同

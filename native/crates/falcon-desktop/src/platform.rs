@@ -16,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use falcon_platform::{AppUpdater, HtmlView, LocalService, Platform, PlatformInfo};
-use gpui_kit::{App, Window};
+use raw_window_handle::HasWindowHandle;
 
 /// "本机"配置的缺省基址：没装过服务、也没用 FALCON_LOCAL_URL 改指别处时
 const LOCAL_URL: &str = "http://127.0.0.1:4923";
@@ -127,7 +127,7 @@ impl Platform for Desktop {
         url: &str,
         prefix: &str,
         open_external: Box<dyn Fn(String) + Send + Sync>,
-        window: &mut Window,
+        window: &dyn HasWindowHandle,
     ) -> Option<Result<Rc<dyn HtmlView>, String>> {
         Some(crate::html_view::create(url, prefix, open_external, window))
     }
@@ -138,13 +138,13 @@ impl Platform for Desktop {
         _url: &str,
         _prefix: &str,
         _open_external: Box<dyn Fn(String) + Send + Sync>,
-        _window: &mut Window,
+        _window: &dyn HasWindowHandle,
     ) -> Option<Result<Rc<dyn HtmlView>, String>> {
         None
     }
 
-    fn open_app_link(&self, url: &str, cx: &App) -> bool {
-        crate::app_link::open(url, cx)
+    fn open_app_link(&self, url: &str) -> Option<bool> {
+        crate::app_link::open(url)
     }
 
     fn set_app_icon(&self, png: &[u8]) {

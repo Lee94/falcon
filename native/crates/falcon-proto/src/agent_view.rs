@@ -79,6 +79,22 @@ wire_enum! {
     }
 }
 
+/// `GET /api/sessions/:id/agent-mode` 返回的能力快照。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModeCapabilities {
+    #[serde(default)]
+    pub agent_mode_snapshot: bool,
+    #[serde(default)]
+    pub interactive_gui: bool,
+    #[serde(default)]
+    pub interactive_terminal: bool,
+    #[serde(default)]
+    pub create_gui: bool,
+    #[serde(default)]
+    pub preserves_process: bool,
+}
+
 /// 斜杠命令描述（由 CLI 初始化握手上报）。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

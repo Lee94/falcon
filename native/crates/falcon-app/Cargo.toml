@@ -1,0 +1,55 @@
+[package]
+name = "falcon-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "falcon_app"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "falcon-app"
+path = "src/main.rs"
+
+[features]
+default = ["tui"]
+tui = ["dep:nsh-platform-tui", "dep:ratatui-core"]
+# Linux GTK4 桌面后端：需要系统安装 libgtk-4-dev（GitHub Release 打包环境开启；无头环境默认走 TUI）
+linux-desktop = ["dep:nsh-platform-linux"]
+
+[dependencies]
+falcon-nsh.workspace = true
+falcon-platform.workspace = true
+falcon-core.workspace = true
+falcon-theme.workspace = true
+nsh-core.workspace = true
+nsh-base.workspace = true
+nsh-engine.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nsh-platform-tui = { workspace = true, optional = true }
+ratatui-core = { version = "0.1.2", default-features = false, features = ["std", "layout-cache", "underline-color"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot", "webview"], optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+nsh-platform-android = { version = "0.5.1", default-features = false, features = ["editor", "highlight", "plot"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+nsh-platform-web = { version = "0.5.1", default-features = false }
