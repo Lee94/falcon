@@ -5,7 +5,7 @@
 //! Rust 版恒为单文件二进制（Node 版的 isSea() 恒真）：install 时先把自己拷到
 //! `<dataDir>/bin/falcon` 再写配置，进程名就叫 falcon，升级也只是覆盖同一路径。
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::process::Command;
@@ -279,8 +279,9 @@ fn schtasks_exec(args: &[&str], can_fail: bool) -> anyhow::Result<String> {
 /// 已装任务 XML 里带的完整 argv（`schtasks /Query /XML`）。没装过或读不出都是 None
 #[cfg(windows)]
 fn existing_task_args() -> Option<Vec<String>> {
+    let tn = falcon_core::schtasks::schtasks_name();
     let out = Command::new("schtasks")
-        .args(["/Query", "/TN", falcon_core::schtasks::SCHTASKS_NAME, "/XML"])
+        .args(["/Query", "/TN", tn.as_str(), "/XML"])
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
@@ -291,21 +292,21 @@ fn existing_task_args() -> Option<Vec<String>> {
     falcon_core::schtasks::schtasks_xml_actions(&xml)
 }
 
-/// `主机\用户`（或 `域\用户`）：任务只在这个用户登录时启动。whoami 拿不到是 None
+/// `域\用户`（或 `主机\用户`）：任务只在这个用户登录时启动。环境变量在 Rust 里是
+/// UTF-16 原文——whoami 的输出过本地代码页，非 ASCII 用户名会乱码，所以从环境变量拼。
+/// 拿不到是 None（XML 不写 UserId，schtasks 默认绑注册任务的当前用户）
 #[cfg(windows)]
-fn whoami() -> Option<String> {
-    let out = Command::new("whoami").stdin(std::process::Stdio::null()).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!name.is_empty()).then_some(name)
+fn current_user_principal() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty())?;
+    let domain = std::env::var("USERDOMAIN").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_default();
+    Some(if domain.is_empty() { user } else { format!("{domain}\\{user}") })
 }
 
 #[cfg(windows)]
 fn task_installed() -> bool {
+    let tn = falcon_core::schtasks::schtasks_name();
     Command::new("schtasks")
-        .args(["/Query", "/TN", falcon_core::schtasks::SCHTASKS_NAME])
+        .args(["/Query", "/TN", tn.as_str()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -313,9 +314,24 @@ fn task_installed() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// /End 是异步的：Windows 锁着运行中的 exe（覆盖不进、旧实例继续跑），等它真的退——
+/// 能打开服务二进制来写才算退了（映像占用时开写直接拒绝）。最多等 10 秒
+#[cfg(windows)]
+fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
+    for _ in 0..50 {
+        match std::fs::OpenOptions::new().append(true).open(bin) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    }
+    anyhow::bail!("服务进程 10 秒内未退出（{} 仍被占用），手动结束后重试", bin.display())
+}
+
 #[cfg(windows)]
 fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
-    use falcon_core::schtasks::{SCHTASKS_NAME, schtasks_xml, utf16le_bytes};
+    use falcon_core::schtasks::{schtasks_name, schtasks_xml, utf16le_bytes};
+    let tn = schtasks_name();
     match cmd {
         "install" => {
             // 没带启动参数时保留已装任务的原参数（升级场景：任务 XML 里的 Command+Arguments）
@@ -328,25 +344,29 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
             };
             let effective = if keep.is_empty() { server_args } else { &keep };
             let config = server_config(effective)?;
+            // 服务在跑先停掉：运行中的 exe 被 Windows 锁着，覆盖不进 `<dataDir>/bin`；
+            // 且 /Create /F + /Run 只是换定义，旧实例会继续跑旧二进制
+            if task_installed() {
+                schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
+                wait_service_stopped(&service_bin_path(&config.data_dir))?;
+            }
             let args = install_program_arguments(effective)?;
-            let xml = schtasks_xml(&args, whoami().as_deref());
+            let xml = schtasks_xml(&args, current_user_principal().as_deref());
             let task_file = std::env::temp_dir().join(format!("falcon-task-{}.xml", std::process::id()));
             std::fs::write(&task_file, utf16le_bytes(&xml))?;
-            let created = schtasks_exec(
-                &["/Create", "/TN", SCHTASKS_NAME, "/XML", &task_file.to_string_lossy(), "/F"],
-                false,
-            );
+            let task_arg = task_file.to_string_lossy().into_owned();
+            let created = schtasks_exec(&["/Create", "/TN", tn.as_str(), "/XML", &task_arg, "/F"], false);
             let _ = std::fs::remove_file(&task_file);
             created?;
-            schtasks_exec(&["/Run", "/TN", SCHTASKS_NAME], false)?;
+            schtasks_exec(&["/Run", "/TN", tn.as_str()], false)?;
             println!(
                 "已安装并启动（计划任务，登录后自启，崩溃自动拉起）。\n程序: {}",
                 service_bin_path(&config.data_dir).display()
             );
         }
         "uninstall" => {
-            schtasks_exec(&["/End", "/TN", SCHTASKS_NAME], true)?;
-            schtasks_exec(&["/Delete", "/TN", SCHTASKS_NAME, "/F"], true)?;
+            schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
+            schtasks_exec(&["/Delete", "/TN", tn.as_str(), "/F"], true)?;
             println!("已停止并移除服务。");
         }
         "start" | "restart" => {
@@ -355,13 +375,21 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
                 return Ok(1);
             }
             if cmd == "restart" {
-                schtasks_exec(&["/End", "/TN", SCHTASKS_NAME], true)?;
+                schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
+                // 旧进程没退完 /Run 会被 IgnoreNew 吞掉，留服务停着：等它真退
+                let data_dir = existing_task_args()
+                    .and_then(|argv| falcon_core::service_args::parse_service_args(&argv).data_dir)
+                    .map(PathBuf::from)
+                    .or_else(|| server_config(server_args).ok().map(|c| c.data_dir));
+                if let Some(d) = data_dir {
+                    wait_service_stopped(&service_bin_path(&d))?;
+                }
             }
-            schtasks_exec(&["/Run", "/TN", SCHTASKS_NAME], false)?;
+            schtasks_exec(&["/Run", "/TN", tn.as_str()], false)?;
             println!("{}", if cmd == "start" { "已启动。" } else { "已重启。" });
         }
         "stop" => {
-            schtasks_exec(&["/End", "/TN", SCHTASKS_NAME], true)?;
+            schtasks_exec(&["/End", "/TN", tn.as_str()], true)?;
             println!("已停止。");
         }
         "status" => {
@@ -369,7 +397,7 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
                 eprintln!("未安装。");
                 return Ok(1);
             }
-            let out = schtasks_exec(&["/Query", "/TN", SCHTASKS_NAME, "/V", "/FO", "LIST"], true)?;
+            let out = schtasks_exec(&["/Query", "/TN", tn.as_str(), "/V", "/FO", "LIST"], true)?;
             print!("{}", if out.is_empty() { "未在运行。\n".to_string() } else { format!("{out}\n") });
         }
         _ => unreachable!("parse_service_cli 只放行认识的子命令"),
