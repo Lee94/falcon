@@ -16,7 +16,7 @@ cargo xtask tui             # 在当前终端启动 falcon-app TUI 工作台（n
 cargo xtask pkg             # macOS 安装包：Falcon.app = NSH 原生客户端 + Resources 里的服务端
 cargo xtask win             # Windows 安装包（Inno Setup）：NSH 原生客户端 + 同目录服务端（装好注册计划任务）；须在 Windows 上打
 cargo xtask linux           # Linux 服务端安装文件：.deb / .rpm / install.sh（只含服务端 + systemd 服务）
-cargo xtask linux-desktop   # Linux GTK4 原生桌面客户端安装包：Falcon-v<版本>-<平台>.deb / .tar.gz
+cargo xtask linux-desktop   # Linux GTK4 原生桌面客户端安装包：Falcon-v<版本>-<平台>-desktop.deb / .tar.gz
 cargo xtask android         # Android 安装包（纯 Rust NSH + Android SDK d8/aapt2/apksigner，零 Gradle）
 cargo xtask web             # Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/）
 cargo xtask nsh-check       # 局部检查 falcon-nsh 与 falcon-app（含测试目标）

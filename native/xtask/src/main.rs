@@ -28,7 +28,7 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
   pkg [--skip-bin]                       macOS 安装包（Falcon.app = NSH 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，NSH 原生客户端 + 同目录服务端）
   linux [--target <平台>] [--server <路径>] [--deb-only]  Linux 服务端安装文件：.deb / .rpm / install.sh
-  linux-desktop [--skip-cargo] [--target <平台>]          Linux GTK4 桌面客户端安装包：Falcon-v<版本>-<平台>.deb / .tar.gz
+  linux-desktop [--skip-cargo] [--target <平台>]          Linux GTK4 桌面客户端安装包：Falcon-v<版本>-<平台>-desktop.deb / .tar.gz
   android [--jni-only]                   Android 安装包（纯 Rust NSH + Android SDK，零 Gradle，产物 release/falcon-v<版本>-android.apk）
   web [--skip-cargo]                     Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/ 与 Falcon-v<版本>-web.tar.gz）
 

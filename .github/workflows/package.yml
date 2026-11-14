@@ -1,7 +1,7 @@
 # 自动打安装包（NSH 六端统一客户端 ADR 0028 + 五平台独立服务端）：
 # - Windows（Inno Setup 的 setup.exe，falcon-app 原生客户端 + 同目录的 Rust 服务端）
 # - macOS（.pkg，falcon-app 原生客户端 + Resources 里的 Rust 服务端，含 TUI 模式）
-# - Linux 桌面与 Web（Falcon-v*-linux-x64.deb/.tar.gz GTK4 桌面端 + Falcon-v*-web.tar.gz 纯 Rust WASM 站点）
+# - Linux 桌面与 Web（Falcon-v*-linux-x64-desktop.deb/.tar.gz GTK4 桌面端 + Falcon-v*-web.tar.gz 纯 Rust WASM 站点）
 # - Android（.apk，纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）
 # 同时发布 Linux / macOS x64、arm64 独立服务端（Windows 那份由 windows job 出，打进安装包），
 # Linux 服务端另有安装文件（.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
@@ -240,7 +240,7 @@ jobs:
         with:
           name: falcon-web-linux
           path: |
-            release/Falcon-v*-linux-x64*
+            release/Falcon-v*-linux-x64-desktop.*
             release/Falcon-v*-web.tar.gz
           if-no-files-found: error
 
@@ -325,6 +325,11 @@ jobs:
             test -f "falcon-${GITHUB_REF_NAME}-${platform}"
           done
           sha256sum falcon-v*-darwin-* falcon-v*-linux-* falcon-v*-win32-x64.exe > SHA256SUMS
+          DUP=$(ls -1 | tr '[:upper:]' '[:lower:]' | sort | uniq -d)
+          if [ -n "$DUP" ]; then
+            echo "GitHub Release 资产文件名存在大小写不敏感重名冲突：$DUP" >&2
+            exit 1
+          fi
 
       - uses: softprops/action-gh-release@v2
         with:

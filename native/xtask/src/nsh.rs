@@ -155,8 +155,9 @@ pub fn linux_desktop(args: &[String]) -> Result<()> {
     let ver = util::version();
     let release_dir = root.join("release");
     std::fs::create_dir_all(&release_dir)?;
+    let (tar_name, deb_name) = linux_desktop_asset_names(ver, &target);
 
-    let tar_out = release_dir.join(format!("Falcon-v{ver}-{target}.tar.gz"));
+    let tar_out = release_dir.join(tar_name);
     let tar_bytes = crate::linux::tar_gz(&[
         ("falcon-app/bin/falcon-app", &bin_bytes, 0o755),
         (
@@ -200,7 +201,7 @@ pub fn linux_desktop(args: &[String]) -> Result<()> {
         ("control.tar.gz", &control_tar),
         ("data.tar.gz", &data_tar),
     ]);
-    let deb_out = release_dir.join(format!("Falcon-v{ver}-{target}.deb"));
+    let deb_out = release_dir.join(deb_name);
     std::fs::write(&deb_out, deb_bytes)?;
 
     let mb = std::fs::metadata(&deb_out)?.len() as f64 / 1024.0 / 1024.0;
@@ -290,6 +291,15 @@ pub(crate) fn web_index_html(wasm_filename: &str) -> String {
     )
 }
 
+/// Linux 桌面端安装包文件名。GitHub Release 资产名在服务端按不区分大小写判重，
+/// 必须带 `-desktop` 后缀，避免与服务端安装包 `falcon-v<版本>-<平台>.deb` 发生大小写重名冲突。
+pub(crate) fn linux_desktop_asset_names(ver: &str, target: &str) -> (String, String) {
+    (
+        format!("Falcon-v{ver}-{target}-desktop.tar.gz"),
+        format!("Falcon-v{ver}-{target}-desktop.deb"),
+    )
+}
+
 pub(crate) fn linux_desktop_entry() -> &'static str {
     "[Desktop Entry]
 Name=Falcon
@@ -348,5 +358,14 @@ mod tests {
         let desktop = linux_desktop_entry();
         assert!(desktop.contains("Exec=/usr/bin/falcon-app %u"));
         assert!(desktop.contains("MimeType=x-scheme-handler/falcon;"));
+    }
+
+    #[test]
+    fn linux_desktop_assets_do_not_collide_case_insensitively_with_server_assets() {
+        let (tar_name, deb_name) = linux_desktop_asset_names("0.4.3", "linux-x64");
+        assert_eq!(tar_name, "Falcon-v0.4.3-linux-x64-desktop.tar.gz");
+        assert_eq!(deb_name, "Falcon-v0.4.3-linux-x64-desktop.deb");
+        let server_deb = "falcon-v0.4.3-linux-x64.deb";
+        assert_ne!(deb_name.to_ascii_lowercase(), server_deb.to_ascii_lowercase());
     }
 }
