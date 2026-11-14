@@ -23,10 +23,11 @@ chmod 755 "$DEST/falcon.new"
 mv "$DEST/falcon.new" "$DEST/falcon"
 
 if [ -d /run/systemd/system ]; then
-  if [ -f "$UNIT" ]; then
-    "$DEST/falcon" service install || true
-  elif [ "$#" -gt 0 ]; then
+  # 显式参数永远生效；不带参数而已有服务 = 升级，沿用旧 unit 的原启动参数
+  if [ "$#" -gt 0 ]; then
     "$DEST/falcon" service install "$@" || true
+  elif [ -f "$UNIT" ]; then
+    "$DEST/falcon" service install || true
   elif [ "$(id -u)" = "0" ]; then
     "$DEST/falcon" service install --data-dir /var/lib/falcon || true
   else
