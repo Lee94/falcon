@@ -16,8 +16,8 @@ pub fn play() {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use nsh_platform_macos::objc2_foundation::NSString;
     use objc2_app_kit::NSSound;
+    use objc2_foundation::NSString;
 
     pub fn play() {
         match NSSound::soundNamed(&NSString::from_str("Glass")) {

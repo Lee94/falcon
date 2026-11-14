@@ -19,16 +19,12 @@ pub fn current_icon_tiff() -> Option<Vec<u8>> {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use nsh_platform_macos::objc2::{AnyThread, MainThreadMarker};
-    use nsh_platform_macos::objc2_app_kit::{NSApplication, NSImage};
-    use nsh_platform_macos::objc2_foundation::NSData;
+    use dispatch2::DispatchQueue;
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
 
-    pub fn set_icon(png: &[u8]) {
-        // AppKit 应用图标只能在主线程修改；若从 NSH 引擎线程调入则切回或跳过
-        let Some(mtm) = MainThreadMarker::new() else {
-            log::warn!("不在主线程上，没换 Dock 图标");
-            return;
-        };
+    fn apply_on_main(mtm: MainThreadMarker, png: &[u8]) {
         let data = NSData::with_bytes(png);
         let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
             log::warn!("Dock 图标解不开（{} 字节）", png.len());
@@ -36,6 +32,20 @@ mod mac {
         };
         let app = NSApplication::sharedApplication(mtm);
         unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
+
+    pub fn set_icon(png: &[u8]) {
+        if let Some(mtm) = MainThreadMarker::new() {
+            apply_on_main(mtm, png);
+            return;
+        }
+        // NSH 组件在独立引擎线程运行，AppKit 图标更新派回主队列执行
+        let bytes = png.to_vec();
+        DispatchQueue::main().exec_async(move || {
+            if let Some(mtm) = MainThreadMarker::new() {
+                apply_on_main(mtm, &bytes);
+            }
+        });
     }
 
     pub fn current_icon_tiff() -> Option<Vec<u8>> {

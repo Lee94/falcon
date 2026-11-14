@@ -98,9 +98,9 @@ pub(crate) fn app_menu_title(mark: &str) -> String {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use nsh_platform_macos::objc2::rc::Retained;
-    use nsh_platform_macos::objc2_app_kit::{NSRunningApplication, NSWorkspace};
-    use nsh_platform_macos::objc2_foundation::{NSBundle, NSString};
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+    use objc2_foundation::{NSBundle, NSString};
 
     use super::{BuiltAt, RunningCopy};
 

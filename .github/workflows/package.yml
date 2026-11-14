@@ -216,10 +216,10 @@ jobs:
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
 
-      - name: Install GTK4 and GStreamer build dependencies
+      - name: Install GTK4, WebKitGTK 6 and GStreamer build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev clang llvm
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -18,8 +18,8 @@ pub fn open(url: &str) -> Option<bool> {
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use nsh_platform_macos::objc2_app_kit::NSWorkspace;
-    use nsh_platform_macos::objc2_foundation::{NSString, NSURL};
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
 
     pub fn open(url: &str) -> bool {
         let Some(ns_url) = NSURL::URLWithString(&NSString::from_str(url)) else {

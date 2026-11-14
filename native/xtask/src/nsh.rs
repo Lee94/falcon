@@ -165,7 +165,7 @@ pub fn linux_desktop(args: &[String]) -> Result<()> {
         .with_context(|| format!("没有 {target} 对应的 deb 架构名"))?;
     let size_kb = ((bin_bytes.len() + icon_bytes.len()) / 1024).max(1);
     let control = format!(
-        "Package: falcon-app\nVersion: {ver}\nArchitecture: {deb_arch}\nMaintainer: Falcon\nInstalled-Size: {size_kb}\nSection: devel\nPriority: optional\nDepends: libc6, libgtk-4-1, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0\nDescription: Falcon Native Shell client\n Falcon 跨端统一客户端（GTK 4 原生桌面版 + 终端 TUI）。\n"
+        "Package: falcon-app\nVersion: {ver}\nArchitecture: {deb_arch}\nMaintainer: Falcon\nInstalled-Size: {size_kb}\nSection: devel\nPriority: optional\nDepends: libc6, libgtk-4-1, libwebkitgtk-6.0-4, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0\nDescription: Falcon Native Shell client\n Falcon 跨端统一客户端（GTK 4 原生桌面版 + 终端 TUI）。\n"
     );
     let control_tar = crate::linux::tar_gz(&[("control", control.as_bytes(), 0o644)])?;
     let data_tar = crate::linux::tar_gz(&[

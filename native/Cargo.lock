@@ -1498,6 +1498,7 @@ version = "0.3.28"
 dependencies = [
  "anyhow",
  "directories",
+ "dispatch2",
  "falcon-core",
  "falcon-nsh",
  "falcon-platform",
@@ -1515,7 +1516,9 @@ dependencies = [
  "nsh-platform-tui",
  "nsh-platform-web",
  "nsh-platform-windows",
+ "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "ratatui-core",
  "serde_json",
  "url",
