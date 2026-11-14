@@ -207,8 +207,7 @@ jobs:
 
   web-linux:
     # nsh-platform-linux 要求 GTK 4.14+（Ubuntu 24.04 自带），独立于 servers 的 ubuntu-22.04（保持服务端 glibc 2.35 兼容）；
-    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包。
-    needs: macos
+    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包，不依赖 sessiond 内嵌产物，直接与 macos / android 并行。
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

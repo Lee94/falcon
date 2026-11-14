@@ -1,6 +1,13 @@
-//! 构建期：Windows 上把应用图标与版本信息编进 exe 的资源段。字体在 falcon-nsh 的 build.rs。
+//! 构建期：Windows 上把应用图标与版本信息编进 exe 的资源段；Android 上为 cdylib 声明 16 KB 页大小对齐。字体在 falcon-nsh 的 build.rs。
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        // rustc-link-arg-cdylib 只作用于产出 cdylib 的 crate 本身（falcon-app），确保 Android 15+ 16 KB 页设备可加载
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,max-page-size=16384");
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,common-page-size=16384");
+    }
+
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

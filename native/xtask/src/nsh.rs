@@ -37,7 +37,20 @@ pub fn web(args: &[String]) -> Result<()> {
 
     if !skip_cargo {
         println!("== cargo build --release -p falcon-app --lib --target wasm32-unknown-unknown ==");
-        util::run(
+        let clang = util::which("clang");
+        let llvm_ar = util::which("llvm-ar");
+        let mut wasm_env: Vec<(&str, &std::ffi::OsStr)> = Vec::new();
+        if std::env::var_os("CC_wasm32_unknown_unknown").is_none()
+            && let Some(ref cc) = clang
+        {
+            wasm_env.push(("CC_wasm32_unknown_unknown", cc.as_os_str()));
+        }
+        if std::env::var_os("AR_wasm32_unknown_unknown").is_none()
+            && let Some(ref ar) = llvm_ar
+        {
+            wasm_env.push(("AR_wasm32_unknown_unknown", ar.as_os_str()));
+        }
+        util::run_env(
             "cargo",
             [
                 "build",
@@ -49,6 +62,7 @@ pub fn web(args: &[String]) -> Result<()> {
                 "wasm32-unknown-unknown",
             ],
             Some(&native),
+            &wasm_env,
         )?;
     }
 

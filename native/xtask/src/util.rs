@@ -199,9 +199,13 @@ impl Drop for TempDir {
     }
 }
 
-/// 通过 `cargo metadata --format-version 1` 定位工作区锁定的依赖包源码目录（如 `nsh-platform-android` / `nsh-platform-web`）。
+/// 通过 `cargo metadata --format-version 1 --locked` 定位工作区锁定的依赖包源码目录（如 `nsh-platform-android` / `nsh-platform-web`）。
 pub fn cargo_package_dir(pkg_name: &str) -> Result<PathBuf> {
-    let raw = output("cargo", ["metadata", "--format-version", "1"], Some(&native()))?;
+    let raw = output(
+        "cargo",
+        ["metadata", "--format-version", "1", "--locked"],
+        Some(&native()),
+    )?;
     let meta: serde_json::Value = serde_json::from_str(&raw).context("解析 cargo metadata JSON 失败")?;
     let packages = meta
         .get("packages")

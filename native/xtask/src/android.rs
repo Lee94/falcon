@@ -55,7 +55,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let tc = rustup_toolchain_bin()?;
     let cargo_bin = tc.join("cargo");
     let rustc_bin = tc.join("rustc");
-    let mut path_entries = vec![tc.clone()];
+    let mut path_entries = vec![tc.clone(), ndk_bin.clone()];
     if let Some(orig) = std::env::var_os("PATH") {
         path_entries.extend(std::env::split_paths(&orig));
     }
@@ -66,11 +66,16 @@ pub fn run(args: &[String]) -> Result<()> {
         .join("lib")
         .into_os_string();
 
-    let strip_bin = ndk_bin.join("llvm-strip");
+    let strip_bin = ndk_bin.join(if cfg!(windows) { "llvm-strip.exe" } else { "llvm-strip" });
     for (rust_target, abi, linker_env, clang_name) in TARGETS {
-        let clang_path = ndk_bin.join(clang_name);
-        if !clang_path.is_file() {
-            bail!("找不到 NDK 编译器：{}", clang_path.display());
+        let target_tools = ndk_target_env(&ndk_bin, rust_target, linker_env, clang_name)?;
+        let mut build_env: Vec<(&str, &OsStr)> = vec![
+            ("PATH", joined_path.as_os_str()),
+            ("RUSTC", rustc_bin.as_os_str()),
+            ("DYLD_FALLBACK_LIBRARY_PATH", dylib_fallback.as_os_str()),
+        ];
+        for (k, v) in &target_tools {
+            build_env.push((k.as_str(), v.as_os_str()));
         }
         util::run_env(
             &cargo_bin,
@@ -84,12 +89,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 rust_target,
             ],
             Some(&native_dir),
-            &[
-                ("PATH", joined_path.as_os_str()),
-                ("RUSTC", rustc_bin.as_os_str()),
-                ("DYLD_FALLBACK_LIBRARY_PATH", dylib_fallback.as_os_str()),
-                (linker_env, clang_path.as_os_str()),
-            ],
+            &build_env,
         )?;
         let built_so = native_dir
             .join("target")
@@ -159,8 +159,22 @@ pub fn run(args: &[String]) -> Result<()> {
         bail!("javac 未产出任何 .class 文件");
     }
 
+    // 先打成单一 classes.jar 再交给 d8，避免向脚本包装器传入上百个含 `$` 内部类名的路径参数
+    let classes_jar = stage.path().join("classes.jar");
+    util::run(
+        &jar_bin,
+        [
+            OsStr::new("cf"),
+            classes_jar.as_os_str(),
+            OsStr::new("-C"),
+            classes_dir.as_os_str(),
+            OsStr::new("."),
+        ],
+        None,
+    )?;
+
     let d8_bin = sdk_tool(&build_tools, "d8")?;
-    let mut d8_args: Vec<OsString> = vec![
+    let d8_args: Vec<OsString> = vec![
         "--release".into(),
         "--min-api".into(),
         "26".into(),
@@ -168,8 +182,8 @@ pub fn run(args: &[String]) -> Result<()> {
         android_jar.clone().into_os_string(),
         "--output".into(),
         apk_extra.clone().into_os_string(),
+        classes_jar.into_os_string(),
     ];
-    d8_args.extend(class_files.into_iter().map(PathBuf::into_os_string));
     let mut java_env: Vec<(&str, &OsStr)> = Vec::new();
     if let Some(ref jh) = java_home {
         java_env.push(("JAVA_HOME", jh.as_os_str()));
@@ -603,6 +617,50 @@ fn find_java_home() -> Option<PathBuf> {
     None
 }
 
+/// 为指定 Android 目标构造带三元组后缀的 Cargo / `cc-rs` 工具链环境变量。
+///
+/// NDK r23+ 只提供带 API 等级的包装器（如 `aarch64-linux-android26-clang`），不再带无后缀的
+/// `aarch64-linux-android-clang`；而 `falcon-app` 在 Android 上会经 `cc-rs` 编译 `ring` 与 `onig_sys`。
+/// 这里只设 `CC_<target>` / `AR_<target>` 等带目标后缀的变量，绝不写全局 `CC` / `AR`，以免污染宿主机
+/// `build.rs` 与 proc-macro 的本地编译。
+fn ndk_target_env(
+    ndk_bin: &Path,
+    rust_target: &str,
+    linker_env: &str,
+    clang_name: &str,
+) -> Result<Vec<(String, OsString)>> {
+    let clang = ndk_tool(ndk_bin, clang_name)?;
+    let clangxx = ndk_tool(ndk_bin, &format!("{clang_name}++"))?;
+    let ar = ndk_tool(ndk_bin, "llvm-ar")?;
+    let ranlib = ndk_tool(ndk_bin, "llvm-ranlib")?;
+
+    let lower = rust_target.replace('-', "_");
+    let upper = lower.to_ascii_uppercase();
+    Ok(vec![
+        (linker_env.to_string(), clang.clone().into_os_string()),
+        (format!("CARGO_TARGET_{upper}_AR"), ar.clone().into_os_string()),
+        (format!("CC_{lower}"), clang.into_os_string()),
+        (format!("CXX_{lower}"), clangxx.into_os_string()),
+        (format!("AR_{lower}"), ar.into_os_string()),
+        (format!("RANLIB_{lower}"), ranlib.into_os_string()),
+    ])
+}
+
+fn ndk_tool(ndk_bin: &Path, name: &str) -> Result<PathBuf> {
+    let candidates = if cfg!(windows) {
+        vec![format!("{name}.cmd"), format!("{name}.exe"), name.to_string()]
+    } else {
+        vec![name.to_string()]
+    };
+    for cand in candidates {
+        let p = ndk_bin.join(&cand);
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+    bail!("找不到 NDK 工具：{}", ndk_bin.join(name).display())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,6 +687,37 @@ mod tests {
             picked_env,
             pinned.join("toolchains/llvm/prebuilt/linux-x86_64/bin")
         );
+    }
+
+    #[test]
+    fn ndk_target_env_wires_cc_rs_and_cargo_cross_tools_without_clobbering_host_cc() {
+        let tmp = util::TempDir::new("android-ndk-env").unwrap();
+        let bin = tmp.path();
+        for tool in [
+            "aarch64-linux-android26-clang",
+            "aarch64-linux-android26-clang++",
+            "x86_64-linux-android26-clang",
+            "x86_64-linux-android26-clang++",
+            "llvm-ar",
+            "llvm-ranlib",
+        ] {
+            std::fs::write(bin.join(tool), b"").unwrap();
+        }
+
+        for (rust_target, _abi, linker_env, clang_name) in TARGETS {
+            let envs = ndk_target_env(bin, rust_target, linker_env, clang_name).unwrap();
+            let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
+            let lower = rust_target.replace('-', "_");
+            let upper = lower.to_ascii_uppercase();
+            assert!(keys.contains(linker_env));
+            assert!(keys.contains(&format!("CARGO_TARGET_{upper}_AR").as_str()));
+            assert!(keys.contains(&format!("CC_{lower}").as_str()));
+            assert!(keys.contains(&format!("CXX_{lower}").as_str()));
+            assert!(keys.contains(&format!("AR_{lower}").as_str()));
+            assert!(keys.contains(&format!("RANLIB_{lower}").as_str()));
+            assert!(!keys.contains(&"CC"));
+            assert!(!keys.contains(&"AR"));
+        }
     }
 
     #[test]
