@@ -139,6 +139,7 @@ pub fn schtasks_xml(program_args: &[String], user: Option<&str>) -> String {
     let command = program_args.first().map(String::as_str).unwrap_or("");
     let arguments = program_args.get(1..).unwrap_or(&[]).iter().map(|a| win_quote(a)).collect::<Vec<_>>().join(" ");
     let user_element = user.map(|u| format!("      <UserId>{}</UserId>\n", xml_escape(u))).unwrap_or_default();
+    // Task Scheduler 的 RestartOnFailure 限 Interval >= PT1M、Count <= 255；PT30S/999 会被 /Create /XML 拒绝
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -171,8 +172,8 @@ pub fn schtasks_xml(program_args: &[String], user: Option<&str>) -> String {
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
     <RestartOnFailure>
-      <Interval>PT30S</Interval>
-      <Count>999</Count>
+      <Interval>PT1M</Interval>
+      <Count>255</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
@@ -290,6 +291,8 @@ mod tests {
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains("<Interval>PT1M</Interval>"));
+        assert!(xml.contains("<Count>255</Count>"));
         assert!(xml.contains("<UserId>HOST\\用户</UserId>"));
         assert!(xml.contains("<Command>C:\\data dir\\bin\\falcon.exe</Command>"));
         assert!(xml.contains("<Arguments>--host 0.0.0.0 --data-dir &quot;C:\\data dir&quot;</Arguments>")
