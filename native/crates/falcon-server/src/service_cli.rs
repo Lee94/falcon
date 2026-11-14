@@ -321,7 +321,8 @@ fn task_installed() -> bool {
 #[cfg(windows)]
 fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
     let self_pid = std::process::id();
-    let path = bin.to_string_lossy().replace('\'', "''");
+    // Get-Process.Path 是规范化的反斜杠形式；--data-dir 允许正斜杠，先统一
+    let path = bin.to_string_lossy().replace('/', "\\").replace('\'', "''");
     let script = format!(
         "exit [int]([bool](Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{path}' -and $_.Id -ne {self_pid} }}))"
     );
