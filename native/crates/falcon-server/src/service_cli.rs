@@ -314,18 +314,31 @@ fn task_installed() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// /End 是异步的：Windows 锁着运行中的 exe（覆盖不进、旧实例继续跑），等它真的退——
-/// 能打开服务二进制来写才算退了（映像占用时开写直接拒绝）。最多等 10 秒
+/// /End 是异步的：服务进程没退完就 /Run，会被 IgnoreNew 吞掉（留服务停着），
+/// 覆盖二进制也会被锁住。等它真退：Get-Process 按 exe 路径比对并排除自身——
+/// `bin/falcon.exe service restart` 时锁文件的还有 CLI 自己，文件可写探针会等死。
+/// powershell 起不来时视为已停（与不加等待等价，不引入新失败点）
 #[cfg(windows)]
 fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
-    for _ in 0..50 {
-        match std::fs::OpenOptions::new().append(true).open(bin) {
-            Ok(_) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+    let self_pid = std::process::id();
+    let path = bin.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "exit [int]([bool](Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{path}' -and $_.Id -ne {self_pid} }}))"
+    );
+    for _ in 0..30 {
+        let running = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.code() == Some(1));
+        if !running {
+            return Ok(());
         }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    anyhow::bail!("服务进程 10 秒内未退出（{} 仍被占用），手动结束后重试", bin.display())
+    anyhow::bail!("服务进程未退出（{}），手动结束后重试", bin.display())
 }
 
 #[cfg(windows)]
