@@ -1,8 +1,9 @@
 # 自动打安装包：Windows（Inno Setup 的 setup.exe，原生客户端 + 同目录的 Rust 服务端）、
 # macOS（.pkg，原生客户端 + Resources 里的 Rust 服务端）与 Android（.apk，Rust JNI +
 # Gradle 原生安卓客户端）。同时发布 Linux / macOS x64、arm64 独立服务端
-# （Windows 那份由 windows job 出，打进安装包），以及汇总的 SHA256SUMS。
-# 打法与本机一样，直接跑 cargo xtask win / pkg / android / server，xtask 是唯一真相。
+# （Windows 那份由 windows job 出，打进安装包），Linux 服务端另有安装文件
+# （.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
+# 打法与本机一样，直接跑 cargo xtask win / pkg / android / server / linux，xtask 是唯一真相。
 # 下面删了 native/.cargo/config.toml（xtask 别名也在里面），所以写成 cargo run --release -p xtask --。
 #
 # - 推 v* tag：全量编译检查、测试、三个安装包与五平台服务端都通过后建 GitHub Release 并挂上；
@@ -190,6 +191,11 @@ jobs:
           path: native/target-sessiond/embed
       - name: 构建独立服务端
         run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- server --target ${{ matrix.platform }} --skip-sessiond
+      # Linux 安装文件（.deb / .rpm / install.sh）只含服务端；文件名后缀是平台名，
+      # falcon-v*-<平台>* 的 artifact glob 已经覆盖
+      - name: 打 Linux 安装文件
+        if: startsWith(matrix.platform, 'linux-')
+        run: cargo run --release --manifest-path native/Cargo.toml -p xtask -- linux --target ${{ matrix.platform }}
       - if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
         with:

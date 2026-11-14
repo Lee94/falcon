@@ -256,6 +256,48 @@ WantedBy={wanted_by}
     )
 }
 
+/// `ExecStart=` 行还原回 argv（[`systemd_quote`] 的逆）：空白切词，双引号段内空白是
+/// 字面量，`\\`→`\`、`\"`→`"`。升级重装时用它读已装 unit 的原启动参数；没有
+/// ExecStart 行返回 None
+pub fn systemd_exec_args(unit_text: &str) -> Option<Vec<String>> {
+    let line = unit_text.lines().map(str::trim).find(|l| l.starts_with("ExecStart="))?;
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut in_arg = false;
+    let mut chars = line["ExecStart=".len()..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                in_arg = true;
+            }
+            '\\' if in_quotes => match chars.next() {
+                Some(esc @ ('"' | '\\')) => cur.push(esc),
+                Some(other) => {
+                    cur.push('\\');
+                    cur.push(other);
+                }
+                None => cur.push('\\'),
+            },
+            c if c.is_whitespace() && !in_quotes => {
+                if in_arg {
+                    args.push(std::mem::take(&mut cur));
+                    in_arg = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                in_arg = true;
+            }
+        }
+    }
+    if in_arg {
+        args.push(cur);
+    }
+    Some(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +407,21 @@ mod tests {
         // 不含空白 / 引号 / 反斜杠的原样；JS 的 \s 含全角空格
         assert_eq!(systemd_quote("--port"), "--port");
         assert_eq!(systemd_quote("a\u{3000}b"), "\"a\u{3000}b\"");
+    }
+
+    #[test]
+    fn systemd_exec_args_round_trips_systemd_quote() {
+        let args =
+            strings(&["/opt/falcon dir/bin/falcon", "--host", "0.0.0.0", "--data-dir", "/srv/a\"b\\c", "tab\there"]);
+        let unit = systemd_unit(&args, true);
+        assert_eq!(systemd_exec_args(&unit), Some(args));
+        // 没有引号的行、空 ExecStart、缺行
+        assert_eq!(
+            systemd_exec_args("[Service]\nExecStart=/usr/bin/falcon --port 4923\n"),
+            Some(strings(&["/usr/bin/falcon", "--port", "4923"]))
+        );
+        assert_eq!(systemd_exec_args("[Unit]\nDescription=x\n"), None);
+        assert_eq!(systemd_exec_args("ExecStart=\"\" --port 1"), Some(strings(&["", "--port", "1"])));
     }
 
     #[test]

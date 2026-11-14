@@ -62,6 +62,21 @@ cargo xtask win --skip-cargo   # 只用已有的 falcon-desktop.exe + 服务端�
 
 产物 `release/Falcon-v<版本>-win32-x64-setup.exe`，默认按当前用户安装，不需要管理员。必须在 Windows 上打：需要 VS 生成工具（rc.exe 给 exe 编图标与版本信息）和 Inno Setup 6（`winget install JRSoftware.InnoSetup --scope user`，或用 `FALCON_ISCC` 指到 ISCC.exe）。没有代码签名，别人机器上 SmartScreen 会拦，选择「更多信息 → 仍要运行」即可。
 
+## Linux 服务端安装文件
+
+只含服务端，装好即注册 system 级 systemd 服务（数据目录 `/var/lib/falcon`）：
+
+```bash
+cd native
+cargo xtask linux --target linux-x64      # 要 release/falcon-v*-linux-x64，没有先 cargo xtask server
+```
+
+产物三个：`falcon-v<版本>-linux-<arch>.deb`、`falcon-v<版本>-linux-<arch>.rpm` 与
+`falcon-v<版本>-linux-<arch>-install.sh`（自解包脚本，`sudo ./…-install.sh` 装到
+/usr/local/bin 并注册服务）。deb / rpm 只放 /usr/bin/falcon，脚本直接调
+`service install` / `uninstall`；升级时 package 管理器走到同一对脚本，已有服务
+保留原启动参数。install.sh 在无 root 时装 `~/.local/bin`、注册 user 级服务。
+
 ## GitHub Actions
 
 [`.github/workflows/package.yml`](../.github/workflows/package.yml) 跑的就是 `cargo xtask win` 与 `cargo xtask pkg`。CI 上会删掉 `native/.cargo/config.toml`，xtask 别名跟着没了，所以写成 `cargo run --manifest-path native/Cargo.toml -p xtask -- …`。推 `v*` tag 时，Windows 安装包与 macOS（Apple Silicon）pkg 一起打，挂到对应的 GitHub Release 上。在 Actions 页手动触发只出构建产物，不发版。打 tag 前先改好 `native/Cargo.toml` 里的版本号。
