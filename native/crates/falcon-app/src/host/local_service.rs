@@ -21,6 +21,21 @@ use std::time::Duration;
 
 use falcon_platform::{LanAccessState, LocalService, ServiceControl, ServicePresence, ServiceStatus};
 
+/// Windows 客户端是 GUI 子系统；从这里启动控制台程序时不带 CREATE_NO_WINDOW，
+/// 系统就会为子程序新建一个黑色控制台窗口。macOS 无需额外处理
+#[cfg(any(target_os = "macos", windows))]
+fn local_process(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    let cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = cmd;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    };
+    cmd
+}
+
 /// 捆绑的服务程序：`Falcon.app/Contents/Resources/falcon`
 #[cfg(target_os = "macos")]
 fn bundled_server() -> Option<std::path::PathBuf> {
@@ -74,7 +89,7 @@ fn program_arguments() -> Option<Vec<String>> {
     }
     #[cfg(windows)]
     {
-        let out = std::process::Command::new("schtasks")
+        let out = local_process("schtasks")
             .args(["/Query", "/TN", falcon_core::schtasks::schtasks_name().as_str(), "/XML"])
             .stdin(std::process::Stdio::null())
             .output()
@@ -258,7 +273,7 @@ fn lan_ipv4_urls(port: u16) -> Vec<String> {
 /// 回环 / 链路本地 / Clash Fake-IP 段与虚拟交换机在 Rust 侧滤掉，以太网 / Wi-Fi 排前面
 #[cfg(windows)]
 fn lan_ipv4_urls(port: u16) -> Vec<String> {
-    let out = std::process::Command::new("powershell")
+    let out = local_process("powershell")
         .args([
             "-NoProfile",
             "-Command",
@@ -310,7 +325,7 @@ fn ensure_running(url: &str) -> ServiceStatus {
     #[cfg(any(target_os = "macos", windows))]
     if let Some(bin) = bundled_server() {
         let keep = installed_service_args().map(|a| a.to_install_args()).unwrap_or_default();
-        match std::process::Command::new(&bin).args(["service", "install"]).args(&keep).output() {
+        match local_process(&bin).args(["service", "install"]).args(&keep).output() {
             Ok(out) if out.status.success() => {}
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -481,7 +496,7 @@ fn wait_until_not_running() -> ServicePresence {
 #[cfg(any(target_os = "macos", windows))]
 fn run_service(args: &[String]) -> Result<(), ServiceControlError> {
     let program = service_program().ok_or(ServiceControlError::NoProgram)?;
-    let out = std::process::Command::new(&program)
+    let out = local_process(&program)
         .args(args)
         .output()
         .map_err(|err| ServiceControlError::Failed(err.to_string()))?;

@@ -12,6 +12,10 @@
 /// 计划任务名的前缀。任务库不区分用户——名在机器上全局唯一，实际名字走 [`schtasks_name`]
 pub const SCHTASKS_NAME: &str = "falcon";
 
+/// 计划任务启动服务端时带的内部标记。`main` 在进入参数解析前取走它并隐藏控制台；
+/// 手动运行服务端没有这个标记，仍保留启动它的终端与日志输出
+pub const SERVICE_RUN_ARG: &str = "--service-run";
+
 /// 本用户的计划任务名：`falcon-<用户名>`。不加用户名的裸 `falcon` 在多人机器上会撞：
 /// 第二个用户 /Create /F 要么覆盖第一个用户的任务、要么权限不够直接失败
 pub fn schtasks_name() -> String {

@@ -356,6 +356,17 @@ fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
     anyhow::bail!("服务进程未退出（{}），手动结束后重试", bin.display())
 }
 
+/// 计划任务在程序路径后带一个内部标记，让服务端最早隐藏自己的控制台。它不属于
+/// ServerConfig；升级时 existing_task_args 经 parse_service_args 过滤，不会把它重复带入
+#[cfg(any(windows, test))]
+fn windows_task_program_arguments(program_args: &[String]) -> Vec<String> {
+    let mut args = program_args.to_vec();
+    if !args.is_empty() {
+        args.insert(1, falcon_core::schtasks::SERVICE_RUN_ARG.to_string());
+    }
+    args
+}
+
 #[cfg(windows)]
 fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
     use falcon_core::schtasks::{schtasks_name, schtasks_xml, utf16le_bytes};
@@ -386,7 +397,7 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
                     .unwrap_or_else(|| service_bin_path(&config.data_dir));
                 wait_service_stopped(&wait_bin)?;
             }
-            let args = install_program_arguments(effective)?;
+            let args = windows_task_program_arguments(&install_program_arguments(effective)?);
             let xml = schtasks_xml(&args, current_user_principal().as_deref());
             let task_file = std::env::temp_dir().join(format!("falcon-task-{}.xml", std::process::id()));
             std::fs::write(&task_file, utf16le_bytes(&xml))?;
@@ -437,4 +448,29 @@ fn schtasks(cmd: &str, server_args: &[String]) -> anyhow::Result<i32> {
         _ => unreachable!("parse_service_cli 只放行认识的子命令"),
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_task_marks_service_run_without_changing_server_args() {
+        let installed = vec![
+            "C:\\data dir\\bin\\falcon.exe".to_string(),
+            "--port".to_string(),
+            "4950".to_string(),
+            "--data-dir".to_string(),
+            "C:\\data dir".to_string(),
+        ];
+        let args = windows_task_program_arguments(&installed);
+        assert_eq!(args[0], installed[0]);
+        assert_eq!(args[1], falcon_core::schtasks::SERVICE_RUN_ARG);
+        assert_eq!(&args[2..], &installed[1..]);
+        let parsed = falcon_core::service_args::parse_service_args(&args);
+        assert_eq!(parsed.port, Some(4950));
+        assert_eq!(parsed.data_dir.as_deref(), Some("C:\\data dir"));
+        let xml = falcon_core::schtasks::schtasks_xml(&args, None);
+        assert_eq!(falcon_core::schtasks::schtasks_xml_actions(&xml), Some(args));
+    }
 }

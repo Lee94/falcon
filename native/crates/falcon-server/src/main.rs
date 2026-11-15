@@ -14,11 +14,20 @@ use falcon_server::db::Db;
 use falcon_server::engine::{self, EngineDeps};
 
 fn main() -> anyhow::Result<()> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    let argv = {
+        let mut argv = argv;
+        if argv.first().is_some_and(|arg| arg == falcon_core::schtasks::SERVICE_RUN_ARG) {
+            hide_service_console();
+            argv.remove(0);
+        }
+        argv
+    };
     // 先于一切子命令：service / node / update-helper 也可能要往宿主机释放或推送守护进程
     #[cfg(feature = "embed-sessiond")]
     falcon_server::sessiond::bin::register_embedded(embedded_sessiond);
     init_logging();
-    let argv: Vec<String> = std::env::args().skip(1).collect();
     // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
     if argv.first().map(String::as_str) == Some("service") {
         std::process::exit(falcon_server::service_cli::run_service_cli(&argv[1..]));
@@ -136,6 +145,20 @@ fn embedded_sessiond(target: falcon_server::sessiond::command::SessiondTarget) -
         SessiondTarget::Aarch64Linux => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-unknown-linux-musl.gz")),
         SessiondTarget::Aarch64Mac => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-apple-darwin.gz")),
         SessiondTarget::X86_64Windows => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-pc-windows-gnu.gz")),
+    }
+}
+
+/// Windows 计划任务是 InteractiveToken：直接启动控制台程序会留下一个黑色终端窗口。
+/// 只隐藏、不 FreeConsole：后代控制台进程继续继承这个不可见的控制台，不会各自再开窗口。
+#[cfg(windows)]
+fn hide_service_console() {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+    unsafe {
+        let window = GetConsoleWindow();
+        if !window.is_null() {
+            ShowWindow(window, SW_HIDE);
+        }
     }
 }
 

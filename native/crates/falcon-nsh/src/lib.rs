@@ -604,6 +604,12 @@ mod tests {
         app.press("label:sidebar-settings").unwrap();
         app.press("label:settings-tab-Hosts").unwrap();
         app.wait_for("dev@10.0.4.12:22").unwrap();
+        // Tailscale 入口在离线模式下如实显示请求失败，不应退回到发真实网络请求。
+        app.press("label:host-add-tailscale").unwrap();
+        app.wait_for("label:host-tailscale-panel").unwrap();
+        app.wait_for("读取 Tailscale 失败。").unwrap();
+        app.press("label:host-add-manual").unwrap();
+        app.wait_for("保存主机").unwrap();
         app.press("label:settings-tab-About").unwrap();
         app.wait_for("Falcon").unwrap();
         app.press("label:settings-close").unwrap();
