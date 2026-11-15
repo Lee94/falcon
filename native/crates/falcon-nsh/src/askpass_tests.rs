@@ -352,4 +352,12 @@ fn askpass_translations_have_chinese_and_english() {
         let en = translations.lookup("en-US", &key).unwrap();
         assert_ne!(zh, en);
     }
+    assert_eq!(
+        translations.lookup("zh-CN", "native.terminal.retryNow").as_deref(),
+        Some("立即重连"),
+    );
+    assert_eq!(
+        translations.lookup("en-US", "native.terminal.retryNow").as_deref(),
+        Some("Retry now"),
+    );
 }
