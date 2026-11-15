@@ -19,6 +19,9 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
         .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.zh-CN.json"))
+        .expect("terminal Chinese translations must be valid JSON");
+    flatten_json("", &terminal, &mut out);
     out
 });
 
@@ -30,6 +33,9 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let mut english = base;
     let root: Value = serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
     flatten_json("", &root, &mut english);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.en.json"))
+        .expect("terminal English translations must be valid JSON");
+    flatten_json("", &terminal, &mut english);
     map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
@@ -78,9 +84,10 @@ mod tests {
     }
 
     #[test]
-    fn english_menu_overlay_has_matching_chinese_keys_and_parameters() {
+    fn english_menu_and_terminal_overlays_have_matching_chinese_keys_and_parameters() {
         let mut english = HashMap::new();
         flatten_json("", &serde_json::from_str(EN_JSON).unwrap(), &mut english);
+        flatten_json("", &serde_json::from_str(include_str!("../locales/terminal.en.json")).unwrap(), &mut english);
         for (key, value) in english {
             let chinese = FLAT_ZH_CN.get(&key).unwrap_or_else(|| panic!("missing Chinese key {key}"));
             assert_eq!(parameters(&value), parameters(chinese), "parameters for {key}");
