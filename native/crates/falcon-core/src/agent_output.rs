@@ -331,15 +331,17 @@ pub fn line_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
 /// 将统一 diff 文本（如 Codex `fileChange` 的 diff）解析为 [`DiffLine`] 序列。
 pub fn unified_diff_lines(patch: &str) -> Vec<DiffLine> {
     let mut out = Vec::new();
+    let mut in_hunk = false;
     for line in patch.lines() {
-        if line.starts_with("+++")
-            || line.starts_with("---")
-            || line.starts_with("diff ")
-            || line.starts_with("index ")
-        {
+        if line.starts_with("diff ") {
+            in_hunk = false;
+            continue;
+        }
+        if !in_hunk && (line.starts_with("+++") || line.starts_with("---") || line.starts_with("index ")) {
             continue;
         }
         if line.starts_with("@@") {
+            in_hunk = true;
             out.push(DiffLine {
                 kind: DiffKind::Context,
                 text: line.to_string(),
@@ -620,6 +622,14 @@ mod tests {
             assert_eq!(output.spans[0].fg, Some(AnsiColor::Red));
         }
         assert_eq!(styled_output("\x1b中文").text, "中文");
+    }
+
+    #[test]
+    fn unified_diff_keeps_hunk_changes_resembling_file_headers() {
+        let patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n---removed\n+++inserted\ndiff --git a/next b/next\n--- a/next\n+++ b/next\n@@ -1 +1 @@\n-old\n+new\n";
+        let lines = unified_diff_lines(patch);
+        assert_eq!(lines.iter().filter(|line| line.kind == DiffKind::Delete).map(|line| line.text.as_str()).collect::<Vec<_>>(), vec!["--removed", "old"]);
+        assert_eq!(lines.iter().filter(|line| line.kind == DiffKind::Insert).map(|line| line.text.as_str()).collect::<Vec<_>>(), vec!["++inserted", "new"]);
     }
 
     #[test]
