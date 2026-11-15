@@ -20,6 +20,9 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
         .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.zh-CN.json"))
+        .expect("terminal Chinese translations must be valid JSON");
+    flatten_json("", &terminal, &mut out);
     out
 });
 
@@ -28,10 +31,13 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let mut map = HashMap::with_capacity(3);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    // 尚未翻译的旧界面保留中文回退；新增预览文案提供独立英文资源。
+    // 尚未翻译的旧界面保留中文回退；叠加预览与终端的英文资源。
     let mut english = base;
     let en: Value = serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
     flatten_json("", &en, &mut english);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.en.json"))
+        .expect("terminal English translations must be valid JSON");
+    flatten_json("", &terminal, &mut english);
     map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
