@@ -3546,8 +3546,15 @@ mod tests {
 
         app.press("label:project-menu-proj-falcon").unwrap();
         assert!(app.shows("用 px0 审阅"), "project menu opened");
+        app.press_key("down").unwrap();
         app.press_key("escape").unwrap();
         assert!(!app.shows("用 px0 审阅"), "Escape closes the menu");
+        app.press_key("enter").unwrap();
+        assert!(
+            app.shows("用 px0 审阅"),
+            "Enter reopens the menu after Escape restores trigger focus"
+        );
+        app.press_key("escape").unwrap();
 
         app.press("label:project-menu-proj-falcon").unwrap();
         app.press_key("down").unwrap();
@@ -3561,6 +3568,50 @@ mod tests {
         app.press("label:project-menu-proj-falcon").unwrap();
         app.press("label:sidebar-settings").unwrap();
         assert!(!app.shows("用 px0 审阅"), "outside press dismisses the menu");
+    }
+
+    #[test]
+    fn host_menu_modal_focus_handoff_and_close_restore_headless() {
+        ensure_test_platform();
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.press("label:host-menu-s:host:host-prod-01").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.wait_for("远端主机").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("id:modal-layer-panel").unwrap();
+        app.wait_for("id:host-add-manual").unwrap();
+        app.hover("id:modal-layer-panel").unwrap();
+        app.wait_for_gone("更多操作", Duration::from_secs(2))
+            .expect("background trigger tooltip leaves focus with the modal");
+
+        app.press("id:host-add-manual").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        app.type_text("id:host-form-name", "Draft").unwrap();
+        app.press_key("x").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Draftx"),
+            "modal rerenders do not steal input focus"
+        );
+
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2))
+            .expect("Escape closes the modal");
+        app.press_key("enter").unwrap();
+        app.wait_for("检测连接")
+            .expect("closing the modal restores focus to its menu trigger");
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("检测连接", Duration::from_secs(2))
+            .expect("one Escape closes the restored host menu");
     }
 
     #[test]

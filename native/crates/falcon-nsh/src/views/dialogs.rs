@@ -43,6 +43,21 @@ pub fn ModalLayer() -> impl IntoElement {
     let settings_filter = signal(String::new());
     let appearance_was_open = signal(false);
     let host_settings_was_open = signal(false);
+    let modal_focus = element_ref();
+    let focus_store = store.clone();
+    let previous_dialog = stored(ActiveDialog::None);
+    effect(move || {
+        let dialog = focus_store.active_dialog.get();
+        let previous = previous_dialog.replace(dialog.clone());
+        if dialog != ActiveDialog::None
+            && previous != ActiveDialog::None
+            && previous != dialog
+            && !dialog_uses_input_autofocus(&dialog)
+        {
+            let focus = modal_focus;
+            after_answer(move || focus.focus());
+        }
+    });
 
     view().child(dynamic(move || {
         let dialog = store.active_dialog.get();
@@ -79,27 +94,15 @@ pub fn ModalLayer() -> impl IntoElement {
         let st_escape = store.clone();
         let escape_dialog = dialog.clone();
         bind_safe_key_when("escape", false, nsh_core::keymap::When::Always, move || {
-            match &escape_dialog {
-                ActiveDialog::RenameSession { session_id, form_id } => {
-                    st_escape.session_operations.close_rename(
-                        &st_escape,
-                        &session_id,
-                        *form_id,
-                    );
-                }
-                ActiveDialog::ConfirmDeleteHost { .. } => {
-                    st_escape.host_delete_error.set(None);
-                    st_escape
-                        .active_dialog
-                        .set(ActiveDialog::Settings(SettingsTab::Hosts));
-                }
-                _ => st_escape.active_dialog.set(ActiveDialog::None),
-            }
+            close_modal_dialog(&st_escape, &escape_dialog);
         });
 
         let resolved = theme_ctrl.resolved();
         let ui = &resolved.ui;
 
+        let focus_card_on_open = !dialog_uses_input_autofocus(&dialog);
+        let cancel_store = store.clone();
+        let cancel_dialog = dialog.clone();
         let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));
         let palette_dialog = matches!(dialog, ActiveDialog::Palette);
         let rename_dialog = matches!(dialog, ActiveDialog::RenameSession { .. });
@@ -171,35 +174,77 @@ pub fn ModalLayer() -> impl IntoElement {
             a: 148,
         });
 
-        view()
-            .absolute()
-            .inset_0()
-            .items_center()
-            .justify_center()
-            .p(zpx(16.0))
-            .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
-            .bg(scrim)
+        let focus_on_open = modal_focus;
+        nsh_base::dialog()
+            .animation(nsh_core::ModalAnimation::None)
+            .close_on_escape(false)
+            .close_on_backdrop_press(false)
+            .close_on_swipe(false)
+            .on_open(move || {
+                if focus_card_on_open {
+                    focus_on_open.focus();
+                }
+            })
+            .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog))
             .child(
                 view()
-                    .w(zpx(if settings_dialog {
-                        1024.0
-                    } else if rename_dialog {
-                        380.0
-                    } else {
-                        580.0
-                    }))
-                    .max_w(relative(1.0))
-                    .max_h(relative(0.86))
-                    .flex_col()
-                    .overflow_hidden()
-                    .rounded(zpx(16.0))
-                    .border_1()
-                    .border_color(rgba_to_hsla(ui.border))
-                    .bg(rgb_to_hsla(ui.background))
-                    .child(card_body),
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .p(zpx(16.0))
+                    .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
+                    .bg(scrim)
+                    .child(
+                        view()
+                            .test_id("modal-layer-panel")
+                            .element_ref(&modal_focus)
+                            .focusable(true)
+                            .w(zpx(if settings_dialog {
+                                1024.0
+                            } else if rename_dialog {
+                                380.0
+                            } else {
+                                580.0
+                            }))
+                            .max_w(relative(1.0))
+                            .max_h(relative(0.86))
+                            .flex_col()
+                            .overflow_hidden()
+                            .rounded(zpx(16.0))
+                            .border_1()
+                            .border_color(rgba_to_hsla(ui.border))
+                            .bg(rgb_to_hsla(ui.background))
+                            .child(card_body),
+                    ),
             )
             .into_element()
     }))
+}
+
+fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
+    matches!(
+        dialog,
+        ActiveDialog::Palette | ActiveDialog::QuickOpen | ActiveDialog::RenameSession { .. }
+    )
+}
+
+fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
+    if store.active_dialog.get_untracked() != dialog.clone() {
+        return;
+    }
+    match dialog {
+        ActiveDialog::RenameSession { session_id, form_id } => {
+            store.session_operations.close_rename(store, session_id, *form_id);
+        }
+        ActiveDialog::ConfirmDeleteHost { .. } => {
+            store.host_delete_error.set(None);
+            store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Hosts));
+        }
+        _ => store.active_dialog.set(ActiveDialog::None),
+    }
 }
 
 fn modal_header(

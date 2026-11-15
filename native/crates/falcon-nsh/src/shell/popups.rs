@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{cell::{Cell, RefCell}, rc::Rc};
 
 use crate::{
     fonts::FONT_FAMILY_MONO,
@@ -105,7 +105,7 @@ impl PopupAction {
 }
 
 pub(crate) fn overflow_menu(
-    trigger: impl IntoElement,
+    trigger: impl Element + Interactive,
     actions: Vec<PopupAction>,
     theme: &ResolvedTheme,
 ) -> impl IntoElement {
@@ -114,8 +114,14 @@ pub(crate) fn overflow_menu(
     let foreground = rgb_to_hsla(ui.popover_foreground);
     let border = rgba_to_hsla(ui.border);
     let popup_token = ActionOwner::current().popup_token();
+    let pending_action = Rc::new(RefCell::new(None));
+    let trigger_focused = Rc::new(Cell::new(false));
     nsh_base::menu()
-        .trigger(trigger)
+        .trigger(popup_action_trigger(
+            trigger,
+            pending_action.clone(),
+            trigger_focused.clone(),
+        ))
         .offset(zpx(4.0))
         .margin(zpx(8.0))
         .popup_style(move |style| {
@@ -133,7 +139,11 @@ pub(crate) fn overflow_menu(
                 popup_token.set_open(*open);
             }
         })
-        .children(popup_items(actions, theme))
+        .children(popup_items(
+            actions,
+            theme,
+            Some((pending_action, trigger_focused)),
+        ))
 }
 
 pub(crate) fn context_menu(
@@ -165,13 +175,34 @@ pub(crate) fn context_menu(
                 popup_token.set_open(*open);
             }
         })
-        .children(popup_items(actions, theme))
+        .children(popup_items(actions, theme, None))
         .into_element()
+}
+
+type PendingPopupAction = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+
+fn popup_action_trigger(
+    trigger: impl Element + Interactive,
+    pending_action: PendingPopupAction,
+    trigger_focused: Rc<Cell<bool>>,
+) -> impl Element + Interactive {
+    let action_owner = ActionOwner::current();
+    let focus_pending = pending_action.clone();
+    let focus_state = trigger_focused.clone();
+    let trigger = trigger.on_focus(move || {
+        focus_state.set(true);
+        let callback = focus_pending.borrow_mut().take();
+        if let Some(callback) = callback {
+            action_owner.run(|| callback());
+        }
+    });
+    trigger.on_blur(move || trigger_focused.set(false))
 }
 
 fn popup_items(
     actions: Vec<PopupAction>,
     theme: &ResolvedTheme,
+    deferred_dispatch: Option<(PendingPopupAction, Rc<Cell<bool>>)>,
 ) -> impl Iterator<Item = impl IntoElement> {
     let foreground = rgb_to_hsla(theme.ui.popover_foreground);
     let hover_background = rgb_to_hsla(theme.ui.tint);
@@ -190,6 +221,7 @@ fn popup_items(
         let is_danger = action.danger;
         let callback = action.activate;
         let action_owner = owner.clone();
+        let deferred_dispatch = deferred_dispatch.clone();
         let currently_disabled = initially_disabled || !disabled_server.is_current();
         let color = if currently_disabled {
             disabled_color
@@ -206,7 +238,28 @@ fn popup_items(
             .on_select(move || {
                 if !initially_disabled && selection_server.is_current() {
                     let callback = callback.clone();
-                    action_owner.run(|| callback());
+                    if let Some((pending_action, trigger_focused)) = deferred_dispatch.clone() {
+                        let callback_server = selection_server.clone();
+                        *pending_action.borrow_mut() = Some(Box::new(move || {
+                            if callback_server.is_current() {
+                                callback();
+                            }
+                        }));
+                        if trigger_focused.get() {
+                            let pending_for_answer = pending_action.clone();
+                            let answer_owner = action_owner.clone();
+                            action_owner.run(|| {
+                                after_answer(move || {
+                                    let callback = pending_for_answer.borrow_mut().take();
+                                    if let Some(callback) = callback {
+                                        answer_owner.run(|| callback());
+                                    }
+                                })
+                            });
+                        }
+                    } else {
+                        action_owner.run(|| callback());
+                    }
                 }
             });
         *item.style() = nsh_core::element::StyleRefinement::default()
@@ -315,7 +368,7 @@ pub(crate) fn menu_trigger(
     id: impl Into<SharedString>,
     title: impl Into<SharedString>,
     theme: &ResolvedTheme,
-) -> impl IntoElement {
+) -> impl Element + Interactive {
     let id = id.into();
     let title = title.into();
     let muted = rgb_to_hsla(theme.ui.muted);
