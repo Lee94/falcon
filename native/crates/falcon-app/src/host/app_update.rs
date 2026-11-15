@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use falcon_core::app_update::{self, Decision, ParseRelease};
-use falcon_platform::{AppUpdater, AvailableUpdate, InstalledUpdate, UpdateCheck, UpdateFailure};
+use falcon_platform::{AppUpdater, AvailableUpdate, InstalledUpdate, UpdateCheck, UpdateFailure, UpdateProgress};
 
 pub struct GithubUpdater;
 
@@ -27,7 +27,15 @@ impl AppUpdater for GithubUpdater {
     }
 
     fn install(&self, update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure> {
-        install_release(update)
+        install_release(update, &mut |_| {})
+    }
+
+    fn install_with_progress(
+        &self,
+        update: &AvailableUpdate,
+        progress: &mut dyn FnMut(UpdateProgress),
+    ) -> Result<InstalledUpdate, UpdateFailure> {
+        install_release(update, progress)
     }
 }
 
@@ -68,21 +76,21 @@ fn check_release(current: &str) -> UpdateCheck {
     }
 }
 
-fn install_release(update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure> {
+fn install_release(update: &AvailableUpdate, progress: &mut dyn FnMut(UpdateProgress)) -> Result<InstalledUpdate, UpdateFailure> {
     if !app_update::download_url_allowed(&update.download_url, app_update::RELEASE_REPO) {
         return Err(UpdateFailure::BadDownloadUrl);
     }
     #[cfg(target_os = "macos")]
     {
-        return install_macos(update);
+        return install_macos(update, progress);
     }
     #[cfg(windows)]
     {
-        return install_windows(update);
+        return install_windows(update, progress);
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = update;
+        let _ = (update, progress);
         Err(UpdateFailure::NoPackage {
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         })
@@ -142,14 +150,18 @@ fn http_get(url: &str) -> Result<String, UpdateFailure> {
 }
 
 #[cfg(any(target_os = "macos", windows))]
-fn download(url: &str, dest: &Path) -> Result<(), UpdateFailure> {
+fn download(url: &str, dest: &Path, progress: &mut dyn FnMut(UpdateProgress)) -> Result<(), UpdateFailure> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|err| UpdateFailure::Install(err.to_string()))?;
     }
     let part = part_path(dest);
-    let out = Command::new(curl())
+    progress(UpdateProgress::Downloading { percent: None });
+    let mut child = Command::new(curl())
         .args([
             "-fL",
+            "--progress-bar",
             "--proto",
             "=https",
             "--retry",
@@ -166,19 +178,43 @@ fn download(url: &str, dest: &Path) -> Result<(), UpdateFailure> {
         ])
         .arg(&part)
         .arg(url)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|err| UpdateFailure::Network(format!("起不来 curl：{err}")))?;
-    if !out.status.success() {
+    let mut errors = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).split(b'\r') {
+            let Ok(line) = line else { break; };
+            let line = String::from_utf8_lossy(&line);
+            if let Some(percent) = download_percent(&line) {
+                progress(UpdateProgress::Downloading { percent: Some(percent) });
+            } else {
+                errors.push_str(&line);
+                if errors.len() > 4096 { errors = one_line(&errors); }
+            }
+        }
+    }
+    let status = child.wait().map_err(|err| UpdateFailure::Network(err.to_string()))?;
+    if !status.success() {
         let _ = std::fs::remove_file(&part);
-        let stderr = one_line(&String::from_utf8_lossy(&out.stderr));
+        let stderr = one_line(&errors);
         return Err(UpdateFailure::Network(if stderr.is_empty() {
-            format!("下载失败（{}）", out.status)
+            format!("下载失败（{}）", status)
         } else {
             stderr
         }));
     }
     std::fs::rename(&part, dest).map_err(|err| UpdateFailure::Install(format!("保存安装包失败：{err}")))?;
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn download_percent(line: &str) -> Option<u8> {
+    let (head, tail) = line.trim().rsplit_once('%')?;
+    if !tail.trim().is_empty() { return None; }
+    let percent: f32 = head.split_whitespace().last()?.parse().ok()?;
+    (percent.is_finite() && (0.0..=100.0).contains(&percent)).then_some(percent as u8)
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -210,10 +246,10 @@ fn one_line(text: &str) -> String {
 }
 
 #[cfg(windows)]
-fn install_windows(update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure> {
+fn install_windows(update: &AvailableUpdate, progress: &mut dyn FnMut(UpdateProgress)) -> Result<InstalledUpdate, UpdateFailure> {
     let dest = downloads_dir().join(&update.asset_name);
     log::info!("下载 {}", dest.display());
-    download(&update.download_url, &dest)?;
+    download(&update.download_url, &dest, progress)?;
     Ok(InstalledUpdate {
         version: update.version.clone(),
         backup_path: None,
@@ -231,11 +267,12 @@ fn downloads_dir() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn install_macos(update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure> {
+fn install_macos(update: &AvailableUpdate, progress: &mut dyn FnMut(UpdateProgress)) -> Result<InstalledUpdate, UpdateFailure> {
     let temp = TempTree::new().map_err(UpdateFailure::Install)?;
     let pkg = temp.path.join(&update.asset_name);
     log::info!("下载 {}", update.asset_name);
-    download(&update.download_url, &pkg)?;
+    download(&update.download_url, &pkg, progress)?;
+    progress(UpdateProgress::Installing);
     let expanded = temp.path.join("expanded");
     log::info!("展开 {}", pkg.display());
     expand_pkg(&pkg, &expanded).map_err(UpdateFailure::Install)?;
@@ -558,6 +595,15 @@ const RELAUNCH_SCRIPT: &str =
 #[cfg(test)]
 mod tests {
     use super::split_http;
+
+    #[test]
+    fn curl_progress_accepts_only_a_trailing_percentage() {
+        assert_eq!(super::download_percent("\r####  12.9%"), Some(12));
+        assert_eq!(super::download_percent("######## 100.0%\n"), Some(100));
+        for line in ["curl: (22) HTTP 404", "NaN%", "101%", "-1%", "12% error"] {
+            assert_eq!(super::download_percent(line), None, "{line}");
+        }
+    }
 
     #[test]
     fn http_status_is_the_last_line() {

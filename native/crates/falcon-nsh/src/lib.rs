@@ -8,6 +8,7 @@
 //! - **右侧栏插件双轨制**：完整兼容存量声明式 JSON `PluginView`（ADR 0025），同时通过 [`ClientPluginVerifier`]
 //!   支持自托管服务端 Ed25519 信任根签名的 `.nshpkg` 沙盒面板包与构建号防回滚。
 
+pub(crate) mod app_update;
 pub mod fonts;
 pub mod i18n;
 pub mod project_operations;
@@ -952,13 +953,16 @@ fn install_macos_tray(store: WorkspaceStore) {
             items.push(MenuItem::separator());
             let st_upd = store.clone();
             items.push(
-                MenuItem::new(t!("native.menuBar.checkUpdate")).on_select(move || {
-                    main_window().show();
-                    main_window().focus();
-                    st_upd
-                        .active_dialog
-                        .set(ActiveDialog::Settings(SettingsTab::About));
-                }),
+                MenuItem::new(crate::app_update::menu_label(&store.app_update.get()))
+                    .disabled(store.app_update.get().busy())
+                    .on_select(move || {
+                        main_window().show();
+                        main_window().focus();
+                        st_upd
+                            .active_dialog
+                            .set(ActiveDialog::Settings(SettingsTab::About));
+                        st_upd.check_app_update();
+                    }),
             );
         }
 
