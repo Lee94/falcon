@@ -5,9 +5,11 @@ pub mod dialogs;
 pub mod files;
 pub mod git;
 mod host_form;
-mod tailscale;
+pub mod palette;
 pub mod plugins;
+pub mod quick_open;
 mod relays;
+mod tailscale;
 
 pub use agent::{AgentPaneView, agent_pane_view};
 pub use dialogs::{ModalLayer, modal_layer};

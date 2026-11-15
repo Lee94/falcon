@@ -82,11 +82,18 @@ pub struct TerminalSession {
     mouse: Mutex<MouseReporter>,
     wheel: Mutex<WheelAccumulator>,
     frame_seq: AtomicU64,
+    #[cfg(test)]
+    test_input_count: AtomicU64,
 }
 
 impl TerminalSession {
     /// 创建离线/演示/压测终端实例（不发网络请求，可直接 `feed_output` / `feed_replay`）。
-    pub fn new_offline(session_id: impl Into<String>, cols: u16, rows: u16, durable: bool) -> Arc<Self> {
+    pub fn new_offline(
+        session_id: impl Into<String>,
+        cols: u16,
+        rows: u16,
+        durable: bool,
+    ) -> Arc<Self> {
         let size = TermSize::new(cols.max(2) as usize, rows.max(1) as usize);
         Arc::new(Self {
             session_id: session_id.into(),
@@ -104,6 +111,8 @@ impl TerminalSession {
             mouse: Mutex::new(MouseReporter::new()),
             wheel: Mutex::new(WheelAccumulator::new()),
             frame_seq: AtomicU64::new(1),
+            #[cfg(test)]
+            test_input_count: AtomicU64::new(0),
         })
     }
 
@@ -244,6 +253,8 @@ impl TerminalSession {
         if text.is_empty() {
             return;
         }
+        #[cfg(test)]
+        self.test_input_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(sock) = self.socket.lock().as_ref() {
             sock.send_input(text);
@@ -252,6 +263,11 @@ impl TerminalSession {
         // 离线演示与纯静态预览模式下回显至本地网格，便于无服务端交互验证与 TUI 直通回归测试
         let echoed = text.replace('\r', "\r\n");
         self.feed_output(echoed.as_bytes());
+    }
+
+    #[cfg(test)]
+    pub fn test_input_count(&self) -> u64 {
+        self.test_input_count.load(Ordering::Relaxed)
     }
 
     /// 粘贴文本：若当前终端开启了 Bracketed Paste（`?2004h`），自动包裹转义序列并清洗嵌套结束符。

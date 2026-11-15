@@ -50,17 +50,49 @@ pub fn is_safe_nsh_keystroke(spec: &str) -> bool {
 
 /// 在当前作用域安全绑定非保留快捷键。
 pub fn bind_safe_key(spec: &str, repeat: bool, handler: impl Fn() + 'static) {
+    bind_safe_key_when(spec, repeat, When::Always, handler);
+}
+
+pub fn bind_safe_key_when(spec: &str, repeat: bool, when: When, handler: impl Fn() + 'static) {
     if is_safe_nsh_keystroke(spec) {
         on_key_with(
             spec,
             KeyOptions {
-                when: When::Always,
+                when,
                 repeat,
                 pass_through: false,
             },
             move |_: &str| handler(),
         );
     }
+}
+
+pub fn terminal_shortcuts_active(
+    focused: bool,
+    modal_open: bool,
+    overview_open: bool,
+    tui_passthrough: bool,
+    terminal_idiom: bool,
+    terminal_input_focused: bool,
+) -> bool {
+    focused
+        && !modal_open
+        && !overview_open
+        && if terminal_idiom {
+            tui_passthrough
+        } else {
+            terminal_input_focused
+        }
+}
+
+pub fn tui_exit_key_active(
+    focused: bool,
+    modal_open: bool,
+    overview_open: bool,
+    tui_passthrough: bool,
+    terminal_idiom: bool,
+) -> bool {
+    focused && !modal_open && !overview_open && tui_passthrough && terminal_idiom
 }
 
 /// 跨六端统一终端视图。
@@ -76,6 +108,11 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     let ime_preedit = signal(String::new());
     let frame_tick = signal(session.frame_seq());
     let sink_ref = element_ref();
+    let terminal_input_focused = signal(false);
+    let focused_signal = signal(props.focused);
+    focused_signal.set(props.focused);
+    let tui_passthrough_signal = signal(props.tui_passthrough);
+    tui_passthrough_signal.set(props.tui_passthrough);
 
     // 16ms 输出轮询仅推进脏帧；光标闪烁另用低频计时器，不依赖终端输出。
     {
@@ -101,64 +138,161 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     }
 
     // 焦点终端非字符控制键路由（经 `is_safe_nsh_keystroke` 守卫排除系统保留键）
-    if props.focused {
-        let terminal_special_keys: &[(&str, &str, TermModifiers)] = &[
-            ("escape", "escape", TermModifiers::default()),
-            ("tab", "tab", TermModifiers::default()),
-            ("shift+tab", "tab", TermModifiers { shift: true, ..Default::default() }),
-            ("up", "up", TermModifiers::default()),
-            ("down", "down", TermModifiers::default()),
-            ("left", "left", TermModifiers::default()),
-            ("right", "right", TermModifiers::default()),
-            ("home", "home", TermModifiers::default()),
-            ("end", "end", TermModifiers::default()),
-            ("pageup", "pageup", TermModifiers::default()),
-            ("pagedown", "pagedown", TermModifiers::default()),
-            ("ctrl+c", "c", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+d", "d", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+z", "z", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+l", "l", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+a", "a", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+e", "e", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+u", "u", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+w", "w", TermModifiers { control: true, ..Default::default() }),
-            ("ctrl+r", "r", TermModifiers { control: true, ..Default::default() }),
-        ];
+    let store_keys = store.clone();
+    let session_keys = session.clone();
+    let focused_keys = focused_signal.clone();
+    let tui_passthrough_keys = tui_passthrough_signal.clone();
+    let terminal_input_focus = terminal_input_focused.clone();
+    let terminal_idiom = idiom() == Idiom::Terminal;
+    effect(move || {
+        let focused = focused_keys.get();
+        let tui_passthrough = tui_passthrough_keys.get();
+        let modal_open = store_keys.active_dialog.get() != crate::store::ActiveDialog::None;
+        let overview_open = store_keys.overview_open.get();
+        let terminal_keys_active = terminal_shortcuts_active(
+            focused,
+            modal_open,
+            overview_open,
+            tui_passthrough,
+            terminal_idiom,
+            terminal_input_focus.get(),
+        );
+        if terminal_keys_active {
+            let terminal_special_keys: &[(&str, &str, TermModifiers)] = &[
+                ("escape", "escape", TermModifiers::default()),
+                ("tab", "tab", TermModifiers::default()),
+                (
+                    "shift+tab",
+                    "tab",
+                    TermModifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                ),
+                ("up", "up", TermModifiers::default()),
+                ("down", "down", TermModifiers::default()),
+                ("left", "left", TermModifiers::default()),
+                ("right", "right", TermModifiers::default()),
+                ("home", "home", TermModifiers::default()),
+                ("end", "end", TermModifiers::default()),
+                ("pageup", "pageup", TermModifiers::default()),
+                ("pagedown", "pagedown", TermModifiers::default()),
+                (
+                    "ctrl+c",
+                    "c",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+d",
+                    "d",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+z",
+                    "z",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+l",
+                    "l",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+a",
+                    "a",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+e",
+                    "e",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+u",
+                    "u",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+w",
+                    "w",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "ctrl+r",
+                    "r",
+                    TermModifiers {
+                        control: true,
+                        ..Default::default()
+                    },
+                ),
+            ];
 
-        for &(nsh_spec, key_name, mods) in terminal_special_keys {
-            let sess = session.clone();
-            let key_owned = key_name.to_string();
-            bind_safe_key(nsh_spec, true, move || {
-                let ks = TermKeystroke {
-                    modifiers: mods,
-                    key: key_owned.clone(),
-                    key_char: None,
-                };
-                match route_key(&ks, false, sess.core().has_selection()) {
-                    KeyRoute::Copy => {
-                        if let Some(sel) = sess.core().selection_text() {
-                            set_clipboard(sel);
+            for &(nsh_spec, key_name, mods) in terminal_special_keys {
+                let sess = session_keys.clone();
+                let key_owned = key_name.to_string();
+                bind_safe_key(nsh_spec, true, move || {
+                    let ks = TermKeystroke {
+                        modifiers: mods,
+                        key: key_owned.clone(),
+                        key_char: None,
+                    };
+                    match route_key(&ks, false, sess.core().has_selection()) {
+                        KeyRoute::Copy => {
+                            if let Some(sel) = sess.core().selection_text() {
+                                set_clipboard(sel);
+                            }
+                        }
+                        KeyRoute::Paste => {}
+                        KeyRoute::Global => {}
+                        KeyRoute::Terminal => {
+                            if let Some(esc) = to_esc_str(&ks, sess.core().mode(), true) {
+                                sess.send_input(&esc);
+                            }
                         }
                     }
-                    KeyRoute::Paste => {}
-                    KeyRoute::Global => {}
-                    KeyRoute::Terminal => {
-                        if let Some(esc) = to_esc_str(&ks, sess.core().mode(), true) {
-                            sess.send_input(&esc);
-                        }
-                    }
-                }
-            });
+                });
+            }
+
+            // TUI 直通模式下按 `Ctrl+\` 退出直通返回工作台导航
         }
 
-        // TUI 直通模式下按 `Ctrl+\` 退出直通返回工作台导航
-        if props.tui_passthrough {
-            let store_exit = store.clone();
+        if tui_exit_key_active(
+            focused,
+            modal_open,
+            overview_open,
+            tui_passthrough,
+            terminal_idiom,
+        ) {
+            let store_exit = store_keys.clone();
             bind_safe_key("ctrl+\\", false, move || {
                 store_exit.set_tui_passthrough(false);
             });
         }
-    }
+    });
 
     // 若宿主显式开启了原生表面扩展组件（如自定义 GPU 表面），直接挂接 `<native>` 槽位
     if props.use_native_surface {
@@ -334,10 +468,11 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
         });
     }
 
-    view()
+    let terminal_view = view()
         .size_full()
         .relative()
         .overflow_hidden()
+        .test_id(&format!("terminal-view-{session_id}"))
         .bg(move || rgb_to_hsla(theme_ctrl.resolved().terminal.background))
         .on_layout(move |b: &Bounds<Points>| {
             let pw = b.size.width.0.max(16.0);
@@ -353,7 +488,10 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
             let sink_focus = sink_ref.clone();
             let store_press = store.clone();
             move |e: &PressEvent| {
-                store_press.focus_session(&sid_focus);
+                if store_press.focused_pane_key.get() != falcon_core::pane_key::term_key(&sid_focus)
+                {
+                    store_press.focus_session(&sid_focus);
+                }
                 sink_focus.focus();
                 let snap = sess_press.snapshot();
                 let vp = compute_vp(&snap, &sess_press);
@@ -447,7 +585,16 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
         // 锚定在当前光标位置的 1pt 极低透明度原生 Input：承接平台输入法候选框、剪贴板粘贴与移动端软键盘
         .child(
             input()
+                .test_id(&format!("terminal-input-{session_id}"))
                 .element_ref(&sink_ref)
+                .on_focus({
+                    let terminal_input_focused = terminal_input_focused.clone();
+                    move || terminal_input_focused.set(true)
+                })
+                .on_blur({
+                    let terminal_input_focused = terminal_input_focused.clone();
+                    move || terminal_input_focused.set(false)
+                })
                 .absolute()
                 .left({
                     let sess_left = sess_anchor.clone();
@@ -508,6 +655,58 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                         }
                     }
                 }),
-        )
-        .into_element()
+        );
+
+    #[cfg(test)]
+    let terminal_view = {
+        let session = session.clone();
+        let frame_tick = frame_tick.clone();
+        terminal_view.child(dynamic(move || {
+            let _ = frame_tick.get();
+            view()
+                .absolute()
+                .left(pt_px(1.0))
+                .top(pt_px(1.0))
+                .test_id("terminal-input-count")
+                .child(text(format!(
+                    "terminal-input-count-{}",
+                    session.test_input_count()
+                )))
+                .into_element()
+        }))
+    };
+
+    terminal_view.into_element()
+}
+
+#[cfg(test)]
+mod shortcut_scope_tests {
+    use super::{terminal_shortcuts_active, tui_exit_key_active};
+
+    #[test]
+    fn terminal_controls_do_not_route_outside_active_terminal_context() {
+        assert!(terminal_shortcuts_active(
+            true, false, false, false, false, true
+        ));
+        assert!(!terminal_shortcuts_active(
+            true, false, false, false, false, false
+        ));
+        assert!(!terminal_shortcuts_active(
+            false, false, false, false, false, true
+        ));
+        assert!(!terminal_shortcuts_active(
+            true, true, false, false, false, true
+        ));
+        assert!(!terminal_shortcuts_active(
+            true, false, true, false, false, true
+        ));
+        assert!(!terminal_shortcuts_active(
+            true, false, false, false, true, false
+        ));
+        assert!(terminal_shortcuts_active(
+            true, false, false, true, true, false
+        ));
+        assert!(tui_exit_key_active(true, false, false, true, true));
+        assert!(!tui_exit_key_active(true, true, false, true, true));
+    }
 }

@@ -71,6 +71,8 @@ pub mod term;
 pub mod window_background;
 /// 对应 React 版的 lib/shortcuts.ts：快捷键定义表
 pub mod shortcuts;
+/// Command palette grouping, prefix filtering, and keyboard selection.
+pub mod command_palette;
 /// 对应 packages/shared/src/ttlCache.ts：TTL + in-flight 合并缓存
 pub mod ttl_cache;
 /// 原生要 `Send`、浏览器不要的那层约束（MaybeSend / MaybeBoxFuture）

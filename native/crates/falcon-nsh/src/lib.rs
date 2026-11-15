@@ -20,10 +20,13 @@ pub mod zoom;
 use std::sync::Arc;
 
 use falcon_core::pane_key::parse_pane_key;
+use falcon_core::shortcuts::{
+    BindingRole, Command as ShortcutCommand, bindings as shortcut_bindings,
+};
 use falcon_platform::{ServiceControl, ServicePresence};
 use falcon_theme::{ThemeSettings, derive_theme, load_theme_settings, resolve_theme_mode};
 use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle, TrayTitleRun};
-use nsh_core::element::desktop::{MenuItem, main_window, quit, set_tray, tray};
+use nsh_core::element::desktop::{MenuItem, main_window, set_tray, tray};
 use nsh_core::element::{Registry, Root};
 use nsh_core::platform::Idiom;
 use nsh_core::prelude::*;
@@ -32,7 +35,7 @@ use crate::i18n::t;
 use crate::shell::{desktop_shell, mobile_shell, tui_shell};
 pub use crate::store::FalconLaunchOptions;
 use crate::store::{ActiveDialog, SettingsTab, WorkspaceStore};
-use crate::terminal::{FalconTerminal, bind_safe_key};
+use crate::terminal::{FalconTerminal, bind_safe_key, bind_safe_key_when};
 use crate::theme::{
     install_theme, nsh_appearance_of, rgb_to_hsla, rgba_to_hsla, tokens_from_resolved, use_theme,
 };
@@ -47,6 +50,23 @@ pub struct FalconAppProps {
     pub offline_demo: bool,
     pub server_url: Option<String>,
     pub initial_theme_json: Option<String>,
+    #[cfg(test)]
+    pub test_client_url: Option<String>,
+    #[cfg(test)]
+    pub test_switch_url: Option<String>,
+    #[cfg(test)]
+    pub test_live_file_operations: bool,
+}
+
+fn bind_primary_command(command: ShortcutCommand, handler: impl Fn() + 'static) {
+    let Some(binding) = shortcut_bindings(command, apple_keys())
+        .into_iter()
+        .find(|binding| binding.role == BindingRole::Primary)
+    else {
+        return;
+    };
+    let spec = binding.keystroke.gpui().replace('-', "+");
+    bind_safe_key_when(&spec, false, nsh_core::keymap::When::Always, handler);
 }
 
 /// 跨六端统一根组件。
@@ -60,17 +80,28 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         offline_demo: props.offline_demo,
         server_url: props.server_url.clone(),
         initial_theme: initial_theme.clone(),
+        #[cfg(test)]
+        test_client_url: props.test_client_url.clone(),
+        #[cfg(test)]
+        test_switch_url: props.test_switch_url.clone(),
+        #[cfg(test)]
+        test_live_file_operations: props.test_live_file_operations,
     };
     let theme_ctrl = install_theme(initial_theme);
     let zoom_ctrl = install_zoom();
     let store = WorkspaceStore::install(&launch_opts);
+    {
+        let st_close = store.clone();
+        main_window().on_close_press(move |_| st_close.request_close_window());
+    }
     #[cfg(all(feature = "snapshot", not(target_arch = "wasm32")))]
     install_review_scene(store.clone());
 
-    // 同步深色/浅色与缩放全局快捷键（全部经 `bind_safe_key` 过滤宿主保留键）
+    // 同步深色/浅色与缩放全局快捷键
     {
         let st_pal = store.clone();
-        bind_safe_key("mod+k", false, move || {
+        let st_pal_secondary = store.clone();
+        bind_primary_command(ShortcutCommand::Palette, move || {
             let next = if st_pal.active_dialog.get() == ActiveDialog::Palette {
                 ActiveDialog::None
             } else {
@@ -78,16 +109,26 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
             };
             st_pal.active_dialog.set(next);
         });
+        if apple_keys() {
+            bind_safe_key_when("cmd+k", false, nsh_core::keymap::When::Always, move || {
+                let next = if st_pal_secondary.active_dialog.get() == ActiveDialog::Palette {
+                    ActiveDialog::None
+                } else {
+                    ActiveDialog::Palette
+                };
+                st_pal_secondary.active_dialog.set(next);
+            });
+        }
     }
     {
-        let st = store.clone();
-        bind_safe_key("mod+shift+p", false, move || {
-            st.active_dialog.set(ActiveDialog::Palette)
+        let st_quick_open = store.clone();
+        bind_primary_command(ShortcutCommand::QuickOpen, move || {
+            st_quick_open.open_quick_open();
         });
     }
     {
         let st_set = store.clone();
-        bind_safe_key("mod+,", false, move || {
+        bind_safe_key_when("mod+,", false, nsh_core::keymap::When::Always, move || {
             st_set
                 .active_dialog
                 .set(ActiveDialog::Settings(SettingsTab::Appearance));
@@ -95,22 +136,32 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     }
     {
         let st_new = store.clone();
-        bind_safe_key("mod+t", false, move || {
+        bind_primary_command(ShortcutCommand::NewTerminal, move || {
             st_new.create_terminal_in_active_project();
         });
     }
     {
         let st_detach = store.clone();
-        bind_safe_key("mod+shift+w", false, move || {
-            let fk = st_detach.focused_pane_key.get();
-            if !fk.is_empty() {
-                st_detach.detach_pane(&fk);
-            }
-        });
+        let detach_key = if apple_keys() {
+            "cmd+shift+w"
+        } else {
+            "ctrl+shift+alt+w"
+        };
+        bind_safe_key_when(
+            detach_key,
+            false,
+            nsh_core::keymap::When::Always,
+            move || {
+                let fk = st_detach.focused_pane_key.get();
+                if !fk.is_empty() {
+                    st_detach.detach_pane(&fk);
+                }
+            },
+        );
     }
     {
         let st_close = store.clone();
-        bind_safe_key("mod+w", false, move || {
+        bind_primary_command(ShortcutCommand::CloseTab, move || {
             let fk = st_close.focused_pane_key.get();
             if let Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) = parse_pane_key(&fk)
             {
@@ -122,13 +173,15 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     }
     {
         let sidebar = store.sidebar_open;
-        bind_safe_key("mod+b", false, move || sidebar.update(|v| *v = !*v));
+        bind_primary_command(ShortcutCommand::ToggleSidebar, move || {
+            sidebar.update(|v| *v = !*v)
+        });
         let files = store.clone();
-        bind_safe_key("mod+shift+e", false, move || {
+        bind_primary_command(ShortcutCommand::ToggleFilesPanel, move || {
             files.toggle_right_panel(crate::store::RightPanelKind::Files)
         });
         let changes = store.clone();
-        bind_safe_key("mod+shift+g", false, move || {
+        bind_primary_command(ShortcutCommand::ToggleChangesPanel, move || {
             changes.toggle_right_panel(crate::store::RightPanelKind::Git)
         });
     }
@@ -136,7 +189,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         bind_safe_key("mod+=", false, move || zoom_ctrl.step_in());
         bind_safe_key("mod+-", false, move || zoom_ctrl.step_out());
         let overview = store.overview_open;
-        bind_safe_key("mod+0", false, move || overview.set(true));
+        bind_primary_command(ShortcutCommand::Overview, move || overview.set(true));
     }
 
     // 处理 `falcon://` URL Scheme 深链（打开指定服务端或会话）
@@ -169,6 +222,179 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         }))
         .child(toast_overlay())
         .child(modal_layer())
+        .child({
+            #[cfg(test)]
+            {
+                if props.test_client_url.is_some() || props.test_switch_url.is_some() {
+                    test_workspace_harness(store.clone(), props.test_switch_url.clone())
+                        .into_element()
+                } else {
+                    view().into_element()
+                }
+            }
+            #[cfg(not(test))]
+            {
+                view().into_element()
+            }
+        })
+}
+
+#[cfg(test)]
+fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> impl IntoElement {
+    let save_path = "native/mock-save-integration.txt";
+    let save_key = falcon_core::pane_key::file_key("proj-falcon", save_path);
+    let preview_path = "native/mock-preview.md";
+    let stale_path = "native/crates/falcon-nsh/src/views/files.rs";
+    let stale_key = falcon_core::pane_key::file_key("proj-falcon", stale_path);
+
+    let open_save = store.clone();
+    let mut controls = view().flex_row().gap(Points(4.0)).child(
+        view()
+            .test_id("test-open-save-file")
+            .on_press(move || open_save.open_file_pane("proj-falcon", save_path))
+            .child(text("open-save")),
+    );
+    let open_stale = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-open-stale-file")
+            .on_press(move || open_stale.open_file_pane("proj-falcon", stale_path))
+            .child(text("open-stale")),
+    );
+    let open_preview = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-open-preview-file")
+            .on_press(move || open_preview.open_file_pane("proj-falcon", preview_path))
+            .child(text("open-preview")),
+    );
+    let reload_save = store.clone();
+    let reload_key = save_key.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-reload-save-file")
+            .on_press(move || reload_save.request_reload_file(&reload_key))
+            .child(text("reload-save")),
+    );
+    let quick_open = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-open-quick-open")
+            .on_press(move || quick_open.open_quick_open())
+            .child(text("quick-open")),
+    );
+    let mut secondary_controls = view().flex_row().gap(Points(4.0));
+    let split_down = store.clone();
+    secondary_controls = secondary_controls.child(
+        view()
+            .test_id("test-split-down")
+            .on_press(move || {
+                split_down.create_terminal_with_request(
+                    falcon_proto::CreateSessionRequest::default(),
+                    crate::store::SessionPlacement::Down,
+                );
+            })
+            .child(text("split-down")),
+    );
+    let split_right = store.clone();
+    secondary_controls = secondary_controls.child(
+        view()
+            .test_id("test-split-right")
+            .on_press(move || {
+                split_right.create_terminal_with_request(
+                    falcon_proto::CreateSessionRequest::default(),
+                    crate::store::SessionPlacement::Right,
+                );
+            })
+            .child(text("split-right")),
+    );
+    let close_stale = store.clone();
+    let close_key = stale_key.clone();
+    secondary_controls = secondary_controls.child(
+        view()
+            .test_id("test-close-stale-file")
+            .on_press(move || close_stale.request_close_file(&close_key))
+            .child(text("close-stale")),
+    );
+    let focus_agent = store.clone();
+    secondary_controls = secondary_controls.child(
+        view()
+            .test_id("test-focus-agent-session")
+            .on_press(move || focus_agent.focus_session("sess-agent"))
+            .child(text("focus-agent-session")),
+    );
+    if let Some(url) = switch_url {
+        let switch = store.clone();
+        secondary_controls = secondary_controls.child(
+            view()
+                .test_id("test-switch-server")
+                .on_press(move || switch.connect_live_server(&url))
+                .child(text("switch-server")),
+        );
+    }
+
+    let controls = view()
+        .flex_col()
+        .gap(Points(4.0))
+        .child(controls)
+        .child(secondary_controls);
+    let probe_store = store;
+    let probe = dynamic(move || {
+        let files = probe_store.open_files.get();
+        let mut state = view().flex_row().gap(Points(2.0));
+        if let Some(buffer) = files.get(&save_key) {
+            state = state
+                .child(text(format!("save-state={:?}", buffer.state)))
+                .child(text(format!("save-dirty={}", buffer.is_dirty())))
+                .child(text(format!("save-saving={}", buffer.saving)))
+                .child(text(format!("save-hash={}", buffer.disk_hash)));
+        } else {
+            state = state.child(text("save-state=closed"));
+        }
+        if let Some(buffer) = files.get(&stale_key) {
+            state = state
+                .child(text(format!("stale-state={:?}", buffer.state)))
+                .child(text(format!("stale-hash={}", buffer.disk_hash)))
+                .child(text(format!("stale-body={}", buffer.current_body)));
+        } else {
+            state = state.child(text("stale-state=closed"));
+        }
+        state = state
+            .child(text(format!(
+                "active-project={}",
+                probe_store.active_project_id.get()
+            )))
+            .child(text(format!(
+                "quick-open-project={}",
+                probe_store.quick_open_project.get()
+            )))
+            .child(text(format!(
+                "quick-open-loading={}",
+                probe_store.quick_open_loading.get()
+            )))
+            .child(text(format!(
+                "quick-open-error-present={}",
+                probe_store.quick_open_error.get().is_some()
+            )))
+            .child(text(format!(
+                "quick-open-paths={}",
+                probe_store.quick_open_paths.get().join(",")
+            )))
+            .child(text(format!(
+                "server-connected={}",
+                probe_store.server_connected.get()
+            )))
+            .child(text(format!("server-url={}", probe_store.server_url.get())));
+        state.into_element()
+    });
+
+    view()
+        .absolute()
+        .top(Points(0.0))
+        .left(Points(0.0))
+        .flex_col()
+        .child(controls)
+        .child(probe)
 }
 
 fn install_macos_tray(store: WorkspaceStore) {
@@ -340,10 +566,15 @@ fn install_macos_tray(store: WorkspaceStore) {
         }
 
         items.push(MenuItem::separator());
+        let st_quit = store.clone();
         items.push(
             MenuItem::new(t!("native.menu.quit"))
-                .shortcut("mod+q")
-                .on_select(quit),
+                .shortcut(if apple_keys() {
+                    "cmd+q"
+                } else {
+                    "ctrl+shift+q"
+                })
+                .on_select(move || st_quit.request_quit()),
         );
 
         let mark = mark_sig.get();
@@ -402,6 +633,7 @@ pub fn falcon_root_with_options(options: FalconLaunchOptions) -> Root {
 
     let mut win = MainWindowOptions::default();
     win.attributes.title = Some("Falcon".to_string());
+    win.attributes.close_on_press = Some(false);
     // 桌面端隐藏系统标题栏，由 identity_strip 兼任（已带 window_drag）：
     // 否则系统栏（标题文字 + 窗口按钮）与应用自己的身份条上下并排两条。
     // Hidden 下 NSH 保留系统窗口控件——macOS 红绿灯居中在这条 34pt 栏内、
@@ -414,6 +646,12 @@ pub fn falcon_root_with_options(options: FalconLaunchOptions) -> Root {
 
     let offline_demo = options.offline_demo;
     let server_url = options.server_url;
+    #[cfg(test)]
+    let test_client_url = options.test_client_url;
+    #[cfg(test)]
+    let test_switch_url = options.test_switch_url;
+    #[cfg(test)]
+    let test_live_file_operations = options.test_live_file_operations;
     let initial_theme_json = options
         .initial_theme
         .as_ref()
@@ -423,6 +661,12 @@ pub fn falcon_root_with_options(options: FalconLaunchOptions) -> Root {
         offline_demo,
         server_url: server_url.clone(),
         initial_theme_json: initial_theme_json.clone(),
+        #[cfg(test)]
+        test_client_url: test_client_url.clone(),
+        #[cfg(test)]
+        test_switch_url: test_switch_url.clone(),
+        #[cfg(test)]
+        test_live_file_operations,
     })
     .app_id("com.falcon.app")
     .url_schemes(["falcon"])
@@ -449,6 +693,10 @@ pub fn registry() -> Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use falcon_theme::{
@@ -468,6 +716,363 @@ mod tests {
         let _ = falcon_platform::shared();
     }
 
+    fn accept_mock_connection(
+        listener: &TcpListener,
+        stop: &Receiver<()>,
+        timeout: Duration,
+    ) -> Option<TcpStream> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if stop.try_recv().is_ok() {
+                return None;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => return Some(stream),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn read_mock_request(stream: &TcpStream) -> Option<String> {
+        let mut reader = BufReader::new(stream.try_clone().ok()?);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).ok()? == 0 {
+            return None;
+        }
+        if request_line.is_empty() {
+            return None;
+        }
+        let mut content_length = 0usize;
+        let mut header = String::new();
+        loop {
+            header.clear();
+            if reader.read_line(&mut header).is_err() || header.is_empty() || header == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut remaining = content_length;
+        let mut body = Vec::with_capacity(content_length);
+        let mut chunk = [0; 1024];
+        while remaining > 0 {
+            let chunk_len = remaining.min(chunk.len());
+            match reader.read(&mut chunk[..chunk_len]) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    remaining -= read;
+                    body.extend_from_slice(&chunk[..read]);
+                }
+            }
+        }
+        let mut request = request_line.trim_end().to_string();
+        if !body.is_empty() {
+            request.push_str("\r\n\r\n");
+            request.push_str(&String::from_utf8_lossy(&body));
+        }
+        Some(request)
+    }
+
+    fn mock_request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map_or("", |(_, body)| body)
+    }
+
+    fn write_mock_response(stream: &mut TcpStream, status: u16, body: &str) {
+        let reason = match status {
+            200 => "OK",
+            409 => "Conflict",
+            500 => "Internal Server Error",
+            _ => "Mock Response",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+
+    struct MockHttpServer {
+        url: String,
+        requests: Receiver<String>,
+        observed_requests: Receiver<String>,
+        unexpected_requests: Receiver<String>,
+        responses_sent: Receiver<()>,
+        release: Sender<()>,
+        stop: Sender<()>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl MockHttpServer {
+        fn new(responses: Vec<(String, u16, String)>) -> Self {
+            Self::new_with_auto_responses(responses, Vec::new())
+        }
+
+        fn with_workspace_bootstrap(responses: Vec<(String, u16, String)>) -> Self {
+            Self::with_workspace_bootstrap_and_hosts(responses, Vec::new())
+        }
+
+        fn with_workspace_bootstrap_and_hosts(
+            responses: Vec<(String, u16, String)>,
+            hosts: Vec<serde_json::Value>,
+        ) -> Self {
+            Self::with_workspace_bootstrap_data(
+                responses,
+                hosts,
+                serde_json::json!([{
+                    "id": "proj-falcon",
+                    "name": "falcon",
+                    "type": "local",
+                    "workingDir": "/workspace/falcon",
+                    "createdAt": 0
+                }]),
+            )
+        }
+
+        fn with_workspace_bootstrap_projects(
+            responses: Vec<(String, u16, String)>,
+            projects: serde_json::Value,
+        ) -> Self {
+            Self::with_workspace_bootstrap_data(responses, Vec::new(), projects)
+        }
+
+        fn with_workspace_bootstrap_data(
+            responses: Vec<(String, u16, String)>,
+            hosts: Vec<serde_json::Value>,
+            projects: serde_json::Value,
+        ) -> Self {
+            let hosts = serde_json::Value::Array(hosts).to_string();
+            Self::new_with_auto_responses(
+                responses,
+                vec![
+                    ("GET /api/system".into(), 200, "{}".into()),
+                    (
+                        "GET /api/app-icon".into(),
+                        200,
+                        r#"{"selected":"default"}"#.into(),
+                    ),
+                    (
+                        "GET /api/projects HTTP/1.1".into(),
+                        200,
+                        projects.to_string(),
+                    ),
+                    ("GET /api/sessions".into(), 200, "[]".into()),
+                    ("GET /api/hosts".into(), 200, hosts),
+                    (
+                        "GET /api/relays".into(),
+                        200,
+                        r#"{"forwards":[],"shares":[]}"#.into(),
+                    ),
+                    ("GET /api/agents".into(), 200, "[]".into()),
+                    (
+                        "GET /api/plugins HTTP/1.1".into(),
+                        200,
+                        r#"{"dir":"","plugins":[],"trustRoot":"unused"}"#.into(),
+                    ),
+                ],
+            )
+        }
+
+        fn new_with_auto_responses(
+            responses: Vec<(String, u16, String)>,
+            auto_responses: Vec<(String, u16, String)>,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let expected_prefixes: Vec<_> = responses
+                .iter()
+                .map(|(prefix, _, _)| prefix.clone())
+                .collect();
+            let (request_tx, requests) = mpsc::channel();
+            let (observed_tx, observed_requests) = mpsc::channel();
+            let (unexpected_tx, unexpected_requests) = mpsc::channel();
+            let (response_sent_tx, responses_sent) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel();
+            let (stop, stop_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let mut responses = responses.into_iter().peekable();
+                loop {
+                    let timeout = if responses.peek().is_some() {
+                        Duration::from_secs(5)
+                    } else {
+                        Duration::from_millis(400)
+                    };
+                    let Some(mut stream) = accept_mock_connection(&listener, &stop_rx, timeout)
+                    else {
+                        return;
+                    };
+                    let Some(request) = read_mock_request(&stream) else {
+                        continue;
+                    };
+                    let _ = observed_tx.send(request.clone());
+                    if let Some((_, status, body)) = auto_responses
+                        .iter()
+                        .find(|(prefix, _, _)| request.starts_with(prefix))
+                    {
+                        write_mock_response(&mut stream, *status, body);
+                        continue;
+                    }
+
+                    if let Some((expected_prefix, _, _)) = responses.peek() {
+                        if request.starts_with(expected_prefix) {
+                            let (_, status, body) = responses.next().unwrap();
+                            let _ = request_tx.send(request);
+                            if release_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                                return;
+                            }
+                            write_mock_response(&mut stream, status, &body);
+                            let _ = response_sent_tx.send(());
+                        } else {
+                            write_mock_response(
+                                &mut stream,
+                                500,
+                                r#"{"error":"unplanned mock request"}"#,
+                            );
+                        }
+                    } else {
+                        if expected_prefixes
+                            .iter()
+                            .any(|prefix| request.starts_with(prefix))
+                        {
+                            let _ = unexpected_tx.send(request.clone());
+                        }
+                        write_mock_response(
+                            &mut stream,
+                            500,
+                            r#"{"error":"unexpected mock request"}"#,
+                        );
+                    }
+                }
+            });
+
+            Self {
+                url: format!("http://{address}"),
+                requests,
+                observed_requests,
+                unexpected_requests,
+                responses_sent,
+                release,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn wait_for_request(&self) -> String {
+            match self.requests.recv_timeout(Duration::from_secs(3)) {
+                Ok(request) => request,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let observed: Vec<_> = self.observed_requests.try_iter().collect();
+                    panic!("mock HTTP request should arrive; observed {observed:?}");
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("mock HTTP request channel disconnected");
+                }
+            }
+        }
+
+        fn wait_for_observed_prefixes(&self, prefixes: &[&str]) -> Vec<String> {
+            let mut found = vec![None; prefixes.len()];
+            let mut observed = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while found.iter().any(Option::is_none) {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let request = self
+                    .observed_requests
+                    .recv_timeout(remaining)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "requests starting with {prefixes:?} not observed: {found:?}; +                             received {observed:?}; {error}"
+                        )
+                    });
+                observed.push(request.clone());
+                for (index, prefix) in prefixes.iter().enumerate() {
+                    if found[index].is_none() && request.starts_with(prefix) {
+                        found[index] = Some(request.clone());
+                    }
+                }
+            }
+            found.into_iter().map(Option::unwrap).collect()
+        }
+
+        fn release_response(&self) {
+            self.release.send(()).unwrap();
+        }
+
+        fn wait_for_response(&self) {
+            self.responses_sent
+                .recv_timeout(Duration::from_secs(3))
+                .expect("mock HTTP response should be sent");
+        }
+
+        fn assert_no_duplicate_request(&self) {
+            match self
+                .unexpected_requests
+                .recv_timeout(Duration::from_millis(500))
+            {
+                Ok(request) => panic!("unexpected duplicate HTTP request: {request}"),
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {}
+            }
+        }
+
+        fn assert_no_request_starting_with(&self, prefix: &str) {
+            let deadline = Instant::now() + Duration::from_millis(600);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match self.observed_requests.recv_timeout(remaining) {
+                    Ok(request) if request.starts_with(prefix) => {
+                        panic!("unexpected request {request}")
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                        return;
+                    }
+                }
+            }
+        }
+
+        fn clear_observed_requests(&self) {
+            let _ = self.observed_requests.try_iter().count();
+        }
+    }
+
+    impl Drop for MockHttpServer {
+        fn drop(&mut self) {
+            for _ in 0..8 {
+                let _ = self.release.send(());
+            }
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn workspace_text_file(text: &str, version: &str) -> String {
+        serde_json::json!({
+            "preview": {
+                "kind": "text",
+                "text": text,
+                "size": text.len(),
+                "truncated": false,
+                "version": version,
+            },
+            "rawBase": "/api/projects/proj-falcon/raw/token/",
+        })
+        .to_string()
+    }
+
     fn headless_with_options(opts: FalconLaunchOptions, os_scheme: ColorScheme) -> Headless {
         ensure_test_platform();
         let root = falcon_root_with_options(opts);
@@ -478,6 +1083,460 @@ mod tests {
         cfg.environment.color_scheme = os_scheme;
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         Headless::start(cfg).expect("start headless FalconApp")
+    }
+
+    fn git_working_response(
+        files: Vec<serde_json::Value>,
+        conflict: Option<serde_json::Value>,
+    ) -> String {
+        let mut response = serde_json::json!({
+            "available": true,
+            "repoName": "mock",
+            "fileCount": files.len(),
+            "files": files,
+        });
+        if let Some(conflict) = conflict {
+            response["conflict"] = conflict;
+        }
+        response.to_string()
+    }
+
+    fn git_diff_response(diff: &str) -> String {
+        serde_json::json!({"available": true, "diff": diff, "truncated": false}).to_string()
+    }
+
+    fn open_mock_git_panel(server: &MockHttpServer, first_file: &str) -> Headless {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:activity-changes").unwrap();
+        app.press("id:git-refresh").unwrap();
+        let request = server.wait_for_request();
+        assert!(request.starts_with("GET /api/projects/proj-falcon/git/working"), "{request}");
+        server.release_response();
+        server.wait_for_response();
+        let first_file_selector = format!("text:{first_file}");
+        app.wait_for(&first_file_selector).unwrap();
+        app
+    }
+
+    #[test]
+    fn git_discard_selected_cancel_payload_failure_and_success_headless() {
+        let working = git_working_response(
+            vec![
+                serde_json::json!({"path":"tracked.txt","index":" ","work":"M","added":1,"deleted":1}),
+                serde_json::json!({"path":"new.txt","index":"?","work":"?","added":1,"deleted":0}),
+                serde_json::json!({"path":"renamed.txt","origPath":"old-name.txt","index":"R","work":" ","added":1,"deleted":1}),
+            ],
+            None,
+        );
+        let empty = git_working_response(Vec::new(), None);
+        let operation_path = "POST /api/projects/proj-falcon/git/op".to_string();
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let server = MockHttpServer::new(vec![
+            (working_path.clone(), 200, working),
+            (operation_path.clone(), 200, r#"{"ok":false,"detail":"restore denied"}"#.into()),
+            (operation_path, 200, r#"{"ok":true,"detail":"restored"}"#.into()),
+            (working_path, 200, empty),
+        ]);
+        let mut app = open_mock_git_panel(&server, "tracked.txt");
+        app.wait_for("id:git-file-1").unwrap();
+        server.clear_observed_requests();
+
+        app.press("id:git-discard-selected").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.wait_for("text:未跟踪文件将被永久删除。").unwrap();
+        app.press("id:git-cancel-confirm").unwrap();
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
+        server.assert_no_request_starting_with("POST /api/projects/proj-falcon/git/op");
+
+        app.press("id:git-discard-selected").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload["op"], "restore");
+        assert_eq!(payload["paths"], serde_json::json!(["tracked.txt", "old-name.txt", "renamed.txt"]));
+        assert_eq!(payload["untracked"], serde_json::json!(["new.txt"]));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:restore denied").unwrap();
+        app.wait_for("id:git-file-0").unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+
+        app.press("id:git-discard-all").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload["op"], "restore");
+        assert_eq!(payload["paths"], serde_json::json!(["tracked.txt", "old-name.txt", "renamed.txt"]));
+        assert_eq!(payload["untracked"], serde_json::json!(["new.txt"]));
+        server.release_response();
+        server.wait_for_response();
+        let refresh = server.wait_for_request();
+        assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("id:git-file-0", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_discard_confirmation_keeps_actions_visible_with_many_paths_headless() {
+        let files = (0..32)
+            .map(|index| serde_json::json!({
+                "path": format!("many-{index:02}.txt"), "index":" ", "work":"M"
+            }))
+            .collect();
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let server = MockHttpServer::new(vec![(
+            working_path,
+            200,
+            git_working_response(files, None),
+        )]);
+        let mut app = open_mock_git_panel(&server, "many-00.txt");
+        server.clear_observed_requests();
+
+        app.press("id:git-discard-all").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.press("id:git-cancel-confirm").unwrap();
+        server.assert_no_request_starting_with("POST /api/projects/proj-falcon/git/op");
+    }
+
+    #[test]
+    fn git_conflict_continue_abort_take_and_failures_headless() {
+        let conflict = Some(serde_json::json!({"kind":"cherry-pick"}));
+        let working = git_working_response(
+            vec![serde_json::json!({"path":"conflict.txt","index":"U","work":"U","added":1,"deleted":1})],
+            conflict,
+        );
+        let empty = git_working_response(Vec::new(), None);
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let operation_path = "POST /api/projects/proj-falcon/git/op".to_string();
+        let server = MockHttpServer::new(vec![
+            (working_path.clone(), 200, working.clone()),
+            (operation_path.clone(), 200, r#"{"ok":false,"detail":"continue rejected"}"#.into()),
+            (operation_path.clone(), 200, r#"{"ok":true,"detail":"continued"}"#.into()),
+            (working_path.clone(), 200, working.clone()),
+            (operation_path.clone(), 200, r#"{"ok":true,"detail":"aborted"}"#.into()),
+            (working_path.clone(), 200, working.clone()),
+            (operation_path.clone(), 200, r#"{"ok":false,"detail":"take rejected"}"#.into()),
+            (operation_path.clone(), 409, r#"{"error":"server locked"}"#.into()),
+            (operation_path, 200, r#"{"ok":true,"detail":"taken"}"#.into()),
+            (working_path, 200, empty),
+        ]);
+        let mut app = open_mock_git_panel(&server, "conflict.txt");
+        app.wait_for("id:git-take-ours").unwrap();
+        server.clear_observed_requests();
+
+        app.press("id:git-continue").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload, serde_json::json!({"op":"continue"}));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:continue rejected").unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+
+        app.press("id:git-continue").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload, serde_json::json!({"op":"continue"}));
+        server.release_response();
+        server.wait_for_response();
+        let refresh = server.wait_for_request();
+        assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        server.release_response();
+        server.wait_for_response();
+        server.clear_observed_requests();
+        app.wait_for("id:git-file-0").unwrap();
+
+        app.press("id:git-abort").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload, serde_json::json!({"op":"abort"}));
+        server.release_response();
+        server.wait_for_response();
+        let refresh = server.wait_for_request();
+        assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        server.release_response();
+        server.wait_for_response();
+        server.clear_observed_requests();
+
+        app.press("id:git-take-ours").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload["op"], "take");
+        assert_eq!(payload["side"], "ours");
+        assert_eq!(payload["paths"], serde_json::json!(["conflict.txt"]));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:take rejected").unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+
+        app.press("id:git-take-theirs").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload["op"], "take");
+        assert_eq!(payload["side"], "theirs");
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:server locked").unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+
+        app.press("id:git-take-ours").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let request = server.wait_for_request();
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(payload["side"], "ours");
+        server.release_response();
+        server.wait_for_response();
+        let refresh = server.wait_for_request();
+        assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("id:git-take-ours", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_multi_repo_selection_routes_working_diff_commit_and_operation_headless() {
+        let repo_a = "/workspace/a";
+        let repo_b = "/workspace/b";
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let diff_path = "GET /api/projects/proj-falcon/git/diff".to_string();
+        let commit_path = "POST /api/projects/proj-falcon/git/commit".to_string();
+        let operation_path = "POST /api/projects/proj-falcon/git/op".to_string();
+        let server = MockHttpServer::with_workspace_bootstrap_projects(
+            vec![
+                (working_path.clone(), 200, git_working_response(
+                    vec![serde_json::json!({"path":"a.txt","index":" ","work":"M"})], None)),
+                (working_path.clone(), 200, git_working_response(
+                    vec![serde_json::json!({"path":"b.txt","index":" ","work":"M"})], None)),
+                (operation_path.clone(), 200, r#"{"ok":true,"detail":"restored old repo"}"#.into()),
+                (diff_path.clone(), 200, git_diff_response(
+                    "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old-b\n+repo-b-change\n")),
+                (commit_path.clone(), 200, r#"{"ok":true,"detail":"committed"}"#.into()),
+                (working_path.clone(), 200, git_working_response(
+                    vec![serde_json::json!({"path":"b.txt","index":" ","work":"M"})], None)),
+                (operation_path.clone(), 200, r#"{"ok":true,"detail":"restored"}"#.into()),
+                (working_path.clone(), 200, git_working_response(Vec::new(), None)),
+            ],
+            serde_json::json!([{
+                "id":"proj-falcon","name":"multi","type":"local","workingDir":"/workspace","createdAt":0,
+                "multi":{"repos":[{"dir":repo_a},{"dir":repo_b}]}
+            }]),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        let initial = server.wait_for_request();
+        assert!(initial.starts_with(&working_path) && initial.contains("repo=%2Fworkspace%2Fa"), "{initial}");
+        server.release_response();
+        server.wait_for_response();
+        app.press("label:activity-changes").unwrap();
+        app.wait_for("id:git-repo-select").unwrap();
+        app.press("id:git-discard-selected").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.press("id:git-repo-select").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
+        let second = server.wait_for_request();
+        assert!(second.starts_with(&working_path) && second.contains("repo=%2Fworkspace%2Fb"), "{second}");
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:git-file-0").unwrap();
+        server.clear_observed_requests();
+        app.press("id:git-confirm-action").unwrap();
+        let captured = server.wait_for_request();
+        assert!(captured.starts_with(&operation_path) && captured.contains("repo=%2Fworkspace%2Fa"), "{captured}");
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&captured)).unwrap();
+        assert_eq!(payload["paths"], serde_json::json!(["a.txt"]));
+        server.release_response();
+        server.wait_for_response();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+
+        app.press("id:git-file-0").unwrap();
+        let diff = server.wait_for_request();
+        assert!(diff.starts_with(&diff_path) && diff.contains("path=b.txt")
+            && diff.contains("repo=%2Fworkspace%2Fb"), "{diff}");
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:-old-b").unwrap();
+        app.wait_for("text:+repo-b-change").unwrap();
+
+        app.type_text("id:git-commit-message", "first").unwrap();
+        app.press("id:git-commit").unwrap();
+        let commit = server.wait_for_request();
+        assert!(commit.starts_with(&commit_path) && commit.contains("repo=%2Fworkspace%2Fb"), "{commit}");
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&commit)).unwrap();
+        assert_eq!(payload["message"], "first");
+        assert_eq!(payload["all"], false);
+        assert_eq!(payload["paths"], serde_json::json!(["b.txt"]));
+        app.type_text("id:git-commit-message", " newer").unwrap();
+        server.release_response();
+        server.wait_for_response();
+        let refreshed = server.wait_for_request();
+        assert!(refreshed.starts_with(&working_path) && refreshed.contains("repo=%2Fworkspace%2Fb"), "{refreshed}");
+        server.release_response();
+        server.wait_for_response();
+        assert_eq!(app.screen().input_text("id:git-commit-message").unwrap(), Some("first newer"));
+
+        app.press("id:git-discard-selected").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        let operation = server.wait_for_request();
+        assert!(operation.starts_with(&operation_path) && operation.contains("repo=%2Fworkspace%2Fb"), "{operation}");
+        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&operation)).unwrap();
+        assert_eq!(payload["op"], "restore");
+        assert_eq!(payload["paths"], serde_json::json!(["b.txt"]));
+        server.release_response();
+        server.wait_for_response();
+        let refreshed = server.wait_for_request();
+        assert!(refreshed.starts_with(&working_path) && refreshed.contains("repo=%2Fworkspace%2Fb"), "{refreshed}");
+        server.release_response();
+        server.wait_for_response();
+    }
+
+    #[test]
+    fn git_diff_a_to_b_to_a_ignores_both_stale_responses_headless() {
+        let working = git_working_response(
+            vec![
+                serde_json::json!({"path":"a.txt","origPath":"old-a.txt","index":"R","work":" "}),
+                serde_json::json!({"path":"b.txt","index":"?","work":"?"}),
+            ],
+            None,
+        );
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let diff_path = "GET /api/projects/proj-falcon/git/diff".to_string();
+        let server = MockHttpServer::new(vec![
+            (working_path, 200, working),
+            (diff_path.clone(), 200, git_diff_response(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+old-a-response\n")),
+            (diff_path.clone(), 200, git_diff_response(
+                "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -0,0 +1 @@\n+stale-b-response\n")),
+            (diff_path.clone(), 200, git_diff_response(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+latest-a-response\n")),
+        ]);
+        let mut app = open_mock_git_panel(&server, "a.txt");
+        app.wait_for("id:git-file-1").unwrap();
+        server.clear_observed_requests();
+
+        app.press("id:git-file-0").unwrap();
+        let first = server.wait_for_request();
+        assert!(first.starts_with(&diff_path)
+            && first.contains("path=a.txt")
+            && first.contains("origPath=old-a.txt"), "{first}");
+        app.press("id:git-file-1").unwrap();
+        app.press("id:git-file-0").unwrap();
+        server.release_response();
+        server.wait_for_response();
+
+        let second = server.wait_for_request();
+        assert!(second.starts_with(&diff_path)
+            && second.contains("path=b.txt")
+            && second.contains("untracked"), "{second}");
+        server.release_response();
+        server.wait_for_response();
+
+        let third = server.wait_for_request();
+        assert!(third.starts_with(&diff_path)
+            && third.contains("path=a.txt")
+            && third.contains("origPath=old-a.txt"), "{third}");
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:+latest-a-response").unwrap();
+        assert!(!app.shows("text:+old-a-response"));
+        assert!(!app.shows("text:+stale-b-response"));
+    }
+
+    #[test]
+    fn git_conflict_status_recognizes_all_unmerged_pairs() {
+        for (index, work) in [
+            ("U", "U"), ("A", "A"), ("D", "D"), ("A", "U"),
+            ("U", "A"), ("D", "U"), ("U", "D"),
+        ] {
+            let change = crate::store::GitChangeItem {
+                path: "conflict.txt".into(),
+                orig_path: None,
+                index: index.into(),
+                work: work.into(),
+                untracked: false,
+                status: format!("{index}{work}"),
+                staged: true,
+                additions: 0,
+                deletions: 0,
+                old_text: String::new(),
+                new_text: String::new(),
+            };
+            assert!(crate::store::git_change_is_conflicted(&change), "{index}{work}");
+        }
+    }
+
+    fn ssh_host_value(
+        id: &str,
+        name: &str,
+        host: &str,
+        port: u16,
+        username: &str,
+        project_count: u32,
+    ) -> serde_json::Value {
+        ssh_host_value_with_auth(
+            id,
+            name,
+            host,
+            port,
+            username,
+            "password",
+            Some("~/.ssh/id_ed25519"),
+            project_count,
+        )
+    }
+
+    fn ssh_host_value_with_auth(
+        id: &str,
+        name: &str,
+        host: &str,
+        port: u16,
+        username: &str,
+        auth_method: &str,
+        key_path: Option<&str>,
+        project_count: u32,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "host": host,
+            "port": port,
+            "username": username,
+            "authMethod": auth_method,
+            "keyPath": key_path,
+            "hasSecret": true,
+            "projectCount": project_count,
+            "createdAt": 0
+        })
+    }
+
+    fn open_hosts_settings(app: &mut Headless) {
+        app.first_render().expect("first render");
+        app.press("label:sidebar-settings").expect("open settings");
+        app.wait_for("label:settings-tab-Hosts")
+            .expect("hosts settings tab");
+        app.press("label:settings-tab-Hosts")
+            .expect("open hosts settings");
+        app.wait_for("id:host-add-manual")
+            .expect("host form actions");
     }
 
     /// ADR 0006 铁律回归：当系统处于浅色模式且用户在浅色槽位放了深底 Ghostty 主题（Dracula）时，
@@ -495,6 +1554,12 @@ mod tests {
             offline_demo: true,
             server_url: Some("http://127.0.0.1:4923".into()),
             initial_theme: Some(settings.clone()),
+            #[cfg(test)]
+            test_client_url: None,
+            #[cfg(test)]
+            test_switch_url: None,
+            #[cfg(test)]
+            test_live_file_operations: false,
         };
 
         let root = falcon_root_with_options(opts.clone());
@@ -520,6 +1585,12 @@ mod tests {
                 offline_demo: true,
                 server_url: Some("http://127.0.0.1:4923".into()),
                 initial_theme: Some(light_settings),
+                #[cfg(test)]
+                test_client_url: None,
+                #[cfg(test)]
+                test_switch_url: None,
+                #[cfg(test)]
+                test_live_file_operations: false,
             },
             ColorScheme::Dark,
         );
@@ -542,6 +1613,12 @@ mod tests {
                 offline_demo: true,
                 server_url: Some("http://127.0.0.1:4923".into()),
                 initial_theme: None,
+                #[cfg(test)]
+                test_client_url: None,
+                #[cfg(test)]
+                test_switch_url: None,
+                #[cfg(test)]
+                test_live_file_operations: false,
             },
             ColorScheme::Dark,
         );
@@ -575,6 +1652,606 @@ mod tests {
     }
 
     #[test]
+    fn failed_http_termination_keeps_session_and_pane_headless() {
+        let mock = MockHttpServer::new(vec![(
+            "POST /api/sessions/sess-main/terminate".into(),
+            500,
+            r#"{"error":"mock termination failed"}"#.into(),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.wait_for("id:active-pane-t:sess-main").unwrap();
+        app.press("label:terminate-sess-main").unwrap();
+        app.wait_for("前台程序仍在运行").unwrap();
+        app.press("仍然终止").unwrap();
+        let request = mock.wait_for_request();
+        assert_eq!(request, "POST /api/sessions/sess-main/terminate HTTP/1.1");
+        app.press("仍然终止").unwrap();
+        mock.release_response();
+
+        app.wait_for("mock termination failed").unwrap();
+        app.wait_for("cargo check -p falcon-nsh").unwrap();
+        app.wait_for("id:active-pane-t:sess-main").unwrap();
+        app.wait_for("label:terminate-sess-main").unwrap();
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn failed_http_save_preserves_dirty_hash_then_success_clears_it_headless() {
+        let path = "native/mock-save-integration.txt";
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", path);
+        let mock = MockHttpServer::new(vec![
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("", "disk-v1"),
+            ),
+            (
+                "PUT /api/projects/proj-falcon/file".into(),
+                500,
+                r#"{"error":"mock save failed"}"#.into(),
+            ),
+            (
+                "PUT /api/projects/proj-falcon/file".into(),
+                200,
+                serde_json::json!({
+                    "path": path,
+                    "size": 20,
+                    "version": "disk-v2",
+                })
+                .to_string(),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-save-file").unwrap();
+        app.wait_for("save-state=Loading").unwrap();
+        let read_request = mock.wait_for_request();
+        assert!(
+            read_request.starts_with("GET /api/projects/proj-falcon/file"),
+            "unexpected read request: {read_request}"
+        );
+        mock.release_response();
+        mock.wait_for_response();
+
+        let editor = format!("id:file-editor-{file_key}");
+        app.wait_for(&editor).unwrap();
+        app.wait_for("save-hash=disk-v1").unwrap();
+        app.type_text(&editor, "first line\nsecond line\n").unwrap();
+        app.wait_for("save-dirty=true").unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("first line\nsecond line\n")
+        );
+
+        let save_button = format!("id:file-save-{file_key}");
+        app.wait_for(&save_button).unwrap();
+        app.type_text(&editor, "").unwrap();
+        app.press(&save_button).unwrap();
+        app.wait_for("save-saving=true").unwrap();
+        let failed_save = mock.wait_for_request();
+        assert!(failed_save.starts_with("PUT /api/projects/proj-falcon/file"));
+        assert_eq!(mock_request_body(&failed_save), "first line\nsecond line\n");
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("mock save failed").unwrap();
+        app.wait_for("save-dirty=true").unwrap();
+        app.wait_for("save-saving=false").unwrap();
+        app.wait_for("save-hash=disk-v1").unwrap();
+
+        app.wait_for(&save_button).unwrap();
+        app.type_text(&editor, "").unwrap();
+        app.press(&save_button).unwrap();
+        app.wait_for("save-saving=true").unwrap();
+        let retry = mock.wait_for_request();
+        assert!(retry.starts_with("PUT /api/projects/proj-falcon/file"));
+        assert!(
+            retry.contains("base=disk-v1"),
+            "retry used unexpected base: {retry}"
+        );
+        assert_eq!(mock_request_body(&retry), "first line\nsecond line\n");
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("save-dirty=false").unwrap();
+        app.wait_for("save-saving=false").unwrap();
+        app.wait_for("save-hash=disk-v2").unwrap();
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn file_editor_multiline_input_persists_full_body_headless() {
+        let path = "native/mock-save-integration.txt";
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", path);
+        let mock = MockHttpServer::new(vec![
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("", "editor-v1"),
+            ),
+            (
+                "PUT /api/projects/proj-falcon/file".into(),
+                200,
+                serde_json::json!({
+                    "path": path,
+                    "size": 23,
+                    "version": "editor-v2",
+                })
+                .to_string(),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-save-file").unwrap();
+        app.wait_for("save-state=Loading").unwrap();
+        assert!(
+            mock.wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/file")
+        );
+        mock.release_response();
+        mock.wait_for_response();
+
+        let editor = format!("id:file-editor-{file_key}");
+        app.wait_for(&editor).unwrap();
+        app.wait_for("save-hash=editor-v1").unwrap();
+        app.type_text(&editor, "first line\nsecond line\n").unwrap();
+        app.wait_for("save-dirty=true").unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("first line\nsecond line\n")
+        );
+        let save_button = format!("id:file-save-{file_key}");
+        app.wait_for(&save_button).unwrap();
+        app.type_text(&editor, "").unwrap();
+        app.press(&save_button).unwrap();
+        app.wait_for("save-saving=true").unwrap();
+        let save_request = mock.wait_for_request();
+        assert_eq!(mock_request_body(&save_request), "first line\nsecond line\n");
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("save-dirty=false").unwrap();
+        app.wait_for("save-hash=editor-v2").unwrap();
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn file_editor_reload_replaces_body_after_generation_change_headless() {
+        let path = "native/mock-save-integration.txt";
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", path);
+        let mock = MockHttpServer::new(vec![
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("old body", "old-v1"),
+            ),
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("replacement body", "new-v2"),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-save-file").unwrap();
+        let initial = mock.wait_for_request();
+        assert!(initial.starts_with("GET /api/projects/proj-falcon/file"));
+        mock.release_response();
+        mock.wait_for_response();
+
+        let editor = format!("id:file-editor-{file_key}");
+        app.wait_for(&editor).unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("old body")
+        );
+        app.press("id:test-reload-save-file").unwrap();
+        app.wait_for("save-state=Loading").unwrap();
+        let reload = mock.wait_for_request();
+        assert!(reload.starts_with("GET /api/projects/proj-falcon/file"));
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("save-hash=new-v2").unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("replacement body")
+        );
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn file_editor_preview_toggle_preserves_current_body_headless() {
+        let path = "native/mock-preview.md";
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", path);
+        let mock = MockHttpServer::new(vec![(
+            "GET /api/projects/proj-falcon/file".into(),
+            200,
+            workspace_text_file("preview body", "preview-v1"),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-preview-file").unwrap();
+        let request = mock.wait_for_request();
+        assert!(request.starts_with("GET /api/projects/proj-falcon/file"));
+        mock.release_response();
+        mock.wait_for_response();
+
+        let preview_toggle = format!("id:file-markdown-preview-{file_key}");
+        let editor = format!("id:file-editor-{file_key}");
+        app.wait_for("preview body").unwrap();
+        app.press(&preview_toggle).unwrap();
+        app.wait_for(&editor).unwrap();
+        app.type_text(&editor, " edited").unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("preview body edited")
+        );
+        app.press(&preview_toggle).unwrap();
+        app.wait_for_gone(&editor, Duration::from_secs(2)).unwrap();
+        app.wait_for("preview body edited").unwrap();
+        app.press(&preview_toggle).unwrap();
+        app.wait_for(&editor).unwrap();
+        assert_eq!(
+            app.screen().input_text(&editor).unwrap(),
+            Some("preview body edited")
+        );
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn focusing_session_in_another_project_refreshes_project_data_headless() {
+        let mock = MockHttpServer::new_with_auto_responses(
+            vec![("GET /__mock_hold__".into(), 200, "{}".into())],
+            vec![
+                ("GET /api/".into(), 500, r#"{"error":"mock"}"#.into()),
+                ("POST /api/".into(), 500, r#"{"error":"mock"}"#.into()),
+            ],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-focus-agent-session").unwrap();
+        app.wait_for("active-project=proj-falcon-nsh").unwrap();
+        app.wait_for("id:active-pane-t:sess-agent").unwrap();
+        for _ in 0..10 {
+            app.next_change(Duration::from_millis(50)).unwrap();
+        }
+
+        let observed = mock.wait_for_observed_prefixes(&[
+            "GET /api/projects/proj-falcon-nsh/files",
+            "GET /api/agents",
+        ]);
+        let file_request = &observed[0];
+        assert!(file_request.contains("proj-falcon-nsh"));
+        let agent_request = &observed[1];
+        assert!(agent_request.contains("proj-falcon-nsh"));
+    }
+
+    #[test]
+    fn stale_http_read_after_reopen_does_not_mutate_new_buffer_headless() {
+        let mock = MockHttpServer::new(vec![
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("old response", "old-v1"),
+            ),
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("new response", "new-v1"),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-stale-file").unwrap();
+        app.wait_for("stale-state=Loading").unwrap();
+        let first_read = mock.wait_for_request();
+        assert!(first_read.starts_with("GET /api/projects/proj-falcon/file"));
+        app.press("id:test-close-stale-file").unwrap();
+        app.wait_for("stale-state=closed").unwrap();
+
+        app.press("id:test-open-stale-file").unwrap();
+        app.wait_for("stale-state=Loading").unwrap();
+        mock.release_response();
+        mock.wait_for_response();
+        let second_read = mock.wait_for_request();
+        assert!(second_read.starts_with("GET /api/projects/proj-falcon/file"));
+        for _ in 0..5 {
+            app.next_change(Duration::from_millis(50)).unwrap();
+            assert!(app.shows("stale-state=Loading"));
+        }
+
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("stale-state=Editable").unwrap();
+        app.wait_for("stale-hash=new-v1").unwrap();
+        app.wait_for("stale-body=new response").unwrap();
+        assert!(!app.shows("stale-body=old response"));
+    }
+
+    #[test]
+    fn stale_http_read_after_server_switch_does_not_mutate_new_buffer_headless() {
+        let old_server = MockHttpServer::with_workspace_bootstrap(vec![(
+            "GET /api/projects/proj-falcon/file?".into(),
+            200,
+            workspace_text_file("old server response", "old-server-v1"),
+        )]);
+        let new_server = MockHttpServer::with_workspace_bootstrap(vec![(
+            "GET /api/projects/proj-falcon/file?".into(),
+            200,
+            workspace_text_file("new server response", "new-server-v1"),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(old_server.url.clone()),
+                test_switch_url: Some(new_server.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-stale-file").unwrap();
+        app.wait_for("stale-state=Loading").unwrap();
+        assert!(
+            old_server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/file?")
+        );
+
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for(&format!("server-url={}", new_server.url))
+            .unwrap();
+        app.wait_for("server-connected=true").unwrap();
+        app.press("id:test-open-stale-file").unwrap();
+        app.wait_for("stale-state=Loading").unwrap();
+        assert!(
+            new_server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/file?")
+        );
+
+        old_server.release_response();
+        old_server.wait_for_response();
+        for _ in 0..5 {
+            app.next_change(Duration::from_millis(50)).unwrap();
+            assert!(app.shows("stale-state=Loading"));
+            assert!(!app.shows("stale-body=old server response"));
+        }
+
+        new_server.release_response();
+        new_server.wait_for_response();
+        app.wait_for("stale-hash=new-server-v1").unwrap();
+        app.wait_for("stale-body=new server response").unwrap();
+        old_server.assert_no_duplicate_request();
+        new_server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn stale_quick_open_index_after_server_switch_is_ignored_headless() {
+        let old_server = MockHttpServer::with_workspace_bootstrap(vec![(
+            "GET /api/projects/proj-falcon/files/index".into(),
+            200,
+            serde_json::json!({"paths":["old-server.rs"],"truncated":false}).to_string(),
+        )]);
+        let new_server = MockHttpServer::with_workspace_bootstrap(vec![(
+            "GET /api/projects/proj-falcon/files/index".into(),
+            200,
+            serde_json::json!({"paths":["new-server.rs"],"truncated":false}).to_string(),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(old_server.url.clone()),
+                test_switch_url: Some(new_server.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-quick-open").unwrap();
+        assert!(
+            old_server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/files/index")
+        );
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for(&format!("server-url={}", new_server.url))
+            .unwrap();
+        app.wait_for("server-connected=true").unwrap();
+        assert!(
+            new_server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/files/index")
+        );
+        old_server.release_response();
+        old_server.wait_for_response();
+        for _ in 0..4 {
+            app.next_change(Duration::from_millis(50)).unwrap();
+            assert!(!app.shows("old-server.rs"));
+        }
+        new_server.release_response();
+        new_server.wait_for_response();
+        app.wait_for("quick-open-paths=new-server.rs").unwrap();
+        assert!(!app.shows("old-server.rs"));
+        old_server.assert_no_duplicate_request();
+        new_server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn quick_open_index_success_empty_and_error_headless() {
+        let index_path = "GET /api/projects/proj-falcon/files/index".to_string();
+        let server = MockHttpServer::new(vec![
+            (
+                index_path.clone(),
+                200,
+                serde_json::json!({"paths":["native/Cargo.toml"],"truncated":false}).to_string(),
+            ),
+            (
+                index_path.clone(),
+                200,
+                serde_json::json!({"paths":[],"truncated":false}).to_string(),
+            ),
+            (
+                index_path,
+                500,
+                serde_json::json!({"error":"index unavailable"}).to_string(),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.press_key("alt+p").unwrap();
+        assert!(
+            server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/files/index")
+        );
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("quick-open-paths=native/Cargo.toml").unwrap();
+        app.press_key("enter").unwrap();
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", "native/Cargo.toml");
+        app.wait_for(&format!("id:file-editor-{file_key}")).unwrap();
+
+        app.press("id:test-open-quick-open").unwrap();
+        assert!(
+            server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/files/index")
+        );
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:没有匹配项").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("id:quick-open-input").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:quick-open-input", Duration::from_secs(2))
+            .unwrap();
+
+        app.press("id:test-open-quick-open").unwrap();
+        assert!(
+            server
+                .wait_for_request()
+                .starts_with("GET /api/projects/proj-falcon/files/index")
+        );
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("quick-open-error-present=true").unwrap();
+        app.wait_for("id:quick-open-input").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:quick-open-input", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn quick_open_keeps_focus_and_reveals_last_row_headless() {
+        let paths = (0..24)
+            .map(|index| format!("src/file-{index:02}.rs"))
+            .collect::<Vec<_>>();
+        let response = serde_json::json!({"paths": paths, "truncated": true}).to_string();
+        let server = MockHttpServer::new(vec![(
+            "GET /api/projects/proj-falcon/files/index".into(),
+            200,
+            response,
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-quick-open").unwrap();
+        server.wait_for_request();
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:quick-open-file-23").unwrap();
+        app.wait_for("quick-open-loading=false").unwrap();
+        app.type_text("id:quick-open-input", "src/").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:quick-open-input").unwrap(),
+            Some("src/")
+        );
+        app.press_key("down").unwrap();
+        app.type_text("id:quick-open-input", "file-").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:quick-open-input").unwrap(),
+            Some("src/file-")
+        );
+        app.wait_for("id:quick-open-file-23").unwrap();
+        app.press_key("up").unwrap();
+        app.wait_for("id:quick-open-file-23-selected").unwrap();
+        app.press_key("escape").unwrap();
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
     fn desktop_tree_activity_bar_and_settings_navigation() {
         let mut app = headless_with_options(
             FalconLaunchOptions {
@@ -605,10 +2282,10 @@ mod tests {
         app.press("label:settings-tab-Hosts").unwrap();
         app.wait_for("dev@10.0.4.12:22").unwrap();
         // Tailscale 入口在离线模式下如实显示请求失败，不应退回到发真实网络请求。
-        app.press("label:host-add-tailscale").unwrap();
+        app.press("id:host-add-tailscale").unwrap();
         app.wait_for("label:host-tailscale-panel").unwrap();
         app.wait_for("读取 Tailscale 失败。").unwrap();
-        app.press("label:host-add-manual").unwrap();
+        app.press("id:host-add-manual").unwrap();
         app.wait_for("保存主机").unwrap();
         app.press("label:settings-tab-About").unwrap();
         app.wait_for("Falcon").unwrap();
@@ -618,6 +2295,488 @@ mod tests {
         app.press("label:overview-session-sess-main").unwrap();
         app.wait_for_gone("label:session-overview", Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn saved_host_edit_prefills_preserves_blank_secret_and_retries_http_failure_headless() {
+        let original = ssh_host_value_with_auth(
+            "host-1",
+            "Saved Host",
+            "ssh.remote.test",
+            2222,
+            "deploy",
+            "key",
+            Some("~/.ssh/work_key"),
+            1,
+        );
+        let updated = ssh_host_value_with_auth(
+            "host-1",
+            "Saved Host Edited",
+            "ssh.remote.test",
+            2222,
+            "deploy",
+            "key",
+            Some("~/.ssh/work_key"),
+            1,
+        );
+        let server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![
+                (
+                    "PUT /api/hosts/host-1".into(),
+                    500,
+                    r#"{"error":"credentials rejected"}"#.into(),
+                ),
+                (
+                    "PUT /api/hosts/host-1".into(),
+                    200,
+                    updated.to_string(),
+                ),
+            ],
+            vec![original],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-key-path").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Saved Host")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-address").unwrap(),
+            Some("ssh.remote.test")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-port").unwrap(),
+            Some("2222")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-username").unwrap(),
+            Some("deploy")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-key-path").unwrap(),
+            Some("~/.ssh/work_key")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-secret").unwrap(),
+            Some("")
+        );
+
+        app.type_text("id:host-form-name", " Edited").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Saved Host Edited")
+        );
+        app.press("id:host-form-submit").unwrap();
+        app.wait_for("正在保存…").unwrap();
+        let failed_request = server.wait_for_request();
+        let expected_body = serde_json::json!({
+            "name": "Saved Host Edited",
+            "host": "ssh.remote.test",
+            "port": 2222,
+            "username": "deploy",
+            "authMethod": "key",
+            "keyPath": "~/.ssh/work_key"
+        });
+        let failed_body: serde_json::Value =
+            serde_json::from_str(mock_request_body(&failed_request)).unwrap();
+        assert_eq!(failed_body, expected_body);
+        assert!(failed_body.get("secret").is_none());
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:host-form-error").unwrap();
+        assert!(app.shows("credentials rejected"));
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Saved Host Edited")
+        );
+        assert_eq!(
+            app.screen().input_text("id:host-form-secret").unwrap(),
+            Some("")
+        );
+        assert!(app.shows("Saved Host"));
+
+        app.press("id:host-form-submit").unwrap();
+        app.wait_for("正在保存…").unwrap();
+        let retry_request = server.wait_for_request();
+        let retry_body: serde_json::Value =
+            serde_json::from_str(mock_request_body(&retry_request)).unwrap();
+        assert_eq!(retry_body, expected_body);
+        assert!(retry_body.get("secret").is_none());
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("Saved Host Edited").unwrap();
+        app.wait_for_gone("id:host-form-key-path", Duration::from_secs(2))
+            .unwrap();
+        assert!(app.shows("Saved Host Edited"));
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-key-path").unwrap();
+        app.type_text("id:host-form-name", "-discarded").unwrap();
+        server.clear_observed_requests();
+        app.press("id:host-form-cancel").unwrap();
+        app.wait_for_gone("id:host-form-key-path", Duration::from_secs(2))
+            .unwrap();
+        assert!(app.shows("Saved Host Edited"));
+        server.assert_no_request_starting_with("PUT /api/hosts/host-1");
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn saved_host_delayed_update_preserves_reopened_editor_and_draft_headless() {
+        let original = ssh_host_value_with_auth(
+            "host-1",
+            "Saved Host",
+            "ssh.remote.test",
+            2222,
+            "deploy",
+            "key",
+            Some("~/.ssh/work_key"),
+            1,
+        );
+        let updated = ssh_host_value_with_auth(
+            "host-1",
+            "Server Updated",
+            "ssh.remote.test",
+            2222,
+            "deploy",
+            "key",
+            Some("~/.ssh/work_key"),
+            1,
+        );
+        let server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![("PUT /api/hosts/host-1".into(), 200, updated.to_string())],
+            vec![original],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        app.type_text("id:host-form-name", " Pending").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        let pending_update = server.wait_for_request();
+        assert!(pending_update.starts_with("PUT /api/hosts/host-1"));
+        app.wait_for("正在保存…").unwrap();
+
+        app.press("label:settings-close").unwrap();
+        app.wait_for_gone("id:host-form-name", Duration::from_secs(2))
+            .unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for("label:settings-tab-Hosts").unwrap();
+        app.press("label:settings-tab-Hosts").unwrap();
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        assert!(
+            !app.shows("正在保存…"),
+            "reopened editor inherited the previous request's busy state"
+        );
+        app.type_text("id:host-form-name", " New Draft").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Saved Host New Draft")
+        );
+
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("Server Updated").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("Saved Host New Draft")
+        );
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn saved_host_delayed_failure_after_close_and_stale_connection_are_ignored_headless() {
+        let original = ssh_host_value_with_auth(
+            "host-1",
+            "Saved Host",
+            "ssh.remote.test",
+            2222,
+            "deploy",
+            "key",
+            Some("~/.ssh/work_key"),
+            1,
+        );
+        let new_server_host = ssh_host_value(
+            "host-1",
+            "New Server Host",
+            "ssh.new.test",
+            22,
+            "runner",
+            0,
+        );
+        let old_server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![
+                (
+                    "PUT /api/hosts/host-1".into(),
+                    500,
+                    r#"{"error":"closed save failed"}"#.into(),
+                ),
+                (
+                    "POST /api/hosts".into(),
+                    500,
+                    r#"{"error":"stale save failed"}"#.into(),
+                ),
+            ],
+            vec![original],
+        );
+        let new_server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![(
+                "GET /api/never-used-host-route".into(),
+                200,
+                "{}".into(),
+            )],
+            vec![new_server_host],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(old_server.url.clone()),
+                test_switch_url: Some(new_server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        app.type_text("id:host-form-name", " Closed").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        let pending_update = old_server.wait_for_request();
+        assert!(pending_update.starts_with("PUT /api/hosts/host-1"));
+        app.wait_for("正在保存…").unwrap();
+
+        app.press("label:settings-close").unwrap();
+        app.wait_for_gone("id:host-form-name", Duration::from_secs(2))
+            .unwrap();
+        old_server.release_response();
+        old_server.wait_for_response();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for("label:settings-tab-Hosts").unwrap();
+        app.press("label:settings-tab-Hosts").unwrap();
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.press("label:host-edit-host-1").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        assert!(!app.shows("closed save failed"));
+        app.press("id:host-form-cancel").unwrap();
+        app.wait_for_gone("id:host-form-key-path", Duration::from_secs(2))
+            .unwrap();
+        app.press("id:host-add-manual").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        app.type_text("id:host-form-name", "New Host").unwrap();
+        app.type_text("id:host-form-address", "ssh.new.test").unwrap();
+        app.type_text("id:host-form-username", "runner").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        let pending_create = old_server.wait_for_request();
+        assert!(pending_create.starts_with("POST /api/hosts"));
+        app.wait_for("正在保存…").unwrap();
+
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for(&format!("server-url={}", new_server.url))
+            .unwrap();
+        new_server.wait_for_observed_prefixes(&[
+            "GET /api/system",
+            "GET /api/projects HTTP/1.1",
+        ]);
+        app.wait_for("server-connected=true").unwrap();
+        app.wait_for("New Server Host").unwrap();
+        app.press("id:host-add-manual").unwrap();
+        app.wait_for("id:host-form-name").unwrap();
+        app.type_text("id:host-form-name", "New UI").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("New UI")
+        );
+        old_server.release_response();
+        old_server.wait_for_response();
+        app.wait_for_gone("正在保存…", Duration::from_secs(2))
+            .unwrap();
+        assert!(!app.shows("stale save failed"));
+        assert_eq!(
+            app.screen().input_text("id:host-form-name").unwrap(),
+            Some("New UI")
+        );
+        old_server.assert_no_duplicate_request();
+        new_server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn saved_host_delete_cancel_conflict_and_success_are_server_confirmed_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![
+                (
+                    "DELETE /api/hosts/host-1".into(),
+                    409,
+                    r#"{"error":"host is still referenced by projects"}"#.into(),
+                ),
+                (
+                    "DELETE /api/hosts/host-1".into(),
+                    200,
+                    r#"{"ok":true}"#.into(),
+                ),
+            ],
+            vec![
+                ssh_host_value("host-1", "Saved Host", "ssh.remote.test", 22, "deploy", 2),
+                ssh_host_value("host-2", "Other Node", "ssh.other.test", 22, "runner", 0),
+            ],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-1").unwrap();
+        app.wait_for("label:host-edit-host-2").unwrap();
+
+        app.press("label:host-delete-host-1").unwrap();
+        app.wait_for("删除主机「Saved Host」？").unwrap();
+        app.wait_for("有 2 个项目正在使用该主机，请先改绑或删除这些项目。")
+            .unwrap();
+        app.press("id:host-delete-cancel").unwrap();
+        app.wait_for_gone("id:host-delete-confirmation", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_request_starting_with("DELETE /api/hosts/host-1");
+
+        app.press("label:host-delete-host-1").unwrap();
+        app.wait_for("id:host-delete-confirm").unwrap();
+        app.press("id:host-delete-confirm").unwrap();
+        app.wait_for("正在删除…").unwrap();
+        let failed_request = server.wait_for_request();
+        assert!(failed_request.starts_with("DELETE /api/hosts/host-1"));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:host-delete-error").unwrap();
+        assert!(app.shows("host is still referenced by projects"));
+        assert!(app.shows("Saved Host"));
+        assert!(app.shows("Other Node"));
+
+        app.press("id:host-delete-confirm").unwrap();
+        app.wait_for("正在删除…").unwrap();
+        let success_request = server.wait_for_request();
+        assert!(success_request.starts_with("DELETE /api/hosts/host-1"));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("label:host-edit-host-1", Duration::from_secs(2))
+            .unwrap();
+        app.wait_for("label:host-edit-host-2").unwrap();
+        assert!(app.shows("Other Node"));
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn saved_host_create_validation_and_success_use_the_stable_form_headless() {
+        let mut created = ssh_host_value_with_auth(
+            "host-new",
+            "New Node",
+            "ssh.new.test",
+            22,
+            "runner",
+            "agent",
+            None,
+            0,
+        );
+        created["hasSecret"] = serde_json::Value::Bool(false);
+        let server = MockHttpServer::with_workspace_bootstrap_and_hosts(
+            vec![("POST /api/hosts".into(), 200, created.to_string())],
+            vec![ssh_host_value(
+                "host-existing",
+                "Existing Node",
+                "ssh.existing.test",
+                22,
+                "runner",
+                0,
+            )],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-existing").unwrap();
+        app.press("id:host-add-manual").unwrap();
+        app.wait_for("id:host-form-fields").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        app.wait_for("名称、主机地址和用户名不能为空。").unwrap();
+        server.assert_no_request_starting_with("POST /api/hosts");
+
+        app.type_text("id:host-form-name", "New Node").unwrap();
+        app.type_text("id:host-form-address", "ssh.new.test").unwrap();
+        app.type_text("id:host-form-username", "runner").unwrap();
+        app.type_text("id:host-form-port", "70000").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        app.wait_for("端口必须是 1 到 65535 之间的整数。").unwrap();
+        let invalid_port = app
+            .screen()
+            .input_text("id:host-form-port")
+            .unwrap()
+            .unwrap();
+        assert!(invalid_port.parse::<u16>().ok().filter(|port| *port > 0).is_none());
+        server.assert_no_request_starting_with("POST /api/hosts");
+        drop(app);
+
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        open_hosts_settings(&mut app);
+        app.wait_for("label:host-edit-host-existing").unwrap();
+        app.press("id:host-add-manual").unwrap();
+        app.wait_for("id:host-form-fields").unwrap();
+        app.type_text("id:host-form-name", "New Node").unwrap();
+        app.type_text("id:host-form-address", "ssh.new.test").unwrap();
+        app.type_text("id:host-form-username", "runner").unwrap();
+        app.press("id:host-form-submit").unwrap();
+        app.wait_for("正在保存…").unwrap();
+        let request = server.wait_for_request();
+        let body: serde_json::Value =
+            serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "name": "New Node",
+                "host": "ssh.new.test",
+                "port": 22,
+                "username": "runner",
+                "authMethod": "agent"
+            })
+        );
+        assert!(body.get("secret").is_none());
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("label:host-edit-host-new").unwrap();
+        assert!(app.shows("New Node"));
+        server.assert_no_duplicate_request();
     }
 
     #[test]
@@ -659,12 +2818,252 @@ mod tests {
 
     /// 移动端（Android `Idiom::Phone`）与终端工作台（`Idiom::Terminal`）自适应骨架无头验证。
     #[test]
+    fn dirty_file_close_can_cancel_save_and_discard_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:activity-files").unwrap();
+
+        let path = "native/Cargo.toml";
+        let pane_key = falcon_core::pane_key::file_key("proj-falcon", path);
+        let file_editor = format!("id:file-editor-{pane_key}");
+        let close_button = format!("label:close-{pane_key}");
+        let titlebar = format!("label:titlebar-{pane_key}");
+
+        app.press("text:Cargo.toml").unwrap();
+        app.type_text(&file_editor, "cancel-check").unwrap();
+        app.press(&close_button).unwrap();
+        app.wait_for("文件有未保存的修改").unwrap();
+        app.press("id:unsaved-cancel").unwrap();
+        app.wait_for(&titlebar).unwrap();
+
+        app.press(&close_button).unwrap();
+        app.wait_for("文件有未保存的修改").unwrap();
+        app.press("id:unsaved-save").unwrap();
+        app.wait_for_gone(&titlebar, Duration::from_secs(2))
+            .unwrap();
+
+        app.press("text:Cargo.toml").unwrap();
+        app.type_text(&file_editor, "discard-check").unwrap();
+        app.press(&close_button).unwrap();
+        app.wait_for("文件有未保存的修改").unwrap();
+        app.press("id:unsaved-discard").unwrap();
+        app.wait_for_gone(&titlebar, Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn terminal_controls_follow_focus_and_stop_at_file_editor_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:terminal-view-sess-main").unwrap();
+        app.press_key("right").unwrap();
+        app.wait_for("text:terminal-input-count-1").unwrap();
+        app.press_key("ctrl+c").unwrap();
+        app.wait_for("text:terminal-input-count-2").unwrap();
+
+        app.press("label:activity-files").unwrap();
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", "native/Cargo.toml");
+        let file_editor = format!("id:file-editor-{file_key}");
+        app.press("text:Cargo.toml").unwrap();
+        app.wait_for(&file_editor).unwrap();
+        app.type_text(&file_editor, "x").unwrap();
+        app.press_key("right").unwrap();
+        app.wait_for_gone("text:terminal-input-count-3", Duration::from_millis(200))
+            .unwrap();
+    }
+
+    #[test]
+    fn palette_project_selection_focuses_an_attached_session_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-project-proj-falcon-nsh").unwrap();
+        app.press("id:palette-project-proj-falcon-nsh").unwrap();
+        app.wait_for("id:active-pane-t:sess-agent").unwrap();
+        app.wait_for_gone("id:active-pane-t:sess-main", Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn palette_keyboard_wrap_dispatch_empty_enter_and_escape_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        assert!(!app.shows("text:terminal-input-count-1"));
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.type_text("id:palette-input", "no-such-command")
+            .unwrap();
+        app.wait_for("id:palette-empty").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("no-such-command")
+        );
+        app.press_key("enter").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.wait_for("id:palette-empty").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("no-such-command")
+        );
+        assert!(!app.shows("text:terminal-input-count-1"));
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:palette-input", Duration::from_secs(2))
+            .unwrap();
+
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("")
+        );
+        app.type_text("id:palette-input", "@").unwrap();
+        app.press_key("up").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("id:active-pane-t:sess-agent").unwrap();
+        assert!(!app.shows("text:terminal-input-count-1"));
+    }
+
+    #[test]
+    fn palette_keeps_focus_and_reveals_last_row_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.type_text("id:palette-input", "n").unwrap();
+        app.press_key("down").unwrap();
+        app.type_text("id:palette-input", "o-such-command").unwrap();
+        app.wait_for("id:palette-empty").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("no-such-command")
+        );
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:palette-input", Duration::from_secs(2))
+            .unwrap();
+
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("")
+        );
+        app.press_key("up").unwrap();
+        app.wait_for("id:palette-entry-command:maximize-selected")
+            .unwrap();
+        app.press_key("escape").unwrap();
+    }
+
+    #[test]
+    fn split_creation_waits_for_http_success_before_layout_placement_headless() {
+        let session = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "projectId": "proj-falcon",
+                "name": "",
+                "state": "active",
+                "durable": true,
+                "createdAt": 0,
+                "lastActiveAt": 0
+            })
+            .to_string()
+        };
+        let mock = MockHttpServer::new(vec![
+            (
+                "POST /api/projects/proj-falcon/sessions".into(),
+                200,
+                session("split-down"),
+            ),
+            (
+                "POST /api/projects/proj-falcon/sessions".into(),
+                200,
+                session("split-right"),
+            ),
+        ]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:terminal-view-sess-main").unwrap();
+        app.press("id:test-split-down").unwrap();
+        assert!(
+            mock.wait_for_request()
+                .starts_with("POST /api/projects/proj-falcon/sessions")
+        );
+        assert!(
+            !app.screen()
+                .matches("id:active-pane-t:split-down")
+                .unwrap()
+        );
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("id:active-pane-t:split-down")
+            .unwrap();
+        app.press("id:test-split-right").unwrap();
+        assert!(
+            mock.wait_for_request()
+                .starts_with("POST /api/projects/proj-falcon/sessions")
+        );
+        assert!(
+            !app.screen()
+                .matches("id:active-pane-t:split-right")
+                .unwrap()
+        );
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("id:active-pane-t:split-right")
+            .unwrap();
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
     fn mobile_and_tui_idioms_mount_cleanly_headless() {
         ensure_test_platform();
         let opts = FalconLaunchOptions {
             offline_demo: true,
             server_url: Some("http://127.0.0.1:4923".into()),
             initial_theme: None,
+            #[cfg(test)]
+            test_client_url: None,
+            #[cfg(test)]
+            test_switch_url: None,
+            #[cfg(test)]
+            test_live_file_operations: false,
         };
 
         let mut mobile_cfg = EngineConfig::new(falcon_root_with_options(opts.clone()));

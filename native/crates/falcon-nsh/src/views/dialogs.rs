@@ -12,7 +12,10 @@ use nsh_core::prelude::*;
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
 use crate::shell::widgets::{Glyph, glyph, icon_button};
-use crate::store::{ActiveDialog, RightPanelKind, SettingsTab, WorkspaceStore, use_workspace};
+use crate::store::{
+    ActiveDialog, FileGuardAction, FileGuardChoice, SettingsTab, WorkspaceStore, use_workspace,
+};
+use crate::terminal::bind_safe_key_when;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::{ZoomController, zpx};
 
@@ -24,6 +27,14 @@ pub fn ModalLayer() -> impl IntoElement {
     let zoom_ctrl = use_context::<ZoomController>();
 
     let palette_query = signal(String::new());
+    let palette_selection = signal(0usize);
+    let palette_key_state = std::rc::Rc::new(std::cell::RefCell::new(
+        crate::views::palette::PaletteKeyState::default(),
+    ));
+    let palette_was_open = signal(false);
+    let quick_open_query = signal(String::new());
+    let quick_open_selection = signal(0usize);
+    let quick_open_was_open = signal(false);
     let profile_name = signal(String::new());
     let profile_url = signal(String::new());
     let new_proj_name = signal(String::new());
@@ -34,12 +45,47 @@ pub fn ModalLayer() -> impl IntoElement {
     let theme_slot = signal(theme_ctrl.active_slot());
     let theme_picker_open = signal(false);
     let settings_filter = signal(String::new());
+    let host_settings_was_open = signal(false);
 
     view().child(dynamic(move || {
         let dialog = store.active_dialog.get();
+        let host_settings_open = dialog == ActiveDialog::Settings(SettingsTab::Hosts);
+        if host_settings_was_open.get() && !host_settings_open {
+            store.invalidate_host_edit_generation();
+        }
+        host_settings_was_open.set(host_settings_open);
+        if dialog == ActiveDialog::Palette && !palette_was_open.get() {
+            palette_query.set(String::new());
+            palette_selection.set(0);
+        }
+        if dialog == ActiveDialog::QuickOpen && !quick_open_was_open.get() {
+            quick_open_query.set(String::new());
+            quick_open_selection.set(0);
+        }
+        palette_was_open.set(dialog == ActiveDialog::Palette);
+        quick_open_was_open.set(dialog == ActiveDialog::QuickOpen);
+        if dialog == ActiveDialog::QuickOpen
+            && store.server_connected.get()
+            && store.quick_open_project.get() != store.active_project_id.get()
+        {
+            store.load_quick_open_index(&store.active_project_id.get());
+        }
         if dialog == ActiveDialog::None {
             return view().into_element();
         }
+
+        let st_escape = store.clone();
+        let escape_dialog = dialog.clone();
+        bind_safe_key_when("escape", false, nsh_core::keymap::When::Always, move || {
+            if matches!(escape_dialog, ActiveDialog::ConfirmDeleteHost { .. }) {
+                st_escape.host_delete_error.set(None);
+                st_escape
+                    .active_dialog
+                    .set(ActiveDialog::Settings(SettingsTab::Hosts));
+            } else {
+                st_escape.active_dialog.set(ActiveDialog::None);
+            }
+        });
 
         let resolved = theme_ctrl.resolved();
         let ui = &resolved.ui;
@@ -48,8 +94,20 @@ pub fn ModalLayer() -> impl IntoElement {
         let palette_dialog = matches!(dialog, ActiveDialog::Palette);
         let card_body = match dialog {
             ActiveDialog::None => return view().into_element(),
-            ActiveDialog::Palette => {
-                render_palette_modal(&store, &resolved, palette_query).into_element()
+            ActiveDialog::Palette => crate::views::palette::render(
+                &store,
+                palette_query,
+                palette_selection,
+                palette_key_state.clone(),
+                theme_ctrl,
+                zoom_ctrl,
+                theme_picker_open,
+                theme_slot,
+            )
+            .into_element(),
+            ActiveDialog::QuickOpen => {
+                crate::views::quick_open::render(&store, quick_open_query, quick_open_selection)
+                    .into_element()
             }
             ActiveDialog::Profiles => {
                 render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
@@ -82,6 +140,21 @@ pub fn ModalLayer() -> impl IntoElement {
                 foreground_cmd,
             } => render_confirm_terminate_modal(&store, &resolved, &session_id, &foreground_cmd)
                 .into_element(),
+            ActiveDialog::ConfirmDeleteHost {
+                host_id,
+                host_name,
+                project_count,
+            } => render_confirm_delete_host_modal(
+                &store,
+                &resolved,
+                &host_id,
+                &host_name,
+                project_count,
+            )
+            .into_element(),
+            ActiveDialog::ConfirmUnsavedFiles { action, file_keys } => {
+                render_unsaved_files_modal(&store, &resolved, action, file_keys).into_element()
+            }
         };
 
         let scrim = rgba_to_hsla(ThemeRgba {
@@ -153,190 +226,130 @@ fn modal_header(
         )
 }
 
-fn render_palette_modal(
+fn render_unsaved_files_modal(
     store: &WorkspaceStore,
     resolved: &falcon_theme::ResolvedTheme,
-    query: Signal<String>,
+    action: FileGuardAction,
+    file_keys: Vec<String>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
-    let q = query.get().trim().to_ascii_lowercase();
-    let sessions = store.sessions.get();
-    let projects = store.projects.get();
+    let saving = file_keys.iter().any(|key| {
+        store
+            .open_files
+            .get()
+            .get(key)
+            .is_some_and(|buffer| buffer.saving)
+    });
+    let reload = matches!(action, FileGuardAction::Reload(_));
+    let st_save = store.clone();
+    let st_discard = store.clone();
+    let st_cancel = store.clone();
+    let save_label = if file_keys.len() > 1 {
+        t!("native.nsh.saveAllFiles")
+    } else {
+        t!("native.nsh.saveFile")
+    };
+    let file_list = file_keys
+        .iter()
+        .filter_map(|key| {
+            store
+                .open_files
+                .get()
+                .get(key)
+                .map(|buffer| buffer.path.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    let mut items = view().flex_col().p(zpx(10.0)).gap(zpx(4.0));
-
-    // 会话快速跳转与后台持久会话接回
-    items = items.child(
-        text(t!("palette.groupSessions"))
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb_to_hsla(ui.muted_foreground)),
+    let mut buttons = view().flex_row().justify_end().gap(zpx(8.0)).child(
+        view()
+            .test_id("unsaved-cancel")
+            .px(zpx(10.0))
+            .py(zpx(5.0))
+            .rounded(zpx(6.0))
+            .cursor_pointer()
+            .bg(rgb_to_hsla(ui.secondary))
+            .on_press(move || st_cancel.resolve_file_guard(FileGuardChoice::Cancel))
+            .child(
+                text(t!("common.cancel"))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.secondary_foreground)),
+            ),
     );
-    for s in sessions {
-        let title = s.display_title();
-        if !q.is_empty() && !title.to_ascii_lowercase().contains(&q) {
-            continue;
-        }
-        let attached = store.is_session_attached(&s.id);
-        let st = store.clone();
-        let sid = s.id.clone();
-        let right_label = if attached {
-            t!("session.open")
-        } else {
-            t!("native.nsh.reattachSession")
-        };
-        items = items.child(
+
+    if !saving {
+        buttons = buttons.child(
             view()
-                .flex_row()
-                .items_center()
-                .justify_between()
+                .test_id("unsaved-discard")
                 .px(zpx(10.0))
-                .py(zpx(6.0))
+                .py(zpx(5.0))
                 .rounded(zpx(6.0))
                 .cursor_pointer()
-                .bg(rgb_to_hsla(ui.card))
-                .on_press(move || {
-                    st.focus_session(&sid);
-                    st.active_dialog.set(ActiveDialog::None);
-                })
-                .child(text(title).text_xs().text_color(rgb_to_hsla(ui.foreground)))
+                .bg(rgb_to_hsla(ui.destructive))
+                .on_press(move || st_discard.resolve_file_guard(FileGuardChoice::Discard))
                 .child(
-                    text(right_label)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.tint_strong)),
+                    text(if reload {
+                        t!("native.nsh.reloadFile")
+                    } else {
+                        t!("native.nsh.discardFileChanges")
+                    })
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.destructive_foreground)),
                 ),
         );
     }
 
-    // 项目切换
-    items = items.child(
-        view().pt(zpx(6.0)).child(
-            text(t!("palette.groupProjects"))
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb_to_hsla(ui.muted_foreground)),
-        ),
-    );
-    for p in projects {
-        if !q.is_empty() && !p.name.to_ascii_lowercase().contains(&q) {
-            continue;
-        }
-        let st = store.clone();
-        let pid = p.id.clone();
-        items = items.child(
+    if !reload {
+        buttons = buttons.child(
             view()
-                .flex_row()
-                .items_center()
-                .justify_between()
+                .test_id("unsaved-save")
                 .px(zpx(10.0))
-                .py(zpx(6.0))
+                .py(zpx(5.0))
                 .rounded(zpx(6.0))
                 .cursor_pointer()
-                .bg(rgb_to_hsla(ui.card))
-                .on_press(move || {
-                    st.active_project_id.set(pid.clone());
-                    st.active_dialog.set(ActiveDialog::None);
-                })
+                .bg(rgb_to_hsla(ui.tint))
+                .on_press(move || st_save.resolve_file_guard(FileGuardChoice::Save))
                 .child(
-                    text(p.name)
+                    text(save_label)
                         .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    text(p.path)
-                        .text_xs()
-                        .font_family(FONT_FAMILY_MONO)
-                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        .text_color(rgb_to_hsla(ui.tint_foreground)),
                 ),
-        );
-    }
-
-    // 全局操作
-    items = items.child(
-        view().pt(zpx(6.0)).child(
-            text(t!("palette.groupActions"))
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb_to_hsla(ui.muted_foreground)),
-        ),
-    );
-
-    let quick_actions: Vec<(String, Box<dyn Fn()>)> = vec![
-        (t!("sidebar.newTerminal"), {
-            let st = store.clone();
-            Box::new(move || {
-                st.create_terminal_in_active_project();
-                st.active_dialog.set(ActiveDialog::None);
-            })
-        }),
-        (t!("palette.openSettings"), {
-            let st = store.clone();
-            Box::new(move || {
-                st.active_dialog
-                    .set(ActiveDialog::Settings(SettingsTab::Appearance));
-            })
-        }),
-        (t!("palette.openRelays"), {
-            let st = store.clone();
-            Box::new(move || {
-                st.active_dialog
-                    .set(ActiveDialog::Settings(SettingsTab::Relays));
-            })
-        }),
-        (t!("native.menu.files"), {
-            let st = store.clone();
-            Box::new(move || {
-                st.right_panel_open.set(true);
-                st.right_panel_kind.set(RightPanelKind::Files);
-                st.active_dialog.set(ActiveDialog::None);
-            })
-        }),
-        (t!("native.menu.changes"), {
-            let st = store.clone();
-            Box::new(move || {
-                st.right_panel_open.set(true);
-                st.right_panel_kind.set(RightPanelKind::Git);
-                st.active_dialog.set(ActiveDialog::None);
-            })
-        }),
-    ];
-
-    for (label, cb) in quick_actions {
-        if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
-            continue;
-        }
-        items = items.child(
-            view()
-                .px(zpx(10.0))
-                .py(zpx(6.0))
-                .rounded(zpx(6.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.card))
-                .on_press(cb)
-                .child(text(label).text_xs().text_color(rgb_to_hsla(ui.foreground))),
         );
     }
 
     view()
         .flex_col()
-        .h(zpx(460.0))
+        .child(modal_header(
+            store,
+            resolved,
+            t!("native.nsh.unsavedFilesTitle"),
+        ))
         .child(
-            view().p(zpx(16.0)).child(
-                input()
-                    .w_full()
-                    .px(zpx(10.0))
-                    .py(zpx(6.0))
-                    .rounded(zpx(6.0))
-                    .bg(rgba_to_hsla(ui.input))
+            view()
+                .flex_col()
+                .p(zpx(14.0))
+                .gap(zpx(12.0))
+                .child(
+                    text(if saving {
+                        t!("native.nsh.fileSaveInProgress")
+                    } else if reload {
+                        t!("native.nsh.confirmReloadFile")
+                    } else {
+                        t!("native.nsh.unsavedFilesBody")
+                    })
                     .text_xs()
-                    .text_color(rgb_to_hsla(ui.foreground))
-                    .placeholder(t!("palette.placeholder"))
-                    .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                    .value(query.get())
-                    .on_change(move |v: &str| query.set(v.to_string())),
-            ),
+                    .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .when(!file_list.is_empty(), |v| {
+                    v.child(
+                        text(file_list)
+                            .text_xs()
+                            .font_family(FONT_FAMILY_MONO)
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                    )
+                })
+                .child(buttons),
         )
-        .child(scroll().flex_1().child(items))
 }
 
 fn render_profiles_modal(
@@ -1214,47 +1227,52 @@ fn render_hosts_tab(
     store: &WorkspaceStore,
     resolved: &falcon_theme::ResolvedTheme,
 ) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let hosts = store.hosts.get();
-    let mut table = view()
-        .flex_col()
-        .p(zpx(8.0))
-        .rounded(zpx(12.0))
-        .bg(rgb_to_hsla(ui.app))
-        .child(
-            view()
-                .h(zpx(32.0))
-                .flex_row()
-                .gap(zpx(12.0))
-                .child(
-                    text(t!("host.name"))
-                        .w(zpx(136.0))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    text(t!("native.nsh.hostConnection"))
-                        .flex_1()
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    text(t!("project.authMethod"))
-                        .w(zpx(160.0))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                ),
-        );
-    for host in hosts {
-        let st = store.clone();
-        let id = host.id.clone();
-        let auth = host
-            .source
-            .as_ref()
-            .map(|h| h.auth_method.as_str())
-            .unwrap_or("agent");
-        table = table.child(
-            view()
+    let row_store = store.clone();
+    let row_theme = resolved.clone();
+    let table = dynamic(move || {
+        let store = row_store.clone();
+        let resolved = row_theme.clone();
+        let ui = &resolved.ui;
+        let hosts = store.hosts.get();
+        let mut table = view()
+            .flex_col()
+            .p(zpx(8.0))
+            .rounded(zpx(12.0))
+            .bg(rgb_to_hsla(ui.app))
+            .child(
+                view()
+                    .h(zpx(32.0))
+                    .flex_row()
+                    .gap(zpx(12.0))
+                    .child(
+                        text(t!("host.name"))
+                            .w(zpx(136.0))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                    )
+                    .child(
+                        text(t!("native.nsh.hostConnection"))
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                    )
+                    .child(
+                        text(t!("project.authMethod"))
+                            .w(zpx(160.0))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                    ),
+            );
+        for host in hosts {
+            let st = store.clone();
+            let id = host.id.clone();
+            let host_source = host.source.clone();
+            let auth = host
+                .source
+                .as_ref()
+                .map(|h| h.auth_method.as_str())
+                .unwrap_or("agent");
+            let mut row = view()
                 .min_h(zpx(40.0))
                 .flex_row()
                 .items_center()
@@ -1288,6 +1306,7 @@ fn render_hosts_tab(
                 )
                 .child(
                     view()
+                        .label(format!("host-test-{id}"))
                         .px(zpx(8.0))
                         .py(zpx(4.0))
                         .rounded(zpx(8.0))
@@ -1299,14 +1318,165 @@ fn render_hosts_tab(
                                 .text_xs()
                                 .text_color(rgb_to_hsla(ui.foreground)),
                         ),
-                ),
-        );
+                );
+            if let Some(source) = host_source {
+                let edit_store = store.clone();
+                let delete_store = store.clone();
+                let edit_source = source.clone();
+                let delete_id = source.id.clone();
+                let delete_name = source.name.clone();
+                let project_count = source.project_count;
+                row = row
+                    .child(
+                        view()
+                            .label(format!("host-edit-{}", source.id))
+                            .px(zpx(8.0))
+                            .py(zpx(4.0))
+                            .rounded(zpx(8.0))
+                            .cursor_pointer()
+                            .bg(rgb_to_hsla(ui.background))
+                            .on_press(move || {
+                                edit_store.begin_host_edit(edit_source.clone());
+                                edit_store
+                                    .active_dialog
+                                    .set(ActiveDialog::Settings(SettingsTab::Hosts));
+                            })
+                            .child(
+                                text(t!("host.edit"))
+                                    .text_xs()
+                                    .text_color(rgb_to_hsla(ui.foreground)),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .label(format!("host-delete-{}", source.id))
+                            .px(zpx(8.0))
+                            .py(zpx(4.0))
+                            .rounded(zpx(8.0))
+                            .cursor_pointer()
+                            .bg(rgb_to_hsla(ui.background))
+                            .on_press(move || {
+                                delete_store.host_delete_error.set(None);
+                                delete_store
+                                    .active_dialog
+                                    .set(ActiveDialog::ConfirmDeleteHost {
+                                        host_id: delete_id.clone(),
+                                        host_name: delete_name.clone(),
+                                        project_count,
+                                    });
+                            })
+                            .child(
+                                text(t!("host.delete"))
+                                    .text_xs()
+                                    .text_color(rgb_to_hsla(ui.destructive)),
+                            ),
+                    );
+            }
+            table = table.child(row);
+        }
+        table
+    });
+    let editing = store.editing_host.get();
+    let editing_generation = store.editing_host_generation.get();
+    let editing_id = editing.as_ref().map(|host| host.id.clone());
+    let form_key = editing_id.as_ref().map_or_else(
+        || "host-form-create".to_string(),
+        |id| format!("host-form-{id}-{editing_generation}"),
+    );
+    view().flex_col().gap(zpx(12.0)).child(table).child(
+        super::host_form::host_form()
+            .editing_id(editing_id)
+            .key(form_key),
+    )
+}
+fn render_confirm_delete_host_modal(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+    host_id: &str,
+    host_name: &str,
+    project_count: u32,
+) -> impl IntoElement {
+    let ui = &resolved.ui;
+    let busy_target = store.host_delete_busy.get();
+    let busy = busy_target.is_some();
+    let deleting = busy_target
+        .as_ref()
+        .is_some_and(|(_, id)| id == host_id);
+    let error = store.host_delete_error.get();
+    let cancel = store.clone();
+    let delete = store.clone();
+    let id = host_id.to_string();
+    let title = t!("host.deleteTitle", name = host_name);
+    let mut confirm = view()
+        .test_id("host-delete-confirm")
+        .px(zpx(12.0))
+        .py(zpx(7.0))
+        .rounded(zpx(8.0))
+        .bg(rgb_to_hsla(ui.destructive));
+    if !busy {
+        confirm = confirm.cursor_pointer().on_press(move || delete.delete_ssh_host(&id));
     }
     view()
+        .test_id("host-delete-confirmation")
         .flex_col()
         .gap(zpx(12.0))
-        .child(table)
-        .child(super::host_form::host_form())
+        .p(zpx(20.0))
+        .child(
+            text(title)
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb_to_hsla(ui.foreground)),
+        )
+        .child(
+            text(t!("host.deleteBody"))
+                .text_xs()
+                .text_color(rgb_to_hsla(ui.foreground)),
+        )
+        .when(project_count > 0, |view| {
+            view.child(
+                text(t!("host.deleteInUse", n = project_count.to_string().as_str()))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.warning)),
+            )
+        })
+        .when_some(error, |view, error| {
+            view.child(
+                text(error)
+                    .test_id("host-delete-error")
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.destructive)),
+            )
+        })
+        .child(
+            view().flex_row().justify_end().gap(zpx(8.0))
+                .child(
+                    view()
+                        .test_id("host-delete-cancel")
+                        .px(zpx(12.0))
+                        .py(zpx(7.0))
+                        .rounded(zpx(8.0))
+                        .cursor_pointer()
+                        .bg(rgb_to_hsla(ui.secondary))
+                        .on_press(move || {
+                            cancel.host_delete_error.set(None);
+                            cancel.active_dialog.set(ActiveDialog::Settings(SettingsTab::Hosts));
+                        })
+                        .child(
+                            text(t!("common.cancel"))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                        ),
+                )
+                .child(confirm.child(
+                    text(if deleting {
+                        t!("host.deleting")
+                    } else {
+                        t!("host.delete")
+                    })
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.destructive_foreground)),
+                )),
+        )
 }
 
 fn render_relays_tab(

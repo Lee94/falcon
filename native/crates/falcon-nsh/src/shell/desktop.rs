@@ -678,6 +678,10 @@ fn render_pane_island(
         .items_center()
         .justify_between()
         .label(format!("titlebar-{pane_key}"))
+        .test_id(&format!(
+            "{}-pane-{pane_key}",
+            if is_focused { "active" } else { "inactive" }
+        ))
         .h(zpx(34.0))
         .flex_none()
         .bg(rgb_to_hsla(if is_focused {
