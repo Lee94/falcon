@@ -38,7 +38,8 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let overlay: Value = serde_json::from_str(EN_JSON)
         .expect("falcon-nsh locales/en.json must be valid JSON");
     flatten_json("", &overlay, &mut english);
-    map.insert("en".to_string(), english);
+    map.insert("en".to_string(), english.clone());
+    map.insert("en-US".to_string(), english);
     Translations::from_map(map)
 });
 

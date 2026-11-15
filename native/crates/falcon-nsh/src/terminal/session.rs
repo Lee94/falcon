@@ -23,6 +23,19 @@ use falcon_term::{
 use falcon_theme::ResolvedTheme;
 use parking_lot::Mutex;
 
+pub use falcon_core::agent_mode::AgentCommand;
+use falcon_core::agent_mode::{AgentModeTransition, agent_command_allowed};
+#[cfg(not(target_arch = "wasm32"))]
+use falcon_core::agent_mode;
+use falcon_proto::AgentViewState;
+
+#[derive(Clone, Debug, Default)]
+pub struct AgentRuntime {
+    pub state: Option<AgentViewState>,
+    pub connected: bool,
+    pub transition: AgentModeTransition,
+}
+
 /// 会话非定尺寸生效网格记录（ADR 0022）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectiveGrid {
@@ -99,6 +112,8 @@ pub struct TerminalSession {
     mouse: Mutex<MouseReporter>,
     wheel: Mutex<WheelAccumulator>,
     frame_seq: AtomicU64,
+    agent: Mutex<AgentRuntime>,
+    agent_revision: AtomicU64,
     #[cfg(test)]
     test_input_count: AtomicU64,
 }
@@ -130,6 +145,8 @@ impl TerminalSession {
             mouse: Mutex::new(MouseReporter::new()),
             wheel: Mutex::new(WheelAccumulator::new()),
             frame_seq: AtomicU64::new(1),
+            agent: Mutex::new(AgentRuntime::default()),
+            agent_revision: AtomicU64::new(1),
             #[cfg(test)]
             test_input_count: AtomicU64::new(0),
         })
@@ -169,6 +186,49 @@ impl TerminalSession {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn agent_revision(&self) -> u64 {
+        self.agent_revision.load(Ordering::Acquire)
+    }
+
+    pub fn agent_runtime(&self) -> AgentRuntime {
+        self.agent.lock().clone()
+    }
+
+    /// Recheck the latest network state at activation time, including stale popup actions.
+    pub fn send_agent_command(&self, command: AgentCommand) -> bool {
+        let agent = self.agent.lock();
+        let meta = self.meta();
+        let available = agent.connected
+            && agent.transition.synchronized
+            && !agent.transition.switching()
+            && meta.state == SessionState::Active
+            && meta.reconnecting_attempt.is_none();
+        if !available
+            || !agent
+                .state
+                .as_ref()
+                .is_some_and(|state| agent_command_allowed(state, &command))
+        {
+            return false;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(socket) = self.socket.lock().as_ref() {
+            match command {
+                AgentCommand::Prompt(text) => socket.agent_prompt(text),
+                AgentCommand::Interrupt => socket.agent_interrupt(),
+                AgentCommand::Permission { call_id, decision } => {
+                    socket.agent_permission(call_id, decision, None)
+                }
+                AgentCommand::SetModel(model) => socket.agent_set_model(model),
+                AgentCommand::SetReasoningEffort(effort) => {
+                    socket.agent_set_reasoning_effort(effort)
+                }
+            }
+            return true;
+        }
+        false
     }
 
     pub fn is_durable(&self) -> bool {
@@ -489,6 +549,11 @@ impl SessionSink for TerminalSession {
         match ev {
             SessionEvent::Connected { .. } => {
                 *self.mouse.lock() = MouseReporter::new();
+                {
+                    let mut agent = self.agent.lock();
+                    agent.connected = true;
+                    agent.transition = agent.transition.connected(true);
+                }
                 let mut meta = self.meta.lock();
                 meta.connection = match meta.state {
                     SessionState::Dead => ConnectionState::Dead,
@@ -500,6 +565,7 @@ impl SessionSink for TerminalSession {
                     meta.last_error = None;
                 }
                 drop(meta);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
             SessionEvent::Output(bytes) => {
@@ -533,6 +599,7 @@ impl SessionSink for TerminalSession {
                 meta.connection = ConnectionState::Reconnecting;
                 meta.reconnecting_attempt = Some(attempt);
                 drop(meta);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
             SessionEvent::Error(msg) => {
@@ -551,6 +618,14 @@ impl SessionSink for TerminalSession {
                 self.bump_frame();
             }
             SessionEvent::Disconnected { retry_attempt, .. } => {
+                {
+                    let mut agent = self.agent.lock();
+                    agent.connected = false;
+                    agent.transition = agent.transition.disconnected();
+                    if let Some(state) = agent.state.as_mut().filter(|state| state.active && !state.terminal_backed) {
+                        state.status = falcon_proto::AgentTurnStatus::Unknown;
+                    }
+                }
                 let mut meta = self.meta.lock();
                 if meta.connection != ConnectionState::Dead {
                     meta.connection = ConnectionState::Disconnected;
@@ -558,16 +633,147 @@ impl SessionSink for TerminalSession {
                 meta.reconnecting_attempt = Some(retry_attempt);
                 meta.program_status.clear();
                 drop(meta);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
-            SessionEvent::AgentSnapshot(_)
-            | SessionEvent::AgentEntry(_)
-            | SessionEvent::AgentDelta { .. }
-            | SessionEvent::AgentMeta { .. } => {}
+            SessionEvent::AgentSnapshot(state) => {
+                let mut agent = self.agent.lock();
+                agent.transition = agent.transition.snapshot(
+                    agent_mode::is_interactive_gui(Some(&state)),
+                    agent_mode::is_snapshot_ready(&state),
+                );
+                agent.state = Some(state);
+                self.agent_revision.fetch_add(1, Ordering::Release);
+            }
+            SessionEvent::AgentEntry(entry) => {
+                if let Some(state) = self.agent.lock().state.as_mut() {
+                    state.upsert_entry(entry);
+                    self.agent_revision.fetch_add(1, Ordering::Release);
+                }
+            }
+            SessionEvent::AgentDelta { id, kind, delta } => {
+                if let Some(state) = self.agent.lock().state.as_mut() {
+                    state.apply_delta(&id, kind, &delta);
+                    self.agent_revision.fetch_add(1, Ordering::Release);
+                }
+            }
+            SessionEvent::AgentMeta {
+                active,
+                status,
+                model,
+                permission_mode,
+                cwd,
+                commands,
+                models,
+                model_options,
+                reasoning_effort,
+            } => {
+                if let Some(state) = self.agent.lock().state.as_mut() {
+                    state.active = active;
+                    state.status = status;
+                    if model.is_some() {
+                        state.model = model;
+                    }
+                    if permission_mode.is_some() {
+                        state.permission_mode = permission_mode;
+                    }
+                    if cwd.is_some() {
+                        state.cwd = cwd;
+                    }
+                    if let Some(commands) = commands {
+                        state.commands = commands;
+                    }
+                    if let Some(models) = models {
+                        state.models = models;
+                    }
+                    if let Some(options) = model_options {
+                        state.model_options = options;
+                    }
+                    state.reasoning_effort = reasoning_effort;
+                    self.agent_revision.fetch_add(1, Ordering::Release);
+                }
+            }
             SessionEvent::Unauthorized => {
+                {
+                    let mut agent = self.agent.lock();
+                    agent.connected = false;
+                    agent.transition = agent.transition.disconnected();
+                    if let Some(state) = agent.state.as_mut().filter(|state| state.active && !state.terminal_backed) {
+                        state.status = falcon_proto::AgentTurnStatus::Unknown;
+                    }
+                }
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.meta.lock().connection = ConnectionState::Disconnected;
                 self.bump_frame();
             }
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod agent_tests {
+    use super::*;
+    use falcon_proto::{
+        AgentDeltaKind, AgentEntry, AgentSlashCommand, AgentTurnStatus, SessionAgent,
+    };
+
+    #[test]
+    fn agent_snapshot_entries_deltas_meta_and_reconnect_are_authoritative() {
+        let session = TerminalSession::new_offline("agent-test", 80, 24, true);
+        session.on_event(SessionEvent::Connected { reconnected: false });
+        assert!(!session.agent_runtime().transition.synchronized);
+        session.on_event(SessionEvent::AgentSnapshot(AgentViewState::new(
+            SessionAgent::Claude,
+            true,
+        )));
+        assert!(session.agent_runtime().transition.synchronized);
+        let revision = session.agent_revision();
+        session.on_event(SessionEvent::AgentEntry(AgentEntry::Message {
+            id: "message".into(),
+            text: "hello".into(),
+        }));
+        session.on_event(SessionEvent::AgentDelta {
+            id: "message".into(),
+            kind: AgentDeltaKind::Message,
+            delta: " world".into(),
+        });
+        session.on_event(SessionEvent::AgentMeta {
+            active: true,
+            status: AgentTurnStatus::Running,
+            model: Some("confirmed".into()),
+            permission_mode: None,
+            cwd: None,
+            commands: Some(vec![AgentSlashCommand {
+                name: "help".into(),
+                description: "help".into(),
+            }]),
+            models: None,
+            model_options: None,
+            reasoning_effort: None,
+        });
+        let runtime = session.agent_runtime();
+        let state = runtime.state.unwrap();
+        assert!(session.agent_revision() > revision);
+        assert_eq!(state.model.as_deref(), Some("confirmed"));
+        assert_eq!(state.commands.len(), 1);
+        assert_eq!(
+            state.entries,
+            vec![AgentEntry::Message {
+                id: "message".into(),
+                text: "hello world".into()
+            }]
+        );
+        assert!(!session.send_agent_command(AgentCommand::Prompt("blocked while running".into())));
+        session.on_event(SessionEvent::Disconnected {
+            retry_attempt: 1,
+            retry_in: std::time::Duration::from_secs(1),
+        });
+        assert!(!session.agent_runtime().connected);
+        assert!(!session.agent_runtime().transition.synchronized);
+        session.on_event(SessionEvent::Connected { reconnected: true });
+        assert!(!session.agent_runtime().transition.synchronized);
+        assert!(!session.send_agent_command(AgentCommand::Interrupt));
+        session.on_event(SessionEvent::AgentSnapshot(state));
+        assert!(session.agent_runtime().transition.synchronized);
     }
 }
