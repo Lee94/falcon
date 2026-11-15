@@ -493,7 +493,7 @@ fn checkout_row(
                 false,
                 resolved,
                 move || {
-                    create.active_project_id.set(create_id.clone());
+                    create.select_project(&create_id);
                     create.create_terminal_in_active_project();
                 },
             ));

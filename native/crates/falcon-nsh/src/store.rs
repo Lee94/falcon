@@ -3855,9 +3855,17 @@ impl WorkspaceStore {
         if !self.set_active_project_id(project_id.to_string()) {
             return;
         }
+        self.git_working_generation
+            .set(self.git_working_generation.get().wrapping_add(1));
+        self.git_loading.set(false);
+        self.git_error.set(None);
+        self.git_changes.set(Vec::new());
+        self.git_commits.set(Vec::new());
         self.selected_git_path.set(None);
+        self.selected_git_repo.set(None);
         self.clear_git_diff();
         self.git_conflict.set(None);
+        self.git_confirmation.set(None);
         self.git_operation_error.set(None);
         self.refresh_project_data();
         self.refresh_project_agents();

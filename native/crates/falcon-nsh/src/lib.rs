@@ -404,6 +404,28 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             })
             .child(text("begin-pending-mapping-change")),
     );
+    let add_project_b = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-add-project-b")
+            .on_press(move || {
+                add_project_b.projects.update(|projects| {
+                    if !projects.iter().any(|project| project.id == "proj-b") {
+                        projects.push(crate::store::ProjectRecord {
+                            id: "proj-b".into(),
+                            name: "B".into(),
+                            path: "/workspace/b".into(),
+                            host_id: None,
+                            host_name: None,
+                            derived_from: None,
+                            branch: None,
+                            source: None,
+                        });
+                    }
+                });
+            })
+            .child(text("add-project-b")),
+    );
     let open_preview = store.clone();
     controls = controls.child(
         view()
@@ -1759,6 +1781,92 @@ mod tests {
         app.press("id:git-confirm-action").unwrap();
         app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
         server.assert_no_request_starting_with(operation_path);
+    }
+
+    #[test]
+    fn sidebar_terminal_create_clears_git_paths_before_failed_project_refresh_headless() {
+        let project_a_git = "GET /api/projects/proj-falcon/git/working".to_string();
+        let project_b_git = "GET /api/projects/proj-b/git/working".to_string();
+        let project_b_files = "GET /api/projects/proj-b/files";
+        let project_b_agents = "GET /api/agents";
+        let project_b_session = "POST /api/projects/proj-b/sessions";
+        let project_b_git_operation = "POST /api/projects/proj-b/git/op";
+        let server = MockHttpServer::new_with_auto_responses(
+            vec![(
+                project_a_git.clone(),
+                200,
+                git_working_response(
+                    vec![serde_json::json!({"path":"a-only.txt","index":" ","work":"M"})],
+                    None,
+                ),
+            )],
+            vec![
+                (
+                    project_b_git.clone(),
+                    500,
+                    r#"{"error":"project B Git listing failed"}"#.into(),
+                ),
+                (
+                    project_b_files.into(),
+                    200,
+                    r#"{"path":"/workspace/b","entries":[]}"#.into(),
+                ),
+                (project_b_agents.into(), 200, "[]".into()),
+                (
+                    project_b_session.into(),
+                    500,
+                    r#"{"error":"mock terminal creation failure"}"#.into(),
+                ),
+            ],
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-add-project-b").unwrap();
+        app.wait_for("label:new-terminal-proj-b").unwrap();
+        app.press("label:activity-changes").unwrap();
+        app.press("id:git-refresh").unwrap();
+        app.wait_for("id:git-loading").unwrap();
+        let initial_git = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[project_a_git.as_str()]);
+        assert!(initial_git[0].starts_with(&project_a_git), "{}", initial_git[0]);
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:a-only.txt").unwrap();
+        app.wait_for("id:git-discard-all").unwrap();
+        server.clear_observed_requests();
+
+        app.press("label:new-terminal-proj-b").unwrap();
+        app.wait_for("id:git-discard-all").unwrap();
+        let requests = server.wait_for_observed_prefixes_pumping(
+            &mut app,
+            &[
+                project_b_git.as_str(),
+                project_b_files,
+                project_b_agents,
+                project_b_session,
+            ],
+        );
+        let project_b_git_request = &requests[0];
+        assert!(project_b_git_request.starts_with(&project_b_git));
+        assert!(requests[1].starts_with(project_b_files));
+        assert!(requests[2].starts_with(project_b_agents));
+        assert!(requests[3].starts_with(project_b_session));
+        app.wait_for_gone("id:git-file-0", Duration::from_secs(2))
+            .unwrap();
+        assert!(!app.screen().enabled("id:git-discard-all").unwrap());
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_request_starting_with(project_b_git_operation);
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_request_starting_with(project_b_git_operation);
     }
 
     #[test]
