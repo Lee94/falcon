@@ -163,6 +163,64 @@ fn project_picker_navigation_preserves_form_and_uses_discovered_shell() {
 }
 
 #[test]
+fn inline_ssh_edits_disable_saved_connection_probes_and_ignore_late_shells() {
+    let mock = MockHttpServer::with_workspace_bootstrap_projects(
+        vec![
+            (
+                "GET /api/shells?projectId=inline".into(),
+                200,
+                r#"{"kind":"posix","default":"/old/shell","shells":["/old/shell"]}"#.into(),
+            ),
+            (
+                "GET /api/shells?projectId=inline".into(),
+                200,
+                r#"{"kind":"posix","default":"/saved/shell","shells":["/saved/shell"]}"#.into(),
+            ),
+            (
+                "GET /api/fs/list?path=%2Fremote%2Frepo&projectId=inline".into(),
+                200,
+                listing(
+                    "/remote/repo",
+                    Some("/remote"),
+                    &[("saved-subdir", "/remote/repo/subdir")],
+                ),
+            ),
+        ],
+        inline_project(),
+    );
+    let mut app = inline_app(&mock);
+    app.press("label:project-menu-inline").unwrap();
+    app.press("编辑项目").unwrap();
+    mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/shells?projectId=inline"]);
+    app.clear("label:主机").unwrap();
+    app.type_text("label:主机", "new.example").unwrap();
+    mock.release_response();
+    mock.wait_for_response();
+    app.next_change(Duration::from_millis(100)).unwrap();
+    app.wait_for("先选一台远端主机，才能浏览那边的目录")
+        .unwrap();
+    mock.clear_observed_requests();
+    app.press("浏览…").unwrap();
+    mock.assert_no_request_starting_with("GET /api/fs/list");
+    app.press("label:project-shell-menu").unwrap();
+    app.wait_for("自定义…").unwrap();
+    assert!(!app.shows("/old/shell"));
+    app.press("自定义…").unwrap();
+    app.clear("label:主机").unwrap();
+    app.type_text("label:主机", "old.example").unwrap();
+    mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/shells?projectId=inline"]);
+    mock.release_response();
+    mock.wait_for_response();
+    app.press("浏览…").unwrap();
+    mock.wait_for_observed_prefixes_pumping(
+        &mut app,
+        &["GET /api/fs/list?path=%2Fremote%2Frepo&projectId=inline"],
+    );
+    mock.release_response();
+    app.wait_for("saved-subdir").unwrap();
+}
+
+#[test]
 fn project_multi_picker_uses_host_presets_and_keeps_cross_directory_selection() {
     let mock = MockHttpServer::new_with_auto_responses(
         vec![(

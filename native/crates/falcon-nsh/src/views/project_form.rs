@@ -148,7 +148,21 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
         } else {
             probe_project
                 .as_ref()
-                .filter(|p| p.project_type == ProjectType::Ssh)
+                .filter(|p| {
+                    // Project probes resolve the persisted SSH connection on the
+                    // server. Never offer its directories/shells for edited credentials.
+                    p.project_type == ProjectType::Ssh
+                        && p.host_id.is_none()
+                        && p.ssh.as_ref().is_some_and(|ssh| {
+                            ssh_host.get().trim() == ssh.host
+                                && ssh_port.get().trim().parse::<u16>().ok() == Some(ssh.port)
+                                && ssh_username.get().trim() == ssh.username
+                                && ssh_auth_method.get() == ssh.auth_method
+                                && ssh_key_path.get().trim()
+                                    == ssh.key_path.as_deref().unwrap_or("")
+                                && ssh_secret.get().is_empty()
+                        })
+                })
                 .map(|p| ProbeTarget::Project(p.id.clone()))
         });
     });
