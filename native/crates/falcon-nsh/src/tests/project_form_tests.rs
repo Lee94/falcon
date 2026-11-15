@@ -48,6 +48,57 @@ fn probe_app(mock: &MockHttpServer) -> Headless {
     app
 }
 
+fn inline_project() -> serde_json::Value {
+    serde_json::json!([{
+        "id": "inline", "name": "Legacy", "type": "ssh", "workingDir": "/remote/repo", "createdAt": 0,
+        "ssh": { "host": "old.example", "port": 22, "username": "dev", "authMethod": "agent", "hasSecret": false }
+    }])
+}
+
+fn inline_app(mock: &MockHttpServer) -> Headless {
+    let mut app = headless_with_options(
+        FalconLaunchOptions {
+            server_url: Some(mock.url.clone()),
+            ..Default::default()
+        },
+        ColorScheme::Dark,
+    );
+    app.first_render().unwrap();
+    app.wait_for("Legacy").unwrap();
+    app
+}
+
+#[test]
+fn legacy_ssh_group_creation_never_probes_or_creates_on_backend() {
+    let mock = MockHttpServer::with_workspace_bootstrap_projects(
+        vec![(
+            "POST /api/projects ".into(),
+            500,
+            r#"{"error":"ssh rejected"}"#.into(),
+        )],
+        inline_project(),
+    );
+    let mut app = inline_app(&mock);
+    mock.clear_observed_requests();
+    app.press("label:new-project-s:legacy:dev@old.example:22")
+        .unwrap();
+    app.wait_for("label:主机").unwrap();
+    assert!(!app.shows("选择文件夹"));
+    app.type_text("label:项目名称", "Remote draft").unwrap();
+    app.type_text("label:主机", "new.example").unwrap();
+    app.type_text("label:用户名", "dev").unwrap();
+    mock.assert_no_request_starting_with("GET /api/fs/list");
+    mock.assert_no_request_starting_with("GET /api/shells");
+    app.press("label:project-submit").unwrap();
+    let request =
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/projects "])[0].clone();
+    let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+    assert_eq!(body["type"], "ssh");
+    assert_eq!(body["ssh"]["host"], "new.example");
+    mock.release_response();
+    app.wait_for("ssh rejected").unwrap();
+}
+
 #[test]
 fn project_picker_navigation_preserves_form_and_uses_discovered_shell() {
     let mock = MockHttpServer::new_with_auto_responses(

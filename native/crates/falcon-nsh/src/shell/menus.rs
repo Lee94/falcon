@@ -267,7 +267,7 @@ pub(crate) fn host_menu_actions(
         let st = store.clone();
         let host_id = host_id.map(str::to_owned);
         actions.push(PopupAction::new(server.clone(), if multi { t!("multi.newProject") } else { t!("sidebar.newProject") }, false, false, move || {
-            st.active_dialog.set(ActiveDialog::NewProjectPreset { host_id: host_id.clone(), multi });
+            st.active_dialog.set(ActiveDialog::NewProjectPreset { host_id: host_id.clone(), remote: host_id.is_some(), multi });
         }));
     }
     actions

@@ -68,7 +68,7 @@ pub enum ActiveDialog {
     QuickOpen,
     Profiles,
     NewProject,
-    NewProjectPreset { host_id: Option<String>, multi: bool },
+    NewProjectPreset { host_id: Option<String>, remote: bool, multi: bool },
     EditProject(String),
     DeriveProject(String),
     Settings(SettingsTab),

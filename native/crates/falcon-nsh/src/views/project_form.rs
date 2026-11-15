@@ -66,6 +66,8 @@ pub struct ProjectFormProps {
     #[prop(default)]
     pub preset_host_id: Option<String>,
     #[prop(default)]
+    pub preset_remote: bool,
+    #[prop(default)]
     pub preset_multi: bool,
 }
 
@@ -99,7 +101,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
         .then_some((props.preset_host_id, props.preset_multi));
     if let Some((host, is_multi)) = &preset {
         initial.host_id = host.clone();
-        initial.project_type = if host.is_some() {
+        initial.project_type = if host.is_some() || props.preset_remote {
             ProjectType::Ssh
         } else {
             ProjectType::Local
@@ -173,15 +175,18 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     });
 
     if let Some((host_id, is_multi)) = &preset {
-        let probe = host_id
-            .clone()
-            .map(ProbeTarget::SshHost)
-            .unwrap_or(ProbeTarget::Backend);
-        browser.start(
-            probe,
-            working_dir.get_untracked(),
-            (!is_multi).then_some(working_dir),
-        );
+        // An unbound legacy SSH group has no saved host to probe yet.
+        if host_id.is_some() || !props.preset_remote {
+            let probe = host_id
+                .clone()
+                .map(ProbeTarget::SshHost)
+                .unwrap_or(ProbeTarget::Backend);
+            browser.start(
+                probe,
+                working_dir.get_untracked(),
+                (!is_multi).then_some(working_dir),
+            );
+        }
     }
 
     let title = if project_id.is_some() {

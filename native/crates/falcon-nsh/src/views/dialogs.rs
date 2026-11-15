@@ -137,8 +137,8 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
             }
             ActiveDialog::NewProject => project_form().project_id(None).into_element(),
-            ActiveDialog::NewProjectPreset { host_id, multi } => project_form()
-                .project_id(None).preset(true).preset_host_id(host_id).preset_multi(multi).into_element(),
+            ActiveDialog::NewProjectPreset { host_id, remote, multi } => project_form()
+                .project_id(None).preset(true).preset_host_id(host_id).preset_remote(remote).preset_multi(multi).into_element(),
             ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
             ActiveDialog::DeriveProject(id) => worktree_form().project_id(id).into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
