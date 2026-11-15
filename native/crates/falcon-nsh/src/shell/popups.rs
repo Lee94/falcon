@@ -323,7 +323,7 @@ pub(crate) fn themed_tooltip(
     content: impl IntoElement,
     shortcut: Option<SharedString>,
     theme: &ResolvedTheme,
-) -> impl IntoTooltip {
+) -> nsh_base::TooltipElement {
     // nsh_base supplies placement and hover/focus behavior; this child provides the app surface.
     let ui = &theme.ui;
     let background = rgb_to_hsla(ui.popover);

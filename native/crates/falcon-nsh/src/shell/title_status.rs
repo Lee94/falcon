@@ -50,6 +50,7 @@ pub fn TitleStatus(props: TitleStatusProps) -> impl IntoElement {
     });
     let clock = stored(StateClock::new());
     let started = nsh_core::time::now();
+    let tooltip_now = signal(0u64);
     let sid = props.session_id;
     let clock_id = sid.clone();
     let status = computed(move || {
@@ -119,12 +120,12 @@ pub fn TitleStatus(props: TitleStatusProps) -> impl IntoElement {
             } else {
                 color
             };
-            // Build on hover so an unchanged status never freezes its elapsed time at mount.
+            // NSH mounts tooltip children eagerly. Refresh the reading whenever it opens.
             let tip_badge = badge.clone();
             let tip_tasks = tasks.clone();
             let tip_id = clock_id.clone();
             let tip = dynamic(move || {
-                let now = nsh_core::time::now().duration_since(started).as_millis() as u64;
+                let now = tooltip_now.get();
                 let reading = clock.with(|c| c.reading(&tip_id, now));
                 text(tooltip_text(
                     &tip_badge,
@@ -150,7 +151,10 @@ pub fn TitleStatus(props: TitleStatusProps) -> impl IntoElement {
                 .p(zpx(2.0))
                 .rounded_full()
                 .test_id("program-status-chip")
-                .tooltip(themed_tooltip(tip, None, &resolved))
+                .tooltip(themed_tooltip(tip, None, &resolved).on_open(move || {
+                    tooltip_now
+                        .set(nsh_core::time::now().duration_since(started).as_millis() as u64);
+                }))
                 .bind_opacity(&motion.fade)
                 .child(
                     view()
@@ -399,6 +403,82 @@ mod tests {
                 .map(|r| r.id.as_str())
                 .collect::<Vec<_>>(),
             ["", "waiting"]
+        );
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct TooltipHarnessProps {}
+
+    #[component]
+    fn TooltipHarness(_props: TooltipHarnessProps) -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        crate::shell::action_owner::ActionOwner::install();
+        let store = crate::store::WorkspaceStore::install(&crate::FalconLaunchOptions {
+            offline_demo: true,
+            ..Default::default()
+        });
+        // The clock only times transitions witnessed by this client, never an already-running job.
+        store.sessions.update(|sessions| {
+            let session = sessions.iter_mut().find(|s| s.id == "sess-main").unwrap();
+            session.program_summary = None;
+        });
+        view()
+            .flex_col()
+            .p(zpx(30.0))
+            .child(title_status().session_id("sess-main"))
+            .child(
+                view()
+                    .test_id("start-program")
+                    .on_press(move || {
+                        store.sessions.update(|sessions| {
+                            let session =
+                                sessions.iter_mut().find(|s| s.id == "sess-main").unwrap();
+                            session.program_summary = Some(rest_summary());
+                        });
+                    })
+                    .child(text("start program")),
+            )
+            .child(
+                view()
+                    .test_id("away")
+                    .w(zpx(200.0))
+                    .h(zpx(100.0))
+                    .child(text("away")),
+            )
+    }
+
+    #[test]
+    fn tooltip_uses_current_elapsed_time_on_every_open_without_status_changes() {
+        let root = Root::new::<TooltipHarness>(|| TooltipHarnessProps {})
+            .translations(crate::i18n::translations());
+        let mut config = EngineConfig::new(root);
+        config.environment.os = nsh_core::platform::Os::Linux;
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+        config.environment.reduce_motion = true;
+        config.clock = nsh_engine::Clock::manual(std::time::UNIX_EPOCH);
+        let mut app = Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        app.press("id:start-program").unwrap();
+        app.wait_for("id:program-status-chip").unwrap();
+        app.run_for(Duration::from_secs(10)).unwrap();
+        app.hover("id:program-status-chip").unwrap();
+        app.run_for(Duration::from_millis(600)).unwrap();
+        assert!(
+            app.screen()
+                .texts()
+                .iter()
+                .any(|t| t.contains("Running for 0:10"))
+        );
+        app.hover("id:away").unwrap();
+        app.run_for(Duration::from_secs(20)).unwrap();
+        app.hover("id:program-status-chip").unwrap();
+        app.run_for(Duration::from_millis(600)).unwrap();
+        assert!(
+            app.screen()
+                .texts()
+                .iter()
+                .any(|t| t.contains("Running for 0:31"))
         );
     }
 
