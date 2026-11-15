@@ -69,12 +69,29 @@ pub fn sidebar_island(
     let sessions = store.sessions.get();
     let collapsed = store.collapsed.get();
     let mut tree = view().flex_col().p(zpx(8.0)).gap(zpx(2.0));
-    for group in group_servers(&projects, &hosts, &t!("forward.local"), false) {
+    for group in group_servers(&projects, &hosts, &t!("forward.local"), store.show_archived.get()) {
         let open = !collapsed.get(&group.key).copied().unwrap_or(false);
         let st = store.clone();
         let key = group.key.clone();
         let new_project = store.clone();
         let host_id = group.host.as_ref().map(|host| host.id.clone());
+        let preset = crate::menu_operations::ProjectPreset {
+            local: group.kind == ServerKind::Local,
+            host_id: host_id.clone(),
+            multi: false,
+        };
+        let mut machine_actions = if let Some(id) = host_id.as_deref() {
+            menus::host_menu_actions(store, Some(id))
+        } else {
+            menus::server_menu_actions(store, group.kind == ServerKind::Local, None)
+        };
+        if let Some(id) = group.standalone_id.as_ref().filter(|id| {
+            !sessions.iter().any(|s| &s.project_id == *id) && store.active_project_id.get() != **id
+        }) {
+            let mut terminal_actions = menus::new_session_actions(store, id);
+            terminal_actions.append(&mut machine_actions);
+            machine_actions = terminal_actions;
+        }
         let header = view()
                 .h(zpx(30.0))
                 .flex_row()
@@ -128,25 +145,21 @@ pub fn sidebar_island(
                     Glyph::Plus,
                     false,
                     resolved,
-                    move || new_project.active_dialog.set(ActiveDialog::NewProject),
+                    move || new_project.active_dialog.set(ActiveDialog::NewProjectPreset(preset.clone())),
                 ));
-        let header = if let Some(host_id) = host_id.as_deref() {
-            context_menu(
+        let header = context_menu(
                 header.child(overflow_menu(
                 menu_trigger(
                     format!("host-menu-{}", group.key),
                     t!("session.moreActions"),
                     resolved,
                 ),
-                menus::host_menu_actions(store, Some(host_id)),
+                machine_actions.clone(),
                 resolved,
                 )),
-                menus::host_menu_actions(store, Some(host_id)),
+                machine_actions,
                 resolved,
-            )
-        } else {
-            header.into_element()
-        };
+            );
         let mut block = view().flex_col().gap(zpx(2.0)).child(header);
         if open {
             if let Some(id) = group.standalone_id.as_ref().filter(|id| {

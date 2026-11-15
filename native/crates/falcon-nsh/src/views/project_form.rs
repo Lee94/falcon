@@ -48,6 +48,12 @@ fn use_form_guard() -> FormUiGuard {
 #[derive(Clone, PartialEq, Props)]
 pub struct ProjectFormProps {
     pub project_id: Option<String>,
+    #[prop(default)]
+    pub preset_local: Option<bool>,
+    #[prop(default)]
+    pub preset_host_id: Option<String>,
+    #[prop(default)]
+    pub preset_multi: bool,
 }
 
 #[component]
@@ -73,7 +79,11 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let initial = original
         .as_ref()
         .map(ProjectFormDraft::from_project)
-        .unwrap_or_default();
+        .unwrap_or_else(|| crate::menu_operations::ProjectPreset {
+            local: props.preset_local.unwrap_or(true),
+            host_id: props.preset_host_id,
+            multi: props.preset_multi,
+        }.draft());
     let context = store.project_operations.begin_form();
     let form_guard = provide_form_guard(store.project_operations.clone(), context);
 

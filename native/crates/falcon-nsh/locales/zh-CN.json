@@ -974,6 +974,12 @@
     "logout": "退出登录"
   },
   "native": {
+    "menus": {
+      "checkingWorktree": "正在检查附属项目的改动…",
+      "closeProjectFiles": "请先关闭此项目的文件，并等待文件、Git 或项目操作完成，再存档或删除。",
+      "projectChanged": "项目或其打开的文件已变化，请重新确认操作。",
+      "projectFilter": "项目：%{name}"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",

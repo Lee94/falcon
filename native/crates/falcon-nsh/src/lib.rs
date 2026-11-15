@@ -11,6 +11,7 @@
 pub mod fonts;
 pub mod i18n;
 pub mod project_operations;
+pub(crate) mod menu_operations;
 pub(crate) mod session_operations;
 pub mod appearance;
 pub mod shell;
@@ -98,6 +99,10 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     shell::action_owner::ActionOwner::install();
     let store = WorkspaceStore::install(&launch_opts);
     crate::appearance::install_effects(store.clone());
+    {
+        let agents = store.clone();
+        set_interval(std::time::Duration::from_secs(30), move || agents.refresh_menu_agents());
+    }
     {
         let st_close = store.clone();
         main_window().on_close_press(move |_| st_close.request_close_window());
@@ -1757,6 +1762,8 @@ mod tests {
         cfg.environment.os = nsh_core::platform::Os::Linux;
         cfg.environment.idiom = Idiom::Desktop;
         cfg.environment.color_scheme = os_scheme;
+        cfg.environment.locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
+        cfg.environment.locale_settings.languages = nsh_core::platform::Languages::one(cfg.environment.locale);
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         Headless::start(cfg).expect("start headless FalconApp")
     }
@@ -3636,6 +3643,190 @@ mod tests {
         server.assert_no_duplicate_request();
     }
 
+    fn menu_projects(archived: bool) -> serde_json::Value {
+        serde_json::json!([
+            {"id":"proj-falcon","name":"falcon","type":"local","workingDir":"/workspace/falcon","createdAt":0},
+            {"id":"menu-worktree","name":"worktree-review","type":"local","workingDir":"/workspace/falcon-review","createdAt":0,
+             "worktree":{"sourceProjectId":"proj-falcon","branch":"review","repoDir":"/workspace/falcon","createdByFalcon":true,"archivedAt": if archived { Some(1) } else { None::<i64> }}}
+        ])
+    }
+
+    fn open_menu_workspace(server: &MockHttpServer) -> Headless {
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: false,
+            server_url: Some(server.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        app.first_render().unwrap();
+        app.wait_for("label:project-menu-proj-falcon").unwrap();
+        app
+    }
+
+    #[test]
+    fn project_menu_shows_detected_cli_icons_and_terminal_shortcut_headless() {
+        let mut app = headless_with_options(FalconLaunchOptions { offline_demo: true, ..Default::default() }, ColorScheme::Dark);
+        app.first_render().unwrap();
+        app.press("label:project-menu-proj-falcon").unwrap();
+        assert!(app.shows("Claude Code"));
+        assert!(app.shows("Codex"));
+        assert!(!app.shows("Gemini CLI"));
+        assert!(app.shows("Ctrl+Shift+T"));
+        app.press("role:menuitem[Claude Code]").unwrap();
+        app.wait_for("label:session-sess-3").unwrap();
+        assert!(!app.shows("label:session-sess-4"));
+    }
+
+    #[test]
+    fn server_and_host_menus_prefill_multi_repo_forms_headless() {
+        let mut app = headless_with_options(FalconLaunchOptions { offline_demo: true, ..Default::default() }, ColorScheme::Dark);
+        app.first_render().unwrap();
+        app.press("label:host-menu-s:local").unwrap();
+        app.press("role:menuitem[新建多仓库项目…]").unwrap();
+        app.wait_for("添加仓库…").unwrap();
+        assert!(app.shows("多仓库"));
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2)).unwrap();
+        app.press("label:host-menu-s:host:host-prod-01").unwrap();
+        app.press("role:menuitem[新建多仓库项目…]").unwrap();
+        app.wait_for("添加仓库…").unwrap();
+        assert!(app.shows("远程 SSH"));
+    }
+
+    #[test]
+    fn project_overview_filter_can_be_cleared_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_data_and_sessions(Vec::new(), Vec::new(), menu_projects(false), serde_json::json!([
+            {"id":"menu-root-session","projectId":"proj-falcon","projectName":"falcon","projectType":"local","name":"root-session","state":"active","durable":false,"createdAt":0,"lastActiveAt":0},
+            {"id":"menu-child-session","projectId":"menu-worktree","projectName":"worktree-review","projectType":"local","name":"child-session","state":"active","durable":false,"createdAt":0,"lastActiveAt":0}
+        ]));
+        let mut app = open_menu_workspace(&server);
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("role:menuitem[在总览中筛选此项目]").unwrap();
+        app.wait_for("label:overview-session-menu-root-session").unwrap();
+        assert!(!app.shows("label:overview-session-menu-child-session"));
+        app.press("全部").unwrap();
+        app.wait_for("label:overview-session-menu-child-session").unwrap();
+    }
+
+    #[test]
+    fn worktree_delete_preflight_lists_dirty_files_and_cancel_sends_no_delete_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_projects(vec![(
+            "GET /api/projects/menu-worktree/worktree".into(), 200,
+            serde_json::json!({"present":true,"dirtyCount":3,"dirtySample":["changed.rs","new.txt"],"ignoredCount":2,"ahead":4}).to_string()
+        )], menu_projects(false));
+        let mut app = open_menu_workspace(&server);
+        app.press("label:project-menu-menu-worktree").unwrap();
+        assert!(!app.shows("派生附属项目…"));
+        app.press("role:menuitem[删除并清理目录]").unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/projects/menu-worktree/worktree"]);
+        assert!(!app.shows("label:project-action-confirmation"));
+        server.assert_no_request_starting_with("DELETE /api/projects");
+        server.release_response();
+        app.wait_for("label:project-action-confirmation").unwrap();
+        assert!(app.shows("changed.rs"));
+        assert!(app.shows("new.txt"));
+        assert!(app.shows("另有 1 处未提交的改动未列出 · 另有 2 个被 .gitignore 忽略的文件也会被删除（.env、本地数据库等） · 还有 4 个提交没有推送到远程"));
+        app.press("label:project-action-cancel").unwrap();
+        app.wait_for_gone("label:project-action-confirmation", Duration::from_secs(2)).unwrap();
+        server.assert_no_request_starting_with("DELETE /api/projects");
+    }
+
+    #[test]
+    fn root_project_delete_preflights_children_and_discloses_unknown_status_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_projects(vec![(
+            "GET /api/projects/menu-worktree/worktree".into(), 500, r#"{"error":"unreachable"}"#.into()
+        )], menu_projects(false));
+        let mut app = open_menu_workspace(&server);
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("role:menuitem[删除项目…]").unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/projects/menu-worktree/worktree"]);
+        server.release_response();
+        app.wait_for("label:project-action-confirmation").unwrap();
+        assert!(app.shows("/workspace/falcon-review"));
+        assert!(app.shows("读不到工作区状态，无法确认里面有没有未保存的东西 · 其下 1 个附属项目会一并删除，对应的 worktree 目录也会被清理；源项目自己的目录不会动。"));
+        server.assert_no_request_starting_with("DELETE /api/projects");
+    }
+
+    #[test]
+    fn archived_worktree_menu_only_restores_or_deletes_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_projects(Vec::new(), menu_projects(true));
+        let mut app = open_menu_workspace(&server);
+        assert!(!app.shows("label:project-menu-menu-worktree"));
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("role:menuitem[显示已存档（1）]").unwrap();
+        app.wait_for("label:project-menu-menu-worktree").unwrap();
+        app.press("label:project-menu-menu-worktree").unwrap();
+        assert!(app.shows("立即删除…"));
+        assert!(!app.shows("普通终端"));
+        assert!(!app.shows("存档…"));
+    }
+
+    #[test]
+    fn dismissing_worktree_preflight_does_not_reopen_confirmation_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_projects(vec![(
+            "GET /api/projects/menu-worktree/worktree".into(), 200,
+            r#"{"present":true,"dirtyCount":0,"dirtySample":[],"ignoredCount":0}"#.into()
+        )], menu_projects(false));
+        let mut app = open_menu_workspace(&server);
+        app.press("label:project-menu-menu-worktree").unwrap();
+        app.press("role:menuitem[存档…]").unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/projects/menu-worktree/worktree"]);
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2)).unwrap();
+        server.release_response();
+        server.wait_for_response();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for("id:modal-layer-panel").unwrap();
+        assert!(!app.shows("label:project-action-confirmation"));
+        server.assert_no_request_starting_with("POST /api/projects/menu-worktree/archive");
+    }
+
+    #[test]
+    fn worktree_archive_and_delete_wait_for_explicit_confirmation_headless() {
+        for archive in [true, false] {
+            let endpoint = if archive { "POST /api/projects/menu-worktree/archive" } else { "DELETE /api/projects/menu-worktree?force=true" };
+            let result = if archive { menu_projects(true)[1].to_string() } else { r#"{"ok":true,"warnings":["leftover test directory"]}"#.into() };
+            let server = MockHttpServer::with_workspace_bootstrap_projects(vec![
+                ("GET /api/projects/menu-worktree/worktree".into(), 200, r#"{"present":true,"dirtyCount":0,"dirtySample":[],"ignoredCount":0}"#.into()),
+                (endpoint.into(), 200, result),
+            ], menu_projects(false));
+            let mut app = open_menu_workspace(&server);
+            app.press("label:project-menu-menu-worktree").unwrap();
+            app.press(if archive { "role:menuitem[存档…]" } else { "role:menuitem[删除并清理目录]" }).unwrap();
+            server.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/projects/menu-worktree/worktree"]);
+            server.release_response();
+            app.wait_for("label:project-action-confirmation").unwrap();
+            server.assert_no_request_starting_with(endpoint);
+            app.press("label:project-action-confirm").unwrap();
+            server.wait_for_observed_prefixes_pumping(&mut app, &[endpoint]);
+            app.press("label:project-action-confirm").unwrap();
+            server.assert_no_duplicate_request();
+            server.release_response();
+            app.wait_for_gone("label:project-action-confirmation", Duration::from_secs(2)).unwrap();
+            app.wait_for(if archive { "已存档「worktree-review」" } else { "目录没能删干净\nleftover test directory" }).unwrap();
+        }
+    }
+
+    #[test]
+    fn archived_worktree_restore_is_server_confirmed_and_deduplicated_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap_projects(vec![(
+            "POST /api/projects/menu-worktree/restore".into(), 200, menu_projects(false)[1].to_string()
+        )], menu_projects(true));
+        let mut app = open_menu_workspace(&server);
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("role:menuitem[显示已存档（1）]").unwrap();
+        app.press("label:project-menu-menu-worktree").unwrap();
+        app.press("role:menuitem[恢复]").unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/projects/menu-worktree/restore"]);
+        app.press("label:project-menu-menu-worktree").unwrap();
+        assert!(app.shows("立即删除…"));
+        app.press("role:menuitem[恢复]").unwrap();
+        server.assert_no_duplicate_request();
+        server.release_response();
+        app.wait_for("已恢复「worktree-review」").unwrap();
+        app.press("label:project-menu-menu-worktree").unwrap();
+        app.wait_for("role:menuitem[存档…]").unwrap();
+    }
+
     #[test]
     fn project_menu_supports_escape_outside_dismissal_and_keyboard_selection() {
         let mut app = headless_with_options(
@@ -3662,10 +3853,9 @@ mod tests {
 
         app.press("label:project-menu-proj-falcon").unwrap();
         app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
         app.press_key("enter").unwrap();
         app.wait_for("label:session-sess-3")
-            .expect("the second menu action creates exactly one terminal");
+            .expect("the terminal menu action creates exactly one terminal");
         assert!(!app.shows("用 px0 审阅"), "Enter closes the menu");
         assert!(!app.shows("label:session-sess-4"), "the action is not invoked twice");
 
@@ -3687,6 +3877,9 @@ mod tests {
         app.first_render().unwrap();
 
         app.press("label:host-menu-s:host:host-prod-01").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
         app.press_key("down").unwrap();
         app.press_key("down").unwrap();
         app.wait_for("远端主机").unwrap();
@@ -3938,9 +4131,7 @@ mod tests {
         open_hosts_settings(&mut app);
         app.wait_for("label:host-edit-host-1").unwrap();
         app.press("label:host-settings-menu-host-1").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("enter").unwrap();
+        app.press("role:menuitem[编辑]").unwrap();
         app.wait_for("id:host-form-key-path").unwrap();
         assert_eq!(
             app.screen().input_text("id:host-form-name").unwrap(),
@@ -4248,10 +4439,7 @@ mod tests {
         app.wait_for("label:host-edit-host-2").unwrap();
 
         app.press("label:host-settings-menu-host-1").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("enter").unwrap();
+        app.press("role:menuitem[删除…]").unwrap();
         app.wait_for("删除主机「Saved Host」？").unwrap();
         app.wait_for("有 2 个项目正在使用该主机，请先改绑或删除这些项目。")
             .unwrap();
@@ -4261,10 +4449,7 @@ mod tests {
         server.assert_no_request_starting_with("DELETE /api/hosts/host-1");
 
         app.press("label:host-settings-menu-host-1").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("down").unwrap();
-        app.press_key("enter").unwrap();
+        app.press("role:menuitem[删除…]").unwrap();
         app.wait_for("id:host-delete-confirm").unwrap();
         app.press("id:host-delete-confirm").unwrap();
         app.wait_for("正在删除…").unwrap();

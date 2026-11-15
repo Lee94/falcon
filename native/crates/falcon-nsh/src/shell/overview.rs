@@ -12,11 +12,13 @@ use nsh_core::prelude::*;
 pub fn SessionOverview() -> impl IntoElement {
     let store = use_workspace();
     let theme = use_theme();
-    let filter = signal(None::<SessionState>);
+    let filter = store.overview_filter;
     dynamic(move || {
         let resolved = theme.resolved();
         let ui = &resolved.ui;
-        let sessions = store.sessions.get();
+        let sessions = store.sessions.get().into_iter().filter(|session| {
+            store.overview_project.get().as_ref().is_none_or(|id| id == &session.project_id)
+        }).collect::<Vec<_>>();
         let projects = store.projects.get();
         let mut cards = view().flex_row().gap(zpx(12.0));
         for (state, key) in [
@@ -177,6 +179,7 @@ pub fn SessionOverview() -> impl IntoElement {
             );
         }
         let create = store.clone();
+        let clear_project = store.clone();
         scroll()
             .label("session-overview")
             .size_full()
@@ -194,6 +197,9 @@ pub fn SessionOverview() -> impl IntoElement {
                             .text_color(rgb_to_hsla(ui.foreground)),
                     )
                     .child(cards)
+                    .when_some(store.overview_project.get().and_then(|id| projects.iter().find(|p| p.id == id).map(|p| p.name.clone())), |v, name| {
+                        v.child(text(t!("native.menus.projectFilter", name = name)).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
+                    })
                     .child(
                         view()
                             .flex_row()
@@ -211,7 +217,10 @@ pub fn SessionOverview() -> impl IntoElement {
                                     .rounded(zpx(6.0))
                                     .cursor_pointer()
                                     .bg(rgb_to_hsla(ui.muted))
-                                    .on_press(move || filter.set(None))
+                                    .on_press(move || {
+                                        filter.set(None);
+                                        clear_project.overview_project.set(None);
+                                    })
                                     .child(
                                         text(t!("overview.all"))
                                             .text_xs()
