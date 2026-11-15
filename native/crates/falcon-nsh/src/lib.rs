@@ -4243,6 +4243,53 @@ mod tests {
     }
 
     #[test]
+    fn palette_theme_picker_uses_active_slot_and_closes_headless() {
+        let mut theme_settings = ThemeSettings::default();
+        theme_settings.mode = ThemePref::Dark;
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                initial_theme: Some(theme_settings),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.type_text("id:palette-input", "choose theme").unwrap();
+        app.wait_for("id:palette-entry-command:theme-picker-selected")
+            .unwrap();
+        app.press("id:palette-entry-command:theme-picker-selected")
+            .unwrap();
+        app.wait_for("id:theme-picker-filter").unwrap();
+        app.type_text("id:theme-picker-filter", "Dracula").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:theme-picker-filter").unwrap(),
+            Some("Dracula")
+        );
+        app.wait_for("text:Dracula").unwrap();
+        app.press("text:Dracula").unwrap();
+        app.wait_for_gone("id:theme-picker-filter", Duration::from_secs(2))
+            .unwrap();
+        app.wait_for("label:theme-slot-Dark >> text:Dracula")
+            .unwrap();
+        app.wait_for("label:theme-slot-Light >> text:Falcon Light")
+            .unwrap();
+        app.wait_for("label:settings-close").unwrap();
+
+        app.press("label:theme-slot-Dark").unwrap();
+        app.wait_for("id:theme-picker-filter").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("label:settings-close", Duration::from_secs(2))
+            .unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for("label:settings-close").unwrap();
+        app.wait_for_gone("id:theme-picker-filter", Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
     fn palette_project_selection_focuses_an_attached_session_headless() {
         let mut app = headless_with_options(
             FalconLaunchOptions {

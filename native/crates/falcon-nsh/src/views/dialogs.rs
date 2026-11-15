@@ -41,10 +41,16 @@ pub fn ModalLayer() -> impl IntoElement {
     let theme_slot = signal(theme_ctrl.active_slot());
     let theme_picker_open = signal(false);
     let settings_filter = signal(String::new());
+    let appearance_was_open = signal(false);
     let host_settings_was_open = signal(false);
 
     view().child(dynamic(move || {
         let dialog = store.active_dialog.get();
+        let appearance_open = dialog == ActiveDialog::Settings(SettingsTab::Appearance);
+        if appearance_was_open.get() && !appearance_open {
+            theme_picker_open.set(false);
+        }
+        appearance_was_open.set(appearance_open);
         let host_settings_open = dialog == ActiveDialog::Settings(SettingsTab::Hosts);
         if host_settings_was_open.get() && !host_settings_open {
             store.invalidate_host_edit_generation();
@@ -125,6 +131,8 @@ pub fn ModalLayer() -> impl IntoElement {
                 &resolved,
                 tab,
                 settings_filter,
+                theme_picker_open,
+                theme_slot,
             )
             .into_element(),
             ActiveDialog::Askpass { id, prompt } => {
@@ -518,6 +526,8 @@ fn render_settings_modal(
     resolved: &falcon_theme::ResolvedTheme,
     active_tab: SettingsTab,
     settings_filter: Signal<String>,
+    theme_picker_open: Signal<bool>,
+    theme_slot: Signal<falcon_theme::ThemeMode>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let muted = ui.muted;
@@ -620,7 +630,10 @@ fn render_settings_modal(
         SettingsTab::Appearance => view()
             .flex_col()
             .gap(zpx(24.0))
-            .child(crate::views::appearance_settings())
+            .child(crate::views::appearance_settings(
+                theme_picker_open,
+                theme_slot,
+            ))
             .child(crate::views::terminal_settings())
             .into_element(),
         SettingsTab::Terminal => crate::views::terminal_settings().into_element(),

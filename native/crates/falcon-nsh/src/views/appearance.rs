@@ -14,13 +14,13 @@ use crate::store::{WorkspaceStore, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::{ZoomController, zpx};
 
-#[component]
-pub fn AppearanceSettings() -> impl IntoElement {
+pub fn appearance_settings(
+    theme_picker_open: Signal<bool>,
+    theme_slot: Signal<ThemeMode>,
+) -> impl IntoElement {
     let theme = use_theme();
     let zoom = use_context::<ZoomController>();
     let theme_filter = signal(String::new());
-    let theme_slot = signal(theme.active_slot());
-    let theme_picker_open = signal(false);
 
     view()
         .flex_col()
@@ -165,6 +165,7 @@ fn theme_settings(
             let ui = &resolved.ui;
             let catalog = theme.catalog();
             let filter_input = input()
+                .test_id("theme-picker-filter")
                 .w_full()
                 .px(zpx(8.0))
                 .py(zpx(6.0))
