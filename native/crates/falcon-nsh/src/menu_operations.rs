@@ -6,7 +6,7 @@ use crate::{
     zoom::zpx,
 };
 pub use falcon_core::project_form::ProjectPreset;
-use falcon_proto::{Project, SessionState, WorktreeStatus};
+use falcon_proto::{Project, ProjectType, SessionState, WorktreeStatus};
 use nsh_core::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

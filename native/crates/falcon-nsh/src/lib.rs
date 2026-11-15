@@ -3837,11 +3837,12 @@ mod tests {
             app.wait_for(if archive { "已存档「worktree-review」" } else { "目录没能删干净\nleftover test directory" }).unwrap();
             if !archive {
                 app.wait_for("label:project-cleanup-warning").unwrap();
-                app.fast_forward(Duration::from_secs(4)).unwrap();
-                assert!(app.shows("label:project-cleanup-warning"));
+                app.wait(Duration::from_secs(4)).unwrap();
+                assert!(!app.shows("目录没能删干净\nleftover test directory"));
+                app.wait_for("label:project-cleanup-warning").unwrap();
                 assert!(app.shows("leftover test directory"));
                 app.press("label:project-cleanup-warning-copy").unwrap();
-                assert!(app.shows("label:project-cleanup-warning"));
+                app.wait_for("label:project-cleanup-warning").unwrap();
                 app.press("label:project-cleanup-warning-dismiss").unwrap();
                 app.wait_for_gone("label:project-cleanup-warning", Duration::from_secs(2)).unwrap();
             }
