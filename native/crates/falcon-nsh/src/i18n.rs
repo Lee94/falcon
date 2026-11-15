@@ -20,6 +20,9 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
         .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.zh-CN.json"))
+        .expect("terminal Chinese translations must be valid JSON");
+    flatten_json("", &terminal, &mut out);
     out
 });
 
@@ -32,6 +35,9 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let root: Value = serde_json::from_str(EN_JSON)
         .expect("falcon-nsh locales/en.json must be valid JSON");
     flatten_json("", &root, &mut english);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.en.json"))
+        .expect("terminal English translations must be valid JSON");
+    flatten_json("", &terminal, &mut english);
     map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
@@ -74,6 +80,16 @@ pub fn lookup_static(key: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn english_overlays_preserve_connection_and_terminal_translations() {
+        let translations = translations();
+        for locale in ["en", "en-US"] {
+            assert_eq!(translations.lookup(locale, "native.connect.connect").as_deref(), Some("Connect"));
+            assert_eq!(translations.lookup(locale, "native.terminal.copy").as_deref(), Some("Copy"));
+        }
+        assert_eq!(translations.lookup("zh-CN", "native.terminal.copy").as_deref(), Some("复制"));
+    }
 
     #[test]
     fn connection_resources_have_matching_chinese_and_english_keys() {
