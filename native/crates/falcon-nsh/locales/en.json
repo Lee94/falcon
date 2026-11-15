@@ -1,0 +1,52 @@
+{
+  "project": {
+    "createTitle": "New project",
+    "editTitle": "Edit project",
+    "name": "Project name",
+    "typeLocal": "Local folder",
+    "typeSsh": "Remote SSH",
+    "workingDir": "Folder path",
+    "shell": "Shell",
+    "shellAuto": "Default (auto-detect)",
+    "shellAutoDetected": "Default (%{shell})",
+    "shellCustom": "Custom…",
+    "browse": "Browse…",
+    "pickTitle": "Choose folder",
+    "pickSelect": "Select this folder",
+    "pickHome": "Home",
+    "pickUp": "Parent folder",
+    "pickRoots": "Filesystem roots",
+    "pickJump": "Go",
+    "pickFilter": "Filter this directory",
+    "pickSelected": "Add %{n} selected folders",
+    "pickMultipleHint": "Select multiple folders using the checkboxes. Click a name to enter it. Selections persist across directories. With no selection, choose the current folder.",
+    "pickEmpty": "No subfolders in this directory",
+    "pickEmptyFilter": "No matching folders",
+    "pickLoading": "Loading…",
+    "pickConnecting": "Connecting to remote host…",
+    "pickNeedHost": "Select a saved host before browsing remote folders",
+    "create": "Create",
+    "creating": "Creating…",
+    "save": "Save"
+  },
+  "multi": {
+    "typeMulti": "Multiple repositories",
+    "repos": "Member repositories",
+    "addRepo": "Add repositories…",
+    "removeRepo": "Remove repository",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "useCommonParent": "Use common parent folder",
+    "repoLimit": "At most 16 member repositories are supported.",
+    "newProject": "New multi-repository project…"
+  },
+  "native": {
+    "projectForm": {
+      "probeUnavailable": "Cannot connect to the host. Connect and try again.",
+      "select": "Select",
+      "unselect": "Deselect",
+      "addManualRepo": "Add repository manually",
+      "saving": "Saving…"
+    }
+  }
+}

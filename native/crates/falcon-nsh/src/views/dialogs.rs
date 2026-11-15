@@ -31,6 +31,8 @@ pub struct ModalLayerProps {
 #[component]
 pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let store = use_workspace();
+    let project_picker = signal(false);
+    provide_context(crate::views::project_form::ProjectPickerNavigation(project_picker));
     let theme_ctrl = use_theme();
     let zoom_ctrl = use_context::<ZoomController>();
 
@@ -102,7 +104,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         let st_escape = store.clone();
         let escape_dialog = dialog.clone();
         bind_safe_key_when("escape", false, nsh_core::keymap::When::Always, move || {
-            close_modal_dialog(&st_escape, &escape_dialog);
+            close_modal_dialog(&st_escape, &escape_dialog, project_picker);
         });
 
         let resolved = theme_ctrl.resolved();
@@ -135,6 +137,8 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
             }
             ActiveDialog::NewProject => project_form().project_id(None).into_element(),
+            ActiveDialog::NewProjectPreset { host_id, multi } => project_form()
+                .project_id(None).preset(true).preset_host_id(host_id).preset_multi(multi).into_element(),
             ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
             ActiveDialog::DeriveProject(id) => worktree_form().project_id(id).into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
@@ -233,7 +237,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                     focus_on_open.focus();
                 }
             })
-            .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog))
+            .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog, project_picker))
             .child(overlay)
             .into_element()
     }))
@@ -246,11 +250,13 @@ fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
     )
 }
 
-fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
+fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog, project_picker: Signal<bool>) {
     if store.active_dialog.get_untracked() != dialog.clone() {
         return;
     }
     match dialog {
+        ActiveDialog::NewProject | ActiveDialog::NewProjectPreset { .. } | ActiveDialog::EditProject(_)
+            if project_picker.get_untracked() => project_picker.set(false),
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }

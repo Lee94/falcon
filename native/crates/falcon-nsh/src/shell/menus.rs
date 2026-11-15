@@ -204,6 +204,7 @@ pub(crate) fn host_menu_actions(
 ) -> Vec<PopupAction> {
     let server = ServerUrlGuard::capture(store);
     let mut actions = Vec::new();
+    // Preserve the existing host actions' keyboard order; append creation presets below.
     if let Some(host_id) = host_id {
         let st = store.clone();
         let id = host_id.to_string();
@@ -256,12 +257,19 @@ pub(crate) fn host_menu_actions(
     }
     let st = store.clone();
     actions.push(PopupAction::new(
-        server,
+        server.clone(),
         t!("settings.tab_hosts"),
         false,
         false,
         move || st.active_dialog.set(ActiveDialog::Settings(SettingsTab::Hosts)),
     ));
+    for multi in [false, true] {
+        let st = store.clone();
+        let host_id = host_id.map(str::to_owned);
+        actions.push(PopupAction::new(server.clone(), if multi { t!("multi.newProject") } else { t!("sidebar.newProject") }, false, false, move || {
+            st.active_dialog.set(ActiveDialog::NewProjectPreset { host_id: host_id.clone(), multi });
+        }));
+    }
     actions
 }
 

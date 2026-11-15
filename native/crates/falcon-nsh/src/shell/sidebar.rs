@@ -75,6 +75,7 @@ pub fn sidebar_island(
         let key = group.key.clone();
         let new_project = store.clone();
         let host_id = group.host.as_ref().map(|host| host.id.clone());
+        let preset_host = host_id.clone();
         let header = view()
                 .h(zpx(30.0))
                 .flex_row()
@@ -128,7 +129,7 @@ pub fn sidebar_island(
                     Glyph::Plus,
                     false,
                     resolved,
-                    move || new_project.active_dialog.set(ActiveDialog::NewProject),
+                    move || new_project.active_dialog.set(ActiveDialog::NewProjectPreset { host_id: preset_host.clone(), multi: false }),
                 ));
         let header = if let Some(host_id) = host_id.as_deref() {
             context_menu(
