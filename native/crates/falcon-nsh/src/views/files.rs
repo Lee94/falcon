@@ -12,9 +12,11 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, glyph, icon_button};
+use crate::shell::widgets::{Glyph, icon_button};
 use crate::store::{ActiveDialog, FileBufferState, FilePreviewKind, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
+use crate::views::file_operations::file_operations_toolbar;
+use crate::views::file_operations::{selection_icon, selection_indicator};
 use crate::zoom::zpx;
 
 /// 校验 HTML 预览地址是否严格位于 `/api/projects/<id>/raw/` 只读作用域路由下（ADR 0007）。
@@ -68,24 +70,36 @@ pub fn FilesPanel() -> impl IntoElement {
                         let dir = st.file_directory.get();
                         let refresh = st.clone();
                         let up = st.clone();
-                        let refresh_dir = dir.clone();
                         let parent = falcon_core::file_path::parent_nav_path(&dir);
+                        let parent_disabled = parent.is_none() || st.files_loading.get();
+                        let refresh_disabled = st.files_loading.get();
                         view()
                             .flex_row()
                             .items_center()
                             .gap(zpx(4.0))
-                            .child(icon_button(
-                                "files-parent",
-                                t!("files.parent"),
-                                Glyph::ArrowUp,
-                                false,
-                                &resolved,
-                                move || {
-                                    if let Some(parent) = parent.as_deref() {
-                                        up.browse_directory(parent);
-                                    }
-                                },
-                            ))
+                            .child(
+                                view()
+                                    .when(parent_disabled, |button| button.opacity(0.45))
+                                    .child(icon_button(
+                                        "files-parent",
+                                        t!("files.parent"),
+                                        Glyph::ArrowUp,
+                                        false,
+                                        &resolved,
+                                        move || {
+                                            if !up.files_loading.get() {
+                                                let current_dir = up.file_directory.get();
+                                                if let Some(parent) =
+                                                    falcon_core::file_path::parent_nav_path(
+                                                        &current_dir,
+                                                    )
+                                                {
+                                                    up.browse_directory(&parent);
+                                                }
+                                            }
+                                        },
+                                    )),
+                            )
                             .child(
                                 text(if dir.is_empty() { "/".to_string() } else { dir })
                                     .flex_1()
@@ -106,14 +120,23 @@ pub fn FilesPanel() -> impl IntoElement {
                                 &resolved,
                                 move || show_hidden.update(|v| *v = !*v),
                             ))
-                            .child(icon_button(
-                                "files-refresh",
-                                t!("files.refresh"),
-                                Glyph::Refresh,
-                                false,
-                                &resolved,
-                                move || refresh.browse_directory(&refresh_dir),
-                            ))
+                            .child(
+                                view()
+                                    .when(refresh_disabled, |button| button.opacity(0.45))
+                                    .child(icon_button(
+                                        "files-refresh",
+                                        t!("files.refresh"),
+                                        Glyph::Refresh,
+                                        false,
+                                        &resolved,
+                                        move || {
+                                            if !refresh.files_loading.get() {
+                                                let current_dir = refresh.file_directory.get();
+                                                refresh.browse_directory(&current_dir);
+                                            }
+                                        },
+                                    )),
+                            )
                     }
                 }))
                 .child(
@@ -133,6 +156,7 @@ pub fn FilesPanel() -> impl IntoElement {
                         .on_change(move |v: &str| filter_query.set(v.to_string())),
                 ),
         )
+        .child(file_operations_toolbar())
         .child(scroll().flex_1().child(dynamic(move || {
             let resolved = theme_ctrl.resolved();
             let ui = &resolved.ui;
@@ -140,6 +164,7 @@ pub fn FilesPanel() -> impl IntoElement {
             let proj_id = store.active_project_id.get();
             if store.files_loading.get() {
                 return text(t!("files.loading"))
+                    .test_id("files-loading")
                     .text_xs()
                     .text_color(rgb_to_hsla(ui.muted_foreground))
                     .into_element();
@@ -180,43 +205,134 @@ pub fn FilesPanel() -> impl IntoElement {
                     .into_element();
             }
 
+            let visible_paths: Vec<String> =
+                filtered.iter().map(|entry| entry.path.clone()).collect();
+            let selected_paths = store.file_operations.selected.get();
+            let selected_visible = visible_paths
+                .iter()
+                .filter(|path| selected_paths.contains(*path))
+                .count();
+            let all_visible_selected = selected_visible == visible_paths.len();
+            let bulk_store = store.clone();
+            let bulk_paths = visible_paths.clone();
+            let bulk_label = if all_visible_selected {
+                t!("files.operations.deselectVisible")
+            } else {
+                t!("files.operations.selectVisible")
+            };
+
             view()
                 .flex_col()
                 .p(zpx(6.0))
                 .gap(zpx(2.0))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(zpx(5.0))
+                        .py(zpx(4.0))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(zpx(6.0))
+                                .cursor_pointer()
+                                .on_press(move || {
+                                    bulk_store.file_operations.select_visible(&bulk_paths)
+                                })
+                                .child(selection_indicator(all_visible_selected, &resolved))
+                                .child(
+                                    text(bulk_label)
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                                ),
+                        )
+                        .child(
+                            text(t!(
+                                "files.operations.visibleCount",
+                                count = selected_visible.to_string()
+                            ))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        ),
+                )
                 .children(filtered.into_iter().map(|entry| {
                     let st = store.clone();
                     let pid = proj_id.clone();
                     let path = entry.path.clone();
                     let is_dir = entry.is_dir;
                     let size_kb = (entry.size_bytes as f64) / 1024.0;
+                    let selected = selected_paths.contains(&path);
+                    let checkbox_store = store.file_operations.clone();
+                    let checkbox_path = path.clone();
+                    let checkbox_visible = visible_paths.clone();
+                    let row_store = store.file_operations.clone();
+                    let row_path = path.clone();
+                    let row_visible = visible_paths.clone();
+                    let file_open_blocked = !is_dir && row_store.blocks_file_open(&store);
                     view()
                         .flex_row()
                         .items_center()
-                        .justify_between()
                         .px(zpx(8.0))
                         .py(zpx(6.0))
                         .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .on_press(move || {
-                            if is_dir {
-                                st.browse_directory(&path);
-                            } else {
-                                st.open_file_pane(&pid, &path);
-                            }
-                        })
                         .gap(zpx(6.0))
                         .text_color(rgb_to_hsla(ui.muted_foreground))
                         .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
-                        .child(glyph(if is_dir { Glyph::Folder } else { Glyph::File }))
                         .child(
-                            text(entry.name)
+                            view()
+                                .test_id(&format!("file-select-{}", entry.name))
+                                .w(zpx(24.0))
+                                .h(zpx(24.0))
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_press(move |event: &PressEvent| {
+                                    if event.modifiers.shift {
+                                        checkbox_store
+                                            .select_range(&checkbox_path, &checkbox_visible);
+                                    } else {
+                                        checkbox_store.toggle_selected(&checkbox_path);
+                                    }
+                                })
+                                .child(selection_indicator(selected, &resolved)),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
                                 .flex_1()
                                 .min_w_0()
-                                .number_of_lines(1)
-                                .text_xs()
-                                .font_family(FONT_FAMILY_MONO)
-                                .text_color(rgb_to_hsla(ui.foreground)),
+                                .items_center()
+                                .gap(zpx(6.0))
+                                .cursor_pointer()
+                                .on_press(move |event: &PressEvent| {
+                                    if event.modifiers.shift {
+                                        row_store.select_range(&row_path, &row_visible);
+                                    } else if event.modifiers.cmd || event.modifiers.ctrl {
+                                        row_store.toggle_selected(&row_path);
+                                    } else if is_dir {
+                                        st.browse_directory(&path);
+                                    } else if row_store.blocks_file_open(&st) {
+                                        st.show_toast(row_store.file_open_lock_message(&st).unwrap_or_else(
+                                            || t!("files.operations.busy").to_string(),
+                                        ));
+                                    } else {
+                                        st.open_file_pane(&pid, &path);
+                                    }
+                                })
+                                .child(selection_icon(is_dir))
+                                .child(
+                                    text(entry.name)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .number_of_lines(1)
+                                        .text_xs()
+                                        .font_family(FONT_FAMILY_MONO)
+                                        .text_color(rgb_to_hsla(ui.foreground)),
+                                )
+                                .when(file_open_blocked, |row| row.opacity(0.45)),
                         )
                         .child(
                             text(if is_dir {

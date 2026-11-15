@@ -10,6 +10,9 @@
 
 pub mod fonts;
 pub mod i18n;
+pub mod project_operations;
+pub(crate) mod session_operations;
+pub mod appearance;
 pub mod shell;
 pub mod store;
 pub mod terminal;
@@ -35,12 +38,15 @@ use crate::i18n::t;
 use crate::shell::{desktop_shell, mobile_shell, tui_shell};
 pub use crate::store::FalconLaunchOptions;
 use crate::store::{ActiveDialog, SettingsTab, WorkspaceStore};
+#[cfg(test)]
+use crate::store::SessionRecord;
 use crate::terminal::{FalconTerminal, bind_safe_key, bind_safe_key_when};
 use crate::theme::{
     install_theme, nsh_appearance_of, rgb_to_hsla, rgba_to_hsla, tokens_from_resolved, use_theme,
 };
 use crate::views::{
-    AgentPaneView, DiffPaneView, FilePaneView, FilesPanel, GitPanel, PluginPanel, modal_layer,
+    AgentPaneView, DiffPaneView, FilePaneView, FilesPanel, GitPanel, PluginPanel,
+    file_operation_layer, modal_layer,
 };
 use crate::zoom::{install_zoom, zpx};
 
@@ -89,7 +95,9 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     };
     let theme_ctrl = install_theme(initial_theme);
     let zoom_ctrl = install_zoom();
+    shell::action_owner::ActionOwner::install();
     let store = WorkspaceStore::install(&launch_opts);
+    crate::appearance::install_effects(store.clone());
     {
         let st_close = store.clone();
         main_window().on_close_press(move |_| st_close.request_close_window());
@@ -210,11 +218,24 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         install_macos_tray(store.clone());
     }
 
+    let window_background = store.appearance.window_background;
     view()
         .size_full()
         .relative()
         .overflow_hidden()
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
+        .bg(move || {
+            let app = theme_ctrl.resolved().ui.app;
+            let background = crate::appearance::effective_background(
+                window_background.get(),
+                idiom() == Idiom::Desktop,
+            );
+            rgba_to_hsla(falcon_theme::Rgba {
+                r: app.r,
+                g: app.g,
+                b: app.b,
+                a: (background.fill_alpha() * 255.0).round() as u8,
+            })
+        })
         .child(dynamic(move || match idiom() {
             Idiom::Terminal => tui_shell().into_element(),
             Idiom::Phone => mobile_shell().into_element(),
@@ -222,6 +243,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         }))
         .child(toast_overlay())
         .child(modal_layer())
+        .child(file_operation_layer())
         .child({
             #[cfg(test)]
             {
@@ -254,6 +276,93 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             .on_press(move || open_save.open_file_pane("proj-falcon", save_path))
             .child(text("open-save")),
     );
+    let install_dirty_file = store.clone();
+    let install_dirty_key = save_key.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-install-dirty-file-pane")
+            .on_press(move || {
+                let mut buffer = crate::store::OpenFileBuffer::from_disk_text(
+                    "proj-falcon",
+                    save_path,
+                    "disk",
+                    "disk-v1",
+                    None,
+                );
+                buffer.current_body = "dirty-reconnect".into();
+                buffer.edit_revision = 1;
+                install_dirty_file.open_files.update(|files| {
+                    files.insert(install_dirty_key.clone(), buffer);
+                });
+                install_dirty_file.columns.set(vec![falcon_core::layout::column(
+                    [install_dirty_key.clone()],
+                    None,
+                )]);
+                install_dirty_file
+                    .focused_pane_key
+                    .set(install_dirty_key.clone());
+            })
+            .child(text("install-dirty-file-pane")),
+    );
+    let reconnect_file_store = store.clone();
+    let reconnect_file_key = save_key.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-reconnect-file-state")
+            .child(dynamic(move || {
+                let has_pane = falcon_core::layout::pane_keys(
+                    &reconnect_file_store.columns.get(),
+                )
+                .contains(&reconnect_file_key);
+                let files = reconnect_file_store.open_files.get();
+                let body = files
+                    .get(&reconnect_file_key)
+                    .map(|buffer| buffer.current_body.as_str())
+                    .unwrap_or("");
+                text(format!("reconnect-file={has_pane}:{body}")).into_element()
+            })),
+    );
+    let pending_save_store = store.clone();
+    let pending_save_key = save_key.clone();
+    let pending_save_state = signal("idle".to_string());
+    let state_for_button = pending_save_state.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-save-after-pane-removal")
+            .on_press(move || {
+                let mut buffer = crate::store::OpenFileBuffer::from_disk_text(
+                    "proj-falcon",
+                    save_path,
+                    "before",
+                    "disk-v1",
+                    None,
+                );
+                buffer.current_body = "after".into();
+                buffer.edit_revision = 1;
+                pending_save_store.open_files.update(|files| {
+                    files.insert(pending_save_key.clone(), buffer);
+                });
+                pending_save_store.open_file_pane("proj-falcon", save_path);
+                let dispatched = pending_save_store.save_file_buffer(&pending_save_key);
+                let columns = pending_save_store.columns.get();
+                pending_save_store.columns.set(falcon_core::layout::remove_pane(
+                    &columns,
+                    &pending_save_key,
+                ));
+                pending_save_store.open_files.update(|files| {
+                    files.remove(&pending_save_key);
+                });
+                let blocked = pending_save_store.has_open_file_mapping("proj-falcon");
+                state_for_button.set(format!("dispatched={dispatched};blocked={blocked}"));
+            })
+            .child(text("save-after-pane-removal")),
+    );
+    let state_for_label = pending_save_state;
+    controls = controls.child(
+        view()
+            .test_id("test-save-mapping-state")
+            .child(dynamic(move || text(state_for_label.get()).into_element())),
+    );
     let open_stale = store.clone();
     controls = controls.child(
         view()
@@ -261,12 +370,54 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             .on_press(move || open_stale.open_file_pane("proj-falcon", stale_path))
             .child(text("open-stale")),
     );
+    let advance_mapping = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-advance-project-mapping")
+            .on_press(move || {
+                advance_mapping
+                    .project_operations
+                    .test_advance_mapping_generation("proj-falcon");
+                advance_mapping.on_project_mapping_change_started("proj-falcon");
+            })
+            .child(text("advance-project-mapping")),
+    );
     let open_preview = store.clone();
     controls = controls.child(
         view()
             .test_id("test-open-preview-file")
             .on_press(move || open_preview.open_file_pane("proj-falcon", preview_path))
             .child(text("open-preview")),
+    );
+    let restored_pane_store = store.clone();
+    let restored_pane_key = falcon_core::pane_key::file_key("proj-falcon", save_path);
+    let restored_pane_state = signal(String::new());
+    let restored_pane_state_for_button = restored_pane_state.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-install-restored-file-pane")
+            .on_press(move || {
+                restored_pane_store
+                    .open_files
+                    .update(|files| drop(files.remove(&restored_pane_key)));
+                restored_pane_store.columns.set(vec![falcon_core::layout::column(
+                    [restored_pane_key.clone()],
+                    None,
+                )]);
+                restored_pane_state_for_button.set(format!(
+                    "restored-file-pane-mapping={}",
+                    restored_pane_store.has_open_file_mapping("proj-falcon")
+                ));
+            })
+            .child(text("install-restored-file-pane")),
+    );
+    let restored_pane_state_for_label = restored_pane_state;
+    controls = controls.child(
+        view()
+            .test_id("test-restored-file-pane-state")
+            .child(dynamic(move || {
+                text(restored_pane_state_for_label.get()).into_element()
+            })),
     );
     let reload_save = store.clone();
     let reload_key = save_key.clone();
@@ -323,15 +474,82 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             .on_press(move || focus_agent.focus_session("sess-agent"))
             .child(text("focus-agent-session")),
     );
+    let open_relays = store.clone();
+    secondary_controls = secondary_controls.child(
+        view().test_id("test-open-relays-settings").on_press(move || {
+            open_relays.active_dialog.set(ActiveDialog::Settings(SettingsTab::Relays));
+        }).child(text("open-relays")),
+    );
+    let refresh_relays = store.clone();
+    secondary_controls = secondary_controls.child(
+        view().test_id("test-refresh-relays").on_press(move || refresh_relays.refresh_relays())
+            .child(text("refresh-relays")),
+    );
+    let duplicate_relay = store.clone();
+    secondary_controls = secondary_controls.child(
+        view().test_id("test-force-duplicate-share").on_press(move || {
+            duplicate_relay.create_public_share("", 8080, "draft");
+        }).child(text("duplicate-share")),
+    );
+    let rebuild_relay_hosts = store.clone();
+    secondary_controls = secondary_controls.child(
+        view().test_id("test-rebuild-relay-hosts").on_press(move || {
+            if let Some(mut host) = rebuild_relay_hosts.hosts.get().first().cloned() {
+                host.id = "relay-test-host".into();
+                host.name = "relay-test-host".into();
+                rebuild_relay_hosts.hosts.update(|hosts| hosts.push(host));
+            }
+        }).child(text("rebuild-relay-hosts")),
+    );
     if let Some(url) = switch_url {
         let switch = store.clone();
+        let switch_url = url.clone();
         secondary_controls = secondary_controls.child(
             view()
                 .test_id("test-switch-server")
-                .on_press(move || switch.connect_live_server(&url))
+                .on_press(move || switch.connect_live_server(&switch_url))
                 .child(text("switch-server")),
         );
+        let open_profiles = store.clone();
+        let profile_url = url;
+        secondary_controls = secondary_controls.child(
+            view()
+                .test_id("test-open-connect-server")
+                .on_press(move || {
+                    let profile = falcon_core::profiles::ServerProfile {
+                        id: "test-switch-profile".into(),
+                        name: "Test switch".into(),
+                        url: profile_url.clone(),
+                        plaintext_ok: true,
+                    };
+                    open_profiles.profiles.update(|profiles| profiles.upsert(profile));
+                    open_profiles
+                        .active_dialog
+                        .set(crate::store::ActiveDialog::Profiles);
+                })
+                .child(text("connect-profiles")),
+        );
     }
+    let mark_session_list = store.clone();
+    secondary_controls = secondary_controls.child(
+        view()
+            .test_id("test-mark-session-list-sentinel")
+            .on_press(move || {
+                mark_session_list.sessions.set(vec![SessionRecord {
+                    id: "session-list-sentinel".into(),
+                    project_id: "proj-falcon".into(),
+                    name: "session-list-sentinel".into(),
+                    auto_title: String::new(),
+                    cwd: "/workspace/falcon".into(),
+                    durable: false,
+                    state: falcon_proto::SessionState::Active,
+                    agent: None,
+                    program_status: None,
+                    foreground_cmd: None,
+                }]);
+            })
+            .child(text("mark-session-list")),
+    );
 
     let controls = view()
         .flex_col()
@@ -696,6 +914,8 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -823,6 +1043,24 @@ mod tests {
             Self::with_workspace_bootstrap_and_hosts(responses, Vec::new())
         }
 
+        fn with_workspace_bootstrap_and_sessions(
+            responses: Vec<(String, u16, String)>,
+            sessions: serde_json::Value,
+        ) -> Self {
+            Self::with_workspace_bootstrap_data_and_sessions(
+                responses,
+                Vec::new(),
+                serde_json::json!([{
+                    "id": "proj-falcon",
+                    "name": "falcon",
+                    "type": "local",
+                    "workingDir": "/workspace/falcon",
+                    "createdAt": 0
+                }]),
+                sessions,
+            )
+        }
+
         fn with_workspace_bootstrap_and_hosts(
             responses: Vec<(String, u16, String)>,
             hosts: Vec<serde_json::Value>,
@@ -852,6 +1090,20 @@ mod tests {
             hosts: Vec<serde_json::Value>,
             projects: serde_json::Value,
         ) -> Self {
+            Self::with_workspace_bootstrap_data_and_sessions(
+                responses,
+                hosts,
+                projects,
+                serde_json::json!([]),
+            )
+        }
+
+        fn with_workspace_bootstrap_data_and_sessions(
+            responses: Vec<(String, u16, String)>,
+            hosts: Vec<serde_json::Value>,
+            projects: serde_json::Value,
+            sessions: serde_json::Value,
+        ) -> Self {
             let hosts = serde_json::Value::Array(hosts).to_string();
             Self::new_with_auto_responses(
                 responses,
@@ -867,7 +1119,7 @@ mod tests {
                         200,
                         projects.to_string(),
                     ),
-                    ("GET /api/sessions".into(), 200, "[]".into()),
+                    ("GET /api/sessions".into(), 200, sessions.to_string()),
                     ("GET /api/hosts".into(), 200, hosts),
                     (
                         "GET /api/relays".into(),
@@ -904,7 +1156,7 @@ mod tests {
             let worker = thread::spawn(move || {
                 let mut responses = responses.into_iter().peekable();
                 loop {
-                    let timeout = if responses.peek().is_some() {
+                    let timeout = if responses.peek().is_some() || !auto_responses.is_empty() {
                         Duration::from_secs(5)
                     } else {
                         Duration::from_millis(400)
@@ -993,7 +1245,7 @@ mod tests {
                     .recv_timeout(remaining)
                     .unwrap_or_else(|error| {
                         panic!(
-                            "requests starting with {prefixes:?} not observed: {found:?}; +                             received {observed:?}; {error}"
+                            "requests starting with {prefixes:?} not observed: {found:?}; received {observed:?}; {error}"
                         )
                     });
                 observed.push(request.clone());
@@ -1002,6 +1254,45 @@ mod tests {
                         found[index] = Some(request.clone());
                     }
                 }
+            }
+            found.into_iter().map(Option::unwrap).collect()
+        }
+
+        fn wait_for_observed_prefixes_pumping(
+            &self,
+            app: &mut Headless,
+            prefixes: &[&str],
+        ) -> Vec<String> {
+            let mut found = vec![None; prefixes.len()];
+            let mut observed = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while found.iter().any(Option::is_none) {
+                loop {
+                    match self.observed_requests.try_recv() {
+                        Ok(request) => {
+                            observed.push(request.clone());
+                            for (index, prefix) in prefixes.iter().enumerate() {
+                                if found[index].is_none() && request.starts_with(prefix) {
+                                    found[index] = Some(request.clone());
+                                }
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            panic!("mock HTTP request channel disconnected")
+                        }
+                    }
+                }
+                if found.iter().all(Option::is_some) {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "requests starting with {prefixes:?} not observed: {found:?}; received {observed:?}"
+                );
+                app.next_change(remaining.min(Duration::from_millis(50)))
+                    .unwrap();
             }
             found.into_iter().map(Option::unwrap).collect()
         }
@@ -1059,6 +1350,207 @@ mod tests {
         }
     }
 
+    struct HeldSessionRequest {
+        request: String,
+        response: Sender<(u16, String)>,
+        snapshot_body: Option<String>,
+    }
+
+    struct SessionRaceMock {
+        url: String,
+        session_list_requests: Receiver<String>,
+        snapshots: Receiver<HeldSessionRequest>,
+        writes: Receiver<HeldSessionRequest>,
+        sessions_body: Arc<Mutex<String>>,
+        outstanding: Arc<Mutex<Vec<Sender<(u16, String)>>>>,
+        stop: Sender<()>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl SessionRaceMock {
+        fn new(sessions_body: String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let sessions_body = Arc::new(Mutex::new(sessions_body));
+            let outstanding = Arc::new(Mutex::new(Vec::new()));
+            let session_list_count = Arc::new(AtomicUsize::new(0));
+            let (session_list_tx, session_list_requests) = mpsc::channel();
+            let (snapshot_tx, snapshots) = mpsc::channel();
+            let (write_tx, writes) = mpsc::channel();
+            let (stop, stop_rx) = mpsc::channel();
+
+            let body_for_worker = sessions_body.clone();
+            let outstanding_for_worker = outstanding.clone();
+            let count_for_worker = session_list_count.clone();
+            let worker = thread::spawn(move || {
+                while stop_rx.try_recv().is_err() {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let sessions_body = body_for_worker.clone();
+                            let outstanding = outstanding_for_worker.clone();
+                            let session_list_count = count_for_worker.clone();
+                            let session_list_tx = session_list_tx.clone();
+                            let snapshot_tx = snapshot_tx.clone();
+                            let write_tx = write_tx.clone();
+                            thread::spawn(move || {
+                                let Some(request) = read_mock_request(&stream) else {
+                                    return;
+                                };
+                                if request.starts_with("GET /api/sessions") {
+                                    let list_index = session_list_count
+                                        .fetch_add(1, Ordering::SeqCst);
+                                    let _ = session_list_tx.send(request.clone());
+                                    if list_index == 1 {
+                                        let snapshot_body = sessions_body.lock().unwrap().clone();
+                                        let (response, response_rx) = mpsc::channel();
+                                        outstanding.lock().unwrap().push(response.clone());
+                                        let held = HeldSessionRequest {
+                                            request,
+                                            response,
+                                            snapshot_body: Some(snapshot_body),
+                                        };
+                                        if snapshot_tx.send(held).is_ok()
+                                            && let Ok((status, body)) = response_rx
+                                                .recv_timeout(Duration::from_secs(5))
+                                        {
+                                            write_mock_response(&mut stream, status, &body);
+                                            return;
+                                        }
+                                        write_mock_response(
+                                            &mut stream,
+                                            500,
+                                            r#"{"error":"mock snapshot timed out"}"#,
+                                        );
+                                        return;
+                                    }
+                                    let body = sessions_body.lock().unwrap().clone();
+                                    write_mock_response(&mut stream, 200, &body);
+                                    return;
+                                }
+
+                                if request.starts_with("PATCH /api/sessions/")
+                                    || request.starts_with("DELETE /api/sessions/")
+                                {
+                                    let (response, response_rx) = mpsc::channel();
+                                    outstanding.lock().unwrap().push(response.clone());
+                                    if write_tx
+                                        .send(HeldSessionRequest {
+                                            request,
+                                            response,
+                                            snapshot_body: None,
+                                        })
+                                        .is_ok()
+                                        && let Ok((status, body)) =
+                                            response_rx.recv_timeout(Duration::from_secs(5))
+                                    {
+                                        write_mock_response(&mut stream, status, &body);
+                                        return;
+                                    }
+                                    write_mock_response(
+                                        &mut stream,
+                                        500,
+                                        r#"{"error":"mock write timed out"}"#,
+                                    );
+                                    return;
+                                }
+
+                                let (status, body) = if request.starts_with("GET /api/system") {
+                                    (200, "{}".to_string())
+                                } else if request.starts_with("GET /api/app-icon") {
+                                    (200, r#"{"selected":"default"}"#.to_string())
+                                } else if request.starts_with("GET /api/projects") {
+                                    (
+                                        200,
+                                        serde_json::json!([{
+                                            "id": "proj-falcon",
+                                            "name": "falcon",
+                                            "type": "local",
+                                            "workingDir": "/workspace/falcon",
+                                            "createdAt": 0
+                                        }])
+                                        .to_string(),
+                                    )
+                                } else if request.starts_with("GET /api/hosts") {
+                                    (200, "[]".to_string())
+                                } else if request.starts_with("GET /api/relays") {
+                                    (200, r#"{"forwards":[],"shares":[]}"#.to_string())
+                                } else if request.starts_with("GET /api/agents") {
+                                    (200, "[]".to_string())
+                                } else if request.starts_with("GET /api/plugins") {
+                                    (
+                                        200,
+                                        r#"{"dir":"","plugins":[],"trustRoot":"unused"}"#
+                                            .to_string(),
+                                    )
+                                } else {
+                                    (500, r#"{"error":"unexpected mock request"}"#.to_string())
+                                };
+                                write_mock_response(&mut stream, status, &body);
+                            });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => return,
+                    }
+                }
+            });
+
+            Self {
+                url: format!("http://{address}"),
+                session_list_requests,
+                snapshots,
+                writes,
+                sessions_body,
+                outstanding,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn wait_for_session_list_request(&self) -> String {
+            self.session_list_requests
+                .recv_timeout(Duration::from_secs(3))
+                .expect("session list request should arrive")
+        }
+
+        fn wait_for_snapshot(&self) -> HeldSessionRequest {
+            self.snapshots
+                .recv_timeout(Duration::from_secs(3))
+                .expect("delayed session snapshot should arrive")
+        }
+
+        fn wait_for_write(&self) -> HeldSessionRequest {
+            self.writes
+                .recv_timeout(Duration::from_secs(3))
+                .expect("session write request should arrive")
+        }
+
+        fn set_sessions_body(&self, body: String) {
+            *self.sessions_body.lock().unwrap() = body;
+        }
+
+        fn respond(request: HeldSessionRequest, status: u16, body: String) {
+            request
+                .response
+                .send((status, body))
+                .expect("session mock request should still be pending");
+        }
+    }
+
+    impl Drop for SessionRaceMock {
+        fn drop(&mut self) {
+            for response in self.outstanding.lock().unwrap().iter() {
+                let _ = response.send((200, r#"{"ok":true}"#.into()));
+            }
+            let _ = self.stop.send(());
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
     fn workspace_text_file(text: &str, version: &str) -> String {
         serde_json::json!({
             "preview": {
@@ -1070,6 +1562,22 @@ mod tests {
             },
             "rawBase": "/api/projects/proj-falcon/raw/token/",
         })
+        .to_string()
+    }
+
+    fn session_list_json(id: &str, name: &str, state: &str) -> String {
+        serde_json::json!([{
+            "id": id,
+            "projectId": "proj-falcon",
+            "projectName": "falcon",
+            "projectType": "local",
+            "name": name,
+            "title": "mock command",
+            "state": state,
+            "durable": false,
+            "createdAt": 0,
+            "lastActiveAt": 0
+        }])
         .to_string()
     }
 
@@ -1117,6 +1625,7 @@ mod tests {
         app.first_render().unwrap();
         app.press("label:activity-changes").unwrap();
         app.press("id:git-refresh").unwrap();
+        app.wait_for("id:git-loading").unwrap();
         let request = server.wait_for_request();
         assert!(request.starts_with("GET /api/projects/proj-falcon/git/working"), "{request}");
         server.release_response();
@@ -1226,15 +1735,15 @@ mod tests {
             (working_path.clone(), 200, working.clone()),
             (operation_path.clone(), 200, r#"{"ok":false,"detail":"take rejected"}"#.into()),
             (operation_path.clone(), 409, r#"{"error":"server locked"}"#.into()),
-            (operation_path, 200, r#"{"ok":true,"detail":"taken"}"#.into()),
-            (working_path, 200, empty),
+            (operation_path.clone(), 200, r#"{"ok":true,"detail":"taken"}"#.into()),
+            (working_path.clone(), 200, empty),
         ]);
         let mut app = open_mock_git_panel(&server, "conflict.txt");
         app.wait_for("id:git-take-ours").unwrap();
         server.clear_observed_requests();
 
         app.press("id:git-continue").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload, serde_json::json!({"op":"continue"}));
         server.release_response();
@@ -1243,34 +1752,40 @@ mod tests {
         server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
 
         app.press("id:git-continue").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload, serde_json::json!({"op":"continue"}));
         server.release_response();
         server.wait_for_response();
-        let refresh = server.wait_for_request();
+        let refresh = server.wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0].clone();
         assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        app.wait_for("id:git-loading").unwrap();
         server.release_response();
         server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+        app.wait_for("id:git-take-ours").unwrap();
         server.clear_observed_requests();
         app.wait_for("id:git-file-0").unwrap();
 
         app.press("id:git-abort").unwrap();
         app.press("id:git-confirm-action").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload, serde_json::json!({"op":"abort"}));
         server.release_response();
         server.wait_for_response();
-        let refresh = server.wait_for_request();
+        let refresh = server.wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0].clone();
         assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        app.wait_for("id:git-loading").unwrap();
         server.release_response();
         server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+        app.wait_for("id:git-take-ours").unwrap();
         server.clear_observed_requests();
 
         app.press("id:git-take-ours").unwrap();
         app.press("id:git-confirm-action").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload["op"], "take");
         assert_eq!(payload["side"], "ours");
@@ -1282,7 +1797,7 @@ mod tests {
 
         app.press("id:git-take-theirs").unwrap();
         app.press("id:git-confirm-action").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload["op"], "take");
         assert_eq!(payload["side"], "theirs");
@@ -1293,15 +1808,17 @@ mod tests {
 
         app.press("id:git-take-ours").unwrap();
         app.press("id:git-confirm-action").unwrap();
-        let request = server.wait_for_request();
+        let request = server.wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0].clone();
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(payload["side"], "ours");
         server.release_response();
         server.wait_for_response();
-        let refresh = server.wait_for_request();
+        let refresh = server.wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0].clone();
         assert!(refresh.starts_with("GET /api/projects/proj-falcon/git/working"));
+        app.wait_for("id:git-loading").unwrap();
         server.release_response();
         server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
         app.wait_for_gone("id:git-take-ours", Duration::from_secs(2)).unwrap();
     }
 
@@ -1684,6 +2201,300 @@ mod tests {
     }
 
     #[test]
+    fn session_rename_failure_keeps_the_typed_draft_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(
+            vec![(
+                "PATCH /api/sessions/sess-main".into(),
+                500,
+                r#"{"error":"mock rename failed"}"#.into(),
+            )],
+            serde_json::from_str(&session_list_json("sess-main", "DraftBase", "active"))
+                .unwrap(),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("server-connected=true").unwrap();
+        app.wait_for("DraftBase").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+        app.right_click("label:session-sess-main").unwrap();
+        app.press("重命名会话…").unwrap();
+
+        let input = "id:rename-session-input";
+        app.wait_for(input).unwrap();
+        assert_eq!(app.screen().input_text(input).unwrap(), Some("DraftBase".into()));
+        app.type_text(input, " updated").unwrap();
+        let draft = "DraftBase updated";
+        assert_eq!(app.screen().input_text(input).unwrap(), Some(draft.into()));
+        app.press("id:rename-session-submit").unwrap();
+        let request = mock.wait_for_request();
+        assert!(request.starts_with("PATCH /api/sessions/sess-main"), "{request}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
+            serde_json::json!({"name": draft})
+        );
+        assert_eq!(app.screen().input_text(input).unwrap(), Some(draft.into()));
+
+        mock.release_response();
+        app.wait_for("会话重命名失败").unwrap();
+        assert_eq!(app.screen().input_text(input).unwrap(), Some(draft.into()));
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn session_rename_empty_name_restores_the_automatic_title_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(
+            vec![(
+                "PATCH /api/sessions/sess-main".into(),
+                200,
+                r#"{"ok":true}"#.into(),
+            )],
+            serde_json::from_str(&session_list_json("sess-main", "Manual", "active")).unwrap(),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("Manual").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+        app.right_click("label:session-sess-main").unwrap();
+        app.press("重命名会话…").unwrap();
+        let input = "id:rename-session-input";
+        app.wait_for(input).unwrap();
+        app.type_text(input, " ").unwrap();
+        for _ in 0..7 {
+            app.press_key("backspace").unwrap();
+        }
+        assert_eq!(app.screen().input_text(input).unwrap(), Some(""));
+        app.press("id:rename-session-submit").unwrap();
+        let request = mock.wait_for_request();
+        assert!(request.starts_with("PATCH /api/sessions/sess-main"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
+            serde_json::json!({"name": ""})
+        );
+        mock.release_response();
+        app.wait_for_gone(input, Duration::from_secs(2)).unwrap();
+        app.wait_for("mock command").unwrap();
+    }
+
+    #[test]
+    fn session_clear_failure_keeps_the_dead_record_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(
+            vec![(
+                "DELETE /api/sessions/sess-dead".into(),
+                500,
+                r#"{"error":"mock clear failed"}"#.into(),
+            )],
+            serde_json::from_str(&session_list_json("sess-dead", "Lost record", "dead"))
+                .unwrap(),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("Lost record").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+        app.right_click("label:session-sess-dead").unwrap();
+        app.press("清除记录").unwrap();
+        let request = mock.wait_for_request();
+        assert!(
+            request.starts_with("DELETE /api/sessions/sess-dead"),
+            "clear record must use clear_session: {request}"
+        );
+        mock.release_response();
+        app.wait_for("清除会话记录失败").unwrap();
+        app.wait_for("label:session-sess-dead").unwrap();
+    }
+
+    #[test]
+    fn session_rename_retries_a_stale_bootstrap_snapshot_headless() {
+        let old_sessions = session_list_json("sess-main", "Before", "active");
+        let mock = SessionRaceMock::new(old_sessions);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for("Before").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+
+        app.press("id:test-switch-server").unwrap();
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for("server-connected=true").unwrap();
+        let snapshot = mock.wait_for_snapshot();
+
+        app.right_click("label:session-sess-main").unwrap();
+        app.press("重命名会话…").unwrap();
+        let input = "id:rename-session-input";
+        app.wait_for(input).unwrap();
+        app.type_text(input, " After").unwrap();
+        app.press("id:rename-session-submit").unwrap();
+        let write = mock.wait_for_write();
+        assert!(write.request.starts_with("PATCH /api/sessions/sess-main"));
+        let stale_body = snapshot
+            .snapshot_body
+            .as_ref()
+            .expect("delayed list captured its old body")
+            .clone();
+        mock.set_sessions_body(session_list_json("sess-main", "Before After", "active"));
+
+        SessionRaceMock::respond(write, 200, r#"{"ok":true}"#.into());
+        app.wait_for_gone(input, Duration::from_secs(2)).unwrap();
+        SessionRaceMock::respond(snapshot, 200, stale_body);
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for("Before After").unwrap();
+    }
+
+    #[test]
+    fn clearing_dead_session_does_not_resurrect_from_a_stale_snapshot_headless() {
+        let stale_sessions = session_list_json("sess-dead", "Lost record", "dead");
+        let mock = SessionRaceMock::new(stale_sessions);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for("Lost record").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+
+        app.press("id:test-switch-server").unwrap();
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for("server-connected=true").unwrap();
+        let snapshot = mock.wait_for_snapshot();
+        app.right_click("label:session-sess-dead").unwrap();
+        app.press("清除记录").unwrap();
+        let write = mock.wait_for_write();
+        assert!(
+            write.request.starts_with("DELETE /api/sessions/sess-dead"),
+            "clear record must use DELETE, not terminate: {}",
+            write.request
+        );
+        let stale_body = snapshot
+            .snapshot_body
+            .as_ref()
+            .expect("delayed list captured the dead record")
+            .clone();
+        mock.set_sessions_body("[]".into());
+
+        SessionRaceMock::respond(write, 200, r#"{"ok":true}"#.into());
+        app.wait_for_gone("label:session-sess-dead", Duration::from_secs(2))
+            .unwrap();
+        SessionRaceMock::respond(snapshot, 200, stale_body);
+        assert!(mock
+            .wait_for_session_list_request()
+            .starts_with("GET /api/sessions"));
+        app.wait_for_gone("label:session-sess-dead", Duration::from_secs(2))
+            .unwrap();
+        assert!(!app.shows("Lost record"), "stale snapshot did not restore the record");
+    }
+
+    #[test]
+    fn session_same_server_reconnect_preserves_file_pane_and_dirty_buffer_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(
+            Vec::new(),
+            serde_json::from_str(&session_list_json(
+                "sess-main",
+                "Reconnect target",
+                "active",
+            ))
+            .unwrap(),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("Reconnect target").unwrap();
+
+        app.press("id:test-install-dirty-file-pane").unwrap();
+        app.wait_for("reconnect-file=true:dirty-reconnect").unwrap();
+
+        app.press("id:test-mark-session-list-sentinel").unwrap();
+        app.wait_for("session-list-sentinel").unwrap();
+        mock.clear_observed_requests();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("Reconnect target").unwrap();
+        assert!(mock
+            .wait_for_observed_prefixes(&[
+                "GET /api/projects HTTP/1.1",
+                "GET /api/sessions",
+            ])
+            .first()
+            .is_some_and(|request| request.starts_with("GET /api/projects HTTP/1.1")));
+        assert!(app.shows("reconnect-file=true:dirty-reconnect"));
+    }
+
+    #[test]
+    fn session_restored_file_pane_blocks_project_mapping_change_headless() {
+        let mock = MockHttpServer::new(Vec::new());
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-install-restored-file-pane").unwrap();
+        app.wait_for("restored-file-pane-mapping=true").unwrap();
+    }
+
+    #[test]
     fn failed_http_save_preserves_dirty_hash_then_success_clears_it_headless() {
         let path = "native/mock-save-integration.txt";
         let file_key = falcon_core::pane_key::file_key("proj-falcon", path);
@@ -1771,6 +2582,36 @@ mod tests {
         app.wait_for("save-saving=false").unwrap();
         app.wait_for("save-hash=disk-v2").unwrap();
         mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn pending_file_save_after_pane_removal_blocks_mapping_change_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap(vec![(
+            "PUT /api/projects/proj-falcon/file".into(),
+            200,
+            serde_json::json!({
+                "path": "native/mock-save-integration.txt",
+                "size": 5,
+                "version": "disk-v2",
+            })
+            .to_string(),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-save-after-pane-removal").unwrap();
+        app.wait_for("text:dispatched=true;blocked=true").unwrap();
+        let request = mock.wait_for_request();
+        assert!(request.starts_with("PUT /api/projects/proj-falcon/file"));
+        mock.release_response();
+        mock.wait_for_response();
     }
 
     #[test]
@@ -1957,11 +2798,7 @@ mod tests {
         app.press("id:test-focus-agent-session").unwrap();
         app.wait_for("active-project=proj-falcon-nsh").unwrap();
         app.wait_for("id:active-pane-t:sess-agent").unwrap();
-        for _ in 0..10 {
-            app.next_change(Duration::from_millis(50)).unwrap();
-        }
-
-        let observed = mock.wait_for_observed_prefixes(&[
+        let observed = mock.wait_for_observed_prefixes_pumping(&mut app, &[
             "GET /api/projects/proj-falcon-nsh/files",
             "GET /api/agents",
         ]);
@@ -2078,6 +2915,212 @@ mod tests {
         app.wait_for("stale-body=new server response").unwrap();
         old_server.assert_no_duplicate_request();
         new_server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn stale_file_read_after_project_mapping_change_is_ignored_headless() {
+        let server = MockHttpServer::with_workspace_bootstrap(vec![(
+            "GET /api/projects/proj-falcon/file?".into(),
+            200,
+            workspace_text_file("stale mapping response", "mapping-v1"),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-open-stale-file").unwrap();
+        app.wait_for("stale-state=Loading").unwrap();
+        assert!(server
+            .wait_for_request()
+            .starts_with("GET /api/projects/proj-falcon/file?"));
+
+        app.press("id:test-advance-project-mapping").unwrap();
+        server.release_response();
+        server.wait_for_response();
+        for _ in 0..5 {
+            app.next_change(Duration::from_millis(50)).unwrap();
+            assert!(app.shows("stale-state=Loading"));
+            assert!(!app.shows("stale-body=stale mapping response"));
+        }
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn file_operations_mkdir_rename_delete_partial_failure_and_keyboard_headless() {
+        let listing = |entries: &[(&str, &str)]| {
+            serde_json::json!({
+                "path": "/workspace/falcon",
+                "entries": entries.iter().map(|(name, kind)| serde_json::json!({
+                    "name": name,
+                    "path": format!("/workspace/falcon/{name}"),
+                    "kind": kind,
+                    "size": 1
+                })).collect::<Vec<_>>(),
+                "truncated": false
+            })
+            .to_string()
+        };
+        let list_prefix = "GET /api/projects/proj-falcon/files?path=";
+        let server = MockHttpServer::new_with_auto_responses(
+            vec![
+                (list_prefix.into(), 200, listing(&[("old.txt", "file"), ("keep.txt", "file")])),
+                (
+                    "POST /api/projects/proj-falcon/mkdir".into(),
+                    200,
+                    r#"{"path":"/workspace/falcon/docs"}"#.into(),
+                ),
+                (
+                    list_prefix.into(),
+                    200,
+                    listing(&[("docs", "dir"), ("old.txt", "file"), ("keep.txt", "file")]),
+                ),
+                (
+                    "POST /api/projects/proj-falcon/rename".into(),
+                    200,
+                    r#"{"path":"/workspace/falcon/old.txt-renamed"}"#.into(),
+                ),
+                (
+                    list_prefix.into(),
+                    200,
+                    listing(&[("docs", "dir"), ("old.txt-renamed", "file"), ("keep.txt", "file")]),
+                ),
+                (
+                    "POST /api/projects/proj-falcon/remove".into(),
+                    200,
+                    r#"{"removed":["/workspace/falcon/old.txt-renamed"],"errors":[{"path":"/workspace/falcon/keep.txt","error":"permission denied"}]}"#.into(),
+                ),
+                (
+                    list_prefix.into(),
+                    200,
+                    listing(&[("docs", "dir"), ("keep.txt", "file")]),
+                ),
+            ],
+            Vec::new(),
+        );
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(server.url.clone()),
+                test_live_file_operations: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:activity-files").unwrap();
+        app.wait_for("label:files-refresh").unwrap();
+        if !app.shows("id:files-loading") {
+            app.press("label:files-refresh").unwrap();
+        }
+        app.wait_for("id:files-loading").unwrap();
+        assert!(server.wait_for_request().starts_with(list_prefix));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:file-select-old.txt").unwrap();
+
+        app.press("id:file-operations-new-folder").unwrap();
+        app.wait_for("id:file-operation-name").unwrap();
+        app.type_text("id:file-operation-name", "docs").unwrap();
+        app.press_key("enter").unwrap();
+        let request = server.wait_for_request();
+        assert!(request.starts_with("POST /api/projects/proj-falcon/mkdir"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
+            serde_json::json!({"path":"/workspace/falcon/docs","recursive":false})
+        );
+        server.release_response();
+        server.wait_for_response();
+        assert!(server.wait_for_request().starts_with(list_prefix));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:file-select-docs").unwrap();
+
+        app.press("id:file-select-old.txt").unwrap();
+        app.press("id:file-operations-rename").unwrap();
+        app.wait_for("id:file-operation-name").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:file-operation-name", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_request_starting_with("POST /api/projects/proj-falcon/rename");
+
+        app.press("id:file-operations-rename").unwrap();
+        app.wait_for("id:file-operation-name").unwrap();
+        app.press("id:file-select-old.txt").unwrap();
+        app.type_text("id:file-operation-name", "-renamed").unwrap();
+        app.press_key("enter").unwrap();
+        let request = server.wait_for_request();
+        assert!(request.starts_with("POST /api/projects/proj-falcon/rename"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
+            serde_json::json!({"path":"/workspace/falcon/old.txt","name":"old.txt-renamed"})
+        );
+        server.release_response();
+        server.wait_for_response();
+        assert!(server.wait_for_request().starts_with(list_prefix));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:file-select-old.txt-renamed").unwrap();
+
+        app.press("id:file-select-old.txt-renamed").unwrap();
+        app.press("id:file-select-keep.txt").unwrap();
+        app.press("id:file-operations-delete").unwrap();
+        app.wait_for("id:file-operation-confirmation").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:file-operation-confirmation", Duration::from_secs(2))
+            .unwrap();
+        server.assert_no_request_starting_with("POST /api/projects/proj-falcon/remove");
+
+        app.press("id:file-operations-delete").unwrap();
+        app.wait_for("id:file-operation-confirmation").unwrap();
+        app.press("id:file-operation-confirm-confirmation").unwrap();
+        let request = server.wait_for_request();
+        assert!(request.starts_with("POST /api/projects/proj-falcon/remove"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
+            serde_json::json!({"paths":["/workspace/falcon/keep.txt","/workspace/falcon/old.txt-renamed"]})
+        );
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:/permission denied/").unwrap();
+        assert!(server.wait_for_request().starts_with(list_prefix));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:file-select-keep.txt").unwrap();
+        server.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn selecting_server_profile_preserves_dirty_file_confirmation_headless() {
+        let switch_url = "http://127.0.0.1:49317".to_string();
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_switch_url: Some(switch_url),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:activity-files").unwrap();
+        app.press("text:Cargo.toml").unwrap();
+        let file_key = falcon_core::pane_key::file_key("proj-falcon", "native/Cargo.toml");
+        let editor = format!("id:file-editor-{file_key}");
+        let titlebar = format!("label:titlebar-{file_key}");
+        app.type_text(&editor, "dirty-switch-check").unwrap();
+        app.press("id:test-open-connect-server").unwrap();
+        app.wait_for("id:connect-server-profile-test-switch-profile")
+            .unwrap();
+        app.press("id:connect-server-profile-test-switch-profile")
+            .unwrap();
+        app.wait_for("文件有未保存的修改").unwrap();
+        app.press("id:unsaved-cancel").unwrap();
+        app.wait_for(&titlebar).unwrap();
     }
 
     #[test]
@@ -2252,6 +3295,72 @@ mod tests {
     }
 
     #[test]
+    fn project_menu_supports_escape_outside_dismissal_and_keyboard_selection() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                server_url: Some("http://127.0.0.1:4923".into()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        assert!(app.shows("用 px0 审阅"), "project menu opened");
+        app.press_key("escape").unwrap();
+        assert!(!app.shows("用 px0 审阅"), "Escape closes the menu");
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("label:session-sess-3")
+            .expect("the second menu action creates exactly one terminal");
+        assert!(!app.shows("用 px0 审阅"), "Enter closes the menu");
+        assert!(!app.shows("label:session-sess-4"), "the action is not invoked twice");
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        assert!(!app.shows("用 px0 审阅"), "outside press dismisses the menu");
+    }
+
+    #[test]
+    fn session_context_menu_detach_and_terminate_keep_existing_guards() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+
+        app.right_click("label:session-sess-main").unwrap();
+        assert!(app.shows("收起窗口"));
+        assert!(app.shows("终止会话…"));
+        assert!(app.shows("重命名会话…"));
+        app.press_key("escape").unwrap();
+        assert!(!app.shows("收起窗口"), "one Escape closes the context menu");
+
+        app.right_click("label:session-sess-main").unwrap();
+        app.press("收起窗口").unwrap();
+        app.wait_for("label:reattach-sess-main")
+            .expect("detach removes the pane but keeps the session record");
+
+        app.right_click("label:session-sess-main").unwrap();
+        assert!(app.shows("接回会话"));
+        assert!(!app.shows("收起窗口"));
+        app.press("终止会话…").unwrap();
+        app.wait_for("前台程序仍在运行")
+            .expect("terminate keeps the busy-process confirmation guard");
+        app.press("取消").unwrap();
+        app.wait_for("label:session-sess-main")
+            .expect("cancelling does not terminate the session");
+    }
+
+    #[test]
     fn desktop_tree_activity_bar_and_settings_navigation() {
         let mut app = headless_with_options(
             FalconLaunchOptions {
@@ -2344,7 +3453,10 @@ mod tests {
         );
         open_hosts_settings(&mut app);
         app.wait_for("label:host-edit-host-1").unwrap();
-        app.press("label:host-edit-host-1").unwrap();
+        app.press("label:host-settings-menu-host-1").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
         app.wait_for("id:host-form-key-path").unwrap();
         assert_eq!(
             app.screen().input_text("id:host-form-name").unwrap(),
@@ -2561,9 +3673,9 @@ mod tests {
         app.wait_for("id:host-form-name").unwrap();
         app.type_text("id:host-form-name", " Closed").unwrap();
         app.press("id:host-form-submit").unwrap();
-        let pending_update = old_server.wait_for_request();
-        assert!(pending_update.starts_with("PUT /api/hosts/host-1"));
         app.wait_for("正在保存…").unwrap();
+        let pending_update = old_server.wait_for_observed_prefixes_pumping(&mut app, &["PUT /api/hosts/host-1"])[0].clone();
+        assert!(pending_update.starts_with("PUT /api/hosts/host-1"));
 
         app.press("label:settings-close").unwrap();
         app.wait_for_gone("id:host-form-name", Duration::from_secs(2))
@@ -2586,14 +3698,14 @@ mod tests {
         app.type_text("id:host-form-address", "ssh.new.test").unwrap();
         app.type_text("id:host-form-username", "runner").unwrap();
         app.press("id:host-form-submit").unwrap();
-        let pending_create = old_server.wait_for_request();
-        assert!(pending_create.starts_with("POST /api/hosts"));
         app.wait_for("正在保存…").unwrap();
+        let pending_create = old_server.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/hosts"])[0].clone();
+        assert!(pending_create.starts_with("POST /api/hosts"));
 
         app.press("id:test-switch-server").unwrap();
         app.wait_for(&format!("server-url={}", new_server.url))
             .unwrap();
-        new_server.wait_for_observed_prefixes(&[
+        new_server.wait_for_observed_prefixes_pumping(&mut app, &[
             "GET /api/system",
             "GET /api/projects HTTP/1.1",
         ]);
@@ -2651,7 +3763,11 @@ mod tests {
         app.wait_for("label:host-edit-host-1").unwrap();
         app.wait_for("label:host-edit-host-2").unwrap();
 
-        app.press("label:host-delete-host-1").unwrap();
+        app.press("label:host-settings-menu-host-1").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
         app.wait_for("删除主机「Saved Host」？").unwrap();
         app.wait_for("有 2 个项目正在使用该主机，请先改绑或删除这些项目。")
             .unwrap();
@@ -2660,7 +3776,11 @@ mod tests {
             .unwrap();
         server.assert_no_request_starting_with("DELETE /api/hosts/host-1");
 
-        app.press("label:host-delete-host-1").unwrap();
+        app.press("label:host-settings-menu-host-1").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
         app.wait_for("id:host-delete-confirm").unwrap();
         app.press("id:host-delete-confirm").unwrap();
         app.wait_for("正在删除…").unwrap();
@@ -3240,6 +4360,177 @@ mod tests {
             p95 < 50.0,
             "Debug p95 frame time {p95:.3}ms unexpectedly slow"
         );
+    }
+
+    fn relay_list_json(id: &str) -> String {
+        serde_json::json!({
+            "forwards": [],
+            "shares": [{
+                "id": id, "destHost": "127.0.0.1", "destPort": 8080,
+                "enabled": true, "state": "active", "createdAt": 0
+            }],
+        }).to_string()
+    }
+
+    fn relay_share_json(id: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "destHost": "127.0.0.1",
+            "destPort": 8080,
+            "enabled": true,
+            "state": "active",
+            "createdAt": 0,
+        }).to_string()
+    }
+
+    fn open_relay_settings(app: &mut Headless) {
+        app.first_render().unwrap();
+        app.press("id:test-open-relays-settings").unwrap();
+        app.wait_for("id:relay-share-port-local").unwrap();
+        app.wait_for_gone("id:relay-actions-unavailable-local", Duration::from_secs(3)).unwrap();
+    }
+
+    #[test]
+    fn relay_create_duplicate_suppressed_and_failure_keeps_draft_headless() {
+        let mock = MockHttpServer::new(vec![(
+            "POST /api/shares".into(), 500, r#"{"error":"mock relay write failed"}"#.into(),
+        )]);
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        open_relay_settings(&mut app);
+        app.type_text("id:relay-share-port-local", " 8080 ").unwrap();
+        app.type_text("id:relay-share-name-local", " draft ").unwrap();
+        app.press("id:relay-create-share-local").unwrap();
+        let request = mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/shares"])[0].clone();
+        let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(body["destPort"], 8080);
+        assert_eq!(body["name"], "draft");
+        app.press("id:test-force-duplicate-share").unwrap();
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("mock relay write failed").unwrap();
+        assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some(" 8080 ".into()));
+        assert_eq!(app.screen().input_text("id:relay-share-name-local").unwrap(), Some(" draft ".into()));
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn relay_success_applies_confirmed_record_before_refresh_headless() {
+        let mock = MockHttpServer::new_with_auto_responses(
+            vec![
+                ("POST /api/shares".into(), 200, relay_share_json("confirmed")),
+                ("GET /api/relays".into(), 200, relay_list_json("confirmed")),
+            ],
+            vec![
+                ("GET /api/system".into(), 200, "{}".into()),
+                ("GET /api/app-icon".into(), 200, r#"{"selected":"default"}"#.into()),
+                ("GET /api/projects HTTP/1.1".into(), 200, r#"[{"id":"proj-falcon","name":"falcon","type":"local","workingDir":"/workspace/falcon","createdAt":0}]"#.into()),
+                ("GET /api/sessions".into(), 200, "[]".into()),
+                ("GET /api/hosts".into(), 200, "[]".into()),
+                ("GET /api/agents".into(), 200, "[]".into()),
+                ("GET /api/plugins HTTP/1.1".into(), 200, r#"{"dir":"","plugins":[],"trustRoot":"unused"}"#.into()),
+            ],
+        );
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        open_relay_settings(&mut app);
+        app.type_text("id:relay-share-port-local", "8080").unwrap();
+        app.press("id:relay-create-share-local").unwrap();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/shares"]);
+        mock.release_response();
+        mock.wait_for_response();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        app.wait_for("id:relay-toggle-confirmed").unwrap();
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("id:relay-toggle-confirmed").unwrap();
+    }
+
+    #[test]
+    fn relay_empty_snapshot_keeps_creation_form_headless() {
+        let mock = MockHttpServer::with_workspace_bootstrap(vec![]);
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        open_relay_settings(&mut app);
+        app.press("id:test-refresh-relays").unwrap();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        app.wait_for("id:relay-empty-shares").unwrap();
+        app.wait_for("id:relay-empty-forwards").unwrap();
+        assert!(app.screen().input_text("id:relay-share-port-local").unwrap().is_some());
+        app.type_text("id:relay-share-port-local", "70000").unwrap();
+        app.press("id:relay-create-share-local").unwrap();
+        app.wait_for("id:relay-share-error-local").unwrap();
+        assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some("70000".into()));
+        mock.assert_no_request_starting_with("POST /api/shares");
+    }
+
+    #[test]
+    fn relay_refresh_is_serialized_trailing_only_and_preserves_form_typing_headless() {
+        let mock = MockHttpServer::new(vec![
+            ("GET /api/relays".into(), 200, relay_list_json("stale")),
+            ("GET /api/relays".into(), 200, relay_list_json("fresh")),
+        ]);
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        open_relay_settings(&mut app);
+        app.type_text("id:relay-share-port-local", "8181").unwrap();
+        app.press("id:test-rebuild-relay-hosts").unwrap();
+        assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some("8181".into()));
+        app.press("id:test-refresh-relays").unwrap();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        app.press("id:test-refresh-relays").unwrap();
+        mock.release_response();
+        mock.wait_for_response();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_for("id:relay-toggle-fresh").unwrap();
+        app.wait_for_gone("id:relay-toggle-stale", Duration::from_millis(500)).unwrap();
+        assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some("8181".into()));
+        app.type_text("id:relay-share-port-local", "2").unwrap();
+        assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some("81812".into()));
+    }
+
+    #[test]
+    fn relay_old_snapshot_is_ignored_after_same_url_reconnect_headless() {
+        let mock = MockHttpServer::new_with_auto_responses(
+            vec![("GET /api/relays".into(), 200, relay_list_json("stale-connection"))],
+            vec![
+                ("GET /api/system".into(), 200, "{}".into()),
+                ("GET /api/app-icon".into(), 200, r#"{"selected":"default"}"#.into()),
+                ("GET /api/projects".into(), 200, r#"[{"id":"proj-falcon","name":"falcon","type":"local","workingDir":"/workspace/falcon","createdAt":0}]"#.into()),
+                ("GET /api/sessions".into(), 200, "[]".into()),
+                ("GET /api/hosts".into(), 200, "[]".into()),
+                ("GET /api/agents".into(), 200, "[]".into()),
+                ("GET /api/plugins".into(), 200, r#"{"dir":"","plugins":[],"trustRoot":"unused"}"#.into()),
+            ],
+        );
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            test_switch_url: Some(mock.url.clone()),
+            ..Default::default()
+        }, ColorScheme::Dark);
+        open_relay_settings(&mut app);
+        app.press("id:test-refresh-relays").unwrap();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        app.press("id:test-switch-server").unwrap();
+        mock.release_response();
+        mock.wait_for_response();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
+        app.wait_for_gone("id:relay-toggle-stale-connection", Duration::from_millis(500)).unwrap();
     }
 
     /// ADR 0018 对账回归：`falcon-core::app_icon::APP_ICON_IDS` 中全部内置图标均已在 `assets/app-icons/` 下就位。

@@ -16,12 +16,15 @@ mod js;
 
 /// 对应 shared 的 appIcon.ts（客户端用得到的部分）+ 原生 Dock 版式的像素运算（ADR 0018）
 pub mod app_icon;
+#[cfg(feature = "app-icon-image")]
+pub mod app_icon_image;
 /// 对应 React 版的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）
 pub mod layout;
 /// 对应 React 版的 lib/paneKey.ts：窗口 key 约定
 pub mod pane_key;
 /// 对应 React 版的 lib/projectTree.ts：侧栏「服务器 → 文件夹 → 检出」分组
 pub mod project_tree;
+pub mod project_form;
 /// 对应 React 版的 lib/sessionTitle.ts：会话自动标题
 pub mod session_title;
 /// 对应 React 版的 lib/hostColor.ts：主机身份色

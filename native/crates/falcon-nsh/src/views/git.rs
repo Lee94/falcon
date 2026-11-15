@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::check_indicator;
+use crate::shell::widgets::{Glyph, check_indicator, glyph};
 use crate::store::{GitConfirmedOperation, git_change_is_conflicted, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -132,11 +132,15 @@ pub fn GitPanel() -> impl IntoElement {
             if !repos.is_empty() {
                 let selected = selected_repo.clone();
                 let select_store = body_store.clone();
+                let selected_repo_value = selected_repo.clone().unwrap_or_default();
                 let trigger_title = selected_repo.as_deref().and_then(|value| value.rsplit('/').next())
                     .unwrap_or("").to_string();
-                let popup_bg = rgb_to_hsla(ui.app);
+                let popup_bg = rgb_to_hsla(ui.popover);
+                let popup_foreground = rgb_to_hsla(ui.popover_foreground);
                 let popup_border = rgba_to_hsla(ui.border);
-                let popup_foreground = rgb_to_hsla(ui.foreground);
+                let action_owner = crate::shell::action_owner::ActionOwner::current();
+                let popup_token = action_owner.popup_token();
+                let select_guard = crate::shell::popups::ServerUrlGuard::capture(&body_store);
                 let repo_select = nsh_base::select()
                     .items(repos.iter().map(|repo| {
                         nsh_base::SelectItem::new(
@@ -145,17 +149,39 @@ pub fn GitPanel() -> impl IntoElement {
                         )
                     }).collect::<Vec<_>>())
                     .value(selected.unwrap_or_default())
-                    .popup_style(move |style| style.bg(popup_bg).rounded(zpx(8.0))
-                        .border_1().border_color(popup_border))
+                    .offset(zpx(4.0))
+                    .margin(zpx(8.0))
+                    .item_class("group focus:bg-tint focus:text-tint-foreground selected:bg-tint selected:text-tint-foreground disabled:opacity-50")
+                    .popup_style(move |style| style.bg(popup_bg).text_color(popup_foreground)
+                        .rounded(zpx(8.0)).border_1().border_color(popup_border).p(zpx(4.0))
+                        .shadow([crate::shell::popups::popup_shadow(popup_border)]))
                     .trigger(view().test_id("git-repo-select").w_full().px(zpx(10.0)).py(zpx(6.0))
+                        .focusable(true).flex_row().items_center().justify_between()
                         .border_1().border_color(rgba_to_hsla(ui.border)).rounded(zpx(8.0))
-                        .child(text(trigger_title).text_xs().text_color(rgb_to_hsla(ui.foreground))))
+                        .bg(rgb_to_hsla(ui.app))
+                        .child(text(trigger_title).text_xs().text_color(rgb_to_hsla(ui.foreground)))
+                        .child(glyph(Glyph::ChevronDown)))
                     .render_item(move |entry: &nsh_base::SelectEntry| {
-                        view().px(zpx(10.0)).py(zpx(6.0))
-                            .child(text(entry.title.clone()).text_xs().text_color(popup_foreground))
+                        let is_selected = entry.value.as_ref() == selected_repo_value.as_str();
+                        let mut item = view().flex_row().items_center().gap(zpx(6.0))
+                            .px(zpx(10.0)).py(zpx(6.0)).rounded(zpx(6.0));
+                        if is_selected { item = item.child(glyph(Glyph::Check)); }
+                        item.child(text(entry.title.clone()).text_xs())
+                    })
+                    .on_open_change(move |event: &nsh_base::SelectEvent| {
+                        if let nsh_base::SelectEvent::OpenChange(open, _) = event {
+                            popup_token.set_open(*open);
+                        }
                     })
                     .on_change(move |value: &Option<SharedString>| {
-                        if let Some(repo) = value.as_deref() { select_store.select_git_repo(repo); }
+                        if let Some(repo) = value.as_deref() {
+                            let repo = repo.to_string();
+                            let store = select_store.clone();
+                            let guard = select_guard.clone();
+                            action_owner.run(|| {
+                                if guard.is_current() { store.select_git_repo(&repo); }
+                            });
+                        }
                     });
                 content = content.child(view().p(zpx(8.0)).child(repo_select));
             }
@@ -238,7 +264,7 @@ pub fn GitPanel() -> impl IntoElement {
 
             let mut list = view().flex_col().p(zpx(8.0)).gap(zpx(2.0));
             if body_store.git_loading.get() {
-                list = list.child(text(t!("git.loading")).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)));
+                list = list.child(text(t!("git.loading")).test_id("git-loading").text_xs().text_color(rgb_to_hsla(ui.muted_foreground)));
             }
             for (index, item) in changes.iter().cloned().enumerate() {
                 let select = body_store.clone();
