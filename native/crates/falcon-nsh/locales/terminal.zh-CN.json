@@ -1,0 +1,33 @@
+{
+  "native": {
+    "terminal": {
+      "copy": "复制",
+      "paste": "粘贴",
+      "clear": "清屏",
+      "pasteImageTooLarge": "图片过大，已跳过",
+      "pasteImageFailed": "粘贴图片失败",
+      "transferUnavailable": "当前平台暂不支持终端文件传输",
+      "connReconnecting": "与后端连接断开，第 %{attempt} 次自动重连中…",
+      "connClosed": "与后端的连接已断开",
+      "connClosedBody": "会话本身没有受影响，接通后画面会自动恢复",
+      "retryNow": "立即重连",
+      "deadTitle": "这个会话已经结束",
+      "deadBody": "%{reason} · 这里只剩一条记录",
+      "deadReason_exited": "shell 已退出",
+      "deadReason_backend_restart": "后端重启（该会话非持久）",
+      "deadReason_link_lost": "SSH 链路断开（该会话非持久）",
+      "deadReason_session_gone": "宿主机上找不到这个会话了（已被结束，或是 Falcon 升级前建的旧会话）",
+      "deadActionNew": "用同样配置新建",
+      "clearRecord": "清除记录",
+      "reconnecting": "正在接回，第 %{attempt} 次…",
+      "unverifiedTitle": "链路断了，会话很可能还在跑",
+      "unverifiedBody": "输入已暂停，正在自动接回",
+      "attachFailed": "接回失败",
+      "reattach": "接回",
+      "retry": "重试",
+      "viewFailed": "打开文件失败",
+      "viewLoading": "正在加载预览…",
+      "viewImageFailed": "图片预览失败"
+    }
+  }
+}
