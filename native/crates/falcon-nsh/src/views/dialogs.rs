@@ -31,6 +31,8 @@ pub struct ModalLayerProps {
 #[component]
 pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let store = use_workspace();
+    let project_picker = signal(false);
+    provide_context(crate::views::project_form::ProjectPickerNavigation(project_picker));
     let theme_ctrl = use_theme();
     let zoom_ctrl = use_context::<ZoomController>();
 
@@ -104,7 +106,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         let st_escape = store.clone();
         let escape_dialog = dialog.clone();
         bind_safe_key_when("escape", false, nsh_core::keymap::When::Always, move || {
-            close_modal_dialog(&st_escape, &escape_dialog);
+            close_modal_dialog(&st_escape, &escape_dialog, project_picker);
         });
 
         let resolved = theme_ctrl.resolved();
@@ -260,7 +262,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                     focus_on_open.focus();
                 }
             })
-            .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog))
+            .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog, project_picker))
             .child(overlay)
             .into_element()
     }))
@@ -277,7 +279,7 @@ fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
     )
 }
 
-fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
+fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog, project_picker: Signal<bool>) {
     if store.active_dialog.get_untracked() != dialog.clone() {
         return;
     }
@@ -287,6 +289,8 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
         ActiveDialog::ConfirmAppUpdate(_) => {
             store.active_dialog.set(ActiveDialog::Settings(SettingsTab::About));
         }
+        ActiveDialog::NewProject | ActiveDialog::NewProjectPreset(_) | ActiveDialog::EditProject(_)
+            if project_picker.get_untracked() => project_picker.set(false),
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }
@@ -311,6 +315,9 @@ pub(super) fn modal_header(
     let ui = &resolved.ui;
     let st = store.clone();
     let dialog = store.active_dialog.get_untracked();
+    let project_picker = use_context::<crate::views::project_form::ProjectPickerNavigation>()
+        .map(|nav| nav.0)
+        .unwrap_or_else(|| signal(false));
     view()
         .flex_row()
         .items_center()
@@ -332,7 +339,7 @@ pub(super) fn modal_header(
             false,
             Some("escape"),
             resolved,
-            move || close_modal_dialog(&st, &dialog),
+            move || close_modal_dialog(&st, &dialog, project_picker),
         ))
 }
 

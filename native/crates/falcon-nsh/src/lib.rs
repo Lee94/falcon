@@ -1112,6 +1112,7 @@ pub fn registry() -> Registry {
 #[cfg(test)]
 mod tests {
     mod server_update;
+    mod project_form_tests;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::{self, Receiver, Sender};
@@ -1801,6 +1802,8 @@ mod tests {
         cfg.environment.locale_settings = nsh_core::platform::LocaleSettings::of(locale);
         cfg.environment.locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
         cfg.environment.locale_settings.languages = nsh_core::platform::Languages::one(cfg.environment.locale);
+        cfg.environment.locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
+        cfg.environment.locale_settings = nsh_core::platform::LocaleSettings::of(cfg.environment.locale);
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         Headless::start(cfg).expect("start headless FalconApp")
     }

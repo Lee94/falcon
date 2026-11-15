@@ -3,8 +3,8 @@ use falcon_core::project_form::{
 };
 use falcon_core::worktree_path::{preview_dir, preview_multi_dir};
 use falcon_proto::{
-    MultiRepoProbe, MultiWorktreeInput, MultiWorktreeMode, ProjectType, RepoBranch,
-    RepoInfo, SshAuthMethod, WorktreeInput, WorktreeMode,
+    MultiRepoProbe, MultiWorktreeInput, MultiWorktreeMode, ProjectType, RepoBranch, RepoInfo,
+    SshAuthMethod, WorktreeInput, WorktreeMode,
 };
 use nsh_core::element::input;
 use nsh_core::element::reactive::Owner;
@@ -17,6 +17,13 @@ use crate::project_operations::{FormOperationContext, ProjectOperations, worktre
 use crate::store::use_workspace;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
+
+#[path = "project_browser.rs"]
+mod browser;
+use browser::{FolderBrowser, ProbeTarget};
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProjectPickerNavigation(pub Signal<bool>);
 
 #[derive(Clone)]
 struct FormUiGuard {
@@ -35,8 +42,14 @@ impl FormUiGuard {
     }
 }
 
-fn provide_form_guard(operations: Rc<ProjectOperations>, context: FormOperationContext) -> FormUiGuard {
-    let guard = FormUiGuard { operations, context };
+fn provide_form_guard(
+    operations: Rc<ProjectOperations>,
+    context: FormOperationContext,
+) -> FormUiGuard {
+    let guard = FormUiGuard {
+        operations,
+        context,
+    };
     provide_context(guard.clone());
     guard
 }
@@ -59,9 +72,11 @@ pub struct ProjectFormProps {
 #[component]
 pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let store = use_workspace();
+    let has_preset =
+        props.preset_local.is_some() || props.preset_host_id.is_some() || props.preset_multi;
+    let quick_create = has_preset && !props.preset_multi;
     let theme = use_theme();
     let resolved = theme.resolved();
-    let ui = &resolved.ui;
     let project_id = props.project_id;
     let original = project_id.as_ref().and_then(|id| {
         store
@@ -72,20 +87,44 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
             .and_then(|project| project.source)
     });
     let missing_project = project_id.is_some() && original.is_none();
-    let derived = original.as_ref().is_some_and(|project| project.worktree.is_some());
-    let root_multi = original.as_ref().is_some_and(|project| {
-        project.multi.is_some() && project.worktree.is_none()
-    });
-    let initial = original
+    let derived = original
+        .as_ref()
+        .is_some_and(|project| project.worktree.is_some());
+    let root_multi = original
+        .as_ref()
+        .is_some_and(|project| project.multi.is_some() && project.worktree.is_none());
+    let mut initial = original
         .as_ref()
         .map(ProjectFormDraft::from_project)
-        .unwrap_or_else(|| crate::menu_operations::ProjectPreset {
-            local: props.preset_local.unwrap_or(true),
-            host_id: props.preset_host_id,
-            multi: props.preset_multi,
-        }.draft());
+        .unwrap_or_else(|| {
+            if has_preset {
+                crate::menu_operations::ProjectPreset {
+                    local: props.preset_local.unwrap_or(true),
+                    host_id: props.preset_host_id.clone(),
+                    multi: props.preset_multi,
+                }
+                .draft()
+            } else {
+                ProjectFormDraft::default()
+            }
+        });
+    let preset = (has_preset && project_id.is_none())
+        .then_some((props.preset_host_id.clone(), props.preset_multi));
+    if let Some((host, is_multi)) = &preset {
+        initial.host_id = host.clone();
+        initial.project_type = if host.is_some() || !props.preset_local.unwrap_or(true) {
+            ProjectType::Ssh
+        } else {
+            ProjectType::Local
+        };
+        initial.multi = *is_multi;
+    }
     let context = store.project_operations.begin_form();
     let form_guard = provide_form_guard(store.project_operations.clone(), context);
+    let picking = use_context::<ProjectPickerNavigation>()
+        .map(|nav| nav.0)
+        .unwrap_or_else(|| signal(false));
+    let browser = FolderBrowser::new(picking, store.clone(), form_guard.clone());
 
     let name = signal(initial.name);
     let project_type = signal(initial.project_type);
@@ -110,6 +149,71 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let busy = signal(false);
     let error = signal(None::<String>);
 
+    let probe_project = original.clone();
+    let target = signal(None::<ProbeTarget>);
+    effect(move || {
+        target.set(if project_type.get() == ProjectType::Local {
+            Some(ProbeTarget::Backend)
+        } else if let Some(id) = host_id.get() {
+            Some(ProbeTarget::SshHost(id))
+        } else {
+            probe_project
+                .as_ref()
+                .filter(|p| {
+                    // Project probes resolve the persisted SSH connection on the
+                    // server. Never offer its directories/shells for edited credentials.
+                    p.project_type == ProjectType::Ssh
+                        && p.host_id.is_none()
+                        && p.ssh.as_ref().is_some_and(|ssh| {
+                            ssh_host.get().trim() == ssh.host
+                                && ssh_port.get().trim().parse::<u16>().ok() == Some(ssh.port)
+                                && ssh_username.get().trim() == ssh.username
+                                && ssh_auth_method.get() == ssh.auth_method
+                                && ssh_key_path.get().trim()
+                                    == ssh.key_path.as_deref().unwrap_or("")
+                                && ssh_secret.get().is_empty()
+                        })
+                })
+                .map(|p| ProbeTarget::Project(p.id.clone()))
+        });
+    });
+    let shells = signal(None::<falcon_proto::ShellsInfo>);
+    let shell_request = signal(0u64);
+    let shell_store = store.clone();
+    let shell_guard = form_guard.clone();
+    effect(move || {
+        let target = target.get();
+        let request = shell_request.get_untracked() + 1;
+        shell_request.set(request);
+        shells.set(None);
+        let Some(target) = target else {
+            return;
+        };
+        let store = shell_store.clone();
+        let guard = shell_guard.clone();
+        spawn(async move {
+            let result = browser::shells(&store, &target).await;
+            if guard.is_current() && shell_request.get_untracked() == request {
+                shells.set(result.ok());
+            }
+        });
+    });
+
+    if let Some((host_id, is_multi)) = &preset {
+        // An unbound legacy SSH group has no saved host to probe yet.
+        if host_id.is_some() || props.preset_local.unwrap_or(true) {
+            let probe = host_id
+                .clone()
+                .map(ProbeTarget::SshHost)
+                .unwrap_or(ProbeTarget::Backend);
+            browser.start(
+                probe,
+                working_dir.get_untracked(),
+                (!is_multi).then_some(working_dir),
+            );
+        }
+    }
+
     let title = if project_id.is_some() {
         t!("project.editTitle")
     } else {
@@ -119,9 +223,10 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
 
     let type_store = store.clone();
     let is_editing = project_id.is_some();
+    let preset_locked = preset.is_some();
     let type_theme = resolved.clone();
     let type_selector = dynamic(move || {
-        if is_editing {
+        if is_editing || preset_locked {
             return view().into_element();
         }
         let resolved = type_theme.clone();
@@ -174,7 +279,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
 
         let hosts = ssh_hosts_store.hosts.get();
         let selected = ssh_selected_host.get();
-        let mut choices = view().flex_col().gap(zpx(6.0));
+        let mut choices = view().label("project-ssh-hosts").flex_col().gap(zpx(6.0));
         let host_signal = ssh_selected_host;
         choices = choices.child(
             view()
@@ -286,7 +391,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let multi_toggle_signal = multi;
     let toggle_theme = resolved.clone();
     let multi_toggle = dynamic(move || {
-        if root_multi || derived || is_editing {
+        if root_multi || derived || is_editing || preset_locked {
             return view().into_element();
         }
         let enabled = multi_toggle_signal.get();
@@ -306,10 +411,13 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let repos_original = original.clone();
     let repos_theme = resolved.clone();
     let repos_guard = form_guard.clone();
+    let repos_browser = browser.clone();
     let repos_section = dynamic(move || {
         let resolved = repos_theme.clone();
         let visible = if derived {
-            repos_original.as_ref().is_some_and(|project| project.multi.is_some())
+            repos_original
+                .as_ref()
+                .is_some_and(|project| project.multi.is_some())
         } else if root_multi {
             true
         } else {
@@ -326,11 +434,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
                 .unwrap_or_default();
             let mut rows = view().flex_col().gap(zpx(4.0));
             for member in members {
-                rows = rows.child(readonly_field(
-                    t!("multi.repos"),
-                    member.dir,
-                    &resolved,
-                ));
+                rows = rows.child(readonly_field(t!("multi.repos"), member.dir, &resolved));
             }
             return rows.into_element();
         }
@@ -353,6 +457,20 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
                         &resolved,
                         true,
                         false,
+                    ))
+                    .child(choice_button(
+                        t!("project.browse"),
+                        false,
+                        target.get().is_none(),
+                        &resolved,
+                        {
+                            let picker = repos_browser.clone();
+                            move || {
+                                if let Some(target) = target.get_untracked() {
+                                    picker.start(target, value.get_untracked(), Some(value));
+                                }
+                            }
+                        },
                     ))
                     .child(choice_button(
                         t!("multi.moveUp"),
@@ -393,8 +511,29 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
         }
         let add = repo_rows;
         let add_guard = repos_guard.clone();
-        list.child(choice_button(
+        let picker = repos_browser.clone();
+        list = list.child(choice_button(
             t!("multi.addRepo"),
+            false,
+            repo_rows.get().len() >= falcon_proto::MULTI_REPO_MAX || target.get().is_none(),
+            &resolved,
+            move || {
+                if let Some(target) = target.get_untracked() {
+                    let paths: Vec<_> = add
+                        .get_untracked()
+                        .iter()
+                        .map(|p| p.get_untracked())
+                        .collect();
+                    picker.start(
+                        target,
+                        falcon_core::multi_path::common_parent_dir(&paths),
+                        None,
+                    );
+                }
+            },
+        ));
+        list.child(choice_button(
+            t!("native.projectForm.addManualRepo"),
             false,
             repo_rows.get().len() >= falcon_proto::MULTI_REPO_MAX,
             &resolved,
@@ -418,7 +557,10 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let save_original = original.clone();
     let save_project_id = project_id.clone();
     let save = move || {
-        if !save_ops.is_current(context) {
+        if !save_ops.is_current(context)
+            || busy.get_untracked()
+            || name.get_untracked().trim().is_empty()
+        {
             return;
         }
         if save_project_id.is_some() && save_original.is_none() {
@@ -437,11 +579,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
             ssh_auth_method: ssh_auth_method.get(),
             ssh_key_path: ssh_key_path.get(),
             ssh_secret: ssh_secret.get(),
-            repos: repos
-                .get()
-                .iter()
-                .map(|value| value.get())
-                .collect(),
+            repos: repos.get().iter().map(|value| value.get()).collect(),
             multi: multi.get(),
             default_worktree_branch: default_worktree_branch.get(),
         };
@@ -459,36 +597,70 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     };
     let save_button_owner = Owner::current();
     let save_button_operations = store.project_operations.clone();
-    let save_action = save;
-
-    let save_label_busy = busy;
-    let save_label_theme = resolved.clone();
-    let save_label = dynamic(move || {
-        text(if save_label_busy.get() {
-            t!("project.creating")
-        } else if is_editing {
-            t!("project.save")
-        } else {
-            t!("project.create")
-        })
-        .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(rgb_to_hsla(save_label_theme.ui.primary_foreground))
-        .into_element()
-    });
+    let save_action = Rc::new(save);
+    let quick_save = save_action.clone();
 
     let working_dir_field = if derived {
         readonly_field(t!("project.workingDir"), working_dir.get(), &resolved).into_element()
     } else {
-        text_field(
-            t!("project.workingDir"),
-            working_dir,
-            t!("project.workingDir"),
-            &resolved,
-            true,
-            false,
-        )
-        .into_element()
+        view()
+            .flex_col()
+            .gap(zpx(4.0))
+            .child(text_field(
+                t!("project.workingDir"),
+                working_dir,
+                t!("project.workingDir"),
+                &resolved,
+                true,
+                false,
+            ))
+            .child({
+                let picker = browser.clone();
+                let browse_theme = resolved.clone();
+                dynamic(move || {
+                    let picker = picker.clone();
+                    view()
+                        .flex_row()
+                        .gap(zpx(6.0))
+                        .child(choice_button(
+                            t!("project.browse"),
+                            false,
+                            target.get().is_none() || busy.get(),
+                            &browse_theme,
+                            move || {
+                                if let Some(target) = target.get_untracked() {
+                                    picker.start(
+                                        target,
+                                        working_dir.get_untracked(),
+                                        Some(working_dir),
+                                    );
+                                }
+                            },
+                        ))
+                        .when(multi.get(), |v| {
+                            v.child(choice_button(
+                                t!("multi.useCommonParent"),
+                                false,
+                                repos.get().is_empty(),
+                                &browse_theme,
+                                move || {
+                                    let paths: Vec<_> = repos
+                                        .get_untracked()
+                                        .iter()
+                                        .map(|p| p.get_untracked())
+                                        .collect();
+                                    working_dir
+                                        .set(falcon_core::multi_path::common_parent_dir(&paths));
+                                },
+                            ))
+                        })
+                        .when(target.get().is_none(), |v| {
+                            v.child(text(t!("project.pickNeedHost")).text_xs())
+                        })
+                        .into_element()
+                })
+            })
+            .into_element()
     };
 
     let default_branch_field = if derived {
@@ -513,13 +685,98 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
         false,
         false,
     );
-    let shell_field = text_field(
-        t!("project.shell"),
-        shell,
-        t!("project.shellAuto"),
-        &resolved,
-        true,
-        false,
+    let shell_custom = signal(false);
+    let shell_theme = resolved.clone();
+    let shell_server = crate::shell::popups::ServerUrlGuard::capture(&store);
+    let shell_menu_guard = form_guard.clone();
+    let shell_field = dynamic(move || {
+        use crate::shell::popups::{PopupAction, menu_trigger, overflow_menu};
+        let current = shell.get();
+        let auto = shells
+            .get()
+            .map(|info| t!("project.shellAutoDetected", shell = info.default))
+            .unwrap_or_else(|| t!("project.shellAuto"));
+        let mut values = shells.get().map(|info| info.shells).unwrap_or_default();
+        if !current.is_empty() && !values.contains(&current) {
+            values.insert(0, current.clone());
+        }
+        let guard = shell_menu_guard.clone();
+        let mut actions = vec![PopupAction::new(
+            shell_server.clone(),
+            auto.clone(),
+            busy.get(),
+            false,
+            move || {
+                if guard.is_current() {
+                    shell.set(String::new());
+                    shell_custom.set(false);
+                }
+            },
+        )];
+        for value in values {
+            let guard = shell_menu_guard.clone();
+            actions.push(PopupAction::new(
+                shell_server.clone(),
+                value.clone(),
+                busy.get(),
+                false,
+                move || {
+                    if guard.is_current() {
+                        shell.set(value.clone());
+                        shell_custom.set(false);
+                    }
+                },
+            ));
+        }
+        let guard = shell_menu_guard.clone();
+        actions.push(PopupAction::new(
+            shell_server.clone(),
+            t!("project.shellCustom"),
+            busy.get(),
+            false,
+            move || {
+                if guard.is_current() {
+                    shell_custom.set(true);
+                }
+            },
+        ));
+        view()
+            .flex_col()
+            .gap(zpx(4.0))
+            .child(text(t!("project.shell")).text_xs())
+            .child(overflow_menu(
+                menu_trigger(
+                    "project-shell-menu",
+                    if shell_custom.get() {
+                        t!("project.shellCustom")
+                    } else if current.is_empty() {
+                        auto
+                    } else {
+                        current
+                    },
+                    &shell_theme,
+                ),
+                actions,
+                &shell_theme,
+            ))
+            .into_element()
+    });
+    // Keep the editable input outside the menu's reactive subtree so typing
+    // updates the menu label without replacing the focused input each keystroke.
+    let shell_field = view().flex_col().gap(zpx(4.0)).child(shell_field).child(
+        view()
+            .child(text_field(
+                t!("project.shell"),
+                shell,
+                t!("project.shellAuto"),
+                &resolved,
+                true,
+                false,
+            ))
+            .style_when(
+                move || !shell_custom.get() && shells.get().is_some(),
+                |v| v.hidden(),
+            ),
     );
     let error_theme = resolved.clone();
     let error_view = dynamic(move || {
@@ -534,45 +791,126 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
             .unwrap_or_else(|| view().into_element())
     });
 
-    view()
+    let save_disabled = dynamic({
+        let save_theme = resolved.clone();
+        move || {
+            let disabled = busy.get() || name.get().trim().is_empty() || missing_project;
+            view()
+                .label("project-submit")
+                .items_center()
+                .py(zpx(7.0))
+                .rounded(zpx(6.0))
+                .when(!disabled, |v| v.cursor_pointer())
+                .when(disabled, |v| v.opacity(0.5))
+                .bg(rgb_to_hsla(save_theme.ui.tint_strong))
+                .on_press({
+                    let action = save_action.clone();
+                    let ops = save_button_operations.clone();
+                    move || {
+                        if !disabled && save_button_owner.is_live() && ops.is_current(context) {
+                            action();
+                        }
+                    }
+                })
+                .child(
+                    text(if busy.get() {
+                        if is_editing {
+                            t!("native.projectForm.saving")
+                        } else {
+                            t!("project.creating")
+                        }
+                    } else if is_editing {
+                        t!("project.save")
+                    } else {
+                        t!("project.create")
+                    })
+                    .text_xs()
+                    .text_color(rgb_to_hsla(save_theme.ui.primary_foreground)),
+                )
+                .into_element()
+        }
+    });
+    let form = view()
         .flex_col()
         .child(header)
         .child(
             scroll().flex_shrink(1.0).min_h(zpx(0.0)).child(
                 view()
-                .flex_col()
-                .p(zpx(14.0))
-                .gap(zpx(10.0))
-                .child(type_selector)
-                .child(name_field)
-                .child(working_dir_field)
-                .child(ssh_section)
-                .child(shell_field)
-                .child(default_branch_field)
-                .child(multi_toggle)
-                .child(repos_section)
-                .when(missing_project, |view| {
-                    view.child(text(t!("project.missingProject")).text_xs())
-                })
-                .child(error_view)
-                .child(
-                    view()
-                        .items_center()
-                        .py(zpx(7.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(rgb_to_hsla(ui.tint_strong))
-                        .on_press(move || {
-                            if save_button_owner.is_live()
-                                && save_button_operations.is_current(context)
-                            {
-                                save_action();
-                            }
-                        })
-                        .child(save_label),
-                ),
+                    .flex_col()
+                    .p(zpx(14.0))
+                    .gap(zpx(10.0))
+                    .child(type_selector)
+                    .child(name_field)
+                    .child(working_dir_field)
+                    .child(ssh_section)
+                    .child(shell_field)
+                    .child(default_branch_field)
+                    .child(multi_toggle)
+                    .child(repos_section)
+                    .when(missing_project, |view| {
+                        view.child(text(t!("project.missingProject")).text_xs())
+                    })
+                    .child(error_view)
+                    .child(save_disabled),
             ),
         )
+        .into_element();
+    let confirm_browser = browser.clone();
+    let confirm_guard = form_guard.clone();
+    let confirm: Rc<dyn Fn(Vec<String>)> = Rc::new(move |paths| {
+        if !confirm_guard.is_current() {
+            return;
+        }
+        if let Some(destination) = confirm_browser.destination.get_untracked() {
+            if let Some(path) = paths.first() {
+                destination.set(path.clone());
+                if destination == working_dir
+                    && !is_editing
+                    && name.get_untracked().trim().is_empty()
+                {
+                    name.set(
+                        falcon_core::file_search::basename(
+                            &path.trim_end_matches(['/', '\\']).replace('\\', "/"),
+                        )
+                        .to_string(),
+                    );
+                }
+            }
+        } else {
+            let mut values = repos.get_untracked();
+            for path in paths {
+                if values.iter().any(|value| value.get_untracked() == path) {
+                    continue;
+                }
+                if values.len() == falcon_proto::MULTI_REPO_MAX {
+                    error.set(Some(t!("multi.repoLimit")));
+                    break;
+                }
+                if let Some(value) = confirm_guard.signal(path) {
+                    values.push(value);
+                }
+            }
+            repos.set(values);
+        }
+        picking.set(false);
+        if quick_create && !is_editing {
+            quick_save();
+        }
+    });
+    // Keep the form mounted while browsing, preserving fields and in-flight shell discovery.
+    let visible_form = view()
+        .child(form)
+        .style_when(move || picking.get(), |v| v.hidden());
+    view()
+        .flex_col()
+        .child(visible_form)
+        .child(dynamic(move || {
+            if picking.get() {
+                browser.render(&resolved, confirm.clone())
+            } else {
+                view().into_element()
+            }
+        }))
 }
 
 fn project_form_error(error: ProjectFormError) -> String {
@@ -633,9 +971,10 @@ fn text_field(
     view()
         .flex_col()
         .gap(zpx(4.0))
-        .child(text(label).text_xs().text_color(muted))
+        .child(text(label.clone()).text_xs().text_color(muted))
         .child(
             input()
+                .label(label)
                 .w_full()
                 .px(zpx(8.0))
                 .py(zpx(6.0))
@@ -664,7 +1003,11 @@ fn readonly_field(
     view()
         .flex_col()
         .gap(zpx(4.0))
-        .child(text(label).text_xs().text_color(rgb_to_hsla(resolved.ui.muted_foreground)))
+        .child(
+            text(label)
+                .text_xs()
+                .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+        )
         .child(
             text(value)
                 .text_xs()
@@ -693,15 +1036,11 @@ fn choice_button(
                 action();
             }
         })
-        .child(
-            text(label)
-                .text_xs()
-                .text_color(rgb_to_hsla(if selected {
-                    resolved.ui.tint_foreground
-                } else {
-                    resolved.ui.foreground
-                })),
-        )
+        .child(text(label).text_xs().text_color(rgb_to_hsla(if selected {
+            resolved.ui.tint_foreground
+        } else {
+            resolved.ui.foreground
+        })))
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -721,7 +1060,9 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
         .into_iter()
         .find(|project| project.id == project_id)
         .and_then(|project| project.source);
-    let is_multi = project.as_ref().is_some_and(|project| project.multi.is_some());
+    let is_multi = project
+        .as_ref()
+        .is_some_and(|project| project.multi.is_some());
     let project_name = project
         .as_ref()
         .map(|project| project.name.clone())
@@ -799,7 +1140,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             return view()
                 .flex_col()
                 .gap(zpx(6.0))
-                .child(text(message).text_xs().text_color(rgb_to_hsla(resolved.ui.destructive)))
+                .child(
+                    text(message)
+                        .text_xs()
+                        .text_color(rgb_to_hsla(resolved.ui.destructive)),
+                )
                 .child(choice_button(
                     t!("worktree.retry"),
                     false,
@@ -820,7 +1165,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 return view()
                     .flex_col()
                     .gap(zpx(6.0))
-                    .child(text(t!("worktree.notDerivable")).text_xs().text_color(rgb_to_hsla(resolved.ui.destructive)))
+                    .child(
+                        text(t!("worktree.notDerivable"))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(resolved.ui.destructive)),
+                    )
                     .child(choice_button(
                         t!("worktree.retry"),
                         false,
@@ -848,7 +1197,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                     view()
                         .flex_col()
                         .gap(zpx(2.0))
-                        .child(text(member.dir.clone()).text_xs().text_color(rgb_to_hsla(resolved.ui.foreground)))
+                        .child(
+                            text(member.dir.clone())
+                                .text_xs()
+                                .text_color(rgb_to_hsla(resolved.ui.foreground)),
+                        )
                         .child(text(label).text_xs().text_color(color)),
                 );
             }
@@ -881,8 +1234,16 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             return view()
                 .flex_col()
                 .gap(zpx(4.0))
-                .child(text(reason).text_xs().text_color(rgb_to_hsla(resolved.ui.destructive)))
-                .child(text(detail).text_xs().text_color(rgb_to_hsla(resolved.ui.muted_foreground)))
+                .child(
+                    text(reason)
+                        .text_xs()
+                        .text_color(rgb_to_hsla(resolved.ui.destructive)),
+                )
+                .child(
+                    text(detail)
+                        .text_xs()
+                        .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                )
                 .child(choice_button(
                     t!("worktree.retry"),
                     false,
@@ -907,7 +1268,10 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 Some(BranchSelection::ExistingLocal(local)) => {
                     selected == *local && mode.get() == WorktreeMode::ExistingBranch
                 }
-                Some(BranchSelection::NewFromRemote { local_branch, remote_ref }) => {
+                Some(BranchSelection::NewFromRemote {
+                    local_branch,
+                    remote_ref,
+                }) => {
                     selected == *local_branch
                         && start_point.get() == *remote_ref
                         && mode.get() == WorktreeMode::NewBranch
@@ -920,26 +1284,34 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             let branch_value = branch_info.clone();
             list = list.child(choice_button(
                 if checked_out {
-                    format!("{} · {}", branch_name, t!("worktree.inUse", path = branch_info.checked_out_at.as_deref().unwrap_or_default()))
+                    format!(
+                        "{} · {}",
+                        branch_name,
+                        t!(
+                            "worktree.inUse",
+                            path = branch_info.checked_out_at.as_deref().unwrap_or_default()
+                        )
+                    )
                 } else {
                     branch_name
                 },
                 chosen,
                 unavailable,
                 &resolved,
-                move || {
-                    match branch_selection(&branch_value) {
-                        Some(BranchSelection::NewFromRemote { local_branch, remote_ref }) => {
-                            branch_signal.set(local_branch);
-                            base_signal.set(remote_ref);
-                            mode_signal.set(WorktreeMode::NewBranch);
-                        }
-                        Some(BranchSelection::ExistingLocal(local_branch)) => {
-                            branch_signal.set(local_branch);
-                            mode_signal.set(WorktreeMode::ExistingBranch);
-                        }
-                        None => {}
+                move || match branch_selection(&branch_value) {
+                    Some(BranchSelection::NewFromRemote {
+                        local_branch,
+                        remote_ref,
+                    }) => {
+                        branch_signal.set(local_branch);
+                        base_signal.set(remote_ref);
+                        mode_signal.set(WorktreeMode::NewBranch);
                     }
+                    Some(BranchSelection::ExistingLocal(local_branch)) => {
+                        branch_signal.set(local_branch);
+                        mode_signal.set(WorktreeMode::ExistingBranch);
+                    }
+                    None => {}
                 },
             ));
         }
@@ -1033,17 +1405,14 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             if start_mode.get() != WorktreeMode::NewBranch {
                 return view().into_element();
             }
-            let mut section = view()
-                .flex_col()
-                .gap(zpx(5.0))
-                .child(text_field(
-                    t!("worktree.startPoint"),
-                    start_signal,
-                    t!("worktree.startPointHead", ref = "HEAD"),
-                    &resolved,
-                    true,
-                    false,
-                ));
+            let mut section = view().flex_col().gap(zpx(5.0)).child(text_field(
+                t!("worktree.startPoint"),
+                start_signal,
+                t!("worktree.startPointHead", ref = "HEAD"),
+                &resolved,
+                true,
+                false,
+            ));
             if let Some(info) = repo_info.get() {
                 let fallback = info
                     .head_branch
@@ -1056,13 +1425,9 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                     t!("worktree.startPointDetached", sha = fallback.as_str())
                 };
                 let selected_start = start_signal;
-                section = section.child(choice_button(
-                    label,
-                    false,
-                    false,
-                    &resolved,
-                    move || selected_start.set(fallback.clone()),
-                ));
+                section = section.child(choice_button(label, false, false, &resolved, move || {
+                    selected_start.set(fallback.clone())
+                }));
             }
             section.into_element()
         })
@@ -1081,7 +1446,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
         };
         let suggested = single_suggested_dir(&info, &branch_value);
         let custom = manual_directory.get();
-        let chosen = if custom { directory.get() } else { suggested.clone() };
+        let chosen = if custom {
+            directory.get()
+        } else {
+            suggested.clone()
+        };
         let occupied = info.branches.iter().any(|branch| {
             branch.dir_occupied && branch.suggested_dir == suggested && chosen == suggested
         });
@@ -1128,13 +1497,9 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             let signal = branch;
             let chosen = current == name;
             let value = name.clone();
-            choices = choices.child(choice_button(
-                name,
-                chosen,
-                false,
-                &resolved,
-                move || signal.set(value.clone()),
-            ));
+            choices = choices.child(choice_button(name, chosen, false, &resolved, move || {
+                signal.set(value.clone())
+            }));
         }
         choices.into_element()
     });
@@ -1165,7 +1530,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
             if is_multi {
                 multi_dir_probe
                     .get()
-                    .and_then(|probe| probe.base_dir.map(|base| preview_multi_dir(&base, &directory_project_name, &branch)))
+                    .and_then(|probe| {
+                        probe
+                            .base_dir
+                            .map(|base| preview_multi_dir(&base, &directory_project_name, &branch))
+                    })
                     .unwrap_or_default()
             } else {
                 single_dir_repo
@@ -1206,7 +1575,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 view()
                     .flex_col()
                     .gap(zpx(2.0))
-                    .child(text(member.dir).text_xs().text_color(rgb_to_hsla(resolved.ui.foreground)))
+                    .child(
+                        text(member.dir)
+                            .text_xs()
+                            .text_color(rgb_to_hsla(resolved.ui.foreground)),
+                    )
                     .child(text(label).text_xs().text_color(color)),
             );
         }
@@ -1280,7 +1653,10 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 return;
             }
             let selected = selected_branch(&info, &branch_name);
-            let local_exists = info.branches.iter().any(|item| !item.remote && item.name == branch_name);
+            let local_exists = info
+                .branches
+                .iter()
+                .any(|item| !item.remote && item.name == branch_name);
             if selected.is_some_and(|item| item.checked_out_at.is_some()) {
                 submit_error.set(Some(t!("worktree.branchInUse")));
                 return;
@@ -1317,7 +1693,9 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 mode: chosen_mode,
                 branch: branch_name,
                 start_point,
-                dir: manual.then(|| directory.get().trim().to_string()).filter(|dir| !dir.is_empty()),
+                dir: manual
+                    .then(|| directory.get().trim().to_string())
+                    .filter(|dir| !dir.is_empty()),
             };
             submit_ops.derive_worktree(
                 submit_store.clone(),
@@ -1349,16 +1727,18 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
     let error_view = dynamic(move || {
         error
             .get()
-            .map(|message| text(message).text_xs().text_color(rgb_to_hsla(error_theme.ui.destructive)).into_element())
+            .map(|message| {
+                text(message)
+                    .text_xs()
+                    .text_color(rgb_to_hsla(error_theme.ui.destructive))
+                    .into_element()
+            })
             .unwrap_or_else(|| view().into_element())
     });
 
-    view()
-        .flex_col()
-        .child(header)
-        .child(
-            scroll().flex_shrink(1.0).min_h(zpx(0.0)).child(
-                view()
+    view().flex_col().child(header).child(
+        scroll().flex_shrink(1.0).min_h(zpx(0.0)).child(
+            view()
                 .flex_col()
                 .p(zpx(14.0))
                 .gap(zpx(10.0))
@@ -1369,7 +1749,11 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                 .child(multi_branch_options)
                 .child(start_point_field)
                 .child(name_field)
-                .child(text(t!("worktree.suggestedDirectory")).text_xs().text_color(rgb_to_hsla(resolved.ui.muted_foreground)))
+                .child(
+                    text(t!("worktree.suggestedDirectory"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                )
                 .child(directory_input)
                 .child(path_warning)
                 .child(multi_default_hint)
@@ -1391,8 +1775,8 @@ pub fn WorktreeForm(props: WorktreeFormProps) -> impl IntoElement {
                         })
                         .child(save_label),
                 ),
-            ),
-        )
+        ),
+    )
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -1429,7 +1813,11 @@ fn common_branch_names(probe: &MultiRepoProbe) -> Vec<String> {
         .map(|branch| branch.name.clone())
         .filter(|name| {
             probe.members.iter().skip(1).all(|member| {
-                member.info.branches.iter().any(|branch| !branch.remote && branch.name == *name)
+                member
+                    .info
+                    .branches
+                    .iter()
+                    .any(|branch| !branch.remote && branch.name == *name)
             })
         })
         .collect()
@@ -1469,7 +1857,10 @@ fn multi_member_status(
         .iter()
         .find(|candidate| !candidate.remote && candidate.name == branch);
     if let Some(existing) = existing.filter(|existing| existing.checked_out_at.is_some()) {
-        return Err(t!("worktree.inUse", path = existing.checked_out_at.as_deref().unwrap_or_default()));
+        return Err(t!(
+            "worktree.inUse",
+            path = existing.checked_out_at.as_deref().unwrap_or_default()
+        ));
     }
     match mode {
         MultiWorktreeMode::Auto => Ok(if existing.is_some() {

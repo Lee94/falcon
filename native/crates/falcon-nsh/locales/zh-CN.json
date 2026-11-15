@@ -1087,6 +1087,13 @@
       "projectChanged": "项目或其打开的文件已变化，请重新确认操作。",
       "projectFilter": "项目：%{name}"
     },
+    "projectForm": {
+      "probeUnavailable": "无法连接宿主机，请连接后重试。",
+      "select": "勾选",
+      "unselect": "取消勾选",
+      "addManualRepo": "手动添加仓库",
+      "saving": "正在保存…"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",

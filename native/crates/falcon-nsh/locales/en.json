@@ -178,6 +178,13 @@
       "closeProjectFiles": "Close this project's files and finish pending file, Git or project operations before archiving or deleting it.",
       "projectChanged": "The project or its open files changed. Review the operation again.",
       "projectFilter": "Project: %{name}"
+    },
+    "projectForm": {
+      "probeUnavailable": "Cannot connect to the host. Connect and try again.",
+      "select": "Select",
+      "unselect": "Deselect",
+      "addManualRepo": "Add repository manually",
+      "saving": "Saving…"
     }
   },
   "common": {
@@ -197,7 +204,35 @@
     "openIn": "Open in %{editor}",
     "openInFailed": "Could not open in %{editor}",
     "editorMissing": "%{editor} not found",
-    "editorMissingBody": "No application on this computer handles %{editor} links. Install and launch %{editor} once, then try again."
+    "editorMissingBody": "No application on this computer handles %{editor} links. Install and launch %{editor} once, then try again.",
+    "createTitle": "New project",
+    "editTitle": "Edit project",
+    "name": "Project name",
+    "typeLocal": "Local folder",
+    "typeSsh": "Remote SSH",
+    "workingDir": "Folder path",
+    "shell": "Shell",
+    "shellAuto": "Default (auto-detect)",
+    "shellAutoDetected": "Default (%{shell})",
+    "shellCustom": "Custom…",
+    "browse": "Browse…",
+    "pickTitle": "Choose folder",
+    "pickSelect": "Select this folder",
+    "pickHome": "Home",
+    "pickUp": "Parent folder",
+    "pickRoots": "Filesystem roots",
+    "pickJump": "Go",
+    "pickFilter": "Filter this directory",
+    "pickSelected": "Add %{n} selected folders",
+    "pickMultipleHint": "Select multiple folders using the checkboxes. Click a name to enter it. Selections persist across directories. With no selection, choose the current folder.",
+    "pickEmpty": "No subfolders in this directory",
+    "pickEmptyFilter": "No matching folders",
+    "pickLoading": "Loading…",
+    "pickConnecting": "Connecting to remote host…",
+    "pickNeedHost": "Select a saved host before browsing remote folders",
+    "create": "Create",
+    "creating": "Creating…",
+    "save": "Save"
   },
   "sidebar": {
     "standalone": "Standalone sessions",
@@ -304,7 +339,15 @@
     "newProject": "New multi-repository project…",
     "derive": "Derive multi-repository project…",
     "deleteFootnote": "All %{n} worktrees under this directory will be removed; repository branches will be kept.",
-    "deleteVirtualDirFootnote": "Falcon's generated virtual project directory and all its files will also be deleted. Member repositories and custom working directories will not be deleted."
+    "deleteVirtualDirFootnote": "Falcon's generated virtual project directory and all its files will also be deleted. Member repositories and custom working directories will not be deleted.",
+    "typeMulti": "Multiple repositories",
+    "repos": "Member repositories",
+    "addRepo": "Add repositories…",
+    "removeRepo": "Remove repository",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "useCommonParent": "Use common parent folder",
+    "repoLimit": "At most 16 member repositories are supported."
   },
   "worktree": {
     "archive": "Archive…",
