@@ -1270,6 +1270,39 @@ impl WorkspaceStore {
         self.terminals.client.lock().clone()
     }
 
+    /// 读取后端本机 tailnet 里的设备。环境不可用由响应的 `available/reason` 表达，
+    /// 这里的 `Err` 只表示 HTTP 请求或响应解码没有完成。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn tailscale_devices(
+        &self,
+    ) -> Result<falcon_proto::TailscaleDevices, String> {
+        let client = self
+            .client()
+            .ok_or_else(|| crate::i18n::t!("host.tailscaleFailed").to_string())?;
+        client
+            .tailscale_devices()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Web 端与初始状态同步一样使用浏览器 `fetch`，不经过原生 `FalconClient`。
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn tailscale_devices(
+        &self,
+    ) -> Result<falcon_proto::TailscaleDevices, String> {
+        use nsh_core::prelude::{HttpRequest, fetch};
+
+        let failed = || crate::i18n::t!("host.tailscaleFailed").to_string();
+        let base = self.server_url.get().trim_end_matches('/').to_string();
+        let response = fetch(HttpRequest::get(format!("{base}/api/tailscale/devices")))
+            .await
+            .map_err(|_| failed())?;
+        if !response.ok() {
+            return Err(failed());
+        }
+        serde_json::from_slice(&response.body).map_err(|_| failed())
+    }
+
     pub fn select_app_icon(&self, id: &str) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.client() {

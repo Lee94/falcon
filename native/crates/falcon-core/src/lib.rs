@@ -26,6 +26,8 @@ pub mod project_tree;
 pub mod session_title;
 /// 对应 React 版的 lib/hostColor.ts：主机身份色
 pub mod host_color;
+/// 从 Tailscale 设备预填 SSH 主机：搜索、识别已添加设备、显示名避重
+pub mod tailscale;
 /// 对应服务端的 sessions/relay_spec.rs：中转的同端口槽位（设置「中转」页的徽标）
 pub mod relay;
 /// 对应 React 版的 lib/filePath.ts：宿主机路径（posix / windows，不用 std::path）

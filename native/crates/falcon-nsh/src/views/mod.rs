@@ -5,6 +5,7 @@ pub mod dialogs;
 pub mod files;
 pub mod git;
 mod host_form;
+mod tailscale;
 pub mod plugins;
 mod relays;
 
