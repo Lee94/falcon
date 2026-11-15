@@ -90,6 +90,7 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
                 let st = store.clone();
                 let id = rule.id.clone();
                 let enabled = rule.enabled;
+                let busy = store.relay_toggle_pending(&id, share);
                 section = section.child(
                     view()
                         .flex_row()
@@ -112,6 +113,7 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
                                     "size-4 rounded-full bg-background checked:translate-x-4",
                                 )
                                 .checked(enabled)
+                                .disabled(busy)
                                 .on_change(move |enabled: &bool| {
                                     st.set_relay_enabled(&id, share, *enabled)
                                 }),
@@ -121,6 +123,7 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
             if share {
                 let st = store.clone();
                 let host = props.machine_id.clone();
+                let busy = store.relay_create_pending(&host, true);
                 section = section
                     .child(
                         view()
@@ -145,6 +148,8 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
                             )
                             .child(
                                 view()
+                                    .disabled(busy)
+                                    .disabled_style(|style| style.opacity(0.55))
                                     .px(zpx(10.0))
                                     .py(zpx(5.0))
                                     .rounded(zpx(8.0))
@@ -178,6 +183,7 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
             } else {
                 let st = store.clone();
                 let host = props.machine_id.clone();
+                let busy = store.relay_create_pending(&host, false);
                 section = section.child(
                     view()
                         .flex_row()
@@ -219,6 +225,8 @@ pub fn RelayMachine(props: RelayMachineProps) -> impl IntoElement {
                         )
                         .child(
                             view()
+                                .disabled(busy)
+                                .disabled_style(|style| style.opacity(0.55))
                                 .px(zpx(10.0))
                                 .py(zpx(5.0))
                                 .rounded(zpx(8.0))

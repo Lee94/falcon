@@ -348,6 +348,7 @@
   },
   "forward": {
     "title": "中转",
+    "unavailable": "当前未连接服务器，无法修改中转规则。",
     "local": "本机",
     "localConn": "falcon 后端所在的机器",
     "noHosts": "还没有远端主机。端口转发要挂在一台 SSH 主机上，先添加一台。",

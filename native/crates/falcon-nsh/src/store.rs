@@ -9,7 +9,7 @@
 //! - **源项目 / 附属项目 / 远端主机 / 中转**：保持与服务端节点模型（ADR 0027）一致的归属关系；
 //! - 同时支持离线确定性工作台（供 `nsh-testing` 无头回归测试与首屏展示）与在线 `FalconClient` 实时同步。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -164,6 +164,26 @@ pub struct RelayRecord {
     pub public_url: Option<String>,
     pub enabled: bool,
     pub same_port_conflict: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum RelayWriteKind {
+    Toggle { id: String, share: bool },
+    CreateShare { host: String },
+    CreateForward { host: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RelayWriteKey {
+    generation: u64,
+    kind: RelayWriteKind,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Default)]
+struct RelayRefreshState {
+    in_flight: bool,
+    queued: bool,
 }
 
 /// Agent 会话图形时间线条目。
@@ -337,6 +357,9 @@ pub struct WorkspaceStore {
     pub sessions: Signal<Vec<SessionRecord>>,
     pub hosts: Signal<Vec<HostRecord>>,
     pub relays: Signal<Vec<RelayRecord>>,
+    relay_writes: Signal<HashSet<RelayWriteKey>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    relay_refreshes: Signal<HashMap<u64, RelayRefreshState>>,
     pub detected_agents: Signal<Vec<String>>,
 
     pub columns: Signal<Vec<ColumnLayout>>,
@@ -837,6 +860,9 @@ impl WorkspaceStore {
             sessions: signal(sessions),
             hosts: signal(hosts),
             relays: signal(relays),
+            relay_writes: signal(HashSet::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            relay_refreshes: signal(HashMap::new()),
             detected_agents: signal(vec!["claude".into(), "codex".into()]),
             columns: signal(vec![initial_col]),
             active_canvas_id: signal(c1),
@@ -1585,55 +1611,190 @@ impl WorkspaceStore {
         let _ = (amend, push);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin_relay_write(&self, key: &RelayWriteKey) -> bool {
+        if key.generation != self.connection_generation() {
+            return false;
+        }
+        let mut began = false;
+        self.relay_writes.update(|pending| {
+            pending.retain(|pending| pending.generation == key.generation);
+            began = pending.insert(key.clone());
+        });
+        began
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_relay_write(&self, key: &RelayWriteKey) {
+        // Generation-scoped keys keep stale completions from clearing newer busy entries.
+        self.relay_writes.update(|pending| {
+            pending.remove(key);
+        });
+    }
+
+    fn relay_write_pending(&self, kind: RelayWriteKind) -> bool {
+        let key = RelayWriteKey {
+            generation: self.connection_generation(),
+            kind,
+        };
+        self.relay_writes.get().contains(&key)
+    }
+
+    pub(crate) fn relay_toggle_pending(&self, id: &str, share: bool) -> bool {
+        self.relay_write_pending(RelayWriteKind::Toggle {
+            id: id.to_string(),
+            share,
+        })
+    }
+
+    pub(crate) fn relay_create_pending(&self, host: &str, share: bool) -> bool {
+        self.relay_write_pending(if share {
+            RelayWriteKind::CreateShare {
+                host: host.to_string(),
+            }
+        } else {
+            RelayWriteKind::CreateForward {
+                host: host.to_string(),
+            }
+        })
+    }
+
+    fn show_relay_unavailable(&self) {
+        self.show_toast(crate::i18n::t!("forward.unavailable"));
+    }
+
     pub fn refresh_relays(&self) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
-            spawn(async move {
-                match client.list_relays().await {
-                    Ok(list) => {
-                        let mut rules: Vec<_> = list
-                            .forwards
-                            .into_iter()
-                            .map(|f| RelayRecord {
-                                id: f.id,
-                                machine_label: f.host_id,
-                                kind_label: if f.kind == falcon_proto::ForwardKind::Local {
-                                    "L → R".into()
-                                } else {
-                                    "R → L".into()
-                                },
-                                local_port: f.bind_port,
-                                target: format!("{}:{}", f.dest_host, f.dest_port),
-                                public_url: None,
-                                enabled: f.enabled,
-                                same_port_conflict: false,
-                            })
-                            .collect();
-                        rules.extend(list.shares.into_iter().map(|s| RelayRecord {
-                            id: s.id,
-                            machine_label: s.host_id.unwrap_or_else(|| "local".into()),
-                            kind_label: "Quick Tunnel".into(),
-                            local_port: s.dest_port,
-                            target: format!("http://{}:{}", s.dest_host, s.dest_port),
-                            public_url: s.public_url,
-                            enabled: s.enabled,
-                            same_port_conflict: false,
-                        }));
-                        store.relays.set(rules);
+        {
+            let client = self.client();
+            let generation = self.connection_generation();
+            if let Some(client) = client {
+                self.queue_relay_refresh(client, generation);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn queue_relay_refresh(&self, client: FalconClient, generation: u64) {
+        if self.connection_generation() != generation {
+            return;
+        }
+        let mut should_spawn = false;
+        self.relay_refreshes.update(|refreshes| {
+            refreshes.retain(|active_generation, _| *active_generation == generation);
+            let state = refreshes.entry(generation).or_default();
+            if state.in_flight {
+                state.queued = true;
+            } else {
+                state.in_flight = true;
+                should_spawn = true;
+            }
+        });
+        if should_spawn {
+            self.spawn_relay_refresh(client, generation);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_relay_refresh(&self, client: FalconClient, generation: u64) {
+        let store = self.clone();
+        self.spawn_root(async move {
+            if store.connection_generation() != generation {
+                store.relay_refreshes.update(|refreshes| {
+                    refreshes.remove(&generation);
+                });
+                return;
+            }
+            let result = client.list_relays().await;
+
+            let mut queued = false;
+            store.relay_refreshes.update(|refreshes| {
+                queued = refreshes
+                    .get(&generation)
+                    .is_some_and(|state| state.queued);
+                if queued {
+                    if let Some(state) = refreshes.get_mut(&generation) {
+                        state.queued = false;
                     }
-                    Err(e) => store.show_toast(e.to_string()),
+                } else {
+                    refreshes.remove(&generation);
                 }
             });
-        }
+            if store.connection_generation() != generation {
+                store.relay_refreshes.update(|refreshes| {
+                    refreshes.remove(&generation);
+                });
+                return;
+            }
+            if queued {
+                // A newer request invalidated this snapshot; only the trailing read may apply rows.
+                store.spawn_relay_refresh(client, generation);
+                return;
+            }
+
+            match result {
+                Ok(list) => {
+                    let mut rules: Vec<_> = list
+                        .forwards
+                        .into_iter()
+                        .map(|f| RelayRecord {
+                            id: f.id,
+                            machine_label: f.host_id,
+                            kind_label: if f.kind == falcon_proto::ForwardKind::Local {
+                                "L → R".into()
+                            } else {
+                                "R → L".into()
+                            },
+                            local_port: f.bind_port,
+                            target: format!("{}:{}", f.dest_host, f.dest_port),
+                            public_url: None,
+                            enabled: f.enabled,
+                            same_port_conflict: false,
+                        })
+                        .collect();
+                    rules.extend(list.shares.into_iter().map(|s| RelayRecord {
+                        id: s.id,
+                        machine_label: s.host_id.unwrap_or_else(|| "local".into()),
+                        kind_label: "Quick Tunnel".into(),
+                        local_port: s.dest_port,
+                        target: format!("http://{}:{}", s.dest_host, s.dest_port),
+                        public_url: s.public_url,
+                        enabled: s.enabled,
+                        same_port_conflict: false,
+                    }));
+                    store.relays.set(rules);
+                }
+                Err(e) => store.show_toast(e.to_string()),
+            }
+        });
     }
 
     pub fn set_relay_enabled(&self, id: &str, share: bool, enabled: bool) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
+        {
+            let client = self.client();
+            let generation = self.connection_generation();
+            let Some(client) = client else {
+                self.show_relay_unavailable();
+                return;
+            };
             let id = id.to_string();
-            spawn(async move {
+            let key = RelayWriteKey {
+                generation,
+                kind: RelayWriteKind::Toggle {
+                    id: id.clone(),
+                    share,
+                },
+            };
+            if !self.begin_relay_write(&key) {
+                return;
+            }
+            let store = self.clone();
+            self.spawn_root(async move {
+                if store.connection_generation() != generation {
+                    store.finish_relay_write(&key);
+                    return;
+                }
                 let result = if share {
                     client
                         .update_share(
@@ -1657,40 +1818,69 @@ impl WorkspaceStore {
                         .await
                         .map(|_| ())
                 };
+                store.finish_relay_write(&key);
+                if store.connection_generation() != generation {
+                    return;
+                }
                 match result {
                     Ok(()) => store.refresh_relays(),
                     Err(e) => store.show_toast(e.to_string()),
                 }
             });
-            return;
         }
-        let _ = share;
-        self.relays.update(|rules| {
-            if let Some(r) = rules.iter_mut().find(|r| r.id == id) {
-                r.enabled = enabled;
-            }
-        });
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (id, share, enabled);
+            self.show_relay_unavailable();
+        }
     }
 
     pub fn create_public_share(&self, host: &str, port: u16, name: &str) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
+        {
+            let client = self.client();
+            let generation = self.connection_generation();
+            let Some(client) = client else {
+                self.show_relay_unavailable();
+                return;
+            };
+            let host = host.to_string();
+            let key = RelayWriteKey {
+                generation,
+                kind: RelayWriteKind::CreateShare { host: host.clone() },
+            };
+            if !self.begin_relay_write(&key) {
+                return;
+            }
             let input = falcon_proto::PublicShareInput {
-                host_id: (!host.is_empty()).then(|| host.to_string()),
+                host_id: (!host.is_empty()).then(|| host.clone()),
                 name: (!name.is_empty()).then(|| name.to_string()),
                 dest_host: None,
                 dest_port: port,
                 enabled: Some(true),
             };
-            spawn(async move {
-                match client.create_share(&input).await {
+            let store = self.clone();
+            self.spawn_root(async move {
+                if store.connection_generation() != generation {
+                    store.finish_relay_write(&key);
+                    return;
+                }
+                let result = client.create_share(&input).await;
+                store.finish_relay_write(&key);
+                if store.connection_generation() != generation {
+                    return;
+                }
+                match result {
                     Ok(_) => store.refresh_relays(),
                     Err(e) => store.show_toast(e.to_string()),
                 }
             });
         }
-        let _ = (host, port, name);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (host, port, name);
+            self.show_relay_unavailable();
+        }
     }
 
     pub fn create_port_forward(
@@ -1703,10 +1893,23 @@ impl WorkspaceStore {
         name: &str,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
+        {
+            let client = self.client();
+            let generation = self.connection_generation();
+            let Some(client) = client else {
+                self.show_relay_unavailable();
+                return;
+            };
+            let host = host.to_string();
+            let key = RelayWriteKey {
+                generation,
+                kind: RelayWriteKind::CreateForward { host: host.clone() },
+            };
+            if !self.begin_relay_write(&key) {
+                return;
+            }
             let input = falcon_proto::PortForwardInput {
-                host_id: host.to_string(),
+                host_id: host.clone(),
                 name: (!name.is_empty()).then(|| name.to_string()),
                 kind: if remote {
                     falcon_proto::ForwardKind::Remote
@@ -1719,14 +1922,28 @@ impl WorkspaceStore {
                 dest_port: port,
                 enabled: Some(true),
             };
-            spawn(async move {
-                match client.create_forward(&input).await {
+            let store = self.clone();
+            self.spawn_root(async move {
+                if store.connection_generation() != generation {
+                    store.finish_relay_write(&key);
+                    return;
+                }
+                let result = client.create_forward(&input).await;
+                store.finish_relay_write(&key);
+                if store.connection_generation() != generation {
+                    return;
+                }
+                match result {
                     Ok(_) => store.refresh_relays(),
                     Err(e) => store.show_toast(e.to_string()),
                 }
             });
         }
-        let _ = (host, remote, bind, destination, port, name);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (host, remote, bind, destination, port, name);
+            self.show_relay_unavailable();
+        }
     }
 
     /// 切换连接前先保存旧工作区，再读取目标服务端的布局，避免把旧布局写进新配置。
