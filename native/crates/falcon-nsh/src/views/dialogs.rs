@@ -45,19 +45,21 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let quick_open_was_open = signal(false);
     let profile_name = signal(String::new());
     let profile_url = signal(String::new());
-    let askpass_input = signal(String::new());
     let theme_slot = signal(theme_ctrl.active_slot());
     let theme_picker_open = signal(false);
     let settings_filter = signal(String::new());
     let appearance_was_open = signal(false);
     let host_settings_was_open = signal(false);
     let modal_focus = element_ref();
+    let askpass_focus = element_ref();
     let focus_store = store.clone();
     let previous_dialog = stored(ActiveDialog::None);
     effect(move || {
         let dialog = focus_store.active_dialog.get();
         let previous = previous_dialog.replace(dialog.clone());
-        if dialog != ActiveDialog::None
+        if matches!(dialog, ActiveDialog::Askpass { .. }) && previous != dialog {
+            after_answer(move || askpass_focus.focus());
+        } else if dialog != ActiveDialog::None
             && previous != ActiveDialog::None
             && previous != dialog
             && !dialog_uses_input_autofocus(&dialog)
@@ -147,7 +149,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             )
             .into_element(),
             ActiveDialog::Askpass { id, prompt } => {
-                render_askpass_modal(&store, &resolved, &id, &prompt, askpass_input).into_element()
+                render_askpass_modal(&store, &resolved, &id, &prompt, askpass_focus).into_element()
             }
             ActiveDialog::ConfirmTerminate {
                 session_id,
@@ -242,7 +244,10 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
 fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
     matches!(
         dialog,
-        ActiveDialog::Palette | ActiveDialog::QuickOpen | ActiveDialog::RenameSession { .. }
+        ActiveDialog::Palette
+            | ActiveDialog::QuickOpen
+            | ActiveDialog::RenameSession { .. }
+            | ActiveDialog::Askpass { .. }
     )
 }
 
@@ -251,6 +256,7 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
         return;
     }
     match dialog {
+        ActiveDialog::Askpass { id, .. } => store.answer_askpass(id, true),
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }
@@ -271,6 +277,7 @@ fn modal_header(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let st = store.clone();
+    let dialog = store.active_dialog.get_untracked();
     view()
         .flex_row()
         .items_center()
@@ -291,7 +298,7 @@ fn modal_header(
             Glyph::Close,
             false,
             resolved,
-            move || st.active_dialog.set(ActiveDialog::None),
+            move || close_modal_dialog(&st, &dialog),
         ))
 }
 
@@ -1219,15 +1226,22 @@ fn render_about_tab(
 fn render_askpass_modal(
     store: &WorkspaceStore,
     resolved: &falcon_theme::ResolvedTheme,
-    _id: &str,
+    id: &str,
     prompt: &str,
-    secret: Signal<String>,
+    focus: nsh_core::element::ElementRef,
 ) -> impl IntoElement {
+    let secret = store.askpass.secret;
     let ui = &resolved.ui;
     let st_ok = store.clone();
+    let st_enter = store.clone();
+    let st_cancel = store.clone();
+    let id_ok = id.to_string();
+    let id_enter = id.to_string();
+    let id_cancel = id.to_string();
+    let busy = store.askpass.busy.get();
     view()
         .flex_col()
-        .child(modal_header(store, resolved, t!("askpass.title")))
+        .child(modal_header(store, resolved, t!("native.askpass.title")))
         .child(
             view()
                 .flex_col()
@@ -1240,32 +1254,58 @@ fn render_askpass_modal(
                 )
                 .child(
                     input()
+                        .key(id.to_string())
+                        .test_id("askpass-input")
+                        .element_ref(&focus)
                         .w_full()
                         .px(zpx(8.0))
                         .py(zpx(6.0))
                         .rounded(zpx(6.0))
                         .masked(true)
+                        .auto_focus(true)
+                        .readonly(busy)
                         .bg(rgba_to_hsla(ui.input))
                         .text_xs()
                         .text_color(rgb_to_hsla(ui.foreground))
-                        .placeholder(t!("askpass.placeholder"))
+                        .placeholder(t!("native.askpass.placeholder"))
                         .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                        .value(secret.get())
-                        .on_change(move |v: &str| secret.set(v.to_string())),
+                        .value(move || secret.get())
+                        .on_change(move |v: &str| secret.set(v.to_string()))
+                        .on_submit(move |_: &str| st_enter.answer_askpass(&id_enter, false)),
+                )
+                .when_some(store.askpass.error.get(), |v, error| {
+                    v.child(text(error).text_xs().text_color(rgb_to_hsla(ui.destructive)))
+                })
+                .child(
+                    view()
+                        .test_id("askpass-cancel")
+                        .items_center()
+                        .py(zpx(6.0))
+                        .rounded(zpx(6.0))
+                        .cursor_pointer()
+                        .bg(rgb_to_hsla(ui.secondary))
+                        .on_press(move || st_cancel.answer_askpass(&id_cancel, true))
+                        .child(
+                            text(t!("native.askpass.cancel"))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.foreground)),
+                        ),
                 )
                 .child(
                     view()
+                        .test_id("askpass-submit")
                         .items_center()
                         .py(zpx(6.0))
                         .rounded(zpx(6.0))
                         .cursor_pointer()
                         .bg(rgb_to_hsla(ui.tint_strong))
-                        .on_press(move || {
-                            secret.set(String::new());
-                            st_ok.active_dialog.set(ActiveDialog::None);
-                        })
+                        .on_press(move || st_ok.answer_askpass(&id_ok, false))
                         .child(
-                            text(t!("askpass.submit"))
+                            text(t!(if busy {
+                                "native.askpass.sending"
+                            } else {
+                                "native.askpass.submit"
+                            }))
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb_to_hsla(ui.primary_foreground)),

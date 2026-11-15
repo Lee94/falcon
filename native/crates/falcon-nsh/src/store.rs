@@ -46,6 +46,10 @@ mod file_operations;
 use file_operations::FileOperations;
 pub(crate) use file_operations::{ConfirmationKind, FileJob, JobKind, NameAction};
 
+#[path = "askpass.rs"]
+mod askpass;
+pub(crate) use askpass::AskpassState;
+
 use crate::terminal::TerminalSession;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::theme::use_theme;
@@ -684,6 +688,7 @@ pub struct WorkspaceStore {
     pub right_panel_kind: Signal<RightPanelKind>,
 
     pub active_dialog: Signal<ActiveDialog>,
+    pub(crate) askpass: AskpassState,
     pub editing_host: Signal<Option<falcon_proto::SshHost>>,
     pub editing_host_generation: Signal<u64>,
     pub host_delete_busy: Signal<Option<(u64, String)>>,
@@ -858,6 +863,7 @@ impl WorkspaceStore {
     }
 
     fn next_connection_request_generation(&self) -> u64 {
+        self.reset_askpass();
         let generation = self.connection_request_generation.get().wrapping_add(1);
         self.connection_request_generation.set(generation);
         generation
@@ -1592,6 +1598,7 @@ impl WorkspaceStore {
             right_panel_width: signal(260.0),
             right_panel_kind: signal(RightPanelKind::Plugin("sysmon".into())),
             active_dialog: signal(ActiveDialog::None),
+            askpass: AskpassState::new(),
             editing_host: signal(None),
             editing_host_generation: signal(0),
             host_delete_busy: signal(None),
@@ -1728,6 +1735,7 @@ impl WorkspaceStore {
             });
         }
 
+        store.install_askpass();
         provide_context(store.clone());
         store
     }

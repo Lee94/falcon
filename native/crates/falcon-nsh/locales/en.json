@@ -1,0 +1,12 @@
+{
+  "native": {
+    "askpass": {
+      "title": "Password required",
+      "placeholder": "Password",
+      "submit": "Confirm",
+      "cancel": "Cancel",
+      "sending": "Sending…",
+      "failed": "Could not send the response. Retry or cancel."
+    }
+  }
+}
