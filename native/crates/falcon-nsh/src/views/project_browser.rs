@@ -97,6 +97,14 @@ async fn fetch_probe<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&response.body).map_err(|error| error.to_string())
 }
 
+// Navigation stays valid when a path fails, unlike that path's directory entries.
+#[derive(Clone, PartialEq)]
+struct FolderNavigation {
+    home: String,
+    parent: Option<String>,
+    root: String,
+}
+
 #[derive(Clone)]
 pub(super) struct FolderBrowser {
     pub open: Signal<bool>,
@@ -104,6 +112,7 @@ pub(super) struct FolderBrowser {
     pub destination: Signal<Option<Signal<String>>>,
     target: Signal<Option<ProbeTarget>>,
     listing: Signal<Option<FsListing>>,
+    navigation: Signal<Option<FolderNavigation>>,
     path: Signal<String>,
     filter: Signal<String>,
     selected: Signal<Vec<String>>,
@@ -127,6 +136,7 @@ impl FolderBrowser {
             destination: signal(None),
             target: signal(None),
             listing: signal(None),
+            navigation: signal(None),
             path: signal(String::new()),
             filter: signal(String::new()),
             selected: signal(Vec::new()),
@@ -146,6 +156,7 @@ impl FolderBrowser {
         self.multiple.set(destination.is_none());
         self.destination.set(destination);
         self.listing.set(None);
+        self.navigation.set(None);
         self.selected.set(Vec::new());
         self.path.set(initial.clone());
         self.open.set(true);
@@ -172,7 +183,8 @@ impl FolderBrowser {
                 }
                 // A stale saved directory should not strand the picker: open home, keeping the reason.
                 let mut fallback_error = None;
-                if result.is_err() && path.is_some() && browser.listing.get_untracked().is_none() {
+                if result.is_err() && path.is_some() && browser.navigation.get_untracked().is_none()
+                {
                     fallback_error = result.err();
                     result = directories(&browser.store, &target, None).await;
                     if !browser.current(request) {
@@ -182,6 +194,15 @@ impl FolderBrowser {
                 browser.busy.set(false);
                 match result {
                     Ok(listing) => {
+                        browser.navigation.set(Some(FolderNavigation {
+                            home: listing.home.clone(),
+                            parent: listing.parent.clone(),
+                            root: if listing.roots.iter().any(|r| r == "/") {
+                                "/".into()
+                            } else {
+                                String::new()
+                            },
+                        }));
                         browser.path.set(listing.path.clone());
                         browser.filter.set(String::new());
                         browser.listing.set(Some(listing));
@@ -252,6 +273,7 @@ impl FolderBrowser {
         let resolved = resolved.clone();
         let content = dynamic(move || {
             let listing = browser.listing.get();
+            let navigation = browser.navigation.get();
             let busy = browser.busy.get();
             let selected = browser.selected.get();
             let multiple = browser.multiple.get();
@@ -259,21 +281,15 @@ impl FolderBrowser {
             for (label, path) in [
                 (
                     t!("project.pickHome"),
-                    listing.as_ref().map(|l| l.home.clone()),
+                    navigation.as_ref().map(|nav| nav.home.clone()),
                 ),
                 (
                     t!("project.pickUp"),
-                    listing.as_ref().and_then(|l| l.parent.clone()),
+                    navigation.as_ref().and_then(|nav| nav.parent.clone()),
                 ),
                 (
                     t!("project.pickRoots"),
-                    listing.as_ref().map(|l| {
-                        if l.roots.iter().any(|r| r == "/") {
-                            "/".into()
-                        } else {
-                            String::new()
-                        }
-                    }),
+                    navigation.as_ref().map(|nav| nav.root.clone()),
                 ),
             ] {
                 let nav = browser.clone();

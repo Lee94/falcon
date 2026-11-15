@@ -347,6 +347,68 @@ fn project_picker_drops_late_results_after_escape_and_shell_failure_keeps_input(
 }
 
 #[test]
+fn failed_folder_jump_keeps_home_parent_and_root_recovery_available() {
+    for (control, expected_path, marker, request) in [
+        (
+            "家目录",
+            "/srv/repos",
+            "alpha",
+            "GET /api/fs/list?path=%2Fsrv%2Frepos ",
+        ),
+        (
+            "上一级",
+            "/srv",
+            "repo-home",
+            "GET /api/fs/list?path=%2Fsrv ",
+        ),
+        ("此电脑", "/", "srv-root", "GET /api/fs/list?path=%2F "),
+    ] {
+        let mut responses = vec![
+            (
+                "GET /api/fs/list?path=%2Fmissing".into(),
+                400,
+                r#"{"error":"folder missing"}"#.into(),
+            ),
+            (
+                "GET /api/fs/list?path=%2Fsrv ".into(),
+                200,
+                listing("/srv", Some("/"), &[("repo-home", "/srv/repos")]),
+            ),
+            (
+                "GET /api/fs/list?path=%2F ".into(),
+                200,
+                listing("/", None, &[("srv-root", "/srv")]),
+            ),
+        ];
+        responses.extend(probe_responses());
+        let mock = MockHttpServer::new_with_auto_responses(vec![], responses);
+        let mut app = probe_app(&mock);
+        app.press("label:new-project-s:local").unwrap();
+        app.wait_for("alpha").unwrap();
+        // Repeated failures must not trigger the initial-directory home fallback.
+        for _ in 0..2 {
+            app.clear("label:folder-picker-path").unwrap();
+            app.type_text("label:folder-picker-path", "/missing")
+                .unwrap();
+            app.press("跳转").unwrap();
+            app.wait_for("folder missing").unwrap();
+            assert!(!app.shows("alpha"));
+            app.press("选择此文件夹").unwrap();
+            mock.assert_no_request_starting_with("POST /api/projects ");
+        }
+        mock.clear_observed_requests();
+        app.press(control).unwrap();
+        mock.wait_for_observed_prefixes_pumping(&mut app, &[request]);
+        app.wait_for(marker).unwrap();
+        assert_eq!(
+            app.screen().input_text("label:folder-picker-path").unwrap(),
+            Some(expected_path)
+        );
+        assert!(!app.shows("folder missing"));
+    }
+}
+
+#[test]
 fn project_shell_target_switch_ignores_late_response_and_keeps_custom_commands() {
     let mock = MockHttpServer::new(vec![
         (
