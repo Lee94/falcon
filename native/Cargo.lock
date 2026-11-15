@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-app"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "directories",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-client"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-core"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "falcon-proto",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-nsh"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-platform"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "directories",
  "log",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-proto"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-server"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-term"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "falcon-theme"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "serde",
@@ -7657,7 +7657,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
