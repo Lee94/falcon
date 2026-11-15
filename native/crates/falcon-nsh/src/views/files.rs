@@ -583,7 +583,9 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
 
             toolbar = toolbar.child(actions);
 
-            let mut page = view().flex_col().child(toolbar);
+            let mut page = view().flex_col().min_h_0()
+                .when(!buf.editable() || preview_active, |page| page.flex_1())
+                .child(toolbar);
 
             if let Some(notice) = readonly_notice {
                 page = page.child(
@@ -804,6 +806,47 @@ mod tests {
     use nsh_core::element::Root;
     use nsh_engine::EngineConfig;
     use nsh_testing::Headless;
+
+    #[component]
+    fn ImagePaneFixture() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        crate::shell::action_owner::ActionOwner::install();
+        let store = crate::store::WorkspaceStore::install(&crate::FalconLaunchOptions {
+            offline_demo: true, ..Default::default()
+        });
+        store.open_files.update(|files| {
+            files.insert(file_key("p", "image.png"), crate::store::OpenFileBuffer::from_preview(
+                "p", "image.png", 1,
+                falcon_proto::FilePreview::Image { mime: "image/png".into(), size: 100 },
+                Some("https://example.test/api/projects/p/raw/token/image.png".into()),
+            ));
+        });
+        view().size_full().child(file_pane_view().project_id("p").path("image.png"))
+    }
+
+    #[test]
+    fn loaded_image_keeps_the_full_file_pane_viewport_headless() {
+        let mut config = EngineConfig::new(Root::of::<ImagePaneFixture>().translations(crate::i18n::translations()));
+        config.viewport = Size::new(Points(848.0), Points(680.0));
+        config.ui_sets = vec![nsh_base::registry(), crate::registry()];
+        let mut app = Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        let image = app.screen().layout_nodes().into_iter()
+            .find(|n| n.test_id.as_deref() == Some("file-image")).unwrap();
+        app.engine().control().dispatch_event(image.id, nsh_core::EventKind::Load,
+            nsh_core::EventPayload::Map(vec![
+                ("width", nsh_core::PayloadValue::Number(1600.0)),
+                ("height", nsh_core::PayloadValue::Number(1200.0)),
+            ]));
+        app.wait_until("loaded image fills the file pane", std::time::Duration::from_secs(2), |screen| {
+            screen.layout_nodes().iter().any(|node| node.id == image.id && node.bounds.size.height.0 > 300.0)
+        }).unwrap();
+        let viewport = app.screen().layout_nodes().into_iter()
+            .find(|n| n.test_id.as_deref() == Some("file-image-viewport")).unwrap();
+        assert!(viewport.bounds.size.height.0 > 400.0);
+        assert!(viewport.bounds.origin.y.0 + viewport.bounds.size.height.0 <= 680.0);
+    }
 
     #[component]
     fn FilesFixture() -> impl IntoElement {
