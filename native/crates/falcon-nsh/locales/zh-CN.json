@@ -770,6 +770,7 @@
     "termCursor": "光标",
     "termCursorBlink": "光标闪烁",
     "termPreview": "预览",
+    "termPreviewSample": "$ git status\nOn branch main\nnothing to commit, working tree clean\n$ echo 你好 ▋",
     "termReset": "恢复默认",
     "passwordStatus": "访问密码",
     "passwordSet": "已设置",
@@ -787,14 +788,16 @@
     "name_flash": "一闪",
     "name_thunderbird": "雷鸟",
     "custom": "自定义",
-    "customHint": "自定义图标：PNG / JPG / WebP / SVG 都行，等比缩放成 512×512，不裁切，空出的地方透明。",
+    "customHint": "自定义图标：PNG / JPG / GIF / WebP / BMP / ICO / SVG，等比缩放成 512×512，不裁切，空出的地方透明。",
     "upload": "上传图片…",
     "replace": "换一张…",
     "remove": "移除自定义",
     "saveFailed": "更换应用图标失败",
+    "loadFailed": "读取服务端应用图标失败，请重新连接后重试。",
     "uploadFailed": "自定义图标上传失败",
     "removeFailed": "移除自定义图标失败",
-    "decodeFailed": "这张图片读不出来"
+    "decodeFailed": "这张图片读不出来",
+    "platformNote": "应用图标选择保存在服务端；目前只有 macOS 会把选中的图标应用到 Dock，其他平台仍会在这里预览。"
   },
   "term": {
     "copy": "复制",
@@ -859,7 +862,13 @@
       "uiZoomIn": "放大",
       "uiZoomOut": "缩小",
       "uiZoomReset": "恢复 100%",
-      "appIconDockNote": "装好的 App 没启动时，Dock 与访达里是安装包自带的默认图标；启动并连上服务端后才换成这里选的。"
+      "appIconDockNote": "装好的 App 没启动时，Dock 与访达里是安装包自带的默认图标；启动并连上服务端后才换成这里选的。",
+      "windowBackground": "窗口背景",
+      "backgroundOpaque": "不透明",
+      "backgroundTransparent": "透明",
+      "backgroundBlurred": "透明 + 模糊",
+      "backgroundNote": "只调整窗口底层；浮动岛、面板和文字保持不透明。",
+      "backgroundUnavailable": "所选效果在当前 NSH 平台窗口 API 中不可用；偏好仍会保留，实际显示保持不透明。Windows 的 NSH Window 背板映射为 Mica（不是模糊），仅 Windows 11 22H2 及以上系统支持，且已打开的窗口不能切换透明度；Linux 当前没有窗口背景模糊 API。"
     },
     "menu": {
       "settings": "设置…",

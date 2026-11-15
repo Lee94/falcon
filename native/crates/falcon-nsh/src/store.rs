@@ -359,7 +359,7 @@ pub struct WorkspaceStore {
     pub extra_ctrl_latched: Signal<bool>,
     pub extra_alt_latched: Signal<bool>,
 
-    pub selected_app_icon: Signal<String>,
+    pub appearance: crate::appearance::AppearanceState,
     pub server_info: Signal<Option<falcon_proto::SystemInfo>>,
     pub finish_sound: Signal<bool>,
     pub file_directory: Signal<String>,
@@ -855,7 +855,7 @@ impl WorkspaceStore {
             tui_passthrough: signal(false),
             extra_ctrl_latched: signal(false),
             extra_alt_latched: signal(false),
-            selected_app_icon: signal(falcon_core::app_icon::DEFAULT_APP_ICON.to_string()),
+            appearance: crate::appearance::AppearanceState::new(),
             server_info: signal(None),
             finish_sound: signal(
                 crate::theme::load_pref_item("falcon.finishSound").as_deref() != Some("off"),
@@ -935,6 +935,7 @@ impl WorkspaceStore {
         let Ok(parsed_url) = url.parse() else {
             return;
         };
+        let icon_token = self.appearance.app_icon.begin_server_epoch();
         self.switch_workspace(url);
         let client = FalconClient::new(parsed_url);
         *self.terminals.client.lock() = Some(client.clone());
@@ -952,6 +953,10 @@ impl WorkspaceStore {
         let target_url = url.to_string();
         let store = self.clone();
         spawn(async move {
+            let icon_store = store.clone();
+            spawn(async move {
+                crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
+            });
             // 若连接的是本机默认服务端且平台托管了本机服务（如 macOS LaunchAgent），先按需拉起
             let is_local = target_url.trim_end_matches('/')
                 == falcon_platform::shared()
@@ -969,9 +974,6 @@ impl WorkspaceStore {
 
             if let Ok(info) = client.system().await {
                 store.server_info.set(Some(info));
-            }
-            if let Ok(icon) = client.app_icon().await {
-                store.selected_app_icon.set(icon.selected);
             }
             let mut proj_paths: HashMap<String, String> = HashMap::new();
 
@@ -1178,6 +1180,7 @@ impl WorkspaceStore {
     /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
+        let icon_token = self.appearance.app_icon.begin_server_epoch();
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
@@ -1194,6 +1197,11 @@ impl WorkspaceStore {
         let store = self.clone();
         spawn(async move {
             use nsh_core::prelude::{HttpRequest, fetch};
+
+            let icon_store = store.clone();
+            spawn(async move {
+                crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
+            });
 
             if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await
                 && resp.ok()
@@ -1301,22 +1309,6 @@ impl WorkspaceStore {
             return Err(failed());
         }
         serde_json::from_slice(&response.body).map_err(|_| failed())
-    }
-
-    pub fn select_app_icon(&self, id: &str) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
-            let id = id.to_string();
-            spawn(async move {
-                match client.set_app_icon(&id).await {
-                    Ok(icon) => store.selected_app_icon.set(icon.selected),
-                    Err(e) => store.show_toast(e.to_string()),
-                }
-            });
-            return;
-        }
-        self.selected_app_icon.set(id.to_string());
     }
 
     pub fn reload_plugins(&self) {

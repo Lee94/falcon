@@ -41,7 +41,6 @@ pub fn DesktopShell() -> impl IntoElement {
         .flex_row()
         .p(zpx(6.0))
         .gap(zpx(6.0))
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
         .child(dynamic({
             let st = store.clone();
             move || {
@@ -126,7 +125,6 @@ pub fn DesktopShell() -> impl IntoElement {
     view()
         .size_full()
         .flex_col()
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
         .child(dynamic(move || {
             identity_strip(&identity, &theme_ctrl.resolved()).into_element()
         }))
@@ -913,8 +911,8 @@ fn identity_strip(
     }
     strip
         .child(
-            image(super::widgets::app_icon_source(
-                &store.selected_app_icon.get(),
+            image(crate::appearance::app_icon::selected_source(
+                &store.appearance.app_icon,
             ))
             .w(zpx(18.0))
             .h(zpx(18.0)),

@@ -10,6 +10,7 @@
 
 pub mod fonts;
 pub mod i18n;
+pub mod appearance;
 pub mod shell;
 pub mod store;
 pub mod terminal;
@@ -64,6 +65,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     let theme_ctrl = install_theme(initial_theme);
     let zoom_ctrl = install_zoom();
     let store = WorkspaceStore::install(&launch_opts);
+    crate::appearance::install_effects(store.clone());
     #[cfg(all(feature = "snapshot", not(target_arch = "wasm32")))]
     install_review_scene(store.clone());
 
@@ -157,11 +159,24 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         install_macos_tray(store.clone());
     }
 
+    let window_background = store.appearance.window_background;
     view()
         .size_full()
         .relative()
         .overflow_hidden()
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
+        .bg(move || {
+            let app = theme_ctrl.resolved().ui.app;
+            let background = crate::appearance::effective_background(
+                window_background.get(),
+                idiom() == Idiom::Desktop,
+            );
+            rgba_to_hsla(falcon_theme::Rgba {
+                r: app.r,
+                g: app.g,
+                b: app.b,
+                a: (background.fill_alpha() * 255.0).round() as u8,
+            })
+        })
         .child(dynamic(move || match idiom() {
             Idiom::Terminal => tui_shell().into_element(),
             Idiom::Phone => mobile_shell().into_element(),
