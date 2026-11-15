@@ -270,7 +270,10 @@ impl TerminalSession {
     pub fn feed_replay(&self, bytes: &[u8]) {
         let mut scanner = self.cwd_scanner.lock();
         *scanner = Default::default();
-        *self.output_cwd.lock() = scanner.feed(bytes);
+        // Durable VT snapshots omit OSC 7; retain the last observed cwd unless replay supplies one.
+        if let Some(cwd) = scanner.feed(bytes) {
+            *self.output_cwd.lock() = Some(cwd);
+        }
         drop(scanner);
         self.core.replace_with_replay(bytes);
         let _ = self.core.take_events();

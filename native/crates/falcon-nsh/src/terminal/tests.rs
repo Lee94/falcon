@@ -213,3 +213,21 @@ fn connection_events_gate_input_and_recover_on_active_state() {
     assert_eq!(session.test_input_count(), 1);
     assert!(session.meta().last_error.is_none());
 }
+
+#[test]
+fn replay_preserves_observed_cwd_unless_it_supplies_a_new_one() {
+    let session = TerminalSession::new_offline("cwd", 20, 3, false);
+    session.feed_output(b"\x1b]7;file://host/work/subdir\x1b\\");
+    session.feed_replay(b"durable snapshot without OSC 7");
+    assert_eq!(session.output_cwd().as_deref(), Some("/work/subdir"));
+    session.feed_replay(b"\x1b]7;file://host/new\x1b\\replayed");
+    assert_eq!(session.output_cwd().as_deref(), Some("/new"));
+    session.feed_output(b"\x1b]7;file://host/stale-partial");
+    session.feed_replay(b"fresh snapshot");
+    session.feed_output(b"\x1b\\");
+    assert_eq!(
+        session.output_cwd().as_deref(),
+        Some("/new"),
+        "replay resets partial OSC framing"
+    );
+}
