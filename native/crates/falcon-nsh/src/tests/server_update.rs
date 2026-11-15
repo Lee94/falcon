@@ -127,6 +127,47 @@ fn server_update_accepts_normalized_client_address_headless() {
 }
 
 #[test]
+fn server_update_warns_about_non_durable_sessions_for_gateway_and_node_headless() {
+    for node in [false, true] {
+        let (status, check_path) = if node {
+            (
+                "GET /api/hosts/host-1/node/system/update/status HTTP/1.1",
+                "GET /api/hosts/host-1/node/system/update HTTP/1.1",
+            )
+        } else {
+            (STATUS, CHECK)
+        };
+        let server = mock(vec![
+            (status, 200, task("idle")),
+            (check_path, 200, check("1.0.0", true)),
+        ]);
+        let mut app = app(&server, None);
+        if node {
+            app.press("label:sidebar-settings").unwrap();
+            app.press("label:settings-tab-Hosts").unwrap();
+            app.wait_for("id:host-update-host-1").unwrap();
+            app.press("id:host-update-host-1").unwrap();
+        } else {
+            open(&mut app);
+        }
+        respond(&server, &mut app, status);
+        respond(&server, &mut app, check_path);
+        app.wait_for("id:server-update-install").unwrap();
+        app.press("id:server-update-install").unwrap();
+        app.wait_for("id:server-update-confirm").unwrap();
+        assert!(app.screen().texts().iter().any(|text| {
+            text.contains("Non-durable sessions on that node will be interrupted")
+                && text.contains("unsaved work may be lost")
+                && text.contains("durable sessions can reconnect after the restart")
+                && text.contains(if node { "Update node" } else { &server.url })
+        }));
+        app.press("id:server-update-cancel").unwrap();
+        app.wait_for("id:server-update-install").unwrap();
+        server.assert_no_request_starting_with("POST ");
+    }
+}
+
+#[test]
 fn server_update_lifecycle_survives_close_reopen_and_restart_headless() {
     let server = mock(vec![
         (STATUS, 200, task("idle")),

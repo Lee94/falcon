@@ -983,7 +983,7 @@
       "checking": "正在检查…",
       "versions": "当前 v%{current} · 最新 v%{latest} · %{platform}",
       "install": "升级至 v%{version}",
-      "confirm": "将把 %{target} 的 Falcon 服务端升级至 v%{version}，并重启该节点。确认继续？",
+      "confirm": "将把 %{target} 的 Falcon 服务端升级至 v%{version}，并重启该节点。该节点上的非持久会话会被中断，未保存的工作可能丢失；持久会话可在重启后接回。确认继续？",
       "cancel": "取消",
       "requestFailed": "无法查询或更新节点，请检查连接后重试。",
       "reconnecting": "连接暂时中断，正在等待节点恢复并查询结果。不会重复发起升级。",

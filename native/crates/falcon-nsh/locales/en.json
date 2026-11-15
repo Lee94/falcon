@@ -9,7 +9,7 @@
       "checking": "Checking…",
       "versions": "Current v%{current} · Latest v%{latest} · %{platform}",
       "install": "Update to v%{version}",
-      "confirm": "Update the Falcon server on %{target} to v%{version} and restart that node?",
+      "confirm": "Update the Falcon server on %{target} to v%{version} and restart that node? Non-durable sessions on that node will be interrupted and unsaved work may be lost; durable sessions can reconnect after the restart. Continue?",
       "cancel": "Cancel",
       "requestFailed": "Unable to query or update this node. Check the connection and try again.",
       "reconnecting": "Connection interrupted. Waiting for the node to reconnect and report the result. The update will not be submitted again.",
