@@ -382,6 +382,28 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             })
             .child(text("advance-project-mapping")),
     );
+    let advance_mapping_only = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-advance-mapping-generation-only")
+            .on_press(move || {
+                advance_mapping_only
+                    .project_operations
+                    .test_advance_mapping_generation("proj-falcon");
+            })
+            .child(text("advance-mapping-generation-only")),
+    );
+    let pending_mapping = store.clone();
+    controls = controls.child(
+        view()
+            .test_id("test-begin-pending-mapping-change")
+            .on_press(move || {
+                pending_mapping
+                    .project_operations
+                    .test_begin_pending_mapping_change("proj-falcon");
+            })
+            .child(text("begin-pending-mapping-change")),
+    );
     let open_preview = store.clone();
     controls = controls.child(
         view()
@@ -1692,6 +1714,51 @@ mod tests {
         server.release_response();
         server.wait_for_response();
         app.wait_for_gone("id:git-file-0", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_confirmation_rejects_mapping_changes_and_pending_updates_headless() {
+        let working_path = "GET /api/projects/proj-falcon/git/working".to_string();
+        let operation_path = "POST /api/projects/proj-falcon/git/op";
+        let working = git_working_response(
+            vec![serde_json::json!({"path":"tracked.txt","index":" ","work":"M"})],
+            None,
+        );
+        let server = MockHttpServer::new(vec![
+            (working_path.clone(), 200, working.clone()),
+            (working_path.clone(), 200, working),
+        ]);
+        let mut app = open_mock_git_panel(&server, "tracked.txt");
+        server.clear_observed_requests();
+
+        app.press("id:git-discard-selected").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.press("id:test-advance-project-mapping").unwrap();
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
+        server.assert_no_request_starting_with(operation_path);
+
+        app.press("id:git-refresh").unwrap();
+        app.wait_for("id:git-loading").unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()]);
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+        app.wait_for("id:git-file-0").unwrap();
+        server.clear_observed_requests();
+
+        app.press("id:git-discard-selected").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.press("id:test-advance-mapping-generation-only").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
+        server.assert_no_request_starting_with(operation_path);
+
+        app.press("id:git-discard-selected").unwrap();
+        app.wait_for("id:git-confirm-action").unwrap();
+        app.press("id:test-begin-pending-mapping-change").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
+        server.assert_no_request_starting_with(operation_path);
     }
 
     #[test]

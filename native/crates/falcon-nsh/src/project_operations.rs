@@ -747,6 +747,12 @@ impl ProjectOperations {
             .expect("project mapping update should start");
         self.finish_project_update(project_id, &token, ProjectUpdateOutcome::Applied);
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_begin_pending_mapping_change(&self, project_id: &str) {
+        self.begin_project_update(project_id, true)
+            .expect("project mapping update should start");
+    }
 }
 
 fn mapping_changed_in_store(

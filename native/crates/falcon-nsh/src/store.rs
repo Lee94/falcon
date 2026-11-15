@@ -2681,10 +2681,11 @@ impl WorkspaceStore {
     }
 
     fn git_context_is_current(&self, context: &GitRequestContext) -> bool {
-        self.connection_generation.get() == context.connection_generation
-            && self.server_url.get() == context.server_url
-            && self.active_project_id.get() == context.project_id
-            && self.selected_git_repo.get() == context.repo
+        self.projects
+            .get()
+            .iter()
+            .any(|project| project.id == context.project_id)
+            && self.current_git_context().as_ref() == Some(context)
             && self
                 .project_operations
                 .mapping_is_current(&context.project_id, &context.mapping_generation)
@@ -2796,6 +2797,7 @@ impl WorkspaceStore {
         self.git_diff_truncated.set(false);
         self.selected_git_path.set(None);
         self.selected_git_repo.set(None);
+        self.git_confirmation.set(None);
         self.file_operations.cancel_confirmation();
         self.file_operations.name_form.set(None);
         self.file_operations.clear_selection();
@@ -3096,9 +3098,7 @@ impl WorkspaceStore {
     pub fn confirm_git_operation(&self) {
         let Some(confirmation) = self.git_confirmation.get() else { return; };
         self.git_confirmation.set(None);
-        if self.connection_generation.get() != confirmation.context.connection_generation
-            || self.server_url.get() != confirmation.context.server_url
-        {
+        if !self.git_context_is_current(&confirmation.context) {
             self.git_operation_error.set(Some(crate::i18n::t!("git.contextChanged")));
             return;
         }
@@ -3123,6 +3123,10 @@ impl WorkspaceStore {
     }
 
     fn run_git_operation(&self, context: GitRequestContext, operation: falcon_proto::GitOpInput) {
+        if !self.git_context_is_current(&context) {
+            self.git_operation_error.set(Some(crate::i18n::t!("git.contextChanged")));
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.client() {
             if !self.git_mutation_in_flight.lock().insert(context.clone()) { return; }
