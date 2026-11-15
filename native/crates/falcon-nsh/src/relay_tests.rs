@@ -178,13 +178,15 @@ fn relay_inline_rename_edit_delete_and_forward_defaults() {
     app.clear("id:relay-dest-host-edit").unwrap();
     app.type_text("id:relay-dest-host-edit", "[2001:4860::8888]:8443")
         .unwrap();
+    app.clear("id:relay-share-port-edit").unwrap();
+    app.type_text("id:relay-share-port-edit", "5432").unwrap();
     app.press("id:relay-edit-save").unwrap();
     let request = mock.wait_for_observed_prefixes_pumping(&mut app, &["PATCH /api/shares/managed"])
         [0]
     .clone();
     let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
     assert_eq!(body["destHost"], "2001:4860::8888");
-    assert_eq!(body["destPort"], 8443);
+    assert_eq!(body["destPort"], 5432);
     mock.release_response();
     mock.wait_for_response();
     app.wait_for("label:relay-delete-managed").unwrap();
@@ -230,9 +232,10 @@ fn relay_inline_rename_edit_delete_and_forward_defaults() {
 #[test]
 fn relay_destination_typing_preserves_complete_addresses() {
     let cases = [
-        ("2001:4860::8888", "2001:4860::8888", 9090),
-        ("[2001:4860::8888]:8443", "2001:4860::8888", 8443),
-        ("db.internal:8080", "db.internal", 8080),
+        ("2001:4860::8888", "2001:4860::8888", 9090, false),
+        ("[2001:4860::8888]:8443", "2001:4860::8888", 8443, false),
+        ("db.internal:8080", "db.internal", 8080, false),
+        ("db.internal:8080", "db.internal", 5432, true),
     ];
     let mock = relay_mock(
         cases
@@ -251,7 +254,7 @@ fn relay_destination_typing_preserves_complete_addresses() {
     open_relay_settings(&mut app);
     app.type_text("id:relay-bind-port-host-prod-01", "9090")
         .unwrap();
-    for (raw, host, port) in cases {
+    for (raw, host, port, edit_port) in cases {
         app.clear("id:relay-dest-host-host-prod-01").unwrap();
         app.type_text("id:relay-dest-host-host-prod-01", raw)
             .unwrap();
@@ -261,6 +264,11 @@ fn relay_destination_typing_preserves_complete_addresses() {
                 .unwrap(),
             Some(raw.into())
         );
+        if edit_port {
+            app.clear("id:relay-dest-port-host-prod-01").unwrap();
+            app.type_text("id:relay-dest-port-host-prod-01", &port.to_string())
+                .unwrap();
+        }
         app.press("id:relay-create-forward-host-prod-01").unwrap();
         let request =
             mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/forwards"])[0].clone();

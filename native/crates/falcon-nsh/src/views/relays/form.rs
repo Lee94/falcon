@@ -265,8 +265,20 @@ pub fn RelayForm(props: RelayFormProps) -> impl IntoElement {
             )
             .on_change(move |v: &str| {
                 // An incomplete IPv6 address can look like host:port. Preserve
-                // the draft verbatim and parse the complete value on submit.
+                // the draft until the user leaves the field or submits it.
                 host.set(v.to_string());
+            })
+            .on_blur(move || {
+                // Transfer a complete endpoint's port before the user edits the
+                // dedicated port field, so that later port edits take priority.
+                if let Ok((Some(address), Some(target))) = parse_forward_dest(&host.get()) {
+                    host.set(address);
+                    if share {
+                        port.set(target.to_string());
+                    } else {
+                        dest.set(target.to_string());
+                    }
+                }
             })
             .on_submit(move |_: &str| enter_host()),
         );
