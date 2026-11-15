@@ -74,10 +74,6 @@ impl PopupAction {
             }),
         }
     }
-
-    fn is_disabled(&self) -> bool {
-        self.disabled || !self.server.is_current()
-    }
 }
 
 pub(crate) fn overflow_menu(
@@ -139,32 +135,33 @@ fn popup_items(
 ) -> impl Iterator<Item = impl IntoElement> {
     let foreground = rgb_to_hsla(theme.ui.popover_foreground);
     let muted = rgb_to_hsla(theme.ui.muted);
-    let danger = rgb_to_hsla(theme.ui.destructive);
+    let danger_color = rgb_to_hsla(theme.ui.destructive);
     let disabled_color = rgb_to_hsla(theme.ui.muted_foreground);
     // Menu items are lazy children; retain FalconApp's owner for work that outlives the overlay.
     let owner = ActionOwner::current();
     actions.into_iter().map(move |action| {
-        // The lazy item reads server_url so an open menu becomes disabled on a server switch.
-        let disabled = action.is_disabled();
-        let server = action.server.clone();
+        let initially_disabled = action.disabled;
+        let disabled_server = action.server.clone();
+        let selection_server = action.server.clone();
         let label = action.label;
-        let danger = action.danger;
+        let is_danger = action.danger;
         let callback = action.activate;
         let action_owner = owner.clone();
-        let color = if disabled {
+        let currently_disabled = initially_disabled || !disabled_server.is_current();
+        let color = if currently_disabled {
             disabled_color
-        } else if danger {
-            danger
+        } else if is_danger {
+            danger_color
         } else {
             foreground
         };
         let mut item = nsh_base::menu_item()
-            .disabled(disabled)
+            .disabled(move || initially_disabled || !disabled_server.is_current())
             .hover(move |style| style.bg(muted))
             .focus(move |style| style.bg(muted))
             .disabled_style(|style| style.opacity(0.55))
             .on_select(move || {
-                if !disabled && server.is_current() {
+                if !initially_disabled && selection_server.is_current() {
                     let callback = callback.clone();
                     action_owner.run(|| callback());
                 }
