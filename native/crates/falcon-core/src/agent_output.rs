@@ -128,17 +128,19 @@ pub fn styled_output(raw: &str) -> StyledOutput {
                         }
                     }
                 } else if i < bytes.len() && bytes[i] == b']' {
-                    while i < bytes.len() && bytes[i] != b'\x07' {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\x07' {
+                            i += 1;
+                            break;
+                        }
                         if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                             i += 2;
                             break;
                         }
                         i += 1;
                     }
-                    if i < bytes.len() {
-                        i += 1;
-                    }
-                } else {
+                } else if i < bytes.len() && bytes[i].is_ascii() {
                     i += 1;
                 }
             }
@@ -608,6 +610,17 @@ pub fn aligned_unified_diff(patch: &str) -> Vec<AlignedDiffRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_hyperlink_terminators_preserve_following_unicode() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let raw = format!("\x1b[31m\x1b]8;;https://example.com{terminator}中文🙂\x1b]8;;{terminator}尾\x1b[0m");
+            let output = styled_output(&raw);
+            assert_eq!(output.text, "中文🙂尾");
+            assert_eq!(output.spans[0].fg, Some(AnsiColor::Red));
+        }
+        assert_eq!(styled_output("\x1b中文").text, "中文");
+    }
 
     #[test]
     fn compact_timeline_keeps_replies_and_actionable_entries_visible() {
