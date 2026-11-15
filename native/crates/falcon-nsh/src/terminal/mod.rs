@@ -5,8 +5,12 @@
 //! - TUI（`Idiom::Terminal`）：自动切换为字符网格投影 + `Enter` / `Ctrl+\` 直通输入切换条；
 //! - 原生扩展槽位：预留 `native("falcon.terminal_surface")` 钩子，供特定宿主需要接管底层纹理时挂载。
 
+mod file_links;
+mod interactions;
 pub mod painter;
 pub mod session;
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +19,7 @@ use falcon_term::keyroute::{KeyRoute, route_key};
 use falcon_term::keys::to_esc_str;
 use falcon_term::keystroke::{Keystroke as TermKeystroke, Modifiers as TermModifiers};
 use falcon_term::{DeltaMode, MouseAction, MouseButton as TermMouseButton, MouseReportEvent};
+use nsh_core::element::desktop::popup_menu_at;
 use nsh_core::element::input;
 use nsh_core::keymap::When;
 use nsh_core::platform::Idiom;
@@ -158,6 +163,23 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
             terminal_input_focus.get(),
         );
         if terminal_keys_active {
+            let copy_session = session_keys.clone();
+            bind_safe_key(
+                if apple_keys() {
+                    "cmd+c"
+                } else {
+                    "ctrl+shift+c"
+                },
+                false,
+                move || interactions::copy(&copy_session),
+            );
+            if !apple_keys() {
+                let paste_store = store_keys.clone();
+                let paste_session = session_keys.clone();
+                bind_safe_key("ctrl+shift+v", false, move || {
+                    interactions::paste_clipboard(&paste_store, &paste_session)
+                });
+            }
             let terminal_special_keys: &[(&str, &str, TermModifiers)] = &[
                 ("escape", "escape", TermModifiers::default()),
                 ("tab", "tab", TermModifiers::default()),
@@ -310,6 +332,7 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     // TUI 宿主环境（`Idiom::Terminal`）：使用等宽字符行网格渲染，省去像素画布往返
     if idiom() == Idiom::Terminal {
         let sess_tui = session.clone();
+        let dim_tui = session.clone();
         let passthrough = props.tui_passthrough;
         let sid_enter = session_id.clone();
         let store_tui = store.clone();
@@ -326,11 +349,24 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                     pane_bounds.set((b.size.width.0, b.size.height.0));
                 }
             })
+            .child(interactions::banner(
+                store.clone(),
+                session.clone(),
+                frame_tick,
+            ))
             .child(
                 view()
                     .flex_1()
                     .flex_col()
                     .overflow_hidden()
+                    .opacity(move || {
+                        let _ = frame_tick.get();
+                        match dim_tui.meta().connection {
+                            session::ConnectionState::Active
+                            | session::ConnectionState::Connecting => 1.0_f32,
+                            _ => 0.55_f32,
+                        }
+                    })
                     .p(zpx(4.0))
                     .child(dynamic(move || {
                         let _ = frame_tick.get();
@@ -419,6 +455,8 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     let sess_canvas = session.clone();
     let sess_layout = session.clone();
     let sess_press = session.clone();
+    let sess_move = session.clone();
+    let sess_up = session.clone();
     let sess_wheel = session.clone();
     let sess_ime_change = session.clone();
     let sess_ime_submit = session.clone();
@@ -426,6 +464,30 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     let sess_anchor = session.clone();
     let sid_focus = session_id.clone();
     let is_focused = props.focused;
+    let dragging = signal(false);
+    let reported = signal(false);
+    // (pointer y at grab, thumb top at grab). Parent handles the drag even outside the narrow track.
+    let scroll_drag = signal(None::<(f32, f32)>);
+    let hovered_link = signal(None::<falcon_term::links::LinkSpan>);
+    let hover_epoch = signal(0_u64);
+    let preview = signal(file_links::Preview::Hidden);
+    {
+        let session = session.clone();
+        effect(move || {
+            let _ = frame_tick.get();
+            if let Some(link) = hovered_link.get_untracked()
+                && session
+                    .snapshot()
+                    .link_at(link.start.0, link.start.1)
+                    .as_ref()
+                    != Some(&link)
+            {
+                hovered_link.set(None);
+                hover_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+                preview.set(file_links::Preview::Hidden);
+            }
+        });
+    }
 
     let term_preferences = store.term_prefs;
     let cursor_visible = signal(true);
@@ -484,7 +546,12 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                 sess_layout.report_viewport_grid(cols, rows);
             }
         })
+        // Keep the host's press recognizer mounted for down/up and keyboard activation.
         .on_press({
+            let sink = sink_ref.clone();
+            move || sink.focus()
+        })
+        .on_press_down({
             let sink_focus = sink_ref.clone();
             let store_press = store.clone();
             move |e: &PressEvent| {
@@ -495,24 +562,177 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                 sink_focus.focus();
                 let snap = sess_press.snapshot();
                 let vp = compute_vp(&snap, &sess_press);
+                preview.set(file_links::Preview::Hidden);
+                hover_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+                let state = falcon_core::term_scroll::ScrollState::from_grid(
+                    snap.display_offset,
+                    snap.history_size,
+                    snap.size.rows,
+                );
+                if e.position.x.0 >= pane_bounds.get().0 - zpx(12.0).0
+                    && let Some(geo) = falcon_core::term_scroll::thumb_geometry(
+                        state,
+                        pane_bounds.get().1,
+                        zpx(24.0).0,
+                    )
+                {
+                    let y = e.position.y.0;
+                    let top = if y >= geo.top && y <= geo.top + geo.height {
+                        geo.top
+                    } else {
+                        (y - geo.height / 2.0)
+                            .clamp(0.0, (pane_bounds.get().1 - geo.height).max(0.0))
+                    };
+                    scroll_drag.set(Some((y, top)));
+                    sess_press.scroll_to(falcon_core::term_scroll::position_for_thumb_top(
+                        state,
+                        pane_bounds.get().1,
+                        geo.height,
+                        top,
+                    ) as usize);
+                    return;
+                }
                 let (col, row) = vp.pixel_to_cell(
                     e.position.x.0,
                     e.position.y.0,
                     snap.size.cols,
                     snap.size.rows,
                 );
-                let _ = sess_press.handle_mouse(MouseReportEvent {
-                    action: MouseAction::Down,
-                    button: TermMouseButton::Left,
-                    col: col as i32,
-                    row: row as i32,
-                    x: e.position.x.0.max(0.0) as i32,
-                    y: e.position.y.0.max(0.0) as i32,
-                    shift: e.modifiers.shift,
-                    alt: e.modifiers.alt,
-                    ctrl: e.modifiers.ctrl,
-                });
-                let _ = sess_press.handle_mouse(MouseReportEvent {
+                if (if apple_keys() {
+                    e.modifiers.cmd
+                } else {
+                    e.modifiers.ctrl
+                }) && let Some(link) = snap.link_at(row, col)
+                {
+                    file_links::open_link(&store_press, &sess_press, link);
+                    return;
+                }
+                let reporting = sess_press.core().mouse_mode().protocol != 0 && !e.modifiers.shift;
+                if reporting {
+                    let _ = sess_press.handle_mouse(MouseReportEvent {
+                        action: MouseAction::Down,
+                        button: TermMouseButton::Left,
+                        col: col as i32,
+                        row: row as i32,
+                        x: e.position.x.0.max(0.0) as i32,
+                        y: e.position.y.0.max(0.0) as i32,
+                        shift: e.modifiers.shift,
+                        alt: e.modifiers.alt,
+                        ctrl: e.modifiers.ctrl,
+                    });
+                    reported.set(true);
+                } else {
+                    use falcon_term::alacritty_terminal::{index::Side, selection::SelectionType};
+                    let side = if ((e.position.x.0 + vp.pan_x) / vp.scale / vp.cell_width).fract()
+                        >= 0.5
+                    {
+                        Side::Right
+                    } else {
+                        Side::Left
+                    };
+                    sess_press
+                        .core()
+                        .start_selection(SelectionType::Simple, row, col, side);
+                    dragging.set(true);
+                    sess_press.selection_changed();
+                }
+            }
+        })
+        .on_mouse_move({
+            let store = store.clone();
+            move |e: &MouseEvent| {
+                let snap = sess_move.snapshot();
+                let vp = compute_vp(&snap, &sess_move);
+                let (col, row) = vp.pixel_to_cell(
+                    e.position.x.0,
+                    e.position.y.0,
+                    snap.size.cols,
+                    snap.size.rows,
+                );
+                if e.pressed_button != Some(MouseButton::Left) {
+                    if dragging.get_untracked() {
+                        dragging.set(false);
+                        interactions::copy(&sess_move);
+                    }
+                    reported.set(false);
+                    scroll_drag.set(None);
+                    let link = snap.link_at(row, col);
+                    if hovered_link.get() != link {
+                        hovered_link.set(link.clone());
+                        hover_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+                        preview.set(file_links::Preview::Hidden);
+                        if let Some(link) = link {
+                            file_links::schedule_preview(
+                                &store,
+                                &sess_move,
+                                link,
+                                hover_epoch,
+                                preview,
+                            );
+                        }
+                    }
+                    return;
+                }
+                if let Some((start_y, start_top)) = scroll_drag.get() {
+                    let state = falcon_core::term_scroll::ScrollState::from_grid(
+                        snap.display_offset,
+                        snap.history_size,
+                        snap.size.rows,
+                    );
+                    if let Some(geo) = falcon_core::term_scroll::thumb_geometry(
+                        state,
+                        pane_bounds.get().1,
+                        zpx(24.0).0,
+                    ) {
+                        sess_move.scroll_to(falcon_core::term_scroll::position_for_thumb_top(
+                            state,
+                            pane_bounds.get().1,
+                            geo.height,
+                            start_top + e.position.y.0 - start_y,
+                        ) as usize);
+                    }
+                } else if reported.get() {
+                    let _ = sess_move.handle_mouse(MouseReportEvent {
+                        action: MouseAction::Move,
+                        button: TermMouseButton::Left,
+                        col: col as i32,
+                        row: row as i32,
+                        x: e.position.x.0.max(0.0) as i32,
+                        y: e.position.y.0.max(0.0) as i32,
+                        shift: e.modifiers.shift,
+                        alt: e.modifiers.alt,
+                        ctrl: e.modifiers.ctrl,
+                    });
+                } else if dragging.get() {
+                    use falcon_term::alacritty_terminal::index::Side;
+                    let side = if ((e.position.x.0 + vp.pan_x) / vp.scale / vp.cell_width).fract()
+                        >= 0.5
+                    {
+                        Side::Right
+                    } else {
+                        Side::Left
+                    };
+                    sess_move.core().update_selection(row, col, side);
+                    sess_move.selection_changed();
+                }
+            }
+        })
+        .on_mouse_up(move |e: &MouseEvent| {
+            if e.button != Some(MouseButton::Left) {
+                return;
+            }
+            scroll_drag.set(None);
+            if reported.get_untracked() {
+                reported.set(false);
+                let snap = sess_up.snapshot();
+                let vp = compute_vp(&snap, &sess_up);
+                let (col, row) = vp.pixel_to_cell(
+                    e.position.x.0,
+                    e.position.y.0,
+                    snap.size.cols,
+                    snap.size.rows,
+                );
+                let _ = sess_up.handle_mouse(MouseReportEvent {
                     action: MouseAction::Up,
                     button: TermMouseButton::Left,
                     col: col as i32,
@@ -524,8 +744,72 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                     ctrl: e.modifiers.ctrl,
                 });
             }
+            if dragging.get_untracked() {
+                dragging.set(false);
+                interactions::copy(&sess_up);
+                sess_up.selection_changed();
+            }
+        })
+        .on_press_up({
+            let session = session.clone();
+            move |e: &PressEvent| {
+                scroll_drag.set(None);
+                if reported.get_untracked() {
+                    reported.set(false);
+                    let snap = session.snapshot();
+                    let vp = compute_vp(&snap, &session);
+                    let (col, row) = vp.pixel_to_cell(
+                        e.position.x.0,
+                        e.position.y.0,
+                        snap.size.cols,
+                        snap.size.rows,
+                    );
+                    let _ = session.handle_mouse(MouseReportEvent {
+                        action: MouseAction::Up,
+                        button: TermMouseButton::Left,
+                        col: col as i32,
+                        row: row as i32,
+                        x: e.position.x.0.max(0.0) as i32,
+                        y: e.position.y.0.max(0.0) as i32,
+                        shift: e.modifiers.shift,
+                        alt: e.modifiers.alt,
+                        ctrl: e.modifiers.ctrl,
+                    });
+                }
+                if dragging.get_untracked() {
+                    dragging.set(false);
+                    interactions::copy(&session);
+                    session.selection_changed();
+                }
+            }
+        })
+        .on_mouse_leave(move |_: &MouseEvent| {
+            hovered_link.set(None);
+            hover_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+            preview.set(file_links::Preview::Hidden);
+        })
+        .on_context_menu({
+            let session = session.clone();
+            let store = store.clone();
+            move |event: &ContextMenuEvent| {
+                let actions = interactions::context_actions(&store, &session);
+                let _ = popup_menu_at(
+                    actions.into_iter().map(|a| a.into_menu_item()).collect(),
+                    event.page_position,
+                );
+            }
+        })
+        .on_file_drop({
+            let store = store.clone();
+            let session = session.clone();
+            move |event: &FileDropEvent| {
+                interactions::drop_files(&store, &session, event.uris.clone())
+            }
         })
         .on_wheel(move |ev: &WheelEvent| {
+            hovered_link.set(None);
+            hover_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+            preview.set(file_links::Preview::Hidden);
             let snap = sess_wheel.snapshot();
             let vp = compute_vp(&snap, &sess_wheel);
             let (col, row) = vp.pixel_to_cell(
@@ -626,10 +910,9 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                 .on_composition_change(move |comp: &Composition| {
                     ime_preedit.set(comp.text.to_string());
                 })
-                .on_paste(move |ev: &PasteEvent| {
-                    if !ev.text.is_empty() {
-                        sess_ime_paste.send_paste(&ev.text);
-                    }
+                .on_paste({
+                    let store = store.clone();
+                    move |ev: &PasteEvent| interactions::paste_event(&store, &sess_ime_paste, ev)
                 })
                 .on_change({
                     let store_ime = store.clone();
@@ -676,7 +959,62 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
         }))
     };
 
-    terminal_view.into_element()
+    let dim_session = session.clone();
+    let scroll_session = session.clone();
+    let terminal_view = terminal_view
+        .child(dynamic(move || {
+            let _ = frame_tick.get();
+            let snap = scroll_session.snapshot();
+            let state = falcon_core::term_scroll::ScrollState::from_grid(
+                snap.display_offset,
+                snap.history_size,
+                snap.size.rows,
+            );
+            let mut track = view()
+                .absolute()
+                .right(zpx(0.0))
+                .top(zpx(0.0))
+                .bottom(zpx(0.0))
+                .w(zpx(12.0))
+                .pointer_events(PointerEvents::None);
+            if let Some(geo) =
+                falcon_core::term_scroll::thumb_geometry(state, pane_bounds.get().1, zpx(24.0).0)
+            {
+                track = track.child(
+                    view()
+                        .test_id("terminal-scrollbar-thumb")
+                        .absolute()
+                        .right(zpx(3.0))
+                        .top(pt_px(geo.top))
+                        .h(pt_px(geo.height))
+                        .w(zpx(6.0))
+                        .rounded(zpx(3.0))
+                        .bg(rgb_to_hsla(theme_ctrl.resolved().ui.muted_foreground)),
+                );
+            }
+            track
+        }))
+        .child(file_links::preview_view(preview));
+    view()
+        .size_full()
+        .flex_col()
+        .child(interactions::banner(store, session, frame_tick))
+        .child(
+            view()
+                .flex_1()
+                .min_h(zpx(0.0))
+                .opacity(move || {
+                    let _ = frame_tick.get();
+                    match dim_session.meta().connection {
+                        session::ConnectionState::Active | session::ConnectionState::Connecting => {
+                            1.0_f32
+                        }
+                        _ => 0.55_f32,
+                    }
+                })
+                .child(terminal_view),
+        )
+        .into_element()
 }
 
 #[cfg(test)]
