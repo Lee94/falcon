@@ -261,9 +261,25 @@ fn normalized_mapping_path(path: Option<&str>) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    let mut path = path.replace('\\', "/");
     let bytes = path.as_bytes();
-    let drive_root = bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'/';
+    let windows_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\');
+    let windows_unc = path.starts_with("\\\\")
+        && path[2..]
+            .split(|ch| ch == '\\' || ch == '/')
+            .filter(|part| !part.is_empty())
+            .take(2)
+            .count()
+            == 2;
+    let mut path = if windows_drive || windows_unc {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
+    let bytes = path.as_bytes();
+    let drive_root = windows_drive && bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'/';
     while path.ends_with('/') && path != "/" && !drive_root {
         path.pop();
     }
@@ -472,6 +488,7 @@ mod tests {
 
         let mut root_multi = inline_project;
         root_multi.project_type = ProjectType::Local;
+        root_multi.working_dir = Some("/repo".into());
         root_multi.ssh = None;
         root_multi.multi = Some(MultiRepoInfo {
             repos: vec![
@@ -492,5 +509,21 @@ mod tests {
         assert!(!mapping_changed(&root_multi, &root_input));
         root_input.repos = Some(vec!["/repo/b".into(), "/repo/a".into()]);
         assert!(mapping_changed(&root_multi, &root_input));
+    }
+
+    #[test]
+    fn mapping_path_normalization_preserves_posix_backslashes_and_normalizes_windows_paths() {
+        assert_ne!(
+            normalized_mapping_path(Some("/repo\\name")),
+            normalized_mapping_path(Some("/repo/name"))
+        );
+        assert_eq!(
+            normalized_mapping_path(Some(r"C:\repo\sub")),
+            Some("C:/repo/sub".into())
+        );
+        assert_eq!(
+            normalized_mapping_path(Some(r"\\server\share\repo")),
+            Some("//server/share/repo".into())
+        );
     }
 }

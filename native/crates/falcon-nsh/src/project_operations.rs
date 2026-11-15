@@ -63,7 +63,7 @@ struct PendingProjectUpdate {
     state: PendingUpdateState,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ProjectUpdateOutcome {
     Applied,
     DefiniteFailure,
