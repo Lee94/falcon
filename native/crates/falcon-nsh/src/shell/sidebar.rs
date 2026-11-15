@@ -1,6 +1,10 @@
 //! 与 GPUI 共用宿主机 → 项目 → 检出 → 会话的分组规则；会话默认收起。
 use super::widgets::{Glyph, glyph, icon_button};
 use crate::i18n::t;
+use crate::shell::{
+    menus,
+    popups::{context_menu, menu_trigger, overflow_menu, themed_tooltip},
+};
 use crate::store::{ActiveDialog, ProjectRecord, SessionRecord, SettingsTab, WorkspaceStore};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla};
 use crate::zoom::zpx;
@@ -70,8 +74,8 @@ pub fn sidebar_island(
         let st = store.clone();
         let key = group.key.clone();
         let new_project = store.clone();
-        let mut block = view().flex_col().gap(zpx(2.0)).child(
-            view()
+        let host_id = group.host.as_ref().map(|host| host.id.clone());
+        let header = view()
                 .h(zpx(30.0))
                 .flex_row()
                 .items_center()
@@ -80,9 +84,13 @@ pub fn sidebar_island(
                 .child(
                     view()
                         .label(format!("tree-{}", group.key))
-                        .tooltip(nsh_base::tooltip().child(text(
-                            group.conn.clone().unwrap_or_else(|| group.name.clone()),
-                        )))
+                        .tooltip(themed_tooltip(
+                            text(crate::shell::popups::tooltip_path_text(
+                                group.conn.clone().unwrap_or_else(|| group.name.clone()),
+                            )),
+                            None,
+                            resolved,
+                        ))
                         .flex_1()
                         .min_w_0()
                         .h_full()
@@ -121,8 +129,25 @@ pub fn sidebar_island(
                     false,
                     resolved,
                     move || new_project.active_dialog.set(ActiveDialog::NewProject),
+                ));
+        let header = if let Some(host_id) = host_id.as_deref() {
+            context_menu(
+                header.child(overflow_menu(
+                menu_trigger(
+                    format!("host-menu-{}", group.key),
+                    t!("session.moreActions"),
+                    resolved,
+                ),
+                menus::host_menu_actions(store, Some(host_id)),
+                resolved,
                 )),
-        );
+                menus::host_menu_actions(store, Some(host_id)),
+                resolved,
+            )
+        } else {
+            header.into_element()
+        };
+        let mut block = view().flex_col().gap(zpx(2.0)).child(header);
         if open {
             if let Some(id) = group.standalone_id.as_ref().filter(|id| {
                 sessions.iter().any(|s| &s.project_id == *id)
@@ -153,8 +178,7 @@ pub fn sidebar_island(
                 let st = store.clone();
                 let pid = p.id.clone();
                 let toggle = store.clone();
-                let mut folder_view = view().flex_col().gap(zpx(2.0)).child(
-                    view()
+                let folder_header = view()
                         .h(zpx(30.0))
                         .flex_row()
                         .items_center()
@@ -181,10 +205,13 @@ pub fn sidebar_island(
                         .child(
                             view()
                                 .label(format!("project-{}", p.id))
-                                .tooltip(
-                                    nsh_base::tooltip()
-                                        .child(text(p.working_dir.clone().unwrap_or_default())),
-                                )
+                                .tooltip(themed_tooltip(
+                                    text(crate::shell::popups::tooltip_path_text(
+                                        p.working_dir.clone().unwrap_or_default(),
+                                    )),
+                                    None,
+                                    resolved,
+                                ))
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
@@ -202,8 +229,22 @@ pub fn sidebar_island(
                                         .number_of_lines(1)
                                         .text_color(rgb_to_hsla(ui.foreground)),
                                 ),
-                        ),
+                        )
+                        .child(overflow_menu(
+                            menu_trigger(
+                                format!("project-folder-menu-{}", p.id),
+                                t!("session.moreActions"),
+                                resolved,
+                            ),
+                            menus::project_menu_actions(store, &p.id),
+                            resolved,
+                        ));
+                let folder_header = context_menu(
+                    folder_header,
+                    menus::project_menu_actions(store, &p.id),
+                    resolved,
                 );
+                let mut folder_view = view().flex_col().gap(zpx(2.0)).child(folder_header);
                 if expanded {
                     let branch = store
                         .projects
@@ -279,7 +320,13 @@ pub fn sidebar_island(
                         .min_w_0()
                         .cursor_pointer()
                         .label("sidebar-settings-label")
-                        .tooltip(nsh_base::tooltip().child(text(store.server_url.get())))
+                        .tooltip(themed_tooltip(
+                            text(crate::shell::popups::tooltip_path_text(
+                                store.server_url.get(),
+                            )),
+                            None,
+                            resolved,
+                        ))
                         .on_press(move || {
                             settings_label
                                 .active_dialog
@@ -345,8 +392,7 @@ fn checkout_row(
     let select_id = id.to_string();
     let create = store.clone();
     let create_id = id.to_string();
-    let mut block = view().flex_col().gap(zpx(2.0)).child(
-        view()
+    let mut row_header = view()
             .h(zpx(30.0))
             .flex_row()
             .items_center()
@@ -358,11 +404,11 @@ fn checkout_row(
             .when(selected, |v| v.bg(rgb_to_hsla(ui.tint)))
             .child(
                 view()
-                    .label(format!("sessions-toggle-{id}"))
-                    .tooltip(nsh_base::tooltip().child(text(t!(
+                .label(format!("sessions-toggle-{id}"))
+                    .tooltip(themed_tooltip(text(t!(
                         "sidebar.sessionCount",
                         n = sessions.len().to_string().as_str()
-                    ))))
+                    )), None, resolved))
                     .w(zpx(18.0))
                     .cursor_pointer()
                     .on_press(move || {
@@ -379,9 +425,13 @@ fn checkout_row(
             .child(
                 view()
                     .label(format!("checkout-{id}"))
-                    .tooltip(
-                        nsh_base::tooltip().child(text(hint.unwrap_or_else(|| name.to_string()))),
-                    )
+                    .tooltip(themed_tooltip(
+                        text(crate::shell::popups::tooltip_path_text(
+                            hint.unwrap_or_else(|| name.to_string()),
+                        )),
+                        None,
+                        resolved,
+                    ))
                     .flex_1()
                     .min_w_0()
                     .h_full()
@@ -443,17 +493,42 @@ fn checkout_row(
                 false,
                 resolved,
                 move || {
-                    create.active_project_id.set(create_id.clone());
+                    create.select_project(&create_id);
                     create.create_terminal_in_active_project();
                 },
-            )),
-    );
+            ));
+    let has_project = store.projects.get().iter().any(|project| project.id == id);
+    let mut block = view().flex_col().gap(zpx(2.0));
+    if has_project {
+        row_header = row_header.child(overflow_menu(
+            menu_trigger(
+                format!("project-menu-{id}"),
+                t!("session.moreActions"),
+                resolved,
+            ),
+            menus::project_menu_actions(store, id),
+            resolved,
+        ));
+        block = block.child(context_menu(
+            row_header,
+            menus::project_menu_actions(store, id),
+            resolved,
+        ));
+    } else {
+        block = block.child(row_header);
+    }
     if expanded {
         for session in sessions {
             let st = store.clone();
             let sid = session.id.clone();
             let focused = store.focused_pane_key.get() == falcon_core::pane_key::term_key(&sid);
             let attached = store.is_session_attached(&sid);
+            let title = session.display_title();
+            let session_path = session
+                .program_status
+                .as_ref()
+                .map(|s| s.1.clone())
+                .unwrap_or_else(|| session.cwd.clone());
             let mut row = view()
                 .label(format!("session-{sid}"))
                 .h(zpx(28.0))
@@ -463,32 +538,32 @@ fn checkout_row(
                 .pl(zpx(16.0 + depth as f32 * 12.0))
                 .pr(zpx(6.0))
                 .rounded(zpx(8.0))
-                .cursor_pointer()
                 .when(focused, |v| v.bg(rgb_to_hsla(ui.tint)))
                 .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
-                .tooltip(
-                    nsh_base::tooltip().child(text(
-                        session
-                            .program_status
-                            .as_ref()
-                            .map(|s| s.1.clone())
-                            .unwrap_or_else(|| session.cwd.clone()),
-                    )),
-                )
-                .on_press(move || st.focus_session(&sid))
+                .tooltip(themed_tooltip(
+                    text(crate::shell::popups::tooltip_path_text(session_path)),
+                    None,
+                    resolved,
+                ))
                 .child(
                     view()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(6.0))
+                        .cursor_pointer()
+                        .on_press(move || st.focus_session(&sid))
+                        .child(view()
                         .w(zpx(5.0))
                         .h(zpx(5.0))
                         .rounded_full()
-                        .bg(rgb_to_hsla(status_color(&session, ui))),
-                )
-                .child(
-                    text(session.display_title())
+                        .bg(rgb_to_hsla(status_color(&session, ui))))
+                        .child(text(title)
                         .flex_1()
                         .text_xs()
                         .number_of_lines(1)
-                        .text_color(rgb_to_hsla(ui.foreground)),
+                        .text_color(rgb_to_hsla(ui.foreground))),
                 );
             if !attached {
                 let st = store.clone();
@@ -502,7 +577,25 @@ fn checkout_row(
                     move || st.focus_session(&sid),
                 ));
             }
-            block = block.child(row);
+            let actions = menus::session_menu_actions(store, &session);
+            if !actions.is_empty() {
+                row = row.child(overflow_menu(
+                    menu_trigger(
+                        format!("session-menu-{}", session.id),
+                        t!("session.moreActions"),
+                        resolved,
+                    ),
+                    actions,
+                    resolved,
+                ));
+                block = block.child(context_menu(
+                    row,
+                    menus::session_menu_actions(store, &session),
+                    resolved,
+                ));
+            } else {
+                block = block.child(row);
+            }
         }
     }
     block

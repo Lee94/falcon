@@ -18,6 +18,10 @@ use nsh_package::{Error as PkgError, PublicKey, TrustStore};
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
+use crate::shell::{
+    action_owner::ActionOwner,
+    popups::{menu_trigger, overflow_menu, PopupAction, ServerUrlGuard},
+};
 use crate::shell::widgets::{Glyph, glyph, icon_button};
 use crate::store::{PackageVerificationState, PluginPanelState, WorkspaceStore, use_workspace};
 use crate::theme::{plugin_tone_color, rgb_to_hsla, rgba_to_hsla, use_theme};
@@ -915,11 +919,17 @@ fn render_list_block(
     items: &[PluginListItem],
 ) -> impl IntoElement {
     let ui = &resolved.ui;
+    let server_scope = ServerUrlGuard::capture(store);
     view()
         .flex_col()
         .gap(zpx(4.0))
-        .children(items.iter().map(|item| {
-            let mut row = view()
+        .children(items.iter().enumerate().map(|(index, item)| {
+            let action_disabled = item
+                .action
+                .as_ref()
+                .is_some_and(plugin_action_disabled);
+            let item_server_scope = server_scope.clone();
+            let row = view()
                 .flex_row()
                 .items_center()
                 .justify_between()
@@ -928,15 +938,7 @@ fn render_list_block(
                 .rounded(zpx(6.0))
                 .bg(rgb_to_hsla(ui.card));
 
-            if let Some(act) = item.action.clone() {
-                let st = store.clone();
-                let pid = plugin_id.to_string();
-                row = row.cursor_pointer().on_press(move || {
-                    execute_plugin_action(&st, &pid, &act);
-                });
-            }
-
-            let left = view()
+            let mut left = view()
                 .flex_row()
                 .items_center()
                 .gap(zpx(6.0))
@@ -955,7 +957,11 @@ fn render_list_block(
                         .child(
                             text(item.title.clone())
                                 .text_xs()
-                                .text_color(rgb_to_hsla(ui.foreground)),
+                                .text_color(rgb_to_hsla(if action_disabled {
+                                    ui.muted_foreground
+                                } else {
+                                    ui.foreground
+                                })),
                         )
                         .when_some(item.detail.clone(), |el, d| {
                             el.child(
@@ -966,6 +972,15 @@ fn render_list_block(
                         }),
                 );
 
+            if let Some(act) = item.action.clone().filter(|_| !action_disabled) {
+                let st = store.clone();
+                let pid = plugin_id.to_string();
+                let action_server = item_server_scope.clone();
+                left = left.cursor_pointer().on_press(move || {
+                    execute_plugin_action(&st, &pid, &act, action_server.clone());
+                });
+            }
+
             let mut right = view().flex_row().items_center().gap(zpx(4.0));
             if let Some(badge) = &item.badge {
                 right = right.child(
@@ -975,8 +990,51 @@ fn render_list_block(
                         .text_color(rgb_to_hsla(ui.muted_foreground)),
                 );
             }
-            for btn in &item.menu {
-                right = right.child(render_plugin_button(store, resolved, plugin_id, btn));
+            if !item.menu.is_empty() {
+                let actions = item
+                    .menu
+                    .iter()
+                    .cloned()
+                    .map(|button| {
+                        let label = button.label;
+                        let action = button.action;
+                        let disabled = plugin_action_disabled(&action);
+                        let danger = matches!(button.tone, Some(PluginTone::Danger))
+                            || matches!(
+                                action,
+                                PluginAction::Invoke {
+                                    confirm: Some(_),
+                                    ..
+                                }
+                            );
+                        let st = store.clone();
+                        let pid = plugin_id.to_string();
+                        let menu_server_scope = server_scope.clone();
+                        PopupAction::new(
+                            menu_server_scope.clone(),
+                            label,
+                            disabled,
+                            danger,
+                            move || {
+                                execute_plugin_action(
+                                    &st,
+                                    &pid,
+                                    &action,
+                                    menu_server_scope.clone(),
+                                );
+                            },
+                        )
+                    })
+                    .collect();
+                right = right.child(overflow_menu(
+                    menu_trigger(
+                        format!("plugin-menu-{plugin_id}-{index}"),
+                        t!("session.moreActions"),
+                        resolved,
+                    ),
+                    actions,
+                    resolved,
+                ));
             }
 
             row.child(left).child(right)
@@ -1020,14 +1078,24 @@ fn render_plugin_button(
     let st = store.clone();
     let pid = plugin_id.to_string();
     let act = btn.action.clone();
-    view()
+    let server_scope = ServerUrlGuard::capture(store);
+    let disabled = plugin_action_disabled(&act);
+    let mut button = view()
         .px(zpx(8.0))
         .py(zpx(4.0))
         .rounded(zpx(6.0))
-        .cursor_pointer()
-        .bg(bg)
-        .on_press(move || execute_plugin_action(&st, &pid, &act))
-        .child(text(btn.label.clone()).text_xs().text_color(fg))
+        .bg(if disabled { rgb_to_hsla(ui.muted) } else { bg })
+        .child(text(btn.label.clone()).text_xs().text_color(if disabled {
+            rgb_to_hsla(ui.muted_foreground)
+        } else {
+            fg
+        }));
+    if !disabled {
+        button = button
+            .cursor_pointer()
+            .on_press(move || execute_plugin_action(&st, &pid, &act, server_scope.clone()));
+    }
+    button
 }
 
 fn render_select_block(
@@ -1040,6 +1108,7 @@ fn render_select_block(
     options: &[PluginOption],
 ) -> impl IntoElement {
     let ui = &resolved.ui;
+    let server_scope = ServerUrlGuard::capture(store);
     // 长名称用下拉菜单，避免侧栏变窄后每个选项挤占一整行。
     if options.len() > 3 || options.iter().any(|o| o.label.chars().count() > 6) {
         let title = options
@@ -1051,8 +1120,13 @@ fn render_select_block(
         let pid = plugin_id.to_owned();
         let key = param.to_owned();
         let fg = rgb_to_hsla(ui.foreground);
-        let bg = rgb_to_hsla(ui.card);
+        let bg = rgb_to_hsla(ui.popover);
+        let popover_fg = rgb_to_hsla(ui.popover_foreground);
         let border = rgba_to_hsla(ui.border);
+        let selected_value = active_value.to_owned();
+        let owner = ActionOwner::current();
+        let popup_token = owner.popup_token();
+        let select_server = server_scope.clone();
         return view()
             .flex_row()
             .items_center()
@@ -1073,9 +1147,18 @@ fn render_select_block(
                             .collect::<Vec<_>>(),
                     )
                     .value(active_value.to_owned())
+                    .offset(zpx(4.0))
+                    .margin(zpx(8.0))
                     .popup_style(move |v| {
-                        v.bg(bg).rounded(zpx(8.0)).border_1().border_color(border)
+                        v.bg(bg)
+                            .text_color(popover_fg)
+                            .rounded(zpx(8.0))
+                            .border_1()
+                            .border_color(border)
+                            .p(zpx(4.0))
+                            .shadow([crate::shell::popups::popup_shadow(border)])
                     })
+                    .item_class("group focus:bg-tint focus:text-tint-foreground selected:bg-tint selected:text-tint-foreground disabled:opacity-50")
                     .trigger(
                         view()
                             .flex_row()
@@ -1092,20 +1175,38 @@ fn render_select_block(
                             .child(glyph(Glyph::ChevronDown)),
                     )
                     .render_item(move |entry: &nsh_base::SelectEntry| {
-                        view()
+                        let selected = entry.value.as_ref() == selected_value.as_str();
+                        let mut item = view()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(6.0))
                             .px(zpx(10.0))
                             .py(zpx(7.0))
-                            .bg(bg)
-                            .child(text(entry.title.clone()).text_xs().text_color(fg))
+                            .rounded(zpx(6.0));
+                        if selected {
+                            item = item.child(glyph(Glyph::Check));
+                        }
+                        item.child(text(entry.title.clone()).text_xs())
+                    })
+                    .on_open_change(move |event: &nsh_base::SelectEvent| {
+                        if let nsh_base::SelectEvent::OpenChange(open, _) = event {
+                            popup_token.set_open(*open);
+                        }
                     })
                     .on_change(move |value: &Option<SharedString>| {
                         if let Some(value) = value {
-                            set_plugin_param(&st, &pid, &key, value);
+                            let value = value.clone();
+                            owner.run(|| {
+                                if select_server.is_current() {
+                                    set_plugin_param(&st, &pid, &key, &value);
+                                }
+                            });
                         }
                     }),
             )
             .into_element();
     }
+    let action_owner = ActionOwner::current();
     view()
         .flex_col()
         .gap(zpx(4.0))
@@ -1133,18 +1234,38 @@ fn render_select_block(
                     } else {
                         rgb_to_hsla(ui.secondary_foreground)
                     };
+                    let hover_bg = rgb_to_hsla(ui.muted);
+                    let focus_border = rgb_to_hsla(ui.tint);
+                    let border = rgba_to_hsla(ui.border);
                     let st = store.clone();
                     let pid = plugin_id.to_string();
                     let p_key = param.to_string();
                     let p_val = opt.value.clone();
+                    let owner = action_owner.clone();
+                    let select_server = server_scope.clone();
                     view()
+                        .focusable(true)
+                        .border_1()
+                        .border_color(border)
                         .px(zpx(8.0))
                         .py(zpx(3.0))
                         .rounded(zpx(5.0))
                         .cursor_pointer()
+                        .hover(move |style| {
+                            if selected {
+                                style.bg(bg)
+                            } else {
+                                style.bg(hover_bg)
+                            }
+                        })
+                        .focus(move |style| style.border_color(focus_border))
                         .bg(bg)
                         .on_press(move || {
-                            set_plugin_param(&st, &pid, &p_key, &p_val);
+                            owner.run(|| {
+                                if select_server.is_current() {
+                                    set_plugin_param(&st, &pid, &p_key, &p_val);
+                                }
+                            });
                         })
                         .child(text(opt.label.clone()).text_xs().text_color(fg))
                 })),
@@ -1167,13 +1288,86 @@ fn set_plugin_param(store: &WorkspaceStore, plugin_id: &str, key: &str, val: &st
     store.dispatch_plugin_action(plugin_id, None, None);
 }
 
-fn execute_plugin_action(store: &WorkspaceStore, plugin_id: &str, action: &PluginAction) {
+fn execute_plugin_action(
+    store: &WorkspaceStore,
+    plugin_id: &str,
+    action: &PluginAction,
+    server_scope: ServerUrlGuard,
+) {
+    // Keep confirmation and dispatch bound to the server active when the action was selected.
+    let starting_server_url = store.server_url.get();
+    if !server_scope.is_current() || !server_scope.matches_url(&starting_server_url) {
+        return;
+    }
+    let owner = ActionOwner::current();
+    if let PluginAction::Invoke {
+        confirm: Some(message),
+        ..
+    } = action
+    {
+        let store = store.clone();
+        let plugin_id = plugin_id.to_string();
+        let action = action.clone();
+        let message = message.clone();
+        let task_owner = owner.clone();
+        let confirmation_scope = server_scope.clone();
+        let confirmation_server_url = starting_server_url.clone();
+        owner.run(move || {
+            if !confirmation_scope.is_current()
+                || !confirmation_scope.matches_url(&confirmation_server_url)
+            {
+                return;
+            }
+            spawn(async move {
+                if !confirmation_scope.is_current()
+                    || !confirmation_scope.matches_url(&confirmation_server_url)
+                {
+                    return;
+                }
+                let answer = nsh_base::alert_dialog()
+                    .title(t!("plugin.confirmActionTitle"))
+                    .description(message)
+                    .cancel("cancel", t!("common.cancel"))
+                    .destructive("confirm", t!("common.confirm"))
+                    .close_on_escape(true)
+                    .close_on_backdrop_press(true)
+                    .show()
+                    .await;
+                let confirmed = answer
+                    .is_ok_and(|answer| answer.action.as_deref() == Some("confirm"));
+                let current_server = confirmation_scope.is_current()
+                    && confirmation_scope.matches_url(&confirmation_server_url);
+                dispatch_after_plugin_confirmation(&action, confirmed && current_server, || {
+                    task_owner.run(|| {
+                        if confirmation_scope.is_current()
+                            && confirmation_scope.matches_url(&confirmation_server_url)
+                        {
+                            execute_plugin_action_without_confirmation(&store, &plugin_id, &action)
+                        }
+                    });
+                });
+            });
+        });
+        return;
+    }
+    owner.run(|| {
+        if server_scope.is_current() && server_scope.matches_url(&starting_server_url) {
+            execute_plugin_action_without_confirmation(store, plugin_id, action);
+        }
+    });
+}
+
+fn execute_plugin_action_without_confirmation(
+    store: &WorkspaceStore,
+    plugin_id: &str,
+    action: &PluginAction,
+) {
     match action {
         PluginAction::Invoke { id, value, .. } => {
             store.dispatch_plugin_action(plugin_id, Some(id.as_str()), value.clone());
         }
         PluginAction::OpenUrl { url } => {
-            if url.starts_with("https://") || url.starts_with("http://") {
+            if valid_plugin_url(url) {
                 let _ = open_url(url.clone());
             }
         }
@@ -1188,5 +1382,67 @@ fn execute_plugin_action(store: &WorkspaceStore, plugin_id: &str, action: &Plugi
             set_plugin_param(store, plugin_id, param, value);
         }
         PluginAction::Unknown => {}
+    }
+}
+
+fn valid_plugin_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+    })
+}
+
+fn plugin_action_disabled(action: &PluginAction) -> bool {
+    matches!(action, PluginAction::Unknown)
+        || matches!(action, PluginAction::OpenUrl { url } if !valid_plugin_url(url))
+}
+
+fn dispatch_after_plugin_confirmation(
+    action: &PluginAction,
+    confirmed: bool,
+    dispatch: impl FnOnce(),
+) {
+    if matches!(
+        action,
+        PluginAction::Invoke {
+            confirm: Some(_),
+            ..
+        }
+    ) && !confirmed
+    {
+        return;
+    }
+    dispatch();
+}
+
+#[cfg(test)]
+mod plugin_action_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn confirmed_plugin_action_dispatches_only_after_explicit_acceptance() {
+        let action = PluginAction::Invoke {
+            id: "dangerous".into(),
+            value: None,
+            confirm: Some("Continue?".into()),
+        };
+        let dispatches = Cell::new(0);
+
+        dispatch_after_plugin_confirmation(&action, false, || dispatches.set(1));
+        assert_eq!(dispatches.get(), 0);
+
+        dispatch_after_plugin_confirmation(&action, true, || dispatches.set(1));
+        assert_eq!(dispatches.get(), 1);
+    }
+
+    #[test]
+    fn unsafe_or_unknown_plugin_menu_actions_are_disabled() {
+        assert!(plugin_action_disabled(&PluginAction::Unknown));
+        assert!(plugin_action_disabled(&PluginAction::OpenUrl {
+            url: "https://".into(),
+        }));
+        assert!(!plugin_action_disabled(&PluginAction::OpenUrl {
+            url: "https://example.test/path".into(),
+        }));
     }
 }

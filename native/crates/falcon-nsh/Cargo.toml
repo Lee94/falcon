@@ -12,7 +12,7 @@ snapshot = []
 falcon-proto.workspace = true
 falcon-term.workspace = true
 falcon-theme.workspace = true
-falcon-core.workspace = true
+falcon-core = { workspace = true, features = ["app-icon-image"] }
 falcon-platform.workspace = true
 
 nsh-core.workspace = true

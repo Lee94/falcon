@@ -19,6 +19,7 @@ use super::sidebar::sidebar_island;
 use super::widgets::{Glyph, icon_button};
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
+use crate::shell::popups::themed_tooltip;
 use crate::store::{ActiveDialog, RightPanelKind, WorkspaceStore, use_workspace};
 use crate::terminal::falcon_terminal;
 use crate::theme::{rgb_to_hsla, use_theme};
@@ -41,7 +42,6 @@ pub fn DesktopShell() -> impl IntoElement {
         .flex_row()
         .p(zpx(6.0))
         .gap(zpx(6.0))
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
         .child(dynamic({
             let st = store.clone();
             move || {
@@ -126,7 +126,6 @@ pub fn DesktopShell() -> impl IntoElement {
     view()
         .size_full()
         .flex_col()
-        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
         .child(dynamic(move || {
             identity_strip(&identity, &theme_ctrl.resolved()).into_element()
         }))
@@ -401,7 +400,7 @@ fn render_canvas_columns(
             stage = stage.child(
                 view()
                     .label(format!("resize-column-{}", col_frame.id))
-                    .tooltip(nsh_base::tooltip().child(text(t!("pane.resizeColumn"))))
+                    .tooltip(themed_tooltip(text(t!("pane.resizeColumn")), None, resolved))
                     .absolute()
                     .left(pt_px((col_frame.x + initial) as f32))
                     .top(pt_px(0.0))
@@ -505,7 +504,7 @@ fn render_pane_island(
         .gap(zpx(8.0))
         .overflow_hidden()
         .cursor_pointer()
-        .tooltip(nsh_base::tooltip().child(text(t!("pane.dragHint"))))
+        .tooltip(themed_tooltip(text(t!("pane.dragHint")), None, resolved))
         .cursor(nsh_core::Cursor::Grab)
         .on_press_down(move |e: &PressEvent| {
             drag_origin.set((
@@ -678,6 +677,10 @@ fn render_pane_island(
         .items_center()
         .justify_between()
         .label(format!("titlebar-{pane_key}"))
+        .test_id(&format!(
+            "{}-pane-{pane_key}",
+            if is_focused { "active" } else { "inactive" }
+        ))
         .h(zpx(34.0))
         .flex_none()
         .bg(rgb_to_hsla(if is_focused {
@@ -913,8 +916,8 @@ fn identity_strip(
     }
     strip
         .child(
-            image(super::widgets::app_icon_source(
-                &store.selected_app_icon.get(),
+            image(crate::appearance::app_icon::selected_source(
+                &store.appearance.app_icon,
             ))
             .w(zpx(18.0))
             .h(zpx(18.0)),

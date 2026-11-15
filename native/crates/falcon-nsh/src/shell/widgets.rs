@@ -1,5 +1,6 @@
 //! 桌面壳层共用的矢量图标与紧凑按钮。颜色继承语义 token，尺寸随界面缩放。
 use crate::theme::rgb_to_hsla;
+use crate::shell::popups::themed_tooltip;
 use crate::zoom::zpx;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -91,7 +92,8 @@ pub fn icon_button(
     let ui = &resolved.ui;
     view()
         .label(id.into())
-        .tooltip(nsh_base::tooltip().child(text(title)))
+        .focusable(true)
+        .tooltip(themed_tooltip(text(title), None, resolved))
         .w(zpx(28.0))
         .h(zpx(28.0))
         .flex_none()
@@ -111,58 +113,6 @@ pub fn icon_button(
         })
         .on_press(action)
         .child(glyph(icon))
-}
-
-/// 图标作为内嵌资源使用，离线首屏也能显示；不依赖服务端图片请求。
-pub fn app_icon_source(id: &str) -> ImageSrc {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use std::sync::LazyLock;
-    static SOURCES: LazyLock<Vec<(&'static str, String)>> = LazyLock::new(|| {
-        let images: [(&str, &[u8]); 8] = [
-            (
-                "emberwing",
-                include_bytes!("../../assets/app-icons/emberwing.png"),
-            ),
-            (
-                "voltwing",
-                include_bytes!("../../assets/app-icons/voltwing.png"),
-            ),
-            (
-                "voltwing-spark",
-                include_bytes!("../../assets/app-icons/voltwing-spark.png"),
-            ),
-            (
-                "voltwing-night",
-                include_bytes!("../../assets/app-icons/voltwing-night.png"),
-            ),
-            (
-                "voltwing-ivory",
-                include_bytes!("../../assets/app-icons/voltwing-ivory.png"),
-            ),
-            ("glyph", include_bytes!("../../assets/app-icons/glyph.png")),
-            ("flash", include_bytes!("../../assets/app-icons/flash.png")),
-            (
-                "thunderbird",
-                include_bytes!("../../assets/app-icons/thunderbird.png"),
-            ),
-        ];
-        images
-            .into_iter()
-            .map(|(id, bytes)| {
-                (
-                    id,
-                    format!("data:image/png;base64,{}", STANDARD.encode(bytes)),
-                )
-            })
-            .collect()
-    });
-    SOURCES
-        .iter()
-        .find(|(name, _)| *name == id)
-        .unwrap_or(&SOURCES[0])
-        .1
-        .clone()
-        .into()
 }
 
 /// 勾选状态用矢量绘制，避免等宽字体的 Unicode 方框在不同平台上显示成细小字形。

@@ -12,9 +12,11 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, glyph, icon_button};
-use crate::store::use_workspace;
+use crate::shell::widgets::{Glyph, icon_button};
+use crate::store::{ActiveDialog, FileBufferState, FilePreviewKind, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
+use crate::views::file_operations::file_operations_toolbar;
+use crate::views::file_operations::{selection_icon, selection_indicator};
 use crate::zoom::zpx;
 
 /// 校验 HTML 预览地址是否严格位于 `/api/projects/<id>/raw/` 只读作用域路由下（ADR 0007）。
@@ -68,24 +70,36 @@ pub fn FilesPanel() -> impl IntoElement {
                         let dir = st.file_directory.get();
                         let refresh = st.clone();
                         let up = st.clone();
-                        let refresh_dir = dir.clone();
-                        let parent = dir
-                            .rsplit_once('/')
-                            .map(|(p, _)| p)
-                            .unwrap_or("")
-                            .to_string();
+                        let parent = falcon_core::file_path::parent_nav_path(&dir);
+                        let parent_disabled = parent.is_none() || st.files_loading.get();
+                        let refresh_disabled = st.files_loading.get();
                         view()
                             .flex_row()
                             .items_center()
                             .gap(zpx(4.0))
-                            .child(icon_button(
-                                "files-parent",
-                                t!("files.parent"),
-                                Glyph::ArrowUp,
-                                false,
-                                &resolved,
-                                move || up.browse_directory(&parent),
-                            ))
+                            .child(
+                                view()
+                                    .when(parent_disabled, |button| button.opacity(0.45))
+                                    .child(icon_button(
+                                        "files-parent",
+                                        t!("files.parent"),
+                                        Glyph::ArrowUp,
+                                        false,
+                                        &resolved,
+                                        move || {
+                                            if !up.files_loading.get() {
+                                                let current_dir = up.file_directory.get();
+                                                if let Some(parent) =
+                                                    falcon_core::file_path::parent_nav_path(
+                                                        &current_dir,
+                                                    )
+                                                {
+                                                    up.browse_directory(&parent);
+                                                }
+                                            }
+                                        },
+                                    )),
+                            )
                             .child(
                                 text(if dir.is_empty() { "/".to_string() } else { dir })
                                     .flex_1()
@@ -106,14 +120,23 @@ pub fn FilesPanel() -> impl IntoElement {
                                 &resolved,
                                 move || show_hidden.update(|v| *v = !*v),
                             ))
-                            .child(icon_button(
-                                "files-refresh",
-                                t!("files.refresh"),
-                                Glyph::Refresh,
-                                false,
-                                &resolved,
-                                move || refresh.browse_directory(&refresh_dir),
-                            ))
+                            .child(
+                                view()
+                                    .when(refresh_disabled, |button| button.opacity(0.45))
+                                    .child(icon_button(
+                                        "files-refresh",
+                                        t!("files.refresh"),
+                                        Glyph::Refresh,
+                                        false,
+                                        &resolved,
+                                        move || {
+                                            if !refresh.files_loading.get() {
+                                                let current_dir = refresh.file_directory.get();
+                                                refresh.browse_directory(&current_dir);
+                                            }
+                                        },
+                                    )),
+                            )
                     }
                 }))
                 .child(
@@ -133,6 +156,7 @@ pub fn FilesPanel() -> impl IntoElement {
                         .on_change(move |v: &str| filter_query.set(v.to_string())),
                 ),
         )
+        .child(file_operations_toolbar())
         .child(scroll().flex_1().child(dynamic(move || {
             let resolved = theme_ctrl.resolved();
             let ui = &resolved.ui;
@@ -140,6 +164,7 @@ pub fn FilesPanel() -> impl IntoElement {
             let proj_id = store.active_project_id.get();
             if store.files_loading.get() {
                 return text(t!("files.loading"))
+                    .test_id("files-loading")
                     .text_xs()
                     .text_color(rgb_to_hsla(ui.muted_foreground))
                     .into_element();
@@ -180,43 +205,134 @@ pub fn FilesPanel() -> impl IntoElement {
                     .into_element();
             }
 
+            let visible_paths: Vec<String> =
+                filtered.iter().map(|entry| entry.path.clone()).collect();
+            let selected_paths = store.file_operations.selected.get();
+            let selected_visible = visible_paths
+                .iter()
+                .filter(|path| selected_paths.contains(*path))
+                .count();
+            let all_visible_selected = selected_visible == visible_paths.len();
+            let bulk_store = store.clone();
+            let bulk_paths = visible_paths.clone();
+            let bulk_label = if all_visible_selected {
+                t!("files.operations.deselectVisible")
+            } else {
+                t!("files.operations.selectVisible")
+            };
+
             view()
                 .flex_col()
                 .p(zpx(6.0))
                 .gap(zpx(2.0))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(zpx(5.0))
+                        .py(zpx(4.0))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(zpx(6.0))
+                                .cursor_pointer()
+                                .on_press(move || {
+                                    bulk_store.file_operations.select_visible(&bulk_paths)
+                                })
+                                .child(selection_indicator(all_visible_selected, &resolved))
+                                .child(
+                                    text(bulk_label)
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                                ),
+                        )
+                        .child(
+                            text(t!(
+                                "files.operations.visibleCount",
+                                count = selected_visible.to_string()
+                            ))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        ),
+                )
                 .children(filtered.into_iter().map(|entry| {
                     let st = store.clone();
                     let pid = proj_id.clone();
                     let path = entry.path.clone();
                     let is_dir = entry.is_dir;
                     let size_kb = (entry.size_bytes as f64) / 1024.0;
+                    let selected = selected_paths.contains(&path);
+                    let checkbox_store = store.file_operations.clone();
+                    let checkbox_path = path.clone();
+                    let checkbox_visible = visible_paths.clone();
+                    let row_store = store.file_operations.clone();
+                    let row_path = path.clone();
+                    let row_visible = visible_paths.clone();
+                    let file_open_blocked = !is_dir && row_store.blocks_file_open(&store);
                     view()
                         .flex_row()
                         .items_center()
-                        .justify_between()
                         .px(zpx(8.0))
                         .py(zpx(6.0))
                         .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .on_press(move || {
-                            if is_dir {
-                                st.browse_directory(&path);
-                            } else {
-                                st.open_file_pane(&pid, &path);
-                            }
-                        })
                         .gap(zpx(6.0))
                         .text_color(rgb_to_hsla(ui.muted_foreground))
                         .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
-                        .child(glyph(if is_dir { Glyph::Folder } else { Glyph::File }))
                         .child(
-                            text(entry.name)
+                            view()
+                                .test_id(&format!("file-select-{}", entry.name))
+                                .w(zpx(24.0))
+                                .h(zpx(24.0))
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .on_press(move |event: &PressEvent| {
+                                    if event.modifiers.shift {
+                                        checkbox_store
+                                            .select_range(&checkbox_path, &checkbox_visible);
+                                    } else {
+                                        checkbox_store.toggle_selected(&checkbox_path);
+                                    }
+                                })
+                                .child(selection_indicator(selected, &resolved)),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
                                 .flex_1()
                                 .min_w_0()
-                                .number_of_lines(1)
-                                .text_xs()
-                                .font_family(FONT_FAMILY_MONO)
-                                .text_color(rgb_to_hsla(ui.foreground)),
+                                .items_center()
+                                .gap(zpx(6.0))
+                                .cursor_pointer()
+                                .on_press(move |event: &PressEvent| {
+                                    if event.modifiers.shift {
+                                        row_store.select_range(&row_path, &row_visible);
+                                    } else if event.modifiers.cmd || event.modifiers.ctrl {
+                                        row_store.toggle_selected(&row_path);
+                                    } else if is_dir {
+                                        st.browse_directory(&path);
+                                    } else if row_store.blocks_file_open(&st) {
+                                        st.show_toast(row_store.file_open_lock_message(&st).unwrap_or_else(
+                                            || t!("files.operations.busy").to_string(),
+                                        ));
+                                    } else {
+                                        st.open_file_pane(&pid, &path);
+                                    }
+                                })
+                                .child(selection_icon(is_dir))
+                                .child(
+                                    text(entry.name)
+                                        .flex_1()
+                                        .min_w_0()
+                                        .number_of_lines(1)
+                                        .text_xs()
+                                        .font_family(FONT_FAMILY_MONO)
+                                        .text_color(rgb_to_hsla(ui.foreground)),
+                                )
+                                .when(file_open_blocked, |row| row.opacity(0.45)),
                         )
                         .child(
                             text(if is_dir {
@@ -248,6 +364,12 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
     let markdown_file = props.path.ends_with(".md") || props.path.ends_with(".markdown");
     let show_markdown_preview = signal(markdown_file);
     let show_html_preview = signal(props.path.ends_with(".html") || props.path.ends_with(".htm"));
+    let editor_ready = signal(false);
+    let editor_generation: Signal<Option<u64>> = signal(None);
+    let editor_initial_body = signal(String::new());
+    let editor_store = store.clone();
+    let editor_key = pane_key.clone();
+    let editor_theme = theme_ctrl.clone();
 
     view()
         .size_full()
@@ -258,6 +380,7 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
             let ui = &resolved.ui;
             let files = store.open_files.get();
             let Some(buf) = files.get(&pane_key).cloned() else {
+                editor_ready.set(false);
                 return view()
                     .p(zpx(12.0))
                     .child(
@@ -267,10 +390,62 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                     )
                     .into_element();
             };
+            let preview_active = (buf.raw_preview_url.is_some() && show_html_preview.get())
+                || (markdown_file && show_markdown_preview.get());
+            if buf.editable() && !preview_active {
+                if !editor_ready.get() || editor_generation.get() != Some(buf.generation) {
+                    editor_initial_body.set(buf.current_body.clone());
+                    editor_generation.set(Some(buf.generation));
+                    editor_ready.set(true);
+                }
+            } else {
+                editor_ready.set(false);
+            }
+
+            let st_save_shortcut = store.clone();
+            let shortcut_key = pane_key.clone();
+            if store.focused_pane_key.get() == pane_key
+                && store.active_dialog.get() == ActiveDialog::None
+            {
+                crate::terminal::bind_safe_key_when(
+                    "mod+s",
+                    false,
+                    nsh_core::keymap::When::Always,
+                    move || {
+                        let _ = st_save_shortcut.save_file_buffer(&shortcut_key);
+                    },
+                );
+            }
 
             let dirty = buf.is_dirty();
             let has_preview = buf.raw_preview_url.is_some();
             let preview_on = has_preview && show_html_preview.get();
+            let can_save = buf.editable() && dirty && !buf.saving && !buf.remote_changed_conflict;
+            let readonly_notice = if buf.state == FileBufferState::ReadOnly {
+                Some(match buf.preview_kind.as_ref() {
+                    Some(FilePreviewKind::Text {
+                        truncated: true, ..
+                    }) => t!("native.nsh.fileTruncatedReadonly"),
+                    Some(FilePreviewKind::Text {
+                        has_version: false, ..
+                    }) => t!("native.nsh.fileVersionMissingReadonly"),
+                    Some(FilePreviewKind::Image { mime, size }) => t!(
+                        "native.nsh.fileImageReadonly",
+                        mime = mime.as_str(),
+                        size = *size
+                    ),
+                    Some(FilePreviewKind::Binary { size }) => {
+                        t!("native.nsh.fileBinaryReadonly", size = *size)
+                    }
+                    Some(FilePreviewKind::TooLarge { size }) => {
+                        t!("native.nsh.fileTooLargeReadonly", size = *size)
+                    }
+                    Some(FilePreviewKind::Unknown) | None => t!("native.nsh.fileUnknownReadonly"),
+                    _ => t!("native.nsh.fileUnknownReadonly"),
+                })
+            } else {
+                None
+            };
 
             let mut toolbar = view()
                 .flex_row()
@@ -310,6 +485,7 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
             if markdown_file {
                 actions = actions.child(
                     view()
+                        .test_id(&format!("file-markdown-preview-{pane_key}"))
                         .px(zpx(8.0))
                         .py(zpx(3.0))
                         .rounded(zpx(8.0))
@@ -348,30 +524,46 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                 );
             }
 
-            {
+            if buf.editable() {
                 let st_save = store.clone();
                 let pk_save = pane_key.clone();
+                let mut save_button = view()
+                    .test_id(&format!("file-save-{pane_key}"))
+                    .px(zpx(8.0))
+                    .py(zpx(3.0))
+                    .rounded(zpx(5.0))
+                    .bg(rgb_to_hsla(ui.tint));
+                if can_save {
+                    save_button = save_button.cursor_pointer().on_press(move || {
+                        let _ = st_save.save_file_buffer(&pk_save);
+                    });
+                }
                 actions = actions.child(
-                    view()
-                        .px(zpx(8.0))
-                        .py(zpx(3.0))
-                        .rounded(zpx(5.0))
-                        .cursor_pointer()
-                        .bg(rgb_to_hsla(ui.tint))
-                        .on_press(move || {
-                            let _ = st_save.save_file_buffer(&pk_save);
+                    save_button.child(
+                        text(if buf.saving {
+                            t!("native.nsh.fileSaving")
+                        } else {
+                            t!("native.nsh.saveFile")
                         })
-                        .child(
-                            text(t!("native.nsh.saveFile"))
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.tint_foreground)),
-                        ),
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.tint_foreground)),
+                    ),
                 );
             }
 
             toolbar = toolbar.child(actions);
 
-            let mut page = view().size_full().flex_col().child(toolbar);
+            let mut page = view().flex_col().child(toolbar);
+
+            if let Some(notice) = readonly_notice {
+                page = page.child(
+                    view()
+                        .px(zpx(10.0))
+                        .py(zpx(6.0))
+                        .bg(rgb_to_hsla(ui.muted))
+                        .child(text(notice).text_xs().text_color(rgb_to_hsla(ui.warning))),
+                );
+            }
 
             if buf.remote_changed_conflict {
                 page = page.child(
@@ -379,11 +571,66 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                         .px(zpx(10.0))
                         .py(zpx(6.0))
                         .bg(rgb_to_hsla(ui.muted))
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
                         .child(
                             text(t!("native.nsh.fileConflictWarning"))
                                 .text_xs()
                                 .text_color(rgb_to_hsla(ui.warning)),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .gap(zpx(6.0))
+                                .child(
+                                    view()
+                                        .px(zpx(8.0))
+                                        .py(zpx(3.0))
+                                        .rounded(zpx(5.0))
+                                        .cursor_pointer()
+                                        .bg(rgb_to_hsla(ui.secondary))
+                                        .on_press({
+                                            let st = store.clone();
+                                            let key = pane_key.clone();
+                                            move || st.request_reload_file(&key)
+                                        })
+                                        .child(
+                                            text(t!("native.nsh.reloadFile"))
+                                                .text_xs()
+                                                .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                                        ),
+                                )
+                                .child({
+                                    let st = store.clone();
+                                    let key = pane_key.clone();
+                                    let mut button = view()
+                                        .px(zpx(8.0))
+                                        .py(zpx(3.0))
+                                        .rounded(zpx(5.0))
+                                        .bg(rgb_to_hsla(ui.destructive));
+                                    if !buf.saving {
+                                        button = button.cursor_pointer().on_press(move || {
+                                            let _ = st.overwrite_file_buffer(&key);
+                                        });
+                                    }
+                                    button.child(
+                                        text(t!("native.nsh.overwriteFile"))
+                                            .text_xs()
+                                            .text_color(rgb_to_hsla(ui.destructive_foreground)),
+                                    )
+                                }),
                         ),
+                );
+            }
+
+            if let Some(error) = buf.save_error.clone().or(buf.load_error.clone()) {
+                page = page.child(
+                    view()
+                        .px(zpx(10.0))
+                        .py(zpx(5.0))
+                        .bg(rgb_to_hsla(ui.muted))
+                        .child(text(error).text_xs().text_color(rgb_to_hsla(ui.warning))),
                 );
             }
 
@@ -416,6 +663,40 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                         ),
                     );
                 }
+            } else if buf.state == FileBufferState::Loading {
+                page = page.child(
+                    view().p(zpx(12.0)).child(
+                        text(t!("native.nsh.fileLoading"))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                    ),
+                );
+            } else if buf.state == FileBufferState::Failed {
+                page = page.child(
+                    view().p(zpx(12.0)).child(
+                        text(t!("native.nsh.fileLoadFailed"))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.warning)),
+                    ),
+                );
+                let st_reload = store.clone();
+                let key_reload = pane_key.clone();
+                page = page.child(
+                    view().px(zpx(12.0)).pb(zpx(8.0)).child(
+                        view()
+                            .px(zpx(8.0))
+                            .py(zpx(4.0))
+                            .rounded(zpx(5.0))
+                            .cursor_pointer()
+                            .bg(rgb_to_hsla(ui.secondary))
+                            .on_press(move || st_reload.request_reload_file(&key_reload))
+                            .child(
+                                text(t!("native.nsh.reloadFile"))
+                                    .text_xs()
+                                    .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                            ),
+                    ),
+                );
             } else if markdown_file && show_markdown_preview.get() {
                 page = page.child(
                     scroll().flex_1().min_h_0().child(
@@ -425,34 +706,53 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                             .p(zpx(20.0)),
                     ),
                 );
-            } else {
-                let st_edit = store.clone();
-                let pk_edit = pane_key.clone();
-                let current_text = buf.current_body.clone();
+            } else if !buf.editable() && !buf.current_body.is_empty() {
                 page = page.child(
-                    input()
-                        .flex_1()
-                        .w_full()
-                        .p(zpx(10.0))
-                        .multiline(true)
-                        .auto_correct(false)
-                        .auto_capitalize(AutoCapitalize::None)
-                        .font_family(FONT_FAMILY_MONO)
-                        .text_sm()
-                        .bg(rgb_to_hsla(ui.background))
-                        .text_color(rgb_to_hsla(ui.foreground))
-                        .caret_color(rgb_to_hsla(ui.tint_strong))
-                        .value(current_text)
-                        .on_change(move |next: &str| {
-                            st_edit.open_files.update(|map| {
-                                if let Some(entry) = map.get_mut(&pk_edit) {
-                                    entry.current_body = next.to_string();
-                                }
-                            });
-                        }),
+                    scroll().flex_1().min_h_0().child(
+                        text(buf.current_body.clone())
+                            .p(zpx(12.0))
+                            .font_family(FONT_FAMILY_MONO)
+                            .text_sm()
+                            .text_color(rgb_to_hsla(ui.foreground))
+                            .selectable(true),
+                    ),
                 );
             }
 
             page.into_element()
+        }))
+        .child(dynamic(move || {
+            if !editor_ready.get() {
+                return view().into_element();
+            }
+            let current_text = editor_initial_body.get();
+            let ui = &editor_theme.resolved().ui;
+            let st_edit = editor_store.clone();
+            let pk_edit = editor_key.clone();
+            input()
+                .test_id(&format!("file-editor-{pk_edit}"))
+                .flex_1()
+                .w_full()
+                .p(zpx(10.0))
+                .multiline(true)
+                .auto_correct(false)
+                .auto_capitalize(AutoCapitalize::None)
+                .font_family(FONT_FAMILY_MONO)
+                .text_sm()
+                .bg(rgb_to_hsla(ui.background))
+                .text_color(rgb_to_hsla(ui.foreground))
+                .caret_color(rgb_to_hsla(ui.tint_strong))
+                .value(current_text)
+                .on_change(move |next: &str| {
+                    st_edit.open_files.update(|map| {
+                        if let Some(entry) = map.get_mut(&pk_edit) {
+                            if entry.current_body != next {
+                                entry.current_body = next.to_string();
+                                entry.edit_revision = entry.edit_revision.wrapping_add(1);
+                            }
+                        }
+                    });
+                })
+                .into_element()
         }))
 }
