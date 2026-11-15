@@ -9,6 +9,7 @@ use crate::{
 };
 use falcon_theme::ResolvedTheme;
 use nsh_core::prelude::*;
+use nsh_core::element::desktop::MenuItem;
 
 /// Binds popup actions to the connection that produced their resource IDs.
 #[derive(Clone)]
@@ -82,6 +83,19 @@ pub(crate) struct PopupAction {
 }
 
 impl PopupAction {
+    /// Native popup items are built when the context menu opens, so selection-dependent
+    /// enabled state does not require rebuilding the terminal surface.
+    pub(crate) fn into_menu_item(self) -> MenuItem {
+        let disabled = self.disabled || !self.server.is_current();
+        MenuItem::new(self.label.to_string())
+            .disabled(disabled)
+            .on_select(move || {
+                if !disabled && self.server.is_current() {
+                    (self.activate)();
+                }
+            })
+    }
+
     pub(crate) fn new(
         server: ServerUrlGuard,
         label: impl Into<SharedString>,
