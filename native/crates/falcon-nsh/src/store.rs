@@ -740,6 +740,7 @@ pub struct WorkspaceStore {
     pub plugin_list: Signal<PluginList>,
     pub plugin_states: Signal<HashMap<String, PluginPanelState>>,
     pub toast_banner: Signal<Option<String>>,
+    pub(crate) project_cleanup_warnings: Signal<Vec<crate::menu_operations::CleanupWarning>>,
 
     pub project_operations: Rc<crate::project_operations::ProjectOperations>,
     pub(crate) session_operations: crate::session_operations::SessionOperations,
@@ -1660,6 +1661,7 @@ impl WorkspaceStore {
             plugin_list: signal(plugin_list),
             plugin_states: signal(plugin_states),
             toast_banner: signal(None),
+            project_cleanup_warnings: signal(Vec::new()),
             project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
                 task_owner,
                 connection_generation.clone(),

@@ -49,6 +49,8 @@
   "native": {
     "nsh": { "DetachWindow": "Detach window", "serverNotConnected": "Not connected to the server." },
     "menus": {
+      "copyWarnings": "Copy cleanup warnings",
+      "dismissWarnings": "Dismiss warnings",
       "checkingWorktree": "Checking worktree changes…",
       "closeProjectFiles": "Close this project's files and finish pending file, Git or project operations before archiving or deleting it.",
       "projectChanged": "The project or its open files changed. Review the operation again.",

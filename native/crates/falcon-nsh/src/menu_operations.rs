@@ -32,6 +32,12 @@ impl ProjectPreset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CleanupWarning {
+    pub server_url: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfirmationItem {
     pub name: String,
     pub meta: String,
@@ -481,6 +487,12 @@ impl WorkspaceStore {
                             t!("project.deleted", name = project.name)
                         });
                         if !warnings.is_empty() {
+                            store.project_cleanup_warnings.update(|retained| {
+                                retained.extend(warnings.iter().map(|message| CleanupWarning {
+                                    server_url: server.origin_url().to_string(),
+                                    message: message.clone(),
+                                }));
+                            });
                             store.show_toast(format!(
                                 "{}\n{}",
                                 t!("worktree.leftoverTitle"),
@@ -531,6 +543,87 @@ impl WorkspaceStore {
         let _ = project_id;
         self.show_toast(t!("native.nsh.serverNotConnected"));
     }
+}
+
+pub(crate) fn render_cleanup_warnings(
+    store: &WorkspaceStore,
+    theme: &falcon_theme::ResolvedTheme,
+) -> AnyElement {
+    let warnings = store.project_cleanup_warnings.get();
+    if warnings.is_empty() {
+        return view().into_element();
+    }
+    let ui = &theme.ui;
+    let mut list = view().flex_col().gap(zpx(8.0));
+    for warning in &warnings {
+        list = list.child(
+            view()
+                .flex_col()
+                .gap(zpx(4.0))
+                .child(
+                    text(warning.server_url.clone())
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(text(warning.message.clone()).text_xs()),
+        );
+    }
+    let dismiss = store.clone();
+    view()
+        .absolute()
+        .left(zpx(16.0))
+        .right(zpx(16.0))
+        .bottom(zpx(64.0))
+        .flex_row()
+        .justify_end()
+        .child(
+            view()
+                .label("project-cleanup-warning")
+                .max_w(zpx(520.0))
+                .p(zpx(12.0))
+                .rounded(zpx(8.0))
+                .border_1()
+                .border_color(rgba_to_hsla(ui.border))
+                .bg(rgb_to_hsla(ui.popover))
+                .text_color(rgb_to_hsla(ui.popover_foreground))
+                .flex_col()
+                .gap(zpx(8.0))
+                .child(
+                    text(t!("worktree.leftoverTitle"))
+                        .text_sm()
+                        .text_color(rgb_to_hsla(ui.warning)),
+                )
+                .child(scroll().max_h(zpx(200.0)).child(list))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(zpx(8.0))
+                        .justify_end()
+                        .child(
+                            view()
+                                .label("project-cleanup-warning-copy")
+                                .cursor_pointer()
+                                .on_press(move || {
+                                    set_clipboard(
+                                        warnings
+                                            .iter()
+                                            .map(|w| format!("{}\n{}", w.server_url, w.message))
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n"),
+                                    )
+                                })
+                                .child(text(t!("native.menus.copyWarnings")).text_xs()),
+                        )
+                        .child(
+                            view()
+                                .label("project-cleanup-warning-dismiss")
+                                .cursor_pointer()
+                                .on_press(move || dismiss.project_cleanup_warnings.set(Vec::new()))
+                                .child(text(t!("native.menus.dismissWarnings")).text_xs()),
+                        ),
+                ),
+        )
+        .into_element()
 }
 
 pub(crate) fn render_confirmation(

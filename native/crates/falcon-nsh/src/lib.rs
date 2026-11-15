@@ -981,6 +981,8 @@ fn install_macos_tray(store: WorkspaceStore) {
 fn ToastOverlay() -> impl IntoElement {
     let store = crate::store::use_workspace();
     let theme_ctrl = use_theme();
+    let cleanup_store = store.clone();
+    let cleanup_theme = theme_ctrl.clone();
 
     view().child(dynamic(move || {
         let Some(msg) = store.toast_banner.get() else {
@@ -1005,7 +1007,7 @@ fn ToastOverlay() -> impl IntoElement {
                     .text_color(rgb_to_hsla(ui.popover_foreground)),
             )
             .into_element()
-    }))
+    })).child(dynamic(move || crate::menu_operations::render_cleanup_warnings(&cleanup_store, &cleanup_theme.resolved())))
 }
 
 /// 构建默认生产环境的 NSH `Root`（自动挂载内嵌 WOFF2 字体、中文文案、首帧 Ghostty 主题 Token 与 `Appearance`）。
@@ -3833,6 +3835,16 @@ mod tests {
             server.release_response();
             app.wait_for_gone("label:project-action-confirmation", Duration::from_secs(2)).unwrap();
             app.wait_for(if archive { "已存档「worktree-review」" } else { "目录没能删干净\nleftover test directory" }).unwrap();
+            if !archive {
+                app.wait_for("label:project-cleanup-warning").unwrap();
+                app.fast_forward(Duration::from_secs(4)).unwrap();
+                assert!(app.shows("label:project-cleanup-warning"));
+                assert!(app.shows("leftover test directory"));
+                app.press("label:project-cleanup-warning-copy").unwrap();
+                assert!(app.shows("label:project-cleanup-warning"));
+                app.press("label:project-cleanup-warning-dismiss").unwrap();
+                app.wait_for_gone("label:project-cleanup-warning", Duration::from_secs(2)).unwrap();
+            }
         }
     }
 
