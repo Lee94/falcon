@@ -27,7 +27,9 @@
 #   tag 流程结束后由 `warm-main` 在 main 上补一次手动触发的运行写缓存，不与发版争抢。
 # - Rust 版本固定在顶层 `RUSTUP_TOOLCHAIN`：rustc 版本变了缓存键就变，不能让 stable 发新版时缓存全部失效。
 # - 不缓存工作区 crate：checkout 会刷新源码 mtime、发版又必改版本号，工作区 crate 每次都要重编，
-#   缓存它们只会挤占仓库 10 GB 的缓存额度、把依赖缓存挤掉。矩阵各组使用独立键；失败时也保存已编完的依赖。
+#   缓存它们只会挤占仓库 10 GB 的缓存额度、把依赖缓存挤掉。矩阵各组使用独立键。
+# - 失败或被取消的 job 不写缓存（不开 cache-on-failure）：rust-cache 的键不含工作区成员版本号，键完全命中时
+#   也不再保存，一份编到一半就被取消的残缺缓存会一直顶着这个键，后面完整的永远写不进去（v0.4.6 实测）。
 #
 # 都没有正式证书签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，Android 用 debug 签名
 # （手机上允许未知来源即可安装），与本机打的包一样。
@@ -144,7 +146,6 @@ jobs:
           workspaces: |
             native
             native/sessiond -> ../target-sessiond
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build and compress session daemon
@@ -238,7 +239,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build Rust workspace tests
@@ -291,7 +291,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Use placeholder session daemons
@@ -354,7 +353,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # include_bytes! 只要文件存在；check 不产出要发布的二进制
@@ -393,7 +391,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Use placeholder session daemons
@@ -460,7 +457,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Use placeholder session daemons
@@ -503,7 +499,6 @@ jobs:
         with:
           key: ${{ matrix.platform }}
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Use placeholder session daemons
@@ -566,7 +561,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build Linux GTK4 desktop and pure-Rust Web clients
@@ -635,7 +629,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native
-          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build APK
@@ -649,12 +642,20 @@ jobs:
           if-no-files-found: error
 
   release:
-    # 同 sessiond：默认 success() 会因祖先 gate 被跳过而跳过发版，改为要求每个直接依赖都成功
+    # 同 sessiond：默认 success() 会因祖先 gate 被跳过而跳过发版，改为逐个要求直接依赖成功。
+    # 不用 `!contains(needs.*.result, …)` 的通配写法：v0.4.6 实测全部依赖成功时它仍判为假、发版被跳过，
+    # 逐个写 `needs.<job>.result == 'success'` 与 sessiond 的条件同一种写法，已实测可用
     if: >-
       ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v')
-      && !contains(needs.*.result, 'failure')
-      && !contains(needs.*.result, 'cancelled')
-      && !contains(needs.*.result, 'skipped') }}
+      && needs.sessiond.result == 'success'
+      && needs.test.result == 'success'
+      && needs.macos.result == 'success'
+      && needs.macos-check.result == 'success'
+      && needs.windows.result == 'success'
+      && needs.windows-check.result == 'success'
+      && needs.android.result == 'success'
+      && needs.servers.result == 'success'
+      && needs.web-linux.result == 'success' }}
     needs: [sessiond, test, macos, macos-check, windows, windows-check, android, servers, web-linux]
     runs-on: ubuntu-latest
     permissions:
