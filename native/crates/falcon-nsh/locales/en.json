@@ -1,0 +1,10 @@
+{
+  "native": {
+    "git": {
+      "viewList": "List view",
+      "viewTree": "Tree view",
+      "resizeSplit": "Drag to resize panels; double-click to reset",
+      "dismissToast": "Dismiss notification"
+    }
+  }
+}

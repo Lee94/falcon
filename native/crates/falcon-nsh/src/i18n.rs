@@ -2,7 +2,7 @@
 //!
 //! 界面上不允许硬编码中文，统一经 `nsh_core::t!("...")` 读取。
 //! NSH 的 `Translations::lookup` 在宿主语言不匹配时（例如无头测试默认 `en-US`）会回退到 `"en"`，
-//! v1 仅有中文一份文案，因此同时填入 `"zh-CN"`、`"zh"` 与 `"en"`，保证任意宿主语言首帧即显示中文。
+//! 尚未翻译的文案回退到中文；`en.json` 逐步补齐英文键。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -27,7 +27,11 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let mut map = HashMap::with_capacity(3);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    map.insert("en".to_string(), base);
+    let mut english = base;
+    let root: Value = serde_json::from_str(include_str!("../locales/en.json"))
+        .expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &root, &mut english);
+    map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
 

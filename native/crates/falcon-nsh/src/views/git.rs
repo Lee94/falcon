@@ -2,10 +2,12 @@
 
 use nsh_core::element::input;
 use nsh_core::prelude::*;
+use falcon_core::file_tree::{FileRow, FileViewMode, build_file_rows};
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, check_indicator, glyph};
+use crate::shell::popups::themed_tooltip;
+use crate::shell::widgets::{Glyph, check_indicator, glyph, icon_button};
 use crate::store::{GitConfirmedOperation, git_change_is_conflicted, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -14,7 +16,18 @@ use crate::zoom::zpx;
 pub fn GitPanel() -> impl IntoElement {
     let store = use_workspace();
     let theme = use_theme();
-    let amend = signal(false);
+    let amend = store.git_amend;
+    let list_ratio = signal(0.5_f32);
+    let split_height = signal(0.0_f32);
+    {
+        let poll = store.clone();
+        effect(move || {
+            if poll.right_panel_open.get() && poll.right_panel_kind.get() == crate::store::RightPanelKind::Git {
+                let poll = poll.clone();
+                set_interval(std::time::Duration::from_secs(4), move || poll.poll_git_data());
+            }
+        });
+    }
 
     let draft = store.commit_draft;
     let draft_store = store.clone();
@@ -45,7 +58,8 @@ pub fn GitPanel() -> impl IntoElement {
                 && footer_store.selected_git_repo.get() == context.repo
                 && footer_store.server_url.get() == context.server_url
         });
-        let has_selection = footer_store.git_changes.get().iter().any(|change| change.staged);
+        let excluded = footer_store.git_excluded.get();
+        let has_selection = footer_store.git_changes.get().iter().any(|change| !excluded.contains(&change.path));
         let draft_present = !footer_store.commit_draft.get().trim().is_empty();
         let amend_enabled = amend.get();
         let can_commit = (draft_present || amend_enabled) && (has_selection || amend_enabled);
@@ -61,16 +75,18 @@ pub fn GitPanel() -> impl IntoElement {
                 text(error).text_xs().text_color(rgb_to_hsla(ui.destructive)),
             );
         }
-        let amend_toggle = amend.clone();
+        let amend_toggle = footer_store.clone();
         let amend_state = amend.clone();
+        let amend_disabled = busy || footer_store.git_head_message.get().is_none();
         controls = controls.child(
             view()
                 .test_id("git-amend")
                 .flex_row()
                 .items_center()
                 .gap(zpx(6.0))
-                .cursor_pointer()
-                .on_press(move || amend_toggle.update(|value| *value = !*value))
+                .disabled(amend_disabled)
+                .when(!amend_disabled, |row| row.cursor_pointer())
+                .on_press(move || amend_toggle.set_git_amend(!amend_toggle.git_amend.get()))
                 .child(check_indicator(amend_state.get(), &resolved))
                 .child(text(t!("changes.amend")).text_xs().text_color(rgb_to_hsla(ui.foreground))),
         );
@@ -104,7 +120,8 @@ pub fn GitPanel() -> impl IntoElement {
             let changes = body_store.git_changes.get();
             let total = changes.len();
             let has_changes = total > 0;
-            let count = changes.iter().filter(|change| change.staged).count();
+            let excluded = body_store.git_excluded.get();
+            let count = changes.iter().filter(|change| !excluded.contains(&change.path)).count();
             let mutation_busy = body_store.git_operation_busy.get().is_some_and(|context| {
                 body_store.active_project_id.get() == context.project_id
                     && body_store.selected_git_repo.get() == context.repo
@@ -115,6 +132,9 @@ pub fn GitPanel() -> impl IntoElement {
             let selected_repo = body_store.selected_git_repo.get();
 
             let refresh = body_store.clone();
+            let list_mode = body_store.clone();
+            let tree_mode = body_store.clone();
+            let file_view_mode = body_store.git_file_view_mode.get();
             let header = view()
                 .h(zpx(40.0))
                 .flex_none()
@@ -126,7 +146,12 @@ pub fn GitPanel() -> impl IntoElement {
                 .border_color(rgba_to_hsla(ui.border))
                 .child(text(t!("changes.panel")).text_xs().font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb_to_hsla(ui.foreground)))
-                .child(action_button("git-refresh", t!("git.refresh"), ui, false, move || refresh.refresh_git_data()));
+                .child(view().flex_row().items_center()
+                    .child(icon_button("git-view-list", t!("native.git.viewList"), Glyph::Changes, file_view_mode == FileViewMode::List,
+                        &resolved, move || list_mode.set_git_file_view_mode(FileViewMode::List)))
+                    .child(icon_button("git-view-tree", t!("native.git.viewTree"), Glyph::Folder, file_view_mode == FileViewMode::Tree,
+                        &resolved, move || tree_mode.set_git_file_view_mode(FileViewMode::Tree)))
+                    .child(action_button("git-refresh", t!("git.refresh"), ui, false, move || refresh.refresh_git_data())));
 
             let mut content = view().size_full().flex_col().child(header);
             if !repos.is_empty() {
@@ -195,7 +220,7 @@ pub fn GitPanel() -> impl IntoElement {
                 let abort = body_store.clone();
                 let ours = body_store.clone();
                 let theirs = body_store.clone();
-                let can_take = changes.iter().any(|item| item.staged && git_change_is_conflicted(item));
+                let can_take = changes.iter().any(|item| !excluded.contains(&item.path) && git_change_is_conflicted(item));
                 content = content.child(view().flex_none().flex_col().gap(zpx(4.0)).p(zpx(8.0))
                     .child(text(t!("git.conflictActive")).text_xs().text_color(rgb_to_hsla(ui.warning)))
                     .child(view().flex_row().gap(zpx(4.0))
@@ -216,8 +241,9 @@ pub fn GitPanel() -> impl IntoElement {
                     .text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
                 .child(view().test_id("git-select-all").cursor_pointer().on_press(move || {
                     let select = count != total;
-                    select_all.git_changes.update(|files| files.iter_mut().for_each(|file| file.staged = select));
-                }).child(check_indicator(count > 0 && count == changes.len(), &resolved))));
+                    let paths = select_all.git_changes.get().into_iter().map(|file| file.path).collect::<Vec<_>>();
+                    select_all.set_git_files_selected(&paths, select);
+                }).child(selection_indicator(count, count > 0 && count == changes.len(), &resolved))));
             let discard_selected = body_store.clone();
             let discard_all = body_store.clone();
             content = content.child(view().flex_none().flex_row().gap(zpx(6.0)).px(zpx(8.0)).pb(zpx(4.0))
@@ -266,37 +292,104 @@ pub fn GitPanel() -> impl IntoElement {
             if body_store.git_loading.get() {
                 list = list.child(text(t!("git.loading")).test_id("git-loading").text_xs().text_color(rgb_to_hsla(ui.muted_foreground)));
             }
-            for (index, item) in changes.iter().cloned().enumerate() {
+            let paths = changes.iter().map(|file| file.path.clone()).collect::<Vec<_>>();
+            let root_name = selected_repo.as_deref().and_then(|repo| repo.rsplit('/').next());
+            let rows = build_file_rows(&paths, file_view_mode, root_name, &body_store.git_collapsed.get());
+            for row in rows {
+                let (index, depth, name_only) = match row {
+                    FileRow::File { index, depth, name_only } => (index, depth, name_only),
+                    FileRow::Dir { name, path, depth, open, paths } => {
+                        let collapse = body_store.clone();
+                        let select = body_store.clone();
+                        let selected = paths.iter().filter(|path| !excluded.contains(*path)).count();
+                        let all_selected = selected == paths.len();
+                        let checkbox_id = format!("git-select-dir-{path}");
+                        let folder = view().test_id(&format!("git-dir-{path}"))
+                            .flex_1().min_w_0().flex_row().items_center().gap(zpx(4.0)).cursor_pointer()
+                            .on_press(move || collapse.git_collapsed.update(|collapsed| {
+                                if !collapsed.remove(&path) { collapsed.insert(path.clone()); }
+                            }))
+                            .child(glyph(if open { Glyph::ChevronDown } else { Glyph::ChevronRight }))
+                            .child(glyph(Glyph::Folder))
+                            .child(text(name).text_xs().number_of_lines(1).text_color(rgb_to_hsla(ui.foreground)))
+                            .child(text(paths.len().to_string()).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)));
+                        let checkbox = view().test_id(&checkbox_id)
+                            .cursor_pointer().on_press(move || select.set_git_files_selected(&paths, !all_selected))
+                            .child(selection_indicator(selected, all_selected, &resolved));
+                        list = list.child(view().h(zpx(28.0)).flex_row().items_center().gap(zpx(6.0))
+                            .pl(zpx(4.0 + depth as f32 * 12.0)).pr(zpx(4.0)).child(folder).child(checkbox));
+                        continue;
+                    }
+                };
+                let item = changes[index].clone();
                 let select = body_store.clone();
                 let toggle = body_store.clone();
                 let path = item.path.clone();
+                let toggle_path = path.clone();
+                let checked = !excluded.contains(&path);
                 let (parent, name) = item.path.rsplit_once('/').unwrap_or(("", item.path.as_str()));
                 let file_test_id = format!("git-file-{index}");
                 let select_test_id = format!("git-select-file-{index}");
-                let row = view().h(zpx(28.0)).flex_row().items_center().gap(zpx(6.0)).px(zpx(4.0))
+                let row = view().h(zpx(28.0)).flex_row().items_center().gap(zpx(6.0))
+                    .pl(zpx(4.0 + depth as f32 * 12.0)).pr(zpx(4.0))
+                    .when(body_store.selected_git_path.get().as_deref() == Some(path.as_str()), |row| row.bg(rgb_to_hsla(ui.selection)))
                     .child(text(item.status.clone()).text_xs().text_color(rgb_to_hsla(if git_change_is_conflicted(&item) { ui.destructive } else { ui.warning })))
                     .child(view().test_id(&file_test_id).flex_1().min_w_0().flex_row().gap(zpx(6.0))
                         .cursor_pointer().on_press(move || select.preview_git_path(&path))
                         .child(text(name.to_string()).text_xs().number_of_lines(1).text_color(rgb_to_hsla(ui.foreground)))
-                        .child(text(parent.to_string()).flex_1().min_w_0().text_xs().number_of_lines(1).text_color(rgb_to_hsla(ui.muted_foreground))))
+                        .when(!name_only, |row| row.child(text(parent.to_string()).flex_1().min_w_0().text_xs().number_of_lines(1).text_color(rgb_to_hsla(ui.muted_foreground)))))
                     .child(text(format!("+{} −{}", item.additions, item.deletions)).text_xs().text_color(rgb_to_hsla(ui.success)))
                     .child(view().test_id(&select_test_id).cursor_pointer().on_press(move || {
-                        toggle.git_changes.update(|files| if let Some(file) = files.get_mut(index) { file.staged = !file.staged; });
-                    }).child(check_indicator(item.staged, &resolved)));
+                        let selected = toggle.git_excluded.get().contains(&toggle_path);
+                        toggle.set_git_files_selected(std::slice::from_ref(&toggle_path), selected);
+                    }).child(check_indicator(checked, &resolved)));
                 list = list.child(row);
             }
-            content = content.child(view().flex_1().min_h_0().flex_col()
-                .child(scroll().flex_1().min_h_0().child(list))
-                .when(body_store.selected_git_path.get().is_some(), |container| {
-                    container.child(view().h(zpx(210.0)).flex_none().border_t_1().border_color(rgba_to_hsla(ui.border))
-                        .child(diff_pane_view()))
-                }));
+            let preview = body_store.selected_git_path.get().is_some();
+            let ratio = list_ratio.get();
+            let available = (split_height.get() - zpx(6.0).0).max(1.0);
+            let min = (zpx(72.0).0 / available).min(0.5);
+            let ratio = ratio.clamp(min, 1.0 - min);
+            let mut split = view().test_id("git-file-split").flex_1().min_h_0().flex_col().overflow_hidden()
+                .on_layout(move |bounds: &Bounds<Points>| {
+                    if (split_height.get() - bounds.size.height.0).abs() > 1.0 {
+                        split_height.set(bounds.size.height.0);
+                    }
+                })
+                .child(view().test_id("git-file-list").flex_1().min_h_0().overflow_hidden()
+                    .flex_grow(if preview { ratio } else { 1.0 })
+                    .child(scroll().flex_1().min_h_0().child(list)));
+            if preview {
+                split = split.child(view().test_id("git-resize-split").h(zpx(6.0)).w_full().flex_none()
+                    .items_center().justify_center().cursor(nsh_core::Cursor::RowResize).pan_enabled(true)
+                    .tooltip(themed_tooltip(text(t!("native.git.resizeSplit")), None, &resolved))
+                    .on_pan_end(move |event: &PanEvent| {
+                        if !event.cancelled {
+                            list_ratio.set((ratio + event.translation.y.0 / available).clamp(min, 1.0 - min));
+                        }
+                    })
+                    .on_press(move |event: &PressEvent| { if event.clicks == 2 { list_ratio.set(0.5); } })
+                    .child(view().h(zpx(1.0)).w_full().bg(rgba_to_hsla(ui.border))))
+                    .child(view().test_id("git-diff-preview").flex_1().flex_grow(1.0 - ratio).min_h_0().overflow_hidden()
+                        .child(diff_pane_view()));
+            }
+            content = content.child(split);
 
             content.into_element()
         })))
         .child(view().flex_none().flex_col().p(zpx(8.0)).gap(zpx(8.0))
             .child(commit_input)
             .child(footer))
+}
+
+fn selection_indicator(selected: usize, all: bool, resolved: &falcon_theme::ResolvedTheme) -> impl IntoElement {
+    if selected > 0 && !all {
+        view().w(zpx(14.0)).h(zpx(14.0)).items_center().justify_center()
+            .rounded(zpx(3.0)).bg(rgb_to_hsla(resolved.ui.tint_strong))
+            .text_color(rgb_to_hsla(resolved.ui.tint_foreground)).child(glyph(Glyph::Minus)).into_element()
+    } else {
+        check_indicator(all, resolved).into_element()
+    }
 }
 
 fn action_button(

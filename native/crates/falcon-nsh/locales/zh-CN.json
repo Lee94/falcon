@@ -974,6 +974,12 @@
     "logout": "退出登录"
   },
   "native": {
+    "git": {
+      "viewList": "列表显示",
+      "viewTree": "目录树显示",
+      "resizeSplit": "上下拖动调整分栏，双击重置",
+      "dismissToast": "关闭提示"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",
