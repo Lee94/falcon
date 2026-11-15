@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use falcon_core::image_view::ImageGeometry;
-use falcon_core::md_link::{external_href, markdown_image_url, relative_href, resolve_rel};
+use falcon_core::md_link::{external_href, markdown_image_url, relative_href, resolve_file_link};
 use nsh_base::text_view::{Block, Document, Inline, Parser};
 use nsh_core::element::{GestureEvent, animated_value};
 use nsh_core::prelude::*;
@@ -316,7 +316,6 @@ pub struct MarkdownPreviewProps {
 #[component]
 pub fn MarkdownPreview(props: MarkdownPreviewProps) -> impl IntoElement {
     let store = use_workspace();
-    let dir = falcon_core::file_path::rel_dir(&props.path);
     let document = markdown_document(&props.source, props.raw_url.as_deref());
     scroll().flex_1().min_h_0().child(
         nsh_base::text_view()
@@ -327,7 +326,7 @@ pub fn MarkdownPreview(props: MarkdownPreviewProps) -> impl IntoElement {
                 if let Some(url) = external_href(&e.url) {
                     drop(nsh_core::element::open_url(url));
                 } else if relative_href(&e.url) {
-                    if let Some(path) = resolve_rel(&dir, &e.url) {
+                    if let Some(path) = resolve_file_link(&props.path, &e.url) {
                         store.open_file_pane(&props.project_id, &path);
                     }
                 }

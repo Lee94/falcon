@@ -20,6 +20,13 @@ pub fn relative_href(href: &str) -> bool {
     !href.starts_with(['#', '/', '\\']) && !href.split('/').next().unwrap_or("").contains(':')
 }
 
+/// 从文档文件本身解析相对链接，保留 Unix 根、Windows 盘符与 UNC 共享目录身份。
+pub fn resolve_file_link(path: &str, href: &str) -> Option<String> {
+    if !relative_href(href) { return None; }
+    let dir = crate::file_path::parent_nav_path(path).unwrap_or_default();
+    resolve_rel(&dir, href)
+}
+
 /// Markdown 图片相对 raw_path 而非宿主机路径解析。保留签发时的 token 与 scope，
 /// 绝不把 ../../ 交给 URL join 越过 token；编码只在最终 URL 上做一次。
 pub fn markdown_image_url(raw: Option<&str>, href: &str) -> Option<String> {
@@ -94,6 +101,23 @@ pub fn resolve_rel(dir: &str, href: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_links_preserve_the_document_directory_at_host_roots() {
+        for (document, expected) in [
+            ("/README.md", "/guide.md"),
+            ("C:/README.md", "C:/guide.md"),
+            ("//host/share/README.md", "//host/share/guide.md"),
+            ("/outside/project/README.md", "/outside/project/guide.md"),
+            ("README.md", "guide.md"),
+            ("docs/README.md", "docs/guide.md"),
+        ] {
+            assert_eq!(resolve_file_link(document, "./guide.md#start").as_deref(), Some(expected));
+        }
+        assert_eq!(resolve_file_link("/README.md", "../guide.md"), None);
+        assert_eq!(resolve_file_link("C:/README.md", "../guide.md"), None);
+        assert_eq!(resolve_file_link("//host/share/README.md", "../guide.md"), None);
+    }
 
     #[test]
     fn markdown_images_resolve_from_the_document_directory_without_double_encoding() {
