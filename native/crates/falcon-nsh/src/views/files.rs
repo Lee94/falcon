@@ -261,6 +261,8 @@ pub fn FilesPanel() -> impl IntoElement {
                     let row_store = store.file_operations.clone();
                     let row_path = path.clone();
                     let row_visible = visible_paths.clone();
+                    let file_open_blocked =
+                        !is_dir && row_store.blocks_file_open(&proj_id, &path);
                     view()
                         .flex_row()
                         .items_center()
@@ -303,6 +305,12 @@ pub fn FilesPanel() -> impl IntoElement {
                                         row_store.toggle_selected(&row_path);
                                     } else if is_dir {
                                         st.browse_directory(&path);
+                                    } else if row_store.blocks_file_open(&pid, &path) {
+                                        st.show_toast(
+                                            row_store.file_open_lock_message().unwrap_or_else(|| {
+                                                t!("files.operations.busy").to_string()
+                                            }),
+                                        );
                                     } else {
                                         st.open_file_pane(&pid, &path);
                                     }
@@ -316,7 +324,8 @@ pub fn FilesPanel() -> impl IntoElement {
                                         .text_xs()
                                         .font_family(FONT_FAMILY_MONO)
                                         .text_color(rgb_to_hsla(ui.foreground)),
-                                ),
+                                )
+                                .when(file_open_blocked, |row| row.opacity(0.45)),
                         )
                         .child(
                             text(if is_dir {

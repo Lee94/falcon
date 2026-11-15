@@ -1,9 +1,10 @@
 use nsh_core::element::input;
+use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
 use crate::shell::widgets::{Glyph, check_indicator, glyph};
-use crate::store::{ConfirmationKind, FileJob, JobKind, use_workspace};
+use crate::store::{ActiveDialog, ConfirmationKind, FileJob, JobKind, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
 
@@ -110,7 +111,15 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                 crate::store::NameAction::Rename { .. } => t!("files.operations.renameName"),
             };
             let st_submit = form_store.clone();
+            let st_submit_input = form_store.clone();
             let st_cancel = form_store.clone();
+            let escape_handler = if form_store.active_dialog.get() == ActiveDialog::None
+                && form_store.file_operations.confirmation.get().is_none()
+            {
+                NameFormEscapeHandler().into_element()
+            } else {
+                view().into_element()
+            };
             view()
                 .flex_row()
                 .items_center()
@@ -127,7 +136,12 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                         .text_color(rgb_to_hsla(resolved.ui.foreground))
                         .placeholder(move || label.clone())
                         .value(move || draft.get())
-                        .on_change(move |value: &str| draft.set(value.to_owned())),
+                        .on_change(move |value: &str| draft.set(value.to_owned()))
+                        .on_submit(move |_: &str| {
+                            st_submit_input
+                                .file_operations
+                                .submit_name_form(&st_submit_input)
+                        }),
                 )
                 .child(action_button(
                     t!("files.operations.confirm").to_string(),
@@ -143,6 +157,7 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                     false,
                     move || st_cancel.file_operations.cancel_name_form(),
                 ))
+                .child(escape_handler)
                 .into_element()
         }))
         .child(dynamic({
@@ -173,9 +188,18 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                     )
                     .into_element()
                 } else {
+                    let uncertain = job.uncertain
+                        && matches!(
+                            job.kind,
+                            JobKind::Rename | JobKind::CreateDirectory | JobKind::Delete
+                        );
                     action_button(
-                        t!("files.operations.dismiss").to_string(),
-                        false,
+                        if uncertain {
+                            t!("files.operations.refreshBeforeDismiss").to_string()
+                        } else {
+                            t!("files.operations.dismiss").to_string()
+                        },
+                        uncertain,
                         &resolved,
                         false,
                         move || st.file_operations.dismiss_job(),
@@ -232,6 +256,7 @@ pub fn FileOperationLayer() -> impl IntoElement {
         });
         let st_cancel = store.clone();
         let st_confirm = store.clone();
+        let escape_handler = FileOperationEscapeHandler();
         view()
             .absolute()
             .inset_0()
@@ -289,8 +314,50 @@ pub fn FileOperationLayer() -> impl IntoElement {
                             )),
                     ),
             )
+            .child(escape_handler)
             .into_element()
     }))
+}
+
+#[component]
+fn NameFormEscapeHandler() -> impl IntoElement {
+    let store = use_workspace();
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: When::Always,
+            repeat: false,
+            pass_through: false,
+        },
+        move |_| {
+            if store.active_dialog.get() == ActiveDialog::None
+                && store.file_operations.confirmation.get().is_none()
+                && store.file_operations.name_form.get().is_some()
+            {
+                store.file_operations.cancel_name_form();
+            }
+        },
+    );
+    view().w(zpx(0.0)).h(zpx(0.0))
+}
+
+#[component]
+fn FileOperationEscapeHandler() -> impl IntoElement {
+    let store = use_workspace();
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: When::Always,
+            repeat: false,
+            pass_through: false,
+        },
+        move |_| {
+            if store.file_operations.confirmation.get().is_some() {
+                store.file_operations.answer_confirmation(false);
+            }
+        },
+    );
+    view().w(zpx(0.0)).h(zpx(0.0))
 }
 
 fn action_button(

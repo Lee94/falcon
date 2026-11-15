@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use falcon_core::file_path::{is_valid_file_name_segment, project_host_path_contains};
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
 use nsh_core::prelude::{Owner, Signal, signal, spawn, timer};
@@ -81,6 +82,16 @@ struct ActiveJob {
 }
 
 #[derive(Clone)]
+struct MutationState {
+    job_id: u64,
+    kind: JobKind,
+    scope: FileScope,
+    uncertain: bool,
+    error: Option<String>,
+    listing_generation_after_uncertainty: Option<u64>,
+}
+
+#[derive(Clone)]
 pub(crate) struct FileOperations {
     pub(crate) selected: Signal<BTreeSet<String>>,
     pub(crate) anchor: Signal<Option<String>>,
@@ -88,6 +99,7 @@ pub(crate) struct FileOperations {
     pub(crate) name_draft: Signal<String>,
     pub(crate) confirmation: Signal<Option<FileConfirmation>>,
     pub(crate) job: Signal<Option<FileJob>>,
+    mutation_state: Signal<Option<MutationState>>,
     pub(crate) task_owner: Owner,
     connection_generation: Rc<Cell<u64>>,
     scope_generation: Rc<Cell<u64>>,
@@ -106,6 +118,7 @@ impl FileOperations {
             name_draft: signal(String::new()),
             confirmation: signal(None),
             job: signal(None),
+            mutation_state: signal(None),
             task_owner,
             connection_generation: Rc::new(Cell::new(0)),
             scope_generation: Rc::new(Cell::new(0)),
@@ -154,6 +167,56 @@ impl FileOperations {
             && current.scope_generation == scope.scope_generation
     }
 
+    pub(crate) fn blocks_file_open(&self, _project_id: &str, _path: &str) -> bool {
+        self.mutation_state
+            .get()
+            .is_some_and(|state| matches!(state.kind, JobKind::Rename | JobKind::Delete))
+    }
+
+    pub(crate) fn file_open_lock_message(&self) -> Option<String> {
+        let state = self.mutation_state.get()?;
+        matches!(state.kind, JobKind::Rename | JobKind::Delete)
+            .then(|| self.mutation_state_message(&state))
+    }
+
+    fn mutation_state_message(&self, state: &MutationState) -> String {
+        let action = mutation_action(state.kind);
+        if state.uncertain {
+            let error = state.error.clone().unwrap_or_else(|| {
+                crate::i18n::t!("files.operations.requestResultUnknown").to_string()
+            });
+            let uncertain = crate::i18n::t!(
+                "files.operations.mutationUncertain",
+                action = action,
+                error = error
+            );
+            let refresh = crate::i18n::t!(
+                "files.operations.mutationRefreshRequired",
+                directory = state.scope.directory.as_str()
+            );
+            format!("{uncertain}\n{refresh}")
+        } else {
+            crate::i18n::t!("files.operations.mutationBusy", action = action).to_string()
+        }
+    }
+
+    fn mutation_uncertain_message(
+        &self,
+        kind: JobKind,
+        scope: &FileScope,
+        error: String,
+    ) -> String {
+        let state = MutationState {
+            job_id: 0,
+            kind,
+            scope: scope.clone(),
+            uncertain: true,
+            error: Some(error),
+            listing_generation_after_uncertainty: None,
+        };
+        self.mutation_state_message(&state)
+    }
+
     pub(crate) fn can_operate(&self, store: &WorkspaceStore) -> bool {
         if self.is_busy()
             || store.files_loading.get()
@@ -197,6 +260,7 @@ impl FileOperations {
         if !self.scope_is_current(store, scope) {
             return false;
         }
+        self.resolve_mutation_after_listing(scope);
         if canonical_path != scope.directory {
             self.scope_generation
                 .set(self.scope_generation.get().wrapping_add(1));
@@ -269,18 +333,28 @@ impl FileOperations {
     fn abort_job_and_clear(&self) {
         let mut active = self.active_job.lock();
         if active.as_ref().is_some_and(|job| !job.dispatched) {
+            let mut cleared_id = None;
             if let Some(job) = active.take() {
+                cleared_id = Some(job.id);
                 job.cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 job.abort.abort();
             }
             drop(active);
+            if let Some(id) = cleared_id {
+                self.clear_mutation_state_for_job(id);
+            }
             self.job.set(None);
         }
     }
 
     pub(crate) fn is_busy(&self) -> bool {
-        self.job.get().is_some_and(|job| job.active) || self.active_job.lock().is_some()
+        self.job.get().is_some_and(|job| job.active)
+            || self.active_job.lock().is_some()
+            || self
+                .mutation_state
+                .get()
+                .is_some_and(|state| state.uncertain)
     }
 
     pub(crate) fn toggle_selected(&self, path: &str) {
@@ -385,7 +459,7 @@ impl FileOperations {
             return;
         };
         let name = self.name_draft.get();
-        if !valid_name_segment(&name, &form.scope.directory) {
+        if !is_valid_file_name_segment(&name, &form.scope.directory) {
             store.show_toast(crate::i18n::t!("files.operations.invalidName").to_string());
             return;
         }
@@ -425,6 +499,7 @@ impl FileOperations {
             },
             1,
             0,
+            Some(form.scope.clone()),
         ) else {
             return;
         };
@@ -445,7 +520,9 @@ impl FileOperations {
                                     Some(&form.scope.directory),
                                     &name,
                                 );
-                                operations.mark_job_dispatched(id);
+                                if !operations.mark_job_dispatched(id) {
+                                    return None;
+                                }
                                 client.mkdir(project, &path, false).await.map(|_| path)
                             }
                             NameAction::Rename { path } => {
@@ -458,7 +535,9 @@ impl FileOperations {
                                     });
                                     return None;
                                 }
-                                operations.mark_job_dispatched(id);
+                                if !operations.mark_job_dispatched(id) {
+                                    return None;
+                                }
                                 client
                                     .rename_file(project, &path, &name)
                                     .await
@@ -469,26 +548,20 @@ impl FileOperations {
                         .unwrap_or_else(|error| {
                             let error = error.to_string();
                             operations.record_job_failure(id, error.clone(), true);
-                            let result = crate::i18n::t!(
-                                "files.operations.mutationUncertain",
-                                action = if renaming {
-                                    crate::i18n::t!("files.operations.rename")
-                                } else {
-                                    crate::i18n::t!("files.operations.newFolder")
-                                },
-                                error = error
-                            );
+                            let kind = if renaming {
+                                JobKind::Rename
+                            } else {
+                                JobKind::CreateDirectory
+                            };
+                            let result =
+                                operations.mutation_uncertain_message(kind, &form.scope, error);
                             let message =
                                 if operations.operation_scope_is_current(&store, &form.scope) {
                                     result
                                 } else {
                                     crate::i18n::t!(
                                         "files.operations.scopeSummary",
-                                        action = if renaming {
-                                            crate::i18n::t!("files.operations.rename")
-                                        } else {
-                                            crate::i18n::t!("files.operations.newFolder")
-                                        },
+                                        action = mutation_action(kind),
                                         directory = form.scope.directory.as_str(),
                                         result = result
                                     )
@@ -502,6 +575,7 @@ impl FileOperations {
                 .await;
                 match result {
                     Ok(Some(path)) if !path.is_empty() => {
+                        operations.clear_mutation_state_for_job(id);
                         let still_current =
                             operations.operation_scope_is_current(&store, &form.scope);
                         operations.finish_job(id, 1, 0, 0, true);
@@ -536,7 +610,16 @@ impl FileOperations {
                         }
                     }
                     Ok(Some(_)) => operations.finish_job(id, 0, 1, 0, true),
-                    Ok(None) | Err(_) => operations.finish_job(id, 0, 0, 0, false),
+                    Ok(None) | Err(_) => operations.finish_mutation_after_abort(
+                        &store,
+                        id,
+                        if renaming {
+                            JobKind::Rename
+                        } else {
+                            JobKind::CreateDirectory
+                        },
+                        &form.scope,
+                    ),
                 }
             });
         });
@@ -578,7 +661,9 @@ impl FileOperations {
         if !self.operation_scope_is_current(store, &scope) {
             return;
         }
-        let Some((id, registration)) = self.begin_job(JobKind::Delete, paths.len(), 0) else {
+        let Some((id, registration)) =
+            self.begin_job(JobKind::Delete, paths.len(), 0, Some(scope.clone()))
+        else {
             return;
         };
         let operations = self.clone();
@@ -615,7 +700,9 @@ impl FileOperations {
                             });
                             return None;
                         }
-                        operations.mark_job_dispatched(id);
+                        if !operations.mark_job_dispatched(id) {
+                            return None;
+                        }
                         match client.remove_files(&scope.project_id, &paths).await {
                             Ok(result) => Some(Ok(result)),
                             Err(error) => Some(Err(error.to_string())),
@@ -626,6 +713,7 @@ impl FileOperations {
                 .await;
                 match result {
                     Ok(Some(Ok(result))) => {
+                        operations.clear_mutation_state_for_job(id);
                         let still_current = operations.operation_scope_is_current(&store, &scope);
                         let error_text = result
                             .errors
@@ -688,11 +776,8 @@ impl FileOperations {
                     Ok(Some(Err(error))) => {
                         operations.record_job_failure(id, error.clone(), true);
                         operations.finish_job(id, 0, 1, 0, true);
-                        let result = crate::i18n::t!(
-                            "files.operations.mutationUncertain",
-                            action = crate::i18n::t!("files.operations.delete"),
-                            error = error
-                        );
+                        let result =
+                            operations.mutation_uncertain_message(JobKind::Delete, &scope, error);
                         let message = if operations.operation_scope_is_current(&store, &scope) {
                             result
                         } else {
@@ -705,7 +790,9 @@ impl FileOperations {
                         };
                         store.show_toast(message.to_string());
                     }
-                    Ok(None) | Err(_) => operations.finish_job(id, 0, 0, 0, false),
+                    Ok(None) | Err(_) => {
+                        operations.finish_mutation_after_abort(&store, id, JobKind::Delete, &scope)
+                    }
                 }
             });
         });
@@ -731,7 +818,7 @@ impl FileOperations {
             return;
         };
         let scope = self.current_scope(store);
-        let Some((id, registration)) = self.begin_job(JobKind::Upload, 0, 0) else {
+        let Some((id, registration)) = self.begin_job(JobKind::Upload, 0, 0, None) else {
             return;
         };
         let operations = self.clone();
@@ -864,7 +951,8 @@ impl FileOperations {
         };
         let scope = self.current_scope(store);
         let bytes_total = files.iter().map(|entry| entry.size_bytes).sum();
-        let Some((id, registration)) = self.begin_job(JobKind::Download, files.len(), bytes_total)
+        let Some((id, registration)) =
+            self.begin_job(JobKind::Download, files.len(), bytes_total, None)
         else {
             return;
         };
@@ -926,7 +1014,10 @@ impl FileOperations {
                                 break;
                             }
                             progress.lock().begin_item(name.clone());
-                            operations.mark_job_dispatched(id);
+                            if !operations.mark_job_dispatched(id) {
+                                summary.cancelled = true;
+                                break;
+                            }
                             let progress_cb = progress.clone();
                             match client
                                 .download_to_file(
@@ -990,16 +1081,37 @@ impl FileOperations {
     }
 
     pub(crate) fn cancel_job(&self) {
-        self.cancel_confirmation();
-        if let Some(job) = self.active_job.lock().as_ref() {
+        let active = self.active_job.lock();
+        if active.as_ref().is_some_and(|job| {
+            job.dispatched
+                && self.job.get().is_some_and(|state| {
+                    state.id == job.id
+                        && matches!(
+                            state.kind,
+                            JobKind::Rename | JobKind::CreateDirectory | JobKind::Delete
+                        )
+                })
+        }) {
+            return;
+        }
+        if let Some(job) = active.as_ref() {
             job.cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             job.abort.abort();
         }
+        drop(active);
+        self.cancel_confirmation();
     }
 
     pub(crate) fn dismiss_job(&self) {
-        if !self.is_busy() {
+        let uncertain_mutation = self.job.get().is_some_and(|job| {
+            job.uncertain
+                && matches!(
+                    job.kind,
+                    JobKind::Rename | JobKind::CreateDirectory | JobKind::Delete
+                )
+        });
+        if !self.is_busy() && !uncertain_mutation {
             self.job.set(None);
         }
     }
@@ -1045,6 +1157,10 @@ impl FileOperations {
     }
 
     fn ensure_ready(&self, store: &WorkspaceStore) -> Option<FileScope> {
+        if let Some(state) = self.mutation_state.get().filter(|state| state.uncertain) {
+            store.show_toast(self.mutation_state_message(&state));
+            return None;
+        }
         if self.is_busy() {
             store.show_toast(crate::i18n::t!("files.operations.busy").to_string());
             return None;
@@ -1093,7 +1209,7 @@ impl FileOperations {
         let target_host = target_record.and_then(|entry| entry.host_id.as_deref());
         let matches_path = |other_project: &str, candidate: &str| {
             if other_project == project.as_str() {
-                return project_path_contains(target_root, target, candidate);
+                return project_host_path_contains(target_root, target, candidate);
             }
             let Some(other_record) = projects.iter().find(|entry| entry.id == other_project) else {
                 return false;
@@ -1103,7 +1219,7 @@ impl FileOperations {
             }
             let candidate =
                 falcon_core::file_path::join_host_path(Some(&other_record.path), candidate);
-            project_path_contains(target_root, target, &candidate)
+            project_host_path_contains(target_root, target, &candidate)
         };
         let dirty = store
             .open_files
@@ -1138,6 +1254,7 @@ impl FileOperations {
         kind: JobKind,
         total: usize,
         bytes_total: u64,
+        mutation_scope: Option<FileScope>,
     ) -> Option<(u64, AbortRegistration)> {
         if self.is_busy() {
             return None;
@@ -1152,6 +1269,16 @@ impl FileOperations {
             dispatched: false,
             cancelled,
         });
+        if let Some(scope) = mutation_scope {
+            self.mutation_state.set(Some(MutationState {
+                job_id: id,
+                kind,
+                scope,
+                uncertain: false,
+                error: None,
+                listing_generation_after_uncertainty: None,
+            }));
+        }
         self.job.set(Some(FileJob {
             id,
             kind,
@@ -1170,24 +1297,96 @@ impl FileOperations {
         Some((id, registration))
     }
 
-    fn mark_job_dispatched(&self, id: u64) {
-        if let Some(job) = self.active_job.lock().as_mut().filter(|job| job.id == id) {
-            job.dispatched = true;
+    fn mark_job_dispatched(&self, id: u64) -> bool {
+        let mut active = self.active_job.lock();
+        let Some(job) = active.as_mut().filter(|job| job.id == id) else {
+            return false;
+        };
+        if job.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
         }
+        job.dispatched = true;
+        drop(active);
         self.job.update(|job| {
             if let Some(job) = job.as_mut().filter(|job| job.id == id) {
                 job.dispatched = true;
             }
         });
+        true
     }
 
     fn record_job_failure(&self, id: u64, error: String, uncertain: bool) {
+        if uncertain {
+            self.mutation_state.update(|state| {
+                if let Some(state) = state.as_mut().filter(|state| state.job_id == id) {
+                    state.uncertain = true;
+                    state.error = Some(error.clone());
+                    state.listing_generation_after_uncertainty =
+                        Some(self.request_generation.get());
+                }
+            });
+        }
         self.job.update(|job| {
             if let Some(job) = job.as_mut().filter(|job| job.id == id) {
                 job.errors.push(error);
                 job.uncertain |= uncertain;
             }
         });
+    }
+
+    fn clear_mutation_state_for_job(&self, id: u64) {
+        self.mutation_state.update(|state| {
+            if state.as_ref().is_some_and(|state| state.job_id == id) {
+                *state = None;
+            }
+        });
+    }
+
+    fn resolve_mutation_after_listing(&self, scope: &FileScope) {
+        let resolved_job_id = self.mutation_state.get().and_then(|state| {
+            (state.uncertain
+                && same_listing_location(&state.scope, scope)
+                && state
+                    .listing_generation_after_uncertainty
+                    .is_some_and(|generation| scope.request_generation > generation))
+            .then_some(state.job_id)
+        });
+        if let Some(id) = resolved_job_id {
+            self.clear_mutation_state_for_job(id);
+            self.job.update(|job| {
+                if let Some(job) = job.as_mut().filter(|job| job.id == id) {
+                    job.uncertain = false;
+                }
+            });
+        }
+    }
+
+    fn finish_mutation_after_abort(
+        &self,
+        store: &WorkspaceStore,
+        id: u64,
+        kind: JobKind,
+        scope: &FileScope,
+    ) {
+        if !self.job_was_dispatched(id) {
+            self.finish_job(id, 0, 0, 0, false);
+            return;
+        }
+        let error = crate::i18n::t!("files.operations.requestResultUnknown").to_string();
+        self.record_job_failure(id, error.clone(), true);
+        self.finish_job(id, 0, 1, 0, true);
+        let result = self.mutation_uncertain_message(kind, scope, error);
+        let message = if self.operation_scope_is_current(store, scope) {
+            result
+        } else {
+            crate::i18n::t!(
+                "files.operations.scopeSummary",
+                action = mutation_action(kind),
+                directory = scope.directory.as_str(),
+                result = result
+            )
+        };
+        store.show_toast(message.to_string());
     }
 
     fn job_was_dispatched(&self, id: u64) -> bool {
@@ -1215,6 +1414,9 @@ impl FileOperations {
             return;
         }
         self.active_job.lock().take();
+        if !keep {
+            self.clear_mutation_state_for_job(id);
+        }
         self.job.update(|job| {
             if let Some(job) = job.as_mut().filter(|job| job.id == id) {
                 job.completed = completed;
@@ -1369,7 +1571,7 @@ impl FileOperations {
                 skipped += 1;
                 continue;
             };
-            if !valid_name_segment(&name, &scope.directory) {
+            if !is_valid_file_name_segment(&name, &scope.directory) {
                 skipped += 1;
                 continue;
             }
@@ -1398,7 +1600,10 @@ impl FileOperations {
                 break;
             }
             progress.lock().begin_item(file.name.clone());
-            self.mark_job_dispatched(job_id);
+            if !self.mark_job_dispatched(job_id) {
+                summary.cancelled = true;
+                break;
+            }
             let progress_cb = progress.clone();
             let mut result = client
                 .upload_file(
@@ -1423,6 +1628,10 @@ impl FileOperations {
                     )
                     .await;
                 if !confirmed || !self.operation_scope_is_current(store, scope) {
+                    summary.cancelled = true;
+                    break;
+                }
+                if !self.mark_job_dispatched(job_id) {
                     summary.cancelled = true;
                     break;
                 }
@@ -1517,7 +1726,10 @@ impl FileOperations {
             }
             let remote = falcon_core::file_path::join_host_path(Some(&scope.directory), &directory);
             progress.lock().begin_item(directory.clone());
-            self.mark_job_dispatched(job_id);
+            if !self.mark_job_dispatched(job_id) {
+                summary.cancelled = true;
+                break;
+            }
             match client.mkdir(&scope.project_id, &remote, true).await {
                 Ok(_) => {
                     progress.lock().complete_item(0, false);
@@ -1549,7 +1761,10 @@ impl FileOperations {
             let remote_dir =
                 falcon_core::file_path::join_host_path(Some(&scope.directory), &relative_dir);
             progress.lock().begin_item(file.relative.clone());
-            self.mark_job_dispatched(job_id);
+            if !self.mark_job_dispatched(job_id) {
+                summary.cancelled = true;
+                break;
+            }
             let progress_cb = progress.clone();
             let mut result = client
                 .upload_file(
@@ -1574,6 +1789,10 @@ impl FileOperations {
                     )
                     .await;
                 if !confirmed || !self.operation_scope_is_current(store, scope) {
+                    summary.cancelled = true;
+                    break;
+                }
+                if !self.mark_job_dispatched(job_id) {
                     summary.cancelled = true;
                     break;
                 }
@@ -1845,59 +2064,24 @@ fn local_relative_string(path: &Path) -> Option<String> {
 }
 
 fn valid_local_name(name: &str, remote_directory: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && (!is_windows_path(remote_directory) || (!name.contains('\\') && !name.contains(':')))
-        && !name.chars().any(char::is_control)
+    is_valid_file_name_segment(name, remote_directory)
 }
 
-fn valid_name_segment(name: &str, directory: &str) -> bool {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.chars().any(char::is_control)
-    {
-        return false;
+fn same_listing_location(left: &FileScope, right: &FileScope) -> bool {
+    left.profile_id == right.profile_id
+        && left.server_url == right.server_url
+        && left.project_id == right.project_id
+        && left.directory == right.directory
+}
+
+fn mutation_action(kind: JobKind) -> String {
+    match kind {
+        JobKind::Rename => crate::i18n::t!("files.operations.rename").to_string(),
+        JobKind::CreateDirectory => crate::i18n::t!("files.operations.newFolder").to_string(),
+        JobKind::Delete => crate::i18n::t!("files.operations.delete").to_string(),
+        JobKind::Upload => crate::i18n::t!("files.operations.uploadAction").to_string(),
+        JobKind::Download => crate::i18n::t!("files.operations.downloadAction").to_string(),
     }
-    !is_windows_path(directory) || (!name.contains('\\') && !name.contains(':'))
-}
-
-fn is_windows_path(path: &str) -> bool {
-    path.starts_with("\\\\") || path.starts_with("//") || path.as_bytes().get(1) == Some(&b':')
-}
-
-fn path_contains(target: &str, candidate: &str) -> bool {
-    let target = falcon_core::file_path::join_host_path(None, target);
-    let candidate = falcon_core::file_path::join_host_path(None, candidate);
-    let windows = is_windows_path(&target);
-    let normalize = |path: &str| {
-        let current = (path.starts_with('/') || is_windows_path(path)).then_some(path);
-        let normalized = falcon_core::file_path::parse_nav_path(path, current)
-            .unwrap_or_else(|| path.to_owned());
-        if windows {
-            normalized.replace('\\', "/").to_lowercase()
-        } else {
-            normalized
-        }
-    };
-    let target = normalize(&target);
-    let candidate = normalize(&candidate);
-    if target == candidate {
-        return true;
-    }
-    let prefix = target.trim_end_matches('/');
-    candidate
-        .strip_prefix(prefix)
-        .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn project_path_contains(root: &str, target: &str, candidate: &str) -> bool {
-    let target = falcon_core::file_path::join_host_path(Some(root), target);
-    let candidate = falcon_core::file_path::join_host_path(Some(root), candidate);
-    path_contains(&target, &candidate)
 }
 
 fn remaining_after_remove(selected: &BTreeSet<String>, removed: &[String]) -> BTreeSet<String> {
@@ -1916,32 +2100,7 @@ fn job_id_is_current(current_id: Option<u64>, finished_id: u64) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{job_id_is_current, path_contains, remaining_after_remove, valid_name_segment};
-
-    #[test]
-    fn name_validation_accepts_one_segment_and_rejects_empty_or_navigation_names() {
-        assert!(valid_name_segment("reports", "/work"));
-        assert!(!valid_name_segment("", "/work"));
-        assert!(!valid_name_segment(".", "/work"));
-        assert!(!valid_name_segment("..", "/work"));
-        assert!(!valid_name_segment("nested/file", "/work"));
-        assert!(!valid_name_segment("C:escape", "C:\\work"));
-    }
-
-    #[test]
-    fn open_file_guard_matches_target_and_descendants_only() {
-        assert!(path_contains("/work/src", "/work/src/lib.rs"));
-        assert!(path_contains("/work/src/lib.rs", "/work/src/lib.rs"));
-        assert!(!path_contains("/work/src", "/work/src-old/lib.rs"));
-        assert!(path_contains("C:\\work\\src", "c:/WORK/src/main.rs"));
-        assert!(path_contains("C:\\", "c:/notes.txt"));
-        assert!(path_contains(
-            "\\\\server\\share",
-            "//SERVER/share/dir/file"
-        ));
-        assert!(!path_contains("/work/dir", "/work/dir\\child"));
-        assert!(path_contains("/work/dir\\name", "/work/dir\\name"));
-    }
+    use super::{job_id_is_current, remaining_after_remove};
 
     #[test]
     fn partial_remove_retains_failed_and_unreported_selection() {
