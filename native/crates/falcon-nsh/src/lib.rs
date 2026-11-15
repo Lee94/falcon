@@ -5097,6 +5097,11 @@ mod tests {
         app.wait_for_gone("id:relay-toggle-stale-connection", Duration::from_millis(500)).unwrap();
     }
 
+    mod relay_parity {
+        use super::*;
+        include!("relay_tests.rs");
+    }
+
     /// ADR 0018 对账回归：`falcon-core::app_icon::APP_ICON_IDS` 中全部内置图标均已在 `assets/app-icons/` 下就位。
     #[test]
     fn app_icons_match_core_app_icon_ids() {

@@ -974,6 +974,13 @@
     "logout": "退出登录"
   },
   "native": {
+    "relays": {
+      "edit": "编辑中转规则",
+      "delete": "删除规则",
+      "save": "保存",
+      "cancel": "取消",
+      "defaults": "监听地址默认为 127.0.0.1；目标地址留空使用 127.0.0.1，目标端口留空使用监听端口。"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",
