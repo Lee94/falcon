@@ -2,7 +2,7 @@
 //!
 //! 界面上不允许硬编码中文，统一经 `nsh_core::t!("...")` 读取。
 //! NSH 的 `Translations::lookup` 在宿主语言不匹配时（例如无头测试默认 `en-US`）会回退到 `"en"`，
-//! v1 仅有中文一份文案，因此同时填入 `"zh-CN"`、`"zh"` 与 `"en"`，保证任意宿主语言首帧即显示中文。
+//! 英文资源按已翻译的区域覆盖中文回退，未迁移的区域仍保留 v1 中文文案。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -13,6 +13,7 @@ use serde_json::Value;
 pub use nsh_core::t;
 
 const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
+const EN_JSON: &str = include_str!("../locales/en.json");
 
 static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     let root: Value = serde_json::from_str(ZH_CN_JSON)
@@ -27,7 +28,11 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let mut map = HashMap::with_capacity(3);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    map.insert("en".to_string(), base);
+    let mut english = base;
+    let root: Value = serde_json::from_str(EN_JSON)
+        .expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &root, &mut english);
+    map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
 
@@ -64,4 +69,27 @@ pub fn translations() -> Translations {
 /// 非组件上下文（纯单元测试对账文案 key）直接按点分键取值。
 pub fn lookup_static(key: &str) -> Option<&'static str> {
     FLAT_ZH_CN.get(key).map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_resources_have_matching_chinese_and_english_keys() {
+        let mut english = HashMap::new();
+        flatten_json("", &serde_json::from_str::<Value>(EN_JSON).unwrap(), &mut english);
+        let chinese = FLAT_ZH_CN.iter().filter(|(key, _)| key.starts_with("native.connect."));
+        for (key, chinese) in chinese {
+            let translated = english.get(key).unwrap_or_else(|| panic!("missing English key {key}"));
+            assert!(!translated.is_empty());
+            for locale in ["zh-CN", "en-US"] {
+                assert!(translations().lookup(locale, key).is_some());
+            }
+            for placeholder in ["%{name}", "%{url}"] {
+                assert_eq!(chinese.contains(placeholder), translated.contains(placeholder), "{key}");
+            }
+        }
+        assert_eq!(translations().lookup("en-US", "native.connect.connect").as_deref(), Some("Connect"));
+    }
 }

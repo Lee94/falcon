@@ -8,6 +8,14 @@ use web_time::{SystemTime, UNIX_EPOCH};
 
 pub const LOCAL_PROFILE_ID: &str = "local";
 
+/// GPUI 连接表单的基址规则：去空白与尾斜杠，仅接受带主机的 HTTP(S) URL。
+pub fn normalize_connection_url(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches('/');
+    let parsed = url::Url::parse(value).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+        .then(|| value.to_string())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
@@ -43,7 +51,7 @@ impl ServerProfile {
 
     /// 非回环地址的明文 HTTP 连接。
     pub fn is_insecure(&self) -> bool {
-        self.url.starts_with("http://") && !self.is_loopback()
+        url::Url::parse(&self.url).is_ok_and(|url| url.scheme() == "http") && !self.is_loopback()
     }
 }
 
@@ -129,6 +137,18 @@ pub fn new_profile_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_url_matches_connect_form_rules() {
+        for value in ["", "example.com", "ftp://example.com", "https://", "http://?x", "http://example.com:bad"] {
+            assert_eq!(normalize_connection_url(value), None, "{value}");
+        }
+        for value in ["https://example.com", "http://localhost:4923", "http://[::1]:4923", "https://example.com/falcon?x=y"] {
+            assert_eq!(normalize_connection_url(&format!("  {value}///  ")), Some(value.to_string()));
+        }
+        let profile = ServerProfile { id: "remote".into(), name: String::new(), url: "HTTP://example.com".into(), plaintext_ok: false };
+        assert!(profile.is_insecure());
+    }
 
     #[test]
     fn local_url_is_always_refreshed_and_undeletable() {

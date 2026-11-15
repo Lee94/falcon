@@ -88,6 +88,13 @@ pub enum ActiveDialog {
         host_name: String,
         project_count: u32,
     },
+    ConfirmDeleteProfile {
+        profile: ServerProfile,
+    },
+    ConfirmPlaintextProfile {
+        profile: ServerProfile,
+        is_new: bool,
+    },
     ConfirmUnsavedFiles {
         action: FileGuardAction,
         file_keys: Vec<String>,
