@@ -22,7 +22,7 @@ use std::sync::Arc;
 use falcon_core::pane_key::parse_pane_key;
 use falcon_platform::{ServiceControl, ServicePresence};
 use falcon_theme::{ThemeSettings, derive_theme, load_theme_settings, resolve_theme_mode};
-use nsh_core::desktop::{MainWindowOptions, TrayTitleRun};
+use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle, TrayTitleRun};
 use nsh_core::element::desktop::{MenuItem, main_window, quit, set_tray, tray};
 use nsh_core::element::{Registry, Root};
 use nsh_core::platform::Idiom;
@@ -402,6 +402,15 @@ pub fn falcon_root_with_options(options: FalconLaunchOptions) -> Root {
 
     let mut win = MainWindowOptions::default();
     win.attributes.title = Some("Falcon".to_string());
+    // 桌面端隐藏系统标题栏，由 identity_strip 兼任（已带 window_drag）：
+    // 否则系统栏（标题文字 + 窗口按钮）与应用自己的身份条上下并排两条。
+    // Hidden 下 NSH 保留系统窗口控件——macOS 红绿灯居中在这条 34pt 栏内、
+    // Windows 的 caption 按钮以 Win11 风格画在右侧（含 snap layouts），
+    // 两端让位宽度由 identity_strip 按 title_bar() 环境预留。
+    let mut title_bar = TitleBarOptions::default();
+    title_bar.style = TitleBarStyle::Hidden;
+    title_bar.height = Some(Points(34.0));
+    win.attributes.title_bar = Some(title_bar);
 
     let offline_demo = options.offline_demo;
     let server_url = options.server_url;

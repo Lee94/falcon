@@ -12,6 +12,7 @@ use falcon_core::layout::{
 };
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_proto::ProgramState;
+use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
 use super::sidebar::sidebar_island;
@@ -883,6 +884,12 @@ fn identity_strip(
     let create = store.clone();
     let palette = store.clone();
     let overview = store.overview_open;
+    // 这条兼任桌面端的窗口标题栏（TitleBarStyle::Hidden，window_drag 提供拖动 /
+    // 双击最大化 / 右键系统菜单）。系统窗口控件由 NSH 画在这条的两端：
+    // macOS 红绿灯在左、Windows / GTK 的 caption 按钮在右，宽度按 title_bar()
+    // 环境预留（不随界面缩放——系统控件尺寸是窗口外框，固定点值）；
+    // 系统标题栏可见时与全屏下环境为 0，只剩基础边距。
+    let chrome = title_bar();
     let mut strip = view()
         .label("server-identity-strip")
         .h(zpx(34.0))
@@ -890,12 +897,8 @@ fn identity_strip(
         .flex_row()
         .items_center()
         .gap(zpx(8.0))
-        .pr(zpx(8.0))
-        .pl(zpx(if os() == nsh_core::platform::Os::MacOs {
-            88.0
-        } else {
-            14.0
-        }))
+        .pr(Points(zpx(8.0).0 + chrome.right.0))
+        .pl(Points(zpx(14.0).0 + chrome.left.0))
         .window_drag(true);
     if !store.sidebar_open.get() {
         let sidebar = store.sidebar_open;
