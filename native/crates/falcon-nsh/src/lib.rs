@@ -276,6 +276,38 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
 }
 
 #[cfg(test)]
+#[component]
+fn SheetMenuDispatchTest() -> impl IntoElement {
+    let theme = install_theme(None);
+    install_zoom();
+    shell::action_owner::ActionOwner::install();
+    let store = WorkspaceStore::install(&FalconLaunchOptions {
+        offline_demo: true,
+        ..Default::default()
+    });
+    let count = signal(0usize);
+    view()
+        .size_full()
+        .child(crate::shell::popups::overflow_menu(
+            view()
+                .test_id("sheet-menu-trigger")
+                .focusable(true)
+                .w(Points(100.0))
+                .h(Points(30.0))
+                .child(text("Menu")),
+            vec![crate::shell::popups::PopupAction::new(
+                crate::shell::popups::ServerUrlGuard::capture(&store),
+                "Increment",
+                false,
+                false,
+                move || count.update(|value| *value += 1),
+            )],
+            &theme.resolved(),
+        ))
+        .child(text(move || format!("action-count={}", count.get())))
+}
+
+#[cfg(test)]
 fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> impl IntoElement {
     let save_path = "native/mock-save-integration.txt";
     let save_key = falcon_core::pane_key::file_key("proj-falcon", save_path);
@@ -3684,6 +3716,47 @@ mod tests {
         app.press_key("escape").unwrap();
         app.wait_for_gone("检测连接", Duration::from_secs(2))
             .expect("one Escape closes the restored host menu");
+    }
+
+    #[test]
+    fn overflow_menu_sheet_keyboard_dispatches_once_on_phone_and_pad_headless() {
+        ensure_test_platform();
+        for idiom in [Idiom::Phone, Idiom::Pad] {
+            let mut cfg = EngineConfig::new(Root::of::<SheetMenuDispatchTest>());
+            cfg.viewport = match idiom {
+                Idiom::Phone => Size::new(Points(390.0), Points(844.0)),
+                _ => Size::new(Points(834.0), Points(1112.0)),
+            };
+            cfg.environment.os = nsh_core::platform::Os::Web;
+            cfg.environment.idiom = idiom;
+            cfg.environment.color_scheme = ColorScheme::Dark;
+            cfg.ui_sets = vec![nsh_base::registry(), registry()];
+            let mut app = Headless::start(cfg).unwrap();
+            app.first_render().unwrap();
+
+            // A standalone real menu avoids the terminal consuming Tab.
+            app.press_key("tab").unwrap();
+            app.press_key("enter").unwrap();
+            app.wait_for("role:menuitem[Increment]").unwrap();
+            assert_eq!(
+                app.screen().accessibility_state("id:sheet-menu-trigger").unwrap().expanded,
+                Some(true),
+            );
+            app.press_key("enter").unwrap();
+            app.wait_for("action-count=1")
+                .expect("sheet selection must dispatch without trigger focus return");
+            app.wait_for_gone("role:menuitem[Increment]", Duration::from_secs(2)).unwrap();
+
+            // Refocusing must not run an old pending selection a second time.
+            app.press_key("tab").unwrap();
+            app.press_key("enter").unwrap();
+            app.wait_for("role:menuitem[Increment]").unwrap();
+            assert!(app.shows("action-count=1"));
+            app.press_key("enter").unwrap();
+            app.wait_for("action-count=2").unwrap();
+            app.wait_for_gone("role:menuitem[Increment]", Duration::from_secs(2)).unwrap();
+            assert!(app.shows("action-count=2"));
+        }
     }
 
     #[test]
