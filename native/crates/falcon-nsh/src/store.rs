@@ -9,7 +9,7 @@
 //! - **源项目 / 附属项目 / 远端主机 / 中转**：保持与服务端节点模型（ADR 0027）一致的归属关系；
 //! - 同时支持离线确定性工作台（供 `nsh-testing` 无头回归测试与首屏展示）与在线 `FalconClient` 实时同步。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::rc::Rc;
@@ -316,6 +316,9 @@ pub enum AgentItemRole {
 /// 单个 Agent 会话的交互状态（含 `falcon_core::agent_mode::AgentModeTransition` 状态机）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentSessionView {
+    /// Authoritative structured protocol state; legacy demo fields remain compatible.
+    pub snapshot: Option<falcon_proto::AgentViewState>,
+    pub available: bool,
     pub session_id: String,
     pub agent_name: String,
     pub model: String,
@@ -1247,6 +1250,8 @@ impl WorkspaceStore {
         agent_map.insert(
             "sess-agent".into(),
             AgentSessionView {
+                snapshot: None,
+                available: false,
                 session_id: "sess-agent".into(),
                 agent_name: "Claude Code".into(),
                 model: "claude-sonnet-4-5".into(),
@@ -1728,6 +1733,13 @@ impl WorkspaceStore {
             });
         }
 
+        // Network threads cannot touch NSH signals. Only dirty Agent snapshots cross
+        // this UI-owned timer; terminal output does not clone/repaint the timeline.
+        let agent_store = store.clone();
+        let agent_revisions = RefCell::new(HashMap::new());
+        nsh_core::prelude::set_interval(std::time::Duration::from_millis(50), move || {
+            agent_store.sync_agent_views(&mut agent_revisions.borrow_mut());
+        });
         provide_context(store.clone());
         store
     }
@@ -3966,6 +3978,38 @@ impl WorkspaceStore {
             .lock()
             .insert(session_id.to_string(), created.clone());
         created
+    }
+
+    fn sync_agent_views(&self, revisions: &mut HashMap<String, u64>) {
+        let terminals = self.terminals.map.lock().iter().map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
+        revisions.retain(|id, _| terminals.iter().any(|(sid, _)| sid == id));
+        for (id, terminal) in terminals {
+            let revision = terminal.agent_revision();
+            if revisions.get(&id) == Some(&revision) { continue; }
+            revisions.insert(id.clone(), revision);
+            let runtime = terminal.agent_runtime();
+            let Some(snapshot) = runtime.state else { continue; };
+            let meta = terminal.meta();
+            let available = runtime.connected && runtime.transition.synchronized
+                && !runtime.transition.switching() && meta.state == SessionState::Active
+                && meta.reconnecting_attempt.is_none();
+            self.agent_views.update(|views| {
+                let entry = views.entry(id.clone()).or_insert_with(|| AgentSessionView {
+                    snapshot: None, available: false,
+                    session_id: id.clone(), agent_name: snapshot.agent.as_str().to_owned(),
+                    model: String::new(), available_models: Vec::new(), reasoning_effort: String::new(),
+                    awaiting_permission: None, running: false, graphical: snapshot.active,
+                    style: AgentDisplayStyle::Rich, transition: runtime.transition, items: Vec::new(),
+                });
+                // Snapshot, rather than a successful HTTP response, chooses the input protocol.
+                entry.graphical = snapshot.active;
+                entry.available = available;
+                entry.transition = runtime.transition;
+                entry.running = matches!(snapshot.status, falcon_proto::AgentTurnStatus::Running | falcon_proto::AgentTurnStatus::AwaitingPermission);
+                entry.model = snapshot.model.clone().unwrap_or_default();
+                entry.snapshot = Some(snapshot);
+            });
+        }
     }
 
     /// 判断某条会话此刻是否挂在工作区的任意列上（未挂即处于 Detach 后台运行态）。

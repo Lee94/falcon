@@ -1,22 +1,51 @@
-//! Coding Agent 结构化图形界面与 `TUI ↔ GUI` 双向模式切换窗口（ADR 0013 + ADR 0027）。
-//!
-//! - 复用 `falcon_core::agent_mode::{AgentDisplayStyle, AgentModeTransition}` 状态机；
-//! - 支持 `图形`（`Rich`）与 `紧凑`（`Compact`）两种本地排版切换；
-//! - 支持在可交互 GUI 与底层完整 PTY（[`FalconTerminal`]）之间即时无损切换；
-//! - 内建模型选择、思考程度切换、工具 Diff 折叠卡片与权限审批条。
+//! Structured Agent timeline; rich/compact share the same authoritative protocol.
+mod blocks;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests;
 
-use falcon_core::agent_mode::AgentDisplayStyle;
-use nsh_core::element::input;
-use nsh_core::prelude::*;
+use crate::{
+    i18n::t,
+    shell::{
+        popups::{PopupAction, ServerUrlGuard, overflow_menu, themed_tooltip},
+        widgets::{Glyph, icon_button},
+    },
+    store::{AgentItemRole, AgentSessionView, use_workspace},
+    terminal::{falcon_terminal, session::AgentCommand},
+    theme::{rgb_to_hsla, rgba_to_hsla, use_theme},
+    zoom::zpx,
+};
+use falcon_core::agent_mode::{
+    AgentDisplayStyle, agent_slash_matches,
+};
+use falcon_core::agent_output::{TimelineItem, compact_timeline};
+use falcon_proto::{AgentEntry, AgentPermissionDecision, AgentTurnStatus, AgentViewState};
+use falcon_theme::ResolvedTheme;
+use nsh_core::{element::input, prelude::*};
+use std::{collections::HashSet, rc::Rc};
 
-use crate::fonts::FONT_FAMILY_MONO;
-use crate::i18n::t;
-use crate::store::{AgentItemRole, AgentTimelineItem, use_workspace};
-use crate::terminal::falcon_terminal;
-use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
-use crate::zoom::zpx;
+#[derive(Clone, Debug)]
+pub(super) enum AgentPaneEvent {
+    Command(AgentCommand),
+    ToggleStyle,
+    OpenFile(String),
+}
 
-/// Agent 会话窗口属性。
+#[derive(Clone)]
+pub(super) struct EntryControls {
+    folded: Signal<HashSet<String>>,
+    dispatch: Rc<dyn Fn(AgentPaneEvent)>,
+    can_approve: bool,
+}
+impl EntryControls {
+    fn toggle(&self, id: String) {
+        self.folded.update(|folded| {
+            if !folded.remove(&id) {
+                folded.insert(id);
+            }
+        });
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 pub struct AgentPaneViewProps {
     pub session_id: String,
@@ -29,8 +58,84 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
     let theme_ctrl = use_theme();
     let sid = props.session_id.clone();
     let focused = props.focused;
-    let prompt_draft = signal(String::new());
-
+    let draft = signal(String::new());
+    let folded = signal(HashSet::<String>::new());
+    let composer_focused = signal(false);
+    let composer_ref = element_ref();
+    let timeline_ref = element_ref();
+    let following = signal(true);
+    let terminal = store.ensure_terminal_session(&sid);
+    let server = ServerUrlGuard::capture(&store);
+    let dispatch: Rc<dyn Fn(AgentPaneEvent)> = {
+        let store = store.clone();
+        let sid = sid.clone();
+        let server = server.clone();
+        let terminal = terminal.clone();
+        Rc::new(move |event| {
+            if !server.is_current() {
+                return;
+            }
+            match event {
+                AgentPaneEvent::Command(command) => {
+                    terminal.send_agent_command(command);
+                }
+                AgentPaneEvent::ToggleStyle => store.agent_views.update(|views| {
+                    if let Some(agent) = views.get_mut(&sid) {
+                        agent.style = agent.style.toggle();
+                    }
+                }),
+                AgentPaneEvent::OpenFile(path) => {
+                    if let Some(session) = store
+                        .sessions
+                        .get()
+                        .iter()
+                        .find(|session| session.id == sid)
+                    {
+                        store.open_file_pane(&session.project_id, &path);
+                    }
+                }
+            }
+        })
+    };
+    {
+        let store = store.clone();
+        let sid = sid.clone();
+        let dispatch = dispatch.clone();
+        effect(move || {
+            if !focused
+                || !composer_focused.get()
+                || store.active_dialog.get() != crate::store::ActiveDialog::None
+            {
+                return;
+            }
+            let Some(agent) = store.agent_views.get().get(&sid).cloned() else {
+                return;
+            };
+            let Some(state) = agent.snapshot.as_ref() else {
+                return;
+            };
+            if let Some(call_id) = state.entries.iter().rev().find_map(|entry| match entry {
+                AgentEntry::ToolCall(call) if call.permission_pending => Some(call.id.clone()),
+                _ => None,
+            }) {
+                let dispatch = dispatch.clone();
+                crate::terminal::bind_safe_key(
+                    if apple_keys() {
+                        "cmd+enter"
+                    } else {
+                        "ctrl+enter"
+                    },
+                    false,
+                    move || {
+                        dispatch(AgentPaneEvent::Command(AgentCommand::Permission {
+                            call_id: call_id.clone(),
+                            decision: AgentPermissionDecision::Allow,
+                        }));
+                    },
+                );
+            }
+        });
+    }
     view()
         .size_full()
         .flex_col()
@@ -38,158 +143,169 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
         .child(dynamic(move || {
             let resolved = theme_ctrl.resolved();
             let ui = &resolved.ui;
-            let views = store.agent_views.get();
-            let Some(ag) = views.get(&sid).cloned() else {
+            let Some(agent) = store.agent_views.get().get(&sid).cloned() else {
                 return falcon_terminal()
                     .session_id(sid.clone())
                     .focused(focused)
                     .tui_passthrough(store.tui_passthrough.get())
                     .into_element();
             };
-
-            let compact = ag.style == AgentDisplayStyle::Compact;
-
-            // 顶部模式控制条：Agent 标识 + 模型/思考程度 + 图形/紧凑切换 + TUI/GUI 双向切换
-            let topbar = {
-                let st_style = store.clone();
-                let sid_style = sid.clone();
-                let st_mode = store.clone();
-                let sid_mode = sid.clone();
-                let st_model = store.clone();
-                let sid_model = sid.clone();
-                let cur_graphical = ag.graphical;
-                let models = ag.available_models.clone();
-                let cur_model = ag.model.clone();
-
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .px(zpx(10.0))
-                    .py(zpx(6.0))
-                    .border_b_1()
-                    .border_color(rgba_to_hsla(ui.border))
-                    .bg(rgb_to_hsla(ui.card))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.0))
-                            .child(
-                                text(ag.agent_name.clone())
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb_to_hsla(ui.foreground)),
-                            )
-                            .child(
-                                view()
-                                    .px(zpx(6.0))
-                                    .py(zpx(2.0))
-                                    .rounded(zpx(4.0))
-                                    .cursor_pointer()
-                                    .bg(rgb_to_hsla(ui.secondary))
-                                    .on_press(move || {
-                                        if !models.is_empty() {
-                                            let pos = models
-                                                .iter()
-                                                .position(|m| m == &cur_model)
-                                                .unwrap_or(0);
-                                            let next = models[(pos + 1) % models.len()].clone();
-                                            st_model.agent_views.update(|m| {
-                                                if let Some(entry) = m.get_mut(&sid_model) {
-                                                    entry.model = next;
-                                                }
-                                            });
-                                        }
-                                    })
-                                    .child(
-                                        text(ag.model.clone())
-                                            .text_xs()
-                                            .font_family(FONT_FAMILY_MONO)
-                                            .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                                    ),
-                            )
-                            .child(
-                                text(t!(
-                                    "agentView.reasoningValue",
-                                    effort = ag.reasoning_effort.as_str()
-                                ))
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.muted_foreground)),
-                            ),
-                    )
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.0))
-                            .when(cur_graphical, |el| {
-                                el.child(
-                                    view()
-                                        .px(zpx(7.0))
-                                        .py(zpx(2.5))
-                                        .rounded(zpx(4.0))
-                                        .cursor_pointer()
-                                        .bg(rgb_to_hsla(ui.secondary))
-                                        .on_press(move || {
-                                            st_style.agent_views.update(|m| {
-                                                if let Some(entry) = m.get_mut(&sid_style) {
-                                                    entry.style = entry.style.toggle();
-                                                }
-                                            });
-                                        })
-                                        .child(
-                                            text(if compact {
-                                                t!("agentView.styleTerminal")
-                                            } else {
-                                                t!("agentView.styleGui")
-                                            })
-                                            .text_xs()
-                                            .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                                        ),
-                                )
-                            })
-                            .child(
-                                view()
-                                    .px(zpx(7.0))
-                                    .py(zpx(2.5))
-                                    .rounded(zpx(4.0))
-                                    .cursor_pointer()
-                                    .bg(rgb_to_hsla(ui.tint))
-                                    .on_press(move || {
-                                        st_mode.agent_views.update(|m| {
-                                            if let Some(entry) = m.get_mut(&sid_mode) {
-                                                let next_gui = !entry.graphical;
-                                                entry.transition = entry
-                                                    .transition
-                                                    .start(next_gui)
-                                                    .snapshot(next_gui, true)
-                                                    .finish(true);
-                                                entry.graphical = next_gui;
-                                            }
-                                        });
-                                    })
-                                    .child(
-                                        text(if cur_graphical {
-                                            t!("agentView.modeTerminal")
-                                        } else {
-                                            t!("native.nsh.agentGuiBadge")
-                                        })
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.tint_foreground)),
-                                    ),
-                            ),
-                    )
+            let state = display_state(&agent);
+            let compact = agent.style == AgentDisplayStyle::Compact;
+            let enabled = agent.available
+                && state.active
+                && !state.terminal_backed
+                && state.status != AgentTurnStatus::Unknown;
+            let running = matches!(
+                state.status,
+                AgentTurnStatus::Running | AgentTurnStatus::AwaitingPermission
+            );
+            let can_configure = enabled && !running;
+            let controls = EntryControls {
+                folded,
+                dispatch: dispatch.clone(),
+                can_approve: enabled,
             };
-
-            // 若切换到底层终端控制模式，直接嵌入统一 `FalconTerminal`
-            if !ag.graphical {
+            let style_dispatch = dispatch.clone();
+            let topbar = view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px(zpx(10.0))
+                .py(zpx(6.0))
+                .bg(rgb_to_hsla(ui.card))
+                .child(
+                    text(agent.agent_name.clone())
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(icon_button(
+                    format!("agent-style-{sid}"),
+                    t!(if compact {
+                        "native.agentView.toggleNative"
+                    } else {
+                        "native.agentView.toggleTerminal"
+                    }),
+                    if compact {
+                        Glyph::Activity
+                    } else {
+                        Glyph::Terminal
+                    },
+                    compact,
+                    &resolved,
+                    move || style_dispatch(AgentPaneEvent::ToggleStyle),
+                ));
+            if !state.active {
                 return view()
                     .size_full()
                     .flex_col()
                     .child(topbar)
                     .child(
-                        view().flex_1().child(
+                        falcon_terminal()
+                            .session_id(sid.clone())
+                            .focused(focused)
+                            .tui_passthrough(store.tui_passthrough.get()),
+                    )
+                    .into_element();
+            }
+            let mut timeline = view()
+                .flex_col()
+                .flex_none()
+                .p(zpx(if compact { 8.0 } else { 12.0 }))
+                .gap(zpx(if compact { 6.0 } else { 10.0 }));
+            if state.entries.is_empty() {
+                timeline = timeline.child(
+                    view()
+                        .p(zpx(24.0))
+                        .flex_col()
+                        .gap(zpx(8.0))
+                        .child(
+                            text(t!(if state.terminal_backed {
+                                "native.agentView.transcriptEmptyTitle"
+                            } else {
+                                "native.agentView.emptyTitle"
+                            }))
+                            .text_sm()
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                        )
+                        .child(
+                            text(t!(if state.terminal_backed {
+                                "native.agentView.transcriptEmptyHint"
+                            } else {
+                                "native.agentView.emptyHint"
+                            }))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        ),
+                );
+            }
+            for item in compact_timeline(&state.entries) {
+                match item {
+                    TimelineItem::Entry(index) => {
+                        timeline = timeline.child(blocks::render_entry(
+                            &state.entries[index],
+                            compact,
+                            &controls,
+                            &resolved,
+                        ))
+                    }
+                    TimelineItem::Activity(range) => {
+                        let first = state.entries[range.start].id().unwrap_or_default();
+                        let id = format!("activity:{first}");
+                        let open = folded.get().contains(&id);
+                        let ctrl = controls.clone();
+                        let mut group =
+                            view()
+                                .flex_col()
+                                .flex_none()
+                                .gap(zpx(6.0))
+                                .child(fold_header(
+                                    format!("agent-activity-{first}"),
+                                    t!("native.agentView.activity", count = range.len()),
+                                    open,
+                                    &resolved,
+                                    move || ctrl.toggle(id.clone()),
+                                ));
+                        if open {
+                            for index in range {
+                                group = group.child(blocks::render_entry(
+                                    &state.entries[index],
+                                    compact,
+                                    &controls,
+                                    &resolved,
+                                ));
+                            }
+                        }
+                        timeline = timeline.child(group);
+                    }
+                }
+            }
+            let scroller = scroll()
+                .test_id(&format!("agent-timeline-{sid}"))
+                .r#ref(&timeline_ref)
+                .flex_1()
+                .min_h_0()
+                .on_scroll(move |event: &nsh_core::element::ScrollEvent| {
+                    following.set(
+                        event.content_size.height.0 - event.size.height.0 - event.offset.y.0
+                            <= zpx(32.0).0,
+                    );
+                })
+                .child(timeline);
+            if following.get_untracked() {
+                timeline_ref.scroll_to_end(false);
+            }
+            let page = view()
+                .size_full()
+                .flex_col()
+                .bg(rgb_to_hsla(ui.background))
+                .child(topbar)
+                .child(scroller);
+            if state.terminal_backed {
+                return page
+                    .child(
+                        view().flex_1().min_h_0().child(
                             falcon_terminal()
                                 .session_id(sid.clone())
                                 .focused(focused)
@@ -198,152 +314,218 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                     )
                     .into_element();
             }
-
-            let timeline = view()
-                .flex_col()
-                .p(zpx(if compact { 8.0 } else { 12.0 }))
-                .gap(zpx(if compact { 6.0 } else { 10.0 }))
-                .children(ag.items.iter().map(|item| {
-                    let role_color = match item.role {
-                        AgentItemRole::User => rgb_to_hsla(ui.tint_strong),
-                        AgentItemRole::Assistant => rgb_to_hsla(ui.foreground),
-                        AgentItemRole::Tool => rgb_to_hsla(ui.muted_foreground),
-                        AgentItemRole::Permission => rgb_to_hsla(ui.warning),
-                    };
-
-                    let mut card = view()
-                        .flex_col()
-                        .gap(zpx(4.0))
-                        .p(zpx(if compact { 6.0 } else { 10.0 }))
-                        .rounded(zpx(if compact { 4.0 } else { 8.0 }))
-                        .bg(rgb_to_hsla(ui.card))
-                        .border_1()
-                        .border_color(rgba_to_hsla(ui.border))
-                        .child(
-                            text(item.title.clone())
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(role_color),
-                        )
-                        .child(
-                            text(item.body.clone())
-                                .text_xs()
-                                .font_family(if compact { FONT_FAMILY_MONO } else { "" })
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        );
-
-                    if let Some((old_s, new_s)) = &item.diff {
-                        let mut diff_box = view()
-                            .flex_col()
-                            .p(zpx(6.0))
-                            .rounded(zpx(5.0))
-                            .bg(rgb_to_hsla(ui.muted));
-                        for l in old_s.lines() {
-                            diff_box = diff_box.child(
-                                text(format!("- {l}"))
-                                    .text_xs()
-                                    .font_family(FONT_FAMILY_MONO)
-                                    .text_color(rgb_to_hsla(ui.destructive)),
-                            );
-                        }
-                        for l in new_s.lines() {
-                            diff_box = diff_box.child(
-                                text(format!("+ {l}"))
-                                    .text_xs()
-                                    .font_family(FONT_FAMILY_MONO)
-                                    .text_color(rgb_to_hsla(ui.success)),
-                            );
-                        }
-                        card = card.child(diff_box);
-                    }
-                    card
-                }));
-
             let mut footer = view()
                 .flex_col()
                 .gap(zpx(6.0))
                 .p(zpx(10.0))
-                .border_t_1()
-                .border_color(rgba_to_hsla(ui.border))
                 .bg(rgb_to_hsla(ui.card));
-
-            if let Some(perm_prompt) = ag.awaiting_permission.clone() {
-                let st_ok = store.clone();
-                let sid_ok = sid.clone();
-                let st_no = store.clone();
-                let sid_no = sid.clone();
-                footer = footer.child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .p(zpx(8.0))
-                        .rounded(zpx(6.0))
-                        .bg(rgb_to_hsla(ui.muted))
-                        .child(
-                            text(perm_prompt)
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.warning)),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .gap(zpx(6.0))
-                                .child(
-                                    view()
-                                        .px(zpx(8.0))
-                                        .py(zpx(3.0))
-                                        .rounded(zpx(5.0))
-                                        .cursor_pointer()
-                                        .bg(rgb_to_hsla(ui.success))
-                                        .on_press(move || {
-                                            st_ok.agent_views.update(|m| {
-                                                if let Some(e) = m.get_mut(&sid_ok) {
-                                                    e.awaiting_permission = None;
-                                                }
-                                            });
-                                        })
-                                        .child(
-                                            text(t!("native.nsh.permissionApprove"))
-                                                .text_xs()
-                                                .text_color(rgb_to_hsla(ui.success_foreground)),
-                                        ),
-                                )
-                                .child(
-                                    view()
-                                        .px(zpx(8.0))
-                                        .py(zpx(3.0))
-                                        .rounded(zpx(5.0))
-                                        .cursor_pointer()
-                                        .bg(rgb_to_hsla(ui.destructive))
-                                        .on_press(move || {
-                                            st_no.agent_views.update(|m| {
-                                                if let Some(e) = m.get_mut(&sid_no) {
-                                                    e.awaiting_permission = None;
-                                                }
-                                            });
-                                        })
-                                        .child(
-                                            text(t!("native.nsh.permissionDeny"))
-                                                .text_xs()
-                                                .text_color(rgb_to_hsla(ui.destructive_foreground)),
-                                        ),
-                                ),
-                        ),
+            let draft_value = draft.get();
+            let matches = agent_slash_matches(&state, &draft_value);
+            if enabled && !matches.is_empty() {
+                let mut popup = view()
+                    .flex_col()
+                    .p(zpx(4.0))
+                    .rounded(zpx(6.0))
+                    .bg(rgb_to_hsla(ui.popover));
+                for command in matches {
+                    let value = format!("/{} ", command.name);
+                    popup = popup.child(
+                        view()
+                            .test_id(&format!("agent-slash-{}", command.name))
+                            .focusable(true)
+                            .cursor_pointer()
+                            .px(zpx(8.0))
+                            .py(zpx(5.0))
+                            .hover({
+                                let bg = rgb_to_hsla(ui.secondary);
+                                move |style| style.bg(bg)
+                            })
+                            .on_press(move || {
+                                draft.set(value.clone());
+                                composer_ref.focus();
+                            })
+                            .child(
+                                text(format!("/{}  {}", command.name, command.description))
+                                    .text_xs()
+                                    .text_color(rgb_to_hsla(ui.popover_foreground)),
+                            ),
+                    );
+                }
+                footer = footer.child(popup);
+            }
+            let mut settings = view().flex_row().flex_wrap().items_center().gap(zpx(6.0));
+            let choices = state.model_choices();
+            let selected = state.selected_model_option();
+            let model_label = selected
+                .map(|model| model.label.clone())
+                .or_else(|| state.model.clone())
+                .unwrap_or_else(|| t!("native.agentView.modelLoading"));
+            let model_actions = choices
+                .iter()
+                .map(|model| {
+                    let value = model.id.clone();
+                    let emit = dispatch.clone();
+                    let label = if state.model.as_deref() == Some(&model.id)
+                        || selected.is_some_and(|s| s.id == model.id)
+                    {
+                        format!("✓ {}", model.label)
+                    } else {
+                        model.label.clone()
+                    };
+                    PopupAction::new(server.clone(), label, !can_configure, false, move || {
+                        emit(AgentPaneEvent::Command(AgentCommand::SetModel(
+                            value.clone(),
+                        )))
+                    })
+                })
+                .collect();
+            let model_hint = if running {
+                t!("native.agentView.settingsWhileRunning")
+            } else if choices.is_empty() {
+                t!("native.agentView.modelUnavailable")
+            } else if state.model_options.is_empty() {
+                t!("native.agentView.legacyCatalogHint")
+            } else {
+                t!("native.agentView.model")
+            };
+            settings = settings.child(overflow_menu(
+                selector(
+                    "agent-model",
+                    model_label,
+                    model_hint,
+                    !can_configure || choices.is_empty(),
+                    &resolved,
+                ),
+                model_actions,
+                &resolved,
+            ));
+            let efforts = selected
+                .map(|model| model.reasoning_efforts.clone())
+                .unwrap_or_default();
+            let default_label = selected
+                .and_then(|model| model.default_reasoning_effort.as_deref())
+                .map(|effort| {
+                    t!(
+                        "native.agentView.defaultEffort",
+                        effort = effort_label(effort)
+                    )
+                })
+                .unwrap_or_else(|| t!("native.agentView.default"));
+            let effort_text = if state.model_options.is_empty() && !choices.is_empty() {
+                t!("native.agentView.effortNotReported")
+            } else if efforts.is_empty() {
+                t!("native.agentView.effortUnavailable")
+            } else {
+                t!(
+                    "native.agentView.reasoningValue",
+                    effort = state
+                        .reasoning_effort
+                        .as_deref()
+                        .map(effort_label)
+                        .unwrap_or_else(|| default_label.clone())
+                )
+            };
+            let effort_actions = std::iter::once(None)
+                .chain(efforts.into_iter().map(Some))
+                .map(|effort| {
+                    let emit = dispatch.clone();
+                    let label = effort
+                        .as_deref()
+                        .map(effort_label)
+                        .unwrap_or_else(|| default_label.clone());
+                    let label = if effort == state.reasoning_effort {
+                        format!("✓ {label}")
+                    } else {
+                        label
+                    };
+                    PopupAction::new(
+                        server.clone(),
+                        label,
+                        !can_configure
+                            || selected.is_none_or(|model| model.reasoning_efforts.is_empty()),
+                        false,
+                        move || {
+                            emit(AgentPaneEvent::Command(AgentCommand::SetReasoningEffort(
+                                effort.clone(),
+                            )))
+                        },
+                    )
+                })
+                .collect();
+            settings = settings.child(overflow_menu(
+                selector(
+                    "agent-effort",
+                    effort_text,
+                    if running {
+                        t!("native.agentView.settingsWhileRunning")
+                    } else {
+                        t!("native.agentView.reasoning")
+                    },
+                    !can_configure
+                        || selected.is_none_or(|model| model.reasoning_efforts.is_empty()),
+                    &resolved,
+                ),
+                effort_actions,
+                &resolved,
+            ));
+            if running {
+                settings = settings.child(
+                    text(t!(if state.status == AgentTurnStatus::AwaitingPermission {
+                        "native.agentView.awaitingPermission"
+                    } else {
+                        "native.agentView.running"
+                    }))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.tint_strong)),
                 );
             }
-
-            let st_send = store.clone();
-            let sid_send = sid.clone();
-            let agent_label = ag.agent_name.clone();
+            footer = footer.child(settings);
+            let send_terminal = terminal.clone();
+            let send_server = server.clone();
+            let send = Rc::new(move || {
+                if send_server.is_current()
+                    && send_terminal
+                        .send_agent_command(AgentCommand::Prompt(draft.get().trim().to_owned()))
+                {
+                    draft.set(String::new());
+                    following.set(true);
+                    timeline_ref.scroll_to_end(false);
+                }
+            });
+            let submit = send.clone();
+            let send_click = send.clone();
+            let stop = dispatch.clone();
+            let action = action_button(
+                "agent-send-stop",
+                t!(if running {
+                    "native.agentView.stop"
+                } else {
+                    "native.agentView.send"
+                }),
+                enabled,
+                running,
+                &resolved,
+                move || {
+                    if running {
+                        stop(AgentPaneEvent::Command(AgentCommand::Interrupt));
+                    } else {
+                        send_click();
+                    }
+                },
+            );
             footer = footer.child(
                 view()
                     .flex_row()
-                    .items_center()
+                    .items_end()
                     .gap(zpx(8.0))
                     .child(
                         input()
+                            .test_id(&format!("agent-composer-{sid}"))
+                            .r#ref(&composer_ref)
                             .flex_1()
+                            .multiline(true)
+                            .submit_behavior(nsh_core::SubmitBehavior::Submit)
+                            .readonly(!enabled)
                             .px(zpx(8.0))
                             .py(zpx(6.0))
                             .rounded(zpx(6.0))
@@ -351,54 +533,160 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                             .text_xs()
                             .text_color(rgb_to_hsla(ui.foreground))
                             .placeholder(t!(
-                                "agentView.placeholder",
-                                agent = agent_label.as_str()
+                                "native.agentView.placeholder",
+                                agent = agent.agent_name
                             ))
                             .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                            .value(prompt_draft.get())
-                            .on_change(move |v: &str| prompt_draft.set(v.to_string())),
+                            .value(draft.get())
+                            .on_change(move |value: &str| draft.set(value.to_owned()))
+                            .on_focus(move || composer_focused.set(true))
+                            .on_blur(move || composer_focused.set(false))
+                            .on_submit(move |_: &str| submit()),
                     )
-                    .child(
-                        view()
-                            .px(zpx(10.0))
-                            .py(zpx(6.0))
-                            .rounded(zpx(6.0))
-                            .cursor_pointer()
-                            .bg(rgb_to_hsla(ui.tint_strong))
-                            .on_press(move || {
-                                let msg = prompt_draft.get();
-                                if !msg.trim().is_empty() {
-                                    st_send.agent_views.update(|m| {
-                                        if let Some(entry) = m.get_mut(&sid_send) {
-                                            let next_id = format!("item-{}", entry.items.len() + 1);
-                                            entry.items.push(AgentTimelineItem {
-                                                id: next_id,
-                                                role: AgentItemRole::User,
-                                                title: "User".into(),
-                                                body: msg.trim().to_string(),
-                                                diff: None,
-                                            });
-                                        }
-                                    });
-                                    prompt_draft.set(String::new());
-                                }
-                            })
-                            .child(
-                                text(t!("agentView.send"))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb_to_hsla(ui.primary_foreground)),
-                            ),
-                    ),
+                    .child(action),
             );
-
-            view()
-                .size_full()
-                .flex_col()
-                .bg(rgb_to_hsla(ui.background))
-                .child(topbar)
-                .child(scroll().flex_1().child(timeline))
-                .child(footer)
-                .into_element()
+            page.child(footer).into_element()
         }))
+}
+
+fn selector(
+    id: &str,
+    label: String,
+    hint: String,
+    disabled: bool,
+    theme: &ResolvedTheme,
+) -> impl Element + Interactive {
+    view()
+        .test_id(id)
+        .focusable(!disabled)
+        .disabled(disabled)
+        .px(zpx(6.0))
+        .py(zpx(3.0))
+        .rounded(zpx(4.0))
+        .cursor_pointer()
+        .tooltip(themed_tooltip(text(hint), None, theme))
+        .bg(rgb_to_hsla(theme.ui.secondary))
+        .child(text(label).text_xs().text_color(rgb_to_hsla(if disabled {
+            theme.ui.muted_foreground
+        } else {
+            theme.ui.secondary_foreground
+        })))
+}
+pub(super) fn action_button(
+    id: &str,
+    label: String,
+    enabled: bool,
+    danger: bool,
+    theme: &ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .test_id(id)
+        .focusable(enabled)
+        .disabled(!enabled)
+        .px(zpx(8.0))
+        .py(zpx(5.0))
+        .rounded(zpx(5.0))
+        .cursor_pointer()
+        .bg(rgb_to_hsla(if !enabled {
+            theme.ui.muted
+        } else if danger {
+            theme.ui.destructive
+        } else {
+            theme.ui.tint
+        }))
+        .on_press(move || {
+            if enabled {
+                action();
+            }
+        })
+        .child(text(label).text_xs().text_color(rgb_to_hsla(if !enabled {
+            theme.ui.muted_foreground
+        } else if danger {
+            theme.ui.destructive_foreground
+        } else {
+            theme.ui.tint_foreground
+        })))
+}
+pub(super) fn fold_header(
+    id: String,
+    title: String,
+    open: bool,
+    theme: &ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    view()
+        .test_id(&id)
+        .focusable(true)
+        .flex_row()
+        .items_center()
+        .gap(zpx(6.0))
+        .py(zpx(4.0))
+        .cursor_pointer()
+        .on_press(action)
+        .text_color(rgb_to_hsla(theme.ui.muted_foreground))
+        .child(crate::shell::widgets::glyph(if open {
+            Glyph::ChevronDown
+        } else {
+            Glyph::ChevronRight
+        }))
+        .child(text(title).text_xs())
+}
+fn effort_label(effort: &str) -> String {
+    t!(match effort {
+        "off" => "native.agentView.effortOff",
+        "minimal" => "native.agentView.effortMinimal",
+        "low" => "native.agentView.effortLow",
+        "medium" => "native.agentView.effortMedium",
+        "high" => "native.agentView.effortHigh",
+        "xhigh" => "native.agentView.effortXhigh",
+        "max" => "native.agentView.effortMax",
+        _ => return effort.to_owned(),
+    })
+}
+fn display_state(agent: &AgentSessionView) -> AgentViewState {
+    if let Some(state) = &agent.snapshot {
+        return state.clone();
+    }
+    // Preserve the isolated demo without fabricating online capabilities or replies.
+    let mut state = AgentViewState::new(falcon_proto::SessionAgent::Claude, agent.graphical);
+    state.model = Some(agent.model.clone());
+    state.models = agent.available_models.clone();
+    state.entries = agent
+        .items
+        .iter()
+        .map(|item| match item.role {
+            AgentItemRole::User => AgentEntry::User {
+                id: item.id.clone(),
+                text: item.body.clone(),
+            },
+            AgentItemRole::Tool => AgentEntry::ToolCall(falcon_proto::AgentToolCall {
+                id: item.id.clone(),
+                title: item.title.clone(),
+                description: None,
+                file_path: None,
+                kind: falcon_proto::AgentToolKind::Edit,
+                status: falcon_proto::AgentToolStatus::Completed,
+                content: if let Some((old, new)) = &item.diff {
+                    vec![falcon_proto::AgentToolContent::Diff {
+                        path: String::new(),
+                        old_text: Some(old.clone()),
+                        new_text: Some(new.clone()),
+                        unified_diff: None,
+                    }]
+                } else {
+                    vec![falcon_proto::AgentToolContent::Text {
+                        text: item.body.clone(),
+                    }]
+                },
+                permission_pending: false,
+                permission_reason: None,
+            }),
+            _ => AgentEntry::Message {
+                id: item.id.clone(),
+                text: item.body.clone(),
+            },
+        })
+        .collect();
+    state
 }

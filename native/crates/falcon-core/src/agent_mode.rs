@@ -9,6 +9,56 @@
 use falcon_proto::{AgentTurnStatus, AgentViewState, SessionAgent, SessionState};
 use serde::{Deserialize, Serialize};
 
+/// Structured controls are never converted to PTY bytes or applied optimistically.
+#[derive(Clone, Debug)]
+pub enum AgentCommand {
+    Prompt(String),
+    Interrupt,
+    Permission {
+        call_id: String,
+        decision: falcon_proto::AgentPermissionDecision,
+    },
+    SetModel(String),
+    SetReasoningEffort(Option<String>),
+}
+
+/// Validate again when a delayed menu/permission action is activated.
+pub fn agent_command_allowed(state: &AgentViewState, command: &AgentCommand) -> bool {
+    if !state.active || state.terminal_backed {
+        return false;
+    }
+    let idle = matches!(state.status, AgentTurnStatus::Idle | AgentTurnStatus::Error);
+    match command {
+        AgentCommand::Prompt(text) => idle && !text.trim().is_empty(),
+        AgentCommand::Interrupt => matches!(state.status, AgentTurnStatus::Running | AgentTurnStatus::AwaitingPermission),
+        AgentCommand::Permission { call_id, .. } => state.status == AgentTurnStatus::AwaitingPermission
+            && state.entries.iter().any(|entry| matches!(entry, falcon_proto::AgentEntry::ToolCall(call) if call.id == *call_id && call.permission_pending)),
+        AgentCommand::SetModel(model) => idle && state.model_choices().iter().any(|option| option.id == *model),
+        AgentCommand::SetReasoningEffort(effort) => idle && state.selected_model_option().is_some_and(|option| {
+            !option.reasoning_efforts.is_empty() && effort.as_ref().is_none_or(|effort| option.reasoning_efforts.contains(effort))
+        }),
+    }
+}
+
+pub fn agent_slash_matches<'a>(
+    state: &'a AgentViewState,
+    draft: &str,
+) -> Vec<&'a falcon_proto::AgentSlashCommand> {
+    let Some(prefix) = draft.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if draft.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let query = prefix.trim_start_matches('/').to_lowercase();
+    state
+        .commands
+        .iter()
+        .filter(|command| command.name.to_lowercase().contains(&query))
+        .take(8)
+        .collect()
+}
+
 /// 可交互 GUI 模式内部的本地排版样式。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -164,8 +214,12 @@ pub fn can_send_pty_input(
     ssh_reconnect_attempt: u32,
     agent_state: Option<&AgentViewState>,
 ) -> bool {
-    is_session_available(ws_connected, transition, session_state, ssh_reconnect_attempt)
-        && !transition.switching()
+    is_session_available(
+        ws_connected,
+        transition,
+        session_state,
+        ssh_reconnect_attempt,
+    ) && !transition.switching()
         && !is_interactive_gui(agent_state)
 }
 
@@ -177,8 +231,12 @@ pub fn can_send_agent_prompt(
     ssh_reconnect_attempt: u32,
     agent_state: Option<&AgentViewState>,
 ) -> bool {
-    is_session_available(ws_connected, transition, session_state, ssh_reconnect_attempt)
-        && !transition.switching()
+    is_session_available(
+        ws_connected,
+        transition,
+        session_state,
+        ssh_reconnect_attempt,
+    ) && !transition.switching()
         && agent_state.is_some_and(|s| {
             s.active
                 && !s.terminal_backed
@@ -194,8 +252,12 @@ pub fn can_send_agent_permission(
     ssh_reconnect_attempt: u32,
     agent_state: Option<&AgentViewState>,
 ) -> bool {
-    is_session_available(ws_connected, transition, session_state, ssh_reconnect_attempt)
-        && !transition.switching()
+    is_session_available(
+        ws_connected,
+        transition,
+        session_state,
+        ssh_reconnect_attempt,
+    ) && !transition.switching()
         && agent_state.is_some_and(|s| {
             s.active && !s.terminal_backed && s.status == AgentTurnStatus::AwaitingPermission
         })
@@ -209,8 +271,12 @@ pub fn can_interrupt_agent(
     ssh_reconnect_attempt: u32,
     agent_state: Option<&AgentViewState>,
 ) -> bool {
-    is_session_available(ws_connected, transition, session_state, ssh_reconnect_attempt)
-        && !transition.switching()
+    is_session_available(
+        ws_connected,
+        transition,
+        session_state,
+        ssh_reconnect_attempt,
+    ) && !transition.switching()
         && agent_state.is_some_and(|s| {
             s.active
                 && !s.terminal_backed
@@ -231,7 +297,12 @@ pub fn can_switch_mode(
     agent_state: Option<&AgentViewState>,
 ) -> bool {
     agent == Some(SessionAgent::Claude)
-        && is_session_available(ws_connected, transition, session_state, ssh_reconnect_attempt)
+        && is_session_available(
+            ws_connected,
+            transition,
+            session_state,
+            ssh_reconnect_attempt,
+        )
         && !transition.switching()
         && (!is_interactive_gui(agent_state)
             || agent_state.is_some_and(|s| {
@@ -242,6 +313,91 @@ pub fn can_switch_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_controls_require_real_capabilities_and_current_permission() {
+        use falcon_proto::{
+            AgentEntry, AgentModelOption, AgentPermissionDecision, AgentToolCall, AgentToolKind,
+            AgentToolStatus,
+        };
+        let mut state = AgentViewState::new(SessionAgent::Claude, true);
+        state.model = Some("resolved".into());
+        state.model_options = vec![AgentModelOption {
+            id: "alias".into(),
+            label: "Model".into(),
+            resolved_model: Some("resolved".into()),
+            reasoning_efforts: vec!["high".into()],
+            default_reasoning_effort: Some("high".into()),
+        }];
+        assert!(agent_command_allowed(
+            &state,
+            &AgentCommand::SetModel("alias".into())
+        ));
+        assert!(!agent_command_allowed(
+            &state,
+            &AgentCommand::SetModel("invented".into())
+        ));
+        assert!(agent_command_allowed(
+            &state,
+            &AgentCommand::SetReasoningEffort(None)
+        ));
+        assert!(!agent_command_allowed(
+            &state,
+            &AgentCommand::SetReasoningEffort(Some("invented".into()))
+        ));
+        state.status = AgentTurnStatus::AwaitingPermission;
+        state.entries.push(AgentEntry::ToolCall(AgentToolCall {
+            id: "call".into(),
+            title: "tool".into(),
+            description: None,
+            file_path: None,
+            kind: AgentToolKind::Execute,
+            status: AgentToolStatus::Pending,
+            content: Vec::new(),
+            permission_pending: true,
+            permission_reason: None,
+        }));
+        let permission = AgentCommand::Permission {
+            call_id: "call".into(),
+            decision: AgentPermissionDecision::AllowSession,
+        };
+        assert!(agent_command_allowed(&state, &permission));
+        assert!(!agent_command_allowed(
+            &state,
+            &AgentCommand::Prompt("hello".into())
+        ));
+        assert!(!agent_command_allowed(
+            &state,
+            &AgentCommand::SetModel("alias".into())
+        ));
+        state.entries.clear();
+        assert!(!agent_command_allowed(&state, &permission));
+        state.terminal_backed = true;
+        assert!(!agent_command_allowed(&state, &AgentCommand::Interrupt));
+        state.terminal_backed = false;
+        state.status = AgentTurnStatus::Unknown;
+        assert!(!agent_command_allowed(&state, &AgentCommand::Interrupt));
+    }
+
+    #[test]
+    fn slash_completion_stops_at_arguments_and_limits_case_insensitive_matches() {
+        let mut state = AgentViewState::new(SessionAgent::Claude, true);
+        state.commands = (0..12)
+            .map(|index| falcon_proto::AgentSlashCommand {
+                name: format!("Plan{index}"),
+                description: String::new(),
+            })
+            .collect();
+        assert_eq!(agent_slash_matches(&state, "/").len(), 8);
+        assert_eq!(agent_slash_matches(&state, "/pLaN1").len(), 3);
+        for draft in ["plan", "/plan arg", "/plan\n", "/plan\targ", "/missing"] {
+            assert!(agent_slash_matches(&state, draft).is_empty());
+        }
+        state.model_options.clear();
+        state.models = vec!["legacy".into()];
+        assert!(state.model_choices()[0].reasoning_efforts.is_empty());
+        assert!(state.selected_model_option().is_none());
+    }
 
     #[test]
     fn tui_to_gui_waits_for_both_http_and_ready_snapshot() {
@@ -271,13 +427,27 @@ mod tests {
         t = t.snapshot(true, true);
         assert!(!t.switching());
         let gui = AgentViewState::new(SessionAgent::Claude, true);
-        assert!(!can_send_pty_input(true, &t, SessionState::Active, 0, Some(&gui)));
-        assert!(can_send_agent_prompt(true, &t, SessionState::Active, 0, Some(&gui)));
+        assert!(!can_send_pty_input(
+            true,
+            &t,
+            SessionState::Active,
+            0,
+            Some(&gui)
+        ));
+        assert!(can_send_agent_prompt(
+            true,
+            &t,
+            SessionState::Active,
+            0,
+            Some(&gui)
+        ));
     }
 
     #[test]
     fn snapshot_arriving_before_http_response_unlocks_on_finish() {
-        let mut t = AgentModeTransition::new().connected(true).snapshot(true, true);
+        let mut t = AgentModeTransition::new()
+            .connected(true)
+            .snapshot(true, true);
         t = t.start(false); // GUI -> TUI
         t = t.snapshot(false, true); // WS 先推来 TUI 快照
         assert!(t.switching(), "HTTP 尚未结束时继续锁住");
@@ -304,7 +474,10 @@ mod tests {
 
     #[test]
     fn reconnect_while_awaiting_snapshot_accepts_authoritative_server_mode() {
-        let mut t = AgentModeTransition::new().connected(false).start(true).finish(true);
+        let mut t = AgentModeTransition::new()
+            .connected(false)
+            .start(true)
+            .finish(true);
         assert!(t.awaiting_snapshot());
         // 重连后别的一端可能又切回了 TUI，接受重连首帧权威模式避免永久卡死
         t = t.disconnected().connected(true);
