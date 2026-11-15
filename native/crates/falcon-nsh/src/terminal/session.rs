@@ -42,12 +42,14 @@ impl Default for EffectiveGrid {
 }
 
 /// 单条会话连接在客户端侧持有的实时元数据。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionRuntimeMeta {
     pub state: SessionState,
     pub dead_reason: Option<DeadReason>,
     pub title: Option<String>,
     pub program_status: Vec<ProgramStatusRecord>,
+    /// An empty WS snapshot clears REST status; before the first snapshot REST is authoritative.
+    pub program_status_received: bool,
     pub reconnecting_attempt: Option<u32>,
     pub last_error: Option<String>,
     pub askpass: Option<(String, String)>,
@@ -61,6 +63,7 @@ impl Default for SessionRuntimeMeta {
             dead_reason: None,
             title: None,
             program_status: Vec::new(),
+            program_status_received: false,
             reconnecting_attempt: None,
             last_error: None,
             askpass: None,
@@ -449,7 +452,10 @@ impl SessionSink for TerminalSession {
                 self.bump_frame();
             }
             SessionEvent::ProgramStatus(records) => {
-                self.meta.lock().program_status = records;
+                let mut meta = self.meta.lock();
+                meta.program_status = records;
+                meta.program_status_received = true;
+                drop(meta);
                 self.bump_frame();
             }
             SessionEvent::Disconnected { retry_attempt, .. } => {

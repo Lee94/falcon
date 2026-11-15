@@ -1,0 +1,26 @@
+{
+  "programStatus": {
+    "blocked_permission": "Waiting for your permission",
+    "blocked_question": "Waiting for your answer",
+    "blocked_auth": "Waiting for credentials",
+    "blocked": "Waiting for you",
+    "short_permission": "Permission",
+    "short_question": "Answer",
+    "short_auth": "Credentials",
+    "short_blocked": "Waiting",
+    "working": "Working",
+    "short_working": "Working",
+    "done": "Done",
+    "short_done": "Done",
+    "error": "Failed",
+    "short_error": "Failed",
+    "progress": "%{n}%",
+    "toastTitle": "“%{name}” %{what}",
+    "toastGo": "Go to session",
+    "subtasks": "%{n} subtasks",
+    "clockRunning": "Running for %{t}",
+    "clockWaiting": "Waiting for %{t}",
+    "clockTook": "Took %{t}",
+    "someoneBlocked": "A program is waiting for you"
+  }
+}

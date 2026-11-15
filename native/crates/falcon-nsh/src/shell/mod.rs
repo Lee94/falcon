@@ -9,6 +9,8 @@ mod overview;
 mod sidebar;
 pub mod tui;
 pub(crate) mod widgets;
+mod title_status;
+mod motion;
 
 pub use desktop::{DesktopShell, desktop_shell};
 pub use mobile::{MobileShell, mobile_shell};

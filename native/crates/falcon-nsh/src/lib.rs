@@ -635,6 +635,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
                     state: falcon_proto::SessionState::Active,
                     agent: None,
                     program_status: None,
+                    program_summary: None,
                     foreground_cmd: None,
                 }]);
             })
@@ -2453,7 +2454,8 @@ mod tests {
         app.wait_for("feat/nsh-unified-client").unwrap();
         app.wait_for("build-box-01").unwrap();
         app.press("label:sessions-toggle-proj-falcon").unwrap();
-        app.wait_for("cargo check · 1.2s").unwrap();
+        app.wait_for("id:program-status-chip").unwrap();
+        app.wait_for("text:42%").unwrap();
         app.wait_for("14.2%").unwrap();
 
         // 1. Detach（收起窗口）：窗口从列式画布摘除，但会话仍在侧栏标记为后台运行中且可接回
@@ -4417,7 +4419,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(width(&app), 420.0);
-        assert!(app.shows("cargo check · 1.2s"));
+        assert!(app.screen().matches("id:program-status-chip").unwrap());
     }
 
     /// 移动端（Android `Idiom::Phone`）与终端工作台（`Idiom::Terminal`）自适应骨架无头验证。

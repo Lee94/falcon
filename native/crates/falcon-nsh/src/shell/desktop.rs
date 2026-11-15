@@ -11,12 +11,12 @@ use falcon_core::layout::{
     unpin_all,
 };
 use falcon_core::pane_key::{PaneItem, parse_pane_key};
-use falcon_proto::ProgramState;
 use nsh_core::element::desktop::title_bar;
 use nsh_core::prelude::*;
 
 use super::sidebar::sidebar_island;
 use super::widgets::{Glyph, icon_button};
+use super::title_status::title_status;
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
 use crate::shell::popups::themed_tooltip;
@@ -450,7 +450,7 @@ fn render_pane_island(
     let parsed = parse_pane_key(pane_key);
     let pinned = is_pinned(all_cols, pane_key);
 
-    let (title_text, prog_capsule, term_session_id) = match &parsed {
+    let (title_text, term_session_id) = match &parsed {
         Some(PaneItem::Terminal { id, .. }) => {
             let rec = sessions.iter().find(|s| &s.id == id);
             let title = rec
@@ -464,12 +464,11 @@ fn render_pane_island(
                     }
                 })
                 .unwrap_or_default();
-            let capsule = rec.and_then(|r| r.program_status.clone());
-            (title, capsule, Some(id.clone()))
+            (title, Some(id.clone()))
         }
-        Some(PaneItem::File { path, .. }) => (path.clone(), None, None),
-        Some(PaneItem::Diff { .. }) => (t!("tab.diff"), None, None),
-        None => (pane_key.to_string(), None, None),
+        Some(PaneItem::File { path, .. }) => (path.clone(), None),
+        Some(PaneItem::Diff { .. }) => (t!("tab.diff"), None),
+        None => (pane_key.to_string(), None),
     };
 
     let st_focus = store.clone();
@@ -552,40 +551,15 @@ fn render_pane_island(
                 } else {
                     rgb_to_hsla(ui.muted_foreground)
                 }),
-        )
-        .child(
-            text(title_text)
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .number_of_lines(1)
-                .text_color(rgb_to_hsla(ui.foreground)),
         );
 
     // ADR 0020：程序状态胶囊严格画在窗口标题栏上，绝不在终端内增加动态状态行
-    if let Some((st_kind, summary)) = prog_capsule {
-        let capsule_fg = match st_kind {
-            ProgramState::Working => rgb_to_hsla(ui.tint_strong),
-            ProgramState::Blocked => rgb_to_hsla(ui.warning),
-            ProgramState::Done => rgb_to_hsla(ui.success),
-            ProgramState::Error => rgb_to_hsla(ui.destructive),
-            ProgramState::Idle | ProgramState::Unknown => rgb_to_hsla(ui.muted_foreground),
-        };
-        left = left.child(
-            view()
-                .flex_none()
-                .px(zpx(6.0))
-                .py(zpx(1.5))
-                .rounded(zpx(4.0))
-                .bg(rgb_to_hsla(ui.muted))
-                .child(
-                    text(summary)
-                        .text_xs()
-                        .font_family(FONT_FAMILY_MONO)
-                        .number_of_lines(1)
-                        .text_color(capsule_fg),
-                ),
-        );
+    if let Some(id) = &term_session_id {
+        left = left.child(title_status().session_id(id.clone()));
     }
+    left = left.child(text(title_text).min_w_0().text_xs()
+        .font_weight(FontWeight::SEMIBOLD).number_of_lines(1)
+        .text_color(rgb_to_hsla(ui.foreground)));
 
     if let Some(sid) = &term_session_id {
         if let Some(rec) = sessions.iter().find(|s| &s.id == sid) {
@@ -651,6 +625,7 @@ fn render_pane_island(
         ));
     let close = store.clone();
     let close_key = pane_key.to_string();
+    let edge_session_id = term_session_id.clone();
     right = right.child(icon_button(
         term_session_id
             .as_ref()
@@ -673,6 +648,7 @@ fn render_pane_island(
         },
     ));
     let titlebar = view()
+        .relative()
         .flex_row()
         .items_center()
         .justify_between()
@@ -690,7 +666,8 @@ fn render_pane_island(
         }))
         .px(zpx(8.0))
         .child(left)
-        .child(right);
+        .child(right)
+        .when_some(edge_session_id, |v, id| v.child(title_status().session_id(id).edge(true)));
 
     let body = match parsed {
         Some(PaneItem::Terminal { id, .. }) => {

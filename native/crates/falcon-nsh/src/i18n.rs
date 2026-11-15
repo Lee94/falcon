@@ -2,7 +2,7 @@
 //!
 //! 界面上不允许硬编码中文，统一经 `nsh_core::t!("...")` 读取。
 //! NSH 的 `Translations::lookup` 在宿主语言不匹配时（例如无头测试默认 `en-US`）会回退到 `"en"`，
-//! v1 仅有中文一份文案，因此同时填入 `"zh-CN"`、`"zh"` 与 `"en"`，保证任意宿主语言首帧即显示中文。
+//! 英文资源按功能逐步补齐；未翻译的键保留中文回退，避免显示键名原文。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -13,10 +13,11 @@ use serde_json::Value;
 pub use nsh_core::t;
 
 const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
+const EN_JSON: &str = include_str!("../locales/en.json");
 
 static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let root: Value = serde_json::from_str(ZH_CN_JSON)
-        .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
+    let root: Value =
+        serde_json::from_str(ZH_CN_JSON).expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
     out
@@ -24,10 +25,15 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
 
 static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let base = FLAT_ZH_CN.clone();
-    let mut map = HashMap::with_capacity(3);
+    let mut english = base.clone();
+    let root: Value =
+        serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &root, &mut english);
+    let mut map = HashMap::with_capacity(4);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    map.insert("en".to_string(), base);
+    map.insert("en".to_string(), english.clone());
+    map.insert("en-US".to_string(), english);
     Translations::from_map(map)
 });
 
@@ -64,4 +70,41 @@ pub fn translations() -> Translations {
 /// 非组件上下文（纯单元测试对账文案 key）直接按点分键取值。
 pub fn lookup_static(key: &str) -> Option<&'static str> {
     FLAT_ZH_CN.get(key).map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_status_strings_exist_in_both_locales() {
+        let mut english = HashMap::new();
+        flatten_json("", &serde_json::from_str(EN_JSON).unwrap(), &mut english);
+        for key in falcon_core::program_status::ALL_TEXT_KEYS
+            .iter()
+            .copied()
+            .chain([
+                "programStatus.progress",
+                "programStatus.subtasks",
+                "programStatus.clockRunning",
+                "programStatus.clockWaiting",
+                "programStatus.clockTook",
+            ])
+        {
+            assert!(lookup_static(key).is_some(), "missing zh-CN {key}");
+            assert!(english.contains_key(key), "missing en {key}");
+        }
+        assert_eq!(
+            translations()
+                .lookup("en-US", "programStatus.short_permission")
+                .as_deref(),
+            Some("Permission")
+        );
+        assert_eq!(
+            translations()
+                .lookup("zh-CN", "programStatus.short_permission")
+                .as_deref(),
+            Some("授权")
+        );
+    }
 }

@@ -32,10 +32,24 @@ pub enum Glyph {
     File,
     ArrowUp,
     Refresh,
+    Shield,
+    Question,
+    Key,
+    Warning,
+    ListTree,
 }
 
 pub fn glyph(kind: Glyph) -> impl IntoElement {
+    glyph_sized(kind, zpx(15.0))
+}
+
+pub fn glyph_sized(kind: Glyph, size: Points) -> impl IntoElement {
     let paths = match kind {
+        Glyph::Shield => "<path d='m12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5Z M8 11l3 3 5-6'/>",
+        Glyph::Question => "<circle cx='12' cy='12' r='9'/><path d='M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5 M12 17h.01'/>",
+        Glyph::Key => "<circle cx='8' cy='8' r='5'/><path d='m12 12 9 9 M16 16l3-3 M19 19l3-3'/>",
+        Glyph::Warning => "<path d='m12 3 10 18H2Z M12 9v5 M12 17h.01'/>",
+        Glyph::ListTree => "<path d='M4 3v14h4 M4 7h4 M12 7h9 M12 17h9'/>",
         Glyph::File => "<path d='M14 2H5v20h14V7Z M14 2v5h5'/>",
         Glyph::ArrowUp => "<path d='M12 20V4 m-7 7 7-7 7 7'/>",
         Glyph::Refresh => "<path d='M20 7a9 9 0 1 0 1 8 M20 2v6h-6'/>",
@@ -76,8 +90,8 @@ pub fn glyph(kind: Glyph) -> impl IntoElement {
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'>{paths}</svg>"
     );
     svg(ImageSrc::svg_markup(&markup))
-        .w(zpx(15.0))
-        .h(zpx(15.0))
+        .w(size)
+        .h(size)
         .flex_none()
 }
 
@@ -89,11 +103,23 @@ pub fn icon_button(
     resolved: &falcon_theme::ResolvedTheme,
     action: impl Fn() + 'static,
 ) -> impl IntoElement {
+    icon_button_with_shortcut(id, title, icon, active, None, resolved, action)
+}
+
+pub fn icon_button_with_shortcut(
+    id: impl Into<String>,
+    title: String,
+    icon: Glyph,
+    active: bool,
+    shortcut: Option<&str>,
+    resolved: &falcon_theme::ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
     let ui = &resolved.ui;
     view()
         .label(id.into())
         .focusable(true)
-        .tooltip(themed_tooltip(text(title), None, resolved))
+        .tooltip(themed_tooltip(text(title), shortcut.map(shortcut_label).map(Into::into), resolved))
         .w(zpx(28.0))
         .h(zpx(28.0))
         .flex_none()
@@ -113,6 +139,22 @@ pub fn icon_button(
         })
         .on_press(action)
         .child(glyph(icon))
+}
+
+fn shortcut_label(spec: &str) -> String {
+    nsh_core::keymap::Keystroke::parse_with(spec, apple_keys())
+        .expect("static shortcut must parse")
+        .label(os(), apple_keys())
+}
+
+/// Only show a key that the enclosing form actually handles (submit or modal dismissal).
+pub fn button_caption(label: String, spec: &str, resolved: &falcon_theme::ResolvedTheme) -> impl IntoElement {
+    view().flex_row().items_center().gap(zpx(8.0))
+        .child(text(label).text_xs())
+        .child(view().flex_none().px(zpx(4.0)).py(zpx(1.0)).rounded(zpx(4.0))
+            .bg(rgb_to_hsla(resolved.ui.muted))
+            .text_color(rgb_to_hsla(resolved.ui.muted_foreground))
+            .child(text(shortcut_label(spec)).text_size(zpx(10.0))))
 }
 
 /// 勾选状态用矢量绘制，避免等宽字体的 Unicode 方框在不同平台上显示成细小字形。

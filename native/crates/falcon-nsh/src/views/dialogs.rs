@@ -10,7 +10,7 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, glyph, icon_button};
+use crate::shell::widgets::{Glyph, glyph, icon_button, icon_button_with_shortcut, button_caption};
 use crate::store::{
     ActiveDialog, FileGuardAction, FileGuardChoice, SettingsTab, WorkspaceStore, use_workspace,
 };
@@ -285,11 +285,12 @@ fn modal_header(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb_to_hsla(ui.popover_foreground)),
         )
-        .child(icon_button(
+        .child(icon_button_with_shortcut(
             "modal-close",
             t!("common.close"),
             Glyph::Close,
             false,
+            Some("escape"),
             resolved,
             move || st.active_dialog.set(ActiveDialog::None),
         ))
@@ -340,9 +341,8 @@ fn render_unsaved_files_modal(
             .bg(rgb_to_hsla(ui.secondary))
             .on_press(move || st_cancel.resolve_file_guard(FileGuardChoice::Cancel))
             .child(
-                text(t!("common.cancel"))
-                    .text_xs()
-                    .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                view().text_color(rgb_to_hsla(ui.secondary_foreground))
+                    .child(button_caption(t!("common.cancel"), "escape", resolved)),
             ),
     );
 
