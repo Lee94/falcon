@@ -145,6 +145,10 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             ActiveDialog::NewProject => project_form().project_id(None).into_element(),
             ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
             ActiveDialog::DeriveProject(id) => worktree_form().project_id(id).into_element(),
+            ActiveDialog::ServerUpdate(key) => super::server_update::server_update()
+                .gateway(key.gateway)
+                .host_id(key.host_id)
+                .into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
                 &store,
                 &resolved,
@@ -741,6 +745,15 @@ fn render_hosts_tab(
                         ),
                 );
             if let Some(source) = host_source {
+                let update_store = store.clone();
+                let update_id = source.id.clone();
+                row = row.child(super::server_update::action(
+                    &format!("host-update-{}", source.id),
+                    t!("native.serverUpdate.node"),
+                    false,
+                    &resolved,
+                    move || update_store.server_updates.open(&update_store, Some(update_id.clone())),
+                ));
                 let edit_store = store.clone();
                 let delete_store = store.clone();
                 let edit_source = source.clone();
@@ -1023,6 +1036,7 @@ fn render_about_tab(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let info = store.server_info.get();
+    let update_store = store.clone();
     let value = |value: String| {
         text(value)
             .text_xs()
@@ -1054,6 +1068,17 @@ fn render_about_tab(
             resolved,
             t!("native.settings.clientVersion"),
             value(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        ))
+        .child(setting_row(
+            resolved,
+            t!("native.serverUpdate.title"),
+            super::server_update::action(
+                "server-update-open",
+                t!("native.serverUpdate.open"),
+                false,
+                resolved,
+                move || update_store.server_updates.open(&update_store, None),
+            ),
         ))
         .child(crate::app_update::render(store, resolved))
 }

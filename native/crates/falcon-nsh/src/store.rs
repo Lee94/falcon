@@ -77,6 +77,7 @@ pub enum ActiveDialog {
     DeriveProject(String),
     Settings(SettingsTab),
     ConfirmAppUpdate(falcon_platform::AvailableUpdate),
+    ServerUpdate(crate::server_updates::ServerUpdateKey),
     Askpass {
         id: String,
         prompt: String,
@@ -715,6 +716,7 @@ pub struct WorkspaceStore {
 
     pub active_dialog: Signal<ActiveDialog>,
     pub(crate) askpass: AskpassState,
+    pub(crate) server_updates: crate::server_updates::ServerUpdates,
     pub editing_host: Signal<Option<falcon_proto::SshHost>>,
     pub editing_host_generation: Signal<u64>,
     pub host_delete_busy: Signal<Option<(u64, String)>>,
@@ -1657,6 +1659,7 @@ impl WorkspaceStore {
             right_panel_kind: signal(RightPanelKind::Plugin("sysmon".into())),
             active_dialog: signal(ActiveDialog::None),
             askpass: AskpassState::new(),
+            server_updates: crate::server_updates::ServerUpdates::new(task_owner),
             editing_host: signal(None),
             editing_host_generation: signal(0),
             host_delete_busy: signal(None),

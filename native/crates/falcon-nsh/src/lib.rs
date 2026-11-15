@@ -13,6 +13,7 @@ pub mod fonts;
 pub mod i18n;
 pub mod project_operations;
 pub(crate) mod session_operations;
+pub(crate) mod server_updates;
 pub mod appearance;
 pub mod shell;
 pub mod store;
@@ -1103,6 +1104,7 @@ pub fn registry() -> Registry {
 
 #[cfg(test)]
 mod tests {
+    mod server_update;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc::{self, Receiver, Sender};

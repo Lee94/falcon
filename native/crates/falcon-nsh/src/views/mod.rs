@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod project_form;
 mod profiles;
 pub mod session_operations;
+mod server_update;
 pub mod quick_open;
 pub(crate) mod preview_popup;
 mod relays;
