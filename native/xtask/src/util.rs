@@ -227,11 +227,14 @@ pub fn cargo_package_dir(pkg_name: &str) -> Result<PathBuf> {
     bail!("cargo metadata 中未找到依赖包 {pkg_name}")
 }
 
-/// 定位 `rustup` 的 `stable` 工具链 `bin` 目录。开发机 `PATH` 上若 Homebrew 的 `rustc` 排在前面，
-/// 它不带交叉目标标准库（`x86_64-apple-darwin`、musl、Android 等）；显式取 `rustup` 的 `cargo` / `rustc` 可绕开。
+/// 定位 `rustup` 工具链（默认 `stable`，设了 `RUSTUP_TOOLCHAIN` 时用它）的 `bin` 目录。开发机 `PATH` 上若 Homebrew 的 `rustc` 排在前面，
+/// 它不带交叉目标标准库（musl、Android 等）；显式取 `rustup` 的 `cargo` / `rustc` 可绕开。
 pub fn rustup_toolchain_bin() -> Result<PathBuf> {
+    // 设了 RUSTUP_TOOLCHAIN 就用它（CI 借此固定 Rust 版本，见 package.yml 顶层 env，rustup 代理
+    // 也认这个变量），否则用 stable
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "stable".into());
     let out = Command::new("rustup")
-        .args(["which", "--toolchain", "stable", "cargo"])
+        .args(["which", "--toolchain", toolchain.as_str(), "cargo"])
         .output()
         .context("起不来 rustup（装了吗？）")?;
     if !out.status.success() {

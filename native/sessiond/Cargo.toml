@@ -2,7 +2,7 @@
 #
 # 独立的工作区，不进 native/ 的：falcon-sessiond 链 libghostty-vt 的静态库，静态库要 Zig 编
 # （`cargo xtask ghostty`），放进主工作区的话日常的 `cargo test --workspace` 就离不开 Zig。
-# 构建与零警告检查走 `cargo xtask sessiond [--check]`；它用 cargo-zigbuild 交叉编 5 个目标。
+# 构建与零警告检查走 `cargo xtask sessiond [--check]`；它用 cargo-zigbuild 交叉编 4 个目标。
 #
 # 与主工作区共用的只有 falcon-proto（path 依赖）：holder 与 falcon-server 说的协议就在那里。
 [workspace]

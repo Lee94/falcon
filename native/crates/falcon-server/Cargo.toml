@@ -44,7 +44,7 @@ indexmap = "2"
 getrandom = "0.4"
 http = "1"
 portable-pty = "0.9.0"
-# 编进发布版的会话守护进程是 gzip 过的（5 个目标，见 sessiond/bin.rs）
+# 编进发布版的会话守护进程是 gzip 过的（4 个目标，见 sessiond/bin.rs）
 flate2 = { version = "1", optional = true }
 # 下载第三方二进制（px0，ADR 0017 决定四）。TLS 与 falcon-client 同一套：rustls + ring +
 # 系统信任库（rustls-platform-verifier），不带 aws-lc-sys / webpki-roots；只讲 HTTP/1.1
@@ -71,6 +71,6 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 libc = "0.2.190"
 
 [features]
-# 把 5 个目标的会话守护进程（falcon-sessiond，ADR 0020）编进二进制（发布构建用）。构建时用
+# 把 4 个目标的会话守护进程（falcon-sessiond，ADR 0020）编进二进制（发布构建用）。构建时用
 # FALCON_EMBED_SESSIOND_DIR 指向放 `<三元组>.gz` 的目录（绝对路径），cargo xtask server 准备
 embed-sessiond = ["dep:flate2"]

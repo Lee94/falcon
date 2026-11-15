@@ -8,7 +8,7 @@
 
 安装包文件名与 `cargo xtask pkg` / `cargo xtask win` 一致：
 
-- macOS：`Falcon-v<版本>-darwin-arm64.pkg` 或 `darwin-x64.pkg`
+- macOS（仅 Apple Silicon）：`Falcon-v<版本>-darwin-arm64.pkg`
 - Windows：`Falcon-v<版本>-win32-x64-setup.exe`
 
 Linux 没有客户端安装包，检查直接说明没有这个平台的包。

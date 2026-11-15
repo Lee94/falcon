@@ -20,17 +20,19 @@ cargo xtask linux-desktop   # Linux GTK4 原生桌面客户端安装包：Falcon
 cargo xtask android         # Android 安装包（默认 arm64-v8a，模拟器加 --abis all；纯 Rust NSH + Android SDK，零 Gradle）
 cargo xtask web             # Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/）
 cargo xtask nsh-check       # 局部检查 falcon-nsh 与 falcon-app（含测试目标）
-cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 5 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试
+cargo xtask sessiond        # 会话守护进程 falcon-sessiond（ADR 0020，独立工作区 native/sessiond），产物 native/target-sessiond/<三元组>/release/；开发构建的服务端从这里拿，`--targets all` 交叉编 4 个目标，`--check` 零警告检查（含 Windows），`--test` 跑它的测试
 cargo xtask ghostty         # 钉死版本的 Zig 编 libghostty-vt 静态库（sessiond 会自动调），源码先打上 `native/sessiond/ghostty-patches/` 的补丁（改补丁要同步 ghostty.pin 的 patches=）；`ghostty-bindgen` 只在升 ghostty 的 pin 时跑
 ```
 
-xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、Android SDK 的 javac / d8 / aapt2 / zipalign / apksigner、curl（Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`cargo xtask sessiond` 要 rustup 装好 5 个目标（x86_64 / aarch64 的 linux-musl 与 apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
+xtask 调的外部工具都不是 JS：rsvg-convert（图标、pkg 的 AppIcon）、macOS 的 pkgbuild / iconutil / codesign、Inno Setup 的 ISCC、Android SDK 的 javac / d8 / aapt2 / zipalign / apksigner、curl（Zig 与 ghostty 源码包，都钉了哈希）、patch（给 ghostty 源码打补丁）、`cargo xtask sessiond` 要 rustup 装好 4 个目标（x86_64 / aarch64 的 linux-musl、aarch64-apple-darwin、x86_64-pc-windows-gnu）与 `cargo install cargo-zigbuild`（Zig 本身由 xtask 下到 `native/.cache/zig/`）。发布版本号就是 `native/Cargo.toml` 的工作区版本。
 
 ### 验证：本地局部检查，GitHub 发版执行全量检查
 
 本地提交与 push 只执行和改动相关的局部测试或编译检查，不要求运行全工作区的 `cargo check` / `cargo test`，也不默认打各端安装包。Rust 按修改的 crate / 模块检查（客户端改动可运行 `cargo xtask nsh-check` 与 `cargo test -p falcon-nsh` / `cargo test -p falcon-app`）；仅修改文档或工作流时检查差异格式与工作流语法。用户明确要求全量验证，或局部检查发现需要扩大排查的问题时，再执行额外检查。
 
-全量编译检查与单元测试由 `.github/workflows/package.yml` 在 GitHub 发版流程中执行，失败则禁止发布 GitHub Release；手动触发与定时运行同样执行。主工作区检查使用 release profile，与安装包构建共用依赖缓存；独立的 sessiond 工作区经 xtask 检查全部五个目标并在 runner 本机执行测试。没有 clippy / rustfmt 要求，源码保持零警告。
+全量编译检查与单元测试由 `.github/workflows/package.yml` 在 GitHub 发版流程中执行，失败则禁止发布 GitHub Release；手动触发与定时运行同样执行。主工作区检查使用 release profile，与安装包构建共用依赖缓存；独立的 sessiond 工作区经 xtask 检查全部四个目标并在 runner 本机执行测试。没有 clippy / rustfmt 要求，源码保持零警告。
+
+`main` 上 `native/**`、打包工作流或 `.github/scripts/**` 变更会自动运行打包流程、预热默认分支缓存；文档变更不触发，版本 tag 始终打包。同一提交已有 `v*` tag 时（版本号提交与 tag 一起推），main 那次运行由 `gate` 整体跳过，只跑 tag 那次，避免两条流水线抢并发名额；tag 流程结束后 `warm-main` 用 `GITHUB_TOKEN` 在 main 上补一次 `workflow_dispatch` 写缓存。仅 `main` 写缓存（Rust 检查失败时也保存已编译依赖），tag 只读缓存；CI 的 Rust 版本固定在 package.yml 顶层的 `RUSTUP_TOOLCHAIN`（缓存键含 rustc 版本，跟着 stable 走会在新版发布当天全部失效），xtask 的 `rustup_toolchain_bin` 也认这个变量，本机不设时仍用 `stable`；不缓存工作区 crate（checkout 刷新 mtime、发版改版本号，每次都会重编）。sessiond 每个目标单独一组并行（Linux / Windows 目标在 Linux runner 上交叉编，macOS 组执行本机测试），检查与测试通过后才上传本组产物。macOS / Windows / Linux 服务端与 `test` 不等 sessiond：先用占位文件（`.github/scripts/sessiond-placeholder.sh`）编完整个工作区，再经 `.github/scripts/wait-sessiond.sh` 等同一次运行的守护进程产物，换上后同一条 `cargo build` 只重编 falcon-server 的 `main.rs`（`include_bytes!` 刻意放在那里）；`cargo xtask server` 出包前核对产物里原样带着四份 gzip。macOS / Windows 测试目标的编译检查在单独的 `*-check` job。`sessiond --targets <列表> --pack-embed` 只压缩所选目标，本地 `server` 仍要求全部四目标。macOS 仅发布 Apple Silicon（arm64），Intel macOS 的服务端、客户端安装包与守护进程均不再构建或发布。默认分支自动预热与定时运行只上传下游需要的 sessiond 内部资源，手动运行与 tag 保留安装包产物；只有 tag 在全部检查通过后创建 Release。
 
 ```bash
 cd native

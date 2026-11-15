@@ -10,21 +10,19 @@ use falcon_proto::sessiond::{FALCON_VERSION, SpawnSpec};
 use crate::git::path::join_path;
 use crate::host::{build_command_line, build_pty_command_line, encode_powershell, quote_powershell};
 
-/// 守护进程的 5 个构建目标（与 `cargo xtask sessiond` 的表一致）
+/// 守护进程的 4 个构建目标（与 `cargo xtask sessiond` 的表一致）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessiondTarget {
     X86_64Linux,
     Aarch64Linux,
-    X86_64Mac,
     Aarch64Mac,
     X86_64Windows,
 }
 
 impl SessiondTarget {
-    pub const ALL: [SessiondTarget; 5] = [
+    pub const ALL: [SessiondTarget; 4] = [
         SessiondTarget::X86_64Linux,
         SessiondTarget::Aarch64Linux,
-        SessiondTarget::X86_64Mac,
         SessiondTarget::Aarch64Mac,
         SessiondTarget::X86_64Windows,
     ];
@@ -34,7 +32,6 @@ impl SessiondTarget {
         match self {
             SessiondTarget::X86_64Linux => "x86_64-unknown-linux-musl",
             SessiondTarget::Aarch64Linux => "aarch64-unknown-linux-musl",
-            SessiondTarget::X86_64Mac => "x86_64-apple-darwin",
             SessiondTarget::Aarch64Mac => "aarch64-apple-darwin",
             SessiondTarget::X86_64Windows => "x86_64-pc-windows-gnu",
         }
@@ -57,7 +54,6 @@ pub fn target_from_uname(uname: &str) -> Option<SessiondTarget> {
     match (os.as_str(), arch.as_str()) {
         ("linux", "x86_64" | "amd64") => Some(SessiondTarget::X86_64Linux),
         ("linux", "aarch64" | "arm64") => Some(SessiondTarget::Aarch64Linux),
-        ("darwin", "x86_64") => Some(SessiondTarget::X86_64Mac),
         ("darwin", "arm64" | "aarch64") => Some(SessiondTarget::Aarch64Mac),
         _ => None,
     }
@@ -77,7 +73,6 @@ pub fn local_target() -> Option<SessiondTarget> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some(SessiondTarget::X86_64Linux),
         ("linux", "aarch64") => Some(SessiondTarget::Aarch64Linux),
-        ("macos", "x86_64") => Some(SessiondTarget::X86_64Mac),
         ("macos", "aarch64") => Some(SessiondTarget::Aarch64Mac),
         ("windows", "x86_64" | "aarch64") => Some(SessiondTarget::X86_64Windows),
         _ => None,
@@ -280,7 +275,8 @@ mod tests {
         assert_eq!(target_from_uname("Linux x86_64"), Some(SessiondTarget::X86_64Linux));
         assert_eq!(target_from_uname("Linux aarch64"), Some(SessiondTarget::Aarch64Linux));
         assert_eq!(target_from_uname("Darwin arm64"), Some(SessiondTarget::Aarch64Mac));
-        assert_eq!(target_from_uname("Darwin x86_64"), Some(SessiondTarget::X86_64Mac));
+        assert_eq!(target_from_uname("Darwin x86_64"), None);
+        assert_eq!(SessiondTarget::from_triple("x86_64-apple-darwin"), None);
         assert_eq!(target_from_uname("FreeBSD amd64"), None);
         assert_eq!(target_from_uname("Linux riscv64"), None);
         assert_eq!(target_from_windows_arch("AMD64\r"), Some(SessiondTarget::X86_64Windows));

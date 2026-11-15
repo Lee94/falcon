@@ -4,7 +4,7 @@
 //!   按目标编 libghostty-vt 的静态库（`zig build -Demit-lib-vt -Doptimize=ReleaseSafe`），放进
 //!   `native/.cache/ghostty/<标识>/<三元组>/`（标识见 [`Pin::build_id`]）；
 //! - `ghostty-bindgen`：从同一份头文件重新生成 `ghostty-vt-sys/src/bindings.rs`（只在升 pin 时跑）；
-//! - `sessiond`：用 cargo-zigbuild 交叉编 5 个目标，产物在 `native/target-sessiond/<三元组>/release/`。
+//! - `sessiond`：用 cargo-zigbuild 交叉编 4 个目标，产物在 `native/target-sessiond/<三元组>/release/`。
 //!
 //! 全程不经任何 build.rs 联网：下载只在这里发生，都按钉死的 sha256 校验。Zig 的包缓存
 //! （ghostty 的依赖）也指到 `native/.cache/`，不写进 `~/.cache/zig`。
@@ -20,30 +20,25 @@ use sha2::Digest as _;
 
 use crate::util::{download, native, run_env};
 
-/// 钉死的 Zig。升级时把四个宿主平台 tarball 的 sha256 一起换掉（来自 ziglang.org/download/index.json）
+/// 钉死的 Zig。升级时把三个宿主平台 tarball 的 sha256 一起换掉（来自 ziglang.org/download/index.json）
 const ZIG_VERSION: &str = "0.16.0";
-const ZIG_TARBALLS: [(&str, &str); 4] = [
+const ZIG_TARBALLS: [(&str, &str); 3] = [
     ("aarch64-macos", "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"),
-    ("x86_64-macos", "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7"),
     ("x86_64-linux", "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"),
     ("aarch64-linux", "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"),
 ];
 
-/// 守护进程的 5 个目标：(Rust 三元组, Zig 目标)。
+/// 守护进程的 4 个目标：(Rust 三元组, Zig 目标)。
 ///
-/// macOS 的 Zig 目标带上最低系统版本，与 Rust 的缺省部署目标对齐（arm64 11.0、x64 10.12
-/// 太老，ghostty 不支持，取 10.15）——不对齐的话链接器对每个目标文件报一句
+/// macOS 的 Zig 目标带上最低系统版本，与 Rust 的缺省部署目标 arm64 11.0 对齐。
+/// 不对齐的话链接器对每个目标文件报一句
 /// "built for newer macOS version"。
-pub const TARGETS: [(&str, &str); 5] = [
+pub const TARGETS: [(&str, &str); 4] = [
     ("x86_64-unknown-linux-musl", "x86_64-linux-musl"),
     ("aarch64-unknown-linux-musl", "aarch64-linux-musl"),
-    ("x86_64-apple-darwin", "x86_64-macos.10.15"),
     ("aarch64-apple-darwin", "aarch64-macos.11.0"),
     ("x86_64-pc-windows-gnu", "x86_64-windows-gnu"),
 ];
-
-/// x86_64 macOS 的部署目标：与上面 Zig 目标的版本一致
-const X64_MACOS_DEPLOYMENT: &str = "10.15";
 
 struct Pin {
     commit: String,
@@ -115,7 +110,6 @@ fn sha256_hex(path: &Path) -> Result<String> {
 fn zig_host() -> Result<&'static str> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "aarch64-macos",
-        ("macos", "x86_64") => "x86_64-macos",
         ("linux", "x86_64") => "x86_64-linux",
         ("linux", "aarch64") => "aarch64-linux",
         (os, arch) => bail!("守护进程只在 macOS / Linux 上构建（{os}-{arch} 不支持）：Windows 产物由它们交叉编出"),
@@ -279,7 +273,6 @@ fn parse_targets(args: &[String]) -> Result<(Vec<(&'static str, &'static str)>, 
 pub fn host_target() -> Result<(&'static str, &'static str)> {
     let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
         ("linux", "x86_64") => "x86_64-unknown-linux-musl",
         ("linux", "aarch64") => "aarch64-unknown-linux-musl",
         (os, arch) => bail!("{os}-{arch} 上不构建守护进程"),
@@ -353,16 +346,21 @@ pub fn artifact(triple: &str) -> PathBuf {
     native().join("target-sessiond").join(triple).join("release").join(exe)
 }
 
-/// 将全部 5 个目标的守护进程压缩为 `native/target-sessiond/embed/<三元组>.gz`，供 `falcon-server`
+/// 将全部 4 个目标的守护进程压缩为 `native/target-sessiond/embed/<三元组>.gz`，供 `falcon-server`
 /// `embed-sessiond` 特性内嵌与 CI 跨 runner 传递。
 pub fn pack_embed() -> Result<PathBuf> {
+    pack_embed_targets(&TARGETS)
+}
+
+/// CI 按目标分组构建时只压缩该组；服务端本地打包仍通过 pack_embed 要求全部四目标。
+fn pack_embed_targets(targets: &[(&str, &str)]) -> Result<PathBuf> {
     let embed_dir = native().join("target-sessiond/embed");
     std::fs::create_dir_all(&embed_dir)?;
-    for (t, _) in TARGETS {
+    for (t, _) in targets {
         let path = artifact(t);
         let bytes = std::fs::read(&path).with_context(|| {
             format!(
-                "缺少守护进程产物 {}，请先运行 cargo xtask sessiond --targets all",
+                "缺少守护进程产物 {}，请先运行 cargo xtask sessiond --targets {t}",
                 path.display()
             )
         })?;
@@ -392,7 +390,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     build(&targets, check, test)?;
     if pack {
-        let dir = pack_embed()?;
+        let dir = pack_embed_targets(&targets)?;
         println!("已打包内嵌守护进程：{}/*.gz", dir.display());
     }
     Ok(())
@@ -415,25 +413,17 @@ pub fn build(targets: &[(&'static str, &'static str)], check: bool, test: bool) 
     let path = prepend_path(&path_dirs);
     let manifest = native().join("sessiond/Cargo.toml");
     let target_dir = native().join("target-sessiond");
-    let mut env: Vec<(&str, OsString)> = vec![
+    let env: Vec<(&str, OsString)> = vec![
         ("PATH", path),
         ("ZIG_GLOBAL_CACHE_DIR", cache().join("zig-global").into_os_string()),
-        ("MACOSX_DEPLOYMENT_TARGET_x86_64_apple_darwin", X64_MACOS_DEPLOYMENT.into()),
         // 绕过 rustup 代理时 rust-lld / 构建脚本找不到 libLLVM（同 build-web.sh）
         ("DYLD_FALLBACK_LIBRARY_PATH", tc.parent().expect("工具链目录").join("lib").into_os_string()),
     ];
-    let env_for = |env: &mut Vec<(&str, OsString)>, triple: &str| {
-        env.retain(|(k, _)| *k != "MACOSX_DEPLOYMENT_TARGET");
-        if triple == "x86_64-apple-darwin" {
-            env.push(("MACOSX_DEPLOYMENT_TARGET", X64_MACOS_DEPLOYMENT.into()));
-        }
-    };
 
     if check {
         // 零警告：每个目标都 check 一遍（cfg(windows) 的代码只有交叉 check 才看得到），
         // 单独的 target 目录，不让 -D warnings 冲掉正常构建的缓存
         for (triple, _) in targets {
-            env_for(&mut env, triple);
             let mut e = env.clone();
             e.push(("RUSTFLAGS", "-D warnings".into()));
             let er: Vec<(&str, &std::ffi::OsStr)> = e.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
@@ -457,7 +447,6 @@ pub fn build(targets: &[(&'static str, &'static str)], check: bool, test: bool) 
         }
     }
     if test {
-        env_for(&mut env, host_triple);
         let er: Vec<(&str, &std::ffi::OsStr)> = env.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
         println!("== cargo test（{host_triple}）==");
         run_env(
@@ -481,7 +470,6 @@ pub fn build(targets: &[(&'static str, &'static str)], check: bool, test: bool) 
     }
 
     for (triple, _) in targets {
-        env_for(&mut env, triple);
         let er: Vec<(&str, &std::ffi::OsStr)> = env.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
         // 本机目标用系统链接器；其余交给 cargo-zigbuild（zig cc 当链接器，带各平台的 libc）
         let sub = if *triple == host_triple && cfg!(target_os = "macos") { "build" } else { "zigbuild" };

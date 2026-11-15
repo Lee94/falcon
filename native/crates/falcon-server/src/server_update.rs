@@ -33,6 +33,9 @@ pub fn record_listener(config: &ServerConfig, actual_port: u16) {
 }
 
 pub fn platform(os: &str, arch: &str) -> Option<String> {
+    if os == "macos" && arch != "aarch64" {
+        return None;
+    }
     let os = match os { "linux" => "linux", "macos" => "darwin", "windows" => "win32", _ => return None };
     let arch = match arch { "x86_64" => "x64", "aarch64" if os != "win32" => "arm64", _ => return None };
     Some(format!("{os}-{arch}"))
@@ -765,6 +768,8 @@ mod tests {
 
     #[test]
     fn platform_assets_and_checksums_are_exact() {
+        assert_eq!(platform("macos", "aarch64").as_deref(), Some("darwin-arm64"));
+        assert_eq!(platform("macos", "x86_64"), None);
         assert_eq!(platform("linux", "aarch64").as_deref(), Some("linux-arm64"));
         assert_eq!(platform("windows", "x86_64").as_deref(), Some("win32-x64"));
         assert_eq!(platform("windows", "aarch64"), None);

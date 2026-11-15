@@ -345,7 +345,6 @@ fn platform(target: SessiondTarget) -> &'static str {
     match target {
         SessiondTarget::X86_64Linux => "linux-x64",
         SessiondTarget::Aarch64Linux => "linux-arm64",
-        SessiondTarget::X86_64Mac => "darwin-x64",
         SessiondTarget::Aarch64Mac => "darwin-arm64",
         SessiondTarget::X86_64Windows => "win32-x64",
     }

@@ -22,9 +22,9 @@ cargo xtask server                        # 当前平台
 cargo xtask server --target linux-x64     # 交叉编译：先 rustup target add 对应三元组并配好链接器
 ```
 
-平台名：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`。不支持把服务端编成 Windows 目标。Windows 作为 SSH 远端是支持的。
+平台名：`darwin-arm64`、`linux-x64`、`linux-arm64`、`win32-x64`。macOS 仅支持 Apple Silicon，不再发布 Intel macOS 产物。Windows 服务端产物带 `.exe` 后缀。
 
-产物在 `release/falcon-v<版本>-<平台>`，一个可执行文件。五个目标的会话守护进程（gzip）编在里面，没有首次运行时解压整包的步骤；守护进程在第一次用到时释放或推送。构建要 Zig（xtask 按锁定版本自己下载）、rustup 的五个目标，以及 `cargo install cargo-zigbuild`。
+产物在 `release/falcon-v<版本>-<平台>`，一个可执行文件。四个目标的会话守护进程（gzip）编在里面，没有首次运行时解压整包的步骤；守护进程在第一次用到时释放或推送。构建要 Zig（xtask 按锁定版本自己下载）、rustup 的四个目标，以及 `cargo install cargo-zigbuild`。
 
 ```bash
 ./falcon-v<版本>-linux-x64 --port 8080
@@ -42,9 +42,9 @@ cargo xtask pkg                # 没有当前平台的服务端产物就先 carg
 cargo xtask pkg --skip-bin     # 只用已有的 release/falcon-v*-darwin-*
 ```
 
-要在 macOS 上打，用系统自带的 pkgbuild、iconutil、codesign，外加 `brew install librsvg`（rsvg-convert 画 AppIcon）。
+要在 Apple Silicon macOS 上打，用系统自带的 pkgbuild、iconutil、codesign，外加 `brew install librsvg`（rsvg-convert 画 AppIcon）。
 
-产物 `release/Falcon-v<版本>-darwin-<arch>.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，在系统设置里选择仍要打开即可。已经装过服务的机器可以直接拿它升级：postinstall 与 App 启动时都会先从 LaunchAgent 读出原来的 `--host`、`--port`、`--data-dir`，再执行 `service install`。自定义端口与数据目录照旧。装着的 Falcon.app 每次启动都会用它自带的服务端重装服务。只换服务端二进制、不换 App 的话，下次打开旧 App，服务会被换回旧版。
+产物 `release/Falcon-v<版本>-darwin-arm64.pkg`。没有开发者签名，别人机器上 Gatekeeper 会拦，在系统设置里选择仍要打开即可。已经装过服务的机器可以直接拿它升级：postinstall 与 App 启动时都会先从 LaunchAgent 读出原来的 `--host`、`--port`、`--data-dir`，再执行 `service install`。自定义端口与数据目录照旧。装着的 Falcon.app 每次启动都会用它自带的服务端重装服务。只换服务端二进制、不换 App 的话，下次打开旧 App，服务会被换回旧版。
 
 ## Windows 安装包
 

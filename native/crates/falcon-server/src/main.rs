@@ -14,6 +14,9 @@ use falcon_server::db::Db;
 use falcon_server::engine::{self, EngineDeps};
 
 fn main() -> anyhow::Result<()> {
+    // 先于一切子命令：service / node / update-helper 也可能要往宿主机释放或推送守护进程
+    #[cfg(feature = "embed-sessiond")]
+    falcon_server::sessiond::bin::register_embedded(embedded_sessiond);
     init_logging();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
@@ -120,6 +123,20 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
+}
+
+/// 发布构建内嵌的 4 个目标守护进程（gzip，`FALCON_EMBED_SESSIOND_DIR` 由 `cargo xtask server` /
+/// CI 指好）。写在 bin target 里而不是库里，换守护进程只重编这个文件，原因见
+/// `falcon_server::sessiond::bin::register_embedded`
+#[cfg(feature = "embed-sessiond")]
+fn embedded_sessiond(target: falcon_server::sessiond::command::SessiondTarget) -> &'static [u8] {
+    use falcon_server::sessiond::command::SessiondTarget;
+    match target {
+        SessiondTarget::X86_64Linux => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-unknown-linux-musl.gz")),
+        SessiondTarget::Aarch64Linux => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-unknown-linux-musl.gz")),
+        SessiondTarget::Aarch64Mac => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-apple-darwin.gz")),
+        SessiondTarget::X86_64Windows => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-pc-windows-gnu.gz")),
+    }
 }
 
 /// 日志写 stderr。`FALCON_LOG=debug` 打开调试日志（与原生客户端同一个开关）

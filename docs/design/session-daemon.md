@@ -350,7 +350,7 @@ fn upgrade_vt(&self, _binary: &str) {}
 **二进制定位**（`bin.rs`，按下面的顺序找）：
 
 1. `FALCON_SESSIOND_DIR`：一个目录，按 `<三元组>/release/falcon-sessiond[.exe]` 或 `<三元组>/falcon-sessiond[.exe]` 放；
-2. 编进发布版的那份：`embed-sessiond` feature，5 个目标各一份 gzip（`cargo xtask server` 准备在 `target-sessiond/embed/`）；
+2. 编进发布版的那份：`embed-sessiond` feature，4 个目标各一份 gzip（`cargo xtask server` 准备在 `target-sessiond/embed/`）。`include_bytes!` 写在 falcon-server 的 `main.rs`，启动时经 `register_embedded` 交给库：CI 先用占位文件编完整个工作区、守护进程到了再换上真文件，这时只重编 `main.rs` 并重新链接，不必重编整个库；`cargo xtask server` 出包前核对每份 gzip 解得开、是对应目标的可执行文件，并且原样出现在产物里；
 3. 开发构建：`native/target-sessiond/<三元组>/release/falcon-sessiond`（`cargo xtask sessiond` 的产物）；
 4. 都没有：非持久，原因 `sessiond-unavailable`（只会发生在没编那个目标的开发构建上）。
 
@@ -419,7 +419,7 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 
 | 什么 | 钉在哪 | 值 |
 |---|---|---|
-| Zig | `xtask/src/sessiond.rs`：版本 + 四个宿主平台 tarball 的 sha256 | 0.16.0 |
+| Zig | `xtask/src/sessiond.rs`：版本 + 三个宿主平台 tarball 的 sha256 | 0.16.0 |
 | ghostty | `native/sessiond/ghostty.pin`：commit + 源码包 sha256 | `05dcf887ef51ea27821f20979493306ec3a19149` |
 | 绑定 | `ghostty-vt-sys/src/bindings.rs`，文件头注明 commit | 随 pin 一起更新 |
 | ghostty 补丁 | `native/sessiond/ghostty-patches/*.patch`；`ghostty.pin` 的 `patches=` 是它们按文件名顺序拼起来的 sha256 | `0001`：VT 输出正文里的 OSC 8 链接（6.2 第 6 条） |
@@ -430,10 +430,11 @@ native/sessiond/                      独立的 Cargo 工作区，不进 native/
 
 - `cargo xtask ghostty [--targets host|all|<三元组>,…] [--force]`：确保 Zig（下载到 `native/.cache/zig/`，比对 sha256）和 ghostty 源码（`native/.cache/ghostty/<标识>/src`，源码包比对 sha256，解包后打上 `ghostty-patches/` 的补丁，见 13.2）就绪，按目标 `zig build -Demit-lib-vt -Doptimize=ReleaseSafe -Dtarget=…`，静态库拷到 `native/.cache/ghostty/<标识>/<三元组>/libghostty-vt.a`（目录里只有静态库：同目录有 dylib 时 macOS 链接器会挑 dylib；Windows 上 zig 出的静态库叫 `ghostty-vt-static.lib`，拷成同一个名字）。Zig 的包缓存指到 `native/.cache/zig-global`。两个实测的坑：
   - ghostty 的 build.zig 用 `git describe` 取版本号，而 `.cache` 在 falcon 自己的仓库里——git 一路往上找到 falcon 的仓库和它的 tag，ghostty 当成"打了 tag 的发布版"去核对版本号直接 panic。用 `GIT_CEILING_DIRECTORIES` 挡在源码目录的上一层；
-  - macOS 的 Zig 目标带上最低系统版本（`aarch64-macos.11.0`、`x86_64-macos.10.15`），与 Rust 的部署目标对齐，否则链接器对每个目标文件报 "built for newer macOS version"。
+  - macOS 的 Zig 目标带上最低系统版本（`aarch64-macos.11.0`），与 Rust 的部署目标对齐，否则链接器对每个目标文件报 "built for newer macOS version"。
 - `cargo xtask ghostty-bindgen`：用 bindgen（macOS 用 CommandLineTools 自带的 libclang）从 pin 对应的头文件重新生成 `bindings.rs`。只在升 pin 时跑，diff 就是 ABI 变化。
-- `cargo xtask sessiond [--targets …] [--check] [--test]`：本机目标用系统链接器（macOS），其余用 cargo-zigbuild。用 rustup 的 stable 工具链（PATH 上排前面的 Homebrew rustc 没有交叉目标的标准库）。`--check` 每个目标 `cargo check --all-targets` 加 `-D warnings`（单独的 target 目录，不冲掉正常构建的缓存）——cfg(windows) 的代码只有交叉 check 才看得到；`--test` 跑本机目标的测试。产物 `native/target-sessiond/<三元组>/release/`。
-- `cargo xtask server`：先 `sessiond --targets all`，gzip 到 `target-sessiond/embed/`，再带 `embed-sessiond` 编服务端。CI（`.github/workflows/package.yml`）装好 5 个 rustup 目标与 cargo-zigbuild。
+- `cargo xtask sessiond [--targets …] [--check] [--test]`：本机目标用系统链接器（macOS），其余用 cargo-zigbuild。用 rustup 的 stable 工具链（PATH 上排前面的 Homebrew rustc 没有交叉目标的标准库）；设了 `RUSTUP_TOOLCHAIN` 时用它，CI 借此固定 Rust 版本。`--check` 每个目标 `cargo check --all-targets` 加 `-D warnings`（单独的 target 目录，不冲掉正常构建的缓存）——cfg(windows) 的代码只有交叉 check 才看得到；`--test` 跑本机目标的测试。产物 `native/target-sessiond/<三元组>/release/`。
+- `cargo xtask sessiond --targets <列表> --pack-embed`：只构建并压缩所选目标到 `target-sessiond/embed/`；CI（`.github/workflows/package.yml`）每个目标单独一组并行（Linux / Windows 目标在 Linux runner 上交叉编，macOS 目标在 macOS runner 上编并跑本机测试），各组安装对应 rustup 目标与 cargo-zigbuild，检查与测试通过后才上传本组产物；打包 job 在同一次运行里等这些产物再内嵌，`sessiond` job 另外汇总并核对四目标 gzip。
+- `cargo xtask server`：先 `sessiond --targets all`，把全部四目标 gzip 到 `target-sessiond/embed/`，再带 `embed-sessiond` 编服务端；本地服务端发布仍要求全部四目标。
 
 ### 13.4 实测（2026-10-13，macOS arm64 构建）
 

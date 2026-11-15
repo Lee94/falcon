@@ -49,6 +49,9 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 /// 与 `xtask` 的 `host_platform` 同一套名字。没有客户端安装包的系统返回 None
 pub fn release_platform(os: &str, arch: &str) -> Option<String> {
+    if os == "macos" && arch != "aarch64" {
+        return None;
+    }
     let os = match os {
         "macos" => "darwin",
         "windows" => "win32",
@@ -324,7 +327,7 @@ mod tests {
     #[test]
     fn platform_and_asset_names_match_the_packager() {
         assert_eq!(release_platform("macos", "aarch64").as_deref(), Some("darwin-arm64"));
-        assert_eq!(release_platform("macos", "x86_64").as_deref(), Some("darwin-x64"));
+        assert_eq!(release_platform("macos", "x86_64"), None);
         assert_eq!(release_platform("windows", "x86_64").as_deref(), Some("win32-x64"));
         assert_eq!(release_platform("linux", "x86_64"), None);
         assert_eq!(asset_name("0.3.19", "darwin-arm64"), "Falcon-v0.3.19-darwin-arm64.pkg");

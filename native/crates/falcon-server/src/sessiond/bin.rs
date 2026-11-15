@@ -3,11 +3,12 @@
 //! 1. `FALCON_SESSIOND_DIR`：一个目录，里面按目标三元组分子目录放 `falcon-sessiond[.exe]`
 //!    （即 `native/target-sessiond` 的布局：`<目录>/<三元组>/release/falcon-sessiond`），
 //!    或直接是 `<目录>/<三元组>/falcon-sessiond`；
-//! 2. 编进发布版的那份（`embed-sessiond` feature，5 个目标各一份 gzip）；
+//! 2. 编进发布版的那份（`embed-sessiond` feature，4 个目标各一份 gzip，由 `main.rs` 启动时
+//!    经 [`register_embedded`] 登记）；
 //! 3. 开发构建：`native/target-sessiond/<三元组>/release/falcon-sessiond`（`cargo xtask sessiond` 的产物）；
 //! 4. 都没有：这个构建里没有那个目标的守护进程，会话标非持久（`sessiond-unavailable`）。
 //!
-//! Mac 上的后端也会连 Linux arm64 的远端，所以发布版把 5 个目标全编进去。
+//! Mac 上的后端也会连 Linux arm64 的远端，所以发布版把 4 个目标全编进去。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -89,26 +90,40 @@ fn load(target: SessiondTarget) -> Option<Vec<u8>> {
     None
 }
 
+/// 编进二进制的守护进程：给出某个目标的 gzip（`include_bytes!` 的结果）
+#[cfg(feature = "embed-sessiond")]
+pub type EmbeddedArchive = fn(SessiondTarget) -> &'static [u8];
+
+#[cfg(feature = "embed-sessiond")]
+static EMBEDDED: std::sync::OnceLock<EmbeddedArchive> = std::sync::OnceLock::new();
+
+/// 发布构建的可执行入口（`main.rs`）在启动最早处登记内嵌的守护进程；重复登记保留第一次的。
+///
+/// `include_bytes!` 刻意写在 `main.rs` 而不是库里：CI 先用占位文件把整个工作区编完（与守护进程的
+/// 构建并行），守护进程产物到了再换上真文件重编。include 在库里时换文件要把 6 万行的库整个重编
+/// （macOS / Windows runner 上 3–4 分钟，正好压在发版关键路径上）；放在 bin target 里只重编
+/// `main.rs` 再链接。`cargo xtask server` 出包前核对产物里确实原样带着这 4 份 gzip。
+#[cfg(feature = "embed-sessiond")]
+pub fn register_embedded(gz: EmbeddedArchive) {
+    let _ = EMBEDDED.set(gz);
+}
+
 /// 编进二进制的守护进程（发布构建）。构建时 `FALCON_EMBED_SESSIOND_DIR` 指向放
-/// `<三元组>.gz` 的目录（`cargo xtask server` 准备好）
+/// `<三元组>.gz` 的目录（`cargo xtask server` 准备好），字节由 `main.rs` 登记
 mod embedded {
     use super::SessiondTarget;
-
-    #[cfg(feature = "embed-sessiond")]
-    fn gz(target: SessiondTarget) -> &'static [u8] {
-        match target {
-            SessiondTarget::X86_64Linux => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-unknown-linux-musl.gz")),
-            SessiondTarget::Aarch64Linux => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-unknown-linux-musl.gz")),
-            SessiondTarget::X86_64Mac => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-apple-darwin.gz")),
-            SessiondTarget::Aarch64Mac => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/aarch64-apple-darwin.gz")),
-            SessiondTarget::X86_64Windows => include_bytes!(concat!(env!("FALCON_EMBED_SESSIOND_DIR"), "/x86_64-pc-windows-gnu.gz")),
-        }
-    }
 
     pub fn bytes(target: SessiondTarget) -> Option<Vec<u8>> {
         #[cfg(feature = "embed-sessiond")]
         {
             use std::io::Read as _;
+            // 库的单元测试没有 main.rs，开了特性也没人登记，照常落到开发构建的目录
+            let Some(gz) = super::EMBEDDED.get() else {
+                if !cfg!(test) {
+                    log::warn!("发布构建没有登记内嵌的守护进程（main.rs 没调 register_embedded？）");
+                }
+                return None;
+            };
             let mut out = Vec::new();
             return match flate2::read::GzDecoder::new(gz(target)).read_to_end(&mut out) {
                 Ok(_) => Some(out),

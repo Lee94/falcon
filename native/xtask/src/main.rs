@@ -26,7 +26,7 @@ mod win;
 const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
-  server [--target <平台>] [--skip-sessiond] [--skip-cargo]  服务端发布单文件（内嵌 5 个目标守护进程）
+  server [--target <平台>] [--skip-sessiond] [--skip-cargo]  服务端发布单文件（内嵌 4 个目标守护进程）
   pkg [--skip-bin] [--skip-cargo]        macOS 安装包（Falcon.app = NSH 原生客户端 + Resources 里的服务端）
   win [--skip-cargo]                     Windows 安装包（Inno Setup，NSH 原生客户端 + 同目录服务端）
   linux [--target <平台>] [--server <路径>] [--deb-only]  Linux 服务端安装文件：.deb / .rpm / install.sh
@@ -53,7 +53,7 @@ NSH 六端统一客户端开发与验证（ADR 0028）
   fixtures [--node-updates-only]         起真服务端生成协议样本；可只更新节点与升级接口
   compare-fixtures <基准目录> <对照目录>  比两套 fixture 的形状
 
-平台名：darwin-arm64 / darwin-x64 / linux-x64 / linux-arm64 / win32-x64（Windows 产物加 .exe）。";
+平台名：darwin-arm64 / linux-x64 / linux-arm64 / win32-x64（Windows 产物加 .exe）。";
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

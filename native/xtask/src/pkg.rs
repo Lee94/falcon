@@ -23,8 +23,8 @@ use anyhow::{Result, bail};
 use crate::util::{self, TempDir, host_platform, native, root, version};
 
 fn build(skip_bin: bool, skip_cargo: bool) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        bail!("macOS 安装包只能在 macOS 上打（需要 pkgbuild / iconutil / codesign）");
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        bail!("macOS 安装包只能在 Apple Silicon macOS 上打（需要 pkgbuild / iconutil / codesign）");
     }
     let templates = native().join("xtask/assets/macos-pkg");
     let release = root().join("release");
