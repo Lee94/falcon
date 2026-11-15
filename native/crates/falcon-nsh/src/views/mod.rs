@@ -15,6 +15,7 @@ pub mod session_operations;
 mod server_update;
 pub mod quick_open;
 pub(crate) mod preview_popup;
+mod theme_picker;
 mod relays;
 mod tailscale;
 

@@ -1,12 +1,13 @@
 use std::rc::Rc;
 
 use falcon_core::command_palette::move_selection;
-use falcon_core::file_search::{FILE_SEARCH_LIMIT, filter_files};
+use falcon_core::file_search::{FILE_SEARCH_LIMIT, basename, dirname, filter_files};
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
 use crate::store::{ActiveDialog, WorkspaceStore};
+use crate::shell::widgets::{Glyph, glyph};
 use crate::terminal::bind_safe_key_when;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -39,7 +40,7 @@ pub fn render(
                     .rounded(zpx(6.0))
                     .bg(rgba_to_hsla(ui.input))
                     .text_xs()
-                    .placeholder(t!("palette.goToFile"))
+                    .placeholder(t!("quickOpen.placeholder"))
                     .on_change(move |value: &str| {
                         query.set(value.to_string());
                         selected.set(0);
@@ -68,7 +69,12 @@ fn render_results(
     let resolved = use_theme().resolved();
     let ui = &resolved.ui;
     let paths = store.quick_open_paths.get();
-    let filtered = filter_files(&paths, &query.get(), FILE_SEARCH_LIMIT);
+    let loading = store.quick_open_loading.get();
+    let error = store.quick_open_error.get();
+    let has_project = !store.quick_open_project.get().is_empty();
+    let filtered = if has_project && !loading && error.is_none() {
+        filter_files(&paths, &query.get(), FILE_SEARCH_LIMIT)
+    } else { Vec::new() };
     let selected_index = selected.get().min(filtered.len().saturating_sub(1));
     selected.set(selected_index);
     let down_store = store.clone();
@@ -117,28 +123,24 @@ fn render_results(
         st.open_file_pane(&project, &path);
     });
     let mut list = view().flex_col().gap(zpx(3.0)).p(zpx(10.0));
-    if store.quick_open_loading.get() {
+    if !has_project {
+        list = list.child(text(t!("native.quickOpen.noProject")).test_id("quick-open-no-project")
+            .text_xs().text_color(rgb_to_hsla(ui.muted_foreground)));
+    } else if let Some(error) = error {
+        list = list.child(view().test_id("quick-open-error").flex_col().gap(zpx(4.0))
+            .child(text(t!("native.quickOpen.failed")).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
+            .child(text(error).text_xs().text_color(rgb_to_hsla(ui.destructive))));
+    } else if loading {
         list = list.child(
             text(t!("quickOpen.loading"))
+                .test_id("quick-open-loading")
                 .text_xs()
                 .text_color(rgb_to_hsla(ui.muted_foreground)),
-        );
-    } else if let Some(error) = store.quick_open_error.get() {
-        list = list.child(
-            text(error)
-                .text_xs()
-                .text_color(rgb_to_hsla(ui.destructive)),
         );
     } else if filtered.is_empty() {
         list = list.child(
-            text(t!("palette.empty"))
-                .text_xs()
-                .text_color(rgb_to_hsla(ui.muted_foreground)),
-        );
-    }
-    if store.quick_open_truncated.get() {
-        list = list.child(
-            text(t!("palette.quickOpenTruncated"))
+            text(t!("native.quickOpen.empty"))
+                .test_id("quick-open-empty")
                 .text_xs()
                 .text_color(rgb_to_hsla(ui.muted_foreground)),
         );
@@ -162,6 +164,7 @@ fn render_results(
             .py(zpx(6.0))
             .rounded(zpx(6.0))
             .cursor_pointer()
+            .gap(zpx(8.0))
             .on_press(move || {
                 let project = st.quick_open_project.get();
                 if project != st.active_project_id.get() {
@@ -170,18 +173,30 @@ fn render_results(
                 st.active_dialog.set(ActiveDialog::None);
                 st.open_file_pane(&project, &file);
             })
+            .child(view().text_color(rgb_to_hsla(ui.muted_foreground)).child(glyph(Glyph::File)))
             .child(
-                text(path.clone())
+                text(basename(path).to_string())
+                    .flex_1().min_w_0().number_of_lines(1)
                     .text_xs()
                     .text_color(rgb_to_hsla(ui.foreground)),
-            );
+            )
+            .when(!dirname(path).is_empty(), |v| v.child(text(dirname(path).to_string())
+                .max_w(zpx(200.0)).number_of_lines(1).text_xs()
+                .text_color(rgb_to_hsla(ui.muted_foreground))));
         list = list.child(if index == selected_index {
-            row.bg(rgb_to_hsla(ui.card))
+            row.bg(rgb_to_hsla(ui.tint))
         } else {
             row
         });
         visible_rows.push(row_ref);
     }
     *row_refs.borrow_mut() = visible_rows;
-    scroll().flex_1().child(list)
+    view().flex_1().min_h_0().flex_col()
+        .child(scroll().flex_1().child(list))
+        .when(has_project && !loading && store.quick_open_error.get().is_none() && store.quick_open_truncated.get(), |v| {
+            v.child(text(t!("native.quickOpen.truncated", n = paths.len().to_string().as_str()))
+                .test_id("quick-open-truncated-footer")
+                .px(zpx(16.0)).py(zpx(6.0)).text_xs()
+                .text_color(rgb_to_hsla(ui.muted_foreground)))
+        })
 }

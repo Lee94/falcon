@@ -38,6 +38,7 @@ pub enum Glyph {
     Key,
     Warning,
     ListTree,
+    Copy,
 }
 
 pub(crate) fn session_icon(agent: Option<falcon_proto::SessionAgent>) -> AnyElement {
@@ -74,6 +75,7 @@ pub fn glyph_sized(kind: Glyph, size: Points) -> impl IntoElement {
         Glyph::Key => "<circle cx='8' cy='8' r='5'/><path d='m12 12 9 9 M16 16l3-3 M19 19l3-3'/>",
         Glyph::Warning => "<path d='m12 3 10 18H2Z M12 9v5 M12 17h.01'/>",
         Glyph::ListTree => "<path d='M4 3v14h4 M4 7h4 M12 7h9 M12 17h9'/>",
+        Glyph::Copy => "<rect x='8' y='8' width='13' height='13' rx='2'/><path d='M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3'/>",
         Glyph::File => "<path d='M14 2H5v20h14V7Z M14 2v5h5'/>",
         Glyph::ArrowUp => "<path d='M12 20V4 m-7 7 7-7 7 7'/>",
         Glyph::Refresh => "<path d='M20 7a9 9 0 1 0 1 8 M20 2v6h-6'/>",

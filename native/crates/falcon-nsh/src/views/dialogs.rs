@@ -49,6 +49,25 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let askpass_input = signal(String::new());
     let theme_slot = signal(theme_ctrl.active_slot());
     let theme_picker_open = signal(false);
+    let theme_picker = super::theme_picker::PickerState::new();
+    provide_context(theme_picker);
+    let previous_theme_slot = stored(theme_slot.get_untracked());
+    effect(move || {
+        let selected = theme_slot.get();
+        if previous_theme_slot.replace(selected) != selected {
+            theme_ctrl.preview(None);
+            theme_picker.reset();
+        }
+    });
+    let preview_store = store.clone();
+    effect(move || {
+        let appearance = preview_store.active_dialog.get()
+            == ActiveDialog::Settings(SettingsTab::Appearance);
+        if !appearance || !theme_picker_open.get() {
+            theme_ctrl.preview(None);
+            theme_picker.reset();
+        }
+    });
     let settings_filter = signal(String::new());
     let appearance_was_open = signal(false);
     let host_settings_was_open = signal(false);
@@ -79,6 +98,9 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         }
         appearance_was_open.set(appearance_open);
         let host_settings_open = dialog == ActiveDialog::Settings(SettingsTab::Hosts);
+        if host_settings_open && !host_settings_was_open.get() {
+            store.refresh_settings_hosts();
+        }
         if host_settings_was_open.get() && !host_settings_open {
             store.invalidate_host_edit_generation();
         }
@@ -109,7 +131,12 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             close_modal_dialog(&st_escape, &escape_dialog, project_picker);
         });
 
-        let resolved = theme_ctrl.resolved();
+        // Theme previews must restyle the surface without remounting the editor inputs.
+        let resolved = if appearance_open {
+            untracked(|| theme_ctrl.resolved())
+        } else {
+            theme_ctrl.resolved()
+        };
         let ui = &resolved.ui;
 
         let focus_card_on_open = !dialog_uses_input_autofocus(&dialog);
@@ -201,13 +228,6 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             }
         };
 
-        let scrim = rgba_to_hsla(ThemeRgba {
-            r: ui.app.r,
-            g: ui.app.g,
-            b: ui.app.b,
-            a: 148,
-        });
-
         let focus_on_open = modal_focus;
         let overlay = view()
             .absolute()
@@ -216,7 +236,10 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             .justify_center()
             .p(zpx(16.0))
             .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
-            .bg(scrim)
+            .bg(move || {
+                let app = theme_ctrl.resolved().ui.app;
+                rgba_to_hsla(ThemeRgba { r: app.r, g: app.g, b: app.b, a: 148 })
+            })
             .child(
                 view()
                     .test_id("modal-layer-panel")
@@ -238,8 +261,8 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                     .overflow_hidden()
                     .rounded(zpx(16.0))
                     .border_1()
-                    .border_color(rgba_to_hsla(ui.border))
-                    .bg(rgb_to_hsla(ui.background))
+                    .border_color(move || rgba_to_hsla(theme_ctrl.resolved().ui.border))
+                    .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.background))
                     .child(card_body),
             );
         #[cfg(test)]
@@ -476,24 +499,24 @@ fn render_settings_modal(
     theme_picker_open: Signal<bool>,
     theme_slot: Signal<falcon_theme::ThemeMode>,
 ) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let muted = ui.muted;
-    let foreground = ui.foreground;
-    let muted_foreground = ui.muted_foreground;
-    let tint = ui.tint;
+    let theme = use_theme();
     let nav_store = (*store).clone();
     let search = input()
         .w_full()
         .px(zpx(8.0))
         .py(zpx(5.0))
         .rounded(zpx(8.0))
-        .bg(rgb_to_hsla(muted))
+        .bg(move || rgb_to_hsla(theme.resolved().ui.muted))
         .text_xs()
-        .text_color(rgb_to_hsla(foreground))
+        .text_color(move || rgb_to_hsla(theme.resolved().ui.foreground))
         .placeholder(t!("settings.search"))
         .value(settings_filter.get_untracked())
         .on_change(move |value: &str| settings_filter.set(value.to_string()));
     let nav_rows = dynamic(move || {
+        let resolved = theme.resolved();
+        let ui = &resolved.ui;
+        let (muted, foreground, muted_foreground, tint) =
+            (ui.muted, ui.foreground, ui.muted_foreground, ui.tint);
         let query = settings_filter.get().to_lowercase();
         let tabs = [
             (
@@ -567,7 +590,7 @@ fn render_settings_modal(
         .when(idiom() != Idiom::Phone, |v| v.h(zpx(680.0)))
         .gap(zpx(2.0))
         .p(zpx(12.0))
-        .bg(rgb_to_hsla(ui.app))
+        .bg(move || rgb_to_hsla(theme.resolved().ui.app))
         .when(idiom() == Idiom::Phone, |v| {
             v.w_full().flex_row().flex_wrap()
         })
@@ -618,7 +641,7 @@ fn render_settings_modal(
                         text(title)
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb_to_hsla(ui.foreground)),
+                            .text_color(move || rgb_to_hsla(theme.resolved().ui.foreground)),
                     )
                     .child(body),
             ),
@@ -628,14 +651,17 @@ fn render_settings_modal(
                 .absolute()
                 .top(zpx(6.0))
                 .right(zpx(6.0))
-                .child(icon_button(
+                .child(dynamic(move || icon_button(
                     "settings-close",
                     t!("common.close"),
                     Glyph::Close,
                     false,
-                    resolved,
-                    move || close.active_dialog.set(ActiveDialog::None),
-                )),
+                    &theme.resolved(),
+                    {
+                        let close = close.clone();
+                        move || close.active_dialog.set(ActiveDialog::None)
+                    },
+                ).into_element())),
         )
 }
 
@@ -671,6 +697,13 @@ fn render_hosts_tab(
         let resolved = row_theme.clone();
         let ui = &resolved.ui;
         let hosts = store.hosts.get();
+        let testing = store.host_test_busy.get();
+        if hosts.is_empty() {
+            return view().py(zpx(24.0)).child(
+                text(t!("native.settingsParity.noHosts")).text_xs()
+                    .text_color(rgb_to_hsla(ui.muted_foreground)),
+            ).into_element();
+        }
         let mut table = view()
             .flex_col()
             .p(zpx(8.0))
@@ -703,6 +736,7 @@ fn render_hosts_tab(
         for host in hosts {
             let st = store.clone();
             let id = host.id.clone();
+            let is_testing = testing.as_deref() == Some(id.as_str());
             let host_source = host.source.clone();
             let auth = host
                 .source
@@ -732,14 +766,20 @@ fn render_hosts_tab(
                         .text_color(rgb_to_hsla(ui.muted_foreground)),
                 )
                 .child(
-                    text(match auth {
+                    view().w(zpx(100.0)).flex_col().gap(zpx(2.0))
+                    .child(text(match auth {
                         "key" => t!("project.authKey"),
                         "password" => t!("project.authPassword"),
                         _ => t!("project.authAgent"),
                     })
-                    .w(zpx(100.0))
                     .text_xs()
-                    .text_color(rgb_to_hsla(ui.muted_foreground)),
+                    .text_color(rgb_to_hsla(ui.muted_foreground)))
+                    .when_some(host_source.as_ref(), |v, source| v.child(
+                        text(if source.project_count > 0 {
+                            t!("native.settingsParity.usedBy", n = source.project_count.to_string().as_str())
+                        } else { t!("native.settingsParity.unused") })
+                        .text_xs().text_color(rgb_to_hsla(ui.muted_foreground)),
+                    )),
                 )
                 .child(
                     view()
@@ -747,11 +787,11 @@ fn render_hosts_tab(
                         .px(zpx(8.0))
                         .py(zpx(4.0))
                         .rounded(zpx(8.0))
-                        .cursor_pointer()
+                        .when(testing.is_none(), |v| v.cursor_pointer())
                         .bg(rgb_to_hsla(ui.background))
-                        .on_press(move || st.test_host_connection(&id))
+                        .when(testing.is_none(), |v| v.on_press(move || st.test_host_connection(&id)))
                         .child(
-                            text(t!("host.test"))
+                            text(if is_testing { t!("host.testing") } else { t!("host.test") })
                                 .text_xs()
                                 .text_color(rgb_to_hsla(ui.foreground)),
                         ),
@@ -834,7 +874,7 @@ fn render_hosts_tab(
                 &resolved,
             ));
         }
-        table
+        table.into_element()
     });
     let editing = store.editing_host.get();
     let editing_generation = store.editing_host_generation.get();
@@ -970,6 +1010,9 @@ fn render_plugins_tab(
     let ui = &resolved.ui;
     let list = store.plugin_list.get();
     let reload = store.clone();
+    let copy = store.clone();
+    let dir = list.dir.clone();
+    let no_custom = !list.plugins.iter().any(|p| p.kind != falcon_proto::PluginKind::Builtin);
     view()
         .flex_col()
         .gap(zpx(8.0))
@@ -987,6 +1030,15 @@ fn render_plugins_tab(
                         .text_color(rgb_to_hsla(ui.muted_foreground)),
                 )
                 .child(icon_button(
+                    "copy-plugins-dir", t!("native.settingsParity.copyDir"), Glyph::Copy,
+                    false, resolved, move || {
+                        if !dir.is_empty() {
+                            set_clipboard(dir.clone());
+                            copy.show_toast(t!("native.settingsParity.copied"));
+                        }
+                    },
+                ))
+                .child(icon_button(
                     "reload-plugins",
                     t!("plugin.rescan"),
                     Glyph::Refresh,
@@ -998,7 +1050,14 @@ fn render_plugins_tab(
         .children(list.plugins.into_iter().map(|plugin| {
             let st = store.clone();
             let id = plugin.id.clone();
+            let unavailable = plugin.error.is_some();
+            let kind = match plugin.kind {
+                falcon_proto::PluginKind::Builtin => t!("native.settingsParity.kindBuiltin"),
+                falcon_proto::PluginKind::Package => t!("native.settingsParity.kindPackage"),
+                _ => t!("native.settingsParity.kindCommand"),
+            };
             view()
+                .test_id(&format!("settings-plugin-{}", plugin.id))
                 .min_h(zpx(68.0))
                 .flex_row()
                 .items_center()
@@ -1012,10 +1071,13 @@ fn render_plugins_tab(
                         .flex_col()
                         .gap(zpx(6.0))
                         .child(
-                            text(plugin.name)
+                            view().flex_row().items_center().gap(zpx(8.0))
+                            .child(view().text_color(rgb_to_hsla(ui.muted_foreground)).child(glyph(Glyph::Box)))
+                            .child(text(plugin.name.clone())
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb_to_hsla(ui.foreground)),
+                                .text_color(rgb_to_hsla(ui.foreground)))
+                            .child(text(kind).text_xs().text_color(rgb_to_hsla(ui.muted_foreground))),
                         )
                         .when_some(plugin.description, |v, description| {
                             v.child(
@@ -1023,23 +1085,36 @@ fn render_plugins_tab(
                                     .text_xs()
                                     .text_color(rgb_to_hsla(ui.muted_foreground)),
                             )
-                        }),
+                        })
+                        .when_some(plugin.dir, |v, dir| v.child(text(dir).text_xs()
+                            .font_family(crate::fonts::FONT_FAMILY_MONO)
+                            .text_color(rgb_to_hsla(ui.muted_foreground))))
+                        .child(text(match plugin.refresh {
+                            Some(seconds) => t!("native.settingsParity.pluginRefresh", n = seconds.to_string().as_str()),
+                            None => t!("native.settingsParity.pluginManualRefresh"),
+                        }).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
+                        .when_some(plugin.error, |v, error| v.child(text(error).text_xs()
+                            .text_color(rgb_to_hsla(ui.destructive)))),
                 )
                 .child(
-                    nsh_base::switch()
+                    view().test_id(&format!("settings-plugin-toggle-{}", plugin.id)).child(nsh_base::switch()
+                        .accessibility_label(plugin.name)
+                        .disabled(unavailable)
                         .w(zpx(36.0))
                         .h(zpx(20.0))
                         .rounded_full()
-                        .bg(rgb_to_hsla(if plugin.enabled {
+                        .bg(rgb_to_hsla(if plugin.enabled && !unavailable {
                             ui.primary
                         } else {
                             ui.muted
                         }))
                         .thumb_class("size-4 rounded-full bg-background checked:translate-x-4")
-                        .checked(plugin.enabled)
-                        .on_change(move |enabled: &bool| st.set_plugin_enabled(&id, *enabled)),
+                        .checked(plugin.enabled && !unavailable)
+                        .on_change(move |enabled: &bool| st.set_plugin_enabled(&id, *enabled))),
                 )
         }))
+        .when(no_custom, |v| v.child(text(t!("native.settingsParity.noCustom"))
+            .text_xs().text_color(rgb_to_hsla(ui.muted_foreground))))
 }
 
 fn render_about_tab(

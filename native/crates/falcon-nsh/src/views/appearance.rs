@@ -20,12 +20,11 @@ pub fn appearance_settings(
 ) -> impl IntoElement {
     let theme = use_theme();
     let zoom = use_context::<ZoomController>();
-    let theme_filter = signal(String::new());
 
     view()
         .flex_col()
         .gap(zpx(24.0))
-        .child(theme_settings(theme, theme_filter, theme_slot, theme_picker_open))
+        .child(theme_settings(theme, theme_slot, theme_picker_open))
         .child(zoom_settings(zoom))
         .child(window_background_settings())
         .child(app_icon_settings())
@@ -72,7 +71,6 @@ pub fn TerminalSettings() -> impl IntoElement {
 
 fn theme_settings(
     theme: crate::theme::ThemeController,
-    filter: Signal<String>,
     slot: Signal<ThemeMode>,
     picker_open: Signal<bool>,
 ) -> impl IntoElement {
@@ -124,12 +122,16 @@ fn theme_settings(
                     view()
                         .label(format!("theme-slot-{current_slot:?}"))
                         .w(zpx(256.0))
+                        .flex_row()
+                        .items_center()
+                        .gap(zpx(8.0))
                         .px(zpx(10.0))
                         .py(zpx(5.0))
                         .rounded(zpx(8.0))
                         .bg(rgb_to_hsla(ui.app))
                         .cursor_pointer()
                         .on_press(move || {
+                            theme.preview(None);
                             if selection.get_untracked() == current_slot {
                                 picker.update(|open| *open = !*open);
                             } else {
@@ -137,6 +139,7 @@ fn theme_settings(
                                 picker.set(true);
                             }
                         })
+                        .child(super::theme_picker::swatch(&choice.colors))
                         .child(
                             text(name)
                                 .text_xs()
@@ -161,67 +164,7 @@ fn theme_settings(
             if !picker_open.get() {
                 return view().into_element();
             }
-            let resolved = theme.resolved();
-            let ui = &resolved.ui;
-            let catalog = theme.catalog();
-            let filter_input = input()
-                .test_id("theme-picker-filter")
-                .w_full()
-                .px(zpx(8.0))
-                .py(zpx(6.0))
-                .rounded(zpx(8.0))
-                .bg(rgb_to_hsla(ui.app))
-                .text_xs()
-                .text_color(rgb_to_hsla(ui.foreground))
-                .placeholder(t!("theme.search", n = catalog.len().to_string().as_str()))
-                .value(filter.get_untracked())
-                .on_change(move |value: &str| filter.set(value.to_string()));
-            view()
-                .flex_col()
-                .gap(zpx(8.0))
-                .child(filter_input)
-                .child(dynamic(move || {
-                    let query = filter.get().to_lowercase();
-                    let selected_slot = slot.get();
-                    let resolved = theme.resolved();
-                    let ui = &resolved.ui;
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(zpx(4.0))
-                        .children(
-                            theme
-                                .catalog()
-                                .iter()
-                                .filter(|entry| {
-                                    query.is_empty() || entry.name.to_lowercase().contains(&query)
-                                })
-                                .take(40)
-                                .map(|entry| {
-                                    let name = entry.name.to_string();
-                                    let label = name.clone();
-                                    let theme = theme.clone();
-                                    let picker_open = picker_open;
-                                    view()
-                                        .px(zpx(8.0))
-                                        .py(zpx(5.0))
-                                        .rounded(zpx(8.0))
-                                        .cursor_pointer()
-                                        .bg(rgb_to_hsla(ui.app))
-                                        .on_press(move || {
-                                            theme.select_builtin_for_slot(selected_slot, &name);
-                                            picker_open.set(false);
-                                        })
-                                        .child(
-                                            text(label)
-                                                .text_xs()
-                                                .text_color(rgb_to_hsla(ui.foreground)),
-                                        )
-                                }),
-                        )
-                        .into_element()
-                }))
-                .into_element()
+            super::theme_picker::render(theme, slot.get(), picker_open).into_element()
         }))
 }
 
