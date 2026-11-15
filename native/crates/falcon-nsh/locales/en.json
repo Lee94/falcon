@@ -226,6 +226,30 @@
       "noCustom": "No custom plugins yet. Place plugins in the server's plugin directory, then rescan.",
       "pluginRefresh": "Refresh interval: %{n} seconds",
       "pluginManualRefresh": "Refreshes on open, manual refresh, or actions"
+    },
+    "files": {
+      "name": "Name",
+      "size": "Size",
+      "mtime": "Modified",
+      "openInBrowser": "Open in browser",
+      "htmlNoWebview": "Inline web preview is unavailable. Use the button above to open it in your browser.",
+      "refresh": "Refresh",
+      "imageLoading": "Loading image…",
+      "imageFailed": "Could not load the image.",
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
+      "zoomFit": "Fit to window",
+      "zoomActual": "Actual size",
+      "uploading": "Uploading %{name} (%{pct}%)",
+      "downloading": "Downloading %{name} (%{pct}%)",
+      "transferPreparing": "Preparing transfer…",
+      "transferDone": "Transferred %{count} files",
+      "transferFailed": "%{count} files failed",
+      "transferCancelled": "Transfer cancelled",
+      "transferDismiss": "Dismiss",
+      "transferCancel": "Cancel",
+      "transferDetails": "%{done} / %{total} files · %{bytes}",
+      "transferErrorDetails": "%{errors}"
     }
   },
   "common": {
@@ -363,7 +387,19 @@
   },
   "files": {
     "copyPath": "Copy path",
-    "copiedPath": "Path copied"
+    "copiedPath": "Path copied",
+    "operations": {
+      "uploadAction": "Upload",
+      "downloadAction": "Download",
+      "transferCancelled": "Transfer cancelled: %{completed}/%{total} completed, %{failed} failed.",
+      "transferPartial": "Transfer partially completed: %{completed} completed, %{failed} failed: %{errors}",
+      "uploadCancelled": "Upload cancelled: %{completed}/%{total} completed, %{failed} failed. Completed uploads are retained; created directories may still exist. %{uncertain}",
+      "resultUncertain": "The result of an in-flight request is unknown; remote files may have changed.",
+      "transferDone": "Transfer finished: %{completed} completed.",
+      "uploadSkipped": "Skipped %{count} items.",
+      "downloadSkippedDirectories": "Skipped %{count} directories.",
+      "scopeSummary": "%{action} (%{directory}): %{result}"
+    }
   },
   "host": {
     "test": "Test connection",

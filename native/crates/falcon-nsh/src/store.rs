@@ -367,6 +367,7 @@ pub struct FileEntryItem {
     pub path: String,
     pub is_dir: bool,
     pub size_bytes: u64,
+    pub mtime: Option<i64>,
     pub is_html: bool,
 }
 
@@ -388,7 +389,7 @@ pub struct OpenFileBuffer {
     pub shape: TextShape,
     pub clean_body: String,
     pub current_body: String,
-    /// 若为 HTML 预览，仅允许填入 `/api/projects/:id/raw/<token>/<path>` 作用域路径（ADR 0007）。
+    /// 预览资源仅允许 `/api/projects/:id/raw/<token>/<path>` 作用域路径；query 修订值隔离 NSH 图片缓存。
     pub raw_preview_url: Option<String>,
 }
 
@@ -469,7 +470,15 @@ impl OpenFileBuffer {
         let project_id = project_id.into();
         let path = path.into();
         let mut buffer = Self::loading(project_id, path, generation);
-        buffer.raw_preview_url = raw_preview_url;
+        buffer.raw_preview_url = raw_preview_url.map(|raw| {
+            // NSH 的进程级图片缓存按完整 URL 索引，即使响应 no-store 也会复用解码结果。
+            // 每次读盘分配一个进程内唯一修订值，刷新、关闭重开及不同工作区不共享旧像素。
+            static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let Ok(mut url) = url::Url::parse(&raw) else { return raw };
+            let revision = REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            url.query_pairs_mut().append_pair("_falcon_preview", &revision.to_string());
+            url.into()
+        });
         match preview {
             FilePreview::Text {
                 text,
@@ -1373,6 +1382,7 @@ impl WorkspaceStore {
                 path: "native/Cargo.toml".into(),
                 is_dir: false,
                 size_bytes: 4120,
+                mtime: None,
                 is_html: false,
             },
             FileEntryItem {
@@ -1380,6 +1390,7 @@ impl WorkspaceStore {
                 path: "native/crates/falcon-nsh/src/lib.rs".into(),
                 is_dir: false,
                 size_bytes: 2890,
+                mtime: None,
                 is_html: false,
             },
             FileEntryItem {
@@ -1387,6 +1398,7 @@ impl WorkspaceStore {
                 path: "docs/report.html".into(),
                 is_dir: false,
                 size_bytes: 1540,
+                mtime: None,
                 is_html: true,
             },
         ];
@@ -4004,6 +4016,7 @@ impl WorkspaceStore {
                                 path: e.path,
                                 is_dir: e.kind == WorkspaceEntryKind::Dir,
                                 size_bytes: e.size.unwrap_or(0),
+                                mtime: e.mtime,
                             })
                             .collect();
                         if operations.apply_listing(&store, &scope, &canonical_path, &entries) {
@@ -4667,8 +4680,7 @@ impl WorkspaceStore {
                         Ok(wf) => {
                             let rel = wf.raw_path.as_deref().unwrap_or(&file_path);
                             let raw = raw_url(&wf.raw_base, rel);
-                            let raw = (file_path.ends_with(".html") || file_path.ends_with(".htm"))
-                                .then(|| {
+                            let raw = Some({
                                     if raw.starts_with("http://") || raw.starts_with("https://") {
                                         raw
                                     } else {
@@ -5174,6 +5186,31 @@ mod profile_workspace_tests {
 #[cfg(test)]
 mod file_buffer_tests {
     use super::*;
+
+    #[test]
+    fn each_image_load_has_a_fresh_cache_key_even_after_reopening() {
+        let raw = "https://example.test/api/projects/p/raw/token/docs/image.png";
+        let load = |generation| OpenFileBuffer::from_preview(
+            "p", "docs/image.png", generation,
+            FilePreview::Image { mime: "image/png".into(), size: 17 },
+            Some(raw.into()),
+        ).raw_preview_url.unwrap();
+        let first = load(1);
+        let refreshed = load(2);
+        // 另一个窗口或重开的工作区可能复用 generation，但 NSH 图片缓存仍为同一进程共用。
+        let reopened = load(1);
+        assert_ne!(first, refreshed);
+        assert_ne!(first, reopened);
+        for url in [first, refreshed, reopened] {
+            let url = url::Url::parse(&url).unwrap();
+            assert_eq!(url.path(), "/api/projects/p/raw/token/docs/image.png");
+            assert_eq!(url.query_pairs().filter(|(key, _)| key == "_falcon_preview").count(), 1);
+            let image = falcon_core::md_link::markdown_image_url(Some(url.as_str()), "sibling.png").unwrap();
+            let image = url::Url::parse(&image).unwrap();
+            assert_eq!(image.path(), "/api/projects/p/raw/token/docs/sibling.png");
+            assert_eq!(image.query(), url.query());
+        }
+    }
 
     fn text_preview(truncated: bool, version: Option<&str>) -> FilePreview {
         FilePreview::Text {

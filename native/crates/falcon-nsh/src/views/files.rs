@@ -13,11 +13,13 @@ use nsh_core::prelude::*;
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
 use crate::shell::widgets::{Glyph, icon_button};
+use crate::shell::popups::themed_tooltip;
 use crate::store::{ActiveDialog, FileBufferState, FilePreviewKind, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::views::file_operations::file_operations_toolbar;
 use crate::views::file_operations::{selection_icon, selection_indicator};
 use crate::zoom::zpx;
+use super::file_preview::{image_preview, markdown_preview};
 
 /// 校验 HTML 预览地址是否严格位于 `/api/projects/<id>/raw/` 只读作用域路由下（ADR 0007）。
 pub fn is_scoped_raw_preview_url(url: &str) -> bool {
@@ -33,6 +35,7 @@ pub fn FilesPanel() -> impl IntoElement {
     let theme_ctrl = use_theme();
     let filter_query = signal(String::new());
     let show_hidden = signal(false);
+    let table_width = signal(0.0_f32);
 
     view()
         .size_full()
@@ -157,9 +160,14 @@ pub fn FilesPanel() -> impl IntoElement {
                 ),
         )
         .child(file_operations_toolbar())
-        .child(scroll().flex_1().child(dynamic(move || {
+        .child(scroll().flex_1().on_layout(move |bounds: &Bounds<Points>| {
+            table_width.set(bounds.size.width.0);
+        }).child(dynamic(move || {
             let resolved = theme_ctrl.resolved();
             let ui = &resolved.ui;
+            // 与 GPUI 一样，窄面板优先给名称留空间；时间列在面板展开后出现。
+            let show_size = table_width.get() >= zpx(300.0).0;
+            let show_mtime = table_width.get() >= zpx(360.0).0;
             let q = filter_query.get().trim().to_ascii_lowercase();
             let proj_id = store.active_project_id.get();
             if store.files_loading.get() {
@@ -229,11 +237,13 @@ pub fn FilesPanel() -> impl IntoElement {
                     view()
                         .flex_row()
                         .items_center()
-                        .justify_between()
+                        .gap(zpx(6.0))
                         .px(zpx(5.0))
                         .py(zpx(4.0))
                         .child(
                             view()
+                                .w(zpx(24.0))
+                                .flex_none()
                                 .flex_row()
                                 .items_center()
                                 .gap(zpx(6.0))
@@ -242,27 +252,26 @@ pub fn FilesPanel() -> impl IntoElement {
                                     bulk_store.file_operations.select_visible(&bulk_paths)
                                 })
                                 .child(selection_indicator(all_visible_selected, &resolved))
-                                .child(
-                                    text(bulk_label)
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                                ),
+                                .tooltip(themed_tooltip(text(bulk_label), None, &resolved)),
                         )
                         .child(
-                            text(t!(
-                                "files.operations.visibleCount",
-                                count = selected_visible.to_string()
-                            ))
+                            text(t!("native.files.name"))
+                            .flex_1().min_w_0()
                             .text_xs()
                             .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        ),
+                        )
+                        .when(show_size, |row| row.child(text(t!("native.files.size")).w(zpx(56.0)).flex_none().text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground))))
+                        .when(show_mtime, |row| row.child(text(t!("native.files.mtime")).w(zpx(152.0)).flex_none().text_xs()
+                            .text_color(rgb_to_hsla(ui.muted_foreground)))),
                 )
                 .children(filtered.into_iter().map(|entry| {
                     let st = store.clone();
                     let pid = proj_id.clone();
                     let path = entry.path.clone();
                     let is_dir = entry.is_dir;
-                    let size_kb = (entry.size_bytes as f64) / 1024.0;
+                    let size_label = falcon_core::file_path::format_size(Some(entry.size_bytes as f64));
+                    let mtime = format_mtime(entry.mtime);
                     let selected = selected_paths.contains(&path);
                     let checkbox_store = store.file_operations.clone();
                     let checkbox_path = path.clone();
@@ -334,16 +343,22 @@ pub fn FilesPanel() -> impl IntoElement {
                                 )
                                 .when(file_open_blocked, |row| row.opacity(0.45)),
                         )
-                        .child(
+                        .when(show_size, |row| row.child(
                             text(if is_dir {
                                 String::new()
                             } else {
-                                format!("{size_kb:.1} KB")
+                                size_label
                             })
+                            .w(zpx(56.0)).flex_none()
                             .text_xs()
                             .font_family(FONT_FAMILY_MONO)
                             .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        )
+                        ))
+                        .when(show_mtime, |row| row.child(
+                            text(mtime).w(zpx(152.0)).flex_none().text_xs()
+                                .font_family(FONT_FAMILY_MONO)
+                                .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        ))
                 }))
                 .into_element()
         })))
@@ -423,7 +438,8 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
             }
 
             let dirty = buf.is_dirty();
-            let has_preview = buf.raw_preview_url.is_some();
+            let has_preview = buf.raw_preview_url.is_some()
+                && (buf.path.ends_with(".html") || buf.path.ends_with(".htm"));
             let preview_on = has_preview && show_html_preview.get();
             let can_save = buf.editable() && dirty && !buf.saving && !buf.remote_changed_conflict;
             let readonly_notice = if buf.state == FileBufferState::ReadOnly {
@@ -496,6 +512,20 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                     &resolved, move || crate::views::preview_popup::open_file(&expand, &project, &path),
                 ));
             }
+            let reload_store = store.clone();
+            let reload_key = pane_key.clone();
+            actions = actions.child(icon_button(
+                "file-reload", t!("native.files.refresh"), Glyph::Refresh, false, &resolved,
+                move || reload_store.request_reload_file(&reload_key),
+            ));
+            if let Some(raw) = buf.raw_preview_url.clone().filter(|u| is_scoped_raw_preview_url(u)) {
+                if has_preview || matches!(buf.preview_kind, Some(FilePreviewKind::Image { .. })) {
+                    actions = actions.child(icon_button(
+                        "file-open-raw", t!("native.files.openInBrowser"), Glyph::Link,
+                        false, &resolved, move || { drop(nsh_core::element::open_url(raw.clone())); },
+                    ));
+                }
+            }
             if markdown_file {
                 actions = actions.child(
                     view()
@@ -567,7 +597,9 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
 
             toolbar = toolbar.child(actions);
 
-            let mut page = view().flex_col().child(toolbar);
+            let mut page = view().flex_col().min_h_0()
+                .when(!buf.editable() || preview_active, |page| page.flex_1())
+                .child(toolbar);
 
             if let Some(notice) = readonly_notice {
                 page = page.child(
@@ -667,7 +699,7 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                                     .text_color(rgb_to_hsla(ui.muted_foreground)),
                                 ),
                         )
-                        .child(web_view(raw_url).flex_1().w_full());
+                        .child(web_view(raw_url).incognito(true).flex_1().w_full());
                 } else {
                     page = page.child(
                         view().p(zpx(12.0)).child(
@@ -711,15 +743,19 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                             ),
                     ),
                 );
+            } else if matches!(buf.preview_kind, Some(FilePreviewKind::Image { .. })) {
+                if let Some(url) = buf.raw_preview_url.clone().filter(|u| is_scoped_raw_preview_url(u)) {
+                    page = page.child(image_preview().url(url));
+                } else {
+                    page = page.child(view().p(zpx(12.0)).child(text(t!("native.files.imageFailed"))
+                        .text_xs().text_color(rgb_to_hsla(ui.muted_foreground))));
+                }
             } else if markdown_file && show_markdown_preview.get() {
-                page = page.child(
-                    scroll().flex_1().min_h_0().child(
-                        nsh_base::text_view()
-                            .markdown(buf.current_body.clone())
-                            .selectable(true)
-                            .p(zpx(20.0)),
-                    ),
-                );
+                page = page.child(markdown_preview()
+                    .source(buf.current_body.clone())
+                    .project_id(buf.project_id.clone())
+                    .path(buf.path.clone())
+                    .raw_url(buf.raw_preview_url.clone()));
             } else if !buf.editable() && !buf.current_body.is_empty() {
                 page = page.child(
                     scroll().flex_1().min_h_0().child(
@@ -769,4 +805,94 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                 })
                 .into_element()
         }))
+}
+
+fn format_mtime(sec: Option<i64>) -> String {
+    use chrono::{Local, TimeZone};
+    let offset = sec.and_then(|s| Local.timestamp_opt(s, 0).earliest())
+        .map_or(0, |dt| i64::from(dt.offset().local_minus_utc()));
+    falcon_core::file_path::format_mtime(sec.map(|s| s as f64), offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::element::Root;
+    use nsh_engine::EngineConfig;
+    use nsh_testing::Headless;
+
+    #[component]
+    fn ImagePaneFixture() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        crate::shell::action_owner::ActionOwner::install();
+        let store = crate::store::WorkspaceStore::install(&crate::FalconLaunchOptions {
+            offline_demo: true, ..Default::default()
+        });
+        store.open_files.update(|files| {
+            files.insert(file_key("p", "image.png"), crate::store::OpenFileBuffer::from_preview(
+                "p", "image.png", 1,
+                falcon_proto::FilePreview::Image { mime: "image/png".into(), size: 100 },
+                Some("https://example.test/api/projects/p/raw/token/image.png".into()),
+            ));
+        });
+        view().size_full().child(file_pane_view().project_id("p").path("image.png"))
+    }
+
+    #[test]
+    fn loaded_image_keeps_the_full_file_pane_viewport_headless() {
+        let mut config = EngineConfig::new(Root::of::<ImagePaneFixture>().translations(crate::i18n::translations()));
+        config.viewport = Size::new(Points(848.0), Points(680.0));
+        config.ui_sets = vec![nsh_base::registry(), crate::registry()];
+        let mut app = Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        let image = app.screen().layout_nodes().into_iter()
+            .find(|n| n.test_id.as_deref() == Some("file-image")).unwrap();
+        app.engine().control().dispatch_event(image.id, nsh_core::EventKind::Load,
+            nsh_core::EventPayload::Map(vec![
+                ("width", nsh_core::PayloadValue::Number(1600.0)),
+                ("height", nsh_core::PayloadValue::Number(1200.0)),
+            ]));
+        app.wait_until("loaded image fills the file pane", std::time::Duration::from_secs(2), |screen| {
+            screen.layout_nodes().iter().any(|node| node.id == image.id && node.bounds.size.height.0 > 300.0)
+        }).unwrap();
+        let viewport = app.screen().layout_nodes().into_iter()
+            .find(|n| n.test_id.as_deref() == Some("file-image-viewport")).unwrap();
+        assert!(viewport.bounds.size.height.0 > 400.0);
+        assert!(viewport.bounds.origin.y.0 + viewport.bounds.size.height.0 <= 680.0);
+    }
+
+    #[component]
+    fn FilesFixture() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        crate::shell::action_owner::ActionOwner::install();
+        let store = crate::store::WorkspaceStore::install(&crate::FalconLaunchOptions {
+            offline_demo: true, ..Default::default()
+        });
+        store.file_entries.set(vec![crate::store::FileEntryItem {
+            name: "readme.md".into(), path: "docs/readme.md".into(), is_dir: false,
+            size_bytes: 2048, mtime: Some(1_700_000_000), is_html: false,
+        }]);
+        view().size_full().child(files_panel())
+    }
+
+    #[test]
+    fn file_columns_reveal_size_then_mtime_as_the_panel_widens_headless() {
+        let mut config = EngineConfig::new(Root::of::<FilesFixture>().translations(crate::i18n::translations()));
+        config.viewport = Size::new(Points(280.0), Points(700.0));
+        config.ui_sets = vec![nsh_base::registry(), crate::registry()];
+        let mut app = Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        app.wait_for("text:readme.md").unwrap();
+        assert!(!app.screen().matches("text:Size").unwrap());
+        assert!(!app.screen().matches("text:Modified").unwrap());
+        app.set_viewport(Size::new(Points(320.0), Points(700.0))).unwrap();
+        app.wait_for("text:Size").unwrap();
+        assert!(!app.screen().matches("text:Modified").unwrap());
+        app.set_viewport(Size::new(Points(460.0), Points(700.0))).unwrap();
+        app.wait_for("text:Modified").unwrap();
+        app.wait_for(&format!("text:{}", format_mtime(Some(1_700_000_000)))).unwrap();
+        assert!(app.screen().matches("id:file-select-readme.md").unwrap());
+    }
 }
