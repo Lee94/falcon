@@ -13,6 +13,7 @@ use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
 use crate::shell::widgets::{Glyph, glyph, icon_button};
 use crate::store::{ActiveDialog, RightPanelKind, SettingsTab, WorkspaceStore, use_workspace};
+use crate::views::project_form::{project_form, worktree_form};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::{ZoomController, zpx};
 
@@ -26,9 +27,6 @@ pub fn ModalLayer() -> impl IntoElement {
     let palette_query = signal(String::new());
     let profile_name = signal(String::new());
     let profile_url = signal(String::new());
-    let new_proj_name = signal(String::new());
-    let new_proj_path = signal(String::new());
-    let new_project_host = signal(None::<String>);
     let askpass_input = signal(String::new());
     let theme_filter = signal(String::new());
     let theme_slot = signal(theme_ctrl.active_slot());
@@ -54,14 +52,9 @@ pub fn ModalLayer() -> impl IntoElement {
             ActiveDialog::Profiles => {
                 render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
             }
-            ActiveDialog::NewProject => render_new_project_modal(
-                &store,
-                &resolved,
-                new_proj_name,
-                new_proj_path,
-                new_project_host,
-            )
-            .into_element(),
+            ActiveDialog::NewProject => project_form().project_id(None).into_element(),
+            ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
+            ActiveDialog::DeriveProject(id) => worktree_form().project_id(id).into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
                 &store,
                 theme_ctrl,
@@ -484,123 +477,6 @@ fn render_profiles_modal(
                         })
                         .child(
                             text(t!("native.connect.connect"))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb_to_hsla(ui.primary_foreground)),
-                        ),
-                ),
-        )
-}
-
-fn render_new_project_modal(
-    store: &WorkspaceStore,
-    resolved: &falcon_theme::ResolvedTheme,
-    name_draft: Signal<String>,
-    path_draft: Signal<String>,
-    host: Signal<Option<String>>,
-) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let st_create = store.clone();
-
-    view()
-        .flex_col()
-        .child(modal_header(store, resolved, t!("project.createTitle")))
-        .child(
-            view()
-                .flex_col()
-                .p(zpx(14.0))
-                .gap(zpx(10.0))
-                .child(
-                    view()
-                        .flex_row()
-                        .gap(zpx(8.0))
-                        .flex_wrap()
-                        .child(
-                            view()
-                                .px(zpx(10.0))
-                                .py(zpx(6.0))
-                                .rounded(zpx(8.0))
-                                .cursor_pointer()
-                                .when(host.get().is_none(), |v| v.bg(rgb_to_hsla(ui.tint)))
-                                .on_press(move || host.set(None))
-                                .child(
-                                    text(t!("project.typeLocal"))
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.foreground)),
-                                ),
-                        )
-                        .children(store.hosts.get().into_iter().map(|h| {
-                            let id = h.id.clone();
-                            view()
-                                .px(zpx(10.0))
-                                .py(zpx(6.0))
-                                .rounded(zpx(8.0))
-                                .cursor_pointer()
-                                .when(host.get().as_deref() == Some(h.id.as_str()), |v| {
-                                    v.bg(rgb_to_hsla(ui.tint))
-                                })
-                                .on_press(move || host.set(Some(id.clone())))
-                                .child(
-                                    text(format!("{} · {}", t!("project.typeSsh"), h.name))
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.foreground)),
-                                )
-                        })),
-                )
-                .child(
-                    text(t!("project.name"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                )
-                .child(
-                    input()
-                        .w_full()
-                        .px(zpx(8.0))
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .bg(rgba_to_hsla(ui.input))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground))
-                        .placeholder(t!("project.name"))
-                        .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                        .value(name_draft.get())
-                        .on_change(move |v: &str| name_draft.set(v.to_string())),
-                )
-                .child(
-                    input()
-                        .w_full()
-                        .px(zpx(8.0))
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .bg(rgba_to_hsla(ui.input))
-                        .font_family(FONT_FAMILY_MONO)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground))
-                        .placeholder(t!("project.workingDir"))
-                        .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                        .value(path_draft.get())
-                        .on_change(move |v: &str| path_draft.set(v.to_string())),
-                )
-                .child(
-                    view()
-                        .items_center()
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(rgb_to_hsla(ui.tint_strong))
-                        .on_press(move || {
-                            let name = name_draft.get().trim().to_string();
-                            let path = path_draft.get().trim().to_string();
-                            if !name.is_empty() {
-                                st_create.create_project_request(
-                                    &name,
-                                    &path,
-                                    host.get().as_deref(),
-                                );
-                            }
-                        })
-                        .child(
-                            text(t!("project.create"))
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb_to_hsla(ui.primary_foreground)),

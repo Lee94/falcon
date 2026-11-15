@@ -153,6 +153,10 @@ pub fn sidebar_island(
                 let st = store.clone();
                 let pid = p.id.clone();
                 let toggle = store.clone();
+                let edit_project = store.clone();
+                let edit_id = p.id.clone();
+                let derive_project = store.clone();
+                let derive_id = p.id.clone();
                 let mut folder_view = view().flex_col().gap(zpx(2.0)).child(
                     view()
                         .h(zpx(30.0))
@@ -202,7 +206,33 @@ pub fn sidebar_island(
                                         .number_of_lines(1)
                                         .text_color(rgb_to_hsla(ui.foreground)),
                                 ),
-                        ),
+                        )
+                        .child(icon_button(
+                            format!("edit-project-{}", p.id),
+                            t!("sidebar.editProject"),
+                            Glyph::Settings,
+                            false,
+                            resolved,
+                            move || {
+                                edit_project
+                                    .active_dialog
+                                    .set(ActiveDialog::EditProject(edit_id.clone()))
+                            },
+                        ))
+                        .when(p.worktree.is_none(), |row| {
+                            row.child(icon_button(
+                                format!("derive-project-{}", p.id),
+                                t!("sidebar.deriveProject"),
+                                Glyph::Branch,
+                                false,
+                                resolved,
+                                move || {
+                                    derive_project
+                                        .active_dialog
+                                        .set(ActiveDialog::DeriveProject(derive_id.clone()))
+                                },
+                            ))
+                        }),
                 );
                 if expanded {
                     let branch = store
@@ -345,6 +375,16 @@ fn checkout_row(
     let select_id = id.to_string();
     let create = store.clone();
     let create_id = id.to_string();
+    let edit_project = store.clone();
+    let edit_id = id.to_string();
+    let derive_project = store.clone();
+    let derive_id = id.to_string();
+    let is_derived = store
+        .projects
+        .get()
+        .iter()
+        .find(|project| project.id == id)
+        .is_some_and(|project| project.derived_from.is_some());
     let mut block = view().flex_col().gap(zpx(2.0)).child(
         view()
             .h(zpx(30.0))
@@ -446,7 +486,33 @@ fn checkout_row(
                     create.active_project_id.set(create_id.clone());
                     create.create_terminal_in_active_project();
                 },
-            )),
+            ))
+            .child(icon_button(
+                format!("edit-project-{id}"),
+                t!("sidebar.editProject"),
+                Glyph::Settings,
+                false,
+                resolved,
+                move || {
+                    edit_project
+                        .active_dialog
+                        .set(ActiveDialog::EditProject(edit_id.clone()))
+                },
+            ))
+            .when(!is_derived, |row| {
+                row.child(icon_button(
+                    format!("derive-project-{id}"),
+                    t!("sidebar.deriveProject"),
+                    Glyph::Branch,
+                    false,
+                    resolved,
+                    move || {
+                        derive_project
+                            .active_dialog
+                            .set(ActiveDialog::DeriveProject(derive_id.clone()))
+                    },
+                ))
+            }),
     );
     if expanded {
         for session in sessions {

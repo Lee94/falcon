@@ -9,7 +9,9 @@
 //! - **源项目 / 附属项目 / 远端主机 / 中转**：保持与服务端节点模型（ADR 0027）一致的归属关系；
 //! - 同时支持离线确定性工作台（供 `nsh-testing` 无头回归测试与首屏展示）与在线 `FalconClient` 实时同步。
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +39,7 @@ use falcon_proto::{
     PluginSeries, PluginStat, PluginTone, PluginView, ProgramState, SessionState,
 };
 use nsh_core::prelude::{Signal, effect, provide_context, signal, spawn, use_context};
+use nsh_core::element::reactive::Owner;
 use parking_lot::Mutex;
 
 use crate::terminal::TerminalSession;
@@ -60,6 +63,8 @@ pub enum ActiveDialog {
     Palette,
     Profiles,
     NewProject,
+    EditProject(String),
+    DeriveProject(String),
     Settings(SettingsTab),
     Askpass {
         id: String,
@@ -381,12 +386,18 @@ pub struct WorkspaceStore {
     pub plugin_states: Signal<HashMap<String, PluginPanelState>>,
     pub toast_banner: Signal<Option<String>>,
 
+    pub project_operations: Rc<crate::project_operations::ProjectOperations>,
+    pub(crate) task_owner: Owner,
+    pub(crate) connection_generation: Rc<Cell<u64>>,
+
     terminals: Rc<SharedTerminals>,
 }
 
 impl WorkspaceStore {
     /// 初始化工作区（填充一套结构完备的本地种子状态，并在非离线模式下异步连向 `falcon-server`）。
     pub fn install(opts: &FalconLaunchOptions) -> Self {
+        let task_owner = Owner::current();
+        let connection_generation = Rc::new(Cell::new(0));
         let local_url = falcon_platform::shared().local_server_url();
         let persisted_profiles = (!opts.offline_demo)
             .then(|| falcon_platform::shared().load_profiles())
@@ -879,6 +890,12 @@ impl WorkspaceStore {
             plugin_list: signal(plugin_list),
             plugin_states: signal(plugin_states),
             toast_banner: signal(None),
+            project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
+                task_owner,
+                connection_generation.clone(),
+            )),
+            task_owner,
+            connection_generation,
             terminals,
         };
 
@@ -932,6 +949,7 @@ impl WorkspaceStore {
     /// 异步尝试连接真实 `falcon-server`，拉取项目、会话、远端主机、中转、文件/Git 与双轨插件；连不上时保持可交互不崩。
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_live_server(&self, url: &str) {
+        self.bump_connection_generation();
         let Ok(parsed_url) = url.parse() else {
             return;
         };
@@ -1178,6 +1196,7 @@ impl WorkspaceStore {
     /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
+        self.bump_connection_generation();
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
@@ -1397,65 +1416,6 @@ impl WorkspaceStore {
                 store.show_toast(message);
             });
         }
-    }
-
-    pub fn create_project_request(&self, name: &str, path: &str, host: Option<&str>) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(client) = self.client() {
-            let store = self.clone();
-            let input = falcon_proto::ProjectInput {
-                name: name.to_string(),
-                project_type: if host.is_some() {
-                    falcon_proto::ProjectType::Ssh
-                } else {
-                    falcon_proto::ProjectType::Local
-                },
-                working_dir: (!path.is_empty()).then(|| path.to_string()),
-                shell: None,
-                host_id: host.map(str::to_string),
-                ssh: None,
-                repos: None,
-                default_worktree_branch: None,
-            };
-            spawn(async move {
-                match client.create_project(&input).await {
-                    Ok(project) => {
-                        let id = project.id.clone();
-                        store.projects.update(|list| {
-                            list.push(ProjectRecord {
-                                source: Some(project.clone()),
-                                id: project.id,
-                                name: project.name,
-                                path: project.working_dir.unwrap_or_default(),
-                                host_id: project.host_id,
-                                host_name: project.ssh.map(|s| s.host),
-                                derived_from: None,
-                                branch: None,
-                            })
-                        });
-                        store.active_dialog.set(ActiveDialog::None);
-                        store.select_project(&id);
-                    }
-                    Err(e) => store.show_toast(e.to_string()),
-                }
-            });
-            return;
-        }
-        let id = format!("proj-{}", self.projects.get().len() + 1);
-        self.projects.update(|list| {
-            list.push(ProjectRecord {
-                id: id.clone(),
-                name: name.to_string(),
-                path: path.to_string(),
-                host_id: host.map(str::to_string),
-                host_name: None,
-                derived_from: None,
-                branch: None,
-                source: None,
-            })
-        });
-        self.active_project_id.set(id);
-        self.active_dialog.set(ActiveDialog::None);
     }
 
     pub fn create_ssh_host(&self, input: falcon_proto::SshHostInput) {
@@ -1773,6 +1733,24 @@ impl WorkspaceStore {
             plugins: Vec::new(),
             trust_root: None,
         });
+    }
+
+    fn bump_connection_generation(&self) {
+        if matches!(self.active_dialog.get(), ActiveDialog::NewProject | ActiveDialog::EditProject(_) | ActiveDialog::DeriveProject(_)) {
+            self.active_dialog.set(ActiveDialog::None);
+        }
+        self.connection_generation
+            .set(
+                self.connection_generation
+                    .get()
+                    .checked_add(1)
+                    .expect("connection generation exhausted"),
+            );
+    }
+
+    pub(crate) fn spawn_root(&self, future: impl Future<Output = ()> + 'static) {
+        let owner = self.task_owner;
+        let _spawned = owner.run(|| spawn(future));
     }
 
     /// 沿用 GPUI 的 profile id 与 JSON 形状，直接读取已安装客户端的工作区。

@@ -10,6 +10,7 @@
 
 pub mod fonts;
 pub mod i18n;
+pub mod project_operations;
 pub mod shell;
 pub mod store;
 pub mod terminal;
