@@ -182,6 +182,21 @@ impl TerminalSession {
         self.meta.lock().clone()
     }
 
+    /// Acknowledge finished OSC 7501 records without clearing any running or blocked subtasks.
+    pub fn mark_status_seen(&self) {
+        self.meta.lock().program_status.retain(|record| {
+            !matches!(
+                record.state,
+                falcon_proto::ProgramState::Done | falcon_proto::ProgramState::Error
+            )
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(socket) = self.socket.lock().as_ref() {
+            socket.status_seen(Vec::new());
+        }
+        self.bump_frame();
+    }
+
     pub fn take_clipboard_pending(&self) -> Option<String> {
         self.meta.lock().clipboard_pending.take()
     }

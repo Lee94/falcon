@@ -4014,6 +4014,7 @@ impl WorkspaceStore {
         }
         self.focused_pane_key.set(key);
         // 查看后清除已完成/错误的程序状态提醒（ADR 0020）
+        let mut finished_summary = false;
         self.sessions.update(|list| {
             if let Some(s) = list.iter_mut().find(|s| s.id == session_id) {
                 if matches!(
@@ -4021,9 +4022,25 @@ impl WorkspaceStore {
                     Some(ProgramState::Done | ProgramState::Error)
                 ) {
                     s.program_status = None;
+                    finished_summary = true;
+                }
+                if matches!(
+                    s.program_summary.as_ref().map(|s| s.state),
+                    Some(ProgramState::Done | ProgramState::Error)
+                ) {
+                    s.program_summary = None;
+                    finished_summary = true;
                 }
             }
         });
+        let terminal = self.terminals.map.lock().get(session_id).cloned();
+        if let Some(terminal) = terminal {
+            if finished_summary
+                || falcon_core::program_status::has_finished(&terminal.meta().program_status)
+            {
+                terminal.mark_status_seen();
+            }
+        }
     }
 
     pub fn focus_palette_session(&self, session_id: &str) {

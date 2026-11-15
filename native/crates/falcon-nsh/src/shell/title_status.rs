@@ -30,6 +30,18 @@ pub fn TitleStatus(props: TitleStatusProps) -> impl IntoElement {
     let theme = use_theme();
     let session = store.ensure_terminal_session(&props.session_id);
     let runtime = signal(session.meta());
+    if !props.edge {
+        let focused = store.focused_pane_key;
+        let key = falcon_core::pane_key::term_key(&props.session_id);
+        let seen_session = session.clone();
+        // A first/reconnect snapshot can arrive after focus_session already acknowledged REST.
+        effect(move || {
+            if focused.get() == key && program_status::has_finished(&runtime.get().program_status) {
+                seen_session.mark_status_seen();
+                runtime.set(seen_session.meta());
+            }
+        });
+    }
     set_interval(Duration::from_millis(100), move || {
         let next = session.meta();
         if runtime.get_untracked() != next {
@@ -263,7 +275,132 @@ fn subtasks_tooltip_text(tasks: &[SubTask]) -> String {
 mod tests {
     use super::*;
     use crate::terminal::SessionRuntimeMeta;
+    use falcon_client::{SessionEvent, SessionSink};
     use falcon_proto::{ProgramState, ProgramStatusRecord};
+    use nsh_core::element::Root;
+    use nsh_engine::EngineConfig;
+    use nsh_testing::Headless;
+
+    fn record(id: &str, state: ProgramState) -> ProgramStatusRecord {
+        ProgramStatusRecord {
+            id: id.into(),
+            state,
+            kind: None,
+            progress: None,
+            app: None,
+            title: None,
+            message: None,
+            updated_at: 2,
+        }
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct AcknowledgementHarnessProps {
+        live: bool,
+    }
+
+    #[component]
+    fn AcknowledgementHarness(props: AcknowledgementHarnessProps) -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        crate::shell::action_owner::ActionOwner::install();
+        let store = crate::store::WorkspaceStore::install(&crate::FalconLaunchOptions {
+            offline_demo: true,
+            ..Default::default()
+        });
+        store.focused_pane_key.set(String::new());
+        store.sessions.update(|sessions| {
+            let session = sessions.iter_mut().find(|s| s.id == "sess-main").unwrap();
+            session.program_status = Some((ProgramState::Done, "finished".into()));
+            session.program_summary = Some(ProgramStatusSummary {
+                state: ProgramState::Done,
+                ..rest_summary()
+            });
+        });
+        let session = store.ensure_terminal_session("sess-main");
+        if props.live {
+            session.on_event(SessionEvent::ProgramStatus(vec![record(
+                "",
+                ProgramState::Done,
+            )]));
+        }
+        let focus = store.clone();
+        view()
+            .child(title_status().session_id("sess-main"))
+            .child(
+                view()
+                    .test_id("acknowledge")
+                    .on_press(move || focus.focus_session("sess-main"))
+                    .child(text("focus")),
+            )
+            .child(
+                view()
+                    .test_id("late-finish")
+                    .on_press(move || {
+                        session.on_event(SessionEvent::ProgramStatus(vec![record(
+                            "",
+                            ProgramState::Error,
+                        )]));
+                    })
+                    .child(text("late finish")),
+            )
+            .child(text(move || {
+                let s = store
+                    .sessions
+                    .get()
+                    .into_iter()
+                    .find(|s| s.id == "sess-main")
+                    .unwrap();
+                if s.program_status.is_none() && s.program_summary.is_none() {
+                    "REST cleared"
+                } else {
+                    "REST pending"
+                }
+            }))
+    }
+
+    #[test]
+    fn focusing_finished_status_clears_rest_live_and_late_snapshots() {
+        for live in [false, true] {
+            let root =
+                Root::new::<AcknowledgementHarness>(move || AcknowledgementHarnessProps { live })
+                    .translations(crate::i18n::translations());
+            let mut config = EngineConfig::new(root);
+            config.environment.reduce_motion = true;
+            config.clock = nsh_engine::Clock::manual(std::time::UNIX_EPOCH);
+            let mut app = Headless::start(config).unwrap();
+            app.first_render().unwrap();
+            app.wait_for("id:program-status-chip").unwrap();
+            app.press("id:acknowledge").unwrap();
+            app.wait_for("text:REST cleared").unwrap();
+            app.wait_for_gone("id:program-status-chip", Duration::from_secs(2))
+                .unwrap();
+            app.press("id:late-finish").unwrap();
+            app.run_for(Duration::from_millis(200)).unwrap();
+            assert!(!app.screen().matches("id:program-status-chip").unwrap());
+        }
+    }
+
+    #[test]
+    fn acknowledgement_preserves_unfinished_subtasks() {
+        let session = crate::terminal::TerminalSession::new_offline("test", 80, 24, true);
+        session.on_event(SessionEvent::ProgramStatus(vec![
+            record("", ProgramState::Working),
+            record("done", ProgramState::Done),
+            record("error", ProgramState::Error),
+            record("waiting", ProgramState::Blocked),
+        ]));
+        session.mark_status_seen();
+        let meta = session.meta();
+        assert!(meta.program_status_received);
+        assert_eq!(
+            meta.program_status
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["", "waiting"]
+        );
+    }
 
     fn rest_summary() -> ProgramStatusSummary {
         ProgramStatusSummary {
