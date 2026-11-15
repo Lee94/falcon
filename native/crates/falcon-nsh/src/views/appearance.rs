@@ -323,7 +323,7 @@ fn WindowBackgroundSettings() -> impl IntoElement {
         view()
             .flex_col()
             .gap(zpx(8.0))
-            .child(setting_row(&resolved, t!("native.settings.windowBackground"), choices))
+            .child(setting_row(&resolved, t!("settings.windowBackground"), choices))
             .child(
                 text(note)
                     .text_xs()

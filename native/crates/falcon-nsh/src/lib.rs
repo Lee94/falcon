@@ -4257,9 +4257,42 @@ mod tests {
         app.first_render().unwrap();
         app.press_key("ctrl+shift+p").unwrap();
         app.wait_for("id:palette-input").unwrap();
-        app.type_text("id:palette-input", "choose theme").unwrap();
+        app.type_text("id:palette-input", "主题").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("主题")
+        );
         app.wait_for("id:palette-entry-command:theme-picker-selected")
             .unwrap();
+        app.wait_for("text:选择主题…").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:palette-input", Duration::from_secs(2))
+            .unwrap();
+
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.type_text("id:palette-input", "choose theme").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some("choose theme")
+        );
+        app.wait_for("id:palette-entry-command:theme-picker-selected")
+            .unwrap();
+        app.wait_for("text:选择主题…").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:palette-input", Duration::from_secs(2))
+            .unwrap();
+
+        app.press_key("ctrl+shift+p").unwrap();
+        app.wait_for("id:palette-input").unwrap();
+        app.type_text("id:palette-input", ">主题").unwrap();
+        assert_eq!(
+            app.screen().input_text("id:palette-input").unwrap(),
+            Some(">主题")
+        );
+        app.wait_for("id:palette-entry-command:theme-picker-selected")
+            .unwrap();
+        app.wait_for("text:选择主题…").unwrap();
         app.press("id:palette-entry-command:theme-picker-selected")
             .unwrap();
         app.wait_for("id:theme-picker-filter").unwrap();

@@ -119,7 +119,7 @@ fn render_results(
     let mut list = view().flex_col().gap(zpx(3.0)).p(zpx(10.0));
     if store.quick_open_loading.get() {
         list = list.child(
-            text(t!("common.loading"))
+            text(t!("quickOpen.loading"))
                 .text_xs()
                 .text_color(rgb_to_hsla(ui.muted_foreground)),
         );
