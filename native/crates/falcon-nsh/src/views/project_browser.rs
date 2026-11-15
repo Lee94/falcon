@@ -187,7 +187,12 @@ impl FolderBrowser {
                         browser.listing.set(Some(listing));
                         browser.error.set(fallback_error);
                     }
-                    Err(error) => browser.error.set(Some(error)),
+                    Err(error) => {
+                        // A typed destination can differ from the last successful
+                        // listing. Do not let confirmation submit that previous path.
+                        browser.listing.set(None);
+                        browser.error.set(Some(error));
+                    }
                 }
             })
         });
@@ -370,7 +375,10 @@ impl FolderBrowser {
                 entries = entries.child(row);
             }
             let can_select = !busy
-                && (!selected.is_empty() || listing.as_ref().is_some_and(|l| !l.path.is_empty()));
+                && (!selected.is_empty()
+                    || listing.as_ref().is_some_and(|l| {
+                        !l.path.is_empty() && l.path == browser.path.get().trim()
+                    }));
             let accept = confirm.clone();
             let cancel = browser.open;
             let mut body = view()

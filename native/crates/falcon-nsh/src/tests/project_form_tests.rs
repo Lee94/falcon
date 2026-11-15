@@ -264,6 +264,57 @@ fn project_multi_picker_uses_host_presets_and_keeps_cross_directory_selection() 
 }
 
 #[test]
+fn failed_folder_jump_cannot_confirm_previous_directory_and_can_retry() {
+    let mut responses = probe_responses();
+    responses.insert(
+        0,
+        (
+            "GET /api/fs/list?path=%2Fmissing".into(),
+            400,
+            r#"{"error":"folder missing"}"#.into(),
+        ),
+    );
+    let mock = MockHttpServer::new_with_auto_responses(
+        vec![(
+            "POST /api/projects ".into(),
+            500,
+            r#"{"error":"create rejected"}"#.into(),
+        )],
+        responses,
+    );
+    let mut app = probe_app(&mock);
+    app.press("label:new-project-s:local").unwrap();
+    app.wait_for("alpha").unwrap();
+    app.clear("label:folder-picker-path").unwrap();
+    app.type_text("label:folder-picker-path", "/missing")
+        .unwrap();
+    // A typed path must be loaded before it can replace the selected directory.
+    app.press("选择此文件夹").unwrap();
+    mock.assert_no_request_starting_with("POST /api/projects ");
+    app.press("跳转").unwrap();
+    app.wait_for("folder missing").unwrap();
+    assert_eq!(
+        app.screen().input_text("label:folder-picker-path").unwrap(),
+        Some("/missing")
+    );
+    assert!(!app.shows("alpha"));
+    app.press("选择此文件夹").unwrap();
+    mock.assert_no_request_starting_with("POST /api/projects ");
+    app.clear("label:folder-picker-path").unwrap();
+    app.type_text("label:folder-picker-path", "/srv/repos/alpha")
+        .unwrap();
+    app.press_key("enter").unwrap();
+    app.wait_for("nested").unwrap();
+    app.press("选择此文件夹").unwrap();
+    let request =
+        mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/projects "])[0].clone();
+    let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+    assert_eq!(body["workingDir"], "/srv/repos/alpha");
+    mock.release_response();
+    app.wait_for("create rejected").unwrap();
+}
+
+#[test]
 fn project_picker_drops_late_results_after_escape_and_shell_failure_keeps_input() {
     let mock = MockHttpServer::new_with_auto_responses(
         vec![(
