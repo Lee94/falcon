@@ -83,7 +83,8 @@ fn preview_popup_diff_keyboard_tree_and_sidebar() {
     app.press_key("down").unwrap();
     app.wait_for("+pub struct PluginKeyring {").unwrap();
     app.press_key("up").unwrap();
-    app.wait_for("+pub fn falcon_root() -> nsh_core::element::Root {").unwrap();
+    app.wait_for("+pub fn falcon_root() -> nsh_core::element::Root {")
+        .unwrap();
     app.press("label:preview-sidebar").unwrap();
     app.wait_for_gone("id:preview-search", Duration::from_secs(2))
         .unwrap();
@@ -95,6 +96,48 @@ fn preview_popup_diff_keyboard_tree_and_sidebar() {
     app.press("label:preview-close").unwrap();
     app.wait_for_gone("id:preview-popup", Duration::from_secs(2))
         .unwrap();
+}
+
+#[test]
+fn preview_popup_releases_clean_sidebar_files_for_rename() {
+    let path = "native/crates/falcon-nsh/src/lib.rs";
+    let mock = MockHttpServer::new_with_auto_responses(
+        Vec::new(),
+        vec![
+            (
+                "GET /api/projects/proj-falcon/files/index".into(),
+                200,
+                format!(r#"{{"paths":["{path}"],"truncated":false}}"#),
+            ),
+            (
+                "GET /api/projects/proj-falcon/file".into(),
+                200,
+                workspace_text_file("clean sidebar file", "clean-v1"),
+            ),
+        ],
+    );
+    let mut app = headless_with_options(
+        FalconLaunchOptions {
+            offline_demo: true,
+            test_client_url: Some(mock.url.clone()),
+            test_live_file_operations: true,
+            ..Default::default()
+        },
+        ColorScheme::Dark,
+    );
+    app.first_render().unwrap();
+    expand_cargo(&mut app);
+    app.type_text("id:preview-search", "lib.rs").unwrap();
+    app.wait_for("id:preview-file-0").unwrap();
+    app.press("id:preview-file-0").unwrap();
+    let key = falcon_core::pane_key::file_key("proj-falcon", path);
+    app.wait_for(&format!("id:file-editor-{key}")).unwrap();
+    app.press_key("escape").unwrap();
+    app.wait_for_gone("id:preview-popup", Duration::from_secs(2))
+        .unwrap();
+    app.press("id:file-select-src/lib.rs").unwrap();
+    app.press("id:file-operations-rename").unwrap();
+    app.wait_for("id:file-operation-name").unwrap();
 }
 
 #[test]
@@ -137,8 +180,10 @@ fn preview_popup_saves_shared_buffer_with_version_and_shortcut() {
     app.wait_for("preview body").unwrap();
     app.press(&format!("label:file-expand-{key}")).unwrap();
     app.wait_for("id:preview-popup").unwrap();
-    app.press(&format!("id:preview-popup >> id:file-markdown-preview-{key}"))
-        .unwrap();
+    app.press(&format!(
+        "id:preview-popup >> id:file-markdown-preview-{key}"
+    ))
+    .unwrap();
     let editor = format!("id:file-editor-{key}");
     app.wait_for(&editor).unwrap();
     app.type_text(&editor, " edited").unwrap();

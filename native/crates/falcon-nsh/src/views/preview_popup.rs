@@ -6,6 +6,8 @@ use falcon_core::command_palette::move_selection;
 use falcon_core::file_path::{is_hidden_name, parent_nav_path};
 use falcon_core::file_search::{FILE_SEARCH_LIMIT, filter_files};
 use falcon_core::file_tree::{TreeNode, build_file_tree};
+use falcon_core::layout::find_pane;
+use falcon_core::pane_key::file_key;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
@@ -21,15 +23,26 @@ pub(crate) struct PreviewTarget {
     pub project_id: String,
     /// None 为 Git 差异；所选差异路径继续由 selected_git_path 管理。
     pub path: Option<String>,
+    /// 仅由本次浮层加载的缓冲；原有工作区/缓存文件不归浮层回收。
+    temporary_files: HashSet<String>,
 }
 
 pub(crate) fn open_file(store: &WorkspaceStore, project_id: &str, path: &str) {
+    let existing = store
+        .open_files
+        .get_untracked()
+        .contains_key(&file_key(project_id, path));
     if project_id != store.active_project_id.get() || !store.ensure_file_buffer(project_id, path) {
         return;
     }
     store.preview_popup.set(Some(PreviewTarget {
         project_id: project_id.to_string(),
         path: Some(path.to_string()),
+        temporary_files: if existing {
+            HashSet::new()
+        } else {
+            HashSet::from([path.to_string()])
+        },
     }));
     store.load_quick_open_index(project_id);
     store.active_dialog.set(ActiveDialog::PreviewPopup);
@@ -39,6 +52,7 @@ pub(crate) fn open_diff(store: &WorkspaceStore) {
     store.preview_popup.set(Some(PreviewTarget {
         project_id: store.active_project_id.get(),
         path: None,
+        temporary_files: HashSet::new(),
     }));
     store.active_dialog.set(ActiveDialog::PreviewPopup);
 }
@@ -51,12 +65,26 @@ pub(crate) fn close(store: &WorkspaceStore) {
             .open_files
             .get_untracked()
             .values()
-            .filter(|buffer| buffer.project_id == target.project_id && buffer.is_dirty())
+            .filter(|buffer| {
+                buffer.project_id == target.project_id && (buffer.is_dirty() || buffer.saving)
+            })
             .map(|buffer| buffer.path.clone())
             .collect();
         for path in dirty {
             store.open_file_pane(&target.project_id, &path);
         }
+        // 未编辑的临时预览不再算「已打开文件」，否则文件操作会一直要求先关闭。
+        // 正在加载的缓冲也可回收：读取响应只更新仍存在且 generation 相符的缓冲。
+        let columns = store.columns.get_untracked();
+        store.open_files.update(|files| {
+            files.retain(|key, buffer| {
+                buffer.project_id != target.project_id
+                    || !target.temporary_files.contains(&buffer.path)
+                    || buffer.is_dirty()
+                    || buffer.saving
+                    || find_pane(&columns, key).is_some()
+            })
+        });
     }
     store.preview_popup.set(None);
     store.active_dialog.set(ActiveDialog::None);
@@ -75,9 +103,18 @@ fn activate(store: &WorkspaceStore, path: &str, directory: bool) {
         store.browse_directory(path);
     } else if target.path.is_none() {
         store.preview_git_path(path);
-    } else if store.ensure_file_buffer(&target.project_id, path) {
-        target.path = Some(path.to_string());
-        store.preview_popup.set(Some(target));
+    } else {
+        let existing = store
+            .open_files
+            .get_untracked()
+            .contains_key(&file_key(&target.project_id, path));
+        if store.ensure_file_buffer(&target.project_id, path) {
+            if !existing {
+                target.temporary_files.insert(path.to_string());
+            }
+            target.path = Some(path.to_string());
+            store.preview_popup.set(Some(target));
+        }
     }
 }
 
