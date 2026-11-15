@@ -1320,6 +1320,9 @@ impl WorkspaceStore {
     }
 
     pub fn test_host_connection(&self, id: &str) {
+        // Web 端不在浏览器里探测 SSH 主机
+        #[cfg(target_arch = "wasm32")]
+        let _ = id;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.client() {
             let store = self.clone();
@@ -1338,25 +1341,29 @@ impl WorkspaceStore {
     }
 
     pub fn check_app_update(&self) {
-        let Some(updater) = falcon_platform::shared().app_updater() else {
-            return;
-        };
-        let store = self.clone();
-        self.show_toast(crate::i18n::t!("native.update.checking"));
-        spawn(async move {
-            let result =
-                nsh_core::prelude::blocking(move || updater.check(env!("CARGO_PKG_VERSION"))).await;
-            let message = match result {
-                Ok(falcon_platform::UpdateCheck::UpToDate { .. }) => {
-                    crate::i18n::t!("native.update.upToDate")
-                }
-                Ok(falcon_platform::UpdateCheck::Available(update)) => {
-                    crate::i18n::t!("native.update.available", version = update.version.as_str())
-                }
-                _ => crate::i18n::t!("native.update.failed"),
+        // Web 端没有应用内更新，nsh-core 在 wasm32 上也不提供 blocking（阻塞线程池），整个入口只在原生端编
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(updater) = falcon_platform::shared().app_updater() else {
+                return;
             };
-            store.show_toast(message);
-        });
+            let store = self.clone();
+            self.show_toast(crate::i18n::t!("native.update.checking"));
+            spawn(async move {
+                let result =
+                    nsh_core::prelude::blocking(move || updater.check(env!("CARGO_PKG_VERSION"))).await;
+                let message = match result {
+                    Ok(falcon_platform::UpdateCheck::UpToDate { .. }) => {
+                        crate::i18n::t!("native.update.upToDate")
+                    }
+                    Ok(falcon_platform::UpdateCheck::Available(update)) => {
+                        crate::i18n::t!("native.update.available", version = update.version.as_str())
+                    }
+                    _ => crate::i18n::t!("native.update.failed"),
+                };
+                store.show_toast(message);
+            });
+        }
     }
 
     pub fn create_project_request(&self, name: &str, path: &str, host: Option<&str>) {
