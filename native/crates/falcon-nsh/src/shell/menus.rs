@@ -160,7 +160,7 @@ pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> 
     let id = project.id.clone();
     let overview = store.clone();
     actions.push(PopupAction::new(
-        server,
+        server.clone(),
         t!("project.filterInOverview"),
         false,
         false,
@@ -199,22 +199,6 @@ pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> 
             .sep(),
         );
     }
-    let filter = store.clone();
-    let id = project.id.clone();
-    actions.push(
-        PopupAction::new(
-            server,
-            t!("project.filterInOverview"),
-            false,
-            false,
-            move || {
-                filter.overview_project.set(Some(id.clone()));
-                filter.overview_filter.set(None);
-                filter.overview_open.set(true);
-            },
-        )
-        .sep(),
-    );
 
     actions
 }
