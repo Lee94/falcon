@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, check_indicator, glyph};
+use crate::shell::widgets::{Glyph, check_indicator, glyph, icon_button};
 use crate::store::{GitConfirmedOperation, git_change_is_conflicted, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -327,12 +327,20 @@ pub fn DiffPaneView() -> impl IntoElement {
         let item = changes.iter().find(|change| change.path == selected).cloned();
         let split = store.git_diff_split.get();
         let toggle = store.clone();
+        let expand = store.clone();
         let mut header = view().flex_none().flex_row().items_center().justify_between()
             .px(zpx(10.0)).py(zpx(5.0)).border_b_1().border_color(rgba_to_hsla(ui.border))
             .child(text(item.as_ref().map(|change| change.path.clone()).unwrap_or(selected))
+                .flex_1().min_w_0().number_of_lines(1)
                 .text_xs().font_family(FONT_FAMILY_MONO).text_color(rgb_to_hsla(ui.foreground)))
                     .child(view().test_id("git-diff-mode").cursor_pointer().on_press(move || toggle.git_diff_split.set(!split))
                 .child(text(if split { t!("git.viewUnified") } else { t!("git.viewSplit") }).text_xs().text_color(rgb_to_hsla(ui.tint_strong))));
+        if store.active_dialog.get() != crate::store::ActiveDialog::PreviewPopup {
+            header = header.child(icon_button(
+                "git-diff-expand", t!("native.preview.expandDiff"), Glyph::Maximize, false,
+                &resolved, move || crate::views::preview_popup::open_diff(&expand),
+            ));
+        }
         if let Some(item) = item {
             header = header.child(text(format!("+{} -{}", item.additions, item.deletions))
                 .text_xs().font_family(FONT_FAMILY_MONO).text_color(rgb_to_hsla(ui.muted_foreground)));

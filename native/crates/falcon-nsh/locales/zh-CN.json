@@ -974,6 +974,23 @@
     "logout": "退出登录"
   },
   "native": {
+    "preview": {
+      "expandFile": "放大预览",
+      "expandDiff": "放大差异预览",
+      "fileTitle": "文件预览",
+      "diffTitle": "差异预览",
+      "close": "关闭预览（Esc）",
+      "toggleSidebar": "展开或收起快捷文件栏",
+      "toggleTree": "切换列表与目录树",
+      "toggleHidden": "显示或隐藏隐藏文件",
+      "parent": "上级目录",
+      "refresh": "刷新文件",
+      "repository": "仓库",
+      "filter": "按路径搜索文件…",
+      "loading": "正在加载文件…",
+      "empty": "没有匹配的文件",
+      "truncated": "文件索引已截断，部分文件可能未列出。"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",

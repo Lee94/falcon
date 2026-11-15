@@ -66,6 +66,7 @@ pub enum ActiveDialog {
     None,
     Palette,
     QuickOpen,
+    PreviewPopup,
     Profiles,
     NewProject,
     EditProject(String),
@@ -704,6 +705,7 @@ pub struct WorkspaceStore {
     pub quick_open_loading: Signal<bool>,
     pub quick_open_error: Signal<Option<String>>,
     pub quick_open_project: Signal<String>,
+    pub(crate) preview_popup: Signal<Option<crate::views::preview_popup::PreviewTarget>>,
     pub term_prefs: Signal<TermPref>,
     pub agent_views: Signal<HashMap<String, AgentSessionView>>,
     pub file_entries: Signal<Vec<FileEntryItem>>,
@@ -1613,6 +1615,7 @@ impl WorkspaceStore {
             quick_open_loading: signal(false),
             quick_open_error: signal(None),
             quick_open_project: signal(String::new()),
+            preview_popup: signal(None),
             term_prefs: signal(falcon_core::term::load_term_pref(
                 crate::theme::load_pref_item("falcon.term").as_deref(),
             )),
@@ -4330,19 +4333,34 @@ impl WorkspaceStore {
 
     /// 在工作区打开一扇文件编辑/预览窗口。
     pub fn open_file_pane(&self, project_id: &str, path: &str) {
+        if !self.ensure_file_buffer(project_id, path) {
+            return;
+        }
+        let key = file_key(project_id, path);
+        let cols = self.columns.get();
+        if find_pane(&cols, &key).is_none() {
+            let cid = self.active_canvas_id.get();
+            let next = insert_column(&cols, &key, cols.len(), Some(&cid));
+            self.columns.set(next);
+        }
+        self.focused_pane_key.set(key);
+    }
+
+    /// 浮层复用同一缓冲，但浏览文件不为每个结果新增工作区列。
+    pub(crate) fn ensure_file_buffer(&self, project_id: &str, path: &str) -> bool {
         let mapping_generation = self.project_operations.mapping_generation(project_id);
         if !self
             .project_operations
             .mapping_is_current(project_id, &mapping_generation)
         {
             self.show_toast(crate::i18n::t!("project.mappingChangePending"));
-            return;
+            return false;
         }
         if self.file_operations.blocks_file_open(self) {
             if let Some(message) = self.file_operations.file_open_lock_message(self) {
                 self.show_toast(message);
             }
-            return;
+            return false;
         }
         let key = file_key(project_id, path);
         if !self.open_files.get().contains_key(&key) {
@@ -4363,13 +4381,7 @@ impl WorkspaceStore {
                 self.start_file_load(project_id, path, &key, generation);
             }
         }
-        let cols = self.columns.get();
-        if find_pane(&cols, &key).is_none() {
-            let cid = self.active_canvas_id.get();
-            let next = insert_column(&cols, &key, cols.len(), Some(&cid));
-            self.columns.set(next);
-        }
-        self.focused_pane_key.set(key);
+        true
     }
 
     fn start_file_load(&self, project_id: &str, path: &str, key: &str, generation: u64) {

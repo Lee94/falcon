@@ -114,6 +114,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));
         let palette_dialog = matches!(dialog, ActiveDialog::Palette);
         let rename_dialog = matches!(dialog, ActiveDialog::RenameSession { .. });
+        let preview_dialog = dialog == ActiveDialog::PreviewPopup;
         let card_body = match dialog {
             ActiveDialog::None => return view().into_element(),
             ActiveDialog::Palette => crate::views::palette::render(
@@ -131,6 +132,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 crate::views::quick_open::render(&store, quick_open_query, quick_open_selection)
                     .into_element()
             }
+            ActiveDialog::PreviewPopup => crate::views::preview_popup::preview_popup().into_element(),
             ActiveDialog::Profiles => {
                 render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
             }
@@ -196,7 +198,9 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                     .test_id("modal-layer-panel")
                     .element_ref(&modal_focus)
                     .focusable(true)
-                    .w(zpx(if settings_dialog {
+                    .w(zpx(if preview_dialog {
+                        1360.0
+                    } else if settings_dialog {
                         1024.0
                     } else if rename_dialog {
                         380.0
@@ -204,6 +208,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                         580.0
                     }))
                     .max_w(relative(1.0))
+                    .when(preview_dialog, |v| v.h(zpx(860.0)))
                     .max_h(relative(0.86))
                     .flex_col()
                     .overflow_hidden()
@@ -242,7 +247,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
 fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
     matches!(
         dialog,
-        ActiveDialog::Palette | ActiveDialog::QuickOpen | ActiveDialog::RenameSession { .. }
+        ActiveDialog::Palette | ActiveDialog::QuickOpen | ActiveDialog::PreviewPopup | ActiveDialog::RenameSession { .. }
     )
 }
 
@@ -251,6 +256,7 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
         return;
     }
     match dialog {
+        ActiveDialog::PreviewPopup => crate::views::preview_popup::close(store),
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }

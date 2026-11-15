@@ -1100,6 +1100,10 @@ mod tests {
     use crate::terminal::{TerminalSession, TerminalViewport, paint_snapshot};
     use crate::views::ClientPluginVerifier;
 
+    mod preview_popup_tests {
+        include!("preview_popup_tests.rs");
+    }
+
     fn ensure_test_platform() {
         let _ = falcon_platform::shared();
     }
