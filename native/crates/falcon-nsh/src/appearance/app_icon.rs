@@ -1,7 +1,8 @@
 use std::cell::Cell;
 use std::io::Cursor;
 use std::rc::Rc;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use falcon_core::app_icon::{
@@ -422,8 +423,52 @@ fn image_limits() -> Limits {
 }
 
 fn render_svg(bytes: &[u8]) -> Result<RgbaImage, String> {
-    let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
-        .map_err(|error| error.to_string())?;
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Err("gzip-compressed SVG is not supported".into());
+    }
+    if bytes.len() > MAX_UPLOAD_INPUT_BYTES {
+        return Err("SVG input exceeds size limit".into());
+    }
+    let svg = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+    let document = resvg::usvg::roxmltree::Document::parse_with_options(
+        svg,
+        resvg::usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if document.descendants().any(|node| {
+        node.is_element()
+            && (matches!(node.tag_name().name(), "image" | "feImage")
+                || node.attributes().any(|attribute| {
+                    attribute.name() == "href" && !attribute.value().trim().starts_with('#')
+                }))
+    }) {
+        return Err("SVG image resources and external hrefs are not supported".into());
+    }
+
+    let rejected_resource = Arc::new(AtomicBool::new(false));
+    let rejected_data = Arc::clone(&rejected_resource);
+    let rejected_string = Arc::clone(&rejected_resource);
+    let mut options = resvg::usvg::Options::default();
+    options.resources_dir = None;
+    options.image_href_resolver = resvg::usvg::ImageHrefResolver {
+        resolve_data: Box::new(
+            move |_: &str, _: Arc<Vec<u8>>, _: &resvg::usvg::Options<'_>| {
+                rejected_data.store(true, Ordering::Relaxed);
+                None
+            },
+        ),
+        resolve_string: Box::new(move |_: &str, _: &resvg::usvg::Options<'_>| {
+            rejected_string.store(true, Ordering::Relaxed);
+            None
+        }),
+    };
+    let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|error| error.to_string())?;
+    if rejected_resource.load(Ordering::Relaxed) {
+        return Err("SVG image resources and external hrefs are not supported".into());
+    }
     let size = tree.size();
     let longest = size.width().max(size.height());
     if !longest.is_finite() || longest <= 0.0 {
@@ -822,4 +867,84 @@ async fn web_request(
         return Err("server request failed".into());
     }
     Ok(response.body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[test]
+    fn rejects_external_svg_image_hrefs() {
+        for href in [
+            "missing-falcon-icon-resource.png",
+            "file:///nonexistent-falcon-icon-resource.png",
+            "https://example.invalid/icon.png",
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><image href="{href}" width="8" height="8"/></svg>"#
+            );
+            assert_eq!(
+                render_svg(svg.as_bytes()).unwrap_err(),
+                "SVG image resources and external hrefs are not supported"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_embedded_svg_image() {
+        let png = encode_png(&RgbaImage::new(4097, 1)).unwrap();
+        let data = STANDARD.encode(png);
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><image href="data:image/png;base64,{data}" width="8" height="8"/></svg>"#
+        );
+        assert_eq!(
+            render_svg(svg.as_bytes()).unwrap_err(),
+            "SVG image resources and external hrefs are not supported"
+        );
+    }
+
+    #[test]
+    fn rejects_external_use_hrefs() {
+        for href in [
+            "href=\"external.svg#shape\"",
+            "xlink:href=\"external.svg#shape\"",
+        ] {
+            let svg = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><defs><path id="shape" d="M0 0H10V10H0Z"/></defs><use {href}/></svg>"##
+            );
+            assert_eq!(
+                render_svg(svg.as_bytes()).unwrap_err(),
+                "SVG image resources and external hrefs are not supported"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_ordinary_path_svg() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path d="M0 0H10V10H0Z" fill="#f00"/></svg>"##;
+        let image = render_svg(svg).unwrap();
+        assert_eq!(
+            image.get_pixel(image.width() / 2, image.height() / 2).0,
+            [255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn renders_local_fragment_use() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><defs><path id="shape" d="M0 0H10V10H0Z" fill="#f00"/></defs><use xlink:href="#shape"/></svg>"##;
+        let image = render_svg(svg).unwrap();
+        assert_eq!(
+            image.get_pixel(image.width() / 2, image.height() / 2).0,
+            [255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn rejects_gzip_svg() {
+        assert_eq!(
+            render_svg(&[0x1f, 0x8b, 0x08, 0x00]).unwrap_err(),
+            "gzip-compressed SVG is not supported"
+        );
+    }
 }
