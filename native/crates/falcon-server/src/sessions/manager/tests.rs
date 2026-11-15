@@ -118,6 +118,8 @@ async fn new_session(h: &Harness) -> Session {
 
 /// 真 PTY 验证默认开场契约：CLI 直接连接终端，原始输出与按键不经过结构化驱动器。
 /// 替身不发模型请求，只记录 argv、检查终端与环境，再读写真实 PTY。
+/// 替身是 chmod 过的 `/bin/sh` 脚本，只在 unix 上编译运行（Windows 上 check 测试目标时跳过）
+#[cfg(unix)]
 #[test]
 fn agents_default_to_their_own_interactive_cli() {
     run(async {
@@ -187,6 +189,8 @@ done
 }
 
 /// 新建 GUI 必须直接完成结构化交互，而不是先开官方 CLI 再尝试转换。
+/// 替身同样是 chmod 过的 `/bin/sh` 脚本，只在 unix 上编译运行
+#[cfg(unix)]
 #[test]
 fn agents_can_start_directly_in_gui() {
     run(async {
@@ -477,6 +481,9 @@ fn host_rows_become_fake_projects() {
     assert!(p.working_dir.is_none());
 }
 
+// 图形 / 终端互转的用例大多跑在 mode_harness 上：chmod 过的 `/bin/sh` 假 shell、libc::kill 查进程，
+// 只在 unix 上编译运行；其余用录制后端的用例与平台无关，在 Linux / macOS 的测试里照样覆盖
+#[cfg(unix)]
 mod agent_mode;
 
 // ---------------------------------------------------------------- 守护进程会话（ADR 0020）
@@ -649,7 +656,9 @@ fn gone_rows_are_revived_in_place() {
 /// holder 在有人看着的时候被强杀：会话先待接回，接回判 Gone 后原地重开，claude 接着原来那段
 /// 对话——开场带 `--session-id <会话 id>`，重开带 `--resume <会话 id>`。claude 与登录 shell
 /// 都是假的（真的 `sh -l` 会读真实家目录的 profile，可能找到真 claude）：假 shell 收到 `-c`
-/// 就用 sh 跑那段，落回 shell 时起一个普通 sh；假 claude 只把参数记进日志
+/// 就用 sh 跑那段，落回 shell 时起一个普通 sh；假 claude 只把参数记进日志。
+/// 假程序是 chmod 过的 sh 脚本、杀 holder 用 libc::kill，只在 unix 上编译运行
+#[cfg(unix)]
 #[test]
 fn killed_holder_is_revived_and_resumes_the_agent_conversation() {
     if !sessiond_available() {
@@ -882,13 +891,26 @@ fn auto_title_follows_the_program_even_with_nobody_watching() {
         // Keep each background title state until the test has observed it. Fixed
         // sleep windows can skip the intermediate app identity under build load.
         // Status and custom titles must originate from the foreground awk process.
+        //
+        // shell 自己写的标题要在 shell 还在前台时被 holder 处理完：holder 等 VT 进程解析出标题才查
+        // 前台（Holder::on_title），`printf …; sleep 4` 紧挨着的话，负载高时查到的已经是 sleep，
+        // 这个标题会被误记成程序写的（v0.4.4 的 CI 这样失败过：等 "claude" 时拿到 "fay@mac: ~"）。
+        // 所以 shell 写完停在内建的 read 上，让第二个 Viewer 拿一次快照：VT 进程按顺序处理字节与
+        // 快照请求，快照回来时标题已经按「shell 在前台」处理过，再放行后面的命令。
+        // `ti''tled` 让回显的命令行里没有 "titled"，等到的只能是 echo 的输出
         h.mgr.input(
             &s.id,
             a.id(),
-            "printf '\\033]2;fay@mac: ~\\007'; sleep 4; echo go; awk 'BEGIN{getline gate; \
+            "printf '\\033]2;fay@mac: ~\\007'; echo ti''tled; read gate; sleep 4; echo go; awk 'BEGIN{getline gate; \
              printf \"\\033]7501;state=working:app=claude-code\\033\\\\\"; fflush(); getline gate; \
              printf \"\\033]2;\u{2733} 修复登录 bug\\007\"; fflush(); system(\"sleep 30\")}'\n",
         );
+        a.wait("shell 写完标题", has_output("titled")).await;
+        let mut b = Peer::new();
+        h.mgr.add_viewer(&s.id, b.viewer.clone());
+        b.wait("快照", has_replay("titled")).await;
+        h.mgr.remove_viewer(&s.id, b.id());
+        h.mgr.input(&s.id, a.id(), "\n");
         a.wait("前台命令", |seen| seen.iter().any(|g| matches!(g, Got::Msg(m) if m["type"] == "title" && m["title"] == "sleep")))
             .await;
         assert!(a.msgs("title").iter().all(|m| m["title"] != "fay@mac: ~"), "{:?}", a.msgs("title"));
