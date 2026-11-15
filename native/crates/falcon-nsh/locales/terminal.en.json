@@ -1,0 +1,33 @@
+{
+  "native": {
+    "terminal": {
+      "copy": "Copy",
+      "paste": "Paste",
+      "clear": "Clear",
+      "pasteImageTooLarge": "Image too large; skipped",
+      "pasteImageFailed": "Failed to paste image",
+      "transferUnavailable": "Terminal file transfer is unavailable on this platform",
+      "connReconnecting": "Connection closed, retrying (attempt %{attempt})",
+      "connClosed": "Connection closed",
+      "connClosedBody": "The terminal connection closed. The background session may still be running.",
+      "retryNow": "Retry now",
+      "deadTitle": "Session ended",
+      "deadBody": "%{reason}. Create a terminal or clear this record.",
+      "deadReason_exited": "The shell exited",
+      "deadReason_backend_restart": "The session could not be restored after the backend restarted",
+      "deadReason_link_lost": "The SSH connection was lost",
+      "deadReason_session_gone": "The session no longer exists on the host",
+      "deadActionNew": "New terminal",
+      "clearRecord": "Clear record",
+      "reconnecting": "Reconnecting (attempt %{attempt})",
+      "unverifiedTitle": "Session status unverified",
+      "unverifiedBody": "The host session could not be verified. Reconnect to reattach the original session.",
+      "attachFailed": "Failed to attach",
+      "reattach": "Reconnect",
+      "retry": "Retry",
+      "viewFailed": "Failed to open file",
+      "viewLoading": "Loading preview…",
+      "viewImageFailed": "Failed to preview image"
+    }
+  }
+}
