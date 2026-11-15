@@ -24,7 +24,9 @@ use falcon_theme::ResolvedTheme;
 use parking_lot::Mutex;
 
 pub use falcon_core::agent_mode::AgentCommand;
-use falcon_core::agent_mode::{self, AgentModeTransition, agent_command_allowed};
+use falcon_core::agent_mode::{AgentModeTransition, agent_command_allowed};
+#[cfg(not(target_arch = "wasm32"))]
+use falcon_core::agent_mode;
 use falcon_proto::AgentViewState;
 
 #[derive(Clone, Debug, Default)]
@@ -459,11 +461,11 @@ impl SessionSink for TerminalSession {
                     agent.connected = true;
                     agent.transition = agent.transition.connected(true);
                 }
-                self.agent_revision.fetch_add(1, Ordering::Release);
                 let mut meta = self.meta.lock();
                 meta.reconnecting_attempt = None;
                 meta.last_error = None;
                 drop(meta);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
             SessionEvent::Output(bytes) => {
@@ -490,16 +492,16 @@ impl SessionSink for TerminalSession {
                 self.bump_frame();
             }
             SessionEvent::State { state, dead_reason } => {
-                self.agent_revision.fetch_add(1, Ordering::Release);
                 let mut meta = self.meta.lock();
                 meta.state = state;
                 meta.dead_reason = dead_reason;
                 drop(meta);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
             SessionEvent::Reconnecting { attempt } => {
-                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.meta.lock().reconnecting_attempt = Some(attempt);
+                self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
             SessionEvent::Error(msg) => {
@@ -523,6 +525,9 @@ impl SessionSink for TerminalSession {
                     let mut agent = self.agent.lock();
                     agent.connected = false;
                     agent.transition = agent.transition.disconnected();
+                    if let Some(state) = agent.state.as_mut().filter(|state| state.active && !state.terminal_backed) {
+                        state.status = falcon_proto::AgentTurnStatus::Unknown;
+                    }
                 }
                 self.agent_revision.fetch_add(1, Ordering::Release);
                 self.meta.lock().reconnecting_attempt = Some(retry_attempt);
@@ -589,6 +594,9 @@ impl SessionSink for TerminalSession {
                 let mut agent = self.agent.lock();
                 agent.connected = false;
                 agent.transition = agent.transition.disconnected();
+                if let Some(state) = agent.state.as_mut().filter(|state| state.active && !state.terminal_backed) {
+                    state.status = falcon_proto::AgentTurnStatus::Unknown;
+                }
                 self.agent_revision.fetch_add(1, Ordering::Release);
             }
         }

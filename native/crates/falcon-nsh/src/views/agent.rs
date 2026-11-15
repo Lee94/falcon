@@ -283,7 +283,7 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
             }
             let scroller = scroll()
                 .test_id(&format!("agent-timeline-{sid}"))
-                .r#ref(&timeline_ref)
+                .element_ref(&timeline_ref)
                 .flex_1()
                 .min_h_0()
                 .on_scroll(move |event: &nsh_core::element::ScrollEvent| {
@@ -292,10 +292,11 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                             <= zpx(32.0).0,
                     );
                 })
-                .child(timeline);
-            if following.get_untracked() {
-                timeline_ref.scroll_to_end(false);
-            }
+                .child(timeline.on_layout(move |_: &Bounds<Points>| {
+                    if following.get_untracked() {
+                        timeline_ref.scroll_to_end(false);
+                    }
+                }));
             let page = view()
                 .size_full()
                 .flex_col()
@@ -521,7 +522,7 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                     .child(
                         input()
                             .test_id(&format!("agent-composer-{sid}"))
-                            .r#ref(&composer_ref)
+                            .element_ref(&composer_ref)
                             .flex_1()
                             .multiline(true)
                             .submit_behavior(nsh_core::SubmitBehavior::Submit)

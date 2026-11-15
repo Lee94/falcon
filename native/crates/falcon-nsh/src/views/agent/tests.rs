@@ -5,6 +5,7 @@ use falcon_proto::{
     AgentModelOption, AgentSlashCommand, AgentToolCall, AgentToolContent, AgentToolKind,
     AgentToolStatus, SessionAgent,
 };
+use nsh_core::element::Root;
 use nsh_engine::EngineConfig;
 use nsh_testing::Headless;
 
@@ -135,4 +136,94 @@ fn grouped_activity_nested_folds_diff_and_style_headless() {
     app.wait_for("id:agent-text-u").unwrap();
     // Style changes retain the nested disclosure overrides.
     app.wait_for("text:+ new line").unwrap();
+}
+
+#[component]
+fn PermissionHarness() -> impl IntoElement {
+    let theme = crate::theme::install_theme(None);
+    crate::zoom::install_zoom();
+    crate::shell::action_owner::ActionOwner::install();
+    let folded = signal(HashSet::new());
+    let last_event = signal(String::new());
+    let controls = EntryControls {
+        folded,
+        can_approve: true,
+        dispatch: Rc::new(move |event| {
+            last_event.set(match event {
+                AgentPaneEvent::Command(AgentCommand::Permission { call_id, decision }) => {
+                    format!("permission:{call_id}:{}", decision.as_str())
+                }
+                AgentPaneEvent::OpenFile(path) => format!("open:{path}"),
+                _ => "unexpected".into(),
+            })
+        }),
+    };
+    let entry = AgentEntry::ToolCall(AgentToolCall {
+        id: "approval".into(),
+        title: "Run command".into(),
+        description: None,
+        file_path: Some("src/main.rs".into()),
+        kind: AgentToolKind::Execute,
+        status: AgentToolStatus::Pending,
+        permission_pending: true,
+        permission_reason: Some("Approve command?".into()),
+        content: vec![AgentToolContent::Terminal {
+            command: "test command".into(),
+            cwd: Some("/workspace".into()),
+            exit_code: Some(1),
+            output: format!(
+                "\x1b[1;32m\x1b]8;;https://example.com\x1b\\成功🙂\x1b]8;;\x1b\\\x1b[0m\n{}",
+                (0..14)
+                    .map(|i| format!("output line {i}\n"))
+                    .collect::<String>()
+            ),
+        }],
+    });
+    view().flex_col().size_full().child(dynamic(move || {
+        view()
+            .flex_col()
+            .child(blocks::render_entry(
+                &entry,
+                false,
+                &controls,
+                &theme.resolved(),
+            ))
+            .child(text(last_event.get()))
+            .into_element()
+    }))
+}
+
+#[test]
+fn permission_output_expansion_ansi_and_file_events_headless() {
+    let _ = falcon_platform::shared();
+    let mut cfg = EngineConfig::new(
+        Root::of::<PermissionHarness>().translations(crate::i18n::translations()),
+    );
+    cfg.viewport = Size::new(Points(900.0), Points(900.0));
+    cfg.ui_sets = vec![nsh_base::registry(), crate::registry()];
+    let mut app = Headless::start(cfg).unwrap();
+    app.first_render().unwrap();
+    // Pending permission defaults open, output preview is independently expandable.
+    app.wait_for("text:/成功🙂/").unwrap();
+    assert!(!app.shows("text:/output line 13/"));
+    app.press("id:agent-expand-content:approval:0").unwrap();
+    app.wait_for("text:/output line 13/").unwrap();
+    for (key, decision) in [
+        ("allowOnce", "allow"),
+        ("allowSession", "allow_session"),
+        ("deny", "deny"),
+    ] {
+        app.press(&format!("id:agent-permission-{key}-approval"))
+            .unwrap();
+        app.wait_for(&format!("text:permission:approval:{decision}"))
+            .unwrap();
+    }
+    app.press("label:agent-open-file-approval").unwrap();
+    app.wait_for("text:open:src/main.rs").unwrap();
+    app.press("id:agent-tool-toggle-approval").unwrap();
+    assert!(!app.shows("id:agent-permission-allowOnce-approval"));
+    app.press("id:agent-tool-toggle-approval").unwrap();
+    app.wait_for("id:agent-permission-allowOnce-approval")
+        .unwrap();
+    app.wait_for("text:/output line 13/").unwrap();
 }

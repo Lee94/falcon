@@ -287,7 +287,7 @@ fn render_tool(
                 let id = call.id.clone();
                 buttons = buttons.child(action_button(
                     &format!("agent-permission-{key}-{}", call.id),
-                    t!(format!("native.agentView.{key}")),
+                    t!(&format!("native.agentView.{key}")),
                     controls.can_approve,
                     decision == AgentPermissionDecision::Deny,
                     theme,

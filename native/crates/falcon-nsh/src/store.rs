@@ -3980,13 +3980,14 @@ impl WorkspaceStore {
         created
     }
 
-    fn sync_agent_views(&self, revisions: &mut HashMap<String, u64>) {
+    fn sync_agent_views(&self, revisions: &mut HashMap<String, (std::sync::Weak<TerminalSession>, u64)>) {
         let terminals = self.terminals.map.lock().iter().map(|(id, session)| (id.clone(), session.clone())).collect::<Vec<_>>();
         revisions.retain(|id, _| terminals.iter().any(|(sid, _)| sid == id));
         for (id, terminal) in terminals {
             let revision = terminal.agent_revision();
-            if revisions.get(&id) == Some(&revision) { continue; }
-            revisions.insert(id.clone(), revision);
+            let identity = Arc::downgrade(&terminal);
+            if revisions.get(&id).is_some_and(|(previous, seen)| *seen == revision && previous.ptr_eq(&identity)) { continue; }
+            revisions.insert(id.clone(), (identity, revision));
             let runtime = terminal.agent_runtime();
             let Some(snapshot) = runtime.state else { continue; };
             let meta = terminal.meta();
