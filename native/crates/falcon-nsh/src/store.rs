@@ -214,6 +214,8 @@ pub struct SessionRecord {
     pub agent: Option<String>,
     /// 守护进程经 OSC 7501 推来的程序运行状态摘要（只画在窗口标题栏胶囊与侧栏徽标上，绝不在终端内加动态行）。
     pub program_status: Option<(ProgramState, String)>,
+    /// Preserve OSC 7501 kind/progress/details for the titlebar; the sidebar uses the compact tuple.
+    pub program_summary: Option<falcon_proto::ProgramStatusSummary>,
     /// 前台正在运行的非 shell 命令（用于终止前确认拦截）。
     pub foreground_cmd: Option<String>,
 }
@@ -1234,6 +1236,11 @@ impl WorkspaceStore {
                 state: SessionState::Active,
                 agent: None,
                 program_status: Some((ProgramState::Working, "cargo check · 1.2s".into())),
+                program_summary: Some(falcon_proto::ProgramStatusSummary {
+                    state: ProgramState::Working,
+                    progress: Some(42),
+                    kind: None, app: None, title: None, message: None, updated_at: 0,
+                }),
                 foreground_cmd: Some("cargo check -p falcon-nsh".into()),
             },
             SessionRecord {
@@ -1246,6 +1253,10 @@ impl WorkspaceStore {
                 state: SessionState::Active,
                 agent: Some("claude".into()),
                 program_status: Some((ProgramState::Done, crate::i18n::t!("demo.refactorDone"))),
+                program_summary: Some(falcon_proto::ProgramStatusSummary {
+                    state: ProgramState::Done,
+                    progress: None, kind: None, app: None, title: None, message: None, updated_at: 0,
+                }),
                 foreground_cmd: None,
             },
         ];
@@ -1998,6 +2009,7 @@ impl WorkspaceStore {
                             state: s.state,
                             agent: s.agent.as_ref().map(|a| a.as_str().to_string()),
                             program_status: ps,
+                            program_summary: s.program_status.clone(),
                             foreground_cmd: s.title.clone(),
                         }
                     })
@@ -2335,6 +2347,7 @@ impl WorkspaceStore {
                             .as_ref()
                             .map(|ps| (ps.state, detail_text(ps, 80).unwrap_or_default())),
                         foreground_cmd: s.title.clone(),
+                        program_summary: s.program_status.clone(),
                     })
                     .collect();
                 let columns = store.columns.get();
@@ -4151,6 +4164,7 @@ impl WorkspaceStore {
         }
         self.focused_pane_key.set(key);
         // 查看后清除已完成/错误的程序状态提醒（ADR 0020）
+        let mut finished_summary = false;
         self.sessions.update(|list| {
             if let Some(s) = list.iter_mut().find(|s| s.id == session_id) {
                 if matches!(
@@ -4158,9 +4172,25 @@ impl WorkspaceStore {
                     Some(ProgramState::Done | ProgramState::Error)
                 ) {
                     s.program_status = None;
+                    finished_summary = true;
+                }
+                if matches!(
+                    s.program_summary.as_ref().map(|s| s.state),
+                    Some(ProgramState::Done | ProgramState::Error)
+                ) {
+                    s.program_summary = None;
+                    finished_summary = true;
                 }
             }
         });
+        let terminal = self.terminals.map.lock().get(session_id).cloned();
+        if let Some(terminal) = terminal {
+            if finished_summary
+                || falcon_core::program_status::has_finished(&terminal.meta().program_status)
+            {
+                terminal.mark_status_seen();
+            }
+        }
     }
 
     pub fn focus_palette_session(&self, session_id: &str) {
@@ -4276,6 +4306,7 @@ impl WorkspaceStore {
                                 state: created.state,
                                 agent: created.agent.map(|a| a.as_str().to_string()),
                                 program_status: None,
+                                program_summary: None,
                                 foreground_cmd: None,
                             };
                             store.sessions.update(|v| v.push(rec));
@@ -4311,6 +4342,7 @@ impl WorkspaceStore {
                 .as_ref()
                 .map(|agent| agent.as_str().to_string()),
             program_status: None,
+            program_summary: None,
             foreground_cmd: None,
         };
         let sess = TerminalSession::new_offline(&id, 80, 24, true);

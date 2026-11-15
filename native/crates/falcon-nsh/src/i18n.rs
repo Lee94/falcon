@@ -29,7 +29,11 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
 
 static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let base = FLAT_ZH_CN.clone();
-    let mut map = HashMap::with_capacity(3);
+    let mut english = base.clone();
+    let root: Value =
+        serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &root, &mut english);
+    let mut map = HashMap::with_capacity(4);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
     let mut english = base;

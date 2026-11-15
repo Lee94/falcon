@@ -2,7 +2,7 @@ use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, icon_button};
+use crate::shell::widgets::{Glyph, button_caption, icon_button_with_shortcut};
 use crate::store::use_workspace;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -76,11 +76,12 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(popover_foreground),
                 )
-                .child(icon_button(
+                .child(icon_button_with_shortcut(
                     "rename-session-close",
                     t!("common.close"),
                     Glyph::Close,
                     false,
+                    Some("escape"),
                     &resolved,
                     move || {
                         close_operations.close_rename(
@@ -157,9 +158,8 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                                     )
                                 })
                                 .child(
-                                    text(t!("common.cancel"))
-                                        .text_xs()
-                                        .text_color(secondary_foreground),
+                                    view().text_color(secondary_foreground)
+                                        .child(button_caption(t!("common.cancel"), "escape", &resolved)),
                                 ),
                         )
                         .child(
@@ -183,14 +183,15 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                                     )
                                 })
                                 .child(dynamic(move || {
-                                    text(if busy_operations.is_busy(&busy_session_id) {
+                                    let label = if busy_operations.is_busy(&busy_session_id) {
                                         t!("session.renaming")
                                     } else {
                                         t!("rename.submit")
-                                    })
-                                    .text_xs()
+                                    };
+                                    view()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(tint_foreground)
+                                    .child(button_caption(label, "enter", &resolved))
                                 })),
                         ),
                 ),
