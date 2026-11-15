@@ -30,6 +30,10 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
+    fn pending_restart(&self) -> bool {
+        matches!(self, Self::Installed(update) if update.relaunch && update.relaunch_bundle.is_some())
+    }
+
     pub(crate) fn busy(&self) -> bool {
         matches!(
             self,
@@ -45,7 +49,7 @@ impl Phase {
             Self::Available(update) => {
                 t!("native.update.install", version = update.version.as_str())
             }
-            Self::Installed(update) if update.relaunch && update.relaunch_bundle.is_some() => {
+            phase if phase.pending_restart() => {
                 t!("native.update.restart")
             }
             _ => t!("native.update.check"),
@@ -88,13 +92,15 @@ pub(crate) fn menu_label(phase: &Phase) -> String {
         Phase::Checking => t!("native.menuBar.checkingUpdate"),
         Phase::Downloading { .. } => t!("native.update.downloadingShort"),
         Phase::Installing { .. } => t!("native.menuBar.installingUpdate"),
+        phase if phase.pending_restart() => t!("native.update.restart"),
         _ => t!("native.menuBar.checkUpdate"),
     }
 }
 
 impl WorkspaceStore {
     pub fn check_app_update(&self) {
-        if self.app_update.get_untracked().busy() {
+        let phase = self.app_update.get_untracked();
+        if phase.busy() || phase.pending_restart() {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -109,7 +115,8 @@ impl WorkspaceStore {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn check_with_updater(&self, updater: std::sync::Arc<dyn AppUpdater>) {
-        if self.app_update.get_untracked().busy() {
+        let phase = self.app_update.get_untracked();
+        if phase.busy() || phase.pending_restart() {
             return;
         }
         self.app_update.set(Phase::Checking);
@@ -567,6 +574,8 @@ mod tests {
         app.press("id:next").unwrap();
         app.wait_for("Installing v99.0.0…").unwrap();
         app.press("id:next").unwrap();
+        app.wait_for("Restart App").unwrap();
+        app.press("id:check").unwrap();
         app.wait_for("Restart App").unwrap();
         app.press("id:dirty").unwrap();
         app.press("id:app-update-action").unwrap();
