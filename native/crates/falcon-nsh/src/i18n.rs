@@ -20,6 +20,9 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
         serde_json::from_str(ZH_CN_JSON).expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.zh-CN.json"))
+        .expect("terminal Chinese translations must be valid JSON");
+    flatten_json("", &terminal, &mut out);
     out
 });
 
@@ -32,6 +35,9 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let english_root: Value =
         serde_json::from_str(EN_JSON).expect("falcon-nsh English translations must be valid JSON");
     flatten_json("", &english_root, &mut english);
+    let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.en.json"))
+        .expect("terminal English translations must be valid JSON");
+    flatten_json("", &terminal, &mut english);
     map.insert("en".to_string(), english.clone());
     map.insert("en-US".to_string(), english);
     Translations::from_map(map)
@@ -70,4 +76,20 @@ pub fn translations() -> Translations {
 /// 非组件上下文（纯单元测试对账文案 key）直接按点分键取值。
 pub fn lookup_static(key: &str) -> Option<&'static str> {
     FLAT_ZH_CN.get(key).map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_overlay_keeps_agent_and_terminal_translations() {
+        let translations = translations();
+        for locale in ["en", "en-US"] {
+            assert_eq!(translations.lookup(locale, "native.agentView.send").as_deref(), Some("Send"));
+            assert_eq!(translations.lookup(locale, "native.terminal.copy").as_deref(), Some("Copy"));
+        }
+        assert_eq!(translations.lookup("zh-CN", "native.agentView.send").as_deref(), lookup_static("native.agentView.send"));
+        assert_eq!(translations.lookup("zh-CN", "native.terminal.copy").as_deref(), lookup_static("native.terminal.copy"));
+    }
 }

@@ -54,9 +54,23 @@ impl Default for EffectiveGrid {
     }
 }
 
+/// 与 GPUI banner 对齐的终端传输与会话状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConnectionState {
+    #[default]
+    Active,
+    Connecting,
+    Disconnected,
+    Dead,
+    Unverified,
+    Reconnecting,
+    Error,
+}
+
 /// 单条会话连接在客户端侧持有的实时元数据。
 #[derive(Clone, Debug)]
 pub struct SessionRuntimeMeta {
+    pub connection: ConnectionState,
     pub state: SessionState,
     pub dead_reason: Option<DeadReason>,
     pub title: Option<String>,
@@ -70,6 +84,7 @@ pub struct SessionRuntimeMeta {
 impl Default for SessionRuntimeMeta {
     fn default() -> Self {
         Self {
+            connection: ConnectionState::Active,
             state: SessionState::Active,
             dead_reason: None,
             title: None,
@@ -92,6 +107,8 @@ pub struct TerminalSession {
     effective_grid: Mutex<EffectiveGrid>,
     measured_grid: Mutex<Option<(u16, u16)>>,
     meta: Mutex<SessionRuntimeMeta>,
+    cwd_scanner: Mutex<falcon_core::terminal_link::CwdScanner>,
+    output_cwd: Mutex<Option<String>>,
     mouse: Mutex<MouseReporter>,
     wheel: Mutex<WheelAccumulator>,
     frame_seq: AtomicU64,
@@ -123,6 +140,8 @@ impl TerminalSession {
             }),
             measured_grid: Mutex::new(None),
             meta: Mutex::new(SessionRuntimeMeta::default()),
+            cwd_scanner: Mutex::new(Default::default()),
+            output_cwd: Mutex::new(None),
             mouse: Mutex::new(MouseReporter::new()),
             wheel: Mutex::new(WheelAccumulator::new()),
             frame_seq: AtomicU64::new(1),
@@ -141,6 +160,8 @@ impl TerminalSession {
         resolved: &ResolvedTheme,
         terminal_backed_agent_view: bool,
     ) {
+        self.meta.lock().connection = ConnectionState::Connecting;
+        self.agent_revision.fetch_add(1, Ordering::Release);
         let mut opts = SocketOptions::default();
         opts.terminal_backed_agent_view = terminal_backed_agent_view;
         let sink: Arc<dyn SessionSink> = self.clone();
@@ -183,6 +204,7 @@ impl TerminalSession {
         let available = agent.connected
             && agent.transition.synchronized
             && !agent.transition.switching()
+            && meta.connection == ConnectionState::Active
             && meta.state == SessionState::Active
             && meta.reconnecting_attempt.is_none();
         if !available
@@ -239,12 +261,72 @@ impl TerminalSession {
         self.meta.lock().clone()
     }
 
+    pub fn output_cwd(&self) -> Option<String> {
+        self.output_cwd.lock().clone()
+    }
+
+    pub fn can_input(&self) -> bool {
+        self.meta.lock().connection == ConnectionState::Active
+    }
+
+    pub fn reconnect_now(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(socket) = self.socket.lock().as_ref() {
+            socket.reconnect_now();
+        }
+    }
+
+    pub fn set_state(&self, state: SessionState, reason: Option<DeadReason>) {
+        let mut meta = self.meta.lock();
+        meta.state = state;
+        meta.dead_reason = reason;
+        meta.connection = match state {
+            SessionState::Active => ConnectionState::Active,
+            SessionState::Dead => ConnectionState::Dead,
+            _ => ConnectionState::Unverified,
+        };
+        if meta.connection == ConnectionState::Active {
+            meta.last_error = None;
+        }
+        meta.reconnecting_attempt = None;
+        drop(meta);
+        self.agent_revision.fetch_add(1, Ordering::Release);
+        self.bump_frame();
+    }
+
+    pub fn set_error(&self, message: String) {
+        let mut meta = self.meta.lock();
+        meta.connection = ConnectionState::Error;
+        meta.last_error = Some(message);
+        drop(meta);
+        self.agent_revision.fetch_add(1, Ordering::Release);
+        self.bump_frame();
+    }
+
+    pub fn clear_screen(&self) {
+        self.core.clear_screen();
+        self.bump_frame();
+    }
+
+    pub fn scroll_to(&self, offset: usize) {
+        if self.core.scroll_to(offset) {
+            self.bump_frame();
+        }
+    }
+
+    pub fn selection_changed(&self) {
+        self.bump_frame();
+    }
+
     pub fn take_clipboard_pending(&self) -> Option<String> {
         self.meta.lock().clipboard_pending.take()
     }
 
     /// 注入一段终端实时字节流（网络线程与本地压测共用）。
     pub fn feed_output(&self, bytes: &[u8]) {
+        if let Some(cwd) = self.cwd_scanner.lock().feed(bytes) {
+            *self.output_cwd.lock() = Some(cwd);
+        }
         self.core.advance(bytes);
         self.drain_term_events();
         self.bump_frame();
@@ -252,6 +334,13 @@ impl TerminalSession {
 
     /// 注入整份回放快照（离锁换 Term 并保留本地历史阅读偏移）。
     pub fn feed_replay(&self, bytes: &[u8]) {
+        let mut scanner = self.cwd_scanner.lock();
+        *scanner = Default::default();
+        // Durable VT snapshots omit OSC 7; retain the last observed cwd unless replay supplies one.
+        if let Some(cwd) = scanner.feed(bytes) {
+            *self.output_cwd.lock() = Some(cwd);
+        }
+        drop(scanner);
         self.core.replace_with_replay(bytes);
         let _ = self.core.take_events();
         self.bump_frame();
@@ -310,7 +399,7 @@ impl TerminalSession {
 
     /// 键盘 / IME 上屏 / 粘贴向会话输入字符串。
     pub fn send_input(&self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || !self.can_input() {
             return;
         }
         #[cfg(test)]
@@ -332,9 +421,12 @@ impl TerminalSession {
 
     /// 粘贴文本：若当前终端开启了 Bracketed Paste（`?2004h`），自动包裹转义序列并清洗嵌套结束符。
     pub fn send_paste(&self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || !self.can_input() {
             return;
         }
+        self.core.clear_selection();
+        self.core.scroll_to_bottom();
+        self.bump_frame();
         let bracketed = self
             .core
             .mode()
@@ -461,9 +553,17 @@ impl SessionSink for TerminalSession {
                     agent.connected = true;
                     agent.transition = agent.transition.connected(true);
                 }
+                *self.mouse.lock() = MouseReporter::new();
                 let mut meta = self.meta.lock();
+                meta.connection = match meta.state {
+                    SessionState::Dead => ConnectionState::Dead,
+                    SessionState::Active => ConnectionState::Active,
+                    _ => ConnectionState::Unverified,
+                };
                 meta.reconnecting_attempt = None;
-                meta.last_error = None;
+                if meta.connection == ConnectionState::Active {
+                    meta.last_error = None;
+                }
                 drop(meta);
                 self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
@@ -492,21 +592,18 @@ impl SessionSink for TerminalSession {
                 self.bump_frame();
             }
             SessionEvent::State { state, dead_reason } => {
+                self.set_state(state, dead_reason);
+            }
+            SessionEvent::Reconnecting { attempt } => {
                 let mut meta = self.meta.lock();
-                meta.state = state;
-                meta.dead_reason = dead_reason;
+                meta.connection = ConnectionState::Reconnecting;
+                meta.reconnecting_attempt = Some(attempt);
                 drop(meta);
                 self.agent_revision.fetch_add(1, Ordering::Release);
                 self.bump_frame();
             }
-            SessionEvent::Reconnecting { attempt } => {
-                self.meta.lock().reconnecting_attempt = Some(attempt);
-                self.agent_revision.fetch_add(1, Ordering::Release);
-                self.bump_frame();
-            }
             SessionEvent::Error(msg) => {
-                self.meta.lock().last_error = Some(msg);
-                self.bump_frame();
+                self.set_error(msg);
             }
             SessionEvent::Title(title) => {
                 self.meta.lock().title = title;
@@ -529,8 +626,14 @@ impl SessionSink for TerminalSession {
                         state.status = falcon_proto::AgentTurnStatus::Unknown;
                     }
                 }
+                let mut meta = self.meta.lock();
+                if meta.connection != ConnectionState::Dead {
+                    meta.connection = ConnectionState::Disconnected;
+                }
+                meta.reconnecting_attempt = Some(retry_attempt);
+                meta.program_status.clear();
+                drop(meta);
                 self.agent_revision.fetch_add(1, Ordering::Release);
-                self.meta.lock().reconnecting_attempt = Some(retry_attempt);
                 self.bump_frame();
             }
             SessionEvent::AgentSnapshot(state) => {
@@ -597,7 +700,10 @@ impl SessionSink for TerminalSession {
                 if let Some(state) = agent.state.as_mut().filter(|state| state.active && !state.terminal_backed) {
                     state.status = falcon_proto::AgentTurnStatus::Unknown;
                 }
+                drop(agent);
+                self.meta.lock().connection = ConnectionState::Disconnected;
                 self.agent_revision.fetch_add(1, Ordering::Release);
+                self.bump_frame();
             }
         }
     }
@@ -609,6 +715,35 @@ mod agent_tests {
     use falcon_proto::{
         AgentDeltaKind, AgentEntry, AgentSlashCommand, AgentTurnStatus, SessionAgent,
     };
+
+    #[test]
+    fn connection_status_changes_publish_agent_revisions() {
+        let session = TerminalSession::new_offline("agent-connection", 80, 24, true);
+        session.on_event(SessionEvent::Connected { reconnected: false });
+        session.on_event(SessionEvent::AgentSnapshot(AgentViewState::new(SessionAgent::Claude, true)));
+        for (state, connection) in [
+            (SessionState::Unverified, ConnectionState::Unverified),
+            (SessionState::Dead, ConnectionState::Dead),
+            (SessionState::Active, ConnectionState::Active),
+        ] {
+            let revision = session.agent_revision();
+            session.on_event(SessionEvent::State { state, dead_reason: None });
+            assert_eq!(session.meta().connection, connection);
+            assert!(session.agent_revision() > revision);
+        }
+        let revision = session.agent_revision();
+        session.on_event(SessionEvent::Error("attachment failed".into()));
+        assert_eq!(session.meta().connection, ConnectionState::Error);
+        assert!(session.agent_revision() > revision);
+
+        let revision = session.agent_revision();
+        session.on_event(SessionEvent::Unauthorized);
+        assert_eq!(session.meta().connection, ConnectionState::Disconnected);
+        assert!(!session.agent_runtime().connected);
+        assert!(!session.agent_runtime().transition.synchronized);
+        assert_eq!(session.agent_runtime().state.unwrap().status, AgentTurnStatus::Unknown);
+        assert!(session.agent_revision() > revision);
+    }
 
     #[test]
     fn agent_snapshot_entries_deltas_meta_and_reconnect_are_authoritative() {

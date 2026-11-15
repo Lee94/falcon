@@ -3993,6 +3993,7 @@ impl WorkspaceStore {
             let meta = terminal.meta();
             let available = runtime.connected && runtime.transition.synchronized
                 && !runtime.transition.switching() && meta.state == SessionState::Active
+                && meta.connection == crate::terminal::session::ConnectionState::Active
                 && meta.reconnecting_attempt.is_none();
             self.agent_views.update(|views| {
                 let entry = views.entry(id.clone()).or_insert_with(|| AgentSessionView {
