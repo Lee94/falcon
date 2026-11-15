@@ -71,6 +71,7 @@ pub enum ActiveDialog {
     EditProject(String),
     DeriveProject(String),
     Settings(SettingsTab),
+    ServerUpdate(crate::server_updates::ServerUpdateKey),
     Askpass {
         id: String,
         prompt: String,
@@ -684,6 +685,7 @@ pub struct WorkspaceStore {
     pub right_panel_kind: Signal<RightPanelKind>,
 
     pub active_dialog: Signal<ActiveDialog>,
+    pub(crate) server_updates: crate::server_updates::ServerUpdates,
     pub editing_host: Signal<Option<falcon_proto::SshHost>>,
     pub editing_host_generation: Signal<u64>,
     pub host_delete_busy: Signal<Option<(u64, String)>>,
@@ -1592,6 +1594,7 @@ impl WorkspaceStore {
             right_panel_width: signal(260.0),
             right_panel_kind: signal(RightPanelKind::Plugin("sysmon".into())),
             active_dialog: signal(ActiveDialog::None),
+            server_updates: crate::server_updates::ServerUpdates::new(task_owner),
             editing_host: signal(None),
             editing_host_generation: signal(0),
             host_delete_busy: signal(None),

@@ -11,6 +11,7 @@ pub mod palette;
 pub mod plugins;
 pub mod project_form;
 pub mod session_operations;
+mod server_update;
 pub mod quick_open;
 mod relays;
 mod tailscale;

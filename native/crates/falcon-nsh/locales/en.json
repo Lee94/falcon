@@ -1,0 +1,27 @@
+{
+  "native": {
+    "serverUpdate": {
+      "title": "Server update",
+      "open": "Check server updates",
+      "node": "Update node",
+      "intro": "Update the Falcon server on the node above. Installation restarts the service; polling resumes when it reconnects and continues even after this dialog closes.",
+      "check": "Check again",
+      "checking": "Checking…",
+      "versions": "Current v%{current} · Latest v%{latest} · %{platform}",
+      "install": "Update to v%{version}",
+      "confirm": "Update the Falcon server on %{target} to v%{version} and restart that node?",
+      "cancel": "Cancel",
+      "requestFailed": "Unable to query or update this node. Check the connection and try again.",
+      "reconnecting": "Connection interrupted. Waiting for the node to reconnect and report the result. The update will not be submitted again.",
+      "missingTask": "The node returned no update task, so the request outcome is unknown. Check the node version and status again before retrying.",
+      "phase_unknown": "Updating the node to v%{version}; waiting for the result…",
+      "phase_idle": "No update started",
+      "phase_downloading": "Downloading v%{version}…",
+      "phase_verifying": "Verifying v%{version}…",
+      "phase_installing": "Installing v%{version}…",
+      "phase_restarting": "Restarting to v%{version}…",
+      "phase_succeeded": "Updated to v%{version}",
+      "phase_failed": "Update to v%{version} failed"
+    }
+  }
+}
