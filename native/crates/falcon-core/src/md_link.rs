@@ -39,7 +39,7 @@ pub fn markdown_image_url(raw: Option<&str>, href: &str) -> Option<String> {
     if path.contains('\\') || path.split('/').any(|s| matches!(s, "." | "..")) { return None; }
     let scope = format!("{prefix}/raw/{token}/");
     result.set_path(&scope);
-    result.set_query(None);
+    // 只丢弃 Markdown href 自身的 query（resolve_rel 已完成），保留 raw URL 的缓存修订值。
     result.set_fragment(None);
     result.path_segments_mut().ok()?.pop_if_empty().extend(path.split('/'));
     result.path().starts_with(&scope).then(|| result.into())
@@ -122,6 +122,16 @@ mod tests {
         assert_eq!(markdown_image_url(Some("file:///api/projects/p/raw/token/readme.md"), "image.png"), None);
         assert_eq!(markdown_image_url(None, "https://other.test/image.png").as_deref(),
             Some("https://other.test/image.png"));
+    }
+
+    #[test]
+    fn markdown_images_follow_the_raw_preview_cache_revision() {
+        let image = |revision| markdown_image_url(Some(revision), "./image.png?ignored=1#anchor").unwrap();
+        let first = image("https://example.test/api/projects/p/raw/token/docs/readme.md?_falcon_preview=1");
+        let refreshed = image("https://example.test/api/projects/p/raw/token/docs/readme.md?_falcon_preview=2");
+        assert_ne!(first, refreshed);
+        assert_eq!(first, "https://example.test/api/projects/p/raw/token/docs/image.png?_falcon_preview=1");
+        assert_eq!(refreshed, "https://example.test/api/projects/p/raw/token/docs/image.png?_falcon_preview=2");
     }
 
     #[test]
