@@ -192,6 +192,9 @@ jobs:
     # 汇总同一次运行的四目标为 falcon-sessiond-embed：本机在 Windows 上打包时从这里下载（docs/deploy.md），
     # 发版前也以它再核对一次四个归档；打包 job 直接取各组产物，不经这里中转。
     needs: sessiond-build
+    # 不能用默认的 success()：它连祖先一起看，tag / 定时 / 手动运行里 gate 是 skipped，会把本 job
+    # 连带跳过（v0.4.5 实测）。只看直接依赖的结果
+    if: ${{ !cancelled() && needs.sessiond-build.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -646,7 +649,12 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 同 sessiond：默认 success() 会因祖先 gate 被跳过而跳过发版，改为要求每个直接依赖都成功
+    if: >-
+      ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v')
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+      && !contains(needs.*.result, 'skipped') }}
     needs: [sessiond, test, macos, macos-check, windows, windows-check, android, servers, web-linux]
     runs-on: ubuntu-latest
     permissions:
