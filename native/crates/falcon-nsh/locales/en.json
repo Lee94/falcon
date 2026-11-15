@@ -74,6 +74,12 @@
       "plaintextTitle": "Connect over plaintext HTTP?",
       "plaintextBody": "%{url} is not a loopback address and has no TLS: the access password and all terminal content will travel over the network in plaintext. Use https:// behind a reverse proxy instead.",
       "plaintextConfirm": "Connect anyway"
+    },
+    "git": {
+      "viewList": "List view",
+      "viewTree": "Tree view",
+      "resizeSplit": "Drag to resize panels; double-click to reset",
+      "dismissToast": "Dismiss notification"
     }
   }
 }

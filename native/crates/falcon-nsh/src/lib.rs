@@ -315,12 +315,22 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
     let stale_path = "native/crates/falcon-nsh/src/views/files.rs";
     let stale_key = falcon_core::pane_key::file_key("proj-falcon", stale_path);
 
+    let close_desktop_panel = store.clone();
     let open_save = store.clone();
     let mut controls = view().w_full().flex_row().flex_wrap().gap(Points(4.0)).child(
         view()
             .test_id("test-open-save-file")
             .on_press(move || open_save.open_file_pane("proj-falcon", save_path))
             .child(text("open-save")),
+    );
+    controls = controls.child(
+        view()
+            .test_id("test-close-desktop-git-panel")
+            .on_press(move || {
+                close_desktop_panel.right_panel_kind.set(crate::store::RightPanelKind::Git);
+                close_desktop_panel.right_panel_open.set(false);
+            })
+            .child(text("close-desktop-git-panel")),
     );
     let install_dirty_file = store.clone();
     let install_dirty_key = save_key.clone();
@@ -718,7 +728,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             view()
                 .absolute()
                 .bottom(Points(0.0))
-                .right(Points(0.0))
+                .right(Points(80.0))
                 .w(Points(420.0))
                 .flex_col()
                 .child(controls),
@@ -984,7 +994,12 @@ fn ToastOverlay() -> impl IntoElement {
         let resolved = theme_ctrl.resolved();
         let ui = &resolved.ui;
         let _ = t!("native.nsh.appTitle");
+        let dismiss = store.clone();
         view()
+            .test_id("toast-banner")
+            .flex_row()
+            .items_center()
+            .gap(zpx(8.0))
             .absolute()
             .right(zpx(16.0))
             .bottom(zpx(16.0))
@@ -999,6 +1014,10 @@ fn ToastOverlay() -> impl IntoElement {
                     .text_xs()
                     .text_color(rgb_to_hsla(ui.popover_foreground)),
             )
+            .child(crate::shell::widgets::icon_button(
+                "toast-dismiss", t!("native.git.dismissToast"), crate::shell::widgets::Glyph::Close,
+                false, &resolved, move || dismiss.toast_banner.set(None),
+            ))
             .into_element()
     }))
 }
@@ -1806,6 +1825,185 @@ mod tests {
     }
 
     #[test]
+    fn git_exclusions_survive_refresh_and_tree_groups_include_collapsed_files_headless() {
+        let working = |files: &[&str]| git_working_response(files.iter().map(|path| {
+            serde_json::json!({"path":path,"index":" ","work":"M"})
+        }).collect(), None);
+        let route = "GET /api/projects/proj-falcon/git/working".to_string();
+        let server = MockHttpServer::new(vec![
+            (route.clone(), 200, working(&["src/a.txt", "src/b.txt"])),
+            (route.clone(), 200, working(&["src/b.txt", "src/c.txt"])),
+            (route, 200, working(&["src/a.txt", "src/b.txt", "src/c.txt"])),
+        ]);
+        let mut app = open_mock_git_panel(&server, "a.txt");
+        app.press("id:git-select-file-0").unwrap();
+        app.wait_for("text:已选 1 / 2 个文件").unwrap();
+        for expected in ["已选 2 / 2 个文件", "已选 2 / 3 个文件"] {
+            app.press("id:git-refresh").unwrap();
+            app.wait_for("id:git-loading").unwrap();
+            assert!(server.wait_for_request().starts_with("GET /api/projects/proj-falcon/git/working"));
+            server.release_response();
+            server.wait_for_response();
+            app.wait_for(expected).unwrap();
+        }
+        app.press("label:git-view-tree").unwrap();
+        app.wait_for("id:git-dir-src").unwrap();
+        app.press("id:git-dir-src").unwrap();
+        app.wait_for_gone("id:git-file-0", Duration::from_secs(2)).unwrap();
+        app.press("id:git-select-dir-src").unwrap();
+        app.wait_for("text:已选 3 / 3 个文件").unwrap();
+        app.press("id:git-select-dir-src").unwrap();
+        app.wait_for("text:已选 0 / 3 个文件").unwrap();
+        app.press("id:git-select-all").unwrap();
+        app.wait_for("text:已选 3 / 3 个文件").unwrap();
+        app.press("id:git-dir-src").unwrap();
+        app.wait_for("id:git-file-2").unwrap();
+        app.press("label:git-view-list").unwrap();
+        app.wait_for_gone("id:git-dir-src", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_amend_prefills_only_empty_draft_and_split_resizes_headless() {
+        let mut working: serde_json::Value = serde_json::from_str(&git_working_response(
+            vec![serde_json::json!({"path":"a.txt","index":" ","work":"M"})], None,
+        )).unwrap();
+        working["headMessage"] = serde_json::json!("Previous commit\n\nFull body");
+        let server = MockHttpServer::new(vec![
+            ("GET /api/projects/proj-falcon/git/working".into(), 200, working.to_string()),
+            ("GET /api/projects/proj-falcon/git/diff".into(), 200, git_diff_response("@@ -1 +1 @@\n-old\n+new\n")),
+        ]);
+        let mut app = open_mock_git_panel(&server, "a.txt");
+        app.press("id:git-amend").unwrap();
+        app.wait_for("text:Previous commit\n\nFull body").unwrap();
+        assert_eq!(app.screen().input_text("id:git-commit-message").unwrap(), Some("Previous commit\n\nFull body"));
+        app.press("id:git-amend").unwrap();
+        app.clear("id:git-commit-message").unwrap();
+        app.type_text("id:git-commit-message", "Custom message").unwrap();
+        app.press("id:git-amend").unwrap();
+        assert_eq!(app.screen().input_text("id:git-commit-message").unwrap(), Some("Custom message"));
+        app.press("id:git-file-0").unwrap();
+        app.wait_for("text:正在读取差异…").unwrap();
+        assert!(server.wait_for_request().starts_with("GET /api/projects/proj-falcon/git/diff"));
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:git-resize-split").unwrap();
+        let height = |app: &Headless| app.screen().layout_nodes().iter()
+            .find(|node| node.test_id.as_deref() == Some("git-file-list")).unwrap().bounds.size.height.0;
+        let initial = height(&app);
+        app.drag("id:git-resize-split", Point::new(Points(0.0), Points(60.0))).unwrap();
+        assert!(height(&app) > initial + 40.0, "{initial} -> {}", height(&app));
+        app.drag("id:git-resize-split", Point::new(Points(0.0), Points(-350.0))).unwrap();
+        assert!((height(&app) - 72.0).abs() < 2.0, "{}", height(&app));
+    }
+
+    #[test]
+    fn git_polling_pauses_while_hidden_or_loading_and_failure_toast_is_sticky_headless() {
+        let working = git_working_response(vec![serde_json::json!({"path":"a.txt","index":" ","work":"M"})], None);
+        let route = "GET /api/projects/proj-falcon/git/working".to_string();
+        let server = MockHttpServer::new(vec![
+            (route.clone(), 200, working.clone()),
+            (route.clone(), 200, working.clone()),
+            ("POST /api/projects/proj-falcon/git/op".into(), 200, r#"{"ok":false,"detail":"sticky failure"}"#.into()),
+            (route, 200, working),
+        ]);
+        ensure_test_platform();
+        let root = falcon_root_with_options(FalconLaunchOptions {
+            offline_demo: true, test_client_url: Some(server.url.clone()), ..Default::default()
+        });
+        let mut cfg = EngineConfig::new(root);
+        cfg.viewport = Size::new(Points(1440.0), Points(900.0));
+        cfg.environment.idiom = Idiom::Desktop;
+        cfg.clock = nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH);
+        cfg.environment.os = nsh_core::platform::Os::Linux;
+        cfg.ui_sets = vec![nsh_base::registry(), registry()];
+        let mut app = Headless::start(cfg).unwrap();
+        app.first_render().unwrap();
+        let opened_at = app.clock().now();
+        app.press("label:activity-changes").unwrap();
+        app.fast_forward(Duration::from_millis(3900).saturating_sub(app.clock().now() - opened_at)).unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+        app.fast_forward(Duration::from_millis(200)).unwrap();
+        app.wait_for("id:git-loading").unwrap();
+        server.wait_for_request();
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("text:a.txt").unwrap();
+        server.clear_observed_requests();
+        app.fast_forward(Duration::from_secs(4)).unwrap();
+        app.wait_for("id:git-loading").unwrap();
+        server.wait_for_request();
+        server.clear_observed_requests();
+        app.fast_forward(Duration::from_secs(8)).unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+        app.press("id:git-discard-selected").unwrap();
+        app.press("id:git-confirm-action").unwrap();
+        server.wait_for_request();
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for("id:toast-banner").unwrap();
+        app.press("label:activity-changes").unwrap();
+        server.clear_observed_requests();
+        app.fast_forward(Duration::from_secs(8)).unwrap();
+        app.wait_for("id:toast-banner").unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+        app.press("label:toast-dismiss").unwrap();
+        app.wait_for_gone("id:toast-banner", Duration::from_secs(2)).unwrap();
+        app.press("label:activity-changes").unwrap();
+        app.fast_forward(Duration::from_secs(4)).unwrap();
+        app.wait_for("id:git-loading").unwrap();
+        server.wait_for_request();
+        server.release_response();
+        server.wait_for_response();
+        app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_polling_uses_mounted_panel_not_desktop_visibility_headless() {
+        ensure_test_platform();
+        for (os, idiom) in [
+            (nsh_core::platform::Os::Android, Idiom::Phone),
+            (nsh_core::platform::Os::Linux, Idiom::Terminal),
+        ] {
+            let route = "GET /api/projects/proj-falcon/git/working".to_string();
+            let working = git_working_response(vec![serde_json::json!({"path":"visible.txt","index":" ","work":"M"})], None);
+            let server = MockHttpServer::new(vec![(route.clone(), 200, working)]);
+            let root = falcon_root_with_options(FalconLaunchOptions {
+                offline_demo: true, test_client_url: Some(server.url.clone()), ..Default::default()
+            });
+            let mut cfg = EngineConfig::new(root);
+            cfg.viewport = Size::new(Points(1440.0), Points(900.0));
+            cfg.environment.os = os;
+            cfg.environment.idiom = idiom;
+            cfg.clock = nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH);
+            cfg.ui_sets = vec![nsh_base::registry(), registry()];
+            let mut app = Headless::start(cfg).unwrap();
+            app.first_render().unwrap();
+            app.press("id:test-close-desktop-git-panel").unwrap();
+            if idiom == Idiom::Phone {
+                app.press("面板").unwrap();
+            }
+            app.wait_for("id:git-refresh").unwrap();
+            server.clear_observed_requests();
+            app.fast_forward(Duration::from_secs(4)).unwrap();
+            app.wait_for("id:git-loading").unwrap();
+            assert!(server.wait_for_request().starts_with(&route));
+            server.release_response();
+            server.wait_for_response();
+            app.wait_for("text:visible.txt").unwrap();
+            if idiom == Idiom::Phone {
+                app.press("工作区").unwrap();
+                app.wait_for_gone("id:git-refresh", Duration::from_secs(2)).unwrap();
+                server.clear_observed_requests();
+                app.fast_forward(Duration::from_secs(8)).unwrap();
+                server.assert_no_request_starting_with(&route);
+            }
+        }
+    }
+
+    #[test]
     fn git_discard_selected_cancel_payload_failure_and_success_headless() {
         let working = git_working_response(
             vec![
@@ -2301,7 +2499,6 @@ mod tests {
                 work: work.into(),
                 untracked: false,
                 status: format!("{index}{work}"),
-                staged: true,
                 additions: 0,
                 deletions: 0,
                 old_text: String::new(),

@@ -564,7 +564,6 @@ pub struct GitChangeItem {
     pub work: String,
     pub untracked: bool,
     pub status: String,
-    pub staged: bool,
     pub additions: u32,
     pub deletions: u32,
     pub old_text: String,
@@ -732,6 +731,11 @@ pub struct WorkspaceStore {
     pub git_diff_error: Signal<Option<String>>,
     pub git_diff_truncated: Signal<bool>,
     pub git_changes: Signal<Vec<GitChangeItem>>,
+    pub git_excluded: Signal<HashSet<String>>,
+    pub git_collapsed: Signal<HashSet<String>>,
+    pub git_file_view_mode: Signal<falcon_core::file_tree::FileViewMode>,
+    pub git_head_message: Signal<Option<String>>,
+    pub git_amend: Signal<bool>,
     pub git_commits: Signal<Vec<GitCommitItem>>,
     pub selected_git_path: Signal<Option<String>>,
     pub selected_git_repo: Signal<Option<String>>,
@@ -746,6 +750,7 @@ pub struct WorkspaceStore {
     pub plugin_list: Signal<PluginList>,
     pub plugin_states: Signal<HashMap<String, PluginPanelState>>,
     pub toast_banner: Signal<Option<String>>,
+    toast_generation: Rc<Cell<u64>>,
 
     pub project_operations: Rc<crate::project_operations::ProjectOperations>,
     pub(crate) session_operations: crate::session_operations::SessionOperations,
@@ -1370,7 +1375,6 @@ impl WorkspaceStore {
                 work: "M".into(),
                 untracked: false,
                 status: "M".into(),
-                staged: true,
                 additions: 148,
                 deletions: 0,
                 old_text: "// legacy placeholder\n".into(),
@@ -1383,7 +1387,6 @@ impl WorkspaceStore {
                 work: "?".into(),
                 untracked: true,
                 status: "A".into(),
-                staged: false,
                 additions: 220,
                 deletions: 0,
                 old_text: String::new(),
@@ -1652,6 +1655,15 @@ impl WorkspaceStore {
             git_diff_error: signal(None),
             git_diff_truncated: signal(false),
             git_changes: signal(git_changes),
+            git_excluded: signal(HashSet::new()),
+            git_collapsed: signal(HashSet::new()),
+            git_file_view_mode: signal(if crate::theme::load_pref_item("falcon.fileView").as_deref() == Some("tree") {
+                falcon_core::file_tree::FileViewMode::Tree
+            } else {
+                falcon_core::file_tree::FileViewMode::List
+            }),
+            git_head_message: signal(None),
+            git_amend: signal(false),
             git_commits: signal(git_commits),
             selected_git_path: signal(Some("native/crates/falcon-nsh/src/lib.rs".into())),
             selected_git_repo: signal(None),
@@ -1665,6 +1677,7 @@ impl WorkspaceStore {
             plugin_list: signal(plugin_list),
             plugin_states: signal(plugin_states),
             toast_banner: signal(None),
+            toast_generation: Rc::new(Cell::new(0)),
             project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
                 task_owner,
                 connection_generation.clone(),
@@ -2732,6 +2745,7 @@ impl WorkspaceStore {
             return;
         }
         self.selected_git_repo.set(Some(repo.to_string()));
+        self.reset_git_selection();
         self.selected_git_path.set(None);
         self.git_diff.set(None);
         self.git_diff_error.set(None);
@@ -2745,6 +2759,48 @@ impl WorkspaceStore {
         self.commit_draft.set(draft);
         self.commit_draft_revision
             .set(self.commit_draft_revision.get().wrapping_add(1));
+    }
+
+    fn reset_git_selection(&self) {
+        self.git_excluded.set(HashSet::new());
+        self.git_collapsed.set(HashSet::new());
+        self.git_head_message.set(None);
+        self.git_amend.set(false);
+    }
+
+    pub fn set_git_files_selected(&self, paths: &[String], selected: bool) {
+        self.git_excluded.update(|excluded| {
+            for path in paths {
+                if selected { excluded.remove(path); } else { excluded.insert(path.clone()); }
+            }
+        });
+    }
+
+    pub fn set_git_amend(&self, next: bool) {
+        if self.git_operation_busy.get().is_some() || self.git_head_message.get().is_none() {
+            return;
+        }
+        self.git_amend.set(next);
+        if next && self.commit_draft.get().trim().is_empty()
+            && let Some(message) = self.git_head_message.get()
+        {
+            self.set_commit_draft(message);
+        }
+    }
+
+    pub fn set_git_file_view_mode(&self, mode: falcon_core::file_tree::FileViewMode) {
+        self.git_file_view_mode.set(mode);
+        crate::theme::save_pref_item("falcon.fileView", Some(match mode {
+            falcon_core::file_tree::FileViewMode::List => "list",
+            falcon_core::file_tree::FileViewMode::Tree => "tree",
+        }));
+    }
+
+    pub fn poll_git_data(&self) {
+        if !self.git_loading.get() && self.git_operation_busy.get().is_none()
+        {
+            self.refresh_git_data();
+        }
     }
 
     pub fn refresh_project_data(&self) {
@@ -2832,6 +2888,7 @@ impl WorkspaceStore {
         self.selected_git_repo.set(None);
         self.git_confirmation.set(None);
         self.file_operations.cancel_confirmation();
+        self.reset_git_selection();
         self.file_operations.name_form.set(None);
         self.file_operations.clear_selection();
     }
@@ -2916,7 +2973,7 @@ impl WorkspaceStore {
                 match working {
                     Ok(working) if working.available => {
                         store.git_conflict.set(working.conflict);
-                        let previous = store.git_changes.get();
+                        store.git_head_message.set(working.head_message);
                         let changes: Vec<_> = working.files.into_iter().map(|file| {
                             let path = file.path.clone();
                             let orig_path = file.orig_path.clone();
@@ -2925,9 +2982,6 @@ impl WorkspaceStore {
                             let untracked = (index.trim() == "?" && work.trim() == "?")
                                 || index.trim() == "??" || work.trim() == "??";
                             let status = format!("{}{}", index.trim(), work.trim());
-                            let staged = previous.iter().find(|old| {
-                                old.path == path && old.orig_path == orig_path
-                            }).map_or(true, |old| old.staged);
                             GitChangeItem {
                                 path,
                                 orig_path,
@@ -2935,7 +2989,6 @@ impl WorkspaceStore {
                                 work,
                                 untracked,
                                 status,
-                                staged,
                                 additions: file.added.unwrap_or(0) as u32,
                                 deletions: file.deleted.unwrap_or(0) as u32,
                                 old_text: String::new(),
@@ -2955,6 +3008,7 @@ impl WorkspaceStore {
                         }
                     }
                     Ok(working) => {
+                        store.git_head_message.set(None);
                         store.git_changes.set(Vec::new());
                         store.git_conflict.set(None);
                         store.selected_git_path.set(None);
@@ -2985,12 +3039,13 @@ impl WorkspaceStore {
 
     pub fn commit_git_changes(&self, amend: bool, push: bool) {
         let Some(context) = self.current_git_context() else {
-            self.git_operation_error.set(Some(crate::i18n::t!("git.selectRepoRequired")));
+            self.git_failure(crate::i18n::t!("git.selectRepoRequired"));
             return;
         };
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.client() {
-            let selected = self.git_changes.get().into_iter().filter(|change| change.staged);
+            let excluded = self.git_excluded.get();
+            let selected = self.git_changes.get().into_iter().filter(|change| !excluded.contains(&change.path));
             let mut paths = Vec::new();
             for change in selected {
                 if let Some(old) = change.orig_path {
@@ -3034,6 +3089,8 @@ impl WorkspaceStore {
                 match result {
                     Ok(result) if result.ok => {
                         store.git_operation_error.set(None);
+                        store.git_excluded.set(HashSet::new());
+                        store.git_amend.set(false);
                         if store.commit_draft_revision.get() == draft_revision
                             && store.commit_draft.get() == message
                         {
@@ -3041,15 +3098,15 @@ impl WorkspaceStore {
                         }
                         store.refresh_git_context(context);
                     }
-                    Ok(result) => store.git_operation_error.set(Some(result.detail)),
-                    Err(error) => store.git_operation_error.set(Some(error.to_string())),
+                    Ok(result) => store.git_failure(result.detail),
+                    Err(error) => store.git_failure(error.to_string()),
                 }
             });
         } else {
-            self.git_operation_error.set(Some(crate::i18n::t!("files.notConnected")));
+            self.git_failure(crate::i18n::t!("files.notConnected"));
         }
         #[cfg(target_arch = "wasm32")]
-        self.git_operation_error.set(Some(crate::i18n::t!("files.notConnected")));
+        self.git_failure(crate::i18n::t!("files.notConnected"));
     }
 
     fn make_git_confirmation(
@@ -3077,8 +3134,9 @@ impl WorkspaceStore {
     }
 
     pub fn ask_discard_git_changes(&self, all: bool) {
+        let excluded = self.git_excluded.get();
         let selected: Vec<_> = self.git_changes.get().into_iter()
-            .filter(|change| all || change.staged)
+            .filter(|change| all || !excluded.contains(&change.path))
             .collect();
         if selected.is_empty() { return; }
         let mut paths = Vec::new();
@@ -3112,8 +3170,9 @@ impl WorkspaceStore {
     }
 
     pub fn ask_git_take(&self, side: falcon_proto::GitTakeSide) {
+        let excluded = self.git_excluded.get();
         let paths: Vec<_> = self.git_changes.get().into_iter()
-            .filter(|change| change.staged && git_change_is_conflicted(change))
+            .filter(|change| !excluded.contains(&change.path) && git_change_is_conflicted(change))
             .map(|change| change.path)
             .collect();
         if paths.is_empty() { return; }
@@ -3132,7 +3191,7 @@ impl WorkspaceStore {
         let Some(confirmation) = self.git_confirmation.get() else { return; };
         self.git_confirmation.set(None);
         if !self.git_context_is_current(&confirmation.context) {
-            self.git_operation_error.set(Some(crate::i18n::t!("git.contextChanged")));
+            self.git_failure(crate::i18n::t!("git.contextChanged"));
             return;
         }
         let operation = match confirmation.operation {
@@ -3157,7 +3216,7 @@ impl WorkspaceStore {
 
     fn run_git_operation(&self, context: GitRequestContext, operation: falcon_proto::GitOpInput) {
         if !self.git_context_is_current(&context) {
-            self.git_operation_error.set(Some(crate::i18n::t!("git.contextChanged")));
+            self.git_failure(crate::i18n::t!("git.contextChanged"));
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -3182,15 +3241,15 @@ impl WorkspaceStore {
                         store.git_operation_error.set(None);
                         store.refresh_git_context(context);
                     }
-                    Ok(result) => store.git_operation_error.set(Some(result.detail)),
-                    Err(error) => store.git_operation_error.set(Some(error.to_string())),
+                    Ok(result) => store.git_failure(result.detail),
+                    Err(error) => store.git_failure(error.to_string()),
                 }
             });
         } else {
-            self.git_operation_error.set(Some(crate::i18n::t!("files.notConnected")));
+            self.git_failure(crate::i18n::t!("files.notConnected"));
         }
         #[cfg(target_arch = "wasm32")]
-        self.git_operation_error.set(Some(crate::i18n::t!("files.notConnected")));
+        self.git_failure(crate::i18n::t!("files.notConnected"));
     }
 
     pub fn refresh_relays(&self) {
@@ -3665,6 +3724,7 @@ impl WorkspaceStore {
         self.git_diff_truncated.set(false);
         self.git_conflict.set(None);
         self.selected_git_repo.set(None);
+        self.reset_git_selection();
         self.git_operation_busy.set(None);
         self.git_operation_error.set(None);
         self.git_confirmation.set(None);
@@ -3897,6 +3957,7 @@ impl WorkspaceStore {
         }
         self.file_operations.project_changed(self);
         self.active_project_id.set(project_id);
+        self.reset_git_selection();
         self.git_working_generation
             .set(self.git_working_generation.get().wrapping_add(1));
         self.git_loading.set(false);
@@ -4926,12 +4987,23 @@ impl WorkspaceStore {
     }
 
     pub fn show_toast(&self, msg: impl Into<String>) {
-        let msg = msg.into();
-        self.toast_banner.set(Some(msg));
+        self.show_toast_sticky(msg);
         let banner = self.toast_banner;
+        let generation = self.toast_generation.clone();
+        let expected = generation.get();
         nsh_core::prelude::set_timeout(Duration::from_secs(3), move || {
-            banner.set(None);
+            if generation.get() == expected { banner.set(None); }
         });
+    }
+
+    pub fn show_toast_sticky(&self, msg: impl Into<String>) {
+        self.toast_generation.set(self.toast_generation.get().wrapping_add(1));
+        self.toast_banner.set(Some(msg.into()));
+    }
+
+    fn git_failure(&self, message: String) {
+        self.git_operation_error.set(Some(message.clone()));
+        self.show_toast_sticky(message);
     }
 }
 
