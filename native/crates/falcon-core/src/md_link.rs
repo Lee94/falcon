@@ -23,8 +23,14 @@ pub fn relative_href(href: &str) -> bool {
 /// 从文档文件本身解析相对链接，保留 Unix 根、Windows 盘符与 UNC 共享目录身份。
 pub fn resolve_file_link(path: &str, href: &str) -> Option<String> {
     if !relative_href(href) { return None; }
-    let dir = crate::file_path::parent_nav_path(path).unwrap_or_default();
-    resolve_rel(&dir, href)
+    // 文件协议在 Windows 上也统一用 /。不复用导航栏的分隔符猜测，否则 POSIX 文件名
+    // notes\readme.md 会被误拆为 notes 目录；Unix 根目录则必须保留为 /。
+    let dir = match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((dir, _)) => dir,
+        None => "",
+    };
+    resolve_rel(dir, href)
 }
 
 /// Markdown 图片相对 raw_path 而非宿主机路径解析。保留签发时的 token 与 scope，
@@ -111,6 +117,9 @@ mod tests {
             ("/outside/project/README.md", "/outside/project/guide.md"),
             ("README.md", "guide.md"),
             ("docs/README.md", "docs/guide.md"),
+            ("notes\\readme.md", "guide.md"),
+            ("/root/notes\\readme.md", "/root/guide.md"),
+            ("notes\\folder/readme.md", "notes\\folder/guide.md"),
         ] {
             assert_eq!(resolve_file_link(document, "./guide.md#start").as_deref(), Some(expected));
         }
