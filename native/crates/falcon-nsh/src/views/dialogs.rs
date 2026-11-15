@@ -20,8 +20,16 @@ use crate::views::project_form::{project_form, worktree_form};
 use crate::zoom::{ZoomController, zpx};
 
 /// 顶层模态框渲染组件。
+#[derive(Clone, PartialEq, Props)]
+pub struct ModalLayerProps {
+    #[prop(default)]
+    pub test_modal_controls: bool,
+    #[prop(default)]
+    pub test_switch_url: Option<String>,
+}
+
 #[component]
-pub fn ModalLayer() -> impl IntoElement {
+pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let store = use_workspace();
     let theme_ctrl = use_theme();
     let zoom_ctrl = use_context::<ZoomController>();
@@ -175,6 +183,46 @@ pub fn ModalLayer() -> impl IntoElement {
         });
 
         let focus_on_open = modal_focus;
+        let overlay = view()
+            .absolute()
+            .inset_0()
+            .items_center()
+            .justify_center()
+            .p(zpx(16.0))
+            .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
+            .bg(scrim)
+            .child(
+                view()
+                    .test_id("modal-layer-panel")
+                    .element_ref(&modal_focus)
+                    .focusable(true)
+                    .w(zpx(if settings_dialog {
+                        1024.0
+                    } else if rename_dialog {
+                        380.0
+                    } else {
+                        580.0
+                    }))
+                    .max_w(relative(1.0))
+                    .max_h(relative(0.86))
+                    .flex_col()
+                    .overflow_hidden()
+                    .rounded(zpx(16.0))
+                    .border_1()
+                    .border_color(rgba_to_hsla(ui.border))
+                    .bg(rgb_to_hsla(ui.background))
+                    .child(card_body),
+            );
+        #[cfg(test)]
+        let overlay = overlay.when(props.test_modal_controls, |overlay| {
+            overlay.child(crate::test_modal_workspace_controls(
+                store.clone(),
+                props.test_switch_url.clone(),
+            ))
+        });
+        #[cfg(not(test))]
+        let _ = (&props.test_modal_controls, &props.test_switch_url);
+
         nsh_base::dialog()
             .animation(nsh_core::ModalAnimation::None)
             .close_on_escape(false)
@@ -186,38 +234,7 @@ pub fn ModalLayer() -> impl IntoElement {
                 }
             })
             .on_cancel(move || close_modal_dialog(&cancel_store, &cancel_dialog))
-            .child(
-                view()
-                    .absolute()
-                    .inset_0()
-                    .items_center()
-                    .justify_center()
-                    .p(zpx(16.0))
-                    .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
-                    .bg(scrim)
-                    .child(
-                        view()
-                            .test_id("modal-layer-panel")
-                            .element_ref(&modal_focus)
-                            .focusable(true)
-                            .w(zpx(if settings_dialog {
-                                1024.0
-                            } else if rename_dialog {
-                                380.0
-                            } else {
-                                580.0
-                            }))
-                            .max_w(relative(1.0))
-                            .max_h(relative(0.86))
-                            .flex_col()
-                            .overflow_hidden()
-                            .rounded(zpx(16.0))
-                            .border_1()
-                            .border_color(rgba_to_hsla(ui.border))
-                            .bg(rgb_to_hsla(ui.background))
-                            .child(card_body),
-                    ),
-            )
+            .child(overlay)
             .into_element()
     }))
 }

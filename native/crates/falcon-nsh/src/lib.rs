@@ -242,7 +242,21 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
             _ => desktop_shell().into_element(),
         }))
         .child(toast_overlay())
-        .child(modal_layer())
+        .child({
+            #[cfg(test)]
+            {
+                modal_layer()
+                    .test_modal_controls(
+                        props.test_client_url.is_some() || props.test_switch_url.is_some(),
+                    )
+                    .test_switch_url(props.test_switch_url.clone())
+                    .into_element()
+            }
+            #[cfg(not(test))]
+            {
+                modal_layer().into_element()
+            }
+        })
         .child(file_operation_layer())
         .child({
             #[cfg(test)]
@@ -677,6 +691,64 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
                 .flex_col()
                 .child(controls),
         )
+}
+
+#[cfg(test)]
+pub(crate) fn test_modal_workspace_controls(
+    store: WorkspaceStore,
+    switch_url: Option<String>,
+) -> impl IntoElement {
+    let refresh_relays = store.clone();
+    let duplicate_relay = store.clone();
+    let rebuild_relay_hosts = store.clone();
+    let mut controls = view()
+        .test_id("test-modal-refresh-relays")
+        .on_press(move || refresh_relays.refresh_relays())
+        .w_full()
+        .h(Points(20.0))
+        .child(text("r"));
+    controls = controls.child(
+        view()
+            .test_id("test-modal-force-duplicate-share")
+            .on_press(move || duplicate_relay.create_public_share("", 8080, "draft"))
+            .w_full()
+            .h(Points(20.0))
+            .child(text("d")),
+    );
+    controls = controls.child(
+        view()
+            .test_id("test-modal-rebuild-relay-hosts")
+            .on_press(move || {
+                if let Some(mut host) = rebuild_relay_hosts.hosts.get().first().cloned() {
+                    host.id = "relay-test-host".into();
+                    host.name = "relay-test-host".into();
+                    rebuild_relay_hosts.hosts.update(|hosts| hosts.push(host));
+                }
+            })
+            .w_full()
+            .h(Points(20.0))
+            .child(text("h")),
+    );
+    if let Some(url) = switch_url {
+        let switch = store;
+        controls = controls.child(
+            view()
+                .test_id("test-modal-switch-server")
+                .on_press(move || switch.connect_live_server(&url))
+                .w_full()
+                .h(Points(20.0))
+                .child(text("s")),
+        );
+    }
+    view()
+        .absolute()
+        .left(Points(0.0))
+        .top(Points(0.0))
+        .w(Points(16.0))
+        .h(Points(80.0))
+        .opacity(0.0)
+        .flex_col()
+        .child(controls)
 }
 
 fn install_macos_tray(store: WorkspaceStore) {
@@ -3390,7 +3462,7 @@ mod tests {
                 .wait_for_request()
                 .starts_with("GET /api/projects/proj-falcon/files/index")
         );
-        app.press("id:test-switch-server").unwrap();
+        app.press("id:test-modal-switch-server").unwrap();
         app.wait_for(&format!("server-url={}", new_server.url))
             .unwrap();
         app.wait_for("server-connected=true").unwrap();
@@ -3612,6 +3684,56 @@ mod tests {
         app.press_key("escape").unwrap();
         app.wait_for_gone("检测连接", Duration::from_secs(2))
             .expect("one Escape closes the restored host menu");
+    }
+
+    #[test]
+    fn host_menu_mouse_selection_opens_modal_headless() {
+        ensure_test_platform();
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.press("label:host-menu-s:host:host-prod-01").unwrap();
+        app.press("role:menuitem[远端主机]").unwrap();
+        app.wait_for("id:modal-layer-panel")
+            .expect("mouse selection dispatches after the popup focus lifecycle");
+        app.hover("id:modal-layer-panel").unwrap();
+        app.wait_for_gone("更多操作", Duration::from_secs(2))
+            .expect("the modal does not leave the background trigger tooltip visible");
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn host_context_menu_mouse_selection_opens_modal_headless() {
+        ensure_test_platform();
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.right_click("label:host-menu-s:host:host-prod-01")
+            .unwrap();
+        app.wait_for("远端主机").unwrap();
+        app.press("远端主机").unwrap();
+        app.wait_for("id:modal-layer-panel")
+            .expect("the pointer context-menu action opens its dialog");
+        app.hover("id:modal-layer-panel").unwrap();
+        app.wait_for_gone("更多操作", Duration::from_secs(2))
+            .expect("the context-menu dialog has no background trigger tooltip");
+        app.press_key("escape").unwrap();
+        app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2))
+            .unwrap();
     }
 
     #[test]
@@ -3991,7 +4113,7 @@ mod tests {
         let pending_create = old_server.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/hosts"])[0].clone();
         assert!(pending_create.starts_with("POST /api/hosts"));
 
-        app.press("id:test-switch-server").unwrap();
+        app.press("id:test-modal-switch-server").unwrap();
         app.wait_for(&format!("server-url={}", new_server.url))
             .unwrap();
         new_server.wait_for_observed_prefixes_pumping(&mut app, &[
@@ -4777,7 +4899,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
         assert_eq!(body["destPort"], 8080);
         assert_eq!(body["name"], "draft");
-        app.press("id:test-force-duplicate-share").unwrap();
+        app.press("id:test-modal-force-duplicate-share").unwrap();
         mock.release_response();
         mock.wait_for_response();
         app.wait_for("mock relay write failed").unwrap();
@@ -4830,7 +4952,7 @@ mod tests {
             ..Default::default()
         }, ColorScheme::Dark);
         open_relay_settings(&mut app);
-        app.press("id:test-refresh-relays").unwrap();
+        app.press("id:test-modal-refresh-relays").unwrap();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
         app.wait_for("id:relay-empty-shares").unwrap();
         app.wait_for("id:relay-empty-forwards").unwrap();
@@ -4855,11 +4977,11 @@ mod tests {
         }, ColorScheme::Dark);
         open_relay_settings(&mut app);
         app.type_text("id:relay-share-port-local", "8181").unwrap();
-        app.press("id:test-rebuild-relay-hosts").unwrap();
+        app.press("id:test-modal-rebuild-relay-hosts").unwrap();
         assert_eq!(app.screen().input_text("id:relay-share-port-local").unwrap(), Some("8181".into()));
-        app.press("id:test-refresh-relays").unwrap();
+        app.press("id:test-modal-refresh-relays").unwrap();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
-        app.press("id:test-refresh-relays").unwrap();
+        app.press("id:test-modal-refresh-relays").unwrap();
         mock.release_response();
         mock.wait_for_response();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
@@ -4893,9 +5015,9 @@ mod tests {
             ..Default::default()
         }, ColorScheme::Dark);
         open_relay_settings(&mut app);
-        app.press("id:test-refresh-relays").unwrap();
+        app.press("id:test-modal-refresh-relays").unwrap();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
-        app.press("id:test-switch-server").unwrap();
+        app.press("id:test-modal-switch-server").unwrap();
         mock.release_response();
         mock.wait_for_response();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);

@@ -116,6 +116,7 @@ pub(crate) fn overflow_menu(
     let popup_token = ActionOwner::current().popup_token();
     let pending_action = Rc::new(RefCell::new(None));
     let trigger_focused = Rc::new(Cell::new(false));
+    let popup_focused = Rc::new(Cell::new(false));
     nsh_base::menu()
         .trigger(popup_action_trigger(
             trigger,
@@ -142,7 +143,7 @@ pub(crate) fn overflow_menu(
         .children(popup_items(
             actions,
             theme,
-            Some((pending_action, trigger_focused)),
+            Some((pending_action, trigger_focused, popup_focused)),
         ))
 }
 
@@ -202,7 +203,7 @@ fn popup_action_trigger(
 fn popup_items(
     actions: Vec<PopupAction>,
     theme: &ResolvedTheme,
-    deferred_dispatch: Option<(PendingPopupAction, Rc<Cell<bool>>)>,
+    deferred_dispatch: Option<(PendingPopupAction, Rc<Cell<bool>>, Rc<Cell<bool>>)>,
 ) -> impl Iterator<Item = impl IntoElement> {
     let foreground = rgb_to_hsla(theme.ui.popover_foreground);
     let hover_background = rgb_to_hsla(theme.ui.tint);
@@ -222,6 +223,9 @@ fn popup_items(
         let callback = action.activate;
         let action_owner = owner.clone();
         let deferred_dispatch = deferred_dispatch.clone();
+        let popup_focus_state = deferred_dispatch
+            .as_ref()
+            .map(|(_, _, popup_focused)| popup_focused.clone());
         let currently_disabled = initially_disabled || !disabled_server.is_current();
         let color = if currently_disabled {
             disabled_color
@@ -238,14 +242,16 @@ fn popup_items(
             .on_select(move || {
                 if !initially_disabled && selection_server.is_current() {
                     let callback = callback.clone();
-                    if let Some((pending_action, trigger_focused)) = deferred_dispatch.clone() {
+                    if let Some((pending_action, trigger_focused, popup_focused)) =
+                        deferred_dispatch.clone()
+                    {
                         let callback_server = selection_server.clone();
                         *pending_action.borrow_mut() = Some(Box::new(move || {
                             if callback_server.is_current() {
                                 callback();
                             }
                         }));
-                        if trigger_focused.get() {
+                        if trigger_focused.get() || !popup_focused.get() {
                             let pending_for_answer = pending_action.clone();
                             let answer_owner = action_owner.clone();
                             action_owner.run(|| {
@@ -286,7 +292,17 @@ fn popup_items(
                     }
                 });
         }
-        item.child(text(label).text_xs())
+        let item = item.child(text(label).text_xs());
+        if let Some(popup_focused) = popup_focus_state {
+            let focus_ref = element_ref();
+            let focus_in = popup_focused.clone();
+            let focus_out = popup_focused;
+            focus_ref.on_focus_in(move || focus_in.set(true));
+            focus_ref.on_focus_out(move || focus_out.set(false));
+            view().element_ref(&focus_ref).child(item).into_element()
+        } else {
+            item.into_element()
+        }
     })
 }
 
