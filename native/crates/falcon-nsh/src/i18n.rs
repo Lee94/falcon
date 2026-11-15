@@ -41,7 +41,6 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     flatten_json("", &overlay, &mut english);
     map.insert("en".to_string(), english.clone());
     map.insert("en-US".to_string(), english);
-    map.insert("en".to_string(), base);
     Translations::from_map(map)
 });
 
