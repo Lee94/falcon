@@ -36,8 +36,13 @@ use falcon_proto::{
     PluginBlock, PluginInfo, PluginKind, PluginList, PluginOption, PluginPackageInfo, PluginScope,
     PluginSeries, PluginStat, PluginTone, PluginView, ProgramState, SessionState,
 };
-use nsh_core::prelude::{Signal, effect, provide_context, signal, spawn, use_context};
+use nsh_core::prelude::{Owner, Signal, effect, provide_context, signal, spawn, use_context};
 use parking_lot::Mutex;
+
+#[path = "file_operations.rs"]
+mod file_operations;
+use file_operations::FileOperations;
+pub(crate) use file_operations::{ConfirmationKind, FileJob, JobKind, NameAction};
 
 use crate::terminal::TerminalSession;
 #[cfg(not(target_arch = "wasm32"))]
@@ -368,6 +373,7 @@ pub struct WorkspaceStore {
     pub term_prefs: Signal<TermPref>,
     pub agent_views: Signal<HashMap<String, AgentSessionView>>,
     pub file_entries: Signal<Vec<FileEntryItem>>,
+    pub(crate) file_operations: FileOperations,
     pub open_files: Signal<HashMap<String, OpenFileBuffer>>,
     pub git_loading: Signal<bool>,
     pub git_error: Signal<Option<String>>,
@@ -387,6 +393,7 @@ pub struct WorkspaceStore {
 impl WorkspaceStore {
     /// 初始化工作区（填充一套结构完备的本地种子状态，并在非离线模式下异步连向 `falcon-server`）。
     pub fn install(opts: &FalconLaunchOptions) -> Self {
+        let file_task_owner = Owner::current();
         let local_url = falcon_platform::shared().local_server_url();
         let persisted_profiles = (!opts.offline_demo)
             .then(|| falcon_platform::shared().load_profiles())
@@ -868,6 +875,7 @@ impl WorkspaceStore {
             )),
             agent_views: signal(agent_map),
             file_entries: signal(file_entries),
+            file_operations: FileOperations::new(file_task_owner),
             open_files: signal(open_files),
             git_loading: signal(false),
             git_error: signal(None),
@@ -935,6 +943,7 @@ impl WorkspaceStore {
         let Ok(parsed_url) = url.parse() else {
             return;
         };
+        self.file_operations.connection_changed(self);
         self.switch_workspace(url);
         let client = FalconClient::new(parsed_url);
         *self.terminals.client.lock() = Some(client.clone());
@@ -1006,7 +1015,7 @@ impl WorkspaceStore {
                     .collect();
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
-                        store.active_project_id.set(first.id.clone());
+                        store.set_active_project_id(first.id.clone());
                     }
                 }
                 store.projects.set(mapped);
@@ -1178,6 +1187,7 @@ impl WorkspaceStore {
     /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
+        self.file_operations.connection_changed(self);
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
@@ -1224,7 +1234,7 @@ impl WorkspaceStore {
                     .collect();
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
-                        store.active_project_id.set(first.id.clone());
+                        store.set_active_project_id(first.id.clone());
                     }
                 }
                 store.projects.set(mapped);
@@ -1454,7 +1464,7 @@ impl WorkspaceStore {
                 source: None,
             })
         });
-        self.active_project_id.set(id);
+        self.set_active_project_id(id);
         self.active_dialog.set(ActiveDialog::None);
     }
 
@@ -1775,6 +1785,15 @@ impl WorkspaceStore {
         });
     }
 
+    fn set_active_project_id(&self, project_id: String) -> bool {
+        if self.active_project_id.get() == project_id {
+            return false;
+        }
+        self.file_operations.project_changed(self);
+        self.active_project_id.set(project_id);
+        true
+    }
+
     /// 沿用 GPUI 的 profile id 与 JSON 形状，直接读取已安装客户端的工作区。
     fn workspace_profile_id(&self) -> String {
         let url = self.server_url.get();
@@ -1881,49 +1900,58 @@ impl WorkspaceStore {
     }
 
     pub fn browse_directory(&self, path: &str) {
-        self.file_directory.set(path.to_string());
+        let scope = self.file_operations.begin_directory_request(self, path);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.terminals.client.lock().clone() {
             let store = self.clone();
-            let project = self.active_project_id.get();
+            let project = scope.project_id.clone();
             let directory = path.to_string();
             self.files_loading.set(true);
             self.file_error.set(None);
-            spawn(async move {
-                let result = client.list_files(&project, Some(&directory)).await;
-                // 快速切目录或项目时，迟到的旧响应不得覆盖当前面板。
-                if store.active_project_id.get() != project
-                    || store.file_directory.get() != directory
-                {
-                    return;
-                }
-                match result {
-                    Ok(listing) => store.file_entries.set(
-                        listing
-                            .entries
-                            .into_iter()
-                            .map(|e| FileEntryItem {
-                                is_html: e.path.ends_with(".html") || e.path.ends_with(".htm"),
-                                name: e.name,
-                                path: e.path,
-                                is_dir: e.kind == WorkspaceEntryKind::Dir,
-                                size_bytes: e.size.unwrap_or(0),
-                            })
-                            .collect(),
-                    ),
-                    Err(e) => store.file_error.set(Some(e.to_string())),
-                }
-                store.files_loading.set(false);
+            let operations = self.file_operations.clone();
+            let owner = self.file_operations.task_owner;
+            owner.run(move || {
+                spawn(async move {
+                    let result = client.list_files(&project, Some(&directory)).await;
+                    if !operations.scope_is_current(&store, &scope) {
+                        return;
+                    }
+                    match result {
+                        Ok(listing) => {
+                            let canonical_path = listing.path;
+                            let entries: Vec<FileEntryItem> = listing
+                                .entries
+                                .into_iter()
+                                .map(|e| FileEntryItem {
+                                    is_html: e.path.ends_with(".html") || e.path.ends_with(".htm"),
+                                    name: e.name,
+                                    path: e.path,
+                                    is_dir: e.kind == WorkspaceEntryKind::Dir,
+                                    size_bytes: e.size.unwrap_or(0),
+                                })
+                                .collect();
+                            if operations.apply_listing(&store, &scope, &canonical_path, &entries) {
+                                store.file_directory.set(canonical_path);
+                                store.file_entries.set(entries);
+                            }
+                        }
+                        Err(e) => store.file_error.set(Some(e.to_string())),
+                    }
+                    store.files_loading.set(false);
+                })
             });
+        } else {
+            self.files_loading.set(false);
         }
+        #[cfg(target_arch = "wasm32")]
+        self.files_loading.set(false);
     }
 
     pub fn select_project(&self, project_id: &str) {
         self.selected_git_path.set(None);
         self.git_diff.set(None);
         self.overview_open.set(false);
-        let changed = self.active_project_id.get() != project_id;
-        self.active_project_id.set(project_id.to_string());
+        let changed = self.set_active_project_id(project_id.to_string());
         if changed {
             self.refresh_project_data();
         }
@@ -1998,7 +2026,7 @@ impl WorkspaceStore {
             self.active_canvas_id.set(canvas.clone());
         }
         if let Some(s) = self.sessions.get().iter().find(|s| s.id == session_id) {
-            self.active_project_id.set(s.project_id.clone());
+            self.set_active_project_id(s.project_id.clone());
             self.sessions_open.update(|open| {
                 open.insert(s.project_id.clone(), true);
             });

@@ -37,7 +37,8 @@ use crate::theme::{
     install_theme, nsh_appearance_of, rgb_to_hsla, rgba_to_hsla, tokens_from_resolved, use_theme,
 };
 use crate::views::{
-    AgentPaneView, DiffPaneView, FilePaneView, FilesPanel, GitPanel, PluginPanel, modal_layer,
+    AgentPaneView, DiffPaneView, FilePaneView, FilesPanel, GitPanel, PluginPanel,
+    file_operation_layer, modal_layer,
 };
 use crate::zoom::{install_zoom, zpx};
 
@@ -169,6 +170,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         }))
         .child(toast_overlay())
         .child(modal_layer())
+        .child(file_operation_layer())
 }
 
 fn install_macos_tray(store: WorkspaceStore) {
