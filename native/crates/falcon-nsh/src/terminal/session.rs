@@ -50,7 +50,7 @@ pub struct SessionRuntimeMeta {
     pub program_status: Vec<ProgramStatusRecord>,
     pub reconnecting_attempt: Option<u32>,
     pub last_error: Option<String>,
-    pub askpass: Option<(String, String)>,
+    pub askpass: Vec<(String, String)>,
     pub clipboard_pending: Option<String>,
 }
 
@@ -63,7 +63,7 @@ impl Default for SessionRuntimeMeta {
             program_status: Vec::new(),
             reconnecting_attempt: None,
             last_error: None,
-            askpass: None,
+            askpass: Vec::new(),
             clipboard_pending: None,
         }
     }
@@ -177,6 +177,10 @@ impl TerminalSession {
 
     pub fn meta(&self) -> SessionRuntimeMeta {
         self.meta.lock().clone()
+    }
+
+    pub(crate) fn take_askpass_pending(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.meta.lock().askpass)
     }
 
     pub fn take_clipboard_pending(&self) -> Option<String> {
@@ -445,7 +449,7 @@ impl SessionSink for TerminalSession {
                 self.bump_frame();
             }
             SessionEvent::Askpass { id, prompt } => {
-                self.meta.lock().askpass = Some((id, prompt));
+                self.meta.lock().askpass.push((id, prompt));
                 self.bump_frame();
             }
             SessionEvent::ProgramStatus(records) => {
