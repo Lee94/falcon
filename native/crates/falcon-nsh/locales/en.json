@@ -80,6 +80,23 @@
       "viewTree": "Tree view",
       "resizeSplit": "Drag to resize panels; double-click to reset",
       "dismissToast": "Dismiss notification"
+    },
+    "preview": {
+      "expandFile": "Expand preview",
+      "expandDiff": "Expand diff",
+      "fileTitle": "File preview",
+      "diffTitle": "Diff preview",
+      "close": "Close preview (Esc)",
+      "toggleSidebar": "Toggle quick file sidebar",
+      "toggleTree": "Toggle list / directory tree",
+      "toggleHidden": "Show / hide hidden files",
+      "parent": "Parent directory",
+      "refresh": "Refresh files",
+      "repository": "Repository",
+      "filter": "Search files by path…",
+      "loading": "Loading files…",
+      "empty": "No matching files",
+      "truncated": "File index is truncated; more files may be available."
     }
   }
 }

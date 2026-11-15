@@ -354,6 +354,8 @@ pub fn FilesPanel() -> impl IntoElement {
 pub struct FilePaneViewProps {
     pub project_id: String,
     pub path: String,
+    #[prop(default)]
+    pub expanded: bool,
 }
 
 #[component]
@@ -392,7 +394,9 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
             };
             let preview_active = (buf.raw_preview_url.is_some() && show_html_preview.get())
                 || (markdown_file && show_markdown_preview.get());
-            if buf.editable() && !preview_active {
+            // 挂起背景编辑器，浮层关闭时以共享缓冲的最新内容重新建立原生输入。
+            let covered = !props.expanded && store.active_dialog.get() == ActiveDialog::PreviewPopup;
+            if buf.editable() && !preview_active && !covered {
                 if !editor_ready.get() || editor_generation.get() != Some(buf.generation) {
                     editor_initial_body.set(buf.current_body.clone());
                     editor_generation.set(Some(buf.generation));
@@ -404,8 +408,9 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
 
             let st_save_shortcut = store.clone();
             let shortcut_key = pane_key.clone();
-            if store.focused_pane_key.get() == pane_key
-                && store.active_dialog.get() == ActiveDialog::None
+            if (store.focused_pane_key.get() == pane_key
+                && store.active_dialog.get() == ActiveDialog::None)
+                || (props.expanded && store.active_dialog.get() == ActiveDialog::PreviewPopup)
             {
                 crate::terminal::bind_safe_key_when(
                     "mod+s",
@@ -482,6 +487,15 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                 );
 
             let mut actions = view().flex_row().items_center().gap(zpx(6.0));
+            if !props.expanded {
+                let expand = store.clone();
+                let project = buf.project_id.clone();
+                let path = buf.path.clone();
+                actions = actions.child(icon_button(
+                    format!("file-expand-{pane_key}"), t!("native.preview.expandFile"), Glyph::Maximize, false,
+                    &resolved, move || crate::views::preview_popup::open_file(&expand, &project, &path),
+                ));
+            }
             if markdown_file {
                 actions = actions.child(
                     view()
