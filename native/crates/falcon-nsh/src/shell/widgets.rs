@@ -29,6 +29,8 @@ pub enum Glyph {
     Link,
     Branch,
     File,
+    Edit,
+    Trash,
     ArrowUp,
     Refresh,
 }
@@ -36,6 +38,8 @@ pub enum Glyph {
 pub fn glyph(kind: Glyph) -> impl IntoElement {
     let paths = match kind {
         Glyph::File => "<path d='M14 2H5v20h14V7Z M14 2v5h5'/>",
+        Glyph::Edit => "<path d='M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z'/>",
+        Glyph::Trash => "<path d='M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6 M10 11v5 M14 11v5'/>",
         Glyph::ArrowUp => "<path d='M12 20V4 m-7 7 7-7 7 7'/>",
         Glyph::Refresh => "<path d='M20 7a9 9 0 1 0 1 8 M20 2v6h-6'/>",
         Glyph::Folder => "<path d='M3 7V5h6l2 2h10v12H3Z'/>",

@@ -69,6 +69,10 @@ pub enum ActiveDialog {
         session_id: String,
         foreground_cmd: String,
     },
+    RenameSession {
+        session_id: String,
+        form_id: u64,
+    },
 }
 
 /// 设置模态框页签。
@@ -354,6 +358,7 @@ pub struct WorkspaceStore {
     pub right_panel_kind: Signal<RightPanelKind>,
 
     pub active_dialog: Signal<ActiveDialog>,
+    pub(crate) session_operations: crate::session_operations::SessionOperations,
     pub mobile_tab: Signal<MobileTab>,
     pub tui_passthrough: Signal<bool>,
     pub extra_ctrl_latched: Signal<bool>,
@@ -387,6 +392,7 @@ pub struct WorkspaceStore {
 impl WorkspaceStore {
     /// 初始化工作区（填充一套结构完备的本地种子状态，并在非离线模式下异步连向 `falcon-server`）。
     pub fn install(opts: &FalconLaunchOptions) -> Self {
+        let root_owner = Owner::current();
         let local_url = falcon_platform::shared().local_server_url();
         let persisted_profiles = (!opts.offline_demo)
             .then(|| falcon_platform::shared().load_profiles())
@@ -851,6 +857,7 @@ impl WorkspaceStore {
             right_panel_width: signal(260.0),
             right_panel_kind: signal(RightPanelKind::Plugin("sysmon".into())),
             active_dialog: signal(ActiveDialog::None),
+            session_operations: crate::session_operations::SessionOperations::new(root_owner),
             mobile_tab: signal(MobileTab::Workspace),
             tui_passthrough: signal(false),
             extra_ctrl_latched: signal(false),
@@ -935,6 +942,8 @@ impl WorkspaceStore {
         let Ok(parsed_url) = url.parse() else {
             return;
         };
+        self.session_operations
+            .begin_connection(self.server_connected);
         let icon_token = self.appearance.app_icon.begin_server_epoch();
         self.switch_workspace(url);
         let client = FalconClient::new(parsed_url);
@@ -1183,6 +1192,8 @@ impl WorkspaceStore {
     /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
+        self.session_operations
+            .begin_connection(self.server_connected);
         let icon_token = self.appearance.app_icon.begin_server_epoch();
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
@@ -2110,6 +2121,15 @@ impl WorkspaceStore {
             }
         }
         self.force_terminate_session(session_id);
+    }
+
+    pub fn request_rename_session(&self, session_id: &str) {
+        self.session_operations.open_rename(self, session_id);
+    }
+
+    pub fn request_clear_session_record(&self, session_id: &str) {
+        self.session_operations
+            .clear_record(self.clone(), session_id);
     }
 
     /// 确认销毁会话：移除工作区窗口、关闭本地终端实例并向服务端发 `POST /api/sessions/:id/terminate`。

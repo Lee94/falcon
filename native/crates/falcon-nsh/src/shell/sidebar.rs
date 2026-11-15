@@ -502,6 +502,29 @@ fn checkout_row(
                     move || st.focus_session(&sid),
                 ));
             }
+            if session.state == SessionState::Dead {
+                let st = store.clone();
+                let sid = session.id.clone();
+                row = row.child(icon_button(
+                    format!("clear-session-record-{}", session.id),
+                    t!("session.clearRecord"),
+                    Glyph::Trash,
+                    false,
+                    resolved,
+                    move || st.request_clear_session_record(&sid),
+                ));
+            } else {
+                let st = store.clone();
+                let sid = session.id.clone();
+                row = row.child(icon_button(
+                    format!("rename-session-{}", session.id),
+                    t!("session.rename"),
+                    Glyph::Edit,
+                    false,
+                    resolved,
+                    move || st.request_rename_session(&sid),
+                ));
+            }
             block = block.child(row);
         }
     }

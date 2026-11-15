@@ -8,6 +8,7 @@ pub mod git;
 mod host_form;
 mod tailscale;
 pub mod plugins;
+pub mod session_operations;
 mod relays;
 
 pub use agent::{AgentPaneView, agent_pane_view};
@@ -16,3 +17,4 @@ pub use dialogs::{ModalLayer, modal_layer};
 pub use files::{FilePaneView, FilesPanel, file_pane_view, files_panel, is_scoped_raw_preview_url};
 pub use git::{DiffPaneView, GitPanel, diff_pane_view, git_panel};
 pub use plugins::{ClientPluginVerifier, PluginPanel, plugin_panel};
+pub use session_operations::{RenameSession, rename_session};

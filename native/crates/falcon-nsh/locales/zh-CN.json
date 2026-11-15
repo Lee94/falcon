@@ -437,6 +437,10 @@
   },
   "session": {
     "createFailed": "创建会话失败",
+    "notConnected": "尚未连接到服务器，无法修改会话记录",
+    "renameFailed": "会话重命名失败",
+    "clearRecordFailed": "清除会话记录失败",
+    "renaming": "正在保存…",
     "state_unknown": "未知状态",
     "state_active": "运行中",
     "state_unverified": "待接回",
@@ -482,6 +486,11 @@
     "retryNow": "立即重连",
     "attachFailed": "接回失败",
     "retry": "重试"
+  },
+  "rename": {
+    "title": "重命名会话",
+    "placeholder": "会话名称（留空以恢复自动标题）",
+    "submit": "保存"
   },
   "durable": {
     "enableTitle": "为 %{host} 启用持久会话？",

@@ -13,6 +13,7 @@ pub mod i18n;
 pub mod appearance;
 pub mod shell;
 pub mod store;
+mod session_operations;
 pub mod terminal;
 pub mod theme;
 pub mod views;

@@ -41,6 +41,7 @@ pub fn ModalLayer() -> impl IntoElement {
 
         let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));
         let palette_dialog = matches!(dialog, ActiveDialog::Palette);
+        let rename_dialog = matches!(dialog, ActiveDialog::RenameSession { .. });
         let card_body = match dialog {
             ActiveDialog::None => return view().into_element(),
             ActiveDialog::Palette => {
@@ -72,6 +73,10 @@ pub fn ModalLayer() -> impl IntoElement {
                 foreground_cmd,
             } => render_confirm_terminate_modal(&store, &resolved, &session_id, &foreground_cmd)
                 .into_element(),
+            ActiveDialog::RenameSession { session_id, form_id } => crate::views::rename_session()
+                .session_id(session_id)
+                .form_id(form_id)
+                .into_element(),
         };
 
         let scrim = rgba_to_hsla(ThemeRgba {
@@ -91,7 +96,13 @@ pub fn ModalLayer() -> impl IntoElement {
             .bg(scrim)
             .child(
                 view()
-                    .w(zpx(if settings_dialog { 1024.0 } else { 580.0 }))
+                    .w(zpx(if settings_dialog {
+                        1024.0
+                    } else if rename_dialog {
+                        380.0
+                    } else {
+                        580.0
+                    }))
                     .max_w(relative(1.0))
                     .max_h(relative(0.86))
                     .flex_col()
