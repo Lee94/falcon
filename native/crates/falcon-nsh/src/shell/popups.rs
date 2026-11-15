@@ -174,7 +174,10 @@ fn popup_items(
     theme: &ResolvedTheme,
 ) -> impl Iterator<Item = impl IntoElement> {
     let foreground = rgb_to_hsla(theme.ui.popover_foreground);
-    let muted = rgb_to_hsla(theme.ui.muted);
+    let hover_background = rgb_to_hsla(theme.ui.tint);
+    let hover_foreground = rgb_to_hsla(theme.ui.tint_foreground);
+    let focus_background = rgb_to_hsla(theme.ui.tint);
+    let focus_foreground = rgb_to_hsla(theme.ui.tint_foreground);
     let danger_color = rgb_to_hsla(theme.ui.destructive);
     let disabled_color = rgb_to_hsla(theme.ui.muted_foreground);
     // Menu items are lazy children; retain FalconApp's owner for work that outlives the overlay.
@@ -210,8 +213,8 @@ fn popup_items(
             .rounded(zpx(6.0))
             .text_color(color);
         item = item
-            .hover(move |style| style.bg(muted))
-            .focus(move |style| style.bg(muted));
+            .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
+            .focus(move |style| style.bg(focus_background).text_color(focus_foreground));
         item.child(text(label).text_xs())
     })
 }
