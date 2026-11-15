@@ -1,14 +1,18 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[cfg(not(target_arch = "wasm32"))]
+use falcon_client::ApiErrorKind;
+#[cfg(not(target_arch = "wasm32"))]
 use falcon_client::ApiError;
+use falcon_core::project_form::mapping_changed;
 use falcon_proto::{
-    MultiRepoProbe, MultiWorktreeInput, ProjectInput, RepoInfo, WorktreeFailure,
+    MultiRepoProbe, MultiWorktreeInput, Project, ProjectInput, RepoInfo, WorktreeFailure,
     WorktreeInput,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use falcon_proto::{MultiDeriveError, Project};
+use falcon_proto::MultiDeriveError;
 use nsh_core::element::reactive::Owner;
 use nsh_core::prelude::Signal;
 
@@ -27,7 +31,50 @@ pub struct FormOperationContext {
 pub struct ProjectOperations {
     task_owner: Owner,
     connection_generation: Rc<Cell<u64>>,
+    server_url: Signal<String>,
     form_incarnation: Cell<u64>,
+    mapping_state: RefCell<MappingState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MappingGeneration {
+    server_url: String,
+    connection_generation: u64,
+    project_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectUpdateToken {
+    server_url: String,
+    connection_generation: u64,
+    project_generation: u64,
+    request_id: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingUpdateState {
+    InFlight,
+    NeedsReconciliation,
+}
+
+struct PendingProjectUpdate {
+    token: ProjectUpdateToken,
+    mapping_changed: bool,
+    state: PendingUpdateState,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectUpdateOutcome {
+    Applied,
+    DefiniteFailure,
+    Uncertain,
+}
+
+#[derive(Default)]
+struct MappingState {
+    generations: HashMap<(String, String), u64>,
+    pending: HashMap<(String, String), PendingProjectUpdate>,
+    next_request_id: u64,
 }
 
 enum WorktreeRequest {
@@ -36,12 +83,174 @@ enum WorktreeRequest {
 }
 
 impl ProjectOperations {
-    pub fn new(task_owner: Owner, connection_generation: Rc<Cell<u64>>) -> Self {
+    pub fn new(
+        task_owner: Owner,
+        connection_generation: Rc<Cell<u64>>,
+        server_url: Signal<String>,
+    ) -> Self {
         Self {
             task_owner,
             connection_generation,
+            server_url,
             form_incarnation: Cell::new(0),
+            mapping_state: RefCell::new(MappingState::default()),
         }
+    }
+
+    pub fn mapping_change_pending(&self, project_id: &str) -> bool {
+        let key = (canonical_server_url(&self.server_url.get()), project_id.to_string());
+        self.mapping_state
+            .borrow()
+            .pending
+            .get(&key)
+            .is_some_and(|pending| pending.mapping_changed)
+    }
+
+    pub fn update_pending(&self, project_id: &str) -> bool {
+        let key = (canonical_server_url(&self.server_url.get()), project_id.to_string());
+        self.mapping_state.borrow().pending.contains_key(&key)
+    }
+
+    pub fn mapping_generation(&self, project_id: &str) -> MappingGeneration {
+        let server_url = canonical_server_url(&self.server_url.get());
+        let connection_generation = self.connection_generation.get();
+        let project_generation = self
+            .mapping_state
+            .borrow()
+            .generations
+            .get(&(server_url.clone(), project_id.to_string()))
+            .copied()
+            .unwrap_or(0);
+        MappingGeneration {
+            server_url,
+            connection_generation,
+            project_generation,
+        }
+    }
+
+    pub fn mapping_is_current(&self, project_id: &str, generation: &MappingGeneration) -> bool {
+        self.mapping_server_is_current(generation)
+            && !self.mapping_change_pending(project_id)
+            && self.mapping_generation(project_id) == *generation
+    }
+
+    pub fn mapping_server_is_current(&self, generation: &MappingGeneration) -> bool {
+        generation.server_url == canonical_server_url(&self.server_url.get())
+            && generation.connection_generation == self.connection_generation.get()
+    }
+
+    fn project_update_server_is_current(&self, token: &ProjectUpdateToken) -> bool {
+        token.server_url == canonical_server_url(&self.server_url.get())
+            && token.connection_generation == self.connection_generation.get()
+    }
+
+    pub fn current_connection_generation(&self) -> u64 {
+        self.connection_generation.get()
+    }
+
+    fn begin_project_update(
+        &self,
+        project_id: &str,
+        mapping_changed: bool,
+    ) -> Option<ProjectUpdateToken> {
+        let server_url = canonical_server_url(&self.server_url.get());
+        let key = (server_url.clone(), project_id.to_string());
+        let connection_generation = self.connection_generation.get();
+        let mut state = self.mapping_state.borrow_mut();
+        if state.pending.contains_key(&key) {
+            return None;
+        }
+        let current_generation = state
+            .generations
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        let project_generation = if mapping_changed {
+            current_generation
+                .checked_add(1)
+                .expect("project mapping generation exhausted")
+        } else {
+            current_generation
+        };
+        state.next_request_id = state
+            .next_request_id
+            .checked_add(1)
+            .expect("project mapping request id exhausted");
+        let token = ProjectUpdateToken {
+            server_url,
+            connection_generation,
+            project_generation,
+            request_id: state.next_request_id,
+        };
+        if mapping_changed {
+            state.generations.insert(key.clone(), project_generation);
+        }
+        state.pending.insert(
+            key,
+            PendingProjectUpdate {
+                token: token.clone(),
+                mapping_changed,
+                state: PendingUpdateState::InFlight,
+            },
+        );
+        Some(token)
+    }
+
+    fn finish_project_update(
+        &self,
+        project_id: &str,
+        token: &ProjectUpdateToken,
+        outcome: ProjectUpdateOutcome,
+    ) {
+        let key = (token.server_url.clone(), project_id.to_string());
+        let current_connection = token.server_url == canonical_server_url(&self.server_url.get())
+            && token.connection_generation == self.connection_generation.get();
+        let mut state = self.mapping_state.borrow_mut();
+        let Some(pending) = state.pending.get(&key) else {
+            return;
+        };
+        if pending.token != *token || pending.state != PendingUpdateState::InFlight {
+            return;
+        }
+        let mapping_changed = pending.mapping_changed;
+        if mapping_changed {
+            let next_generation = state
+                .generations
+                .get(&key)
+                .copied()
+                .unwrap_or(token.project_generation)
+                .checked_add(1)
+                .expect("project mapping generation exhausted");
+            state.generations.insert(key.clone(), next_generation);
+        }
+        if outcome == ProjectUpdateOutcome::DefiniteFailure
+            || (outcome == ProjectUpdateOutcome::Applied && current_connection)
+        {
+            state.pending.remove(&key);
+        } else if let Some(pending) = state.pending.get_mut(&key) {
+            pending.state = PendingUpdateState::NeedsReconciliation;
+        }
+    }
+
+    pub fn reconcile_mapping_snapshot(
+        &self,
+        server_url: &str,
+        project_ids: &[String],
+        connection_generation: u64,
+    ) {
+        let server_url = canonical_server_url(server_url);
+        if server_url != canonical_server_url(&self.server_url.get())
+            || connection_generation != self.connection_generation.get()
+        {
+            return;
+        }
+        let mut state = self.mapping_state.borrow_mut();
+        state.pending.retain(|(pending_url, project_id), pending| {
+            pending_url != &server_url
+                || !project_ids.iter().any(|id| id == project_id)
+                || pending.state != PendingUpdateState::NeedsReconciliation
+                || pending.token.connection_generation >= connection_generation
+        });
     }
 
     pub fn begin_form(&self) -> FormOperationContext {
@@ -166,6 +375,32 @@ impl ProjectOperations {
         if !self.is_current(context) || busy.get() {
             return;
         }
+        if let Some(id) = project_id.as_deref() {
+            if self.update_pending(id) {
+                error.set(Some(t!("project.updatePending").to_string()));
+                return;
+            }
+        }
+
+        let mut mapping_changed = false;
+        if let Some(id) = project_id.as_deref() {
+            let Some(original) = store
+                .projects
+                .get()
+                .into_iter()
+                .find(|record| record.id == id)
+                .and_then(|record| record.source)
+            else {
+                error.set(Some(t!("project.sourceUnavailable").to_string()));
+                return;
+            };
+            mapping_changed = mapping_changed_in_store(&store, &original, &input);
+            if mapping_changed && store.has_open_file_mapping(id) {
+                error.set(Some(t!("project.closeFilesBeforeMappingChange").to_string()));
+                return;
+            }
+        }
+
         busy.set(true);
         error.set(None);
 
@@ -190,6 +425,19 @@ impl ProjectOperations {
                 error.set(Some(t!("project.connectionRequired").to_string()));
                 return;
             };
+            let update_token = if let Some(id) = project_id.as_deref() {
+                let Some(token) = self.begin_project_update(id, mapping_changed) else {
+                    busy.set(false);
+                    error.set(Some(t!("project.updatePending").to_string()));
+                    return;
+                };
+                if mapping_changed {
+                    store.on_project_mapping_change_started(id);
+                }
+                Some(token)
+            } else {
+                None
+            };
             let operations = store.project_operations.clone();
             let task_store = store.clone();
             store.spawn_root(async move {
@@ -197,13 +445,26 @@ impl ProjectOperations {
                     Some(id) => client.update_project(id, &input).await,
                     None => client.create_project(&input).await,
                 };
-                if !operations.server_is_current(context) {
-                    return;
-                }
+                let server_is_current = operations.server_is_current(context)
+                    && update_token.as_ref().map_or(true, |token| {
+                        operations.project_update_server_is_current(token)
+                    });
                 match response {
                     Ok(project) => {
                         let id = project.id.clone();
-                        upsert_project(&task_store, &project);
+                        if let (Some(edit_id), Some(token)) =
+                            (project_id.as_deref(), update_token.as_ref())
+                        {
+                            operations.finish_project_update(
+                                edit_id,
+                                token,
+                                ProjectUpdateOutcome::Applied,
+                            );
+                        }
+                        if !server_is_current {
+                            return;
+                        }
+                        task_store.on_project_saved(&project, mapping_changed);
                         if project_id.is_none() && operations.is_current(context) {
                             task_store.select_project(&id);
                         }
@@ -214,9 +475,39 @@ impl ProjectOperations {
                         }
                     }
                     Err(api_error) => {
+                        let definite_failure = api_error.kind == ApiErrorKind::Http
+                            && api_error.status.is_some_and(|status| {
+                                (400..500).contains(&status) && status != 408
+                            })
+                            || api_error.kind == ApiErrorKind::Internal;
+                        if let (Some(edit_id), Some(token)) =
+                            (project_id.as_deref(), update_token.as_ref())
+                        {
+                            operations.finish_project_update(
+                                edit_id,
+                                token,
+                                if definite_failure {
+                                    ProjectUpdateOutcome::DefiniteFailure
+                                } else {
+                                    ProjectUpdateOutcome::Uncertain
+                                },
+                            );
+                        }
+                        if !server_is_current {
+                            return;
+                        }
                         if operations.is_current(context) {
                             busy.set(false);
-                            error.set(Some(api_error.message));
+                            let message = if update_token.is_some() && !definite_failure {
+                                if mapping_changed {
+                                    t!("project.mappingChangeUncertain").to_string()
+                                } else {
+                                    t!("project.updateUncertain").to_string()
+                                }
+                            } else {
+                                api_error.message
+                            };
+                            error.set(Some(message));
                         }
                     }
                 }
@@ -337,6 +628,45 @@ impl ProjectOperations {
             });
         }
     }
+}
+
+fn mapping_changed_in_store(
+    store: &WorkspaceStore,
+    original: &Project,
+    input: &ProjectInput,
+) -> bool {
+    if mapping_changed(original, input) {
+        return true;
+    }
+    let Some(host_id) = original
+        .host_id
+        .as_deref()
+        .filter(|host_id| input.host_id.as_deref() == Some(*host_id))
+    else {
+        return false;
+    };
+    let Some(original_ssh) = original.ssh.as_ref() else {
+        return true;
+    };
+    let Some(host) = store
+        .hosts
+        .get()
+        .into_iter()
+        .find(|host| host.id == host_id)
+        .and_then(|host| host.source)
+    else {
+        return true;
+    };
+    host.host != original_ssh.host
+        || host.port != original_ssh.port
+        || host.username != original_ssh.username
+        || host.auth_method != original_ssh.auth_method
+        || host.key_path != original_ssh.key_path
+        || host.has_secret != original_ssh.has_secret
+}
+
+fn canonical_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

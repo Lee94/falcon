@@ -34,6 +34,12 @@
   "project": {
     "createTitle": "新建项目",
     "editTitle": "编辑项目",
+    "sourceUnavailable": "无法读取项目当前配置，请刷新项目列表后重试。",
+    "closeFilesBeforeMappingChange": "修改工作目录、主机或仓库路径前，请先关闭该项目已打开的文件。",
+    "mappingChangePending": "项目访问目标正在更新或等待服务器状态确认，文件操作已暂停。",
+    "mappingChangeUncertain": "无法确认项目访问目标是否已更新。为安全起见，文件操作已暂停；请重新连接并刷新项目列表。",
+    "updatePending": "项目编辑正在进行或等待服务器状态确认，请稍后重试。",
+    "updateUncertain": "无法确认项目编辑是否已保存。为安全起见，当前服务器的后续项目编辑已暂停；请重新连接并刷新项目列表。",
     "name": "项目名称",
     "typeLocal": "本地文件夹",
     "typeSsh": "远程 SSH",

@@ -426,6 +426,7 @@ impl WorkspaceStore {
             plaintext_ok: false,
         }
         .is_insecure();
+        let server_url = signal(url.clone());
 
         let c1 = new_canvas_id();
         let mut initial_col = column([term_key("sess-main"), term_key("sess-agent")], None);
@@ -840,7 +841,7 @@ impl WorkspaceStore {
 
         let store = Self {
             profiles: signal(profiles),
-            server_url: signal(url.clone()),
+            server_url: server_url.clone(),
             server_connected: signal(opts.offline_demo),
             plaintext_warning: signal(plaintext),
             projects: signal(projects),
@@ -893,6 +894,7 @@ impl WorkspaceStore {
             project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
                 task_owner,
                 connection_generation.clone(),
+                server_url,
             )),
             task_owner,
             connection_generation,
@@ -950,6 +952,7 @@ impl WorkspaceStore {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn connect_live_server(&self, url: &str) {
         self.bump_connection_generation();
+        let connection_generation = self.project_operations.current_connection_generation();
         let Ok(parsed_url) = url.parse() else {
             return;
         };
@@ -1022,6 +1025,10 @@ impl WorkspaceStore {
                         }
                     })
                     .collect();
+                let project_ids = mapped.iter().map(|project| project.id.clone()).collect::<Vec<_>>();
+                store
+                    .project_operations
+                    .reconcile_mapping_snapshot(&target_url, &project_ids, connection_generation);
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
                         store.active_project_id.set(first.id.clone());
@@ -1197,6 +1204,7 @@ impl WorkspaceStore {
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
         self.bump_connection_generation();
+        let connection_generation = self.project_operations.current_connection_generation();
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
@@ -1241,6 +1249,10 @@ impl WorkspaceStore {
                         }
                     })
                     .collect();
+                let project_ids = mapped.iter().map(|project| project.id.clone()).collect::<Vec<_>>();
+                store
+                    .project_operations
+                    .reconcile_mapping_snapshot(&base, &project_ids, connection_generation);
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
                         store.active_project_id.set(first.id.clone());
@@ -1510,6 +1522,60 @@ impl WorkspaceStore {
                 store.git_loading.set(false);
             });
         }
+    }
+
+    pub(crate) fn on_project_saved(
+        &self,
+        project: &falcon_proto::Project,
+        mapping_changed: bool,
+    ) {
+        let _ = mapping_changed;
+        let host_name = project.ssh.as_ref().map(|ssh| ssh.host.clone());
+        let (derived_from, branch) = match &project.worktree {
+            Some(worktree) => (
+                Some(worktree.source_project_id.clone()),
+                Some(worktree.branch.clone()),
+            ),
+            None => (None, None),
+        };
+        let record = ProjectRecord {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            path: project.working_dir.clone().unwrap_or_default(),
+            host_id: project.host_id.clone(),
+            host_name,
+            derived_from,
+            branch,
+            source: Some(project.clone()),
+        };
+        self.projects.update(|projects| {
+            if let Some(existing) = projects.iter_mut().find(|item| item.id == record.id) {
+                *existing = record;
+            } else {
+                projects.push(record);
+            }
+        });
+        if self.active_project_id.get() == project.id {
+            self.refresh_project_data();
+        }
+    }
+
+    pub(crate) fn on_project_mapping_change_started(&self, project_id: &str) {
+        debug_assert!(self.project_operations.mapping_change_pending(project_id));
+    }
+
+    pub(crate) fn has_open_file_mapping(&self, project_id: &str) -> bool {
+        let pane_prefix = format!("f:{project_id}:");
+        self.open_files
+            .get()
+            .values()
+            .any(|buffer| buffer.project_id == project_id)
+            || self.columns.get().iter().any(|column| {
+                column
+                    .panes
+                    .iter()
+                    .any(|pane| pane.key.starts_with(&pane_prefix))
+            })
     }
 
     pub fn commit_git_changes(&self, amend: bool, push: bool) {
@@ -2112,6 +2178,13 @@ impl WorkspaceStore {
 
     /// 在工作区打开一扇文件编辑/预览窗口。
     pub fn open_file_pane(&self, project_id: &str, path: &str) {
+        if self.project_operations.mapping_change_pending(project_id) {
+            self.show_toast(crate::i18n::t!("project.mappingChangePending").to_string());
+            return;
+        }
+        let mapping_generation = self.project_operations.mapping_generation(project_id);
+        #[cfg(target_arch = "wasm32")]
+        let _ = mapping_generation;
         let key = file_key(project_id, path);
         let mut map = self.open_files.get();
         if !map.contains_key(&key) {
@@ -2141,8 +2214,16 @@ impl WorkspaceStore {
                 let fpath = path.to_string();
                 let fkey = key.clone();
                 let base_url = self.server_url.get();
+                let operations = store.project_operations.clone();
                 spawn(async move {
-                    if let Ok(wf) = client.read_file(&pid, &fpath).await
+                    if !operations.mapping_is_current(&pid, &mapping_generation) {
+                        return;
+                    }
+                    let result = client.read_file(&pid, &fpath).await;
+                    if !operations.mapping_is_current(&pid, &mapping_generation) {
+                        return;
+                    }
+                    if let Ok(wf) = result
                         && let FilePreview::Text { text, version, .. } = wf.preview
                     {
                         let rel = wf.raw_path.as_deref().unwrap_or(&fpath);
@@ -2232,9 +2313,31 @@ impl WorkspaceStore {
 
     /// 保存文件修改（ADR 0023：还原原文件 CRLF/LF 与末尾换行，校验 `disk_hash` 冲突）。
     pub fn save_file_buffer(&self, file_pane_key: &str) -> bool {
+        let Some(project_id) = self
+            .open_files
+            .get()
+            .get(file_pane_key)
+            .map(|buffer| buffer.project_id.clone())
+        else {
+            return false;
+        };
+        if self.project_operations.mapping_change_pending(&project_id) {
+            return false;
+        }
+        let mapping_generation = self.project_operations.mapping_generation(&project_id);
+        #[cfg(target_arch = "wasm32")]
+        let _ = mapping_generation;
         let mut ok = false;
         #[cfg(not(target_arch = "wasm32"))]
-        let mut pending_save: Option<(String, String, String, Option<String>)> = None;
+        let mut pending_save: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            crate::project_operations::MappingGeneration,
+            String,
+            String,
+        )> = None;
 
         self.open_files.update(|map| {
             if let Some(buf) = map.get_mut(file_pane_key) {
@@ -2246,27 +2349,66 @@ impl WorkspaceStore {
                 {
                     let base = (!buf.disk_hash.is_empty() && buf.disk_hash != "sha256:initial")
                         .then(|| buf.disk_hash.clone());
-                    pending_save =
-                        Some((buf.project_id.clone(), buf.path.clone(), disk_payload, base));
+                    let previous_clean_body = buf.clean_body.clone();
+                    let submitted_body = buf.current_body.clone();
+                    pending_save = Some((
+                        buf.project_id.clone(),
+                        buf.path.clone(),
+                        disk_payload,
+                        base,
+                        mapping_generation.clone(),
+                        previous_clean_body,
+                        submitted_body.clone(),
+                    ));
+                    buf.clean_body = submitted_body;
                 }
                 #[cfg(target_arch = "wasm32")]
-                let _ = disk_payload;
-                buf.clean_body = buf.current_body.clone();
+                {
+                    let _ = disk_payload;
+                    buf.clean_body = buf.current_body.clone();
+                }
                 ok = true;
             }
         });
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let (Some(client), Some((pid, path, payload, base))) =
+        if let (
+            Some(client),
+            Some((
+                pid,
+                path,
+                payload,
+                base,
+                mapping_generation,
+                previous_clean_body,
+                submitted_body,
+            )),
+        ) =
             (self.terminals.client.lock().clone(), pending_save)
         {
             let store = self.clone();
             let key = file_pane_key.to_string();
+            let operations = store.project_operations.clone();
             spawn(async move {
-                match client
+                if !operations.mapping_is_current(&pid, &mapping_generation) {
+                    if operations.mapping_server_is_current(&mapping_generation) {
+                        store.open_files.update(|map| {
+                            if let Some(buffer) = map.get_mut(&key)
+                                && buffer.clean_body == submitted_body
+                            {
+                                buffer.clean_body = previous_clean_body;
+                            }
+                        });
+                    }
+                    return;
+                }
+                let result = client
                     .save_file(&pid, &path, payload.into_bytes(), base.as_deref())
-                    .await
-                {
+                    .await;
+                if !operations.mapping_is_current(&pid, &mapping_generation) {
+                    return;
+                }
+                match result {
                     Ok(saved) => {
                         store.open_files.update(|m| {
                             if let Some(buf) = m.get_mut(&key) {

@@ -215,6 +215,61 @@ fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+pub fn mapping_changed(original: &Project, input: &ProjectInput) -> bool {
+    normalized_mapping_path(original.working_dir.as_deref())
+        != normalized_mapping_path(input.working_dir.as_deref())
+        || original.project_type != input.project_type
+        || original.host_id != input.host_id
+        || (original.host_id.is_none()
+            && input.host_id.is_none()
+            && inline_ssh_mapping_changed(original.ssh.as_ref(), input.ssh.as_ref()))
+        || input.repos.as_ref().is_some_and(|repos| {
+            if original.worktree.is_some() {
+                return true;
+            }
+            let Some(original_repos) = original.multi.as_ref().map(|multi| &multi.repos) else {
+                return true;
+            };
+            repos.len() != original_repos.len()
+                || repos.iter().zip(original_repos).any(|(input, original)| {
+                    normalized_mapping_path(Some(input.as_str()))
+                        != normalized_mapping_path(Some(original.dir.as_str()))
+                })
+        })
+}
+
+fn inline_ssh_mapping_changed(
+    original: Option<&falcon_proto::SshConfig>,
+    input: Option<&SshConfigInput>,
+) -> bool {
+    match (original, input) {
+        (None, None) => false,
+        (Some(original), Some(input)) => {
+            original.host != input.host
+                || original.port != input.port
+                || original.username != input.username
+                || original.auth_method != input.auth_method
+                || original.key_path != input.key_path
+                || input.secret.as_deref().is_some_and(|secret| !secret.is_empty())
+        }
+        _ => true,
+    }
+}
+
+fn normalized_mapping_path(path: Option<&str>) -> Option<String> {
+    let path = path?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let mut path = path.replace('\\', "/");
+    let bytes = path.as_bytes();
+    let drive_root = bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'/';
+    while path.ends_with('/') && path != "/" && !drive_root {
+        path.pop();
+    }
+    Some(path)
+}
+
 fn optional_secret(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
@@ -270,6 +325,7 @@ mod tests {
         assert_eq!(input.ssh, None);
         assert_eq!(input.repos, None);
         assert_eq!(input.default_worktree_branch, original.default_worktree_branch);
+        assert!(!mapping_changed(&original, &input));
     }
 
     #[test]
@@ -336,5 +392,105 @@ mod tests {
         let input = build_project_input(&draft, None).unwrap();
         assert_eq!(input.project_type, ProjectType::Local);
         assert_eq!(input.host_id, None);
+    }
+
+    #[test]
+    fn mapping_change_ignores_metadata_and_normalizes_directory_separators() {
+        let original = Project {
+            id: "local".into(),
+            name: "old name".into(),
+            project_type: ProjectType::Local,
+            working_dir: Some("/repo/".into()),
+            shell: Some("bash".into()),
+            ssh: None,
+            host_id: None,
+            worktree: None,
+            multi: None,
+            default_worktree_branch: Some("main".into()),
+            created_at: 0,
+        };
+        let input = ProjectInput {
+            name: "new name".into(),
+            project_type: ProjectType::Local,
+            working_dir: Some("/repo".into()),
+            shell: Some("fish".into()),
+            host_id: None,
+            ssh: None,
+            repos: None,
+            default_worktree_branch: Some("develop".into()),
+        };
+        assert!(!mapping_changed(&original, &input));
+
+        let mut changed = input;
+        changed.working_dir = Some("/repo/src".into());
+        assert!(mapping_changed(&original, &changed));
+    }
+
+    #[test]
+    fn mapping_change_detects_inline_secret_and_root_member_order() {
+        let inline_project = Project {
+            id: "ssh".into(),
+            name: "remote".into(),
+            project_type: ProjectType::Ssh,
+            working_dir: Some("/workspace".into()),
+            shell: None,
+            ssh: Some(SshConfig {
+                host: "server".into(),
+                port: 22,
+                username: "user".into(),
+                auth_method: SshAuthMethod::Password,
+                key_path: None,
+                has_secret: true,
+            }),
+            host_id: None,
+            worktree: None,
+            multi: None,
+            default_worktree_branch: None,
+            created_at: 0,
+        };
+        let inline_input = ProjectInput {
+            name: "remote".into(),
+            project_type: ProjectType::Ssh,
+            working_dir: Some("/workspace".into()),
+            shell: None,
+            host_id: None,
+            ssh: Some(SshConfigInput {
+                host: "server".into(),
+                port: 22,
+                username: "user".into(),
+                auth_method: SshAuthMethod::Password,
+                key_path: None,
+                secret: None,
+            }),
+            repos: None,
+            default_worktree_branch: None,
+        };
+        assert!(!mapping_changed(&inline_project, &inline_input));
+        let mut changed_secret = inline_input;
+        changed_secret.ssh.as_mut().unwrap().secret = Some("new secret".into());
+        assert!(mapping_changed(&inline_project, &changed_secret));
+
+        let mut root_multi = inline_project;
+        root_multi.project_type = ProjectType::Local;
+        root_multi.ssh = None;
+        root_multi.multi = Some(MultiRepoInfo {
+            repos: vec![
+                MultiRepoMember { dir: "/repo/a".into(), repo_dir: None },
+                MultiRepoMember { dir: "/repo/b".into(), repo_dir: None },
+            ],
+        });
+        let mut root_input = ProjectInput {
+            name: "multi".into(),
+            project_type: ProjectType::Local,
+            working_dir: Some("/repo".into()),
+            shell: None,
+            host_id: None,
+            ssh: None,
+            repos: Some(vec!["/repo/a".into(), "/repo/b".into()]),
+            default_worktree_branch: None,
+        };
+        assert!(!mapping_changed(&root_multi, &root_input));
+        root_input.repos = Some(vec!["/repo/b".into(), "/repo/a".into()]);
+        assert!(mapping_changed(&root_multi, &root_input));
     }
 }
