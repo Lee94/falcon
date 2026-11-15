@@ -11,6 +11,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod host;
+#[cfg(all(feature = "snapshot", target_os = "macos"))]
+mod snapshot;
 
 use falcon_nsh::{FalconLaunchOptions, falcon_root_with_options};
 use nsh_core::element::{Registry, Root};
@@ -136,11 +138,11 @@ pub fn run_cli() -> anyhow::Result<()> {
 
     host::install_once();
 
-    let force_tui = cli.force_tui;
+    let _force_tui = cli.force_tui;
     let launch_opts = cli.into_launch_options();
 
     #[cfg(feature = "tui")]
-    if force_tui {
+    if _force_tui {
         return tui_host::run_tui(launch_opts);
     }
 
@@ -152,7 +154,7 @@ pub fn run_cli() -> anyhow::Result<()> {
             all(target_os = "linux", feature = "linux-desktop")
         ))
     ))]
-    if force_tui {
+    if _force_tui {
         anyhow::bail!("TUI backend is not enabled in this build (enable feature `tui`)");
     }
 
@@ -171,10 +173,12 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     let mut opts = AppOptions::default();
     opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
-    opts.size = (1360, 860);
+    opts.size = (1440, 900);
     // macOS 关掉最后一扇窗口时保留引擎与菜单栏状态项（自动化运行除外）
     opts.keep_alive_on_close = std::env::var_os("FALCON_AUTOMATE").is_none();
     opts.limits = nsh_engine::Limits::standalone();
+    #[cfg(feature = "snapshot")]
+    snapshot::schedule();
     let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);
     Ok(())
 }
@@ -186,7 +190,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     let mut opts = AppOptions::default();
     opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
-    opts.size = (1360, 860);
+    opts.size = (1440, 900);
     opts.schemes = vec!["falcon".into()];
     opts.limits = nsh_engine::Limits::standalone();
     let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);
@@ -200,7 +204,7 @@ fn run_native_desktop_or_fallback(launch_opts: FalconLaunchOptions) -> anyhow::R
     let mut opts = AppOptions::default();
     opts.app_id = "com.falcon.app".into();
     opts.title = "Falcon".into();
-    opts.size = (1360, 860);
+    opts.size = (1440, 900);
     opts.schemes = vec!["falcon".into()];
     opts.limits = nsh_engine::Limits::standalone();
     let _ = run_app(AppSource::Rust(build_root(launch_opts)), opts);

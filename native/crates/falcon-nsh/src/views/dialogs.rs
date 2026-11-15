@@ -4,16 +4,15 @@
 
 use falcon_core::profiles::{LOCAL_PROFILE_ID, ServerProfile, new_profile_id};
 use falcon_core::term::{TermCursorStyle, TermFontId};
-use falcon_proto::PluginKind;
 use falcon_theme::{Rgba as ThemeRgba, ThemeMode, ThemePref};
 use nsh_core::element::input;
+use nsh_core::platform::Idiom;
 use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::store::{
-    ActiveDialog, ProjectRecord, RightPanelKind, SettingsTab, WorkspaceStore, use_workspace,
-};
+use crate::shell::widgets::{Glyph, glyph, icon_button};
+use crate::store::{ActiveDialog, RightPanelKind, SettingsTab, WorkspaceStore, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::{ZoomController, zpx};
 
@@ -29,8 +28,12 @@ pub fn ModalLayer() -> impl IntoElement {
     let profile_url = signal(String::new());
     let new_proj_name = signal(String::new());
     let new_proj_path = signal(String::new());
+    let new_project_host = signal(None::<String>);
     let askpass_input = signal(String::new());
     let theme_filter = signal(String::new());
+    let theme_slot = signal(theme_ctrl.active_slot());
+    let theme_picker_open = signal(false);
+    let settings_filter = signal(String::new());
 
     view().child(dynamic(move || {
         let dialog = store.active_dialog.get();
@@ -41,23 +44,22 @@ pub fn ModalLayer() -> impl IntoElement {
         let resolved = theme_ctrl.resolved();
         let ui = &resolved.ui;
 
+        let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));
+        let palette_dialog = matches!(dialog, ActiveDialog::Palette);
         let card_body = match dialog {
             ActiveDialog::None => return view().into_element(),
             ActiveDialog::Palette => {
                 render_palette_modal(&store, &resolved, palette_query).into_element()
             }
-            ActiveDialog::Profiles => render_profiles_modal(
-                &store,
-                &resolved,
-                profile_name,
-                profile_url,
-            )
-            .into_element(),
+            ActiveDialog::Profiles => {
+                render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
+            }
             ActiveDialog::NewProject => render_new_project_modal(
                 &store,
                 &resolved,
                 new_proj_name,
                 new_proj_path,
+                new_project_host,
             )
             .into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
@@ -67,6 +69,9 @@ pub fn ModalLayer() -> impl IntoElement {
                 &resolved,
                 tab,
                 theme_filter,
+                theme_slot,
+                theme_picker_open,
+                settings_filter,
             )
             .into_element(),
             ActiveDialog::Askpass { id, prompt } => {
@@ -92,18 +97,19 @@ pub fn ModalLayer() -> impl IntoElement {
             .items_center()
             .justify_center()
             .p(zpx(16.0))
+            .when(palette_dialog, |v| v.justify_start().pt(zpx(96.0)))
             .bg(scrim)
             .child(
                 view()
-                    .w(zpx(580.0))
+                    .w(zpx(if settings_dialog { 1024.0 } else { 580.0 }))
                     .max_w(relative(1.0))
                     .max_h(relative(0.86))
                     .flex_col()
                     .overflow_hidden()
-                    .rounded(zpx(12.0))
+                    .rounded(zpx(16.0))
                     .border_1()
                     .border_color(rgba_to_hsla(ui.border))
-                    .bg(rgb_to_hsla(ui.popover))
+                    .bg(rgb_to_hsla(ui.background))
                     .child(card_body),
             )
             .into_element()
@@ -193,11 +199,7 @@ fn render_palette_modal(
                     st.focus_session(&sid);
                     st.active_dialog.set(ActiveDialog::None);
                 })
-                .child(
-                    text(title)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
+                .child(text(title).text_xs().text_color(rgb_to_hsla(ui.foreground)))
                 .child(
                     text(right_label)
                         .text_xs()
@@ -208,14 +210,12 @@ fn render_palette_modal(
 
     // 项目切换
     items = items.child(
-        view()
-            .pt(zpx(6.0))
-            .child(
-                text(t!("palette.groupProjects"))
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb_to_hsla(ui.muted_foreground)),
-            ),
+        view().pt(zpx(6.0)).child(
+            text(t!("palette.groupProjects"))
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb_to_hsla(ui.muted_foreground)),
+        ),
     );
     for p in projects {
         if !q.is_empty() && !p.name.to_ascii_lowercase().contains(&q) {
@@ -253,14 +253,12 @@ fn render_palette_modal(
 
     // 全局操作
     items = items.child(
-        view()
-            .pt(zpx(6.0))
-            .child(
-                text(t!("palette.groupActions"))
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb_to_hsla(ui.muted_foreground)),
-            ),
+        view().pt(zpx(6.0)).child(
+            text(t!("palette.groupActions"))
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb_to_hsla(ui.muted_foreground)),
+        ),
     );
 
     let quick_actions: Vec<(String, Box<dyn Fn()>)> = vec![
@@ -315,20 +313,15 @@ fn render_palette_modal(
                 .cursor_pointer()
                 .bg(rgb_to_hsla(ui.card))
                 .on_press(cb)
-                .child(
-                    text(label)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                ),
+                .child(text(label).text_xs().text_color(rgb_to_hsla(ui.foreground))),
         );
     }
 
     view()
         .flex_col()
-        .max_h(zpx(460.0))
-        .child(modal_header(store, resolved, t!("palette.title")))
+        .h(zpx(460.0))
         .child(
-            view().p(zpx(10.0)).child(
+            view().p(zpx(16.0)).child(
                 input()
                     .w_full()
                     .px(zpx(10.0))
@@ -504,6 +497,7 @@ fn render_new_project_modal(
     resolved: &falcon_theme::ResolvedTheme,
     name_draft: Signal<String>,
     path_draft: Signal<String>,
+    host: Signal<Option<String>>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let st_create = store.clone();
@@ -516,6 +510,48 @@ fn render_new_project_modal(
                 .flex_col()
                 .p(zpx(14.0))
                 .gap(zpx(10.0))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(zpx(8.0))
+                        .flex_wrap()
+                        .child(
+                            view()
+                                .px(zpx(10.0))
+                                .py(zpx(6.0))
+                                .rounded(zpx(8.0))
+                                .cursor_pointer()
+                                .when(host.get().is_none(), |v| v.bg(rgb_to_hsla(ui.tint)))
+                                .on_press(move || host.set(None))
+                                .child(
+                                    text(t!("project.typeLocal"))
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.foreground)),
+                                ),
+                        )
+                        .children(store.hosts.get().into_iter().map(|h| {
+                            let id = h.id.clone();
+                            view()
+                                .px(zpx(10.0))
+                                .py(zpx(6.0))
+                                .rounded(zpx(8.0))
+                                .cursor_pointer()
+                                .when(host.get().as_deref() == Some(h.id.as_str()), |v| {
+                                    v.bg(rgb_to_hsla(ui.tint))
+                                })
+                                .on_press(move || host.set(Some(id.clone())))
+                                .child(
+                                    text(format!("{} · {}", t!("project.typeSsh"), h.name))
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.foreground)),
+                                )
+                        })),
+                )
+                .child(
+                    text(t!("project.name"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
                 .child(
                     input()
                         .w_full()
@@ -556,27 +592,11 @@ fn render_new_project_modal(
                             let name = name_draft.get().trim().to_string();
                             let path = path_draft.get().trim().to_string();
                             if !name.is_empty() {
-                                let id = format!("proj-{}", st_create.projects.get().len() + 1);
-                                let workdir = if path.is_empty() {
-                                    format!("/workspace/{name}")
-                                } else {
-                                    path
-                                };
-                                st_create.projects.update(|list| {
-                                    list.push(ProjectRecord {
-                                        id: id.clone(),
-                                        name,
-                                        path: workdir,
-                                        host_id: None,
-                                        host_name: None,
-                                        derived_from: None,
-                                        branch: Some("main".into()),
-                                    });
-                                });
-                                st_create.active_project_id.set(id);
-                                name_draft.set(String::new());
-                                path_draft.set(String::new());
-                                st_create.active_dialog.set(ActiveDialog::None);
+                                st_create.create_project_request(
+                                    &name,
+                                    &path,
+                                    host.get().as_deref(),
+                                );
                             }
                         })
                         .child(
@@ -596,268 +616,388 @@ fn render_settings_modal(
     resolved: &falcon_theme::ResolvedTheme,
     active_tab: SettingsTab,
     theme_filter: Signal<String>,
+    theme_slot: Signal<ThemeMode>,
+    theme_picker_open: Signal<bool>,
+    settings_filter: Signal<String>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
 
-    let tabs: &[(SettingsTab, String)] = &[
-        (SettingsTab::Appearance, t!("settings.tab_appearance")),
-        (SettingsTab::Terminal, t!("settings.terminalTitle")),
-        (SettingsTab::Hosts, t!("settings.tab_hosts")),
-        (SettingsTab::Relays, t!("settings.tab_relays")),
-        (SettingsTab::Plugins, t!("settings.tab_plugins")),
-        (SettingsTab::About, t!("settings.tab_about")),
+    let tabs = [
+        (
+            SettingsTab::Appearance,
+            t!("settings.tab_appearance"),
+            Glyph::Settings,
+        ),
+        (
+            SettingsTab::Notifications,
+            t!("settings.tab_notifications"),
+            Glyph::Activity,
+        ),
+        (SettingsTab::Plugins, t!("settings.tab_plugins"), Glyph::Box),
+        (SettingsTab::About, t!("settings.tab_about"), Glyph::Monitor),
+        (SettingsTab::Hosts, t!("settings.tab_hosts"), Glyph::Server),
+        (
+            SettingsTab::Relays,
+            t!("settings.tab_relays"),
+            Glyph::Terminal,
+        ),
     ];
-
-    let nav = view()
-        .flex_row()
-        .flex_wrap()
-        .gap(zpx(4.0))
-        .px(zpx(12.0))
-        .py(zpx(8.0))
-        .border_b_1()
-        .border_color(rgba_to_hsla(ui.border))
-        .children(tabs.iter().map(|(tab, label)| {
-            let selected = *tab == active_tab;
-            let st = store.clone();
-            let next_tab = *tab;
-            view()
+    let query = settings_filter.get().to_lowercase();
+    let mut nav = view()
+        .flex_col()
+        .w(zpx(224.0))
+        .flex_none()
+        .when(idiom() != Idiom::Phone, |v| v.h(zpx(680.0)))
+        .gap(zpx(2.0))
+        .p(zpx(12.0))
+        .bg(rgb_to_hsla(ui.app))
+        .when(idiom() == Idiom::Phone, |v| {
+            v.w_full().flex_row().flex_wrap()
+        })
+        .child(
+            input()
+                .w_full()
                 .px(zpx(8.0))
-                .py(zpx(4.0))
-                .rounded(zpx(6.0))
-                .cursor_pointer()
-                .bg(if selected {
-                    rgb_to_hsla(ui.tint)
-                } else {
-                    rgb_to_hsla(ui.secondary)
-                })
-                .on_press(move || st.active_dialog.set(ActiveDialog::Settings(next_tab)))
-                .child(
-                    text(label.clone()).text_xs().text_color(if selected {
-                        rgb_to_hsla(ui.tint_foreground)
-                    } else {
-                        rgb_to_hsla(ui.secondary_foreground)
-                    }),
-                )
-        }));
-
-    let body = match active_tab {
-        SettingsTab::Appearance => {
-            render_appearance_tab(theme_ctrl, zoom_ctrl, resolved, theme_filter).into_element()
+                .py(zpx(5.0))
+                .rounded(zpx(8.0))
+                .bg(rgb_to_hsla(ui.muted))
+                .text_xs()
+                .text_color(rgb_to_hsla(ui.foreground))
+                .placeholder(t!("settings.search"))
+                .value(settings_filter.get())
+                .on_change(move |v: &str| settings_filter.set(v.to_string())),
+        );
+    for (tab, label, icon) in tabs {
+        if !query.is_empty() && !label.to_lowercase().contains(&query) {
+            continue;
         }
+        if query.is_empty() && (tab == SettingsTab::Appearance || tab == SettingsTab::Hosts) {
+            nav = nav.child(
+                text(if tab == SettingsTab::Hosts {
+                    t!("settings.group_connection")
+                } else {
+                    t!("settings.group_general")
+                })
+                .text_xs()
+                .pt(zpx(20.0))
+                .pb(zpx(6.0))
+                .px(zpx(8.0))
+                .text_color(rgb_to_hsla(ui.muted_foreground)),
+            );
+        }
+        let selected = tab == active_tab;
+        let st = store.clone();
+        nav = nav.child(
+            view()
+                .label(format!("settings-tab-{tab:?}"))
+                .h(zpx(32.0))
+                .flex_row()
+                .items_center()
+                .gap(zpx(8.0))
+                .px(zpx(8.0))
+                .rounded(zpx(8.0))
+                .cursor_pointer()
+                .text_color(rgb_to_hsla(if selected {
+                    ui.foreground
+                } else {
+                    ui.muted_foreground
+                }))
+                .when(selected, |v| v.bg(rgb_to_hsla(ui.tint)))
+                .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
+                .on_press(move || st.active_dialog.set(ActiveDialog::Settings(tab)))
+                .child(glyph(icon))
+                .child(text(label).text_xs()),
+        );
+    }
+    let body = match active_tab {
+        SettingsTab::Appearance => view()
+            .flex_col()
+            .gap(zpx(24.0))
+            .child(render_appearance_tab(
+                store,
+                theme_ctrl,
+                zoom_ctrl,
+                resolved,
+                theme_filter,
+                theme_slot,
+                theme_picker_open,
+            ))
+            .child(render_terminal_tab(store, resolved))
+            .into_element(),
         SettingsTab::Terminal => render_terminal_tab(store, resolved).into_element(),
+        SettingsTab::Notifications => render_notifications_tab(store, resolved).into_element(),
         SettingsTab::Hosts => render_hosts_tab(store, resolved).into_element(),
         SettingsTab::Relays => render_relays_tab(store, resolved).into_element(),
         SettingsTab::Plugins => render_plugins_tab(store, resolved).into_element(),
         SettingsTab::About => render_about_tab(store, resolved).into_element(),
     };
 
+    let title = match active_tab {
+        SettingsTab::Appearance => t!("settings.tab_appearance"),
+        SettingsTab::Terminal => t!("settings.terminalTitle"),
+        SettingsTab::Notifications => t!("settings.soundTitle"),
+        SettingsTab::Hosts => t!("settings.tab_hosts"),
+        SettingsTab::Relays => t!("settings.tab_relays"),
+        SettingsTab::Plugins => t!("settings.tab_plugins"),
+        SettingsTab::About => t!("settings.tab_about"),
+    };
+    let close = store.clone();
     view()
-        .flex_col()
-        .max_h(zpx(500.0))
-        .child(modal_header(store, resolved, t!("sidebar.settings")))
+        .h(zpx(680.0))
+        .max_h(relative(0.86))
+        .flex_row()
+        .relative()
+        .when(idiom() == Idiom::Phone, |v| v.flex_col())
         .child(nav)
-        .child(scroll().flex_1().child(view().p(zpx(14.0)).child(body)))
+        .child(
+            scroll().flex_1().min_w_0().child(
+                view()
+                    .p(zpx(32.0))
+                    .flex_col()
+                    .gap(zpx(24.0))
+                    .child(
+                        text(title)
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                    )
+                    .child(body),
+            ),
+        )
+        .child(
+            view()
+                .absolute()
+                .top(zpx(6.0))
+                .right(zpx(6.0))
+                .child(icon_button(
+                    "settings-close",
+                    t!("common.close"),
+                    Glyph::Close,
+                    false,
+                    resolved,
+                    move || close.active_dialog.set(ActiveDialog::None),
+                )),
+        )
 }
 
 fn render_appearance_tab(
+    store: &WorkspaceStore,
     theme_ctrl: crate::theme::ThemeController,
     zoom_ctrl: Option<ZoomController>,
     resolved: &falcon_theme::ResolvedTheme,
     theme_filter: Signal<String>,
+    theme_slot: Signal<ThemeMode>,
+    theme_picker_open: Signal<bool>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
-    let cur_settings = theme_ctrl.settings();
-    let active_slot = theme_ctrl.active_slot();
+    let settings = theme_ctrl.settings();
     let catalog = theme_ctrl.catalog();
-    let q = theme_filter.get().trim().to_ascii_lowercase();
-
-    let modes: &[(ThemePref, String)] = &[
-        (ThemePref::System, t!("native.nsh.themeModeSystem")),
-        (ThemePref::Light, t!("native.nsh.themeModeLight")),
-        (ThemePref::Dark, t!("native.nsh.themeModeDark")),
-    ];
-
-    let derived_label = if resolved.is_dark {
-        t!("native.nsh.themeDerivedDark")
-    } else {
-        t!("native.nsh.themeDerivedLight")
-    };
-
-    let mut page = view()
-        .flex_col()
-        .gap(zpx(10.0))
-        .child(
+    let mut modes = view()
+        .flex_row()
+        .gap(zpx(2.0))
+        .p(zpx(2.0))
+        .rounded(zpx(8.0))
+        .bg(rgb_to_hsla(ui.app));
+    for (pref, key) in [
+        (ThemePref::System, "theme.system"),
+        (ThemePref::Light, "theme.light"),
+        (ThemePref::Dark, "theme.dark"),
+    ] {
+        modes = modes.child(
             view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    text(t!("theme.label"))
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    text(derived_label)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.tint_strong)),
-                ),
-        )
-        .child(
-            view()
-                .flex_row()
-                .gap(zpx(6.0))
-                .children(modes.iter().map(|(m, label)| {
-                    let selected = cur_settings.mode == *m;
-                    let pref = *m;
-                    view()
-                        .px(zpx(8.0))
-                        .py(zpx(4.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(if selected {
-                            rgb_to_hsla(ui.tint)
-                        } else {
-                            rgb_to_hsla(ui.secondary)
-                        })
-                        .on_press(move || theme_ctrl.set_mode(pref))
-                        .child(text(label.clone()).text_xs().text_color(if selected {
-                            rgb_to_hsla(ui.tint_foreground)
-                        } else {
-                            rgb_to_hsla(ui.secondary_foreground)
-                        }))
-                })),
-        )
-        .child(
-            text(t!(
-                "native.nsh.themeCatalogCount",
-                count = catalog.len().to_string().as_str()
-            ))
-            .text_xs()
-            .text_color(rgb_to_hsla(ui.muted_foreground)),
-        )
-        .child(
-            input()
-                .w_full()
-                .px(zpx(8.0))
+                .px(zpx(10.0))
                 .py(zpx(5.0))
-                .rounded(zpx(6.0))
-                .bg(rgba_to_hsla(ui.input))
-                .text_xs()
-                .text_color(rgb_to_hsla(ui.foreground))
-                .placeholder(t!(
-                    "theme.search",
-                    n = catalog.len().to_string().as_str()
-                ))
-                .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                .value(theme_filter.get())
-                .on_change(move |v: &str| theme_filter.set(v.to_string())),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap(zpx(6.0))
-                .children(
-                    catalog
-                        .iter()
-                        .filter(|e| q.is_empty() || e.name.to_ascii_lowercase().contains(&q))
-                        .take(24)
-                        .map(|entry| {
-                            let is_active = cur_settings.slot(active_slot).name == entry.name;
-                            let entry_name = entry.name.to_string();
-                            let entry_label = entry.name.to_string();
-                            let slot_for_click: ThemeMode = active_slot;
-                            view()
-                                .px(zpx(8.0))
-                                .py(zpx(4.0))
-                                .rounded(zpx(6.0))
-                                .cursor_pointer()
-                                .bg(if is_active {
-                                    rgb_to_hsla(ui.tint)
-                                } else {
-                                    rgb_to_hsla(ui.card)
-                                })
-                                .border_1()
-                                .border_color(rgba_to_hsla(ui.border))
-                                .on_press(move || {
-                                    theme_ctrl.select_builtin_for_slot(slot_for_click, &entry_name);
-                                })
-                                .child(
-                                    text(entry_label)
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.foreground)),
-                                )
-                        }),
-                ),
-        );
-
-    if let Some(zc) = zoom_ctrl {
-        let pct_label = zc.label();
-        page = page.child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .pt(zpx(6.0))
-                .border_t_1()
-                .border_color(rgba_to_hsla(ui.border))
+                .rounded(zpx(8.0))
+                .cursor_pointer()
+                .when(settings.mode == pref, |v| v.bg(rgb_to_hsla(ui.background)))
+                .on_press(move || theme_ctrl.set_mode(pref))
                 .child(
-                    text(t!("native.nsh.ZoomLabel", pct = pct_label.as_str()))
+                    text(t!(key))
                         .text_xs()
                         .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .gap(zpx(6.0))
-                        .child(
-                            view()
-                                .px(zpx(8.0))
-                                .py(zpx(3.0))
-                                .rounded(zpx(5.0))
-                                .cursor_pointer()
-                                .bg(rgb_to_hsla(ui.secondary))
-                                .on_press(move || zc.step_out())
-                                .child(
-                                    text(t!("native.settings.uiZoomOut"))
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .px(zpx(8.0))
-                                .py(zpx(3.0))
-                                .rounded(zpx(5.0))
-                                .cursor_pointer()
-                                .bg(rgb_to_hsla(ui.secondary))
-                                .on_press(move || zc.reset())
-                                .child(
-                                    text(t!("native.settings.uiZoomReset"))
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .px(zpx(8.0))
-                                .py(zpx(3.0))
-                                .rounded(zpx(5.0))
-                                .cursor_pointer()
-                                .bg(rgb_to_hsla(ui.secondary))
-                                .on_press(move || zc.step_in())
-                                .child(
-                                    text(t!("native.settings.uiZoomIn"))
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                                ),
-                        ),
                 ),
         );
     }
+    let mut page = view()
+        .flex_col()
+        .child(setting_row(resolved, t!("theme.label"), modes));
+    for slot in [ThemeMode::Light, ThemeMode::Dark] {
+        let choice = settings.slot(slot);
+        let name = choice.name.clone();
+        page = page.child(setting_row(
+            resolved,
+            if slot == ThemeMode::Light {
+                t!("theme.lightTheme")
+            } else {
+                t!("theme.darkTheme")
+            },
+            view()
+                .label(format!("theme-slot-{slot:?}"))
+                .w(zpx(256.0))
+                .px(zpx(10.0))
+                .py(zpx(5.0))
+                .rounded(zpx(8.0))
+                .bg(rgb_to_hsla(ui.app))
+                .cursor_pointer()
+                .on_press(move || {
+                    if theme_slot.get() == slot {
+                        theme_picker_open.update(|v| *v = !*v);
+                    } else {
+                        theme_slot.set(slot);
+                        theme_picker_open.set(true);
+                    }
+                })
+                .child(
+                    text(name)
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                ),
+        ));
+    }
+    // 外观仍按当前主题底色判定；说明放在选择器附近，不占主侧栏。
+    page = page.child(
+        text(if resolved.is_dark {
+            t!("native.nsh.themeDerivedDark")
+        } else {
+            t!("native.nsh.themeDerivedLight")
+        })
+        .text_xs()
+        .py(zpx(6.0))
+        .text_color(rgb_to_hsla(ui.muted_foreground)),
+    );
+    if theme_picker_open.get() {
+        let query = theme_filter.get().to_lowercase();
+        page = page.child(
+            input()
+                .w_full()
+                .px(zpx(8.0))
+                .py(zpx(6.0))
+                .rounded(zpx(8.0))
+                .bg(rgb_to_hsla(ui.app))
+                .text_xs()
+                .text_color(rgb_to_hsla(ui.foreground))
+                .placeholder(t!("theme.search", n = catalog.len().to_string().as_str()))
+                .value(theme_filter.get())
+                .on_change(move |v: &str| theme_filter.set(v.to_string())),
+        );
+        page = page.child(
+            view().flex_row().flex_wrap().gap(zpx(4.0)).children(
+                catalog
+                    .iter()
+                    .filter(|e| query.is_empty() || e.name.to_lowercase().contains(&query))
+                    .take(40)
+                    .map(|entry| {
+                        let name = entry.name.to_string();
+                        let label = name.clone();
+                        let slot = theme_slot.get();
+                        view()
+                            .px(zpx(8.0))
+                            .py(zpx(5.0))
+                            .rounded(zpx(8.0))
+                            .cursor_pointer()
+                            .bg(rgb_to_hsla(ui.app))
+                            .on_press(move || {
+                                theme_ctrl.select_builtin_for_slot(slot, &name);
+                                theme_picker_open.set(false);
+                            })
+                            .child(text(label).text_xs().text_color(rgb_to_hsla(ui.foreground)))
+                    }),
+            ),
+        );
+    }
+    if let Some(zoom) = zoom_ctrl {
+        page = page.child(setting_row(
+            resolved,
+            t!("native.settings.uiZoom"),
+            view()
+                .flex_row()
+                .items_center()
+                .gap(zpx(6.0))
+                .child(icon_button(
+                    "zoom-out",
+                    t!("native.settings.uiZoomOut"),
+                    Glyph::Minus,
+                    false,
+                    resolved,
+                    move || zoom.step_out(),
+                ))
+                .child(
+                    text(zoom.label())
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(icon_button(
+                    "zoom-in",
+                    t!("native.settings.uiZoomIn"),
+                    Glyph::Plus,
+                    false,
+                    resolved,
+                    move || zoom.step_in(),
+                )),
+        ));
+    }
+    page.child(
+        view()
+            .pt(zpx(32.0))
+            .flex_col()
+            .gap(zpx(16.0))
+            .child(
+                text(t!("appIcon.title"))
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb_to_hsla(ui.foreground)),
+            )
+            .child(view().flex_row().flex_wrap().gap(zpx(8.0)).children(
+                falcon_core::app_icon::APP_ICON_IDS.into_iter().map(|id| {
+                    let st = store.clone();
+                    view()
+                        .w(zpx(96.0))
+                        .h(zpx(112.0))
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(zpx(12.0))
+                        .rounded(zpx(8.0))
+                        .cursor_pointer()
+                        .when(store.selected_app_icon.get() == id, |v| {
+                            v.bg(rgb_to_hsla(ui.tint))
+                        })
+                        .on_press(move || st.select_app_icon(id))
+                        .child(
+                            image(crate::shell::widgets::app_icon_source(id))
+                                .w(zpx(52.0))
+                                .h(zpx(52.0)),
+                        )
+                        .child(
+                            text(t!(falcon_core::app_icon::label_key(id).as_str()))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        )
+                }),
+            )),
+    )
+}
 
-    page
+fn setting_row(
+    resolved: &falcon_theme::ResolvedTheme,
+    label: String,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    view()
+        .min_h(zpx(56.0))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(zpx(16.0))
+        .border_b_1()
+        .border_color(rgba_to_hsla(resolved.ui.border))
+        .child(
+            text(label)
+                .text_xs()
+                .text_color(rgb_to_hsla(resolved.ui.foreground)),
+        )
+        .child(control)
 }
 
 fn render_terminal_tab(
@@ -866,91 +1006,208 @@ fn render_terminal_tab(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let pref = store.term_prefs();
-
-    let fonts: &[(TermFontId, String)] = &[
-        (TermFontId::Berkeley, t!("term.font_berkeley")),
-        (TermFontId::Ioskeley, t!("term.font_ioskeley")),
-        (TermFontId::Maple, t!("term.font_maple")),
-    ];
-
-    let cursors: &[(TermCursorStyle, String)] = &[
-        (TermCursorStyle::Block, t!("term.cursor_block")),
-        (TermCursorStyle::Bar, t!("term.cursor_bar")),
-        (TermCursorStyle::Underline, t!("term.cursor_underline")),
-    ];
-
-    view()
+    let fg = rgb_to_hsla(ui.foreground);
+    let bg = rgb_to_hsla(ui.app);
+    let border = rgba_to_hsla(ui.border);
+    let font_store = store.clone();
+    let font_title = t!(format!("term.font_{}", pref.font_id.as_str().replace('-', "_")).as_str());
+    let fonts = nsh_base::select()
+        .items(
+            TermFontId::ALL
+                .into_iter()
+                .map(|id| {
+                    nsh_base::SelectItem::new(
+                        id.as_str(),
+                        t!(format!("term.font_{}", id.as_str().replace('-', "_")).as_str()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .value(pref.font_id.as_str())
+        .popup_style(move |v| v.bg(bg).rounded(zpx(8.0)).border_1().border_color(border))
+        .trigger(
+            view()
+                .w(zpx(256.0))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px(zpx(10.0))
+                .py(zpx(5.0))
+                .rounded(zpx(8.0))
+                .border_1()
+                .border_color(border)
+                .bg(bg)
+                .text_color(fg)
+                .child(text(font_title).text_xs().number_of_lines(1))
+                .child(glyph(Glyph::ChevronDown)),
+        )
+        .render_item(move |entry: &nsh_base::SelectEntry| {
+            view()
+                .px(zpx(10.0))
+                .py(zpx(6.0))
+                .bg(bg)
+                .child(text(entry.title.clone()).text_xs().text_color(fg))
+        })
+        .on_change(move |value: &Option<SharedString>| {
+            if let Some(id) = value.as_deref().and_then(TermFontId::from_wire) {
+                font_store.term_prefs.update(|p| p.font_id = id);
+            }
+        });
+    let mut page = view()
         .flex_col()
-        .gap(zpx(10.0))
-        .child(
-            text(t!("settings.termFont"))
+        .child(setting_row(resolved, t!("settings.termFont"), fonts));
+    for (custom, label, hint, value) in [
+        (
+            true,
+            "settings.termCustomFont",
+            "settings.termCustomFontPlaceholder",
+            pref.custom_family.clone(),
+        ),
+        (
+            false,
+            "settings.termFallbackFont",
+            "settings.termFallbackFontPlaceholder",
+            pref.fallback_families.clone(),
+        ),
+    ] {
+        if custom && pref.font_id != TermFontId::Custom {
+            continue;
+        }
+        let st = store.clone();
+        page = page.child(setting_row(
+            resolved,
+            t!(label),
+            input()
+                .w(zpx(256.0))
+                .px(zpx(8.0))
+                .py(zpx(5.0))
+                .rounded(zpx(8.0))
+                .border_1()
+                .border_color(border)
+                .bg(bg)
                 .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb_to_hsla(ui.foreground)),
-        )
-        .child(
+                .text_color(fg)
+                .placeholder(t!(hint))
+                .value(value)
+                .on_change(move |v: &str| {
+                    st.term_prefs.update(|p| {
+                        if custom {
+                            p.custom_family = v.to_string();
+                        } else {
+                            p.fallback_families = v.to_string();
+                        }
+                    })
+                }),
+        ));
+    }
+    for (size, label, min, max, step, value) in [
+        (
+            true,
+            "settings.termFontSize",
+            10.0,
+            24.0,
+            1.0,
+            pref.font_size,
+        ),
+        (
+            false,
+            "settings.termLineHeight",
+            1.0,
+            1.6,
+            0.05,
+            pref.line_height,
+        ),
+    ] {
+        let st = store.clone();
+        page = page.child(setting_row(
+            resolved,
+            t!(label),
             view()
                 .flex_row()
-                .flex_wrap()
-                .gap(zpx(6.0))
-                .children(fonts.iter().map(|(preset, label)| {
-                    let selected = pref.font_id == *preset;
-                    let st = store.clone();
-                    let next_font = *preset;
-                    view()
-                        .px(zpx(8.0))
-                        .py(zpx(4.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(if selected {
-                            rgb_to_hsla(ui.tint)
-                        } else {
-                            rgb_to_hsla(ui.secondary)
+                .items_center()
+                .gap(zpx(16.0))
+                .child(
+                    nsh_base::slider()
+                        .min(min)
+                        .max(max)
+                        .step(step)
+                        .value(Some(nsh_base::SliderValue::Single(value)))
+                        .accessibility_label(t!(label))
+                        .track_style(|v| v.w(zpx(112.0)).h(zpx(20.0)).justify_center())
+                        .indicator_style(move |v| v.h(zpx(4.0)).rounded_full().bg(border))
+                        .range_style(move |v| v.rounded_full().bg(fg))
+                        .thumb_style(move |v| {
+                            v.w(zpx(14.0))
+                                .h(zpx(14.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(border)
+                                .bg(bg)
                         })
-                        .on_press(move || {
-                            st.term_prefs.update(|p| p.font_id = next_font);
-                        })
-                        .child(
-                            text(label.clone())
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                })),
-        )
-        .child(
-            text(t!("settings.termCursor"))
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb_to_hsla(ui.foreground)),
-        )
-        .child(
+                        .on_change(move |v: &nsh_base::SliderValue| {
+                            if let nsh_base::SliderValue::Single(value) = v {
+                                st.term_prefs.update(|p| {
+                                    if size {
+                                        p.font_size = *value;
+                                    } else {
+                                        p.line_height = *value;
+                                    }
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    text(if size {
+                        format!("{value:.0}")
+                    } else {
+                        format!("{value:.2}")
+                    })
+                    .w(zpx(40.0))
+                    .text_xs()
+                    .text_color(fg),
+                ),
+        ));
+    }
+    let mut cursors = view()
+        .flex_row()
+        .gap(zpx(4.0))
+        .p(zpx(2.0))
+        .rounded(zpx(8.0))
+        .bg(bg);
+    for (style, key) in [
+        (TermCursorStyle::Block, "term.cursor_block"),
+        (TermCursorStyle::Bar, "term.cursor_bar"),
+        (TermCursorStyle::Underline, "term.cursor_underline"),
+    ] {
+        let st = store.clone();
+        cursors = cursors.child(
             view()
-                .flex_row()
-                .gap(zpx(6.0))
-                .children(cursors.iter().map(|(cs, label)| {
-                    let selected = pref.cursor_style == *cs;
-                    let st = store.clone();
-                    let next_cs = *cs;
-                    view()
-                        .px(zpx(8.0))
-                        .py(zpx(4.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(if selected {
-                            rgb_to_hsla(ui.tint)
-                        } else {
-                            rgb_to_hsla(ui.secondary)
-                        })
-                        .on_press(move || {
-                            st.term_prefs.update(|p| p.cursor_style = next_cs);
-                        })
-                        .child(
-                            text(label.clone())
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                })),
-        )
+                .px(zpx(10.0))
+                .py(zpx(5.0))
+                .rounded(zpx(6.0))
+                .cursor_pointer()
+                .when(pref.cursor_style == style, |v| {
+                    v.bg(rgb_to_hsla(ui.background))
+                })
+                .on_press(move || st.term_prefs.update(|p| p.cursor_style = style))
+                .child(text(t!(key)).text_xs().text_color(fg)),
+        );
+    }
+    let blink = store.clone();
+    let reset = store.clone();
+    page.child(setting_row(resolved, t!("settings.termCursor"), cursors))
+        .child(setting_row(resolved, t!("settings.termCursorBlink"), view().cursor_pointer()
+            .on_press(move || blink.term_prefs.update(|p| p.cursor_blink = !p.cursor_blink))
+            .child(crate::shell::widgets::check_indicator(pref.cursor_blink, resolved))))
+        .child(view().pt(zpx(16.0)).flex_col().gap(zpx(12.0))
+            .child(view().flex_row().justify_between().items_center()
+                .child(text(t!("settings.termPreview")).text_xs().text_color(fg))
+                .child(view().cursor_pointer().on_press(move || reset.term_prefs.set(Default::default()))
+                    .child(text(t!("settings.termReset")).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))))
+            .child(view().p(zpx(12.0)).rounded(zpx(8.0)).border_1().border_color(border)
+                .bg(rgb_to_hsla(resolved.terminal.background)).font_family(falcon_core::term::primary_family(&pref).unwrap_or_else(|| "monospace".into()))
+                .child(text("falcon@host ~/falcon").text_size(zpx(pref.font_size as f32)).text_color(rgb_to_hsla(ui.success)))
+                .child(text("$ git status\nOn branch main\nnothing to commit, working tree clean\n$ echo 你好 ▋").text_size(zpx(pref.font_size as f32)).text_color(rgb_to_hsla(resolved.terminal.foreground)))))
 }
 
 fn render_hosts_tab(
@@ -959,141 +1216,119 @@ fn render_hosts_tab(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let hosts = store.hosts.get();
-
-    view()
+    let mut table = view()
         .flex_col()
-        .gap(zpx(8.0))
-        .children(hosts.into_iter().map(|h| {
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .p(zpx(8.0))
-                .rounded(zpx(8.0))
-                .bg(rgb_to_hsla(ui.card))
-                .border_1()
-                .border_color(rgba_to_hsla(ui.border))
-                .child(
-                    view()
-                        .flex_col()
-                        .child(
-                            text(h.name)
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                        .child(
-                            text(format!("{} · {}", h.destination, h.os_label))
-                                .text_xs()
-                                .font_family(FONT_FAMILY_MONO)
-                                .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        ),
-                )
-                .child(
-                    text(if h.connected {
-                        t!("native.nsh.hostConnected")
-                    } else {
-                        t!("native.nsh.hostDisconnected")
-                    })
-                    .text_xs()
-                    .text_color(if h.connected {
-                        rgb_to_hsla(ui.success)
-                    } else {
-                        rgb_to_hsla(ui.muted_foreground)
-                    }),
-                )
-        }))
-}
-
-fn render_relays_tab(
-    store: &WorkspaceStore,
-    resolved: &falcon_theme::ResolvedTheme,
-) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let relays = store.relays.get();
-
-    view()
-        .flex_col()
-        .gap(zpx(8.0))
+        .p(zpx(8.0))
+        .rounded(zpx(12.0))
+        .bg(rgb_to_hsla(ui.app))
         .child(
-            text(t!("native.nsh.relaysTitle"))
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb_to_hsla(ui.foreground)),
-        )
-        .children(relays.into_iter().enumerate().map(|(idx, r)| {
-            let st = store.clone();
             view()
+                .h(zpx(32.0))
+                .flex_row()
+                .gap(zpx(12.0))
+                .child(
+                    text(t!("host.name"))
+                        .w(zpx(136.0))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(
+                    text(t!("native.nsh.hostConnection"))
+                        .flex_1()
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(
+                    text(t!("project.authMethod"))
+                        .w(zpx(160.0))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                ),
+        );
+    for host in hosts {
+        let st = store.clone();
+        let id = host.id.clone();
+        let auth = host
+            .source
+            .as_ref()
+            .map(|h| h.auth_method.as_str())
+            .unwrap_or("agent");
+        table = table.child(
+            view()
+                .min_h(zpx(40.0))
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .p(zpx(8.0))
-                .rounded(zpx(8.0))
-                .bg(rgb_to_hsla(ui.card))
-                .border_1()
+                .gap(zpx(12.0))
+                .border_t_1()
                 .border_color(rgba_to_hsla(ui.border))
                 .child(
-                    view()
-                        .flex_col()
-                        .gap(zpx(2.0))
-                        .child(
-                            text(format!(
-                                "{} · :{} → {}",
-                                r.machine_label, r.local_port, r.target
-                            ))
-                            .text_xs()
-                            .font_family(FONT_FAMILY_MONO)
-                            .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                        .when_some(r.public_url, |el, pub_url| {
-                            el.child(
-                                text(pub_url)
-                                    .text_xs()
-                                    .font_family(FONT_FAMILY_MONO)
-                                    .text_color(rgb_to_hsla(ui.tint_strong)),
-                            )
-                        })
-                        .when(r.same_port_conflict, |el| {
-                            el.child(
-                                text(t!("native.nsh.samePortConflict"))
-                                    .text_xs()
-                                    .text_color(rgb_to_hsla(ui.warning)),
-                            )
-                        }),
+                    text(host.name)
+                        .w(zpx(136.0))
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(
+                    text(host.destination)
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(
+                    text(match auth {
+                        "key" => t!("project.authKey"),
+                        "password" => t!("project.authPassword"),
+                        _ => t!("project.authAgent"),
+                    })
+                    .w(zpx(100.0))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.muted_foreground)),
                 )
                 .child(
                     view()
                         .px(zpx(8.0))
-                        .py(zpx(3.0))
-                        .rounded(zpx(5.0))
+                        .py(zpx(4.0))
+                        .rounded(zpx(8.0))
                         .cursor_pointer()
-                        .bg(if r.enabled {
-                            rgb_to_hsla(ui.success)
-                        } else {
-                            rgb_to_hsla(ui.secondary)
-                        })
-                        .on_press(move || {
-                            st.relays.update(|list| {
-                                if let Some(entry) = list.get_mut(idx) {
-                                    entry.enabled = !entry.enabled;
-                                }
-                            });
-                        })
+                        .bg(rgb_to_hsla(ui.background))
+                        .on_press(move || st.test_host_connection(&id))
                         .child(
-                            text(if r.enabled {
-                                t!("forward.state_active")
-                            } else {
-                                t!("forward.state_stopped")
-                            })
-                            .text_xs()
-                            .text_color(if r.enabled {
-                                rgb_to_hsla(ui.success_foreground)
-                            } else {
-                                rgb_to_hsla(ui.secondary_foreground)
-                            }),
+                            text(t!("host.test"))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.foreground)),
                         ),
-                )
-        }))
+                ),
+        );
+    }
+    view()
+        .flex_col()
+        .gap(zpx(12.0))
+        .child(table)
+        .child(super::host_form::host_form())
+}
+
+fn render_relays_tab(
+    store: &WorkspaceStore,
+    _resolved: &falcon_theme::ResolvedTheme,
+) -> impl IntoElement {
+    let mut groups = view().flex_col().gap(zpx(24.0)).child(
+        super::relays::relay_machine()
+            .machine_id(String::new())
+            .name(t!("forward.local"))
+            .destination(t!("forward.localConn")),
+    );
+    for host in store.hosts.get() {
+        groups = groups.child(
+            super::relays::relay_machine()
+                .key(host.id.clone())
+                .machine_id(host.id)
+                .name(host.name)
+                .destination(host.destination),
+        );
+    }
+    groups
 }
 
 fn render_plugins_tab(
@@ -1102,77 +1337,75 @@ fn render_plugins_tab(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let list = store.plugin_list.get();
-
+    let reload = store.clone();
     view()
         .flex_col()
         .gap(zpx(8.0))
-        .child(
-            text(format!("{}: {}", t!("plugin.dir"), list.dir))
-                .text_xs()
-                .font_family(FONT_FAMILY_MONO)
-                .text_color(rgb_to_hsla(ui.muted_foreground)),
-        )
-        .children(list.plugins.into_iter().map(|p| {
-            let st = store.clone();
-            let pid = p.id.clone();
-            let kind_tag = match p.kind {
-                PluginKind::Builtin => t!("plugin.kindBuiltin"),
-                PluginKind::Command | PluginKind::Unknown => t!("plugin.kindCommand"),
-                PluginKind::Package => t!("plugin.kindPackage"),
-            };
+        .child(setting_row(
+            resolved,
+            t!("plugin.dir"),
             view()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .p(zpx(8.0))
-                .rounded(zpx(8.0))
-                .bg(rgb_to_hsla(ui.card))
-                .border_1()
+                .gap(zpx(8.0))
+                .child(
+                    text(list.dir.clone())
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(icon_button(
+                    "reload-plugins",
+                    t!("plugin.rescan"),
+                    Glyph::Refresh,
+                    false,
+                    resolved,
+                    move || reload.reload_plugins(),
+                )),
+        ))
+        .children(list.plugins.into_iter().map(|plugin| {
+            let st = store.clone();
+            let id = plugin.id.clone();
+            view()
+                .min_h(zpx(68.0))
+                .flex_row()
+                .items_center()
+                .gap(zpx(16.0))
+                .border_b_1()
                 .border_color(rgba_to_hsla(ui.border))
                 .child(
                     view()
+                        .flex_1()
+                        .min_w_0()
                         .flex_col()
+                        .gap(zpx(6.0))
                         .child(
-                            text(format!("{} · {kind_tag}", p.name))
+                            text(plugin.name)
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb_to_hsla(ui.foreground)),
                         )
-                        .when_some(p.description, |el, d| {
-                            el.child(
-                                text(d)
+                        .when_some(plugin.description, |v, description| {
+                            v.child(
+                                text(description)
                                     .text_xs()
                                     .text_color(rgb_to_hsla(ui.muted_foreground)),
                             )
                         }),
                 )
                 .child(
-                    view()
-                        .px(zpx(8.0))
-                        .py(zpx(3.0))
-                        .rounded(zpx(5.0))
-                        .cursor_pointer()
-                        .bg(if p.enabled {
-                            rgb_to_hsla(ui.tint)
+                    nsh_base::switch()
+                        .w(zpx(36.0))
+                        .h(zpx(20.0))
+                        .rounded_full()
+                        .bg(rgb_to_hsla(if plugin.enabled {
+                            ui.primary
                         } else {
-                            rgb_to_hsla(ui.secondary)
-                        })
-                        .on_press(move || {
-                            st.plugin_list.update(|pl| {
-                                if let Some(target) = pl.plugins.iter_mut().find(|x| x.id == pid) {
-                                    target.enabled = !target.enabled;
-                                }
-                            });
-                        })
-                        .child(
-                            text(if p.enabled {
-                                t!("forward.enabled")
-                            } else {
-                                t!("forward.state_stopped")
-                            })
-                            .text_xs()
-                            .text_color(rgb_to_hsla(ui.foreground)),
-                        ),
+                            ui.muted
+                        }))
+                        .thumb_class("size-4 rounded-full bg-background checked:translate-x-4")
+                        .checked(plugin.enabled)
+                        .on_change(move |enabled: &bool| st.set_plugin_enabled(&id, *enabled)),
                 )
         }))
 }
@@ -1182,25 +1415,72 @@ fn render_about_tab(
     resolved: &falcon_theme::ResolvedTheme,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
-    let url = store.server_url.get();
+    let info = store.server_info.get();
+    let st = store.clone();
+    let value = |value: String| {
+        text(value)
+            .text_xs()
+            .number_of_lines(1)
+            .text_color(rgb_to_hsla(ui.muted_foreground))
+    };
     view()
         .flex_col()
-        .gap(zpx(6.0))
+        .child(setting_row(
+            resolved,
+            t!("overview.version"),
+            value(
+                info.as_ref()
+                    .map(|i| format!("v{}", i.version))
+                    .unwrap_or_else(|| "—".into()),
+            ),
+        ))
+        .child(setting_row(
+            resolved,
+            t!("overview.platform"),
+            value(info.map(|i| i.platform).unwrap_or_else(|| "—".into())),
+        ))
+        .child(setting_row(
+            resolved,
+            t!("native.settings.serverUrl"),
+            value(store.server_url.get()),
+        ))
+        .child(setting_row(
+            resolved,
+            t!("native.settings.clientVersion"),
+            value(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        ))
         .child(
-            text(format!(
-                "{}: v{} ({})",
-                t!("native.settings.clientVersion"),
-                env!("CARGO_PKG_VERSION"),
-                t!("native.nsh.RendererBadge")
-            ))
-            .text_xs()
-            .text_color(rgb_to_hsla(ui.foreground)),
-        )
-        .child(
-            text(format!("{}: {url}", t!("native.settings.serverUrl")))
-                .text_xs()
-                .font_family(FONT_FAMILY_MONO)
-                .text_color(rgb_to_hsla(ui.muted_foreground)),
+            view()
+                .pt(zpx(32.0))
+                .flex_col()
+                .gap(zpx(10.0))
+                .child(
+                    text(t!("native.update.title"))
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(
+                    text(t!("native.update.intro"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(setting_row(
+                    resolved,
+                    t!("native.update.check"),
+                    view()
+                        .px(zpx(10.0))
+                        .py(zpx(4.0))
+                        .rounded(zpx(8.0))
+                        .cursor_pointer()
+                        .bg(rgb_to_hsla(ui.app))
+                        .on_press(move || st.check_app_update())
+                        .child(
+                            text(t!("native.update.check"))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.foreground)),
+                        ),
+                )),
         )
 }
 
@@ -1347,6 +1627,72 @@ fn render_confirm_terminate_modal(
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb_to_hsla(ui.destructive_foreground)),
                                 ),
+                        ),
+                ),
+        )
+}
+
+fn render_notifications_tab(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+) -> impl IntoElement {
+    let ui = &resolved.ui;
+    let enabled = store.finish_sound.get();
+    let toggle = store.finish_sound;
+    view()
+        .flex_col()
+        .gap(zpx(16.0))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(zpx(12.0))
+                .child(
+                    text(t!("settings.finishSound"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(
+                    nsh_base::switch()
+                        .w(zpx(36.0))
+                        .h(zpx(20.0))
+                        .rounded_full()
+                        .bg(rgb_to_hsla(if enabled { ui.primary } else { ui.muted }))
+                        .thumb_class("size-4 rounded-full bg-background checked:translate-x-4")
+                        .checked(enabled)
+                        .on_change(move |on: &bool| {
+                            let on = *on;
+                            toggle.set(on);
+                            crate::theme::save_pref_item(
+                                "falcon.finishSound",
+                                Some(if on { "on" } else { "off" }),
+                            );
+                        }),
+                ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    text(t!("settings.finishSoundPreviewLabel"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(
+                    view()
+                        .px(zpx(12.0))
+                        .py(zpx(6.0))
+                        .rounded(zpx(8.0))
+                        .bg(rgb_to_hsla(ui.secondary))
+                        .cursor_pointer()
+                        .on_press(|| falcon_platform::shared().play_chime())
+                        .child(
+                            text(t!("settings.finishSoundPreview"))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(ui.foreground)),
                         ),
                 ),
         )

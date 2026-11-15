@@ -64,6 +64,8 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     let theme_ctrl = install_theme(initial_theme);
     let zoom_ctrl = install_zoom();
     let store = WorkspaceStore::install(&launch_opts);
+    #[cfg(all(feature = "snapshot", not(target_arch = "wasm32")))]
+    install_review_scene(store.clone());
 
     // 同步深色/浅色与缩放全局快捷键（全部经 `bind_safe_key` 过滤宿主保留键）
     {
@@ -75,6 +77,12 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
                 ActiveDialog::Palette
             };
             st_pal.active_dialog.set(next);
+        });
+    }
+    {
+        let st = store.clone();
+        bind_safe_key("mod+shift+p", false, move || {
+            st.active_dialog.set(ActiveDialog::Palette)
         });
     }
     {
@@ -113,9 +121,22 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
         });
     }
     {
+        let sidebar = store.sidebar_open;
+        bind_safe_key("mod+b", false, move || sidebar.update(|v| *v = !*v));
+        let files = store.clone();
+        bind_safe_key("mod+shift+e", false, move || {
+            files.toggle_right_panel(crate::store::RightPanelKind::Files)
+        });
+        let changes = store.clone();
+        bind_safe_key("mod+shift+g", false, move || {
+            changes.toggle_right_panel(crate::store::RightPanelKind::Git)
+        });
+    }
+    {
         bind_safe_key("mod+=", false, move || zoom_ctrl.step_in());
         bind_safe_key("mod+-", false, move || zoom_ctrl.step_out());
-        bind_safe_key("mod+0", false, move || zoom_ctrl.reset());
+        let overview = store.overview_open;
+        bind_safe_key("mod+0", false, move || overview.set(true));
     }
 
     // 处理 `falcon://` URL Scheme 深链（打开指定服务端或会话）
@@ -283,7 +304,9 @@ fn install_macos_tray(store: WorkspaceStore) {
                                             Ok(state) => (Ok(()), state.enabled),
                                             Err(err) => (
                                                 Err(err),
-                                                svc.lan_access().map(|s| s.enabled).unwrap_or(false),
+                                                svc.lan_access()
+                                                    .map(|s| s.enabled)
+                                                    .unwrap_or(false),
                                             ),
                                         },
                                         None => (Ok(()), false),
@@ -470,6 +493,7 @@ mod tests {
 
         let mut app = headless_with_options(opts, ColorScheme::Light);
         app.first_render().expect("first render");
+        app.press("label:sidebar-settings").unwrap();
         app.wait_for("当前底色判定：深色外观")
             .expect("surface derived dark appearance despite OS ColorScheme::Light and Light slot");
 
@@ -480,10 +504,7 @@ mod tests {
         let mut light_settings = ThemeSettings::default();
         light_settings.mode = ThemePref::Light;
         light_settings.light = choice_of(light_entry);
-        assert_eq!(
-            light_settings.slot(ThemeMode::Light).name,
-            light_entry.name
-        );
+        assert_eq!(light_settings.slot(ThemeMode::Light).name, light_entry.name);
 
         let mut light_app = headless_with_options(
             FalconLaunchOptions {
@@ -494,6 +515,7 @@ mod tests {
             ColorScheme::Dark,
         );
         light_app.first_render().expect("first render light");
+        light_app.press("label:sidebar-settings").unwrap();
         light_app
             .wait_for("当前底色判定：浅色外观")
             .expect("surface derived light appearance despite OS ColorScheme::Dark");
@@ -517,23 +539,21 @@ mod tests {
         app.first_render().expect("first render");
 
         // 首屏领域元素校验
-        app.wait_for("falcon · nsh-client").unwrap();
-        app.wait_for("附属项目").unwrap();
-        app.wait_for("源项目：falcon").unwrap();
-        app.wait_for("远端主机：build-box-01").unwrap();
+        app.wait_for("feat/nsh-unified-client").unwrap();
+        app.wait_for("build-box-01").unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
         app.wait_for("cargo check · 1.2s").unwrap();
         app.wait_for("14.2%").unwrap();
 
         // 1. Detach（收起窗口）：窗口从列式画布摘除，但会话仍在侧栏标记为后台运行中且可接回
         app.press("label:detach-t:sess-main")
             .expect("press detach button on sess-main");
-        app.wait_for("后台运行中").unwrap();
-        app.wait_for("接回窗口").unwrap();
+        app.wait_for("label:reattach-sess-main").unwrap();
 
         // 2. Reattach（接回窗口）：从侧栏重新挂回列式画布
         app.press("label:reattach-sess-main")
             .expect("press reattach button on sess-main");
-        app.wait_for_gone("后台运行中", Duration::from_secs(2))
+        app.wait_for_gone("label:reattach-sess-main", Duration::from_secs(2))
             .unwrap();
 
         // 3. Terminate（终止会话）：sess-main 有前台命令 `cargo check -p falcon-nsh`，必须先弹出确认框
@@ -543,6 +563,83 @@ mod tests {
         app.press("仍然终止").expect("confirm force terminate");
         app.wait_for_gone("cargo check -p falcon-nsh", Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn desktop_tree_activity_bar_and_settings_navigation() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.wait_for("label:right-activity-bar").unwrap();
+        app.press("label:activity-files").unwrap();
+        app.wait_for("搜索文件…").unwrap();
+        app.press("label:activity-files").unwrap();
+        app.wait_for_gone("label:right-panel-island", Duration::from_secs(2))
+            .unwrap();
+        app.press("label:activity-changes").unwrap();
+        app.wait_for("label:right-panel-island").unwrap();
+        app.press("label:sidebar-collapse").unwrap();
+        app.wait_for("label:sidebar-expand").unwrap();
+        app.press("label:sidebar-expand").unwrap();
+        app.wait_for("label:sidebar-island").unwrap();
+        app.press("label:folder-toggle-proj-falcon").unwrap();
+        app.wait_for_gone("feat/nsh-unified-client", Duration::from_secs(2))
+            .unwrap();
+        app.press("label:folder-toggle-proj-falcon").unwrap();
+        app.wait_for("feat/nsh-unified-client").unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        app.press("label:settings-tab-Hosts").unwrap();
+        app.wait_for("dev@10.0.4.12:22").unwrap();
+        app.press("label:settings-tab-About").unwrap();
+        app.wait_for("Falcon").unwrap();
+        app.press("label:settings-close").unwrap();
+        app.press("label:open-overview").unwrap();
+        app.wait_for("label:session-overview").unwrap();
+        app.press("label:overview-session-sess-main").unwrap();
+        app.wait_for_gone("label:session-overview", Duration::from_secs(2))
+            .unwrap();
+    }
+
+    #[test]
+    fn desktop_resize_clamps_sidebar_width_and_keeps_layout_visible() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        let width = |app: &Headless| {
+            app.screen()
+                .layout_nodes()
+                .iter()
+                .find(|n| n.test_id.as_deref() == Some("sidebar-island"))
+                .unwrap()
+                .bounds
+                .size
+                .width
+                .0
+        };
+        assert_eq!(width(&app), 260.0);
+        app.drag(
+            "label:resize-sidebar",
+            Point::new(Points(60.0), Points(0.0)),
+        )
+        .unwrap();
+        assert_eq!(width(&app), 320.0);
+        app.drag(
+            "label:resize-sidebar",
+            Point::new(Points(800.0), Points(0.0)),
+        )
+        .unwrap();
+        assert_eq!(width(&app), 420.0);
+        assert!(app.shows("cargo check · 1.2s"));
     }
 
     /// 移动端（Android `Idiom::Phone`）与终端工作台（`Idiom::Terminal`）自适应骨架无头验证。
@@ -623,16 +720,9 @@ mod tests {
 
         // 1. 合法包（build 5）验签通过并记录防回滚水位
         let pkg_v5 = make_pkg(5, &server_rel, &cert);
-        let res_ok = verifier.verify_and_accept(
-            &root_b64,
-            Some("dev.falcon.plugin.gpu"),
-            &pkg_v5,
-        );
+        let res_ok = verifier.verify_and_accept(&root_b64, Some("dev.falcon.plugin.gpu"), &pkg_v5);
         assert!(
-            matches!(
-                res_ok,
-                PackageVerificationState::Verified { build: 5, .. }
-            ),
+            matches!(res_ok, PackageVerificationState::Verified { build: 5, .. }),
             "expected Verified(build=5), got {res_ok:?}"
         );
 
@@ -640,12 +730,12 @@ mod tests {
         let mut tampered = make_pkg(6, &server_rel, &cert);
         let mid = tampered.len() / 2;
         tampered[mid] ^= 0x5a;
-        let res_tamper = verifier.verify_and_accept(
-            &root_b64,
-            Some("dev.falcon.plugin.gpu"),
-            &tampered,
-        );
-        assert!(matches!(res_tamper, PackageVerificationState::Untrusted { .. }));
+        let res_tamper =
+            verifier.verify_and_accept(&root_b64, Some("dev.falcon.plugin.gpu"), &tampered);
+        assert!(matches!(
+            res_tamper,
+            PackageVerificationState::Untrusted { .. }
+        ));
 
         // 3. 陌生根密钥签出的包拒绝
         let rogue_root = SecretKey::generate().unwrap();
@@ -658,21 +748,18 @@ mod tests {
             now + 3600,
         );
         let rogue_pkg = make_pkg(7, &rogue_rel, &rogue_cert);
-        let res_rogue = verifier.verify_and_accept(
-            &root_b64,
-            Some("dev.falcon.plugin.gpu"),
-            &rogue_pkg,
-        );
-        assert!(matches!(res_rogue, PackageVerificationState::Untrusted { .. }));
+        let res_rogue =
+            verifier.verify_and_accept(&root_b64, Some("dev.falcon.plugin.gpu"), &rogue_pkg);
+        assert!(matches!(
+            res_rogue,
+            PackageVerificationState::Untrusted { .. }
+        ));
 
         // 4. 同一信任根签出的旧构建号（build 4 < 5）被持久水位拦截回滚
         let mut reopened = ClientPluginVerifier::open_persistent(tmp.path()).unwrap();
         let older_pkg = make_pkg(4, &server_rel, &cert);
-        let res_rollback = reopened.verify_and_accept(
-            &root_b64,
-            Some("dev.falcon.plugin.gpu"),
-            &older_pkg,
-        );
+        let res_rollback =
+            reopened.verify_and_accept(&root_b64, Some("dev.falcon.plugin.gpu"), &older_pkg);
         assert_eq!(
             res_rollback,
             PackageVerificationState::RollbackBlocked {
@@ -706,16 +793,7 @@ mod tests {
         // 预热 10 帧
         for _ in 0..10 {
             let snap = sess.snapshot();
-            let vp = TerminalViewport::compute(
-                960.0,
-                720.0,
-                8.0,
-                18.0,
-                13.0,
-                true,
-                true,
-                &snap,
-            );
+            let vp = TerminalViewport::compute(960.0, 720.0, 8.0, 18.0, 13.0, true, true, &snap);
             std::hint::black_box(paint_snapshot(&snap, &resolved, vp, Some("中文输入")));
         }
 
@@ -723,16 +801,7 @@ mod tests {
         for _ in 0..200 {
             let t0 = Instant::now();
             let snap = sess.snapshot();
-            let vp = TerminalViewport::compute(
-                960.0,
-                720.0,
-                8.0,
-                18.0,
-                13.0,
-                true,
-                true,
-                &snap,
-            );
+            let vp = TerminalViewport::compute(960.0, 720.0, 8.0, 18.0, 13.0, true, true, &snap);
             let painter = paint_snapshot(&snap, &resolved, vp, Some("中文输入"));
             std::hint::black_box(painter);
             samples_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -765,7 +834,98 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/app-icons");
         for id in falcon_core::app_icon::APP_ICON_IDS {
             let path = dir.join(format!("{id}.png"));
-            assert!(path.is_file(), "missing builtin app icon asset: {}", path.display());
+            assert!(
+                path.is_file(),
+                "missing builtin app icon asset: {}",
+                path.display()
+            );
         }
     }
+}
+
+/// 与 GPUI 自动化截图保持相同的可复现入口，只编入审阅构建。
+#[cfg(all(feature = "snapshot", not(target_arch = "wasm32")))]
+fn install_review_scene(store: WorkspaceStore) {
+    let Ok(scene) = std::env::var("FALCON_SNAPSHOT_SCENE") else {
+        return;
+    };
+    spawn(async move {
+        timer(std::time::Duration::from_millis(2000)).await;
+        if let Ok(name) = std::env::var("FALCON_SNAPSHOT_PROJECT") {
+            if let Some(p) = store.projects.get().iter().find(|p| p.name == name) {
+                store.select_project(&p.id);
+            }
+        }
+        if let Some(session) = store
+            .sessions
+            .get()
+            .iter()
+            .find(|s| s.project_id == store.active_project_id.get())
+        {
+            store.focus_session(&session.id);
+            store
+                .ensure_terminal_session(&session.id)
+                .send_input("\x15\x0c");
+        }
+        match scene.as_str() {
+            "overview" => store.overview_open.set(true),
+            "files" => {
+                store
+                    .right_panel_kind
+                    .set(crate::store::RightPanelKind::Files);
+                store.right_panel_open.set(true);
+            }
+            "changes" => {
+                store
+                    .right_panel_kind
+                    .set(crate::store::RightPanelKind::Git);
+                store.right_panel_open.set(true);
+            }
+            "terminal" => store.right_panel_open.set(false),
+            "palette" => store.active_dialog.set(ActiveDialog::Palette),
+            "profiles" => store.active_dialog.set(ActiveDialog::Profiles),
+            "project" => store.active_dialog.set(ActiveDialog::NewProject),
+            "file" => {
+                let id = store.active_project_id.get();
+                store.open_file_pane(&id, "README.md");
+            }
+            "diff" => {
+                store
+                    .right_panel_kind
+                    .set(crate::store::RightPanelKind::Git);
+                store.right_panel_open.set(true);
+                if let Some(file) = store.git_changes.get().first() {
+                    store.preview_git_path(&file.path);
+                }
+            }
+            "appearance" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Appearance)),
+            "notifications" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Notifications)),
+            "terminal-settings" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Terminal)),
+            "hosts" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Hosts)),
+            "relays" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Relays)),
+            "plugins" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Plugins)),
+            "about" => store
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::About)),
+            id => {
+                store
+                    .right_panel_kind
+                    .set(crate::store::RightPanelKind::Plugin(id.to_string()));
+                store.right_panel_open.set(true);
+                store.dispatch_plugin_action(id, None, None);
+            }
+        }
+    });
 }

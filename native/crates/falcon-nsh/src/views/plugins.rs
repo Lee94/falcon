@@ -18,6 +18,7 @@ use nsh_package::{Error as PkgError, PublicKey, TrustStore};
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
+use crate::shell::widgets::{Glyph, glyph, icon_button};
 use crate::store::{PackageVerificationState, PluginPanelState, WorkspaceStore, use_workspace};
 use crate::theme::{plugin_tone_color, rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::{pt_px, zpx};
@@ -108,6 +109,54 @@ pub fn PluginPanel(props: PluginPanelProps) -> impl IntoElement {
     let store = use_workspace();
     let theme_ctrl = use_theme();
     let pid = props.plugin_id.clone();
+    let chart_width = signal(236.0_f32);
+    // 面板打开时取首份文档；之后只在可见且没有在途请求时按插件指定的间隔采样。
+    {
+        let st = store.clone();
+        let id = pid.clone();
+        effect(move || {
+            let usable = st
+                .plugin_list
+                .get()
+                .plugins
+                .iter()
+                .any(|p| p.id == id && p.enabled && p.kind != PluginKind::Package);
+            let empty = st
+                .plugin_states
+                .get()
+                .get(&id)
+                .is_none_or(|s| s.view.is_none() && s.error.is_none() && !s.loading);
+            if usable && empty {
+                st.dispatch_plugin_action(&id, None, None);
+            }
+        });
+    }
+    {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+        let st = store.clone();
+        let id = pid.clone();
+        let last = Rc::new(Cell::new(web_time::Instant::now()));
+        set_interval(Duration::from_millis(500), move || {
+            let states = st.plugin_states.get();
+            let Some(state) = states.get(&id) else {
+                return;
+            };
+            let interval = state
+                .view
+                .as_ref()
+                .and_then(|v| v.refresh)
+                .unwrap_or(10.0)
+                .max(1.0);
+            if !state.loading
+                && st.right_panel_open.get()
+                && st.right_panel_kind.get() == crate::store::RightPanelKind::Plugin(id.clone())
+                && last.get().elapsed().as_secs_f64() >= interval
+            {
+                last.set(web_time::Instant::now());
+                st.dispatch_plugin_action(&id, None, None);
+            }
+        });
+    }
 
     view()
         .size_full()
@@ -133,7 +182,7 @@ pub fn PluginPanel(props: PluginPanelProps) -> impl IntoElement {
                     .into_element();
             };
 
-            render_plugin_body(&store, &resolved, &info, state.as_ref()).into_element()
+            render_plugin_body(&store, &resolved, &info, state.as_ref(), chart_width).into_element()
         }))
 }
 
@@ -142,70 +191,64 @@ fn render_plugin_body(
     resolved: &falcon_theme::ResolvedTheme,
     info: &PluginInfo,
     state: Option<&PluginPanelState>,
+    chart_width: Signal<f32>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let pid = info.id.clone();
-    let subtitle = state
-        .and_then(|s| s.view.as_ref())
-        .and_then(|v| v.title.clone())
-        .or_else(|| info.description.clone());
-
-    let mut header = view()
+    let refresh = store.clone();
+    let refresh_id = pid.clone();
+    let header = view()
+        .h(zpx(40.0))
+        .flex_none()
         .flex_row()
         .items_center()
         .justify_between()
         .px(zpx(12.0))
-        .py(zpx(8.0))
         .border_b_1()
         .border_color(rgba_to_hsla(ui.border))
         .child(
             view()
-                .flex_col()
-                .gap(zpx(2.0))
+                .flex_1()
+                .min_w_0()
+                .flex_row()
+                .items_center()
+                .gap(zpx(8.0))
+                .text_color(rgb_to_hsla(ui.muted_foreground))
+                .child(glyph(if info.id == "sysmon" {
+                    Glyph::Activity
+                } else if info.id == "tokens" {
+                    Glyph::Link
+                } else {
+                    Glyph::Box
+                }))
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap(zpx(6.0))
-                        .child(
-                            text(info.name.clone())
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                        .child(render_kind_badge(resolved, &info.kind)),
-                )
-                .when_some(subtitle, |el, sub| {
-                    el.child(
-                        text(sub)
-                            .text_xs()
-                            .text_color(rgb_to_hsla(ui.muted_foreground)),
-                    )
-                }),
-        );
-
-    {
-        let store_refresh = store.clone();
-        let pid_refresh = pid.clone();
-        header = header.child(
-            view()
-                .px(zpx(8.0))
-                .py(zpx(4.0))
-                .rounded(zpx(6.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || {
-                    store_refresh.dispatch_plugin_action(&pid_refresh, None, None);
-                })
-                .child(
-                    text(t!("plugin.refresh"))
+                    text(info.name.clone())
                         .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(ui.foreground)),
                 ),
+        )
+        .child(icon_button(
+            format!("refresh-plugin-{pid}"),
+            t!("plugin.refresh"),
+            Glyph::Refresh,
+            false,
+            resolved,
+            move || refresh.dispatch_plugin_action(&refresh_id, None, None),
+        ));
+
+    let mut content = view().flex_col().gap(zpx(12.0)).p(zpx(12.0));
+    if let Some(title) = state
+        .and_then(|s| s.view.as_ref())
+        .and_then(|v| v.title.clone())
+    {
+        content = content.child(
+            text(title)
+                .text_xs()
+                .number_of_lines(2)
+                .text_color(rgb_to_hsla(ui.muted_foreground)),
         );
     }
-
-    let mut content = view().flex_col().gap(zpx(10.0)).p(zpx(12.0));
 
     if !info.enabled {
         content = content.child(
@@ -240,9 +283,7 @@ fn render_plugin_body(
     }
 
     // 轨道 B：签名沙盒面板包信任链状态卡片
-    if info.kind == PluginKind::Package
-        || state.and_then(|s| s.package_status.as_ref()).is_some()
-    {
+    if info.kind == PluginKind::Package || state.and_then(|s| s.package_status.as_ref()).is_some() {
         content = content.child(render_package_card(resolved, info, state));
     }
 
@@ -261,6 +302,7 @@ fn render_plugin_body(
                 &pid,
                 doc,
                 &st.params,
+                chart_width,
             ));
         } else if st.loading {
             content = content.child(
@@ -288,23 +330,6 @@ fn render_plugin_body(
         .flex_col()
         .child(header)
         .child(scroll().flex_1().child(content))
-}
-
-fn render_kind_badge(resolved: &falcon_theme::ResolvedTheme, kind: &PluginKind) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let (label, fg) = match kind {
-        PluginKind::Builtin => (t!("plugin.kindBuiltin"), rgb_to_hsla(ui.muted_foreground)),
-        PluginKind::Command | PluginKind::Unknown => {
-            (t!("plugin.kindCommand"), rgb_to_hsla(ui.muted_foreground))
-        }
-        PluginKind::Package => (t!("plugin.kindPackage"), rgb_to_hsla(ui.tint_strong)),
-    };
-    view()
-        .px(zpx(6.0))
-        .py(zpx(1.5))
-        .rounded(zpx(4.0))
-        .bg(rgb_to_hsla(ui.muted))
-        .child(text(label).text_xs().text_color(fg))
 }
 
 fn render_package_card(
@@ -356,7 +381,11 @@ fn render_package_card(
                     Some(pkg.sha256.clone()),
                 )
             } else {
-                (t!("plugin.packageLoad"), rgb_to_hsla(ui.muted_foreground), None)
+                (
+                    t!("plugin.packageLoad"),
+                    rgb_to_hsla(ui.muted_foreground),
+                    None,
+                )
             }
         }
     };
@@ -398,6 +427,7 @@ fn render_plugin_document(
     plugin_id: &str,
     doc: &PluginView,
     current_params: &BTreeMap<String, String>,
+    chart_width: Signal<f32>,
 ) -> impl IntoElement {
     let mut col = view().flex_col().gap(zpx(10.0));
     for block in &doc.blocks {
@@ -486,6 +516,7 @@ fn render_plugin_document(
                     series,
                     *max,
                     *slots,
+                    chart_width,
                 ));
             }
             PluginBlock::Kv { items } => {
@@ -540,40 +571,48 @@ fn render_stats_block(
     items: &[PluginStat],
 ) -> impl IntoElement {
     let ui = &resolved.ui;
-    view()
-        .flex_row()
-        .flex_wrap()
-        .gap(zpx(8.0))
-        .children(items.iter().map(|item| {
-            view()
-                .min_w(zpx(124.0))
-                .flex_1()
-                .flex_col()
-                .gap(zpx(2.0))
-                .p(zpx(8.0))
-                .rounded(zpx(8.0))
-                .bg(rgb_to_hsla(ui.card))
-                .border_1()
-                .border_color(rgba_to_hsla(ui.border))
-                .child(
-                    text(item.label.clone())
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                )
-                .child(
-                    text(item.value.clone())
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(plugin_tone_color(resolved, item.tone.as_ref())),
-                )
-                .when_some(item.detail.clone(), |el, d| {
-                    el.child(
-                        text(d)
+    let mut rows = view().flex_col().gap(zpx(8.0));
+    for pair in items.chunks(2) {
+        let mut row = view().flex_row().gap(zpx(8.0));
+        for item in pair {
+            row = row.child(
+                view()
+                    .flex_1()
+                    .min_w_0()
+                    .flex_col()
+                    .gap(zpx(2.0))
+                    .px(zpx(8.0))
+                    .py(zpx(6.0))
+                    .rounded(zpx(8.0))
+                    .bg(rgb_to_hsla(ui.app))
+                    .child(
+                        text(item.label.clone())
                             .text_xs()
+                            .number_of_lines(1)
                             .text_color(rgb_to_hsla(ui.muted_foreground)),
                     )
-                })
-        }))
+                    .child(
+                        text(item.value.clone())
+                            .text_size(zpx(18.0))
+                            .number_of_lines(1)
+                            .text_color(plugin_tone_color(resolved, item.tone.as_ref())),
+                    )
+                    .when_some(item.detail.clone(), |v, d| {
+                        v.child(
+                            text(d)
+                                .text_xs()
+                                .number_of_lines(1)
+                                .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        )
+                    }),
+            );
+        }
+        if pair.len() == 1 {
+            row = row.child(view().flex_1());
+        }
+        rows = rows.child(row);
+    }
+    rows
 }
 
 fn render_meter_block(
@@ -605,11 +644,16 @@ fn render_meter_block(
                 .justify_between()
                 .child(
                     text(label.to_string())
+                        .flex_1()
+                        .min_w_0()
+                        .number_of_lines(1)
                         .text_xs()
                         .text_color(rgb_to_hsla(ui.foreground)),
                 )
                 .child(
                     text(reading)
+                        .flex_none()
+                        .number_of_lines(1)
                         .text_xs()
                         .font_family(FONT_FAMILY_MONO)
                         .text_color(rgb_to_hsla(ui.muted_foreground)),
@@ -639,6 +683,7 @@ fn render_chart_block(
     series: &[PluginSeries],
     max_override: Option<f64>,
     slots_override: Option<u32>,
+    chart_width: Signal<f32>,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let computed_max = max_override
@@ -661,17 +706,11 @@ fn render_chart_block(
         })
         .collect();
 
-    let chart_w = 272.0_f32;
-    let chart_h = 64.0_f32;
+    let chart_h = zpx(52.0).0;
 
     view()
         .flex_col()
         .gap(zpx(4.0))
-        .p(zpx(8.0))
-        .rounded(zpx(8.0))
-        .bg(rgb_to_hsla(ui.card))
-        .border_1()
-        .border_color(rgba_to_hsla(ui.border))
         .when(label.is_some() || reading.is_some(), |el| {
             el.child(
                 view()
@@ -681,14 +720,20 @@ fn render_chart_block(
                     .when_some(label.map(str::to_owned), |r, l| {
                         r.child(
                             text(l)
+                                .flex_1()
+                                .min_w_0()
                                 .text_xs()
-                                .text_color(rgb_to_hsla(ui.muted_foreground)),
+                                .number_of_lines(1)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb_to_hsla(ui.foreground)),
                         )
                     })
                     .when_some(reading.map(str::to_owned), |r, rd| {
                         r.child(
                             text(rd)
+                                .flex_none()
                                 .text_xs()
+                                .number_of_lines(1)
                                 .font_family(FONT_FAMILY_MONO)
                                 .text_color(rgb_to_hsla(ui.foreground)),
                         )
@@ -697,6 +742,8 @@ fn render_chart_block(
         })
         .child(
             canvas(move || {
+                // 取实际布局宽度；固定宽度会把右对齐的最新采样点裁在面板外。
+                let chart_w = chart_width.get().max(1.0);
                 let mut p = Painter::new()
                     .line_width(1.0)
                     .stroke_style(grid_stroke)
@@ -737,8 +784,42 @@ fn render_chart_block(
                 }
                 p
             })
-            .w(pt_px(chart_w))
-            .h(pt_px(chart_h)),
+            .w_full()
+            .h(pt_px(chart_h))
+            .rounded(zpx(10.0))
+            .bg(rgb_to_hsla(ui.card))
+            .on_layout(move |b: &Bounds<Points>| {
+                let width = b.size.width.0;
+                if width > 0.0 && (chart_width.get() - width).abs() > 0.5 {
+                    chart_width.set(width);
+                }
+            }),
+        )
+        .when(
+            series.iter().filter(|s| s.name.is_some()).count() > 1,
+            |v| {
+                v.child(view().flex_row().flex_wrap().gap(zpx(10.0)).children(
+                    series.iter().enumerate().filter_map(|(i, s)| {
+                        s.name.as_ref().map(|name| {
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(zpx(4.0))
+                                .child(view().w(zpx(6.0)).h(zpx(6.0)).rounded_full().bg(
+                                    match &s.tone {
+                                        Some(tone) => plugin_tone_color(resolved, Some(tone)),
+                                        None => rgb_to_hsla(ui.graph[i % ui.graph.len()]),
+                                    },
+                                ))
+                                .child(
+                                    text(name.clone())
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                                )
+                        })
+                    }),
+                ))
+            },
         )
 }
 
@@ -776,24 +857,27 @@ fn render_table_block(
     let ui = &resolved.ui;
     view()
         .flex_col()
-        .rounded(zpx(6.0))
-        .border_1()
-        .border_color(rgba_to_hsla(ui.border))
         .overflow_hidden()
         .child(
             view()
                 .flex_row()
-                .px(zpx(8.0))
+                .px(zpx(2.0))
                 .py(zpx(4.0))
-                .bg(rgb_to_hsla(ui.muted))
-                .children(columns.iter().map(|c| {
-                    let mut cell = view().flex_1();
+                .border_b_1()
+                .border_color(rgba_to_hsla(ui.border))
+                .children(columns.iter().enumerate().map(|(i, c)| {
+                    let mut cell = view()
+                        .flex_1()
+                        .flex_grow(if i == 0 { 2.0 } else { 1.0 })
+                        .min_w_0()
+                        .overflow_hidden();
                     if matches!(c.align, Some(PluginAlign::Right)) {
                         cell = cell.items_end();
                     }
                     cell.child(
                         text(c.title.clone())
                             .text_xs()
+                            .number_of_lines(1)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb_to_hsla(ui.muted_foreground)),
                     )
@@ -802,19 +886,22 @@ fn render_table_block(
         .children(rows.iter().map(|row| {
             view()
                 .flex_row()
-                .px(zpx(8.0))
+                .px(zpx(2.0))
                 .py(zpx(4.0))
-                .border_t_1()
-                .border_color(rgba_to_hsla(ui.border))
                 .children(columns.iter().enumerate().map(|(i, c)| {
                     let val = row.get(i).cloned().unwrap_or_default();
-                    let mut cell = view().flex_1();
+                    let mut cell = view()
+                        .flex_1()
+                        .flex_grow(if i == 0 { 2.0 } else { 1.0 })
+                        .min_w_0()
+                        .overflow_hidden();
                     if matches!(c.align, Some(PluginAlign::Right)) {
                         cell = cell.items_end();
                     }
                     cell.child(
                         text(val)
                             .text_xs()
+                            .number_of_lines(1)
                             .text_color(rgb_to_hsla(ui.foreground)),
                     )
                 }))
@@ -902,15 +989,11 @@ fn render_actions_block(
     plugin_id: &str,
     items: &[PluginButton],
 ) -> impl IntoElement {
-    view()
-        .flex_row()
-        .flex_wrap()
-        .gap(zpx(6.0))
-        .children(
-            items
-                .iter()
-                .map(|btn| render_plugin_button(store, resolved, plugin_id, btn)),
-        )
+    view().flex_row().flex_wrap().gap(zpx(6.0)).children(
+        items
+            .iter()
+            .map(|btn| render_plugin_button(store, resolved, plugin_id, btn)),
+    )
 }
 
 fn render_plugin_button(
@@ -957,6 +1040,72 @@ fn render_select_block(
     options: &[PluginOption],
 ) -> impl IntoElement {
     let ui = &resolved.ui;
+    // 长名称用下拉菜单，避免侧栏变窄后每个选项挤占一整行。
+    if options.len() > 3 || options.iter().any(|o| o.label.chars().count() > 6) {
+        let title = options
+            .iter()
+            .find(|o| o.value == active_value)
+            .map(|o| o.label.clone())
+            .unwrap_or_default();
+        let st = store.clone();
+        let pid = plugin_id.to_owned();
+        let key = param.to_owned();
+        let fg = rgb_to_hsla(ui.foreground);
+        let bg = rgb_to_hsla(ui.card);
+        let border = rgba_to_hsla(ui.border);
+        return view()
+            .flex_row()
+            .items_center()
+            .gap(zpx(8.0))
+            .when_some(label.map(str::to_owned), |v, l| {
+                v.child(
+                    text(l)
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+            })
+            .child(
+                nsh_base::select()
+                    .items(
+                        options
+                            .iter()
+                            .map(|o| nsh_base::SelectItem::new(o.value.clone(), o.label.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                    .value(active_value.to_owned())
+                    .popup_style(move |v| {
+                        v.bg(bg).rounded(zpx(8.0)).border_1().border_color(border)
+                    })
+                    .trigger(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(6.0))
+                            .px(zpx(8.0))
+                            .py(zpx(4.0))
+                            .rounded(zpx(8.0))
+                            .border_1()
+                            .border_color(border)
+                            .bg(bg)
+                            .text_color(fg)
+                            .child(text(title).text_xs().number_of_lines(1))
+                            .child(glyph(Glyph::ChevronDown)),
+                    )
+                    .render_item(move |entry: &nsh_base::SelectEntry| {
+                        view()
+                            .px(zpx(10.0))
+                            .py(zpx(7.0))
+                            .bg(bg)
+                            .child(text(entry.title.clone()).text_xs().text_color(fg))
+                    })
+                    .on_change(move |value: &Option<SharedString>| {
+                        if let Some(value) = value {
+                            set_plugin_param(&st, &pid, &key, value);
+                        }
+                    }),
+            )
+            .into_element();
+    }
     view()
         .flex_col()
         .gap(zpx(4.0))
@@ -1000,8 +1149,8 @@ fn render_select_block(
                         .child(text(opt.label.clone()).text_xs().text_color(fg))
                 })),
         )
+        .into_element()
 }
-
 fn set_plugin_param(store: &WorkspaceStore, plugin_id: &str, key: &str, val: &str) {
     store.plugin_states.update(|map| {
         let entry = map

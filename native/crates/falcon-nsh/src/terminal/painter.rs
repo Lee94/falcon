@@ -337,6 +337,25 @@ pub fn paint_snapshot(
     vp: TerminalViewport,
     ime_preedit: Option<&str>,
 ) -> Painter {
+    paint_snapshot_with_preferences(
+        snap,
+        resolved,
+        vp,
+        ime_preedit,
+        &format!("\"{FONT_FAMILY_MONO}\""),
+        None,
+    )
+}
+
+/// 设置中的字体与光标外观在画布上即时生效；默认入口仍供测试与吞吐基准使用。
+pub fn paint_snapshot_with_preferences(
+    snap: &Snapshot,
+    resolved: &ResolvedTheme,
+    vp: TerminalViewport,
+    ime_preedit: Option<&str>,
+    font_stack: &str,
+    cursor: Option<falcon_core::term::TermCursorStyle>,
+) -> Painter {
     let pal = FastPalette::build(snap, resolved);
     let cols = snap.size.cols;
     let rows = snap.size.rows;
@@ -432,10 +451,10 @@ pub fn paint_snapshot(
 
     // 预构造 4 档 CSS font 字符串
     let fs = vp.font_size.max(8.0);
-    let font_regular = format!("400 {fs:.1}px \"{FONT_FAMILY_MONO}\"");
-    let font_bold = format!("700 {fs:.1}px \"{FONT_FAMILY_MONO}\"");
-    let font_italic = format!("italic 400 {fs:.1}px \"{FONT_FAMILY_MONO}\"");
-    let font_bold_italic = format!("italic 700 {fs:.1}px \"{FONT_FAMILY_MONO}\"");
+    let font_regular = format!("400 {fs:.1}px {font_stack}");
+    let font_bold = format!("700 {fs:.1}px {font_stack}");
+    let font_italic = format!("italic 400 {fs:.1}px {font_stack}");
+    let font_bold_italic = format!("italic 700 {fs:.1}px {font_stack}");
 
     painter = painter
         .text_baseline(CanvasTextBaseline::Top)
@@ -557,8 +576,16 @@ pub fn paint_snapshot(
                     );
                     run_buf.clear();
                 }
-                let (next_p, drawn) =
-                    draw_box_or_block_glyph(painter, &mut last_fill, c, fg, col as f32 * cw, row_y, cw, ch);
+                let (next_p, drawn) = draw_box_or_block_glyph(
+                    painter,
+                    &mut last_fill,
+                    c,
+                    fg,
+                    col as f32 * cw,
+                    row_y,
+                    cw,
+                    ch,
+                );
                 painter = next_p;
                 if drawn {
                     continue;
@@ -629,7 +656,12 @@ pub fn paint_snapshot(
         let shape = if !vp.focused {
             CursorShape::HollowBlock
         } else {
-            cur.shape
+            match cursor {
+                Some(falcon_core::term::TermCursorStyle::Block) => CursorShape::Block,
+                Some(falcon_core::term::TermCursorStyle::Bar) => CursorShape::Beam,
+                Some(falcon_core::term::TermCursorStyle::Underline) => CursorShape::Underline,
+                None => cur.shape,
+            }
         };
         match shape {
             CursorShape::Block => {

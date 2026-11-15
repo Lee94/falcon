@@ -77,7 +77,7 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     let frame_tick = signal(session.frame_seq());
     let sink_ref = element_ref();
 
-    // 16ms 脏帧轮询桥：仅当后台网络线程推进了 `frame_seq` 时才触发信号更新，空闲时零重绘开销
+    // 16ms 输出轮询仅推进脏帧；光标闪烁另用低频计时器，不依赖终端输出。
     {
         let session_poll = session.clone();
         set_interval(Duration::from_millis(16), move || {
@@ -187,9 +187,7 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                 let sess_layout = session.clone();
                 move |b: &Bounds<Points>| {
                     let cols = (b.size.width.0.floor() as usize).max(20);
-                    let rows = (b.size.height.0.floor() as usize)
-                        .saturating_sub(1)
-                        .max(4);
+                    let rows = (b.size.height.0.floor() as usize).saturating_sub(1).max(4);
                     sess_layout.report_viewport_grid(cols, rows);
                     pane_bounds.set((b.size.width.0, b.size.height.0));
                 }
@@ -213,9 +211,13 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                         view()
                             .flex_col()
                             .children(lines.into_iter().map(move |line| {
-                                text(if line.is_empty() { " ".to_string() } else { line })
-                                    .text_color(fg)
-                                    .number_of_lines(1)
+                                text(if line.is_empty() {
+                                    " ".to_string()
+                                } else {
+                                    line
+                                })
+                                .text_color(fg)
+                                .number_of_lines(1)
                             }))
                     })),
             )
@@ -265,7 +267,9 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
                                     }
                                 })
                                 .text_xs()
-                                .text_color(move || rgb_to_hsla(theme_ctrl.resolved().ui.foreground)),
+                                .text_color(move || {
+                                    rgb_to_hsla(theme_ctrl.resolved().ui.foreground)
+                                }),
                             ),
                     ),
             )
@@ -289,7 +293,16 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
     let sid_focus = session_id.clone();
     let is_focused = props.focused;
 
+    let term_preferences = store.term_prefs;
+    let cursor_visible = signal(true);
+    set_interval(Duration::from_millis(500), move || {
+        cursor_visible.update(|v| *v = !*v)
+    });
     let compute_vp = move |snap: &falcon_term::Snapshot, sess: &Arc<TerminalSession>| {
+        let pref = term_preferences.get();
+        let font_size = pref.font_size as f32;
+        let cell_width = (font_size * 0.60).max(6.5);
+        let cell_height = (font_size * pref.line_height as f32).round().max(14.0);
         let (pw, ph) = pane_bounds.get();
         let eff = sess.effective_grid();
         TerminalViewport::compute(
@@ -303,6 +316,23 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
             snap,
         )
     };
+
+    {
+        let session = session.clone();
+        effect(move || {
+            let pref = term_preferences.get();
+            let (width, height) = pane_bounds.get();
+            let cols = (width / (pref.font_size as f32 * 0.60).max(6.5)).floor() as usize;
+            let rows = (height
+                / (pref.font_size as f32 * pref.line_height as f32)
+                    .round()
+                    .max(14.0))
+            .floor() as usize;
+            if cols >= 2 && rows >= 1 {
+                session.report_viewport_grid(cols, rows);
+            }
+        });
+    }
 
     view()
         .size_full()
@@ -383,14 +413,33 @@ pub fn FalconTerminal(props: FalconTerminalProps) -> impl IntoElement {
             canvas(move || {
                 let _ = frame_tick.get();
                 let resolved = theme_ctrl.resolved();
-                let snap = sess_canvas.snapshot();
+                let pref = term_preferences.get();
+                let mut snap = sess_canvas.snapshot();
                 let vp = compute_vp(&snap, &sess_canvas);
+                if pref.cursor_blink && !cursor_visible.get() {
+                    snap.cursor = None;
+                }
                 let preedit = ime_preedit.get();
-                paint_snapshot(
+                let mut families = falcon_core::term::primary_family(&pref)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                families.extend(falcon_core::term::fallback_families(&pref));
+                let mut stack = families
+                    .iter()
+                    .map(|f| format!("\"{}\"", f.replace('\\', "\\\\").replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !stack.is_empty() {
+                    stack.push_str(", ");
+                }
+                stack.push_str(crate::fonts::FONT_STACK_MONO);
+                painter::paint_snapshot_with_preferences(
                     &snap,
                     &resolved,
                     vp,
                     (!preedit.is_empty()).then_some(preedit.as_str()),
+                    &stack,
+                    Some(pref.cursor_style),
                 )
             })
             .size_full(),

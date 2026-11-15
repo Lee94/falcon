@@ -2,7 +2,10 @@
 
 pub mod desktop;
 pub mod mobile;
+mod overview;
+mod sidebar;
 pub mod tui;
+pub(crate) mod widgets;
 
 pub use desktop::{DesktopShell, desktop_shell};
 pub use mobile::{MobileShell, mobile_shell};

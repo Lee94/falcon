@@ -1520,6 +1520,7 @@ name = "falcon-nsh"
 version = "0.4.4"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "bytes",
  "falcon-client",
  "falcon-core",

@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
+# 原生离屏截图与面板走查，发布构建默认不启用。
+snapshot = ["falcon-nsh/snapshot"]
 tui = ["dep:nsh-platform-tui", "dep:ratatui-core"]
 # Linux GTK4 桌面后端：需要系统安装 libgtk-4-dev（GitHub Release 打包环境开启；无头环境默认走 TUI）
 linux-desktop = ["dep:nsh-platform-linux"]

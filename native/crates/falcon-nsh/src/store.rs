@@ -23,9 +23,9 @@ use falcon_core::layout::{
 };
 use falcon_core::pane_key::{DIFF_KEY, file_key, parse_pane_key, term_key};
 use falcon_core::profiles::{ProfilesFile, ServerProfile};
-use falcon_core::program_status::detail_text;
 #[cfg(not(target_arch = "wasm32"))]
 use falcon_core::program_status::FinishChimes;
+use falcon_core::program_status::detail_text;
 use falcon_core::term::TermPref;
 #[cfg(not(target_arch = "wasm32"))]
 use falcon_proto::{
@@ -36,7 +36,7 @@ use falcon_proto::{
     PluginBlock, PluginInfo, PluginKind, PluginList, PluginOption, PluginPackageInfo, PluginScope,
     PluginSeries, PluginStat, PluginTone, PluginView, ProgramState, SessionState,
 };
-use nsh_core::prelude::{Signal, provide_context, signal, spawn, use_context};
+use nsh_core::prelude::{Signal, effect, provide_context, signal, spawn, use_context};
 use parking_lot::Mutex;
 
 use crate::terminal::TerminalSession;
@@ -61,8 +61,14 @@ pub enum ActiveDialog {
     Profiles,
     NewProject,
     Settings(SettingsTab),
-    Askpass { id: String, prompt: String },
-    ConfirmTerminate { session_id: String, foreground_cmd: String },
+    Askpass {
+        id: String,
+        prompt: String,
+    },
+    ConfirmTerminate {
+        session_id: String,
+        foreground_cmd: String,
+    },
 }
 
 /// 设置模态框页签。
@@ -70,6 +76,7 @@ pub enum ActiveDialog {
 pub enum SettingsTab {
     Appearance,
     Terminal,
+    Notifications,
     Hosts,
     Relays,
     Plugins,
@@ -86,7 +93,7 @@ pub enum MobileTab {
 }
 
 /// 项目摘要记录（对齐 `CONTEXT.md`：源项目 vs 附属项目、本机宿主机 vs 远端主机）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectRecord {
     pub id: String,
     pub name: String,
@@ -97,6 +104,8 @@ pub struct ProjectRecord {
     /// 非空表示这是从该源项目 git worktree 派生出的**附属项目**（ADR 0002）。
     pub derived_from: Option<String>,
     pub branch: Option<String>,
+    /// 保留服务端的树分组信息（多仓库、存档与 shell），避免界面摘要丢失归属。
+    pub source: Option<falcon_proto::Project>,
 }
 
 /// 会话摘要记录（对齐 `CONTEXT.md`：默认不起名，显示自动标题；区分持久会话与临时会话）。
@@ -129,18 +138,19 @@ impl SessionRecord {
         if let Some(ag) = &self.agent {
             return ag.clone();
         }
-        "zsh".to_string()
+        falcon_core::session_title::shell_label(None)
     }
 }
 
 /// 远端主机记录（SSH 连接配置）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HostRecord {
     pub id: String,
     pub name: String,
     pub destination: String,
     pub os_label: String,
     pub connected: bool,
+    pub source: Option<falcon_proto::SshHost>,
 }
 
 /// 中转规则记录（ADR 0016：端口转发与公网发布按机器挂，同槽位互斥）。
@@ -333,6 +343,10 @@ pub struct WorkspaceStore {
     pub active_canvas_id: Signal<String>,
     pub focused_pane_key: Signal<String>,
 
+    pub collapsed: Signal<BTreeMap<String, bool>>,
+    pub sessions_open: Signal<BTreeMap<String, bool>>,
+    pub overview_open: Signal<bool>,
+    pub term_zoomed: Signal<bool>,
     pub sidebar_open: Signal<bool>,
     pub sidebar_width: Signal<f32>,
     pub right_panel_open: Signal<bool>,
@@ -345,10 +359,19 @@ pub struct WorkspaceStore {
     pub extra_ctrl_latched: Signal<bool>,
     pub extra_alt_latched: Signal<bool>,
 
+    pub selected_app_icon: Signal<String>,
+    pub server_info: Signal<Option<falcon_proto::SystemInfo>>,
+    pub finish_sound: Signal<bool>,
+    pub file_directory: Signal<String>,
+    pub files_loading: Signal<bool>,
+    pub file_error: Signal<Option<String>>,
     pub term_prefs: Signal<TermPref>,
     pub agent_views: Signal<HashMap<String, AgentSessionView>>,
     pub file_entries: Signal<Vec<FileEntryItem>>,
     pub open_files: Signal<HashMap<String, OpenFileBuffer>>,
+    pub git_loading: Signal<bool>,
+    pub git_error: Signal<Option<String>>,
+    pub git_diff: Signal<Option<String>>,
     pub git_changes: Signal<Vec<GitChangeItem>>,
     pub git_commits: Signal<Vec<GitCommitItem>>,
     pub selected_git_path: Signal<Option<String>>,
@@ -364,10 +387,27 @@ pub struct WorkspaceStore {
 impl WorkspaceStore {
     /// 初始化工作区（填充一套结构完备的本地种子状态，并在非离线模式下异步连向 `falcon-server`）。
     pub fn install(opts: &FalconLaunchOptions) -> Self {
+        let local_url = falcon_platform::shared().local_server_url();
+        let persisted_profiles = (!opts.offline_demo)
+            .then(|| falcon_platform::shared().load_profiles())
+            .flatten();
+        let mut profiles = ProfilesFile::load_with_local(persisted_profiles.as_deref(), &local_url);
         let url = opts
             .server_url
             .clone()
-            .unwrap_or_else(|| falcon_platform::shared().local_server_url());
+            .unwrap_or_else(|| profiles.startup_profile().url);
+        if !profiles
+            .profiles
+            .iter()
+            .any(|p| p.url.trim_end_matches('/') == url.trim_end_matches('/'))
+        {
+            profiles.upsert(ServerProfile {
+                id: falcon_core::profiles::new_profile_id(),
+                name: url.clone(),
+                url: url.clone(),
+                plaintext_ok: false,
+            });
+        }
         let plaintext = ServerProfile {
             id: "probe".into(),
             name: String::new(),
@@ -389,6 +429,7 @@ impl WorkspaceStore {
                 host_name: None,
                 derived_from: None,
                 branch: Some("main".into()),
+                source: None,
             },
             ProjectRecord {
                 id: "proj-falcon-nsh".into(),
@@ -396,8 +437,9 @@ impl WorkspaceStore {
                 path: "/workspace/falcon.worktrees/nsh-client".into(),
                 host_id: None,
                 host_name: None,
-                derived_from: Some("falcon".into()),
+                derived_from: Some("proj-falcon".into()),
                 branch: Some("feat/nsh-unified-client".into()),
+                source: None,
             },
             ProjectRecord {
                 id: "proj-edge-node".into(),
@@ -407,6 +449,7 @@ impl WorkspaceStore {
                 host_name: Some("build-box-01".into()),
                 derived_from: None,
                 branch: Some("release".into()),
+                source: None,
             },
         ];
 
@@ -443,6 +486,7 @@ impl WorkspaceStore {
             destination: "dev@10.0.4.12:22".into(),
             os_label: crate::i18n::t!("demo.hostOsReady"),
             connected: true,
+            source: None,
         }];
 
         let relays = vec![
@@ -640,7 +684,8 @@ impl WorkspaceStore {
                         app_id: "dev.falcon.plugin.gpu-inspector".into(),
                         version: "0.5.1".into(),
                         build: 12,
-                        sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+                        sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                            .into(),
                         size: 18432,
                     }),
                 },
@@ -782,19 +827,6 @@ impl WorkspaceStore {
             guard.insert("sess-agent".into(), t_agent);
         }
 
-        let persisted_profiles = (!opts.offline_demo)
-            .then(|| falcon_platform::shared().load_profiles())
-            .flatten();
-        let mut profiles = ProfilesFile::load_with_local(persisted_profiles.as_deref(), &url);
-        if let Some(custom) = &opts.server_url {
-            profiles.upsert(ServerProfile {
-                id: "active".into(),
-                name: crate::i18n::t!("demo.currentServer"),
-                url: custom.clone(),
-                plaintext_ok: true,
-            });
-        }
-
         let store = Self {
             profiles: signal(profiles),
             server_url: signal(url.clone()),
@@ -809,20 +841,37 @@ impl WorkspaceStore {
             columns: signal(vec![initial_col]),
             active_canvas_id: signal(c1),
             focused_pane_key: signal(term_key("sess-main")),
+            collapsed: signal(BTreeMap::new()),
+            sessions_open: signal(BTreeMap::new()),
+            overview_open: signal(false),
+            term_zoomed: signal(false),
             sidebar_open: signal(true),
-            sidebar_width: signal(252.0),
+            sidebar_width: signal(260.0),
             right_panel_open: signal(true),
-            right_panel_width: signal(320.0),
+            right_panel_width: signal(260.0),
             right_panel_kind: signal(RightPanelKind::Plugin("sysmon".into())),
             active_dialog: signal(ActiveDialog::None),
             mobile_tab: signal(MobileTab::Workspace),
             tui_passthrough: signal(false),
             extra_ctrl_latched: signal(false),
             extra_alt_latched: signal(false),
-            term_prefs: signal(TermPref::default()),
+            selected_app_icon: signal(falcon_core::app_icon::DEFAULT_APP_ICON.to_string()),
+            server_info: signal(None),
+            finish_sound: signal(
+                crate::theme::load_pref_item("falcon.finishSound").as_deref() != Some("off"),
+            ),
+            file_directory: signal(String::new()),
+            files_loading: signal(false),
+            file_error: signal(None),
+            term_prefs: signal(falcon_core::term::load_term_pref(
+                crate::theme::load_pref_item("falcon.term").as_deref(),
+            )),
             agent_views: signal(agent_map),
             file_entries: signal(file_entries),
             open_files: signal(open_files),
+            git_loading: signal(false),
+            git_error: signal(None),
+            git_diff: signal(None),
             git_changes: signal(git_changes),
             git_commits: signal(git_commits),
             selected_git_path: signal(Some("native/crates/falcon-nsh/src/lib.rs".into())),
@@ -834,7 +883,46 @@ impl WorkspaceStore {
         };
 
         if !opts.offline_demo {
+            store.projects.set(Vec::new());
+            store.sessions.set(Vec::new());
+            store.hosts.set(Vec::new());
+            store.relays.set(Vec::new());
+            store.agent_views.set(HashMap::new());
+            store.file_entries.set(Vec::new());
+            store.open_files.set(HashMap::new());
+            store.git_changes.set(Vec::new());
+            store.git_commits.set(Vec::new());
+            store.selected_git_path.set(None);
+            store.plugin_list.set(PluginList {
+                dir: String::new(),
+                plugins: Vec::new(),
+                trust_root: None,
+            });
+            store.plugin_states.set(HashMap::new());
+            store.terminals.map.lock().clear();
+            store.active_project_id.set(String::new());
+            store.columns.set(Vec::new());
+            store.focused_pane_key.set(String::new());
+            store.restore_workspace(&url);
             store.connect_live_server(&url);
+            let persisted = store.clone();
+            effect(move || persisted.persist_workspace());
+            let profiles = store.profiles;
+            effect(move || {
+                if let Ok(json) = serde_json::to_string(&profiles.get()) {
+                    let platform = falcon_platform::shared();
+                    if platform.load_profiles().as_deref() != Some(json.as_str()) {
+                        platform.store_profiles(&json);
+                    }
+                }
+            });
+            let prefs = store.term_prefs;
+            effect(move || {
+                crate::theme::save_pref_item(
+                    "falcon.term",
+                    Some(&falcon_core::term::serialize_term_pref(&prefs.get())),
+                )
+            });
         }
 
         provide_context(store.clone());
@@ -847,6 +935,7 @@ impl WorkspaceStore {
         let Ok(parsed_url) = url.parse() else {
             return;
         };
+        self.switch_workspace(url);
         let client = FalconClient::new(parsed_url);
         *self.terminals.client.lock() = Some(client.clone());
         self.server_url.set(url.to_string());
@@ -878,14 +967,24 @@ impl WorkspaceStore {
                 .await;
             }
 
+            if let Ok(info) = client.system().await {
+                store.server_info.set(Some(info));
+            }
+            if let Ok(icon) = client.app_icon().await {
+                store.selected_app_icon.set(icon.selected);
+            }
             let mut proj_paths: HashMap<String, String> = HashMap::new();
-            let mut first_proj_id: Option<String> = None;
 
             if let Ok(projects) = client.list_projects().await {
+                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+                {
+                    return;
+                }
                 store.server_connected.set(true);
                 let mapped: Vec<ProjectRecord> = projects
                     .into_iter()
                     .map(|p| {
+                        let source = Some(p.clone());
                         let path = p.working_dir.unwrap_or_default();
                         proj_paths.insert(p.id.clone(), path.clone());
                         let host_name = p.ssh.as_ref().map(|s| s.host.clone());
@@ -901,38 +1000,41 @@ impl WorkspaceStore {
                             host_name,
                             derived_from,
                             branch,
+                            source,
                         }
                     })
                     .collect();
                 if let Some(first) = mapped.first() {
-                    first_proj_id = Some(first.id.clone());
-                    store.active_project_id.set(first.id.clone());
+                    if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
+                        store.active_project_id.set(first.id.clone());
+                    }
                 }
-                if !mapped.is_empty() {
-                    store.projects.set(mapped);
-                }
+                store.projects.set(mapped);
+                store.refresh_project_data();
             }
 
             if let Ok(sessions) = client.list_sessions().await {
+                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+                {
+                    return;
+                }
                 let chimed = store.terminals.chimes.lock().observe_all(
                     sessions
                         .iter()
                         .map(|s| (s.id.as_str(), s.program_status.as_ref())),
                 );
-                if !chimed.is_empty() {
+                if !chimed.is_empty() && store.finish_sound.get() {
                     falcon_platform::shared().play_chime();
                 }
 
                 let mapped_sessions: Vec<SessionRecord> = sessions
                     .into_iter()
                     .map(|s| {
-                        let ps = s.program_status.as_ref().map(|sum| {
-                            (sum.state, detail_text(sum, 80).unwrap_or_default())
-                        });
-                        let cwd = proj_paths
-                            .get(&s.project_id)
-                            .cloned()
-                            .unwrap_or_default();
+                        let ps = s
+                            .program_status
+                            .as_ref()
+                            .map(|sum| (sum.state, detail_text(sum, 80).unwrap_or_default()));
+                        let cwd = proj_paths.get(&s.project_id).cloned().unwrap_or_default();
                         SessionRecord {
                             id: s.id.clone(),
                             project_id: s.project_id.clone(),
@@ -948,21 +1050,32 @@ impl WorkspaceStore {
                     })
                     .collect();
 
-                if !mapped_sessions.is_empty() {
-                    let cid = store.active_canvas_id.get();
-                    let first_sid = mapped_sessions[0].id.clone();
-                    let mut col = column([term_key(&first_sid)], None);
-                    col.canvas = Some(cid);
-                    store.columns.set(vec![col]);
-                    store.focused_pane_key.set(term_key(&first_sid));
+                // 只保留实际仍存在的已打开会话；后台会话不因客户端重启自动全部接回。
+                let columns = store.columns.get();
+                let keys: Vec<_> = pane_keys(&columns).into_iter().filter(|key| {
+                    matches!(parse_pane_key(key), Some(falcon_core::pane_key::PaneItem::Terminal { id, .. })
+                        if mapped_sessions.iter().any(|s| s.id == id))
+                }).collect();
+                store
+                    .columns
+                    .set(falcon_core::layout::sync_columns(&columns, &keys));
+                if !keys.contains(&store.focused_pane_key.get()) {
+                    store
+                        .focused_pane_key
+                        .set(keys.first().cloned().unwrap_or_default());
                 }
                 store.sessions.set(mapped_sessions);
             }
 
             if let Ok(hosts) = client.list_hosts().await {
+                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+                {
+                    return;
+                }
                 let mapped_hosts: Vec<HostRecord> = hosts
                     .into_iter()
                     .map(|h| HostRecord {
+                        source: Some(h.clone()),
                         id: h.id,
                         name: h.name,
                         destination: format!("{}@{}:{}", h.username, h.host, h.port),
@@ -974,6 +1087,10 @@ impl WorkspaceStore {
             }
 
             if let Ok(relays) = client.list_relays().await {
+                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+                {
+                    return;
+                }
                 let mut list = Vec::new();
                 for f in relays.forwards {
                     let kind_label = match f.kind {
@@ -1007,15 +1124,16 @@ impl WorkspaceStore {
             }
 
             if let Ok(agents) = client.local_agents().await {
-                store.detected_agents.set(
-                    agents
-                        .into_iter()
-                        .map(|a| a.as_str().to_string())
-                        .collect(),
-                );
+                store
+                    .detected_agents
+                    .set(agents.into_iter().map(|a| a.as_str().to_string()).collect());
             }
 
             if let Ok(plugins) = client.list_plugins().await {
+                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+                {
+                    return;
+                }
                 let trust_root = if let Some(root) = plugins.trust_root.clone() {
                     Some(root)
                 } else {
@@ -1038,14 +1156,13 @@ impl WorkspaceStore {
                             );
                             let pid = p.id.clone();
                             store.plugin_states.update(|map| {
-                                let entry =
-                                    map.entry(pid).or_insert_with(|| PluginPanelState {
-                                        view: None,
-                                        params: BTreeMap::new(),
-                                        package_status: None,
-                                        loading: false,
-                                        error: None,
-                                    });
+                                let entry = map.entry(pid).or_insert_with(|| PluginPanelState {
+                                    view: None,
+                                    params: BTreeMap::new(),
+                                    package_status: None,
+                                    loading: false,
+                                    error: None,
+                                });
                                 entry.package_status = Some(status);
                             });
                         }
@@ -1055,59 +1172,13 @@ impl WorkspaceStore {
                 }
                 store.plugin_list.set(plugins);
             }
-
-            if let Some(proj_id) = first_proj_id {
-                if let Ok(listing) = client.list_files(&proj_id, None).await {
-                    let entries: Vec<FileEntryItem> = listing
-                        .entries
-                        .into_iter()
-                        .map(|e| {
-                            let is_html = e.path.ends_with(".html") || e.path.ends_with(".htm");
-                            FileEntryItem {
-                                name: e.name,
-                                path: e.path,
-                                is_dir: e.kind == WorkspaceEntryKind::Dir,
-                                size_bytes: e.size.unwrap_or(0),
-                                is_html,
-                            }
-                        })
-                        .collect();
-                    store.file_entries.set(entries);
-                }
-
-                if let Ok(git_w) = client.git_working(&proj_id, None).await
-                    && git_w.available
-                {
-                    let changes: Vec<GitChangeItem> = git_w
-                        .files
-                        .into_iter()
-                        .map(|f| {
-                            let staged = !f.index.trim().is_empty() && f.index != "?";
-                            let status = if !f.work.trim().is_empty() {
-                                f.work.clone()
-                            } else {
-                                f.index.clone()
-                            };
-                            GitChangeItem {
-                                path: f.path.clone(),
-                                status,
-                                staged,
-                                additions: f.added.unwrap_or(0) as u32,
-                                deletions: f.deleted.unwrap_or(0) as u32,
-                                old_text: String::new(),
-                                new_text: String::new(),
-                            }
-                        })
-                        .collect();
-                    store.git_changes.set(changes);
-                }
-            }
         });
     }
 
     /// Web (`wasm32`) 端使用浏览器原生 `fetch` 同步 `falcon-server` 状态。
     #[cfg(target_arch = "wasm32")]
     pub fn connect_live_server(&self, url: &str) {
+        self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
         self.plaintext_warning.set(
@@ -1126,12 +1197,14 @@ impl WorkspaceStore {
 
             if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await
                 && resp.ok()
-                && let Ok(projects) = serde_json::from_slice::<Vec<falcon_proto::Project>>(&resp.body)
+                && let Ok(projects) =
+                    serde_json::from_slice::<Vec<falcon_proto::Project>>(&resp.body)
             {
                 store.server_connected.set(true);
                 let mapped: Vec<ProjectRecord> = projects
                     .into_iter()
                     .map(|p| {
+                        let source = Some(p.clone());
                         let host_name = p.ssh.as_ref().map(|s| s.host.clone());
                         let (derived_from, branch) = match p.worktree {
                             Some(wt) => (Some(wt.source_project_id), Some(wt.branch)),
@@ -1145,15 +1218,16 @@ impl WorkspaceStore {
                             host_name,
                             derived_from,
                             branch,
+                            source,
                         }
                     })
                     .collect();
                 if let Some(first) = mapped.first() {
-                    store.active_project_id.set(first.id.clone());
+                    if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
+                        store.active_project_id.set(first.id.clone());
+                    }
                 }
-                if !mapped.is_empty() {
-                    store.projects.set(mapped);
-                }
+                store.projects.set(mapped);
             }
 
             if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/sessions"))).await
@@ -1189,6 +1263,650 @@ impl WorkspaceStore {
                 store.plugin_list.set(plugins);
             }
         });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn client(&self) -> Option<FalconClient> {
+        self.terminals.client.lock().clone()
+    }
+
+    pub fn select_app_icon(&self, id: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let id = id.to_string();
+            spawn(async move {
+                match client.set_app_icon(&id).await {
+                    Ok(icon) => store.selected_app_icon.set(icon.selected),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+            return;
+        }
+        self.selected_app_icon.set(id.to_string());
+    }
+
+    pub fn reload_plugins(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            spawn(async move {
+                match client.list_plugins().await {
+                    Ok(list) => store.plugin_list.set(list),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+    }
+
+    pub fn set_plugin_enabled(&self, id: &str, enabled: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let id = id.to_string();
+            spawn(async move {
+                match client.set_plugin_enabled(&id, enabled).await {
+                    Ok(list) => store.plugin_list.set(list),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+            return;
+        }
+        self.plugin_list.update(|list| {
+            if let Some(p) = list.plugins.iter_mut().find(|p| p.id == id) {
+                p.enabled = enabled;
+            }
+        });
+    }
+
+    pub fn test_host_connection(&self, id: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let id = id.to_string();
+            store.show_toast(crate::i18n::t!("host.testing"));
+            spawn(async move {
+                match client.test_host(&id).await {
+                    Ok(falcon_proto::SshProbeResult::Reachable { .. }) => {
+                        store.show_toast(crate::i18n::t!("host.testOk"))
+                    }
+                    Ok(falcon_proto::SshProbeResult::Failed { error }) => store.show_toast(error),
+                    Err(error) => store.show_toast(error.to_string()),
+                }
+            });
+        }
+    }
+
+    pub fn check_app_update(&self) {
+        let Some(updater) = falcon_platform::shared().app_updater() else {
+            return;
+        };
+        let store = self.clone();
+        self.show_toast(crate::i18n::t!("native.update.checking"));
+        spawn(async move {
+            let result =
+                nsh_core::prelude::blocking(move || updater.check(env!("CARGO_PKG_VERSION"))).await;
+            let message = match result {
+                Ok(falcon_platform::UpdateCheck::UpToDate { .. }) => {
+                    crate::i18n::t!("native.update.upToDate")
+                }
+                Ok(falcon_platform::UpdateCheck::Available(update)) => {
+                    crate::i18n::t!("native.update.available", version = update.version.as_str())
+                }
+                _ => crate::i18n::t!("native.update.failed"),
+            };
+            store.show_toast(message);
+        });
+    }
+
+    pub fn create_project_request(&self, name: &str, path: &str, host: Option<&str>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let input = falcon_proto::ProjectInput {
+                name: name.to_string(),
+                project_type: if host.is_some() {
+                    falcon_proto::ProjectType::Ssh
+                } else {
+                    falcon_proto::ProjectType::Local
+                },
+                working_dir: (!path.is_empty()).then(|| path.to_string()),
+                shell: None,
+                host_id: host.map(str::to_string),
+                ssh: None,
+                repos: None,
+                default_worktree_branch: None,
+            };
+            spawn(async move {
+                match client.create_project(&input).await {
+                    Ok(project) => {
+                        let id = project.id.clone();
+                        store.projects.update(|list| {
+                            list.push(ProjectRecord {
+                                source: Some(project.clone()),
+                                id: project.id,
+                                name: project.name,
+                                path: project.working_dir.unwrap_or_default(),
+                                host_id: project.host_id,
+                                host_name: project.ssh.map(|s| s.host),
+                                derived_from: None,
+                                branch: None,
+                            })
+                        });
+                        store.active_dialog.set(ActiveDialog::None);
+                        store.select_project(&id);
+                    }
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+            return;
+        }
+        let id = format!("proj-{}", self.projects.get().len() + 1);
+        self.projects.update(|list| {
+            list.push(ProjectRecord {
+                id: id.clone(),
+                name: name.to_string(),
+                path: path.to_string(),
+                host_id: host.map(str::to_string),
+                host_name: None,
+                derived_from: None,
+                branch: None,
+                source: None,
+            })
+        });
+        self.active_project_id.set(id);
+        self.active_dialog.set(ActiveDialog::None);
+    }
+
+    pub fn create_ssh_host(&self, input: falcon_proto::SshHostInput) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            spawn(async move {
+                match client.create_host(&input).await {
+                    Ok(h) => store.hosts.update(|list| {
+                        list.push(HostRecord {
+                            source: Some(h.clone()),
+                            id: h.id,
+                            name: h.name,
+                            destination: format!("{}@{}:{}", h.username, h.host, h.port),
+                            os_label: "SSH".into(),
+                            connected: false,
+                        })
+                    }),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+            return;
+        }
+        let _ = input;
+    }
+
+    pub fn refresh_project_data(&self) {
+        self.browse_directory("");
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let project = self.active_project_id.get();
+            if project.is_empty() {
+                return;
+            }
+            self.git_loading.set(true);
+            self.git_error.set(None);
+            spawn(async move {
+                let (head, working) = futures::join!(
+                    client.repo_info(&project),
+                    client.git_working(&project, None)
+                );
+                if store.active_project_id.get() != project {
+                    return;
+                }
+                if let Ok(head) = head {
+                    store.projects.update(|projects| {
+                        if let Some(p) = projects
+                            .iter_mut()
+                            .find(|p| p.id == project && p.derived_from.is_none())
+                        {
+                            p.branch = head.head_branch.or(head.head_sha);
+                        }
+                    });
+                }
+                match working {
+                    Ok(working) if working.available => {
+                        let changes: Vec<_> = working
+                            .files
+                            .into_iter()
+                            .map(|f| GitChangeItem {
+                                path: f.path.clone(),
+                                status: if !f.work.trim().is_empty() {
+                                    f.work.clone()
+                                } else {
+                                    f.index.clone()
+                                },
+                                staged: true,
+                                additions: f.added.unwrap_or(0) as u32,
+                                deletions: f.deleted.unwrap_or(0) as u32,
+                                old_text: String::new(),
+                                new_text: String::new(),
+                            })
+                            .collect();
+                        let selected = store
+                            .selected_git_path
+                            .get()
+                            .filter(|path| changes.iter().any(|c| &c.path == path));
+                        store.selected_git_path.set(selected);
+                        store.git_changes.set(changes);
+                    }
+                    Ok(working) => {
+                        store.git_changes.set(Vec::new());
+                        store.git_error.set(Some(
+                            working
+                                .detail
+                                .unwrap_or_else(|| crate::i18n::t!("changes.loadFailed")),
+                        ));
+                    }
+                    Err(e) => store.git_error.set(Some(e.to_string())),
+                }
+                store.git_loading.set(false);
+            });
+        }
+    }
+
+    pub fn commit_git_changes(&self, amend: bool, push: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let project = self.active_project_id.get();
+            let input = falcon_proto::GitCommitInput {
+                message: self.commit_draft.get(),
+                all: false,
+                paths: Some(
+                    self.git_changes
+                        .get()
+                        .into_iter()
+                        .filter(|c| c.staged)
+                        .map(|c| c.path)
+                        .collect(),
+                ),
+                amend: Some(amend),
+                push: Some(push),
+            };
+            spawn(async move {
+                match client.git_commit_changes(&project, &input, None).await {
+                    Ok(result) if result.ok => {
+                        store.commit_draft.set(String::new());
+                        store.refresh_project_data();
+                    }
+                    Ok(result) => store.show_toast(result.detail),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+        let _ = (amend, push);
+    }
+
+    pub fn refresh_relays(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            spawn(async move {
+                match client.list_relays().await {
+                    Ok(list) => {
+                        let mut rules: Vec<_> = list
+                            .forwards
+                            .into_iter()
+                            .map(|f| RelayRecord {
+                                id: f.id,
+                                machine_label: f.host_id,
+                                kind_label: if f.kind == falcon_proto::ForwardKind::Local {
+                                    "L → R".into()
+                                } else {
+                                    "R → L".into()
+                                },
+                                local_port: f.bind_port,
+                                target: format!("{}:{}", f.dest_host, f.dest_port),
+                                public_url: None,
+                                enabled: f.enabled,
+                                same_port_conflict: false,
+                            })
+                            .collect();
+                        rules.extend(list.shares.into_iter().map(|s| RelayRecord {
+                            id: s.id,
+                            machine_label: s.host_id.unwrap_or_else(|| "local".into()),
+                            kind_label: "Quick Tunnel".into(),
+                            local_port: s.dest_port,
+                            target: format!("http://{}:{}", s.dest_host, s.dest_port),
+                            public_url: s.public_url,
+                            enabled: s.enabled,
+                            same_port_conflict: false,
+                        }));
+                        store.relays.set(rules);
+                    }
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+    }
+
+    pub fn set_relay_enabled(&self, id: &str, share: bool, enabled: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let id = id.to_string();
+            spawn(async move {
+                let result = if share {
+                    client
+                        .update_share(
+                            &id,
+                            &falcon_proto::PublicSharePatch {
+                                enabled: Some(enabled),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    client
+                        .update_forward(
+                            &id,
+                            &falcon_proto::PortForwardPatch {
+                                enabled: Some(enabled),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                };
+                match result {
+                    Ok(()) => store.refresh_relays(),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+            return;
+        }
+        let _ = share;
+        self.relays.update(|rules| {
+            if let Some(r) = rules.iter_mut().find(|r| r.id == id) {
+                r.enabled = enabled;
+            }
+        });
+    }
+
+    pub fn create_public_share(&self, host: &str, port: u16, name: &str) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let input = falcon_proto::PublicShareInput {
+                host_id: (!host.is_empty()).then(|| host.to_string()),
+                name: (!name.is_empty()).then(|| name.to_string()),
+                dest_host: None,
+                dest_port: port,
+                enabled: Some(true),
+            };
+            spawn(async move {
+                match client.create_share(&input).await {
+                    Ok(_) => store.refresh_relays(),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+        let _ = (host, port, name);
+    }
+
+    pub fn create_port_forward(
+        &self,
+        host: &str,
+        remote: bool,
+        bind: u16,
+        destination: &str,
+        port: u16,
+        name: &str,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let input = falcon_proto::PortForwardInput {
+                host_id: host.to_string(),
+                name: (!name.is_empty()).then(|| name.to_string()),
+                kind: if remote {
+                    falcon_proto::ForwardKind::Remote
+                } else {
+                    falcon_proto::ForwardKind::Local
+                },
+                bind_host: None,
+                bind_port: bind,
+                dest_host: (!destination.is_empty()).then(|| destination.to_string()),
+                dest_port: port,
+                enabled: Some(true),
+            };
+            spawn(async move {
+                match client.create_forward(&input).await {
+                    Ok(_) => store.refresh_relays(),
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+        let _ = (host, remote, bind, destination, port, name);
+    }
+
+    /// 切换连接前先保存旧工作区，再读取目标服务端的布局，避免把旧布局写进新配置。
+    fn switch_workspace(&self, url: &str) {
+        if self.server_url.get().trim_end_matches('/') == url.trim_end_matches('/') {
+            return;
+        }
+        self.persist_workspace();
+        for session in self.terminals.map.lock().values() {
+            session.detach_socket();
+        }
+        self.terminals.map.lock().clear();
+        if !self
+            .profiles
+            .get()
+            .profiles
+            .iter()
+            .any(|p| p.url.trim_end_matches('/') == url.trim_end_matches('/'))
+        {
+            self.profiles.update(|profiles| {
+                profiles.upsert(ServerProfile {
+                    id: falcon_core::profiles::new_profile_id(),
+                    name: url.to_string(),
+                    url: url.to_string(),
+                    plaintext_ok: false,
+                })
+            });
+        }
+        self.server_url.set(url.to_string());
+        self.restore_workspace(url);
+        self.server_connected.set(false);
+        self.projects.set(Vec::new());
+        self.sessions.set(Vec::new());
+        self.hosts.set(Vec::new());
+        self.relays.set(Vec::new());
+        self.file_entries.set(Vec::new());
+        self.open_files.set(HashMap::new());
+        self.git_changes.set(Vec::new());
+        self.git_diff.set(None);
+        self.agent_views.set(HashMap::new());
+        self.plugin_states.set(HashMap::new());
+        self.plugin_list.set(PluginList {
+            dir: String::new(),
+            plugins: Vec::new(),
+            trust_root: None,
+        });
+    }
+
+    /// 沿用 GPUI 的 profile id 与 JSON 形状，直接读取已安装客户端的工作区。
+    fn workspace_profile_id(&self) -> String {
+        let url = self.server_url.get();
+        self.profiles
+            .get()
+            .profiles
+            .iter()
+            .find(|p| p.url.trim_end_matches('/') == url.trim_end_matches('/'))
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| "local".into())
+    }
+
+    fn restore_workspace(&self, _url: &str) {
+        use falcon_core::workspace::{ActiveView, RightPanelId, load_workspace, restore_columns};
+        let raw = falcon_platform::shared().load_workspace(&self.workspace_profile_id());
+        let saved = load_workspace(raw.as_deref());
+        self.columns.set(restore_columns(&saved));
+        self.overview_open
+            .set(matches!(saved.active, ActiveView::Overview));
+        self.focused_pane_key.set(match saved.active {
+            ActiveView::Terminal { session_id } => term_key(&session_id),
+            _ => String::new(),
+        });
+        self.active_project_id
+            .set(saved.selected_project_id.unwrap_or_default());
+        self.sidebar_open.set(saved.sidebar_open);
+        self.sidebar_width.set(saved.sidebar_width as f32);
+        self.right_panel_open.set(saved.right_open);
+        self.right_panel_width.set(saved.right_width as f32);
+        self.right_panel_kind.set(match saved.right_panel {
+            RightPanelId::Files => RightPanelKind::Files,
+            RightPanelId::Changes => RightPanelKind::Git,
+            RightPanelId::Plugin(id) => RightPanelKind::Plugin(id),
+        });
+        self.collapsed.set(saved.collapsed);
+        self.sessions_open.set(saved.sessions_open);
+        self.term_zoomed.set(saved.term_zoomed);
+    }
+
+    fn persist_workspace(&self) {
+        use falcon_core::workspace::{
+            ActiveView, PersistedColumn, PersistedWorkspace, RightPanelId, serialize_workspace,
+        };
+        let columns = self.columns.get();
+        let focused = self.focused_pane_key.get();
+        let selected = self.active_project_id.get();
+        let persisted = PersistedWorkspace {
+            tabs: pane_keys(&columns)
+                .iter()
+                .filter_map(|k| match parse_pane_key(k) {
+                    Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            columns: columns
+                .iter()
+                .filter_map(|c| {
+                    let panes: Vec<_> = c
+                        .panes
+                        .iter()
+                        .filter(|p| p.key.starts_with("t:"))
+                        .cloned()
+                        .collect();
+                    (!panes.is_empty()).then(|| PersistedColumn {
+                        basis: c.basis,
+                        panes,
+                        pinned: c.pinned,
+                        canvas: if c.pinned { None } else { c.canvas.clone() },
+                    })
+                })
+                .collect(),
+            active: if self.overview_open.get() {
+                ActiveView::Overview
+            } else {
+                match parse_pane_key(&focused) {
+                    Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) => {
+                        ActiveView::Terminal { session_id: id }
+                    }
+                    _ if !selected.is_empty() => ActiveView::Project,
+                    _ => ActiveView::Overview,
+                }
+            },
+            sidebar_open: self.sidebar_open.get(),
+            sidebar_width: self.sidebar_width.get() as f64,
+            right_open: self.right_panel_open.get(),
+            right_width: self.right_panel_width.get() as f64,
+            right_panel: match self.right_panel_kind.get() {
+                RightPanelKind::Files => RightPanelId::Files,
+                RightPanelKind::Git => RightPanelId::Changes,
+                RightPanelKind::Plugin(id) => RightPanelId::Plugin(id),
+            },
+            collapsed: self.collapsed.get(),
+            sessions_open: self.sessions_open.get(),
+            selected_project_id: (!selected.is_empty()).then_some(selected),
+            term_zoomed: self.term_zoomed.get(),
+            ..Default::default()
+        };
+        let json = serialize_workspace(&persisted);
+        let platform = falcon_platform::shared();
+        let profile = self.workspace_profile_id();
+        if platform.load_workspace(&profile).as_deref() != Some(json.as_str()) {
+            platform.store_workspace(&profile, &json);
+        }
+    }
+
+    pub fn browse_directory(&self, path: &str) {
+        self.file_directory.set(path.to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.terminals.client.lock().clone() {
+            let store = self.clone();
+            let project = self.active_project_id.get();
+            let directory = path.to_string();
+            self.files_loading.set(true);
+            self.file_error.set(None);
+            spawn(async move {
+                let result = client.list_files(&project, Some(&directory)).await;
+                // 快速切目录或项目时，迟到的旧响应不得覆盖当前面板。
+                if store.active_project_id.get() != project
+                    || store.file_directory.get() != directory
+                {
+                    return;
+                }
+                match result {
+                    Ok(listing) => store.file_entries.set(
+                        listing
+                            .entries
+                            .into_iter()
+                            .map(|e| FileEntryItem {
+                                is_html: e.path.ends_with(".html") || e.path.ends_with(".htm"),
+                                name: e.name,
+                                path: e.path,
+                                is_dir: e.kind == WorkspaceEntryKind::Dir,
+                                size_bytes: e.size.unwrap_or(0),
+                            })
+                            .collect(),
+                    ),
+                    Err(e) => store.file_error.set(Some(e.to_string())),
+                }
+                store.files_loading.set(false);
+            });
+        }
+    }
+
+    pub fn select_project(&self, project_id: &str) {
+        self.selected_git_path.set(None);
+        self.git_diff.set(None);
+        self.overview_open.set(false);
+        let changed = self.active_project_id.get() != project_id;
+        self.active_project_id.set(project_id.to_string());
+        if changed {
+            self.refresh_project_data();
+        }
+        // 选项目只切换该项目的画布，不自动接回收起的会话。
+        if let Some(s) = self
+            .sessions
+            .get()
+            .iter()
+            .find(|s| s.project_id == project_id && self.is_session_attached(&s.id))
+        {
+            self.focused_pane_key.set(term_key(&s.id));
+        } else {
+            self.focused_pane_key.set(String::new());
+        }
+    }
+
+    pub fn toggle_right_panel(&self, kind: RightPanelKind) {
+        if self.right_panel_open.get() && self.right_panel_kind.get() == kind {
+            self.right_panel_open.set(false);
+        } else {
+            self.right_panel_kind.set(kind);
+            self.right_panel_open.set(true);
+        }
     }
 
     pub fn term_prefs(&self) -> TermPref {
@@ -1227,12 +1945,23 @@ impl WorkspaceStore {
 
     /// 聚焦指定会话窗口；若该会话处于 Detach 后台态，则自动接回（Reattach）到当前画布最右列。
     pub fn focus_session(&self, session_id: &str) {
+        self.overview_open.set(false);
         let key = term_key(session_id);
         let cols = self.columns.get();
         if find_pane(&cols, &key).is_none() {
             let cid = self.active_canvas_id.get();
             let next = insert_column(&cols, &key, cols.len(), Some(&cid));
             self.columns.set(next);
+        } else if let Some(at) = find_pane(&cols, &key)
+            && let Some(canvas) = cols[at.col].canvas.as_ref()
+        {
+            self.active_canvas_id.set(canvas.clone());
+        }
+        if let Some(s) = self.sessions.get().iter().find(|s| s.id == session_id) {
+            self.active_project_id.set(s.project_id.clone());
+            self.sessions_open.update(|open| {
+                open.insert(s.project_id.clone(), true);
+            });
         }
         self.focused_pane_key.set(key);
         // 查看后清除已完成/错误的程序状态提醒（ADR 0020）
@@ -1251,12 +1980,16 @@ impl WorkspaceStore {
     /// 新建一扇当前焦点项目的持久终端窗口并排入当前画布。
     pub fn create_terminal_in_active_project(&self) -> String {
         let proj_id = self.active_project_id.get();
+        if proj_id.is_empty() {
+            self.active_dialog.set(ActiveDialog::NewProject);
+            return String::new();
+        }
         let proj_path = self
             .projects
             .get()
             .into_iter()
             .find(|p| p.id == proj_id)
-            .map_or_else(|| "/workspace".to_string(), |p| p.path);
+            .map_or_else(String::new, |p| p.path);
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.terminals.client.lock().clone() {
@@ -1312,10 +2045,10 @@ impl WorkspaceStore {
 
     /// **Detach（收起窗口）**：仅从列式工作区移除该窗口并断开本地 Viewer socket，**绝不结束后台会话**。
     pub fn detach_pane(&self, pane_key: &str) {
-        if let Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) =
-            parse_pane_key(pane_key)
+        if let Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) = parse_pane_key(pane_key)
         {
-            if let Some(sess) = self.terminals.map.lock().get(&id) {
+            // 接回时必须重新建立 Viewer；缓存一个已断开 socket 的实例会让终端永远停在旧画面。
+            if let Some(sess) = self.terminals.map.lock().remove(&id) {
                 sess.detach_socket();
             }
         }
@@ -1345,7 +2078,8 @@ impl WorkspaceStore {
     pub fn force_terminate_session(&self, session_id: &str) {
         let key = term_key(session_id);
         self.detach_pane(&key);
-        self.sessions.update(|list| list.retain(|s| s.id != session_id));
+        self.sessions
+            .update(|list| list.retain(|s| s.id != session_id));
         self.terminals.map.lock().remove(session_id);
         self.active_dialog.set(ActiveDialog::None);
 
@@ -1433,8 +2167,42 @@ impl WorkspaceStore {
         self.focused_pane_key.set(key);
     }
 
+    /// 在修改面板内预览差异；仅显式展开时才添加工作区窗口。
+    pub fn preview_git_path(&self, path: &str) {
+        self.selected_git_path.set(Some(path.to_string()));
+        self.load_git_diff();
+    }
+
+    fn load_git_diff(&self) {
+        self.git_diff.set(None);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(client), Some(path)) = (self.client(), self.selected_git_path.get()) {
+            let store = self.clone();
+            let project = self.active_project_id.get();
+            let base_url = self.server_url.get();
+            spawn(async move {
+                match client
+                    .git_file_diff(&project, &falcon_client::GitFileRef::new(&path), None)
+                    .await
+                {
+                    Ok(diff)
+                        if diff.available
+                            && store.server_url.get() == base_url
+                            && store.active_project_id.get() == project
+                            && store.selected_git_path.get().as_deref() == Some(path.as_str()) =>
+                    {
+                        store.git_diff.set(Some(diff.diff))
+                    }
+                    Ok(_) => {}
+                    Err(e) => store.show_toast(e.to_string()),
+                }
+            });
+        }
+    }
+
     /// 打开工作区级统一 Diff 窗口（`DIFF_KEY = "d"`）。
     pub fn open_diff_pane(&self) {
+        self.load_git_diff();
         let cols = self.columns.get();
         if find_pane(&cols, DIFF_KEY).is_none() {
             let cid = self.active_canvas_id.get();
@@ -1460,12 +2228,8 @@ impl WorkspaceStore {
                 {
                     let base = (!buf.disk_hash.is_empty() && buf.disk_hash != "sha256:initial")
                         .then(|| buf.disk_hash.clone());
-                    pending_save = Some((
-                        buf.project_id.clone(),
-                        buf.path.clone(),
-                        disk_payload,
-                        base,
-                    ));
+                    pending_save =
+                        Some((buf.project_id.clone(), buf.path.clone(), disk_payload, base));
                 }
                 #[cfg(target_arch = "wasm32")]
                 let _ = disk_payload;
@@ -1530,9 +2294,32 @@ impl WorkspaceStore {
                 .unwrap_or_default();
 
             if let Some(client) = self.terminals.client.lock().clone() {
+                if action_id.is_none()
+                    && self
+                        .plugin_states
+                        .get()
+                        .get(plugin_id)
+                        .is_some_and(|s| s.loading)
+                {
+                    return;
+                }
+                self.plugin_states.update(|states| {
+                    let state =
+                        states
+                            .entry(plugin_id.to_string())
+                            .or_insert_with(|| PluginPanelState {
+                                view: None,
+                                params: BTreeMap::new(),
+                                package_status: None,
+                                loading: false,
+                                error: None,
+                            });
+                    state.loading = true;
+                });
                 let pid = plugin_id.to_string();
                 let act = action_id.map(str::to_owned);
                 let store = self.clone();
+                let request_url = self.server_url.get();
                 spawn(async move {
                     let res = if let Some(action) = act {
                         client
@@ -1551,6 +2338,16 @@ impl WorkspaceStore {
                             .plugin_render(&pid, &PluginRenderInput { project_id, params })
                             .await
                     };
+                    if store.server_url.get() != request_url {
+                        return;
+                    }
+                    let result_error = res.as_ref().err().map(ToString::to_string);
+                    store.plugin_states.update(|states| {
+                        if let Some(state) = states.get_mut(&pid) {
+                            state.loading = false;
+                            state.error = result_error;
+                        }
+                    });
                     if let Ok(view) = res {
                         store.plugin_states.update(|map| {
                             let entry =

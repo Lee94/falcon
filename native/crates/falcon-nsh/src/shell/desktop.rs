@@ -7,34 +7,39 @@
 //! - 显式区分「收起窗口」（Detach，仅移除视图，后台持久会话继续跑）与「终止会话」（Terminate，忙时先弹确认框）。
 
 use falcon_core::layout::{
-    CANVAS_GAP_PX, Viewport, canvas_groups, canvas_index, is_pinned, layout_frames, move_to_canvas,
-    pin_pane, unpin_all,
+    Viewport, canvas_groups, canvas_index, is_pinned, layout_frames, move_to_canvas, pin_pane,
+    unpin_all,
 };
-use falcon_core::pane_key::{PaneItem, parse_pane_key, term_key};
+use falcon_core::pane_key::{PaneItem, parse_pane_key};
 use falcon_proto::ProgramState;
 use nsh_core::prelude::*;
 
+use super::sidebar::sidebar_island;
+use super::widgets::{Glyph, icon_button};
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::store::{ActiveDialog, RightPanelKind, SettingsTab, WorkspaceStore, use_workspace};
+use crate::store::{ActiveDialog, RightPanelKind, WorkspaceStore, use_workspace};
 use crate::terminal::falcon_terminal;
 use crate::theme::{rgb_to_hsla, use_theme};
 use crate::views::{
     agent_pane_view, diff_pane_view, file_pane_view, files_panel, git_panel, plugin_panel,
 };
-use crate::zoom::{pt_px, zpx};
+use crate::zoom::{current_zoom, pt_px, zpx};
 
 #[component]
 pub fn DesktopShell() -> impl IntoElement {
     let store = use_workspace();
     let theme_ctrl = use_theme();
     let canvas_area_size = signal((960.0_f64, 640.0_f64));
+    let identity = store.clone();
 
-    view()
-        .size_full()
+    let shell = view()
+        .flex_1()
+        .min_h_0()
+        .w_full()
         .flex_row()
-        .p(zpx(8.0))
-        .gap(zpx(8.0))
+        .p(zpx(6.0))
+        .gap(zpx(6.0))
         .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
         .child(dynamic({
             let st = store.clone();
@@ -43,21 +48,32 @@ pub fn DesktopShell() -> impl IntoElement {
                 if !st.sidebar_open.get() {
                     return view().into_element();
                 }
-                render_sidebar_island(&st, &resolved).into_element()
+                view()
+                    .h_full()
+                    .flex_none()
+                    .relative()
+                    .child(sidebar_island(&st, &resolved))
+                    .child(panel_resize_handle(&st, false))
+                    .into_element()
             }
         }))
         .child(
             view()
                 .flex_1()
+                .min_w_0()
                 .h_full()
                 .flex_col()
-                .gap(zpx(8.0))
+                .gap(zpx(0.0))
                 .overflow_hidden()
                 .child(dynamic({
                     let st = store.clone();
                     move || {
                         let resolved = theme_ctrl.resolved();
-                        render_workspace_topbar(&st, &resolved).into_element()
+                        if canvas_groups(&project_columns(&st)).len() > 1 {
+                            render_workspace_topbar(&st, &resolved).into_element()
+                        } else {
+                            view().into_element()
+                        }
                     }
                 }))
                 .child(
@@ -67,333 +83,53 @@ pub fn DesktopShell() -> impl IntoElement {
                         .relative()
                         .overflow_hidden()
                         .on_layout(move |b: &Bounds<Points>| {
-                            let w = (b.size.width.0 as f64).max(320.0);
-                            let h = (b.size.height.0 as f64).max(200.0);
-                            canvas_area_size.set((w, h));
+                            let w = (b.size.width.0 as f64).max(1.0);
+                            let h = (b.size.height.0 as f64).max(1.0);
+                            if canvas_area_size.get() != (w, h) {
+                                canvas_area_size.set((w, h));
+                            }
                         })
                         .child(dynamic({
                             let st = store.clone();
                             move || {
                                 let resolved = theme_ctrl.resolved();
                                 let (vw, vh) = canvas_area_size.get();
-                                render_canvas_columns(&st, &resolved, vw, vh).into_element()
+                                if st.overview_open.get() {
+                                    super::overview::session_overview().into_element()
+                                } else {
+                                    render_canvas_columns(&st, &resolved, vw, vh).into_element()
+                                }
                             }
                         })),
                 ),
         )
-        .child(dynamic(move || {
-            let resolved = theme_ctrl.resolved();
-            if !store.right_panel_open.get() {
-                return view().into_element();
+        .child(dynamic({
+            let store = store.clone();
+            move || {
+                let resolved = theme_ctrl.resolved();
+                if !store.right_panel_open.get() {
+                    return view().into_element();
+                }
+                view()
+                    .h_full()
+                    .flex_none()
+                    .relative()
+                    .child(render_right_panel_island(&store, &resolved))
+                    .child(panel_resize_handle(&store, true))
+                    .into_element()
             }
-            render_right_panel_island(&store, &resolved).into_element()
         }))
-}
-
-fn render_sidebar_island(
-    store: &WorkspaceStore,
-    resolved: &falcon_theme::ResolvedTheme,
-) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let width = store.sidebar_width.get();
-    let projects = store.projects.get();
-    let sessions = store.sessions.get();
-    let active_proj = store.active_project_id.get();
-    let focused_key = store.focused_pane_key.get();
-    let connected = store.server_connected.get();
-    let plaintext = store.plaintext_warning.get();
-
-    let header = {
-        let st_prof = store.clone();
-        let st_set = store.clone();
-        let st_new_proj = store.clone();
-        let st_new_term = store.clone();
-        let appearance_tag = if resolved.is_dark {
-            t!("native.nsh.themeDerivedDark")
-        } else {
-            t!("native.nsh.themeDerivedLight")
-        };
-
-        view()
-            .flex_col()
-            .gap(zpx(6.0))
-            .p(zpx(10.0))
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(zpx(6.0))
-                            .cursor_pointer()
-                            .on_press(move || st_prof.active_dialog.set(ActiveDialog::Profiles))
-                            .child(
-                                text(t!("native.nsh.appTitle"))
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb_to_hsla(ui.sidebar_foreground)),
-                            )
-                            .child(
-                                view()
-                                    .px(zpx(6.0))
-                                    .py(zpx(1.5))
-                                    .rounded(zpx(4.0))
-                                    .bg(rgb_to_hsla(ui.sidebar_accent))
-                                    .child(
-                                        text(if connected {
-                                            t!("native.nsh.serverOnline")
-                                        } else {
-                                            t!("native.nsh.serverOffline")
-                                        })
-                                        .text_xs()
-                                        .text_color(rgb_to_hsla(ui.sidebar_accent_foreground)),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        view()
-                            .px(zpx(7.0))
-                            .py(zpx(3.0))
-                            .rounded(zpx(5.0))
-                            .cursor_pointer()
-                            .bg(rgb_to_hsla(ui.sidebar_accent))
-                            .on_press(move || {
-                                st_set
-                                    .active_dialog
-                                    .set(ActiveDialog::Settings(SettingsTab::Appearance));
-                            })
-                            .child(
-                                text(t!("sidebar.settings"))
-                                    .text_xs()
-                                    .text_color(rgb_to_hsla(ui.sidebar_accent_foreground)),
-                            ),
-                    ),
-            )
-            .child(
-                text(appearance_tag)
-                    .text_xs()
-                    .text_color(rgb_to_hsla(ui.muted_foreground)),
-            )
-            .when(plaintext, |el| {
-                el.child(
-                    text(t!("native.server.plaintext"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.warning)),
-                )
-            })
-            .child(
-                view()
-                    .flex_row()
-                    .gap(zpx(6.0))
-                    .child(
-                        view()
-                            .flex_1()
-                            .items_center()
-                            .py(zpx(5.0))
-                            .rounded(zpx(6.0))
-                            .cursor_pointer()
-                            .bg(rgb_to_hsla(ui.sidebar_accent))
-                            .on_press(move || {
-                                st_new_proj.active_dialog.set(ActiveDialog::NewProject);
-                            })
-                            .child(
-                                text(t!("sidebar.newProject"))
-                                    .text_xs()
-                                    .text_color(rgb_to_hsla(ui.sidebar_accent_foreground)),
-                            ),
-                    )
-                    .child(
-                        view()
-                            .flex_1()
-                            .items_center()
-                            .py(zpx(5.0))
-                            .rounded(zpx(6.0))
-                            .cursor_pointer()
-                            .bg(rgb_to_hsla(ui.tint))
-                            .on_press(move || {
-                                st_new_term.create_terminal_in_active_project();
-                            })
-                            .child(
-                                text(t!("sidebar.newTerminal"))
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb_to_hsla(ui.tint_foreground)),
-                            ),
-                    ),
-            )
-    };
-
-    let mut project_blocks = view().flex_col().px(zpx(8.0)).pb(zpx(10.0)).gap(zpx(8.0));
-
-    for proj in projects {
-        let is_active_proj = proj.id == active_proj;
-        let proj_sessions: Vec<_> = sessions
-            .iter()
-            .filter(|s| s.project_id == proj.id)
-            .cloned()
-            .collect();
-
-        let location_line = match &proj.host_name {
-            Some(host) => t!("native.nsh.hostPrefix", name = host.as_str()),
-            None => t!("native.nsh.localMachine"),
-        };
-
-        let st_pick_proj = store.clone();
-        let pid_pick = proj.id.clone();
-
-        let mut card = view()
-            .flex_col()
-            .gap(zpx(4.0))
-            .p(zpx(8.0))
-            .rounded(zpx(8.0))
-            .bg(if is_active_proj {
-                rgb_to_hsla(ui.sidebar_accent)
-            } else {
-                rgb_to_hsla(ui.sidebar)
-            })
-            .child(
-                view()
-                    .flex_col()
-                    .gap(zpx(2.0))
-                    .cursor_pointer()
-                    .on_press(move || st_pick_proj.active_project_id.set(pid_pick.clone()))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap(zpx(4.0))
-                            .child(
-                                text(proj.name.clone())
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb_to_hsla(ui.sidebar_foreground)),
-                            )
-                            .when(proj.derived_from.is_some(), |el| {
-                                el.child(
-                                    view()
-                                        .px(zpx(5.0))
-                                        .py(zpx(1.0))
-                                        .rounded(zpx(4.0))
-                                        .bg(rgb_to_hsla(ui.tint))
-                                        .child(
-                                            text(t!("native.nsh.derivedBadge"))
-                                                .text_xs()
-                                                .text_color(rgb_to_hsla(ui.tint_foreground)),
-                                        ),
-                                )
-                            }),
-                    )
-                    .when_some(proj.derived_from.clone(), |el, src_name| {
-                        el.child(
-                            text(t!(
-                                "native.nsh.sourceProjectPrefix",
-                                name = src_name.as_str()
-                            ))
-                            .text_xs()
-                            .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        )
-                    })
-                    .child(
-                        text(location_line)
-                            .text_xs()
-                            .text_color(rgb_to_hsla(ui.muted_foreground)),
-                    ),
-            );
-
-        for sess in proj_sessions {
-            let pane_k = term_key(&sess.id);
-            let attached = store.is_session_attached(&sess.id);
-            let is_focused = focused_key == pane_k;
-            let st_focus = store.clone();
-            let sid_focus = sess.id.clone();
-
-            let mut row = view()
-                .flex_col()
-                .gap(zpx(3.0))
-                .p(zpx(6.0))
-                .rounded(zpx(6.0))
-                .bg(if is_focused {
-                    rgb_to_hsla(ui.tint)
-                } else {
-                    rgb_to_hsla(ui.card)
-                })
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(zpx(4.0))
-                        .cursor_pointer()
-                        .on_press(move || st_focus.focus_session(&sid_focus))
-                        .child(
-                            text(sess.display_title())
-                                .text_xs()
-                                .number_of_lines(1)
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        )
-                        .child(
-                            text(if sess.durable {
-                                t!("native.nsh.durableBadge")
-                            } else {
-                                t!("native.nsh.ephemeralBadge")
-                            })
-                            .text_xs()
-                            .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        ),
-                );
-
-            if !attached {
-                let st_reattach = store.clone();
-                let sid_reattach = sess.id.clone();
-                let reattach_label = format!("reattach-{}", sess.id);
-                row = row.child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            text(t!("native.nsh.detachedBadge"))
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.tint_strong)),
-                        )
-                        .child(
-                            view()
-                                .label(reattach_label)
-                                .px(zpx(6.0))
-                                .py(zpx(2.0))
-                                .rounded(zpx(4.0))
-                                .cursor_pointer()
-                                .bg(rgb_to_hsla(ui.tint_strong))
-                                .on_press(move || st_reattach.focus_session(&sid_reattach))
-                                .child(
-                                    text(t!("native.nsh.reattachSession"))
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb_to_hsla(ui.primary_foreground)),
-                                ),
-                        ),
-                );
-            }
-
-            card = card.child(row);
-        }
-
-        project_blocks = project_blocks.child(card);
-    }
-
+        .child(dynamic(move || {
+            activity_bar(&store, &theme_ctrl.resolved()).into_element()
+        }));
     view()
-        .w(zpx(width))
-        .h_full()
+        .size_full()
         .flex_col()
-        .rounded(zpx(10.0))
-        .overflow_hidden()
-        .bg(rgb_to_hsla(ui.sidebar))
-        .child(header)
-        .child(scroll().flex_1().child(project_blocks))
+        .bg(move || rgb_to_hsla(theme_ctrl.resolved().ui.app))
+        .child(dynamic(move || {
+            identity_strip(&identity, &theme_ctrl.resolved()).into_element()
+        }))
+        .child(shell)
 }
 
 fn render_workspace_topbar(
@@ -401,7 +137,7 @@ fn render_workspace_topbar(
     resolved: &falcon_theme::ResolvedTheme,
 ) -> impl IntoElement {
     let ui = &resolved.ui;
-    let cols = store.columns.get();
+    let cols = project_columns(store);
     let focused = store.focused_pane_key.get();
     let remembered = store.active_canvas_id.get();
     let groups = canvas_groups(&cols);
@@ -413,24 +149,30 @@ fn render_workspace_topbar(
 
     let mut left = view().flex_row().items_center().gap(zpx(6.0));
 
-    {
-        let st_sb = store.clone();
-        left = left.child(
-            view()
-                .px(zpx(7.0))
-                .py(zpx(3.0))
-                .rounded(zpx(5.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || st_sb.sidebar_open.update(|v| *v = !*v))
-                .child(
-                    text(t!("sidebar.collapse"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        );
+    if !store.sidebar_open.get() {
+        let st = store.clone();
+        left = left.child(icon_button(
+            "sidebar-expand",
+            t!("native.nsh.expandSidebar"),
+            Glyph::Sidebar,
+            false,
+            resolved,
+            move || st.sidebar_open.set(true),
+        ));
     }
-
+    let project_name = store
+        .projects
+        .get()
+        .into_iter()
+        .find(|p| p.id == store.active_project_id.get())
+        .map(|p| p.name)
+        .unwrap_or_default();
+    left = left.child(
+        text(project_name)
+            .text_xs()
+            .number_of_lines(1)
+            .text_color(rgb_to_hsla(ui.muted_foreground)),
+    );
     for (idx, group) in groups.iter().enumerate() {
         let selected = idx == active_idx;
         let st = store.clone();
@@ -448,13 +190,10 @@ fn render_workspace_topbar(
             view()
                 .px(zpx(8.0))
                 .py(zpx(3.0))
-                .rounded(zpx(5.0))
+                .rounded(zpx(12.0))
                 .cursor_pointer()
-                .bg(if selected {
-                    rgb_to_hsla(ui.tint)
-                } else {
-                    rgb_to_hsla(ui.secondary)
-                })
+                .when(selected, |v| v.bg(rgb_to_hsla(ui.background)))
+                .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
                 .on_press(move || {
                     st.active_canvas_id.set(gid.clone());
                     if let Some(k) = &first_key {
@@ -470,103 +209,51 @@ fn render_workspace_topbar(
     }
 
     if !focused.is_empty() {
-        let st_move = store.clone();
+        let st = store.clone();
         let fk = focused.clone();
         let after = remembered.clone();
-        left = left.child(
-            view()
-                .px(zpx(7.0))
-                .py(zpx(3.0))
-                .rounded(zpx(5.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || {
-                    let cur = st_move.columns.get();
-                    if let Some(next) = move_to_canvas(&cur, &fk, None, Some(&after)) {
-                        st_move.columns.set(next);
-                    }
-                })
-                .child(
-                    text(t!("native.nsh.newCanvas"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        );
+        left = left.child(icon_button(
+            "move-new-canvas",
+            t!("pane.moveToNewCanvas"),
+            Glyph::Plus,
+            false,
+            resolved,
+            move || {
+                if let Some(cols) = move_to_canvas(&st.columns.get(), &fk, None, Some(&after)) {
+                    st.columns.set(cols);
+                }
+            },
+        ));
     }
-
-    let mut right = view().flex_row().items_center().gap(zpx(6.0));
-    {
-        let st_pal = store.clone();
-        right = right.child(
-            view()
-                .px(zpx(8.0))
-                .py(zpx(3.0))
-                .rounded(zpx(5.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || st_pal.active_dialog.set(ActiveDialog::Palette))
-                .child(
-                    text(t!("palette.title"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        );
-    }
-
-    let current_rp = store.right_panel_kind.get();
-    let rp_open = store.right_panel_open.get();
-
-    let mut panel_tabs: Vec<(RightPanelKind, String)> = vec![
-        (RightPanelKind::Files, t!("native.nsh.RightPanelFiles")),
-        (RightPanelKind::Git, t!("native.nsh.RightPanelGit")),
-    ];
-    for p in store.plugin_list.get().plugins {
-        if p.enabled && p.error.is_none() {
-            panel_tabs.push((RightPanelKind::Plugin(p.id), p.name));
-        }
-    }
-
-    for (kind, label) in panel_tabs {
-        let active = rp_open && current_rp == kind;
-        let st = store.clone();
-        let target_kind = kind.clone();
-        right = right.child(
-            view()
-                .px(zpx(8.0))
-                .py(zpx(3.0))
-                .rounded(zpx(5.0))
-                .cursor_pointer()
-                .bg(if active {
-                    rgb_to_hsla(ui.tint)
-                } else {
-                    rgb_to_hsla(ui.secondary)
-                })
-                .on_press(move || {
-                    if st.right_panel_open.get() && st.right_panel_kind.get() == target_kind {
-                        st.right_panel_open.set(false);
-                    } else {
-                        st.right_panel_kind.set(target_kind.clone());
-                        st.right_panel_open.set(true);
-                    }
-                })
-                .child(text(label).text_xs().text_color(if active {
-                    rgb_to_hsla(ui.tint_foreground)
-                } else {
-                    rgb_to_hsla(ui.secondary_foreground)
-                })),
-        );
-    }
-
+    let st_new = store.clone();
+    let st_pal = store.clone();
     view()
+        .label("workspace-topbar")
+        .h(zpx(32.0))
+        .flex_none()
         .flex_row()
         .items_center()
         .justify_between()
-        .px(zpx(10.0))
-        .py(zpx(6.0))
-        .rounded(zpx(10.0))
-        .bg(rgb_to_hsla(ui.background))
-        .child(left)
-        .child(right)
+        .gap(zpx(4.0))
+        .child(left.flex_1().min_w_0())
+        .child(icon_button(
+            "new-terminal",
+            t!("sidebar.newTerminal"),
+            Glyph::Plus,
+            false,
+            resolved,
+            move || {
+                st_new.create_terminal_in_active_project();
+            },
+        ))
+        .child(icon_button(
+            "open-palette",
+            t!("palette.title"),
+            Glyph::Search,
+            false,
+            resolved,
+            move || st_pal.active_dialog.set(ActiveDialog::Palette),
+        ))
 }
 
 fn render_canvas_columns(
@@ -579,14 +266,15 @@ fn render_canvas_columns(
     let all_cols = store.columns.get();
     let focused = store.focused_pane_key.get();
     let remembered = store.active_canvas_id.get();
-    let groups = canvas_groups(&all_cols);
+    let visible = project_columns(store);
+    let groups = canvas_groups(&visible);
 
     if groups.is_empty() {
         return view()
             .size_full()
             .items_center()
             .justify_center()
-            .rounded(zpx(10.0))
+            .rounded(zpx(12.0))
             .bg(rgb_to_hsla(ui.background))
             .child(
                 text(t!("canvas.empty"))
@@ -600,44 +288,147 @@ fn render_canvas_columns(
         (!focused.is_empty()).then_some(focused.as_str()),
         Some(remembered.as_str()),
     );
-    let active_cols = &groups[idx].columns;
+    let zoomed = if store.term_zoomed.get() {
+        groups[idx]
+            .columns
+            .iter()
+            .find(|c| c.panes.iter().any(|p| p.key == focused))
+            .cloned()
+            .map(|mut c| {
+                c.basis = None;
+                vec![c]
+            })
+    } else {
+        None
+    };
+    let active_cols = zoomed.as_ref().unwrap_or(&groups[idx].columns);
+    let gap = zpx(6.0).0 as f64;
     let frames = layout_frames(
         active_cols,
         Viewport {
             width: viewport_w,
             height: viewport_h,
         },
-        CANVAS_GAP_PX,
+        gap,
     );
 
     let mut stage = view().size_full().relative();
-    for col_frame in frames.columns {
+    for (col_idx, col_frame) in frames.columns.iter().enumerate() {
         let pane_count = col_frame.panes.len();
-        for (p_idx, pf) in col_frame.panes.into_iter().enumerate() {
-            let bottom_gap = if p_idx + 1 < pane_count {
-                CANVAS_GAP_PX
-            } else {
-                0.0
-            };
+        for (p_idx, pf) in col_frame.panes.iter().enumerate() {
+            let bottom_gap = if p_idx + 1 < pane_count { gap } else { 0.0 };
             let h = (pf.height - bottom_gap).max(64.0);
             stage = stage.child(
                 view()
+                    .label(format!("pane-{}", pf.key))
                     .key(pf.key.clone())
                     .absolute()
                     .left(pt_px(col_frame.x as f32))
                     .top(pt_px(pf.y as f32))
                     .w(pt_px(col_frame.width as f32))
                     .h(pt_px(h as f32))
-                    .rounded(zpx(10.0))
+                    .rounded(zpx(12.0))
                     .overflow_hidden()
                     .bg(rgb_to_hsla(ui.background))
+                    .border_1()
+                    .border_color(if focused == pf.key {
+                        rgb_to_hsla(ui.tint_strong)
+                    } else {
+                        crate::theme::rgba_to_hsla(ui.app_border)
+                    })
                     .child(render_pane_island(
                         store,
                         resolved,
                         &all_cols,
                         &pf.key,
                         focused == pf.key,
+                        &frames,
+                        active_cols,
+                        (col_frame.x, pf.y),
                     )),
+            );
+            if bottom_gap > 0.0 {
+                let st = store.clone();
+                let reset = store.clone();
+                let key = pf.key.clone();
+                let reset_key = key.clone();
+                let initial = pf.height;
+                let max = (viewport_h - pf.y - falcon_core::layout::PANE_MIN_PX)
+                    .max(falcon_core::layout::PANE_MIN_PX);
+                stage = stage.child(
+                    view()
+                        .label(format!("resize-pane-{}", pf.key))
+                        .absolute()
+                        .left(pt_px(col_frame.x as f32))
+                        .top(pt_px((pf.y + h) as f32))
+                        .w(pt_px(col_frame.width as f32))
+                        .h(pt_px(gap as f32))
+                        .cursor(nsh_core::Cursor::RowResize)
+                        .pan_enabled(true)
+                        .on_pan_end(move |e: &PanEvent| {
+                            if !e.cancelled {
+                                st.columns.set(falcon_core::layout::set_pane_basis(
+                                    &st.columns.get(),
+                                    &key,
+                                    Some(falcon_core::layout::clamp_pane_height(
+                                        initial + e.translation.y.0 as f64,
+                                        max,
+                                    )),
+                                ));
+                            }
+                        })
+                        .on_press(move |e: &PressEvent| {
+                            if e.clicks == 2 {
+                                reset.columns.set(falcon_core::layout::set_pane_basis(
+                                    &reset.columns.get(),
+                                    &reset_key,
+                                    None,
+                                ));
+                            }
+                        }),
+                );
+            }
+        }
+        if col_idx + 1 < frames.columns.len() {
+            let st = store.clone();
+            let reset = store.clone();
+            let id = col_frame.id.clone();
+            let reset_id = id.clone();
+            let initial = col_frame.width;
+            let max = (viewport_w - col_frame.x - falcon_core::layout::COLUMN_MIN_PX - gap)
+                .max(falcon_core::layout::COLUMN_MIN_PX);
+            stage = stage.child(
+                view()
+                    .label(format!("resize-column-{}", col_frame.id))
+                    .tooltip(nsh_base::tooltip().child(text(t!("pane.resizeColumn"))))
+                    .absolute()
+                    .left(pt_px((col_frame.x + initial) as f32))
+                    .top(pt_px(0.0))
+                    .w(pt_px(gap as f32))
+                    .h_full()
+                    .cursor(nsh_core::Cursor::ColResize)
+                    .pan_enabled(true)
+                    .on_pan_end(move |e: &PanEvent| {
+                        if !e.cancelled {
+                            st.columns.set(falcon_core::layout::set_column_basis(
+                                &st.columns.get(),
+                                &id,
+                                Some(falcon_core::layout::clamp_column_width(
+                                    initial + e.translation.x.0 as f64,
+                                    max,
+                                )),
+                            ));
+                        }
+                    })
+                    .on_press(move |e: &PressEvent| {
+                        if e.clicks == 2 {
+                            reset.columns.set(falcon_core::layout::set_column_basis(
+                                &reset.columns.get(),
+                                &reset_id,
+                                None,
+                            ));
+                        }
+                    }),
             );
         }
     }
@@ -650,6 +441,9 @@ fn render_pane_island(
     all_cols: &[falcon_core::layout::ColumnLayout],
     pane_key: &str,
     is_focused: bool,
+    frames: &falcon_core::layout::CanvasFrames,
+    visible: &[falcon_core::layout::ColumnLayout],
+    origin: (f64, f64),
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let sessions = store.sessions.get();
@@ -660,8 +454,16 @@ fn render_pane_island(
         Some(PaneItem::Terminal { id, .. }) => {
             let rec = sessions.iter().find(|s| &s.id == id);
             let title = rec
-                .map(|r| r.display_title())
-                .unwrap_or_else(|| id.clone());
+                .map(|r| {
+                    if !r.name.trim().is_empty() {
+                        r.name.clone()
+                    } else if !r.auto_title.trim().is_empty() {
+                        r.auto_title.clone()
+                    } else {
+                        r.agent.clone().unwrap_or_default()
+                    }
+                })
+                .unwrap_or_default();
             let capsule = rec.and_then(|r| r.program_status.clone());
             (title, capsule, Some(id.clone()))
         }
@@ -672,15 +474,73 @@ fn render_pane_island(
 
     let st_focus = store.clone();
     let pk_focus = pane_key.to_string();
+    let drag = store.clone();
+    let drag_key = pane_key.to_string();
+    let drag_visible = visible.to_vec();
+    let rects: Vec<_> = frames
+        .columns
+        .iter()
+        .map(|c| falcon_core::layout::ColumnRect {
+            left: c.x,
+            right: c.x + c.width,
+            panes: c
+                .panes
+                .iter()
+                .map(|p| falcon_core::layout::PaneRect {
+                    top: p.y,
+                    bottom: p.y + p.height,
+                })
+                .collect(),
+        })
+        .collect();
+    let drag_origin = signal(origin);
+    let press_zoom = store.term_zoomed;
 
     let mut left = view()
         .flex_1()
+        .min_w_0()
         .flex_row()
         .items_center()
         .gap(zpx(8.0))
         .overflow_hidden()
         .cursor_pointer()
-        .on_press(move || st_focus.focused_pane_key.set(pk_focus.clone()))
+        .tooltip(nsh_base::tooltip().child(text(t!("pane.dragHint"))))
+        .cursor(nsh_core::Cursor::Grab)
+        .on_press_down(move |e: &PressEvent| {
+            drag_origin.set((
+                origin.0 + e.position.x.0 as f64,
+                origin.1 + e.position.y.0 as f64,
+            ))
+        })
+        .pan_enabled(true)
+        .on_pan_end(move |e: &PanEvent| {
+            if !e.cancelled && !drag.term_zoomed.get() {
+                use falcon_core::layout::{
+                    COLUMN_EDGE_PX, Point, apply_drop, drop_spot, resolve_spot,
+                };
+                let start = drag_origin.get();
+                let spot = drop_spot(
+                    Point {
+                        x: start.0 + e.translation.x.0 as f64,
+                        y: start.1 + e.translation.y.0 as f64,
+                    },
+                    &rects,
+                    COLUMN_EDGE_PX,
+                );
+                let all = drag.columns.get();
+                if let Some(next) =
+                    apply_drop(&all, &drag_key, resolve_spot(&all, &drag_visible, spot))
+                {
+                    drag.columns.set(next);
+                }
+            }
+        })
+        .on_press(move |e: &PressEvent| {
+            st_focus.focused_pane_key.set(pk_focus.clone());
+            if e.clicks == 2 {
+                press_zoom.update(|v| *v = !*v);
+            }
+        })
         .child(
             view()
                 .flex_none()
@@ -727,89 +587,104 @@ fn render_pane_island(
         );
     }
 
-    let mut right = view().flex_none().flex_row().items_center().gap(zpx(4.0));
-
-    {
-        let st_pin = store.clone();
-        let pk_pin = pane_key.to_string();
-        right = right.child(
-            view()
-                .px(zpx(6.0))
-                .py(zpx(2.0))
-                .rounded(zpx(4.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || {
-                    let cur = st_pin.columns.get();
-                    let next = if pinned {
-                        unpin_all(&cur)
-                    } else {
-                        pin_pane(&cur, &pk_pin)
-                    };
-                    st_pin.columns.set(next);
-                })
-                .child(
-                    text(if pinned {
-                        t!("native.nsh.unpinColumn")
-                    } else {
-                        t!("native.nsh.pinColumn")
-                    })
+    if let Some(sid) = &term_session_id {
+        if let Some(rec) = sessions.iter().find(|s| &s.id == sid) {
+            left = left.child(
+                text(rec.cwd.clone())
+                    .flex_1()
+                    .min_w_0()
                     .text_xs()
-                    .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        );
+                    .number_of_lines(1)
+                    .font_family(FONT_FAMILY_MONO)
+                    .text_color(rgb_to_hsla(ui.muted_foreground)),
+            );
+        }
     }
-
-    // 显式「收起窗口」(Detach) 按钮：仅摘除视图，不杀后台会话
-    {
-        let st_detach = store.clone();
-        let pk_detach = pane_key.to_string();
-        let detach_a11y = format!("detach-{pane_key}");
-        right = right.child(
-            view()
-                .label(detach_a11y)
-                .px(zpx(6.0))
-                .py(zpx(2.0))
-                .rounded(zpx(4.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || st_detach.detach_pane(&pk_detach))
-                .child(
-                    text(t!("native.nsh.DetachWindow"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        );
-    }
-
-    // 显式「终止会话」(Terminate) 按钮：前台忙时触发确认护栏
-    if let Some(sid) = term_session_id {
-        let st_term = store.clone();
-        let terminate_a11y = format!("terminate-{sid}");
-        right = right.child(
-            view()
-                .label(terminate_a11y)
-                .px(zpx(6.0))
-                .py(zpx(2.0))
-                .rounded(zpx(4.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.muted))
-                .on_press(move || st_term.request_terminate_session(&sid))
-                .child(
-                    text(t!("native.nsh.TerminateSession"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.destructive)),
-                ),
-        );
-    }
-
+    let pin = store.clone();
+    let pin_key = pane_key.to_string();
+    let detach = store.clone();
+    let detach_key = pane_key.to_string();
+    let zoom = store.term_zoomed;
+    let mut right = view()
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(zpx(2.0))
+        .child(icon_button(
+            format!("pin-{pane_key}"),
+            t!("pane.pinRight"),
+            Glyph::Pin,
+            pinned,
+            resolved,
+            move || {
+                let cols = pin.columns.get();
+                pin.columns.set(if pinned {
+                    unpin_all(&cols)
+                } else {
+                    pin_pane(&cols, &pin_key)
+                });
+            },
+        ))
+        .child(icon_button(
+            format!("maximize-{pane_key}"),
+            if zoom.get() {
+                t!("pane.restore")
+            } else {
+                t!("pane.maximize")
+            },
+            if zoom.get() {
+                Glyph::Restore
+            } else {
+                Glyph::Maximize
+            },
+            false,
+            resolved,
+            move || zoom.update(|v| *v = !*v),
+        ))
+        .child(icon_button(
+            format!("detach-{pane_key}"),
+            t!("native.nsh.DetachWindow"),
+            Glyph::Detach,
+            false,
+            resolved,
+            move || detach.detach_pane(&detach_key),
+        ));
+    let close = store.clone();
+    let close_key = pane_key.to_string();
+    right = right.child(icon_button(
+        term_session_id
+            .as_ref()
+            .map(|id| format!("terminate-{id}"))
+            .unwrap_or_else(|| format!("close-{pane_key}")),
+        if term_session_id.is_some() {
+            t!("tab.closeHint")
+        } else {
+            t!("tab.closeView")
+        },
+        Glyph::Close,
+        false,
+        resolved,
+        move || {
+            if let Some(id) = &term_session_id {
+                close.request_terminate_session(id);
+            } else {
+                close.detach_pane(&close_key);
+            }
+        },
+    ));
     let titlebar = view()
         .flex_row()
         .items_center()
         .justify_between()
-        .px(zpx(10.0))
-        .py(zpx(5.0))
-        .bg(rgb_to_hsla(ui.card))
+        .label(format!("titlebar-{pane_key}"))
+        .h(zpx(34.0))
+        .flex_none()
+        .bg(rgb_to_hsla(if is_focused {
+            ui.tint
+        } else {
+            ui.background
+        }))
+        .px(zpx(8.0))
         .child(left)
         .child(right);
 
@@ -838,11 +713,14 @@ fn render_pane_island(
         None => view().into_element(),
     };
 
-    view()
-        .size_full()
-        .flex_col()
-        .child(titlebar)
-        .child(view().flex_1().overflow_hidden().child(body))
+    view().size_full().flex_col().child(titlebar).child(
+        view()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .child(body),
+    )
 }
 
 fn render_right_panel_island(
@@ -860,10 +738,235 @@ fn render_right_panel_island(
     };
 
     view()
+        .label("right-panel-island")
+        .test_id("right-panel-island")
+        .flex_none()
         .w(zpx(width))
         .h_full()
-        .rounded(zpx(10.0))
+        .rounded(zpx(12.0))
         .overflow_hidden()
         .bg(rgb_to_hsla(ui.background))
+        .border_1()
+        .border_color(crate::theme::rgba_to_hsla(ui.app_border))
         .child(inner)
+}
+
+fn project_columns(store: &WorkspaceStore) -> Vec<falcon_core::layout::ColumnLayout> {
+    let selected = store.active_project_id.get();
+    let sessions = store.sessions.get();
+    falcon_core::layout::visible_columns(&store.columns.get(), |key| match parse_pane_key(key) {
+        Some(PaneItem::Terminal { id, .. }) => sessions
+            .iter()
+            .any(|s| s.id == id && (selected.is_empty() || s.project_id == selected)),
+        Some(PaneItem::File { project_id, .. }) => selected.is_empty() || project_id == selected,
+        Some(PaneItem::Diff { .. }) => true,
+        None => false,
+    })
+}
+
+fn panel_resize_handle(store: &WorkspaceStore, right: bool) -> impl IntoElement {
+    let width = if right {
+        store.right_panel_width
+    } else {
+        store.sidebar_width
+    };
+    let start = width.get();
+    let zoom = current_zoom();
+    view()
+        .label(if right {
+            "resize-right-panel"
+        } else {
+            "resize-sidebar"
+        })
+        .absolute()
+        .top(pt_px(0.0))
+        .h_full()
+        .w(zpx(6.0))
+        .when(right, |v| v.left(zpx(-6.0)))
+        .when(!right, |v| v.right(zpx(-6.0)))
+        .cursor(nsh_core::Cursor::ColResize)
+        .pan_enabled(true)
+        .on_pan_end(move |event: &PanEvent| {
+            if !event.cancelled {
+                let dx = event.translation.x.0 / zoom;
+                width.set(falcon_core::panel_width::clamp_panel_width_default(
+                    (start + if right { -dx } else { dx }) as f64,
+                ) as f32);
+            }
+        })
+        .on_press(move |event: &PressEvent| {
+            if event.clicks == 2 {
+                width.set(falcon_core::panel_width::PANEL_WIDTH_DEFAULT as f32);
+            }
+        })
+}
+
+fn activity_bar(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+) -> impl IntoElement {
+    let mut bar = view()
+        .label("right-activity-bar")
+        .w(zpx(34.0))
+        .h_full()
+        .flex_none()
+        .flex_col()
+        .items_center()
+        .gap(zpx(4.0))
+        .py(zpx(4.0));
+    for (kind, icon, label) in [
+        (RightPanelKind::Files, Glyph::Folder, t!("files.panel")),
+        (RightPanelKind::Git, Glyph::Changes, t!("changes.panel")),
+    ] {
+        let active = store.right_panel_open.get() && store.right_panel_kind.get() == kind;
+        let id = if kind == RightPanelKind::Files {
+            "activity-files"
+        } else {
+            "activity-changes"
+        };
+        let st = store.clone();
+        bar = bar.child(icon_button(id, label, icon, active, resolved, move || {
+            st.toggle_right_panel(kind.clone())
+        }));
+    }
+    let plugins: Vec<_> = store
+        .plugin_list
+        .get()
+        .plugins
+        .into_iter()
+        .filter(|p| p.enabled && p.error.is_none())
+        .collect();
+    if !plugins.is_empty() {
+        bar = bar.child(
+            view()
+                .w(zpx(14.0))
+                .h(pt_px(1.0))
+                .my(zpx(4.0))
+                .bg(crate::theme::rgba_to_hsla(resolved.ui.border)),
+        );
+    }
+    for p in plugins {
+        let kind = RightPanelKind::Plugin(p.id.clone());
+        let st = store.clone();
+        let active = store.right_panel_open.get() && store.right_panel_kind.get() == kind;
+        bar = bar.child(icon_button(
+            format!("activity-plugin-{}", p.id),
+            p.name,
+            if p.id == "sysmon" {
+                Glyph::Activity
+            } else if p.id == "tokens" {
+                Glyph::Link
+            } else {
+                Glyph::Box
+            },
+            active,
+            resolved,
+            move || st.toggle_right_panel(kind.clone()),
+        ));
+    }
+    bar
+}
+
+fn identity_strip(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+) -> impl IntoElement {
+    let profiles = store.profiles.get();
+    let url = store.server_url.get();
+    let name = profiles
+        .profiles
+        .iter()
+        .find(|p| p.url.trim_end_matches('/') == url.trim_end_matches('/'))
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let profiles_action = store.clone();
+    let create = store.clone();
+    let palette = store.clone();
+    let overview = store.overview_open;
+    let mut strip = view()
+        .label("server-identity-strip")
+        .h(zpx(34.0))
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(zpx(8.0))
+        .pr(zpx(8.0))
+        .pl(zpx(if os() == nsh_core::platform::Os::MacOs {
+            88.0
+        } else {
+            14.0
+        }))
+        .window_drag(true);
+    if !store.sidebar_open.get() {
+        let sidebar = store.sidebar_open;
+        strip = strip.child(icon_button(
+            "sidebar-expand",
+            t!("native.nsh.expandSidebar"),
+            Glyph::Sidebar,
+            false,
+            resolved,
+            move || sidebar.set(true),
+        ));
+    }
+    strip
+        .child(
+            image(super::widgets::app_icon_source(
+                &store.selected_app_icon.get(),
+            ))
+            .w(zpx(18.0))
+            .h(zpx(18.0)),
+        )
+        .child(
+            text("Falcon")
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb_to_hsla(resolved.ui.foreground)),
+        )
+        .child(
+            view()
+                .label("identity-server-profiles")
+                .flex_1()
+                .min_w_0()
+                .flex_row()
+                .gap(zpx(8.0))
+                .cursor_pointer()
+                .on_press(move || profiles_action.active_dialog.set(ActiveDialog::Profiles))
+                .child(
+                    text(name)
+                        .text_xs()
+                        .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                )
+                .child(
+                    text(url)
+                        .text_xs()
+                        .number_of_lines(1)
+                        .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                ),
+        )
+        .child(icon_button(
+            "open-overview",
+            t!("overview.title"),
+            Glyph::Monitor,
+            overview.get(),
+            resolved,
+            move || overview.set(true),
+        ))
+        .child(icon_button(
+            "identity-new-terminal",
+            t!("sidebar.newTerminal"),
+            Glyph::Plus,
+            false,
+            resolved,
+            move || {
+                create.create_terminal_in_active_project();
+            },
+        ))
+        .child(icon_button(
+            "identity-palette",
+            t!("palette.title"),
+            Glyph::Search,
+            false,
+            resolved,
+            move || palette.active_dialog.set(ActiveDialog::Palette),
+        ))
 }

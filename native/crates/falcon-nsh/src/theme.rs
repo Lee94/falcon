@@ -92,7 +92,11 @@ pub fn tokens_from_resolved(resolved: &ResolvedTheme) -> Tokens {
     put_rgb(&mut tokens, "accent", ui.accent);
     put_rgb(&mut tokens, "accent-foreground", ui.accent_foreground);
     put_rgb(&mut tokens, "destructive", ui.destructive);
-    put_rgb(&mut tokens, "destructive-foreground", ui.destructive_foreground);
+    put_rgb(
+        &mut tokens,
+        "destructive-foreground",
+        ui.destructive_foreground,
+    );
     put_rgba(&mut tokens, "border", ui.border);
     put_rgba(&mut tokens, "input", ui.input);
     put_rgba(&mut tokens, "ring", ui.ring);
@@ -101,9 +105,17 @@ pub fn tokens_from_resolved(resolved: &ResolvedTheme) -> Tokens {
     put_rgb(&mut tokens, "sidebar", ui.sidebar);
     put_rgb(&mut tokens, "sidebar-foreground", ui.sidebar_foreground);
     put_rgb(&mut tokens, "sidebar-primary", ui.sidebar_primary);
-    put_rgb(&mut tokens, "sidebar-primary-foreground", ui.sidebar_primary_foreground);
+    put_rgb(
+        &mut tokens,
+        "sidebar-primary-foreground",
+        ui.sidebar_primary_foreground,
+    );
     put_rgb(&mut tokens, "sidebar-accent", ui.sidebar_accent);
-    put_rgb(&mut tokens, "sidebar-accent-foreground", ui.sidebar_accent_foreground);
+    put_rgb(
+        &mut tokens,
+        "sidebar-accent-foreground",
+        ui.sidebar_accent_foreground,
+    );
     put_rgba(&mut tokens, "sidebar-border", ui.sidebar_border);
     put_rgba(&mut tokens, "sidebar-ring", ui.sidebar_ring);
 
@@ -126,7 +138,7 @@ pub fn tokens_from_resolved(resolved: &ResolvedTheme) -> Tokens {
     put_rgb(&mut tokens, "warning-foreground", ui.warning_foreground);
     put_rgb(&mut tokens, "selection", ui.selection);
 
-    tokens.set_number("radius", 10.0);
+    tokens.set_number("radius", 12.0);
     tokens.set_font(FONT_SANS, FONT_FAMILY_MONO);
     tokens.set_font(FONT_MONO, FONT_FAMILY_MONO);
     tokens
@@ -136,9 +148,7 @@ pub fn tokens_from_resolved(resolved: &ResolvedTheme) -> Tokens {
 pub fn plugin_tone_color(resolved: &ResolvedTheme, tone: Option<&PluginTone>) -> Hsla {
     let ui = &resolved.ui;
     match tone {
-        None | Some(PluginTone::Default) | Some(PluginTone::Unknown) => {
-            rgb_to_hsla(ui.foreground)
-        }
+        None | Some(PluginTone::Default) | Some(PluginTone::Unknown) => rgb_to_hsla(ui.foreground),
         Some(PluginTone::Muted) => rgb_to_hsla(ui.muted_foreground),
         Some(PluginTone::Accent) => rgb_to_hsla(ui.tint_strong),
         Some(PluginTone::Success) => rgb_to_hsla(ui.success),

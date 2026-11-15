@@ -12,6 +12,7 @@ use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
+use crate::shell::widgets::{Glyph, glyph, icon_button};
 use crate::store::use_workspace;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -29,6 +30,7 @@ pub fn FilesPanel() -> impl IntoElement {
     let store = use_workspace();
     let theme_ctrl = use_theme();
     let filter_query = signal(String::new());
+    let show_hidden = signal(false);
 
     view()
         .size_full()
@@ -42,17 +44,78 @@ pub fn FilesPanel() -> impl IntoElement {
                 .border_b_1()
                 .border_color(move || rgba_to_hsla(theme_ctrl.resolved().ui.border))
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            text(move || t!("files.panel"))
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(move || rgb_to_hsla(theme_ctrl.resolved().ui.foreground)),
-                        ),
+                    view().flex_row().items_center().justify_between().child(
+                        text({
+                            let st = store.clone();
+                            move || {
+                                st.projects
+                                    .get()
+                                    .into_iter()
+                                    .find(|p| p.id == st.active_project_id.get())
+                                    .map(|p| p.path)
+                                    .unwrap_or_else(|| t!("files.panel"))
+                            }
+                        })
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(move || rgb_to_hsla(theme_ctrl.resolved().ui.foreground)),
+                    ),
                 )
+                .child(dynamic({
+                    let st = store.clone();
+                    move || {
+                        let resolved = theme_ctrl.resolved();
+                        let dir = st.file_directory.get();
+                        let refresh = st.clone();
+                        let up = st.clone();
+                        let refresh_dir = dir.clone();
+                        let parent = dir
+                            .rsplit_once('/')
+                            .map(|(p, _)| p)
+                            .unwrap_or("")
+                            .to_string();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(4.0))
+                            .child(icon_button(
+                                "files-parent",
+                                t!("files.parent"),
+                                Glyph::ArrowUp,
+                                false,
+                                &resolved,
+                                move || up.browse_directory(&parent),
+                            ))
+                            .child(
+                                text(if dir.is_empty() { "/".to_string() } else { dir })
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .number_of_lines(1)
+                                    .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                            )
+                            .child(icon_button(
+                                "files-hidden",
+                                if show_hidden.get() {
+                                    t!("files.hideHidden")
+                                } else {
+                                    t!("files.showHidden")
+                                },
+                                Glyph::Search,
+                                show_hidden.get(),
+                                &resolved,
+                                move || show_hidden.update(|v| *v = !*v),
+                            ))
+                            .child(icon_button(
+                                "files-refresh",
+                                t!("files.refresh"),
+                                Glyph::Refresh,
+                                false,
+                                &resolved,
+                                move || refresh.browse_directory(&refresh_dir),
+                            ))
+                    }
+                }))
                 .child(
                     input()
                         .w_full()
@@ -70,71 +133,104 @@ pub fn FilesPanel() -> impl IntoElement {
                         .on_change(move |v: &str| filter_query.set(v.to_string())),
                 ),
         )
-        .child(
-            scroll()
-                .flex_1()
-                .child(dynamic(move || {
-                    let resolved = theme_ctrl.resolved();
-                    let ui = &resolved.ui;
-                    let q = filter_query.get().trim().to_ascii_lowercase();
-                    let proj_id = store.active_project_id.get();
-                    let entries = store.file_entries.get();
-                    let filtered: Vec<_> = entries
-                        .into_iter()
-                        .filter(|e| {
-                            q.is_empty()
-                                || e.name.to_ascii_lowercase().contains(&q)
-                                || e.path.to_ascii_lowercase().contains(&q)
+        .child(scroll().flex_1().child(dynamic(move || {
+            let resolved = theme_ctrl.resolved();
+            let ui = &resolved.ui;
+            let q = filter_query.get().trim().to_ascii_lowercase();
+            let proj_id = store.active_project_id.get();
+            if store.files_loading.get() {
+                return text(t!("files.loading"))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(ui.muted_foreground))
+                    .into_element();
+            }
+            if let Some(error) = store.file_error.get() {
+                return view()
+                    .p(zpx(12.0))
+                    .child(
+                        text(format!("{}: {error}", t!("files.loadFailed")))
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.destructive)),
+                    )
+                    .into_element();
+            }
+            let entries = store.file_entries.get();
+            let filtered: Vec<_> = entries
+                .into_iter()
+                .filter(|e| {
+                    q.is_empty()
+                        || e.name.to_ascii_lowercase().contains(&q)
+                        || e.path.to_ascii_lowercase().contains(&q)
+                })
+                .filter(|e| show_hidden.get() || !e.name.starts_with('.'))
+                .collect();
+
+            if filtered.is_empty() {
+                return view()
+                    .p(zpx(12.0))
+                    .child(
+                        text(if q.is_empty() {
+                            t!("files.empty")
+                        } else {
+                            t!("files.noMatchingFiles")
                         })
-                        .collect();
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                    )
+                    .into_element();
+            }
 
-                    if filtered.is_empty() {
-                        return view()
-                            .p(zpx(12.0))
-                            .child(
-                                text(t!("files.noMatchingFiles"))
-                                    .text_xs()
-                                    .text_color(rgb_to_hsla(ui.muted_foreground)),
-                            )
-                            .into_element();
-                    }
-
+            view()
+                .flex_col()
+                .p(zpx(6.0))
+                .gap(zpx(2.0))
+                .children(filtered.into_iter().map(|entry| {
+                    let st = store.clone();
+                    let pid = proj_id.clone();
+                    let path = entry.path.clone();
+                    let is_dir = entry.is_dir;
+                    let size_kb = (entry.size_bytes as f64) / 1024.0;
                     view()
-                        .flex_col()
-                        .p(zpx(6.0))
-                        .gap(zpx(2.0))
-                        .children(filtered.into_iter().map(|entry| {
-                            let st = store.clone();
-                            let pid = proj_id.clone();
-                            let path = entry.path.clone();
-                            let size_kb = (entry.size_bytes as f64) / 1024.0;
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .px(zpx(8.0))
-                                .py(zpx(6.0))
-                                .rounded(zpx(6.0))
-                                .cursor_pointer()
-                                .on_press(move || {
-                                    st.open_file_pane(&pid, &path);
-                                })
-                                .child(
-                                    text(entry.name)
-                                        .text_xs()
-                                        .font_family(FONT_FAMILY_MONO)
-                                        .text_color(rgb_to_hsla(ui.foreground)),
-                                )
-                                .child(
-                                    text(format!("{size_kb:.1} KB"))
-                                        .text_xs()
-                                        .font_family(FONT_FAMILY_MONO)
-                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                                )
-                        }))
-                        .into_element()
-                })),
-        )
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(zpx(8.0))
+                        .py(zpx(6.0))
+                        .rounded(zpx(6.0))
+                        .cursor_pointer()
+                        .on_press(move || {
+                            if is_dir {
+                                st.browse_directory(&path);
+                            } else {
+                                st.open_file_pane(&pid, &path);
+                            }
+                        })
+                        .gap(zpx(6.0))
+                        .text_color(rgb_to_hsla(ui.muted_foreground))
+                        .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
+                        .child(glyph(if is_dir { Glyph::Folder } else { Glyph::File }))
+                        .child(
+                            text(entry.name)
+                                .flex_1()
+                                .min_w_0()
+                                .number_of_lines(1)
+                                .text_xs()
+                                .font_family(FONT_FAMILY_MONO)
+                                .text_color(rgb_to_hsla(ui.foreground)),
+                        )
+                        .child(
+                            text(if is_dir {
+                                String::new()
+                            } else {
+                                format!("{size_kb:.1} KB")
+                            })
+                            .text_xs()
+                            .font_family(FONT_FAMILY_MONO)
+                            .text_color(rgb_to_hsla(ui.muted_foreground)),
+                        )
+                }))
+                .into_element()
+        })))
 }
 
 /// 工作区文件编辑 / HTML 沙箱预览窗口属性。
@@ -149,6 +245,8 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
     let store = use_workspace();
     let theme_ctrl = use_theme();
     let pane_key = file_key(&props.project_id, &props.path);
+    let markdown_file = props.path.ends_with(".md") || props.path.ends_with(".markdown");
+    let show_markdown_preview = signal(markdown_file);
     let show_html_preview = signal(props.path.ends_with(".html") || props.path.ends_with(".htm"));
 
     view()
@@ -209,6 +307,26 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                 );
 
             let mut actions = view().flex_row().items_center().gap(zpx(6.0));
+            if markdown_file {
+                actions = actions.child(
+                    view()
+                        .px(zpx(8.0))
+                        .py(zpx(3.0))
+                        .rounded(zpx(8.0))
+                        .cursor_pointer()
+                        .bg(rgb_to_hsla(ui.secondary))
+                        .on_press(move || show_markdown_preview.update(|v| *v = !*v))
+                        .child(
+                            text(if show_markdown_preview.get() {
+                                t!("files.source")
+                            } else {
+                                t!("files.preview")
+                            })
+                            .text_xs()
+                            .text_color(rgb_to_hsla(ui.foreground)),
+                        ),
+                );
+            }
             if has_preview {
                 actions = actions.child(
                     view()
@@ -298,6 +416,15 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                         ),
                     );
                 }
+            } else if markdown_file && show_markdown_preview.get() {
+                page = page.child(
+                    scroll().flex_1().min_h_0().child(
+                        nsh_base::text_view()
+                            .markdown(buf.current_body.clone())
+                            .selectable(true)
+                            .p(zpx(20.0)),
+                    ),
+                );
             } else {
                 let st_edit = store.clone();
                 let pk_edit = pane_key.clone();

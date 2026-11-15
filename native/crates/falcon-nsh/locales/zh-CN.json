@@ -370,6 +370,7 @@
     "portInvalid": "端口必须是 1–65535",
     "state_stopped": "已停止",
     "state_starting": "正在建立",
+    "state_unknown": "未知状态",
     "state_active": "运行中",
     "state_error": "失败",
     "samePort": "同端口 ×%{n}",
@@ -436,6 +437,7 @@
   },
   "session": {
     "createFailed": "创建会话失败",
+    "state_unknown": "未知状态",
     "state_active": "运行中",
     "state_unverified": "待接回",
     "state_dead": "已丢失",
@@ -956,6 +958,8 @@
       "plaintextConfirm": "仍然连接"
     },
     "nsh": {
+      "hostConnection": "连接",
+      "expandSidebar": "展开侧栏",
       "appTitle": "Falcon",
       "RendererBadge": "NSH 0.5",
       "tuiHintNavigate": "浏览模式：方向键切换焦点 · Enter 进入终端直通 · Ctrl+K 命令面板",
