@@ -4650,12 +4650,58 @@ mod tests {
         app.hover("id:theme-choice-Falcon Light").unwrap();
         app.wait_for("当前底色判定：浅色外观").unwrap();
         app.wait_for("label:theme-slot-Light >> text:Parity import").unwrap();
-        app.press("id:theme-choice-Parity import").unwrap();
+        app.press("id:theme-choice-custom-Parity import").unwrap();
         assert_eq!(app.screen().input_text("id:theme-editor-name").unwrap(), Some("Parity import"));
         app.press_key("escape").unwrap();
         app.press("label:sidebar-settings").unwrap();
         app.wait_for_gone("id:theme-editor", Duration::from_secs(2)).unwrap();
         app.wait_for("label:theme-slot-Light >> text:Parity import").unwrap();
+    }
+
+    #[test]
+    fn settings_theme_picker_distinguishes_same_name_choices_headless() {
+        let mut settings = ThemeSettings::default();
+        settings.mode = ThemePref::Dark;
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                initial_theme: Some(settings),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        for (steps, expected) in [(0, "Dracula"), (1, "Dracula"), (2, "Dracula+")] {
+            app.press("label:theme-slot-Dark").unwrap();
+            app.wait_for("id:theme-picker-filter").unwrap();
+            app.press("id:theme-picker-custom").unwrap();
+            app.clear("id:theme-editor-source").unwrap();
+            app.type_text("id:theme-editor-source", "theme = Dracula\nbackground = #101010")
+                .unwrap();
+            assert_eq!(
+                app.screen().input_text("id:theme-editor-name").unwrap(),
+                Some("")
+            );
+            app.press("id:theme-editor-apply").unwrap();
+            app.wait_for_gone("id:theme-editor", Duration::from_secs(2)).unwrap();
+            app.wait_for("label:theme-slot-Dark >> text:Dracula").unwrap();
+
+            app.press("label:theme-slot-Dark").unwrap();
+            app.wait_for("id:theme-picker-filter").unwrap();
+            app.type_text("id:theme-picker-filter", "Dracula").unwrap();
+            if steps == 0 {
+                app.hover("id:theme-choice-Dracula").unwrap();
+            }
+            for _ in 0..steps {
+                app.press_key("down").unwrap();
+            }
+            app.press_key("enter").unwrap();
+            app.wait_for_gone("id:theme-picker-filter", Duration::from_secs(2)).unwrap();
+            app.wait_for_gone("id:theme-editor", Duration::from_secs(2)).unwrap();
+            app.wait_for(&format!("label:theme-slot-Dark >> text:{expected}"))
+                .unwrap();
+        }
     }
 
     #[test]

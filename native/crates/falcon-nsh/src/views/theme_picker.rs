@@ -15,13 +15,20 @@ use crate::terminal::bind_safe_key_when;
 use crate::theme::{ThemeController, rgb_to_hsla, rgba_to_hsla};
 use crate::zoom::zpx;
 
+// Imported themes may reuse a catalog name, so highlight by kind and name together.
+type ChoiceKey = (ThemeKind, String);
+
+fn choice_key(choice: &ThemeChoice) -> ChoiceKey {
+    (choice.kind, choice.name.clone())
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct PickerState {
     filter: Signal<String>,
     editor: Signal<bool>,
     name: Signal<String>,
     source: Signal<String>,
-    highlighted: Signal<Option<String>>,
+    highlighted: Signal<Option<ChoiceKey>>,
 }
 
 impl PickerState {
@@ -251,20 +258,20 @@ fn results(
     let highlighted = state
         .highlighted
         .get_untracked()
-        .filter(|name| choices.iter().any(|choice| &choice.name == name))
+        .filter(|key| choices.iter().any(|choice| choice_key(choice) == *key))
         .or_else(|| {
             choices
                 .iter()
-                .find(|choice| choice.name == current.name)
-                .map(|choice| choice.name.clone())
+                .find(|choice| choice_key(choice) == choice_key(&current))
+                .map(choice_key)
         })
-        .or_else(|| choices.first().map(|choice| choice.name.clone()));
+        .or_else(|| choices.first().map(choice_key));
     state.highlighted.set(highlighted.clone());
     untracked(|| {
         theme.preview(
             highlighted
                 .as_ref()
-                .and_then(|name| choices.iter().find(|choice| &choice.name == name))
+                .and_then(|key| choices.iter().find(|choice| choice_key(choice) == *key))
                 .map(|choice| choice.colors.clone()),
         )
     });
@@ -277,12 +284,12 @@ fn results(
             let at = state
                 .highlighted
                 .get_untracked()
-                .or_else(|| Some(current_name(theme, slot)));
-            let index = at.and_then(|name| choices.iter().position(|c| c.name == name));
+                .or_else(|| Some(choice_key(theme.settings().slot(slot))));
+            let index = at.and_then(|key| choices.iter().position(|c| choice_key(c) == key));
             let next = index.map_or(if delta > 0 { 0 } else { choices.len() - 1 }, |i| {
                 move_selection(i, choices.len(), delta)
             });
-            state.highlighted.set(Some(choices[next].name.clone()));
+            state.highlighted.set(Some(choice_key(&choices[next])));
             theme.preview(Some(choices[next].colors.clone()));
             list_ref.scroll_to_index(next as u32, Percentage(0.5), zpx(0.0), false);
             input_ref.focus();
@@ -290,11 +297,11 @@ fn results(
     }
     let confirm_choices = choices.clone();
     bind_safe_key_when("enter", false, nsh_core::keymap::When::Always, move || {
-        let name = state
+        let key = state
             .highlighted
             .get_untracked()
-            .unwrap_or_else(|| current_name(theme, slot));
-        if let Some(choice) = confirm_choices.iter().find(|c| c.name == name) {
+            .unwrap_or_else(|| choice_key(theme.settings().slot(slot)));
+        if let Some(choice) = confirm_choices.iter().find(|c| choice_key(c) == key) {
             activate(theme, slot, open, state, choice.clone());
         }
     });
@@ -311,7 +318,7 @@ fn results(
     } else {
         let start = highlighted
             .as_ref()
-            .and_then(|name| choices.iter().position(|c| &c.name == name))
+            .and_then(|key| choices.iter().position(|c| choice_key(c) == *key))
             .unwrap_or(0);
         let current = current.clone();
         let choices = choices.clone();
@@ -338,7 +345,11 @@ fn results(
                 let selected = current.kind == choice.kind && current.name == choice.name;
                 cell.child(
                     view()
-                        .test_id(&format!("theme-choice-{}", choice.name))
+                        .test_id(&format!(
+                            "theme-choice-{}{}",
+                            if choice.kind == ThemeKind::Custom { "custom-" } else { "" },
+                            choice.name,
+                        ))
                         .h(zpx(30.0))
                         .px(zpx(8.0))
                         .py(zpx(4.0))
@@ -348,15 +359,15 @@ fn results(
                         .rounded(zpx(6.0))
                         .cursor_pointer()
                         .when(
-                            state.highlighted.get().as_deref().unwrap_or(&current.name)
-                                == choice.name,
+                            state.highlighted.get().unwrap_or_else(|| choice_key(&current))
+                                == choice_key(choice),
                             |v| v.bg(rgb_to_hsla(ui.tint)),
                         )
                         .on_mouse_move(move |_: &nsh_core::element::MouseEvent| {
-                            if state.highlighted.get_untracked().as_deref()
-                                != Some(hover.name.as_str())
+                            if state.highlighted.get_untracked().as_ref()
+                                != Some(&choice_key(&hover))
                             {
-                                state.highlighted.set(Some(hover.name.clone()));
+                                state.highlighted.set(Some(choice_key(&hover)));
                                 theme.preview(Some(hover.colors.clone()));
                             }
                         })
@@ -385,10 +396,6 @@ fn results(
         .initial_scroll_index(start)
         .into_element()
     }
-}
-
-fn current_name(theme: ThemeController, slot: ThemeMode) -> String {
-    theme.settings().slot(slot).name.clone()
 }
 
 fn activate(
