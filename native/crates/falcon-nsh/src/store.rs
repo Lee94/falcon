@@ -336,6 +336,7 @@ pub struct FileEntryItem {
     pub path: String,
     pub is_dir: bool,
     pub size_bytes: u64,
+    pub mtime: Option<i64>,
     pub is_html: bool,
 }
 
@@ -1296,6 +1297,7 @@ impl WorkspaceStore {
                 path: "native/Cargo.toml".into(),
                 is_dir: false,
                 size_bytes: 4120,
+                mtime: None,
                 is_html: false,
             },
             FileEntryItem {
@@ -1303,6 +1305,7 @@ impl WorkspaceStore {
                 path: "native/crates/falcon-nsh/src/lib.rs".into(),
                 is_dir: false,
                 size_bytes: 2890,
+                mtime: None,
                 is_html: false,
             },
             FileEntryItem {
@@ -1310,6 +1313,7 @@ impl WorkspaceStore {
                 path: "docs/report.html".into(),
                 is_dir: false,
                 size_bytes: 1540,
+                mtime: None,
                 is_html: true,
             },
         ];
@@ -3819,6 +3823,7 @@ impl WorkspaceStore {
                                 path: e.path,
                                 is_dir: e.kind == WorkspaceEntryKind::Dir,
                                 size_bytes: e.size.unwrap_or(0),
+                                mtime: e.mtime,
                             })
                             .collect();
                         if operations.apply_listing(&store, &scope, &canonical_path, &entries) {
@@ -4420,8 +4425,7 @@ impl WorkspaceStore {
                         Ok(wf) => {
                             let rel = wf.raw_path.as_deref().unwrap_or(&file_path);
                             let raw = raw_url(&wf.raw_base, rel);
-                            let raw = (file_path.ends_with(".html") || file_path.ends_with(".htm"))
-                                .then(|| {
+                            let raw = Some({
                                     if raw.starts_with("http://") || raw.starts_with("https://") {
                                         raw
                                     } else {

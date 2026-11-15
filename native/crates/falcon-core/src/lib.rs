@@ -48,6 +48,7 @@ pub mod editor;
 pub mod file_text;
 /// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
+pub mod image_view;
 /// 对应 React 版的 lib/multiPath.ts：多仓库成员的公共父目录
 pub mod multi_path;
 /// 对应 React 版的 lib/multiDerive.ts：批量派生的预演

@@ -4,6 +4,7 @@ pub mod agent;
 pub mod appearance;
 pub mod dialogs;
 pub mod files;
+mod file_preview;
 pub mod file_operations;
 pub mod git;
 mod host_form;

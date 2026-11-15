@@ -175,6 +175,9 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                 let Some(job) = store.file_operations.job.get() else {
                     return view().into_element();
                 };
+                if matches!(job.kind, JobKind::Upload | JobKind::Download) {
+                    return view().into_element();
+                }
                 let resolved = theme.resolved();
                 let label = job_label(&job);
                 let st = store.clone();
@@ -238,7 +241,8 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
 pub fn FileOperationLayer() -> impl IntoElement {
     let store = use_workspace();
     let theme = use_theme();
-    view().child(dynamic(move || {
+    view().absolute().inset_0().pointer_events(PointerEvents::BoxNone)
+        .child(file_transfer_toast()).child(dynamic(move || {
         let Some(confirmation) = store.file_operations.confirmation.get() else {
             return view().into_element();
         };
@@ -329,6 +333,58 @@ pub fn FileOperationLayer() -> impl IntoElement {
                     ),
             )
             .child(escape_handler)
+            .into_element()
+    }))
+}
+
+/// 独立于文件面板的常驻通知槽。进度只更新同一个 job 的内容，完成时原地替换状态。
+#[component]
+fn FileTransferToast() -> impl IntoElement {
+    let store = use_workspace();
+    let theme = use_theme();
+    view().absolute().inset_0().pointer_events(PointerEvents::BoxNone).child(dynamic(move || {
+        let Some(job) = store.file_operations.job.get()
+            .filter(|job| matches!(job.kind, JobKind::Upload | JobKind::Download)) else {
+            return view().into_element();
+        };
+        let resolved = theme.resolved();
+        let ui = &resolved.ui;
+        let title = if job.active {
+            if job.current_item.is_empty() { t!("native.files.transferPreparing") }
+            else if job.kind == JobKind::Upload {
+                t!("native.files.uploading", name = job.current_item.as_str(), pct = job.current_percent)
+            } else {
+                t!("native.files.downloading", name = job.current_item.as_str(), pct = job.current_percent)
+            }
+        } else if job.cancelled { t!("native.files.transferCancelled") }
+        else if job.failed > 0 { t!("native.files.transferFailed", count = job.failed) }
+        else { t!("native.files.transferDone", count = job.completed) };
+        let color = if job.failed > 0 || job.uncertain { ui.destructive }
+            else if job.active || job.cancelled { ui.muted_foreground } else { ui.success };
+        let st = store.clone();
+        let active = job.active;
+        view().test_id("file-transfer-toast").absolute()
+            .right(zpx(16.0)).bottom(zpx(64.0)).w(zpx(360.0)).max_w(relative(0.9))
+            .p(zpx(12.0)).rounded(zpx(8.0)).border_1()
+            .border_color(rgba_to_hsla(ui.border)).bg(rgb_to_hsla(ui.popover))
+            .flex_col().gap(zpx(6.0))
+            .child(view().flex_row().items_center().gap(zpx(8.0))
+                .child(glyph(if job.active { Glyph::Refresh } else if job.failed > 0 || job.cancelled { Glyph::Close } else { Glyph::Check }))
+                .child(text(title).test_id("file-transfer-title").flex_1().min_w_0().text_xs().text_color(rgb_to_hsla(color)))
+                .child(action_button(if active { t!("native.files.transferCancel") } else { t!("native.files.transferDismiss") },
+                    "file-transfer-action", false, &resolved, false, move || {
+                        if active { st.file_operations.cancel_job(); } else { st.file_operations.dismiss_job(); }
+                    })))
+            .child(text(t!("native.files.transferDetails", done = job.completed, total = job.total,
+                bytes = falcon_core::file_path::format_size(Some(job.bytes_done as f64))))
+                .text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
+            .when(job.active, |card| card.child(view().h(zpx(3.0)).w_full().rounded(zpx(2.0)).bg(rgb_to_hsla(ui.muted))
+                .child(view().h_full().w(relative(job.current_percent as f32 / 100.0)).bg(rgb_to_hsla(ui.tint)))))
+            .when(!job.active, |card| card.child(text(job.summary_message.clone().unwrap_or_else(|| job_label(&job)))
+                .test_id("file-transfer-summary").text_xs().text_color(rgb_to_hsla(ui.muted_foreground))))
+            .when(!job.errors.is_empty(), |card| card.child(scroll().max_h(zpx(96.0)).child(
+                text(t!("native.files.transferErrorDetails", errors = job.errors.iter().take(3).cloned().collect::<Vec<_>>().join("\n")))
+                    .text_xs().text_color(rgb_to_hsla(ui.destructive)))))
             .into_element()
     }))
 }
@@ -501,5 +557,74 @@ fn job_label(job: &FileJob) -> String {
             total = job.total.to_string(),
             failed = job.failed.to_string()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::WorkspaceStore;
+    use nsh_core::element::Root;
+    use nsh_engine::EngineConfig;
+    use nsh_testing::Headless;
+
+    #[component]
+    fn TransferFixture() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        let store = WorkspaceStore::install(&crate::FalconLaunchOptions { offline_demo: true, ..Default::default() });
+        let job = store.file_operations.job;
+        job.set(Some(FileJob {
+            id: 1, kind: JobKind::Upload, completed: 0, total: 1, failed: 0,
+            bytes_done: 10, bytes_total: 100, current_item: "a.bin".into(), current_percent: 10,
+            summary_message: None, dispatched: true, cancelled: false, uncertain: false,
+            errors: Vec::new(), active: true,
+        }));
+        view().size_full().relative()
+            .child(view().test_id("transfer-progress").on_press(move || job.update(|j| {
+                let j = j.as_mut().unwrap(); j.current_percent = 75; j.bytes_done = 75;
+            })).child(text("progress")))
+            .child(view().test_id("transfer-finish").on_press(move || job.update(|j| {
+                let j = j.as_mut().unwrap(); j.active = false; j.completed = 1;
+                j.summary_message = Some("completed-summary".into());
+            })).child(text("finish")))
+            .child(view().test_id("transfer-fail").on_press(move || job.update(|j| {
+                let j = j.as_mut().unwrap(); j.active = false; j.completed = 0; j.failed = 1;
+                j.errors = vec!["permission denied".into()];
+            })).child(text("fail")))
+            .child(file_operation_layer())
+    }
+
+    fn fixture() -> Headless {
+        let mut config = EngineConfig::new(Root::of::<TransferFixture>().translations(crate::i18n::translations()));
+        config.viewport = Size::new(Points(800.0), Points(600.0));
+        config.ui_sets = vec![nsh_base::registry(), crate::registry()];
+        let mut app = Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        app
+    }
+
+    #[test]
+    fn transfer_toast_updates_one_slot_through_progress_completion_and_dismiss_headless() {
+        let mut app = fixture();
+        app.wait_for("text:/a.bin.*10%/").unwrap();
+        let toast = app.screen().layout_nodes().into_iter().find(|n| n.test_id.as_deref() == Some("file-transfer-toast")).unwrap();
+        assert!(toast.bounds.origin.x.0 > 0.0 && toast.bounds.origin.y.0 > 0.0);
+        app.press("id:transfer-progress").unwrap();
+        app.wait_for("text:/a.bin.*75%/").unwrap();
+        assert_eq!(app.screen().count("id:file-transfer-toast").unwrap(), 1);
+        app.press("id:transfer-finish").unwrap();
+        app.wait_for("text:completed-summary").unwrap();
+        assert_eq!(app.screen().count("id:file-transfer-toast").unwrap(), 1);
+        app.press("id:file-transfer-action").unwrap();
+        app.wait_for_gone("id:file-transfer-toast", std::time::Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn transfer_toast_retains_the_failure_reason_headless() {
+        let mut app = fixture();
+        app.press("id:transfer-fail").unwrap();
+        app.wait_for("text:/permission denied/").unwrap();
+        assert_eq!(app.screen().count("id:file-transfer-toast").unwrap(), 1);
     }
 }

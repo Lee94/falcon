@@ -71,6 +71,8 @@ pub(crate) struct FileJob {
     pub(crate) bytes_done: u64,
     pub(crate) bytes_total: u64,
     pub(crate) current_item: String,
+    pub(crate) current_percent: u64,
+    pub(crate) summary_message: Option<String>,
     pub(crate) dispatched: bool,
     pub(crate) cancelled: bool,
     pub(crate) uncertain: bool,
@@ -929,7 +931,7 @@ impl FileOperations {
                 };
                 if let Some(summary) = summary {
                     operations.finish_transfer_job(id, &summary);
-                    operations.show_transfer_summary(&store, &summary, true, &scope, was_current);
+                    operations.show_transfer_summary(id, &summary, true, &scope, was_current);
                     if summary.changed && was_current {
                         store.browse_directory(&scope.directory);
                     }
@@ -1103,7 +1105,7 @@ impl FileOperations {
                 };
                 let was_current = operations.operation_scope_is_current(&store, &scope);
                 operations.finish_transfer_job(id, &summary);
-                operations.show_transfer_summary(&store, &summary, false, &scope, was_current);
+                operations.show_transfer_summary(id, &summary, false, &scope, was_current);
             });
         });
     }
@@ -1316,6 +1318,8 @@ impl FileOperations {
             bytes_done: 0,
             bytes_total,
             current_item: String::new(),
+            current_percent: 0,
+            summary_message: None,
             dispatched: false,
             cancelled: false,
             uncertain: false,
@@ -1491,13 +1495,14 @@ impl FileOperations {
                 job.failed = snapshot.failed;
                 job.bytes_done = snapshot.bytes_done.saturating_add(snapshot.current_bytes);
                 job.current_item = snapshot.current_item;
+                job.current_percent = transfer_percent(snapshot.current_bytes, snapshot.current_total);
             }
         });
     }
 
     fn show_transfer_summary(
         &self,
-        store: &WorkspaceStore,
+        id: u64,
         summary: &JobSummary,
         upload: bool,
         scope: &FileScope,
@@ -1564,7 +1569,11 @@ impl FileOperations {
                 result = message
             );
         }
-        store.show_toast(message.to_string());
+        self.job.update(|job| {
+            if let Some(job) = job.as_mut().filter(|job| job.id == id && matches!(job.kind, JobKind::Upload | JobKind::Download)) {
+                job.summary_message = Some(message.to_string());
+            }
+        });
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1896,18 +1905,29 @@ struct ProgressSnapshot {
     skipped: usize,
     bytes_done: u64,
     current_bytes: u64,
+    current_total: Option<u64>,
     current_item: String,
     errors: Vec<String>,
+}
+
+/// 请求体发完不等于宿主机已落盘；完成响应到达之前最多显示 99%。
+fn transfer_percent(done: u64, total: Option<u64>) -> u64 {
+    match total {
+        Some(total) if total > 0 => ((done as f64 / total as f64 * 100.0).floor() as u64).min(99),
+        _ => 0,
+    }
 }
 
 impl ProgressSnapshot {
     fn begin_item(&mut self, name: String) {
         self.current_item = name;
         self.current_bytes = 0;
+        self.current_total = None;
     }
 
-    fn set_current_bytes(&mut self, bytes: u64, _total: Option<u64>) {
+    fn set_current_bytes(&mut self, bytes: u64, total: Option<u64>) {
         self.current_bytes = bytes;
+        self.current_total = total;
     }
 
     fn complete_item(&mut self, bytes: u64, failed: bool) {
@@ -1918,6 +1938,7 @@ impl ProgressSnapshot {
         }
         self.bytes_done = self.bytes_done.saturating_add(bytes);
         self.current_bytes = 0;
+        self.current_total = None;
         self.current_item.clear();
     }
 
@@ -2162,6 +2183,15 @@ mod tests {
         FileOperations, JobKind,
     };
     use crate::store::ProjectRecord;
+
+    #[test]
+    fn transfer_percentage_stays_incomplete_until_the_job_finishes() {
+        assert_eq!(super::transfer_percent(0, None), 0);
+        assert_eq!(super::transfer_percent(10, Some(0)), 0);
+        assert_eq!(super::transfer_percent(50, Some(100)), 50);
+        assert_eq!(super::transfer_percent(100, Some(100)), 99);
+        assert_eq!(super::transfer_percent(u64::MAX, Some(1)), 99);
+    }
 
     fn windows_project() -> ProjectRecord {
         ProjectRecord {

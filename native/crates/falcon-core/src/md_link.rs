@@ -15,6 +15,36 @@ pub fn external_href(href: &str) -> Option<String> {
     ok.then(|| s.to_string())
 }
 
+pub fn relative_href(href: &str) -> bool {
+    let href = js_trim(href);
+    !href.starts_with(['#', '/', '\\']) && !href.split('/').next().unwrap_or("").contains(':')
+}
+
+/// Markdown 图片相对 raw_path 而非宿主机路径解析。保留签发时的 token 与 scope，
+/// 绝不把 ../../ 交给 URL join 越过 token；编码只在最终 URL 上做一次。
+pub fn markdown_image_url(raw: Option<&str>, href: &str) -> Option<String> {
+    if let Some(url) = external_href(href) {
+        return (!url.to_ascii_lowercase().starts_with("mailto:")).then_some(url);
+    }
+    if !relative_href(href) { return None; }
+    let mut result = url::Url::parse(raw?).ok()?;
+    if !matches!(result.scheme(), "http" | "https") { return None; }
+    let (prefix, rest) = result.path().split_once("/raw/")?;
+    if !prefix.contains("/api/projects/") { return None; }
+    let (token, file) = rest.split_once('/')?;
+    if token.is_empty() { return None; }
+    let decoded = resolve_rel("", file)?;
+    let path = resolve_rel(&crate::file_path::rel_dir(&decoded), href)?;
+    // raw 路由会再做项目/作用域边界检查；这里也不生成带反斜杠的 URL。
+    if path.contains('\\') || path.split('/').any(|s| matches!(s, "." | "..")) { return None; }
+    let scope = format!("{prefix}/raw/{token}/");
+    result.set_path(&scope);
+    result.set_query(None);
+    result.set_fragment(None);
+    result.path_segments_mut().ok()?.pop_if_empty().extend(path.split('/'));
+    result.path().starts_with(&scope).then(|| result.into())
+}
+
 /// 文档里的相对链接 → 与 dir 同一种身份的路径（项目相对，或宿主机绝对），可直接喂给查看窗口。
 ///
 /// 项目相对目录不能弹出项目；绝对目录不能弹出文件系统根、盘符或 UNC 共享根。raw 图片
@@ -64,6 +94,35 @@ pub fn resolve_rel(dir: &str, href: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_images_resolve_from_the_document_directory_without_double_encoding() {
+        let raw = Some("https://example.test/api/projects/p/raw/token/docs/nested/read%20me.md");
+        assert_eq!(markdown_image_url(raw, "../img%20dir/a%23b.png?q=1#top").as_deref(),
+            Some("https://example.test/api/projects/p/raw/token/docs/img%20dir/a%23b.png"));
+        assert_eq!(markdown_image_url(raw, "./图.png").as_deref(),
+            Some("https://example.test/api/projects/p/raw/token/docs/nested/%E5%9B%BE.png"));
+        let scoped = Some("https://example.test/prefix/api/projects/p/raw/token/readme.md");
+        assert_eq!(markdown_image_url(scoped, "image.png").as_deref(),
+            Some("https://example.test/prefix/api/projects/p/raw/token/image.png"));
+    }
+
+    #[test]
+    fn markdown_images_keep_the_immutable_token_scope() {
+        let raw = Some("https://example.test/api/projects/p/raw/token/docs/readme.md");
+        for href in ["../../secret.png", "%2e%2e/%2e%2e/secret.png", "/etc/image.png",
+            "//other.test/image.png", "file:///etc/image.png", "data:image/png,abc",
+            "javascript:alert(1)", "mailto:a@b", "#anchor", "..\\image.png", "%2f..%2f..%2fsecret.png"] {
+            assert_eq!(markdown_image_url(raw, href), None, "{href}");
+        }
+        // raw_path 对项目外文件是 token 根下的文件名，不能借相对链接跳出签发目录。
+        let absolute_scope = Some("https://example.test/api/projects/p/raw/token/readme.md");
+        assert_eq!(markdown_image_url(absolute_scope, "../image.png"), None);
+        assert_eq!(markdown_image_url(None, "image.png"), None);
+        assert_eq!(markdown_image_url(Some("file:///api/projects/p/raw/token/readme.md"), "image.png"), None);
+        assert_eq!(markdown_image_url(None, "https://other.test/image.png").as_deref(),
+            Some("https://other.test/image.png"));
+    }
 
     #[test]
     fn external_href_only_lets_http_s_and_mailto_through() {
