@@ -1956,7 +1956,13 @@ pub(crate) mod runtime_tests {
                 cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
                 let mut child = cmd.spawn()?;
                 let mut stdin = child.stdin.take().expect("stdin 是 piped");
-                stdin.write_all(input).await?;
+                // 远端脚本可能不读 stdin 就先退出（父目录不存在时直接报 NotFound）：真 SSH 上写进通道
+                // 照样成功、退出码照收，本机管道却会报 EPIPE，被 `?` 当成链路故障（v0.4.7 的 CI 偶发过
+                // save_local_and_remote 拿到 "SSH 连接失败：Broken pipe"）。按 SSH 的语义忽略，退出码交给调用方判
+                match stdin.write_all(input).await {
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    r => r?,
+                }
                 drop(stdin);
                 let out = child.wait_with_output().await?;
                 Ok(ExecResult {
