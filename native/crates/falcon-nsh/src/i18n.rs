@@ -2,7 +2,7 @@
 //!
 //! 界面上不允许硬编码中文，统一经 `nsh_core::t!("...")` 读取。
 //! NSH 的 `Translations::lookup` 在宿主语言不匹配时（例如无头测试默认 `en-US`）会回退到 `"en"`，
-//! v1 仅有中文一份文案，因此同时填入 `"zh-CN"`、`"zh"` 与 `"en"`，保证任意宿主语言首帧即显示中文。
+//! 英文资源逐步补齐；尚未翻译的键沿用中文，避免出现裸 key。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -13,10 +13,11 @@ use serde_json::Value;
 pub use nsh_core::t;
 
 const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
+const EN_JSON: &str = include_str!("../locales/en.json");
 
 static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let root: Value = serde_json::from_str(ZH_CN_JSON)
-        .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
+    let root: Value =
+        serde_json::from_str(ZH_CN_JSON).expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
     out
@@ -27,7 +28,11 @@ static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let mut map = HashMap::with_capacity(3);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    map.insert("en".to_string(), base);
+    let mut english = base;
+    let root: Value =
+        serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &root, &mut english);
+    map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
 
@@ -64,4 +69,39 @@ pub fn translations() -> Translations {
 /// 非组件上下文（纯单元测试对账文案 key）直接按点分键取值。
 pub fn lookup_static(key: &str) -> Option<&'static str> {
     FLAT_ZH_CN.get(key).map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_translations_have_both_languages_and_matching_placeholders() {
+        let english: Value = serde_json::from_str(EN_JSON).unwrap();
+        let mut flat = HashMap::new();
+        flatten_json("", &english, &mut flat);
+        for (key, value) in flat {
+            let chinese =
+                lookup_static(&key).unwrap_or_else(|| panic!("missing Chinese key {key}"));
+            assert!(!value.trim().is_empty());
+            let placeholders = |text: &str| -> Vec<String> {
+                let mut values: Vec<_> = text
+                    .split("%{")
+                    .skip(1)
+                    .map(|part| part.split('}').next().unwrap().to_string())
+                    .collect();
+                values.sort();
+                values
+            };
+            assert_eq!(placeholders(chinese), placeholders(&value), "{key}");
+            assert_eq!(
+                translations().lookup("en-US", &key).as_deref(),
+                Some(value.as_str())
+            );
+            assert_eq!(
+                translations().lookup("zh-CN", &key).as_deref(),
+                Some(chinese)
+            );
+        }
+    }
 }

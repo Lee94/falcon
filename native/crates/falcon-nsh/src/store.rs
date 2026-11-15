@@ -79,6 +79,14 @@ pub enum ActiveDialog {
         session_id: String,
         foreground_cmd: String,
     },
+    ConfirmTerminateMany {
+        session_ids: Vec<String>,
+        connection_generation: u64,
+    },
+    ConfirmClearAllDead {
+        session_ids: Vec<String>,
+        connection_generation: u64,
+    },
     RenameSession {
         session_id: String,
         form_id: u64,
@@ -676,6 +684,9 @@ pub struct WorkspaceStore {
     pub collapsed: Signal<BTreeMap<String, bool>>,
     pub sessions_open: Signal<BTreeMap<String, bool>>,
     pub overview_open: Signal<bool>,
+    pub overview_project: Signal<Option<String>>,
+    pub overview_filter: Signal<Option<SessionState>>,
+    pub overview_selected: Signal<Vec<String>>,
     pub term_zoomed: Signal<bool>,
     pub sidebar_open: Signal<bool>,
     pub sidebar_width: Signal<f32>,
@@ -1585,6 +1596,9 @@ impl WorkspaceStore {
             collapsed: signal(BTreeMap::new()),
             sessions_open: signal(BTreeMap::new()),
             overview_open: signal(false),
+            overview_project: signal(None),
+            overview_filter: signal(None),
+            overview_selected: signal(Vec::new()),
             term_zoomed: signal(false),
             sidebar_open: signal(true),
             sidebar_width: signal(260.0),
@@ -3580,6 +3594,13 @@ impl WorkspaceStore {
         }
         self.next_connection_generation();
         self.server_connected.set(false);
+        self.reset_overview_filter();
+        if matches!(
+            self.active_dialog.get(),
+            ActiveDialog::ConfirmTerminateMany { .. } | ActiveDialog::ConfirmClearAllDead { .. }
+        ) {
+            self.active_dialog.set(ActiveDialog::None);
+        }
         self.host_delete_busy.set(None);
         self.host_delete_error.set(None);
         self.invalidate_host_edit_generation();

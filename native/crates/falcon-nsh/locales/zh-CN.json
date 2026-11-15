@@ -770,7 +770,7 @@
     "selectAll": "全选",
     "selectOne": "选择会话",
     "terminateSelected": "终止所选（%{n}）…",
-    "clearAllDead": "清除全部已丢失",
+    "clearAllDead": "清除全部已结束",
     "noDead": "没有已丢失的会话",
     "clearedDead": "已清除 %{n} 条已丢失记录",
     "clearedDeadBody": "只删记录，不影响任何进程。",
@@ -974,6 +974,13 @@
     "logout": "退出登录"
   },
   "native": {
+    "overview": {
+      "clearProjectFilter": "清除项目筛选",
+      "clearAllDeadTitle": "清除 %{n} 条已结束会话记录？",
+      "clearAllDeadBody": "将清除所有项目中的以下已结束会话记录，不受当前筛选条件影响。",
+      "clearAllDeadConfirm": "清除全部记录",
+      "clearAllDeadFootnote": "只删除记录，不影响任何进程。此操作不可撤销。"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",
