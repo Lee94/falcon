@@ -71,6 +71,7 @@ pub enum ActiveDialog {
     EditProject(String),
     DeriveProject(String),
     Settings(SettingsTab),
+    ConfirmAppUpdate(falcon_platform::AvailableUpdate),
     Askpass {
         id: String,
         prompt: String,
@@ -100,6 +101,7 @@ pub enum FileGuardAction {
     Reload(String),
     SwitchServer(String),
     Quit,
+    RelaunchUpdate(String),
     CloseWindow,
 }
 
@@ -695,6 +697,7 @@ pub struct WorkspaceStore {
 
     pub appearance: crate::appearance::AppearanceState,
     pub server_info: Signal<Option<falcon_proto::SystemInfo>>,
+    pub(crate) app_update: Signal<crate::app_update::Phase>,
     pub finish_sound: Signal<bool>,
     pub file_directory: Signal<String>,
     pub files_loading: Signal<bool>,
@@ -875,7 +878,7 @@ impl WorkspaceStore {
         request_id
     }
 
-    fn dirty_file_keys(&self) -> Vec<String> {
+    pub(crate) fn dirty_file_keys(&self) -> Vec<String> {
         self.open_files
             .get()
             .into_iter()
@@ -935,6 +938,7 @@ impl WorkspaceStore {
                 FileGuardAction::Reload(_) => {}
                 FileGuardAction::SwitchServer(_)
                 | FileGuardAction::Quit
+                | FileGuardAction::RelaunchUpdate(_)
                 | FileGuardAction::CloseWindow => self.start_file_save_batch(action, file_keys),
             },
             FileGuardChoice::Discard => {
@@ -960,8 +964,11 @@ impl WorkspaceStore {
                             );
                         }
                     }
-                    FileGuardAction::SwitchServer(_) => self.complete_file_guard_action(action),
-                    FileGuardAction::Quit | FileGuardAction::CloseWindow => {
+                    FileGuardAction::SwitchServer(_) | FileGuardAction::RelaunchUpdate(_) => {
+                        self.complete_file_guard_action(action)
+                    }
+                    FileGuardAction::Quit
+                    | FileGuardAction::CloseWindow => {
                         for key in file_keys {
                             self.detach_pane_now(&key);
                         }
@@ -983,6 +990,9 @@ impl WorkspaceStore {
             FileGuardAction::Quit => {
                 #[cfg(not(target_arch = "wasm32"))]
                 nsh_core::element::desktop::quit();
+            }
+            FileGuardAction::RelaunchUpdate(bundle) => {
+                self.complete_update_relaunch(&bundle);
             }
             FileGuardAction::CloseWindow => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1602,6 +1612,7 @@ impl WorkspaceStore {
             extra_alt_latched: signal(false),
             appearance: crate::appearance::AppearanceState::new(),
             server_info: signal(None),
+            app_update: signal(crate::app_update::Phase::Idle),
             finish_sound: signal(
                 crate::theme::load_pref_item("falcon.finishSound").as_deref() != Some("off"),
             ),
@@ -2400,36 +2411,6 @@ impl WorkspaceStore {
                         Err(error) => store.show_toast(error.to_string()),
                     }
                 }
-            });
-        }
-    }
-
-    pub fn check_app_update(&self) {
-        // Web 端没有应用内更新，nsh-core 在 wasm32 上也不提供 blocking（阻塞线程池），整个入口只在原生端编
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let Some(updater) = falcon_platform::shared().app_updater() else {
-                return;
-            };
-            let store = self.clone();
-            self.show_toast(crate::i18n::t!("native.update.checking"));
-            spawn(async move {
-                let result =
-                    nsh_core::prelude::blocking(move || updater.check(env!("CARGO_PKG_VERSION")))
-                        .await;
-                let message = match result {
-                    Ok(falcon_platform::UpdateCheck::UpToDate { .. }) => {
-                        crate::i18n::t!("native.update.upToDate")
-                    }
-                    Ok(falcon_platform::UpdateCheck::Available(update)) => {
-                        crate::i18n::t!(
-                            "native.update.available",
-                            version = update.version.as_str()
-                        )
-                    }
-                    _ => crate::i18n::t!("native.update.failed"),
-                };
-                store.show_toast(message);
             });
         }
     }

@@ -149,6 +149,9 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             ActiveDialog::Askpass { id, prompt } => {
                 render_askpass_modal(&store, &resolved, &id, &prompt, askpass_input).into_element()
             }
+            ActiveDialog::ConfirmAppUpdate(update) => {
+                render_confirm_app_update(&store, &resolved, update).into_element()
+            }
             ActiveDialog::ConfirmTerminate {
                 session_id,
                 foreground_cmd,
@@ -251,6 +254,9 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
         return;
     }
     match dialog {
+        ActiveDialog::ConfirmAppUpdate(_) => {
+            store.active_dialog.set(ActiveDialog::Settings(SettingsTab::About));
+        }
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }
@@ -1148,7 +1154,6 @@ fn render_about_tab(
 ) -> impl IntoElement {
     let ui = &resolved.ui;
     let info = store.server_info.get();
-    let st = store.clone();
     let value = |value: String| {
         text(value)
             .text_xs()
@@ -1181,39 +1186,38 @@ fn render_about_tab(
             t!("native.settings.clientVersion"),
             value(format!("v{}", env!("CARGO_PKG_VERSION"))),
         ))
-        .child(
-            view()
-                .pt(zpx(32.0))
-                .flex_col()
-                .gap(zpx(10.0))
-                .child(
-                    text(t!("native.update.title"))
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(
-                    text(t!("native.update.intro"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                )
-                .child(setting_row(
-                    resolved,
-                    t!("native.update.check"),
-                    view()
-                        .px(zpx(10.0))
-                        .py(zpx(4.0))
-                        .rounded(zpx(8.0))
-                        .cursor_pointer()
-                        .bg(rgb_to_hsla(ui.app))
-                        .on_press(move || st.check_app_update())
-                        .child(
-                            text(t!("native.update.check"))
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.foreground)),
-                        ),
-                )),
-        )
+        .child(crate::app_update::render(store, resolved))
+}
+
+fn render_confirm_app_update(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+    update: falcon_platform::AvailableUpdate,
+) -> impl IntoElement {
+    let ui = &resolved.ui;
+    let st_cancel = store.clone();
+    let st_install = store.clone();
+    let st_close = store.clone();
+    view().flex_col()
+        .child(view().flex_row().items_center().justify_between().p(zpx(14.0))
+            .child(text(t!("native.update.confirmTitle", version = update.version.as_str())).text_sm().text_color(rgb_to_hsla(ui.foreground)))
+            .child(icon_button("app-update-close", t!("common.close"), Glyph::Close, false, resolved,
+                move || st_close.active_dialog.set(ActiveDialog::Settings(SettingsTab::About)))))
+        .child(view().flex_col().p(zpx(14.0)).gap(zpx(12.0))
+            .child(text(if update.installs_local_service {
+                t!("native.update.confirmBody", asset = update.asset_name.as_str())
+            } else {
+                t!("native.update.confirmBodyDownload", asset = update.asset_name.as_str())
+            }).text_xs().text_color(rgb_to_hsla(ui.foreground)))
+            .child(view().flex_row().justify_end().gap(zpx(8.0))
+                .child(view().test_id("app-update-cancel").px(zpx(10.0)).py(zpx(5.0)).rounded(zpx(6.0))
+                    .bg(rgb_to_hsla(ui.secondary)).cursor_pointer()
+                    .on_press(move || st_cancel.active_dialog.set(ActiveDialog::Settings(SettingsTab::About)))
+                    .child(text(t!("common.cancel")).text_xs().text_color(rgb_to_hsla(ui.secondary_foreground))))
+                .child(view().test_id("app-update-install").px(zpx(10.0)).py(zpx(5.0)).rounded(zpx(6.0))
+                    .bg(rgb_to_hsla(ui.tint)).cursor_pointer()
+                    .on_press(move || st_install.install_app_update(update.clone()))
+                    .child(text(t!("native.update.confirmOk")).text_xs().text_color(rgb_to_hsla(ui.tint_foreground))))))
 }
 
 fn render_askpass_modal(

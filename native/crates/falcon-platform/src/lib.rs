@@ -266,10 +266,26 @@ pub enum UpdateFailure {
     Service(String),
 }
 
+/// 后台更新阶段；下载长度未知时不报告百分比。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateProgress {
+    Downloading { percent: Option<u8> },
+    Installing,
+}
+
 /// 阻塞。界面把它放到后台执行器上调
 pub trait AppUpdater: Send + Sync {
     fn check(&self, current_version: &str) -> UpdateCheck;
     fn install(&self, update: &AvailableUpdate) -> Result<InstalledUpdate, UpdateFailure>;
+
+    fn install_with_progress(
+        &self,
+        update: &AvailableUpdate,
+        progress: &mut dyn FnMut(UpdateProgress),
+    ) -> Result<InstalledUpdate, UpdateFailure> {
+        progress(UpdateProgress::Installing);
+        self.install(update)
+    }
 }
 
 // ---------------- 默认跨端文件/内存存储实现 ----------------
