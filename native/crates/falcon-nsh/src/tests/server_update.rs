@@ -62,7 +62,7 @@ fn mock(responses: Vec<(&str, u16, String)>) -> MockHttpServer {
 }
 
 fn app(server: &MockHttpServer, switch_url: Option<String>) -> Headless {
-    let mut app = headless_with_options(
+    let mut app = headless_with_locale(
         FalconLaunchOptions {
             server_url: Some(server.url.clone()),
             test_client_url: Some(server.url.clone()),
@@ -70,6 +70,7 @@ fn app(server: &MockHttpServer, switch_url: Option<String>) -> Headless {
             ..Default::default()
         },
         ColorScheme::Dark,
+            "en-US",
     );
     app.first_render().unwrap();
     app
@@ -112,13 +113,14 @@ fn server_update_accepts_normalized_client_address_headless() {
         (CHECK, 200, check("1.0.0", true)),
     ]);
     let url = server.url.replacen("http://", "HTTP://", 1);
-    let mut app = headless_with_options(
+    let mut app = headless_with_locale(
         FalconLaunchOptions {
             server_url: Some(url.clone()),
             test_client_url: Some(url),
             ..Default::default()
         },
         ColorScheme::Dark,
+            "en-US",
     );
     app.first_render().unwrap();
     open(&mut app);

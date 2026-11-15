@@ -183,6 +183,8 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 .gateway(key.gateway)
                 .host_id(key.host_id)
                 .into_element(),
+            ActiveDialog::EditRelay { id, share, connection_generation, request_generation } => super::relays::relay_editor()
+                .id(id).share(share).connection_generation(connection_generation).request_generation(request_generation).into_element(),
             ActiveDialog::Settings(tab) => render_settings_modal(
                 &store,
                 &resolved,
@@ -299,6 +301,7 @@ fn dialog_uses_input_autofocus(dialog: &ActiveDialog) -> bool {
             | ActiveDialog::PreviewPopup
             | ActiveDialog::RenameSession { .. }
             | ActiveDialog::Askpass { .. }
+            | ActiveDialog::EditRelay { .. }
     )
 }
 
@@ -314,6 +317,7 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog, project_pic
         }
         ActiveDialog::NewProject | ActiveDialog::NewProjectPreset(_) | ActiveDialog::EditProject(_)
             if project_picker.get_untracked() => project_picker.set(false),
+        ActiveDialog::EditRelay { .. } => store.active_dialog.set(ActiveDialog::Settings(SettingsTab::Relays)),
         ActiveDialog::RenameSession { session_id, form_id } => {
             store.session_operations.close_rename(store, session_id, *form_id);
         }
@@ -609,7 +613,7 @@ fn render_settings_modal(
         SettingsTab::Terminal => crate::views::terminal_settings().into_element(),
         SettingsTab::Notifications => render_notifications_tab(store, resolved).into_element(),
         SettingsTab::Hosts => render_hosts_tab(store, resolved).into_element(),
-        SettingsTab::Relays => render_relays_tab(store, resolved).into_element(),
+        SettingsTab::Relays => super::relays::relays_pane().into_element(),
         SettingsTab::Plugins => render_plugins_tab(store, resolved).into_element(),
         SettingsTab::About => render_about_tab(store, resolved).into_element(),
     };
@@ -977,30 +981,6 @@ fn render_confirm_delete_host_modal(
                         .text_color(rgb_to_hsla(ui.destructive_foreground)),
                 )),
         )
-}
-
-fn render_relays_tab(
-    store: &WorkspaceStore,
-    _resolved: &falcon_theme::ResolvedTheme,
-) -> impl IntoElement {
-    let local = super::relays::relay_machine()
-        .machine_id(String::new())
-        .name(t!("forward.local"))
-        .destination(t!("forward.localConn"));
-    let hosts_store = store.clone();
-    view().flex_col().gap(zpx(24.0)).child(local).child(dynamic(move || {
-        let mut groups = view().flex_col().gap(zpx(24.0));
-        for host in hosts_store.hosts.get() {
-            groups = groups.child(
-                super::relays::relay_machine()
-                    .key(host.id.clone())
-                    .machine_id(host.id)
-                    .name(host.name)
-                    .destination(host.destination),
-            );
-        }
-        groups
-    }))
 }
 
 fn render_plugins_tab(

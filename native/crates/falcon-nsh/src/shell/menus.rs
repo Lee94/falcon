@@ -382,13 +382,6 @@ pub(crate) fn host_menu_actions(store: &WorkspaceStore, host_id: Option<&str>) -
                 .set(ActiveDialog::Settings(SettingsTab::Hosts))
         },
     ));
-    for multi in [false, true] {
-        let st = store.clone();
-        let host_id = host_id.map(str::to_owned);
-        actions.push(PopupAction::new(server.clone(), if multi { t!("multi.newProject") } else { t!("sidebar.newProject") }, false, false, move || {
-            st.active_dialog.set(ActiveDialog::NewProjectPreset(crate::menu_operations::ProjectPreset { local: host_id.is_none(), host_id: host_id.clone(), multi }));
-        }));
-    }
     actions
 }
 

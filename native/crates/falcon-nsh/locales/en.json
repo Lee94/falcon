@@ -250,6 +250,13 @@
       "transferCancel": "Cancel",
       "transferDetails": "%{done} / %{total} files · %{bytes}",
       "transferErrorDetails": "%{errors}"
+    },
+    "relays": {
+      "edit": "Edit relay rule",
+      "delete": "Delete rule",
+      "save": "Save",
+      "cancel": "Cancel",
+      "defaults": "Listen on 127.0.0.1 by default. Leave the target address blank for 127.0.0.1, or the target port blank to use the listening port."
     }
   },
   "common": {
@@ -305,7 +312,35 @@
     "editProject": "Edit project"
   },
   "forward": {
-    "local": "Local"
+    "local": "Local machine",
+    "localConn": "The machine running the Falcon backend",
+    "unavailable": "Relay actions are unavailable while disconnected or on this platform.",
+    "noHosts": "No remote hosts yet. Add an SSH host to create port forwards.",
+    "goHosts": "Add remote host",
+    "empty": "No port forwards yet.",
+    "port": "Target port",
+    "bindPort": "Listening port",
+    "destPort": "Target port",
+    "addAction": "Add",
+    "kind_local": "Local",
+    "kind_remote": "Remote",
+    "destHostPlaceholder": "Target 127.0.0.1",
+    "hostInvalid": "Enter an IP address or hostname without spaces",
+    "namePlaceholder": "Name (optional)",
+    "portInvalid": "Port must be between 1 and 65535",
+    "state_stopped": "Stopped",
+    "state_starting": "Starting",
+    "state_active": "Active",
+    "state_error": "Failed",
+    "samePort": "Same port ×%{n}",
+    "samePortHint": "%{n} rules share this port; only one can be enabled",
+    "sshSection": "Port forwarding",
+    "shareSection": "Public sharing",
+    "shareEmpty": "No public shares yet. Add one to get a trycloudflare.com URL.",
+    "shareHint_local": "Publish the HTTP service on this machine's 127.0.0.1 to the internet. Anyone with the link can access it.",
+    "shareHint_remote": "Connect the HTTP service on this host's 127.0.0.1 over SSH, then publish it. Anyone with the link can access it.",
+    "shareCopy": "Copy URL",
+    "shareCopied": "Copied"
   },
   "session": {
     "state_active": "Running",

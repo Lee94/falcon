@@ -81,6 +81,12 @@ pub enum ActiveDialog {
     Settings(SettingsTab),
     ConfirmAppUpdate(falcon_platform::AvailableUpdate),
     ServerUpdate(crate::server_updates::ServerUpdateKey),
+    EditRelay {
+        id: String,
+        share: bool,
+        connection_generation: u64,
+        request_generation: u64,
+    },
     Askpass {
         id: String,
         prompt: String,
@@ -263,11 +269,33 @@ pub struct RelayRecord {
     pub target: String,
     pub public_url: Option<String>,
     pub enabled: bool,
-    pub same_port_conflict: bool,
+    pub name: String,
+    pub bind_host: String,
+    pub dest_host: String,
+    pub dest_port: u16,
+    pub state: falcon_proto::ForwardState,
+    pub error: Option<String>,
+    pub same_port_count: usize,
+}
+
+impl RelayRecord {
+    pub fn is_share(&self) -> bool { self.kind_label == "Quick Tunnel" }
+}
+
+pub(crate) enum RelayChange {
+    Forward(falcon_proto::PortForwardPatch),
+    Share(falcon_proto::PublicSharePatch),
+    Delete { share: bool },
 }
 
 fn relay_record_from_forward(forward: falcon_proto::PortForward) -> RelayRecord {
     RelayRecord {
+        name: forward.name.unwrap_or_default(),
+        bind_host: forward.bind_host,
+        dest_host: forward.dest_host.clone(),
+        dest_port: forward.dest_port,
+        state: forward.state,
+        error: forward.error,
         id: forward.id,
         machine_label: forward.host_id,
         kind_label: if forward.kind == falcon_proto::ForwardKind::Local {
@@ -279,12 +307,18 @@ fn relay_record_from_forward(forward: falcon_proto::PortForward) -> RelayRecord 
         target: format!("{}:{}", forward.dest_host, forward.dest_port),
         public_url: None,
         enabled: forward.enabled,
-        same_port_conflict: false,
+        same_port_count: 1,
     }
 }
 
 fn relay_record_from_share(share: falcon_proto::PublicShare) -> RelayRecord {
     RelayRecord {
+        name: share.name.unwrap_or_default(),
+        bind_host: String::new(),
+        dest_host: share.dest_host.clone(),
+        dest_port: share.dest_port,
+        state: share.state,
+        error: share.error,
         id: share.id,
         machine_label: share.host_id.unwrap_or_else(|| "local".into()),
         kind_label: "Quick Tunnel".into(),
@@ -292,13 +326,13 @@ fn relay_record_from_share(share: falcon_proto::PublicShare) -> RelayRecord {
         target: format!("http://{}:{}", share.dest_host, share.dest_port),
         public_url: share.public_url,
         enabled: share.enabled,
-        same_port_conflict: false,
+        same_port_count: 1,
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RelayWriteKind {
-    Toggle { id: String, share: bool },
+    Toggle { id: String, share: bool }, // Rule lock shared by toggle, edit, rename and delete.
     CreateShare { host: String },
     CreateForward { host: String },
 }
@@ -1307,13 +1341,19 @@ impl WorkspaceStore {
         let relays = vec![
             RelayRecord {
                 id: "relay-1".into(),
-                machine_label: "build-box-01".into(),
+                machine_label: "host-prod-01".into(),
                 kind_label: "L → R".into(),
                 local_port: 5432,
                 target: "127.0.0.1:5432".into(),
                 public_url: None,
                 enabled: true,
-                same_port_conflict: false,
+                name: "Postgres".into(),
+                bind_host: "127.0.0.1".into(),
+                dest_host: "127.0.0.1".into(),
+                dest_port: 5432,
+                state: falcon_proto::ForwardState::Active,
+                error: None,
+                same_port_count: 1,
             },
             RelayRecord {
                 id: "relay-2".into(),
@@ -1323,7 +1363,13 @@ impl WorkspaceStore {
                 target: "http://127.0.0.1:4923".into(),
                 public_url: Some("https://falcon-demo.trycloudflare.com".into()),
                 enabled: false,
-                same_port_conflict: false,
+                name: String::new(),
+                bind_host: String::new(),
+                dest_host: "127.0.0.1".into(),
+                dest_port: 4923,
+                state: falcon_proto::ForwardState::Stopped,
+                error: None,
+                same_port_count: 1,
             },
         ];
 
@@ -3373,6 +3419,23 @@ impl WorkspaceStore {
         connection_generation: u64,
         request_generation: u64,
     ) {
+        let change = if share {
+            RelayChange::Share(falcon_proto::PublicSharePatch { enabled: Some(enabled), ..Default::default() })
+        } else {
+            RelayChange::Forward(falcon_proto::PortForwardPatch { enabled: Some(enabled), ..Default::default() })
+        };
+        self.change_relay(id, change, connection_generation, request_generation, || {});
+    }
+
+    /// All row mutations share one lock; a stale row may never write to a new connection.
+    pub(crate) fn change_relay(
+        &self,
+        id: &str,
+        change: RelayChange,
+        connection_generation: u64,
+        request_generation: u64,
+        on_success: impl FnOnce() + 'static,
+    ) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let origin_url = crate::project_operations::canonical_server_url(&self.server_url.get());
@@ -3389,6 +3452,7 @@ impl WorkspaceStore {
             };
             let store = self.clone();
             let id = id.to_string();
+            let share = matches!(change, RelayChange::Share(_) | RelayChange::Delete { share: true });
             let key = RelayWriteKey {
                 origin_url: origin_url.clone(),
                 kind: RelayWriteKind::Toggle { id: id.clone(), share },
@@ -3397,30 +3461,13 @@ impl WorkspaceStore {
                 return;
             };
             self.spawn_root(async move {
-                let result = if share {
-                    client
-                        .update_share(
-                            &id,
-                            &falcon_proto::PublicSharePatch {
-                                enabled: Some(enabled),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map(relay_record_from_share)
-                } else {
-                    client
-                        .update_forward(
-                            &id,
-                            &falcon_proto::PortForwardPatch {
-                                enabled: Some(enabled),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map(relay_record_from_forward)
+                let result = match change {
+                    RelayChange::Share(patch) => client.update_share(&id, &patch).await.map(relay_record_from_share).map(Some),
+                    RelayChange::Forward(patch) => client.update_forward(&id, &patch).await.map(relay_record_from_forward).map(Some),
+                    RelayChange::Delete { share: true } => client.delete_share(&id).await.map(|_| None),
+                    RelayChange::Delete { share: false } => client.delete_forward(&id).await.map(|_| None),
                 };
-                store.finish_relay_write_result(
+                let success = store.finish_relay_write_result(
                     client,
                     key,
                     token,
@@ -3429,16 +3476,21 @@ impl WorkspaceStore {
                     request_generation,
                     result.map_err(|error| error.to_string()),
                 );
+                if success { on_success(); }
             });
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (id, share, enabled, connection_generation, request_generation);
+            let _ = (id, change, connection_generation, request_generation, on_success);
             self.show_relay_unavailable();
         }
     }
 
     pub fn create_public_share(&self, host: &str, port: u16, name: &str) {
+        self.create_public_share_then(host, port, name, || {});
+    }
+
+    pub(crate) fn create_public_share_then(&self, host: &str, port: u16, name: &str, on_success: impl FnOnce() + 'static) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if !self.relay_actions_available() {
@@ -3474,19 +3526,20 @@ impl WorkspaceStore {
                     .await
                     .map(relay_record_from_share)
                     .map_err(|error| error.to_string());
-                store.finish_relay_write_result(
+                let success = store.finish_relay_write_result(
                     client,
                     key,
                     token,
                     origin_url,
                     connection_generation,
                     request_generation,
-                    result,
+                    result.map(Some),
                 );
+                if success { on_success(); }
             });
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = (host, port, name);
+        let _ = (host, port, name, on_success);
         #[cfg(target_arch = "wasm32")]
         self.show_relay_unavailable();
     }
@@ -3499,6 +3552,13 @@ impl WorkspaceStore {
         destination: &str,
         port: u16,
         name: &str,
+    ) {
+        self.create_port_forward_then(host, remote, bind, destination, port, name, || {});
+    }
+
+    pub(crate) fn create_port_forward_then(
+        &self, host: &str, remote: bool, bind: u16, destination: &str,
+        port: u16, name: &str, on_success: impl FnOnce() + 'static,
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3542,20 +3602,21 @@ impl WorkspaceStore {
                     .await
                     .map(relay_record_from_forward)
                     .map_err(|error| error.to_string());
-                store.finish_relay_write_result(
+                let success = store.finish_relay_write_result(
                     client,
                     key,
                     token,
                     origin_url,
                     connection_generation,
                     request_generation,
-                    result,
+                    result.map(Some),
                 );
+                if success { on_success(); }
             });
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (host, remote, bind, destination, port, name);
+            let _ = (host, remote, bind, destination, port, name, on_success);
             self.show_relay_unavailable();
         }
     }
@@ -3644,15 +3705,20 @@ impl WorkspaceStore {
         origin_url: String,
         connection_generation: u64,
         request_generation: u64,
-        result: Result<RelayRecord, String>,
-    ) {
+        result: Result<Option<RelayRecord>, String>,
+    ) -> bool {
         let current = self.relay_context_is_current(&origin_url, connection_generation, request_generation);
         if current {
             match result {
                 Ok(record) => {
-                    self.upsert_relay(record);
+                    if let Some(record) = record {
+                        self.upsert_relay(record);
+                    } else if let RelayWriteKind::Toggle { id, share } = &key.kind {
+                        self.relays.update(|rules| rules.retain(|rule| rule.id != *id || rule.is_share() != *share));
+                    }
                     self.finish_relay_write(&key, token);
                     self.queue_relay_refresh(client, &origin_url, connection_generation, request_generation);
+                    return true;
                 }
                 Err(error) => {
                     self.finish_relay_write(&key, token);
@@ -3665,6 +3731,7 @@ impl WorkspaceStore {
                 self.queue_current_relay_refresh();
             }
         }
+        false
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3744,9 +3811,15 @@ impl WorkspaceStore {
             }
             match result {
                 Ok(list) => {
+                    let counts = falcon_core::relay::same_port_counts(&list);
                     let mut rules: Vec<_> = list.forwards.into_iter().map(relay_record_from_forward).collect();
                     rules.extend(list.shares.into_iter().map(relay_record_from_share));
-                    store.relays.set(rules);
+                    for rule in &mut rules {
+                        rule.same_port_count = counts.get(&rule.id).copied().unwrap_or(1);
+                    }
+                    if store.relays.get_untracked() != rules {
+                        store.relays.set(rules);
+                    }
                 }
                 Err(error) => store.show_toast(error.to_string()),
             }

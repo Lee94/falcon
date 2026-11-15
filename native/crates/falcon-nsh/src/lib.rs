@@ -1790,6 +1790,14 @@ mod tests {
     }
 
     fn headless_with_options(opts: FalconLaunchOptions, os_scheme: ColorScheme) -> Headless {
+        headless_with_locale(opts, os_scheme, "zh-CN")
+    }
+
+    fn headless_with_locale(
+        opts: FalconLaunchOptions,
+        os_scheme: ColorScheme,
+        locale_tag: &str,
+    ) -> Headless {
         ensure_test_platform();
         let root = falcon_root_with_options(opts);
         let mut cfg = EngineConfig::new(root);
@@ -1797,13 +1805,10 @@ mod tests {
         cfg.environment.os = nsh_core::platform::Os::Linux;
         cfg.environment.idiom = Idiom::Desktop;
         cfg.environment.color_scheme = os_scheme;
-        let locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
+        let locale = nsh_core::platform::Locale::parse(locale_tag).unwrap();
         cfg.environment.locale = locale;
         cfg.environment.locale_settings = nsh_core::platform::LocaleSettings::of(locale);
-        cfg.environment.locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
         cfg.environment.locale_settings.languages = nsh_core::platform::Languages::one(cfg.environment.locale);
-        cfg.environment.locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
-        cfg.environment.locale_settings = nsh_core::platform::LocaleSettings::of(cfg.environment.locale);
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         Headless::start(cfg).expect("start headless FalconApp")
     }
@@ -3847,7 +3852,7 @@ mod tests {
             200,
             response,
         )]);
-        let mut app = headless_with_options(
+        let mut app = headless_with_locale(
             FalconLaunchOptions {
                 offline_demo: true,
                 test_client_url: Some(server.url.clone()),
@@ -3855,6 +3860,7 @@ mod tests {
                 ..Default::default()
             },
             ColorScheme::Dark,
+            "en-US",
         );
         app.first_render().unwrap();
         app.press("id:test-open-quick-open").unwrap();
@@ -3952,12 +3958,15 @@ mod tests {
         app.first_render().unwrap();
         app.press("label:host-menu-s:local").unwrap();
         app.press("role:menuitem[新建多仓库项目…]").unwrap();
+        // GPUI parity: a multi preset opens the repo folder picker first; close it to reach the form.
+        app.press("取消").unwrap();
         app.wait_for("添加仓库…").unwrap();
         assert!(app.shows("多仓库"));
         app.press_key("escape").unwrap();
         app.wait_for_gone("id:modal-layer-panel", Duration::from_secs(2)).unwrap();
         app.press("label:host-menu-s:host:host-prod-01").unwrap();
         app.press("role:menuitem[新建多仓库项目…]").unwrap();
+        app.press("取消").unwrap();
         app.wait_for("添加仓库…").unwrap();
         assert!(app.shows("远程 SSH"));
     }
@@ -5211,13 +5220,14 @@ mod tests {
     fn settings_theme_preview_cancel_and_custom_import_keep_inputs_headless() {
         let mut settings = ThemeSettings::default();
         settings.mode = ThemePref::Light;
-        let mut app = headless_with_options(
+        let mut app = headless_with_locale(
             FalconLaunchOptions {
                 offline_demo: true,
                 initial_theme: Some(settings),
                 ..Default::default()
             },
             ColorScheme::Light,
+            "en-US",
         );
         app.first_render().unwrap();
         app.press("label:sidebar-settings").unwrap();
@@ -5849,6 +5859,11 @@ mod tests {
         mock.wait_for_response();
         mock.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/relays"]);
         app.wait_for_gone("id:relay-toggle-stale-connection", Duration::from_millis(500)).unwrap();
+    }
+
+    mod relay_parity {
+        use super::*;
+        include!("relay_tests.rs");
     }
 
     /// ADR 0018 对账回归：`falcon-core::app_icon::APP_ICON_IDS` 中全部内置图标均已在 `assets/app-icons/` 下就位。

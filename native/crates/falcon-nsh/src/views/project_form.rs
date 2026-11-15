@@ -223,10 +223,9 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
 
     let type_store = store.clone();
     let is_editing = project_id.is_some();
-    let preset_locked = preset.is_some();
     let type_theme = resolved.clone();
     let type_selector = dynamic(move || {
-        if is_editing || preset_locked {
+        if is_editing {
             return view().into_element();
         }
         let resolved = type_theme.clone();
@@ -391,7 +390,7 @@ pub fn ProjectForm(props: ProjectFormProps) -> impl IntoElement {
     let multi_toggle_signal = multi;
     let toggle_theme = resolved.clone();
     let multi_toggle = dynamic(move || {
-        if root_multi || derived || is_editing || preset_locked {
+        if root_multi || derived || is_editing {
             return view().into_element();
         }
         let enabled = multi_toggle_signal.get();
