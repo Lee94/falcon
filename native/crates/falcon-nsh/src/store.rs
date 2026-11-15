@@ -389,6 +389,7 @@ pub struct WorkspaceStore {
     pub project_operations: Rc<crate::project_operations::ProjectOperations>,
     pub(crate) task_owner: Owner,
     pub(crate) connection_generation: Rc<Cell<u64>>,
+    pub(crate) connection_request_generation: Rc<Cell<u64>>,
 
     terminals: Rc<SharedTerminals>,
 }
@@ -398,6 +399,7 @@ impl WorkspaceStore {
     pub fn install(opts: &FalconLaunchOptions) -> Self {
         let task_owner = Owner::current();
         let connection_generation = Rc::new(Cell::new(0));
+        let connection_request_generation = Rc::new(Cell::new(0));
         let local_url = falcon_platform::shared().local_server_url();
         let persisted_profiles = (!opts.offline_demo)
             .then(|| falcon_platform::shared().load_profiles())
@@ -894,10 +896,12 @@ impl WorkspaceStore {
             project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
                 task_owner,
                 connection_generation.clone(),
+                connection_request_generation.clone(),
                 server_url,
             )),
             task_owner,
             connection_generation,
+            connection_request_generation,
             terminals,
         };
 
@@ -953,6 +957,7 @@ impl WorkspaceStore {
     pub fn connect_live_server(&self, url: &str) {
         self.bump_connection_generation();
         let connection_generation = self.project_operations.current_connection_generation();
+        let connection_request_generation = self.bump_connection_request_generation();
         let Ok(parsed_url) = url.parse() else {
             return;
         };
@@ -996,11 +1001,58 @@ impl WorkspaceStore {
             }
             let mut proj_paths: HashMap<String, String> = HashMap::new();
 
-            if let Ok(projects) = client.list_projects().await {
-                if store.server_url.get().trim_end_matches('/') != target_url.trim_end_matches('/')
+            let mut snapshot = store
+                .project_operations
+                .begin_mapping_snapshot(
+                    &target_url,
+                    connection_generation,
+                    connection_request_generation,
+                );
+            let mut revision = store.project_operations.project_update_revision(&target_url);
+            let projects = loop {
+                if !store
+                    .project_operations
+                    .mapping_snapshot_is_current(&snapshot)
                 {
                     return;
                 }
+                let Ok(projects) = client.list_projects().await else {
+                    break None;
+                };
+                if !store
+                    .project_operations
+                    .mapping_snapshot_is_current(&snapshot)
+                {
+                    return;
+                }
+                if !store
+                    .project_operations
+                    .project_update_revision_is_current(&revision)
+                {
+                    snapshot = store
+                        .project_operations
+                        .begin_mapping_snapshot(
+                            &target_url,
+                            connection_generation,
+                            connection_request_generation,
+                        );
+                    revision = store.project_operations.project_update_revision(&target_url);
+                    continue;
+                }
+                let project_ids = projects
+                    .iter()
+                    .map(|project| project.id.clone())
+                    .collect::<Vec<_>>();
+                if !store
+                    .project_operations
+                    .reconcile_mapping_snapshot(&snapshot, &project_ids)
+                {
+                    return;
+                }
+                break Some(projects);
+            };
+
+            if let Some(projects) = projects {
                 store.server_connected.set(true);
                 let mapped: Vec<ProjectRecord> = projects
                     .into_iter()
@@ -1025,10 +1077,6 @@ impl WorkspaceStore {
                         }
                     })
                     .collect();
-                let project_ids = mapped.iter().map(|project| project.id.clone()).collect::<Vec<_>>();
-                store
-                    .project_operations
-                    .reconcile_mapping_snapshot(&target_url, &project_ids, connection_generation);
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
                         store.active_project_id.set(first.id.clone());
@@ -1205,6 +1253,7 @@ impl WorkspaceStore {
     pub fn connect_live_server(&self, url: &str) {
         self.bump_connection_generation();
         let connection_generation = self.project_operations.current_connection_generation();
+        let connection_request_generation = self.bump_connection_request_generation();
         self.switch_workspace(url);
         let base = url.trim_end_matches('/').to_string();
         self.server_url.set(url.to_string());
@@ -1222,11 +1271,66 @@ impl WorkspaceStore {
         spawn(async move {
             use nsh_core::prelude::{HttpRequest, fetch};
 
-            if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await
-                && resp.ok()
-                && let Ok(projects) =
+            let mut snapshot = store
+                .project_operations
+                .begin_mapping_snapshot(
+                    &base,
+                    connection_generation,
+                    connection_request_generation,
+                );
+            let mut revision = store.project_operations.project_update_revision(&base);
+            let projects = loop {
+                if !store
+                    .project_operations
+                    .mapping_snapshot_is_current(&snapshot)
+                {
+                    return;
+                }
+                let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await else {
+                    break None;
+                };
+                if !resp.ok() {
+                    break None;
+                }
+                let Ok(projects) =
                     serde_json::from_slice::<Vec<falcon_proto::Project>>(&resp.body)
-            {
+                else {
+                    break None;
+                };
+                if !store
+                    .project_operations
+                    .mapping_snapshot_is_current(&snapshot)
+                {
+                    return;
+                }
+                if !store
+                    .project_operations
+                    .project_update_revision_is_current(&revision)
+                {
+                    snapshot = store
+                        .project_operations
+                        .begin_mapping_snapshot(
+                            &base,
+                            connection_generation,
+                            connection_request_generation,
+                        );
+                    revision = store.project_operations.project_update_revision(&base);
+                    continue;
+                }
+                let project_ids = projects
+                    .iter()
+                    .map(|project| project.id.clone())
+                    .collect::<Vec<_>>();
+                if !store
+                    .project_operations
+                    .reconcile_mapping_snapshot(&snapshot, &project_ids)
+                {
+                    return;
+                }
+                break Some(projects);
+            };
+
+            if let Some(projects) = projects {
                 store.server_connected.set(true);
                 let mapped: Vec<ProjectRecord> = projects
                     .into_iter()
@@ -1249,10 +1353,6 @@ impl WorkspaceStore {
                         }
                     })
                     .collect();
-                let project_ids = mapped.iter().map(|project| project.id.clone()).collect::<Vec<_>>();
-                store
-                    .project_operations
-                    .reconcile_mapping_snapshot(&base, &project_ids, connection_generation);
                 if let Some(first) = mapped.first() {
                     if !mapped.iter().any(|p| p.id == store.active_project_id.get()) {
                         store.active_project_id.set(first.id.clone());
@@ -1812,6 +1912,16 @@ impl WorkspaceStore {
                     .checked_add(1)
                     .expect("connection generation exhausted"),
             );
+    }
+
+    fn bump_connection_request_generation(&self) -> u64 {
+        let generation = self
+            .connection_request_generation
+            .get()
+            .checked_add(1)
+            .expect("connection request generation exhausted");
+        self.connection_request_generation.set(generation);
+        generation
     }
 
     pub(crate) fn spawn_root(&self, future: impl Future<Output = ()> + 'static) {

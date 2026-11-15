@@ -26,11 +26,13 @@ pub struct FormOperationContext {
     pub(crate) owner: Owner,
     incarnation: u64,
     server_generation: u64,
+    connection_request_generation: u64,
 }
 
 pub struct ProjectOperations {
     task_owner: Owner,
     connection_generation: Rc<Cell<u64>>,
+    connection_request_generation: Rc<Cell<u64>>,
     server_url: Signal<String>,
     form_incarnation: Cell<u64>,
     mapping_state: RefCell<MappingState>,
@@ -44,9 +46,24 @@ pub struct MappingGeneration {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MappingSnapshotToken {
+    server_url: String,
+    connection_generation: u64,
+    connection_request_generation: u64,
+    completed_pending: Vec<(String, ProjectUpdateToken)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectUpdateRevision {
+    server_url: String,
+    revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ProjectUpdateToken {
     server_url: String,
     connection_generation: u64,
+    connection_request_generation: u64,
     project_generation: u64,
     request_id: u64,
 }
@@ -74,6 +91,7 @@ enum ProjectUpdateOutcome {
 struct MappingState {
     generations: HashMap<(String, String), u64>,
     pending: HashMap<(String, String), PendingProjectUpdate>,
+    project_update_revisions: HashMap<String, u64>,
     next_request_id: u64,
 }
 
@@ -86,11 +104,13 @@ impl ProjectOperations {
     pub fn new(
         task_owner: Owner,
         connection_generation: Rc<Cell<u64>>,
+        connection_request_generation: Rc<Cell<u64>>,
         server_url: Signal<String>,
     ) -> Self {
         Self {
             task_owner,
             connection_generation,
+            connection_request_generation,
             server_url,
             form_incarnation: Cell::new(0),
             mapping_state: RefCell::new(MappingState::default()),
@@ -142,10 +162,97 @@ impl ProjectOperations {
     fn project_update_server_is_current(&self, token: &ProjectUpdateToken) -> bool {
         token.server_url == canonical_server_url(&self.server_url.get())
             && token.connection_generation == self.connection_generation.get()
+            && token.connection_request_generation == self.connection_request_generation.get()
     }
 
     pub fn current_connection_generation(&self) -> u64 {
         self.connection_generation.get()
+    }
+
+    pub fn project_update_revision(&self, server_url: &str) -> ProjectUpdateRevision {
+        let server_url = canonical_server_url(server_url);
+        let revision = self
+            .mapping_state
+            .borrow()
+            .project_update_revisions
+            .get(&server_url)
+            .copied()
+            .unwrap_or(0);
+        ProjectUpdateRevision {
+            server_url,
+            revision,
+        }
+    }
+
+    pub fn project_update_revision_is_current(&self, revision: &ProjectUpdateRevision) -> bool {
+        self.task_owner.is_live()
+            && revision.server_url == canonical_server_url(&self.server_url.get())
+            && self
+                .mapping_state
+                .borrow()
+                .project_update_revisions
+                .get(&revision.server_url)
+                .copied()
+                .unwrap_or(0)
+                == revision.revision
+    }
+
+    pub fn begin_mapping_snapshot(
+        &self,
+        server_url: &str,
+        connection_generation: u64,
+        connection_request_generation: u64,
+    ) -> MappingSnapshotToken {
+        let server_url = canonical_server_url(server_url);
+        let completed_pending = self
+            .mapping_state
+            .borrow()
+            .pending
+            .iter()
+            .filter(|((pending_url, _), pending)| {
+                pending_url == &server_url
+                    && pending.state == PendingUpdateState::NeedsReconciliation
+            })
+            .map(|((_, project_id), pending)| (project_id.clone(), pending.token.clone()))
+            .collect();
+        MappingSnapshotToken {
+            server_url,
+            connection_generation,
+            connection_request_generation,
+            completed_pending,
+        }
+    }
+
+    pub fn mapping_snapshot_is_current(&self, snapshot: &MappingSnapshotToken) -> bool {
+        self.task_owner.is_live()
+            && snapshot.server_url == canonical_server_url(&self.server_url.get())
+            && snapshot.connection_generation == self.connection_generation.get()
+            && snapshot.connection_request_generation == self.connection_request_generation.get()
+    }
+
+    pub fn reconcile_mapping_snapshot(
+        &self,
+        snapshot: &MappingSnapshotToken,
+        project_ids: &[String],
+    ) -> bool {
+        if !self.mapping_snapshot_is_current(snapshot) {
+            return false;
+        }
+        let mut state = self.mapping_state.borrow_mut();
+        for (project_id, token) in &snapshot.completed_pending {
+            if !project_ids.iter().any(|id| id == project_id) {
+                continue;
+            }
+            let key = (snapshot.server_url.clone(), project_id.clone());
+            let matching_completed = state.pending.get(&key).is_some_and(|pending| {
+                pending.state == PendingUpdateState::NeedsReconciliation
+                    && pending.token == *token
+            });
+            if matching_completed {
+                state.pending.remove(&key);
+            }
+        }
+        true
     }
 
     fn begin_project_update(
@@ -156,10 +263,12 @@ impl ProjectOperations {
         let server_url = canonical_server_url(&self.server_url.get());
         let key = (server_url.clone(), project_id.to_string());
         let connection_generation = self.connection_generation.get();
+        let connection_request_generation = self.connection_request_generation.get();
         let mut state = self.mapping_state.borrow_mut();
         if state.pending.contains_key(&key) {
             return None;
         }
+        bump_project_update_revision(&mut state, &server_url);
         let current_generation = state
             .generations
             .get(&key)
@@ -179,6 +288,7 @@ impl ProjectOperations {
         let token = ProjectUpdateToken {
             server_url,
             connection_generation,
+            connection_request_generation,
             project_generation,
             request_id: state.next_request_id,
         };
@@ -204,7 +314,8 @@ impl ProjectOperations {
     ) {
         let key = (token.server_url.clone(), project_id.to_string());
         let current_connection = token.server_url == canonical_server_url(&self.server_url.get())
-            && token.connection_generation == self.connection_generation.get();
+            && token.connection_generation == self.connection_generation.get()
+            && token.connection_request_generation == self.connection_request_generation.get();
         let mut state = self.mapping_state.borrow_mut();
         let Some(pending) = state.pending.get(&key) else {
             return;
@@ -213,6 +324,7 @@ impl ProjectOperations {
             return;
         }
         let mapping_changed = pending.mapping_changed;
+        bump_project_update_revision(&mut state, &token.server_url);
         if mapping_changed {
             let next_generation = state
                 .generations
@@ -232,33 +344,13 @@ impl ProjectOperations {
         }
     }
 
-    pub fn reconcile_mapping_snapshot(
-        &self,
-        server_url: &str,
-        project_ids: &[String],
-        connection_generation: u64,
-    ) {
-        let server_url = canonical_server_url(server_url);
-        if server_url != canonical_server_url(&self.server_url.get())
-            || connection_generation != self.connection_generation.get()
-        {
-            return;
-        }
-        let mut state = self.mapping_state.borrow_mut();
-        state.pending.retain(|(pending_url, project_id), pending| {
-            pending_url != &server_url
-                || !project_ids.iter().any(|id| id == project_id)
-                || pending.state != PendingUpdateState::NeedsReconciliation
-                || pending.token.connection_generation >= connection_generation
-        });
-    }
-
     pub fn begin_form(&self) -> FormOperationContext {
         let incarnation = self.bump_form_incarnation();
         FormOperationContext {
             owner: Owner::current(),
             incarnation,
             server_generation: self.connection_generation.get(),
+            connection_request_generation: self.connection_request_generation.get(),
         }
     }
 
@@ -271,6 +363,7 @@ impl ProjectOperations {
     fn server_is_current(&self, context: FormOperationContext) -> bool {
         self.task_owner.is_live()
             && context.server_generation == self.connection_generation.get()
+            && context.connection_request_generation == self.connection_request_generation.get()
     }
 
     pub fn close_form(&self, store: &WorkspaceStore, context: FormOperationContext) {
@@ -667,6 +760,16 @@ fn mapping_changed_in_store(
 
 fn canonical_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+fn bump_project_update_revision(state: &mut MappingState, server_url: &str) {
+    let revision = state
+        .project_update_revisions
+        .entry(server_url.to_string())
+        .or_default();
+    *revision = revision
+        .checked_add(1)
+        .expect("project update revision exhausted");
 }
 
 #[cfg(not(target_arch = "wasm32"))]
