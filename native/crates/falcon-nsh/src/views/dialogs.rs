@@ -137,20 +137,14 @@ fn modal_header(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb_to_hsla(ui.popover_foreground)),
         )
-        .child(
-            view()
-                .px(zpx(8.0))
-                .py(zpx(3.0))
-                .rounded(zpx(6.0))
-                .cursor_pointer()
-                .bg(rgb_to_hsla(ui.secondary))
-                .on_press(move || st.active_dialog.set(ActiveDialog::None))
-                .child(
-                    text(t!("common.close"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
-                ),
-        )
+        .child(icon_button(
+            "modal-close",
+            t!("common.close"),
+            Glyph::Close,
+            false,
+            resolved,
+            move || st.active_dialog.set(ActiveDialog::None),
+        ))
 }
 
 fn render_palette_modal(
