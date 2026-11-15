@@ -2020,6 +2020,7 @@ impl WorkspaceStore {
                     })
                     .collect();
                 store.hosts.set(mapped_hosts);
+                store.refresh_menu_agents();
             }
 
             store.queue_relay_refresh(
@@ -2548,6 +2549,7 @@ impl WorkspaceStore {
                                 hosts.push(record);
                             }
                         });
+                        store.refresh_menu_agents();
                         if let (Some(host_id), Some(editing_generation)) =
                             (host_id.as_deref(), editing_generation)
                         {
@@ -2626,6 +2628,7 @@ impl WorkspaceStore {
                 match result {
                     Ok(_) => {
                         store.hosts.update(|hosts| hosts.retain(|host| host.id != host_id));
+                        store.refresh_menu_agents();
                         let editing_generation = store.editing_host_generation.get();
                         store.clear_host_edit_if_current(&host_id, editing_generation);
                         if store.active_dialog.get() == expected_dialog {

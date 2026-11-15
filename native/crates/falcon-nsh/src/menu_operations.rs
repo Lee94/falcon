@@ -230,32 +230,66 @@ impl WorkspaceStore {
             let store = self.clone();
             let server = ServerUrlGuard::capture(self);
             let projects = self.projects.get_untracked();
+            let hosts = self.hosts.get_untracked();
+            let mut targets = projects
+                .iter()
+                .filter(|project| !falcon_proto::is_standalone_project_id(&project.id))
+                .map(|project| {
+                    (
+                        project.id.clone(),
+                        falcon_client::ProbeTarget::Project(project.id.clone()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            targets.push((
+                falcon_proto::STANDALONE_LOCAL.to_string(),
+                falcon_client::ProbeTarget::Backend,
+            ));
+            targets.extend(hosts.iter().map(|host| {
+                (
+                    falcon_proto::standalone_for_host(&host.id),
+                    falcon_client::ProbeTarget::SshHost(host.id.clone()),
+                )
+            }));
             let request = self.menu_agents_request.get_untracked().wrapping_add(1);
             self.menu_agents_request.set(request);
             self.spawn_root(async move {
-                let results = futures::future::join_all(projects.into_iter().map(|project| {
+                let results = futures::future::join_all(targets.into_iter().map(|(id, target)| {
                     let client = client.clone();
                     async move {
-                        let agents = client
-                            .agents(&falcon_client::ProbeTarget::Project(project.id.clone()))
-                            .await
-                            .unwrap_or_default();
-                        (project, agents)
+                        let agents = client.agents(&target).await.unwrap_or_default();
+                        (id, target, agents)
                     }
                 }))
                 .await;
                 if server.is_current() && store.menu_agents_request.get_untracked() == request {
                     let current = store.projects.get_untracked();
+                    let current_hosts = store.hosts.get_untracked();
                     store.project_agents.set(
                         results
                             .into_iter()
-                            .filter(|(project, _)| {
-                                current
-                                    .iter()
-                                    .any(|p| p.id == project.id && p.source == project.source)
-                                    && !store.project_operations.update_pending(&project.id)
+                            .filter(|(id, target, _)| match target {
+                                falcon_client::ProbeTarget::Backend => true,
+                                falcon_client::ProbeTarget::SshHost(host_id) => {
+                                    hosts.iter().find(|h| &h.id == host_id).is_some_and(|host| {
+                                        current_hosts
+                                            .iter()
+                                            .any(|h| h.id == host.id && h.source == host.source)
+                                    })
+                                }
+                                falcon_client::ProbeTarget::Project(_) => {
+                                    projects
+                                        .iter()
+                                        .find(|p| &p.id == id)
+                                        .is_some_and(|project| {
+                                            current.iter().any(|p| {
+                                                p.id == project.id && p.source == project.source
+                                            })
+                                        })
+                                        && !store.project_operations.update_pending(id)
+                                }
                             })
-                            .map(|(project, agents)| (project.id, agents))
+                            .map(|(id, _, agents)| (id, agents))
                             .collect(),
                     );
                 }

@@ -3663,6 +3663,36 @@ mod tests {
     }
 
     #[test]
+    fn machine_menus_probe_agents_without_materialized_standalone_projects_headless() {
+        let server = MockHttpServer::new_with_auto_responses(Vec::new(), vec![
+            ("GET /api/system".into(), 200, "{}".into()),
+            ("GET /api/app-icon".into(), 200, r#"{"selected":"default"}"#.into()),
+            ("GET /api/projects HTTP/1.1".into(), 200, "[]".into()),
+            ("GET /api/sessions".into(), 200, "[]".into()),
+            ("GET /api/hosts".into(), 200, serde_json::json!([{
+                "id":"host-1","name":"Agent Host","host":"ssh.agent.test","port":22,"username":"dev",
+                "authMethod":"agent","hasSecret":false,"projectCount":0,"createdAt":0
+            }]).to_string()),
+            ("GET /api/agents?hostId=host-1".into(), 200, r#"["codex"]"#.into()),
+            ("GET /api/agents HTTP/1.1".into(), 200, r#"["claude"]"#.into()),
+            ("GET /api/plugins HTTP/1.1".into(), 200, r#"{"dir":"","plugins":[],"trustRoot":"unused"}"#.into()),
+        ]);
+        let mut app = headless_with_options(FalconLaunchOptions {
+            offline_demo: false, server_url: Some(server.url.clone()), ..Default::default()
+        }, ColorScheme::Dark);
+        app.first_render().unwrap();
+        server.wait_for_observed_prefixes_pumping(&mut app, &["GET /api/agents HTTP/1.1", "GET /api/agents?hostId=host-1"]);
+        app.press("label:host-menu-s:host:host-1").unwrap();
+        app.wait_for("role:menuitem[Codex]").unwrap();
+        assert!(!app.shows("Claude Code"));
+        app.press_key("escape").unwrap();
+        app.press("label:host-menu-s:local").unwrap();
+        app.wait_for("role:menuitem[Claude Code]").unwrap();
+        assert!(!app.shows("Codex"));
+        server.assert_no_request_starting_with("GET /api/agents?projectId=standalone");
+    }
+
+    #[test]
     fn project_menu_shows_detected_cli_icons_and_terminal_shortcut_headless() {
         let mut app = headless_with_options(FalconLaunchOptions { offline_demo: true, ..Default::default() }, ColorScheme::Dark);
         app.first_render().unwrap();
