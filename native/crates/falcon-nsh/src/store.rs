@@ -92,6 +92,13 @@ pub enum ActiveDialog {
         host_name: String,
         project_count: u32,
     },
+    ConfirmDeleteProfile {
+        profile: ServerProfile,
+    },
+    ConfirmPlaintextProfile {
+        profile: ServerProfile,
+        is_new: bool,
+    },
     ConfirmUnsavedFiles {
         action: FileGuardAction,
         file_keys: Vec<String>,
@@ -664,6 +671,7 @@ struct SharedTerminals {
 #[derive(Clone)]
 pub struct WorkspaceStore {
     pub profiles: Signal<ProfilesFile>,
+    active_workspace_profile_id: Signal<String>,
     pub server_url: Signal<String>,
     pub server_connected: Signal<bool>,
     pub plaintext_warning: Signal<bool>,
@@ -1148,6 +1156,10 @@ impl WorkspaceStore {
                 plaintext_ok: false,
             });
         }
+        let workspace_profile_id = profiles.profiles.iter()
+            .find(|profile| profile.url.trim_end_matches('/') == url.trim_end_matches('/'))
+            .map(|profile| profile.id.clone())
+            .expect("initial server has a profile");
         let plaintext = ServerProfile {
             id: "probe".into(),
             name: String::new(),
@@ -1580,6 +1592,7 @@ impl WorkspaceStore {
         let server_url = signal(url.clone());
         let store = Self {
             profiles: signal(profiles),
+            active_workspace_profile_id: signal(workspace_profile_id),
             server_url: server_url.clone(),
             server_connected: signal(opts.offline_demo),
             plaintext_warning: signal(plaintext),
@@ -3675,18 +3688,17 @@ impl WorkspaceStore {
 
     /// 沿用 GPUI 的 profile id 与 JSON 形状，直接读取已安装客户端的工作区。
     fn workspace_profile_id(&self) -> String {
-        let url = self.server_url.get();
-        self.profiles
-            .get()
-            .profiles
-            .iter()
-            .find(|p| p.url.trim_end_matches('/') == url.trim_end_matches('/'))
-            .map(|p| p.id.clone())
-            .unwrap_or_else(|| "local".into())
+        // 配置可在连接存活时删除；当前布局仍属于原 profile，不能回退写入本机。
+        self.active_workspace_profile_id.get()
     }
 
-    fn restore_workspace(&self, _url: &str) {
+    fn restore_workspace(&self, url: &str) {
         use falcon_core::workspace::{ActiveView, RightPanelId, load_workspace, restore_columns};
+        let profile_id = self.profiles.get().profiles.iter()
+            .find(|profile| profile.url.trim_end_matches('/') == url.trim_end_matches('/'))
+            .map(|profile| profile.id.clone())
+            .expect("workspace server has a profile");
+        self.active_workspace_profile_id.set(profile_id);
         let raw = falcon_platform::shared().load_workspace(&self.workspace_profile_id());
         let saved = load_workspace(raw.as_deref());
         self.columns.set(restore_columns(&saved));
@@ -4926,6 +4938,44 @@ impl WorkspaceStore {
 /// 在组件树任意深度读取 `WorkspaceStore`。
 pub fn use_workspace() -> WorkspaceStore {
     use_context::<WorkspaceStore>().expect("WorkspaceStore must be installed by FalconApp root")
+}
+
+#[cfg(test)]
+mod profile_workspace_tests {
+    use super::*;
+    use nsh_core::{element::Root, prelude::*};
+
+    #[component]
+    fn ProfileWorkspaceTest() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        let url = "https://profile-workspace.invalid";
+        let store = WorkspaceStore::install(&FalconLaunchOptions {
+            offline_demo: true,
+            server_url: Some(url.into()),
+            ..Default::default()
+        });
+        let original_id = store.workspace_profile_id();
+        assert_ne!(original_id, falcon_core::profiles::LOCAL_PROFILE_ID);
+        store.profiles.update(|profiles| { profiles.remove(&original_id); });
+        assert_eq!(store.workspace_profile_id(), original_id);
+        store.profiles.update(|profiles| profiles.upsert(ServerProfile {
+            id: "replacement-profile".into(),
+            name: String::new(),
+            url: url.into(),
+            plaintext_ok: false,
+        }));
+        assert_eq!(store.workspace_profile_id(), original_id);
+        view().child(text("workspace identity remains isolated"))
+    }
+
+    #[test]
+    fn deleting_active_profile_cannot_redirect_workspace_to_local_or_duplicate() {
+        let config = nsh_engine::EngineConfig::new(Root::of::<ProfileWorkspaceTest>());
+        let mut app = nsh_testing::Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        app.wait_for("workspace identity remains isolated").unwrap();
+    }
 }
 
 #[cfg(test)]

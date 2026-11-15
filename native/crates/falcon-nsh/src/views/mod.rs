@@ -10,6 +10,7 @@ mod host_form;
 pub mod palette;
 pub mod plugins;
 pub mod project_form;
+mod profiles;
 pub mod session_operations;
 pub mod quick_open;
 mod relays;

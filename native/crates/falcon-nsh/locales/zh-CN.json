@@ -1156,6 +1156,12 @@
     "connect": {
       "add": "添加 falcon 服务端",
       "namePlaceholder": "名称（可选）",
+      "urlPlaceholder": "https://falcon.example.com",
+      "connected": "已连接",
+      "delete": "删除",
+      "deleteTitle": "删除服务端配置「%{name}」？",
+      "deleteBody": "只删除这条保存的连接配置，不会停止当前连接或删除服务端的数据。",
+      "cancel": "取消",
       "hint": "填 falcon 服务端的地址，通常是反向代理后面的 https://…；访问密码在打开后输入。",
       "badUrl": "地址要以 http:// 或 https:// 开头，并带上主机名",
       "connect": "连接",

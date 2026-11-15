@@ -32,6 +32,7 @@ pub enum Glyph {
     File,
     ArrowUp,
     Refresh,
+    Trash,
 }
 
 pub fn glyph(kind: Glyph) -> impl IntoElement {
@@ -39,6 +40,7 @@ pub fn glyph(kind: Glyph) -> impl IntoElement {
         Glyph::File => "<path d='M14 2H5v20h14V7Z M14 2v5h5'/>",
         Glyph::ArrowUp => "<path d='M12 20V4 m-7 7 7-7 7 7'/>",
         Glyph::Refresh => "<path d='M20 7a9 9 0 1 0 1 8 M20 2v6h-6'/>",
+        Glyph::Trash => "<path d='M3 6h18 M9 6V3h6v3 M5 6l1 15h12l1-15 M10 10v7 M14 10v7'/>",
         Glyph::Folder => "<path d='M3 7V5h6l2 2h10v12H3Z'/>",
         Glyph::Changes => "<path d='M14 2H6v20h12V6Z M14 2v5h5 M8 12h8 M8 16h8 M12 9v6'/>",
         Glyph::Monitor => {

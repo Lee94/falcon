@@ -2,7 +2,6 @@
 //!
 //! 严格遵循 `CONTEXT.md` 术语与 `falcon-theme` 语义取色，零硬编码中文与颜色常量。
 
-use falcon_core::profiles::{LOCAL_PROFILE_ID, ServerProfile, new_profile_id};
 use falcon_theme::Rgba as ThemeRgba;
 use nsh_core::element::input;
 use nsh_core::platform::Idiom;
@@ -17,6 +16,7 @@ use crate::store::{
 use crate::terminal::bind_safe_key_when;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::views::project_form::{project_form, worktree_form};
+use crate::views::profiles::{ProfileDraft, render_profiles_modal, render_profile_confirmation};
 use crate::zoom::{ZoomController, zpx};
 
 /// 顶层模态框渲染组件。
@@ -43,8 +43,8 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
     let quick_open_query = signal(String::new());
     let quick_open_selection = signal(0usize);
     let quick_open_was_open = signal(false);
-    let profile_name = signal(String::new());
-    let profile_url = signal(String::new());
+    let profile_draft = ProfileDraft::new();
+    let askpass_input = signal(String::new());
     let theme_slot = signal(theme_ctrl.active_slot());
     let theme_picker_open = signal(false);
     let settings_filter = signal(String::new());
@@ -134,7 +134,11 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                     .into_element()
             }
             ActiveDialog::Profiles => {
-                render_profiles_modal(&store, &resolved, profile_name, profile_url).into_element()
+                render_profiles_modal(&store, &resolved, profile_draft).into_element()
+            }
+            dialog @ (ActiveDialog::ConfirmDeleteProfile { .. }
+            | ActiveDialog::ConfirmPlaintextProfile { .. }) => {
+                render_profile_confirmation(&store, &resolved, profile_draft, dialog).into_element()
             }
             ActiveDialog::NewProject => project_form().project_id(None).into_element(),
             ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
@@ -266,11 +270,14 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog) {
                 .active_dialog
                 .set(ActiveDialog::Settings(SettingsTab::Hosts));
         }
+        ActiveDialog::ConfirmDeleteProfile { .. } | ActiveDialog::ConfirmPlaintextProfile { .. } => {
+            store.active_dialog.set(ActiveDialog::Profiles);
+        }
         _ => store.active_dialog.set(ActiveDialog::None),
     }
 }
 
-fn modal_header(
+pub(super) fn modal_header(
     store: &WorkspaceStore,
     resolved: &falcon_theme::ResolvedTheme,
     title: String,
@@ -427,162 +434,6 @@ fn render_unsaved_files_modal(
                 .child(buttons),
         )
 }
-
-fn render_profiles_modal(
-    store: &WorkspaceStore,
-    resolved: &falcon_theme::ResolvedTheme,
-    name_draft: Signal<String>,
-    url_draft: Signal<String>,
-) -> impl IntoElement {
-    let ui = &resolved.ui;
-    let profiles_file = store.profiles.get();
-    let current_url = store.server_url.get();
-    let draft_url = url_draft.get();
-    let draft_insecure = ServerProfile {
-        id: "draft".into(),
-        name: String::new(),
-        url: draft_url.clone(),
-        plaintext_ok: false,
-    }
-    .is_insecure();
-
-    let st_add = store.clone();
-    view()
-        .flex_col()
-        .child(modal_header(store, resolved, t!("native.connect.add")))
-        .child(
-            view()
-                .flex_col()
-                .p(zpx(14.0))
-                .gap(zpx(10.0))
-                .children(profiles_file.profiles.into_iter().map(|prof| {
-                    let active = prof.url == current_url;
-                    let profile_id = format!("connect-server-profile-{}", prof.id);
-                    let title = if prof.id == LOCAL_PROFILE_ID && prof.name.is_empty() {
-                        t!("native.server.local")
-                    } else if prof.name.is_empty() {
-                        prof.url.clone()
-                    } else {
-                        prof.name.clone()
-                    };
-                    let st_switch = store.clone();
-                    let next_url = prof.url.clone();
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .p(zpx(8.0))
-                        .rounded(zpx(8.0))
-                        .border_1()
-                        .border_color(rgba_to_hsla(ui.border))
-                        .bg(if active {
-                            rgb_to_hsla(ui.tint)
-                        } else {
-                            rgb_to_hsla(ui.card)
-                        })
-                        .test_id(&profile_id)
-                        .cursor_pointer()
-                        .on_press(move || {
-                            st_switch.active_dialog.set(ActiveDialog::None);
-                            st_switch.connect_live_server(&next_url);
-                        })
-                        .child(
-                            view()
-                                .flex_col()
-                                .child(
-                                    text(title)
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb_to_hsla(ui.foreground)),
-                                )
-                                .child(
-                                    text(prof.url)
-                                        .text_xs()
-                                        .font_family(FONT_FAMILY_MONO)
-                                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                                ),
-                        )
-                }))
-                .child(
-                    text(t!("native.connect.hint"))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.muted_foreground)),
-                )
-                .child(
-                    input()
-                        .w_full()
-                        .px(zpx(8.0))
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .bg(rgba_to_hsla(ui.input))
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground))
-                        .placeholder(t!("native.connect.namePlaceholder"))
-                        .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                        .value(name_draft.get())
-                        .on_change(move |v: &str| name_draft.set(v.to_string())),
-                )
-                .child(
-                    input()
-                        .w_full()
-                        .px(zpx(8.0))
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .bg(rgba_to_hsla(ui.input))
-                        .font_family(FONT_FAMILY_MONO)
-                        .text_xs()
-                        .text_color(rgb_to_hsla(ui.foreground))
-                        .placeholder("https://falcon.example.com")
-                        .placeholder_color(rgb_to_hsla(ui.muted_foreground))
-                        .value(draft_url.clone())
-                        .on_change(move |v: &str| url_draft.set(v.to_string())),
-                )
-                .when(draft_insecure, |el| {
-                    el.child(
-                        view()
-                            .p(zpx(8.0))
-                            .rounded(zpx(6.0))
-                            .bg(rgb_to_hsla(ui.muted))
-                            .child(
-                                text(t!("native.server.plaintext"))
-                                    .text_xs()
-                                    .text_color(rgb_to_hsla(ui.warning)),
-                            ),
-                    )
-                })
-                .child(
-                    view()
-                        .items_center()
-                        .py(zpx(6.0))
-                        .rounded(zpx(6.0))
-                        .cursor_pointer()
-                        .bg(rgb_to_hsla(ui.tint_strong))
-                        .on_press(move || {
-                            let u = url_draft.get().trim().to_string();
-                            if u.starts_with("http://") || u.starts_with("https://") {
-                                let p = ServerProfile {
-                                    id: new_profile_id(),
-                                    name: name_draft.get().trim().to_string(),
-                                    url: u.clone(),
-                                    plaintext_ok: true,
-                                };
-                                st_add.profiles.update(|f| f.upsert(p));
-                                name_draft.set(String::new());
-                                url_draft.set(String::new());
-                                st_add.active_dialog.set(ActiveDialog::None);
-                                st_add.connect_live_server(&u);
-                            }
-                        })
-                        .child(
-                            text(t!("native.connect.connect"))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb_to_hsla(ui.primary_foreground)),
-                        ),
-                ),
-        )
-}
-
 
 fn render_settings_modal(
     store: &WorkspaceStore,

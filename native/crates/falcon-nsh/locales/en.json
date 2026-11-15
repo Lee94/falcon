@@ -51,6 +51,29 @@
       "toolPending": "Pending",
       "toolCompleted": "Completed",
       "toolFailed": "Failed"
+    },
+    "menu": {
+      "connect": "Connect to server…"
+    },
+    "server": {
+      "local": "Local server"
+    },
+    "connect": {
+      "add": "Add a Falcon server",
+      "namePlaceholder": "Name (optional)",
+      "urlPlaceholder": "https://falcon.example.com",
+      "hint": "Enter the Falcon server URL, usually https://… behind a reverse proxy; enter the access password after opening it.",
+      "badUrl": "The address must start with http:// or https:// and include a hostname",
+      "connect": "Connect",
+      "open": "Open",
+      "connected": "Connected",
+      "delete": "Delete",
+      "deleteTitle": "Delete server profile “%{name}”?",
+      "deleteBody": "Only the saved connection profile will be removed. The current connection and server data will not be affected.",
+      "cancel": "Cancel",
+      "plaintextTitle": "Connect over plaintext HTTP?",
+      "plaintextBody": "%{url} is not a loopback address and has no TLS: the access password and all terminal content will travel over the network in plaintext. Use https:// behind a reverse proxy instead.",
+      "plaintextConfirm": "Connect anyway"
     }
   }
 }
