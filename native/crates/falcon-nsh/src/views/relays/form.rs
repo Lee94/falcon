@@ -130,11 +130,9 @@ pub fn RelayForm(props: RelayFormProps) -> impl IntoElement {
             error.set(Some(t!("forward.hostInvalid")));
             return;
         };
-        let target = if share {
-            Some(bind)
-        } else if let Some(pasted_port) = pasted_port {
+        let target = if let Some(pasted_port) = pasted_port {
             Some(pasted_port)
-        } else if dest.get().trim().is_empty() {
+        } else if share || dest.get().trim().is_empty() {
             Some(bind)
         } else {
             parse_relay_port(&dest.get())
@@ -157,7 +155,7 @@ pub fn RelayForm(props: RelayFormProps) -> impl IntoElement {
                 RelayChange::Share(PublicSharePatch {
                     name: Some(name.get().trim().into()),
                     dest_host: Some(destination.unwrap_or_else(|| "127.0.0.1".into())),
-                    dest_port: Some(bind),
+                    dest_port: Some(target),
                     ..Default::default()
                 })
             } else {
@@ -266,16 +264,9 @@ pub fn RelayForm(props: RelayFormProps) -> impl IntoElement {
                 &resolved,
             )
             .on_change(move |v: &str| {
-                if let Ok((Some(address), Some(pasted))) = parse_forward_dest(v) {
-                    host.set(address);
-                    if share {
-                        port.set(pasted.to_string());
-                    } else {
-                        dest.set(pasted.to_string());
-                    }
-                } else {
-                    host.set(v.to_string());
-                }
+                // An incomplete IPv6 address can look like host:port. Preserve
+                // the draft verbatim and parse the complete value on submit.
+                host.set(v.to_string());
             })
             .on_submit(move |_: &str| enter_host()),
         );

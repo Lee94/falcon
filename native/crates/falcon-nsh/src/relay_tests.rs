@@ -175,13 +175,16 @@ fn relay_inline_rename_edit_delete_and_forward_defaults() {
         app.screen().input_text("id:relay-share-port-edit").unwrap(),
         Some("8080".into())
     );
+    app.clear("id:relay-dest-host-edit").unwrap();
+    app.type_text("id:relay-dest-host-edit", "[2001:4860::8888]:8443")
+        .unwrap();
     app.press("id:relay-edit-save").unwrap();
     let request = mock.wait_for_observed_prefixes_pumping(&mut app, &["PATCH /api/shares/managed"])
         [0]
     .clone();
     let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
-    assert_eq!(body["destHost"], "127.0.0.1");
-    assert_eq!(body["destPort"], 8080);
+    assert_eq!(body["destHost"], "2001:4860::8888");
+    assert_eq!(body["destPort"], 8443);
     mock.release_response();
     mock.wait_for_response();
     app.wait_for("label:relay-delete-managed").unwrap();
@@ -222,4 +225,59 @@ fn relay_inline_rename_edit_delete_and_forward_defaults() {
     mock.release_response();
     mock.wait_for_response();
     app.wait_for("forward defaults verified").unwrap();
+}
+
+#[test]
+fn relay_destination_typing_preserves_complete_addresses() {
+    let cases = [
+        ("2001:4860::8888", "2001:4860::8888", 9090),
+        ("[2001:4860::8888]:8443", "2001:4860::8888", 8443),
+        ("db.internal:8080", "db.internal", 8080),
+    ];
+    let mock = relay_mock(
+        cases
+            .iter()
+            .map(|_| {
+                (
+                    "POST /api/forwards".into(),
+                    500,
+                    r#"{"error":"keep draft"}"#.into(),
+                )
+            })
+            .collect(),
+        r#"{"forwards":[],"shares":[]}"#.into(),
+    );
+    let mut app = relay_app(&mock);
+    open_relay_settings(&mut app);
+    app.type_text("id:relay-bind-port-host-prod-01", "9090")
+        .unwrap();
+    for (raw, host, port) in cases {
+        app.clear("id:relay-dest-host-host-prod-01").unwrap();
+        app.type_text("id:relay-dest-host-host-prod-01", raw)
+            .unwrap();
+        assert_eq!(
+            app.screen()
+                .input_text("id:relay-dest-host-host-prod-01")
+                .unwrap(),
+            Some(raw.into())
+        );
+        app.press("id:relay-create-forward-host-prod-01").unwrap();
+        let request =
+            mock.wait_for_observed_prefixes_pumping(&mut app, &["POST /api/forwards"])[0].clone();
+        let body: serde_json::Value = serde_json::from_str(mock_request_body(&request)).unwrap();
+        assert_eq!(body["destHost"], host);
+        assert_eq!(body["destPort"], port);
+        mock.release_response();
+        mock.wait_for_response();
+        app.wait_until(
+            "destination write finished",
+            Duration::from_secs(3),
+            |screen| {
+                screen
+                    .enabled("id:relay-create-forward-host-prod-01")
+                    .unwrap_or(false)
+            },
+        )
+        .unwrap();
+    }
 }
