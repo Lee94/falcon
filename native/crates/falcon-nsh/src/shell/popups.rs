@@ -198,6 +198,8 @@ fn popup_items(
         } else {
             foreground
         };
+        let hover_server = disabled_server.clone();
+        let focus_server = disabled_server.clone();
         let mut item = nsh_base::menu_item()
             .disabled(move || initially_disabled || !disabled_server.is_current())
             .disabled_style(|style| style.opacity(0.55))
@@ -212,9 +214,25 @@ fn popup_items(
             .py(zpx(7.0))
             .rounded(zpx(6.0))
             .text_color(color);
-        item = item
-            .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
-            .focus(move |style| style.bg(focus_background).text_color(focus_foreground));
+        if !initially_disabled {
+            let hover_foreground = if is_danger { danger_color } else { hover_foreground };
+            let focus_foreground = if is_danger { danger_color } else { focus_foreground };
+            item = item
+                .hover(move |style| {
+                    if hover_server.is_current() {
+                        style.bg(hover_background).text_color(hover_foreground)
+                    } else {
+                        style
+                    }
+                })
+                .focus(move |style| {
+                    if focus_server.is_current() {
+                        style.bg(focus_background).text_color(focus_foreground)
+                    } else {
+                        style
+                    }
+                });
+        }
         item.child(text(label).text_xs())
     })
 }

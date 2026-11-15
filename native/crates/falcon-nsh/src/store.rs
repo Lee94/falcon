@@ -3855,6 +3855,16 @@ impl WorkspaceStore {
         if !self.set_active_project_id(project_id.to_string()) {
             return;
         }
+        self.refresh_project_data();
+        self.refresh_project_agents();
+    }
+
+    fn set_active_project_id(&self, project_id: String) -> bool {
+        if self.active_project_id.get() == project_id {
+            return false;
+        }
+        self.file_operations.project_changed(self);
+        self.active_project_id.set(project_id);
         self.git_working_generation
             .set(self.git_working_generation.get().wrapping_add(1));
         self.git_loading.set(false);
@@ -3867,16 +3877,6 @@ impl WorkspaceStore {
         self.git_conflict.set(None);
         self.git_confirmation.set(None);
         self.git_operation_error.set(None);
-        self.refresh_project_data();
-        self.refresh_project_agents();
-    }
-
-    fn set_active_project_id(&self, project_id: String) -> bool {
-        if self.active_project_id.get() == project_id {
-            return false;
-        }
-        self.file_operations.project_changed(self);
-        self.active_project_id.set(project_id);
         true
     }
 

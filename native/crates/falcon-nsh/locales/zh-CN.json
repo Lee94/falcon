@@ -249,7 +249,7 @@
     "diffEmpty": "没有可显示的差异",
     "diffTruncated": "差异太长，只显示了前面一部分。",
     "selectRepoRequired": "请先选择一个仓库。",
-    "contextChanged": "服务器连接已切换，操作未发送。",
+    "contextChanged": "Git 操作上下文已更改，操作未发送。",
     "confirmDiscard": "确认丢弃列出的改动？",
     "confirmAbort": "确认中止当前 Git 操作？",
     "confirmTake": "确认替换列出的冲突文件？",

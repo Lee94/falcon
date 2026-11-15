@@ -270,7 +270,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
     let stale_key = falcon_core::pane_key::file_key("proj-falcon", stale_path);
 
     let open_save = store.clone();
-    let mut controls = view().flex_row().gap(Points(4.0)).child(
+    let mut controls = view().w_full().flex_row().flex_wrap().gap(Points(4.0)).child(
         view()
             .test_id("test-open-save-file")
             .on_press(move || open_save.open_file_pane("proj-falcon", save_path))
@@ -478,7 +478,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             .on_press(move || quick_open.open_quick_open())
             .child(text("quick-open")),
     );
-    let mut secondary_controls = view().flex_row().gap(Points(4.0));
+    let mut secondary_controls = view().w_full().flex_row().flex_wrap().gap(Points(4.0));
     let split_down = store.clone();
     secondary_controls = secondary_controls.child(
         view()
@@ -596,12 +596,15 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
     );
 
     let controls = view()
+        .w_full()
         .flex_col()
         .gap(Points(4.0))
         .child(controls)
         .child(secondary_controls);
     let probe_store = store;
-    let probe = dynamic(move || {
+    let probe = view()
+        .pointer_events(nsh_core::element::PointerEvents::None)
+        .child(dynamic(move || {
         let files = probe_store.open_files.get();
         let mut state = view().flex_row().gap(Points(2.0));
         if let Some(buffer) = files.get(&save_key) {
@@ -648,15 +651,32 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             )))
             .child(text(format!("server-url={}", probe_store.server_url.get())));
         state.into_element()
-    });
+    }));
 
     view()
         .absolute()
         .top(Points(0.0))
         .left(Points(0.0))
-        .flex_col()
-        .child(controls)
-        .child(probe)
+        .right(Points(0.0))
+        .bottom(Points(0.0))
+        .pointer_events(nsh_core::element::PointerEvents::BoxNone)
+        .child(
+            view()
+                .absolute()
+                .bottom(Points(0.0))
+                .left(Points(0.0))
+                .w_full()
+                .child(probe),
+        )
+        .child(
+            view()
+                .absolute()
+                .bottom(Points(0.0))
+                .right(Points(0.0))
+                .w(Points(420.0))
+                .flex_col()
+                .child(controls),
+        )
 }
 
 fn install_macos_tray(store: WorkspaceStore) {
@@ -2011,7 +2031,6 @@ mod tests {
                     vec![serde_json::json!({"path":"a.txt","index":" ","work":"M"})], None)),
                 (working_path.clone(), 200, git_working_response(
                     vec![serde_json::json!({"path":"b.txt","index":" ","work":"M"})], None)),
-                (operation_path.clone(), 200, r#"{"ok":true,"detail":"restored old repo"}"#.into()),
                 (diff_path.clone(), 200, git_diff_response(
                     "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old-b\n+repo-b-change\n")),
                 (commit_path.clone(), 200, r#"{"ok":true,"detail":"committed"}"#.into()),
@@ -2034,7 +2053,9 @@ mod tests {
             ColorScheme::Dark,
         );
         app.first_render().unwrap();
-        let initial = server.wait_for_request();
+        let initial = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0]
+            .clone();
         assert!(initial.starts_with(&working_path) && initial.contains("repo=%2Fworkspace%2Fa"), "{initial}");
         server.release_response();
         server.wait_for_response();
@@ -2045,23 +2066,23 @@ mod tests {
         app.press("id:git-repo-select").unwrap();
         app.press_key("down").unwrap();
         app.press_key("enter").unwrap();
-        let second = server.wait_for_request();
+        let second = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0]
+            .clone();
         assert!(second.starts_with(&working_path) && second.contains("repo=%2Fworkspace%2Fb"), "{second}");
         server.release_response();
         server.wait_for_response();
         app.wait_for("id:git-file-0").unwrap();
         server.clear_observed_requests();
         app.press("id:git-confirm-action").unwrap();
-        let captured = server.wait_for_request();
-        assert!(captured.starts_with(&operation_path) && captured.contains("repo=%2Fworkspace%2Fa"), "{captured}");
-        let payload: serde_json::Value = serde_json::from_str(mock_request_body(&captured)).unwrap();
-        assert_eq!(payload["paths"], serde_json::json!(["a.txt"]));
-        server.release_response();
-        server.wait_for_response();
-        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+        app.wait_for_gone("id:git-confirm-action", Duration::from_secs(2)).unwrap();
+        app.wait_for("Git 操作上下文已更改，操作未发送。").unwrap();
+        server.assert_no_request_starting_with(&operation_path);
 
         app.press("id:git-file-0").unwrap();
-        let diff = server.wait_for_request();
+        let diff = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[diff_path.as_str()])[0]
+            .clone();
         assert!(diff.starts_with(&diff_path) && diff.contains("path=b.txt")
             && diff.contains("repo=%2Fworkspace%2Fb"), "{diff}");
         server.release_response();
@@ -2071,7 +2092,9 @@ mod tests {
 
         app.type_text("id:git-commit-message", "first").unwrap();
         app.press("id:git-commit").unwrap();
-        let commit = server.wait_for_request();
+        let commit = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[commit_path.as_str()])[0]
+            .clone();
         assert!(commit.starts_with(&commit_path) && commit.contains("repo=%2Fworkspace%2Fb"), "{commit}");
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&commit)).unwrap();
         assert_eq!(payload["message"], "first");
@@ -2080,7 +2103,9 @@ mod tests {
         app.type_text("id:git-commit-message", " newer").unwrap();
         server.release_response();
         server.wait_for_response();
-        let refreshed = server.wait_for_request();
+        let refreshed = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0]
+            .clone();
         assert!(refreshed.starts_with(&working_path) && refreshed.contains("repo=%2Fworkspace%2Fb"), "{refreshed}");
         server.release_response();
         server.wait_for_response();
@@ -2088,14 +2113,18 @@ mod tests {
 
         app.press("id:git-discard-selected").unwrap();
         app.press("id:git-confirm-action").unwrap();
-        let operation = server.wait_for_request();
+        let operation = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[operation_path.as_str()])[0]
+            .clone();
         assert!(operation.starts_with(&operation_path) && operation.contains("repo=%2Fworkspace%2Fb"), "{operation}");
         let payload: serde_json::Value = serde_json::from_str(mock_request_body(&operation)).unwrap();
         assert_eq!(payload["op"], "restore");
         assert_eq!(payload["paths"], serde_json::json!(["b.txt"]));
         server.release_response();
         server.wait_for_response();
-        let refreshed = server.wait_for_request();
+        let refreshed = server
+            .wait_for_observed_prefixes_pumping(&mut app, &[working_path.as_str()])[0]
+            .clone();
         assert!(refreshed.starts_with(&working_path) && refreshed.contains("repo=%2Fworkspace%2Fb"), "{refreshed}");
         server.release_response();
         server.wait_for_response();
@@ -2706,8 +2735,13 @@ mod tests {
         );
         app.first_render().unwrap();
         app.press("id:test-open-save-file").unwrap();
+        let read_request = mock
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["GET /api/projects/proj-falcon/file"],
+            )[0]
+            .clone();
         app.wait_for("save-state=Loading").unwrap();
-        let read_request = mock.wait_for_request();
         assert!(
             read_request.starts_with("GET /api/projects/proj-falcon/file"),
             "unexpected read request: {read_request}"
@@ -2729,8 +2763,13 @@ mod tests {
         app.wait_for(&save_button).unwrap();
         app.type_text(&editor, "").unwrap();
         app.press(&save_button).unwrap();
+        let failed_save = mock
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["PUT /api/projects/proj-falcon/file"],
+            )[0]
+            .clone();
         app.wait_for("save-saving=true").unwrap();
-        let failed_save = mock.wait_for_request();
         assert!(failed_save.starts_with("PUT /api/projects/proj-falcon/file"));
         assert_eq!(mock_request_body(&failed_save), "first line\nsecond line\n");
         mock.release_response();
@@ -2743,8 +2782,13 @@ mod tests {
         app.wait_for(&save_button).unwrap();
         app.type_text(&editor, "").unwrap();
         app.press(&save_button).unwrap();
+        let retry = mock
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["PUT /api/projects/proj-falcon/file"],
+            )[0]
+            .clone();
         app.wait_for("save-saving=true").unwrap();
-        let retry = mock.wait_for_request();
         assert!(retry.starts_with("PUT /api/projects/proj-falcon/file"));
         assert!(
             retry.contains("base=disk-v1"),
@@ -3194,7 +3238,8 @@ mod tests {
             app.press("label:files-refresh").unwrap();
         }
         app.wait_for("id:files-loading").unwrap();
-        assert!(server.wait_for_request().starts_with(list_prefix));
+        assert!(server.wait_for_observed_prefixes_pumping(&mut app, &[list_prefix])[0]
+            .starts_with(list_prefix));
         server.release_response();
         server.wait_for_response();
         app.wait_for("id:file-select-old.txt").unwrap();
@@ -3203,7 +3248,12 @@ mod tests {
         app.wait_for("id:file-operation-name").unwrap();
         app.type_text("id:file-operation-name", "docs").unwrap();
         app.press_key("enter").unwrap();
-        let request = server.wait_for_request();
+        let request = server
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["POST /api/projects/proj-falcon/mkdir"],
+            )[0]
+            .clone();
         assert!(request.starts_with("POST /api/projects/proj-falcon/mkdir"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
@@ -3211,7 +3261,8 @@ mod tests {
         );
         server.release_response();
         server.wait_for_response();
-        assert!(server.wait_for_request().starts_with(list_prefix));
+        assert!(server.wait_for_observed_prefixes_pumping(&mut app, &[list_prefix])[0]
+            .starts_with(list_prefix));
         server.release_response();
         server.wait_for_response();
         app.wait_for("id:file-select-docs").unwrap();
@@ -3229,7 +3280,12 @@ mod tests {
         app.press("id:file-select-old.txt").unwrap();
         app.type_text("id:file-operation-name", "-renamed").unwrap();
         app.press_key("enter").unwrap();
-        let request = server.wait_for_request();
+        let request = server
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["POST /api/projects/proj-falcon/rename"],
+            )[0]
+            .clone();
         assert!(request.starts_with("POST /api/projects/proj-falcon/rename"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
@@ -3237,7 +3293,8 @@ mod tests {
         );
         server.release_response();
         server.wait_for_response();
-        assert!(server.wait_for_request().starts_with(list_prefix));
+        assert!(server.wait_for_observed_prefixes_pumping(&mut app, &[list_prefix])[0]
+            .starts_with(list_prefix));
         server.release_response();
         server.wait_for_response();
         app.wait_for("id:file-select-old.txt-renamed").unwrap();
@@ -3254,7 +3311,12 @@ mod tests {
         app.press("id:file-operations-delete").unwrap();
         app.wait_for("id:file-operation-confirmation").unwrap();
         app.press("id:file-operation-confirm-confirmation").unwrap();
-        let request = server.wait_for_request();
+        let request = server
+            .wait_for_observed_prefixes_pumping(
+                &mut app,
+                &["POST /api/projects/proj-falcon/remove"],
+            )[0]
+            .clone();
         assert!(request.starts_with("POST /api/projects/proj-falcon/remove"));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(mock_request_body(&request)).unwrap(),
@@ -3263,7 +3325,8 @@ mod tests {
         server.release_response();
         server.wait_for_response();
         app.wait_for("text:/permission denied/").unwrap();
-        assert!(server.wait_for_request().starts_with(list_prefix));
+        assert!(server.wait_for_observed_prefixes_pumping(&mut app, &[list_prefix])[0]
+            .starts_with(list_prefix));
         server.release_response();
         server.wait_for_response();
         app.wait_for("id:file-select-keep.txt").unwrap();
