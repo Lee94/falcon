@@ -974,6 +974,47 @@
     "logout": "退出登录"
   },
   "native": {
+    "themePicker": {
+      "groupCurrent": "当前",
+      "groupFalcon": "Falcon",
+      "groupLight": "Ghostty · 浅色",
+      "groupDark": "Ghostty · 深色",
+      "empty": "没有匹配的主题",
+      "search": "搜索 %{n} 个主题…",
+      "customEntry": "自定义（粘贴 Ghostty 主题）…",
+      "copyGhostty": "复制为 Ghostty 主题",
+      "copied": "已复制 Ghostty 主题配置",
+      "close": "关闭选择器",
+      "cancel": "取消",
+      "editorTitle": "自定义主题",
+      "editorHint": "粘贴 Ghostty 主题内容，或先写 theme = 内置主题名，再覆盖颜色。支持 background / foreground / cursor-* / selection-* / palette。",
+      "editorName": "名称",
+      "editorNamePlaceholder": "例如 noctis-lux",
+      "editorText": "主题内容",
+      "editorRecognized": "识别到 %{n} 项颜色",
+      "editorNothing": "没有识别到任何颜色",
+      "editorUnknownBase": "theme = %{name} 不是内置主题，将按 Ghostty 默认值补齐缺省项",
+      "editorApply": "应用"
+    },
+    "quickOpen": {
+      "noProject": "先选一个项目，才能搜索它的文件。",
+      "failed": "读不到文件列表",
+      "empty": "没有匹配的文件",
+      "truncated": "文件太多，只索引了前 %{n} 个。"
+    },
+    "settingsParity": {
+      "noHosts": "还没有 SSH 主机",
+      "usedBy": "%{n} 个项目引用",
+      "unused": "未被引用",
+      "kindBuiltin": "内置",
+      "kindCommand": "命令",
+      "kindPackage": "NSH 包",
+      "copyDir": "复制目录",
+      "copied": "已复制插件目录",
+      "noCustom": "还没有自定义插件。将插件放入服务端的插件目录后，点击重新扫描。",
+      "pluginRefresh": "刷新间隔：%{n} 秒",
+      "pluginManualRefresh": "仅在打开、手动刷新或执行动作时刷新"
+    },
     "files": {
       "quitAnyway": "仍然退出",
       "closeAnyway": "仍然关闭",

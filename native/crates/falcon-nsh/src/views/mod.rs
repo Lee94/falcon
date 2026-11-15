@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod project_form;
 pub mod session_operations;
 pub mod quick_open;
+mod theme_picker;
 mod relays;
 mod tailscale;
 

@@ -1,0 +1,45 @@
+{
+  "native": {
+    "themePicker": {
+      "groupCurrent": "Current",
+      "groupFalcon": "Falcon",
+      "groupLight": "Ghostty · Light",
+      "groupDark": "Ghostty · Dark",
+      "empty": "No matching themes",
+      "search": "Search %{n} themes…",
+      "customEntry": "Custom (paste a Ghostty theme)…",
+      "copyGhostty": "Copy as Ghostty theme",
+      "copied": "Ghostty theme copied",
+      "close": "Close picker",
+      "cancel": "Cancel",
+      "editorTitle": "Custom theme",
+      "editorHint": "Paste a Ghostty theme, or start with theme = a built-in name and override colors. Supports background / foreground / cursor-* / selection-* / palette.",
+      "editorName": "Name",
+      "editorNamePlaceholder": "For example, noctis-lux",
+      "editorText": "Theme content",
+      "editorRecognized": "Recognized %{n} colors",
+      "editorNothing": "No colors recognized",
+      "editorUnknownBase": "theme = %{name} is not built in; missing colors use Ghostty defaults",
+      "editorApply": "Apply"
+    },
+    "quickOpen": {
+      "noProject": "Select a project to search its files.",
+      "failed": "Could not read the file list",
+      "empty": "No matching files",
+      "truncated": "Too many files; only the first %{n} were indexed."
+    },
+    "settingsParity": {
+      "noHosts": "No SSH hosts yet",
+      "usedBy": "Used by %{n} projects",
+      "unused": "Not referenced",
+      "kindBuiltin": "Built-in",
+      "kindCommand": "Command",
+      "kindPackage": "NSH package",
+      "copyDir": "Copy directory",
+      "copied": "Plugin directory copied",
+      "noCustom": "No custom plugins yet. Place plugins in the server's plugin directory, then rescan.",
+      "pluginRefresh": "Refresh interval: %{n} seconds",
+      "pluginManualRefresh": "Refreshes on open, manual refresh, or actions"
+    }
+  }
+}

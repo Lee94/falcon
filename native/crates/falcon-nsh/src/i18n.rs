@@ -2,7 +2,7 @@
 //!
 //! 界面上不允许硬编码中文，统一经 `nsh_core::t!("...")` 读取。
 //! NSH 的 `Translations::lookup` 在宿主语言不匹配时（例如无头测试默认 `en-US`）会回退到 `"en"`，
-//! v1 仅有中文一份文案，因此同时填入 `"zh-CN"`、`"zh"` 与 `"en"`，保证任意宿主语言首帧即显示中文。
+//! 迁移中的旧键以中文兜底，新增 native.* 键由 en.json 提供英文。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -13,6 +13,7 @@ use serde_json::Value;
 pub use nsh_core::t;
 
 const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
+const EN_JSON: &str = include_str!("../locales/en.json");
 
 static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     let root: Value = serde_json::from_str(ZH_CN_JSON)
@@ -24,10 +25,13 @@ static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
 
 static TRANSLATIONS: LazyLock<Translations> = LazyLock::new(|| {
     let base = FLAT_ZH_CN.clone();
+    let mut english = base.clone();
+    let en: Value = serde_json::from_str(EN_JSON).expect("falcon-nsh locales/en.json must be valid JSON");
+    flatten_json("", &en, &mut english);
     let mut map = HashMap::with_capacity(3);
     map.insert("zh-CN".to_string(), base.clone());
     map.insert("zh".to_string(), base.clone());
-    map.insert("en".to_string(), base);
+    map.insert("en".to_string(), english);
     Translations::from_map(map)
 });
 
@@ -64,4 +68,28 @@ pub fn translations() -> Translations {
 /// 非组件上下文（纯单元测试对账文案 key）直接按点分键取值。
 pub fn lookup_static(key: &str) -> Option<&'static str> {
     FLAT_ZH_CN.get(key).map(String::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_english_keys_have_chinese_and_matching_placeholders() {
+        let english: Value = serde_json::from_str(EN_JSON).unwrap();
+        let mut flat = HashMap::new();
+        flatten_json("", &english, &mut flat);
+        for (key, en) in flat {
+            assert!(key.starts_with("native."), "{key}");
+            let zh = lookup_static(&key).unwrap_or_else(|| panic!("missing Chinese key: {key}"));
+            let placeholders = |text: &str| {
+                text.split("%{").skip(1)
+                    .map(|part| part.split('}').next().unwrap().to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            assert_eq!(placeholders(&en), placeholders(zh), "{key}");
+            assert_eq!(translations().lookup("en-US", &key).as_deref(), Some(en.as_str()));
+            assert_eq!(translations().lookup("zh-CN", &key).as_deref(), Some(zh));
+        }
+    }
 }

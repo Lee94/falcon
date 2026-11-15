@@ -3518,6 +3518,23 @@ mod tests {
     }
 
     #[test]
+    fn quick_open_without_project_has_its_own_empty_state_headless() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: false,
+                server_url: Some("http://127.0.0.1:1".into()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press_key("alt+p").unwrap();
+        app.wait_for("id:quick-open-no-project").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("id:quick-open-input").unwrap();
+    }
+
+    #[test]
     fn quick_open_index_success_empty_and_error_headless() {
         let index_path = "GET /api/projects/proj-falcon/files/index".to_string();
         let server = MockHttpServer::new(vec![
@@ -3548,6 +3565,7 @@ mod tests {
         app.first_render().unwrap();
 
         app.press_key("alt+p").unwrap();
+        app.wait_for("id:quick-open-loading").unwrap();
         assert!(
             server
                 .wait_for_request()
@@ -3568,7 +3586,7 @@ mod tests {
         );
         server.release_response();
         server.wait_for_response();
-        app.wait_for("text:没有匹配项").unwrap();
+        app.wait_for("id:quick-open-empty").unwrap();
         app.press_key("enter").unwrap();
         app.wait_for("id:quick-open-input").unwrap();
         app.press_key("escape").unwrap();
@@ -3584,6 +3602,7 @@ mod tests {
         server.release_response();
         server.wait_for_response();
         app.wait_for("quick-open-error-present=true").unwrap();
+        app.wait_for("id:quick-open-error").unwrap();
         app.wait_for("id:quick-open-input").unwrap();
         app.press_key("escape").unwrap();
         app.wait_for_gone("id:quick-open-input", Duration::from_secs(2))
@@ -3618,6 +3637,8 @@ mod tests {
         server.wait_for_response();
         app.wait_for("id:quick-open-file-23").unwrap();
         app.wait_for("quick-open-loading=false").unwrap();
+        app.wait_for("id:quick-open-truncated-footer").unwrap();
+        app.wait_for("text:Too many files; only the first 24 were indexed.").unwrap();
         app.type_text("id:quick-open-input", "src/").unwrap();
         assert_eq!(
             app.screen().input_text("id:quick-open-input").unwrap(),
@@ -4566,6 +4587,75 @@ mod tests {
         app.wait_for("label:settings-close").unwrap();
         app.wait_for_gone("id:theme-picker-filter", Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn settings_theme_preview_cancel_and_custom_import_keep_inputs_headless() {
+        let mut settings = ThemeSettings::default();
+        settings.mode = ThemePref::Light;
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                initial_theme: Some(settings),
+                ..Default::default()
+            },
+            ColorScheme::Light,
+        );
+        app.first_render().unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for("当前底色判定：浅色外观").unwrap();
+        app.press("label:theme-slot-Dark").unwrap();
+        app.hover("id:theme-choice-Falcon Dark").unwrap();
+        app.wait_for("当前底色判定：深色外观").unwrap();
+        app.wait_for("label:theme-slot-Dark >> text:Falcon Dark").unwrap();
+        app.press("id:theme-picker-close").unwrap();
+        app.wait_for("当前底色判定：浅色外观").unwrap();
+
+        app.press("label:theme-slot-Light").unwrap();
+        app.type_text("id:theme-picker-filter", "no-such-theme").unwrap();
+        app.wait_for("id:theme-picker-empty").unwrap();
+        app.clear("id:theme-picker-filter").unwrap();
+        app.type_text("id:theme-picker-filter", "Flcn Lght").unwrap();
+        app.wait_for("id:theme-choice-Falcon Light").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for_gone("id:theme-picker-filter", Duration::from_secs(2)).unwrap();
+
+        app.press("label:theme-slot-Light").unwrap();
+        app.press("id:theme-picker-custom").unwrap();
+        app.clear("id:theme-editor-source").unwrap();
+        app.type_text("id:theme-editor-source", "not a theme").unwrap();
+        app.wait_for("text:No colors recognized").unwrap();
+        app.clear("id:theme-editor-source").unwrap();
+        let source = "theme = Dracula\nbackground = #101010\nforeground = #f0f0f0";
+        app.type_text("id:theme-editor-source", source).unwrap();
+        assert_eq!(app.screen().input_text("id:theme-editor-source").unwrap(), Some(source));
+        app.type_text("id:theme-editor-name", "Parity import").unwrap();
+        assert_eq!(app.screen().input_text("id:theme-editor-name").unwrap(), Some("Parity import"));
+        app.wait_for("当前底色判定：深色外观").unwrap();
+        app.wait_for("label:theme-slot-Light >> text:Falcon Light").unwrap();
+        app.press("id:theme-editor-cancel").unwrap();
+        app.wait_for("当前底色判定：浅色外观").unwrap();
+
+        app.press("label:theme-slot-Light").unwrap();
+        app.press("id:theme-picker-custom").unwrap();
+        app.clear("id:theme-editor-source").unwrap();
+        app.type_text("id:theme-editor-source", source).unwrap();
+        app.type_text("id:theme-editor-name", "Parity import").unwrap();
+        app.press("id:theme-editor-apply").unwrap();
+        app.wait_for_gone("id:theme-editor", Duration::from_secs(2)).unwrap();
+        app.wait_for("label:theme-slot-Light >> text:Parity import").unwrap();
+        app.wait_for("当前底色判定：深色外观").unwrap();
+
+        app.press("label:theme-slot-Light").unwrap();
+        app.hover("id:theme-choice-Falcon Light").unwrap();
+        app.wait_for("当前底色判定：浅色外观").unwrap();
+        app.wait_for("label:theme-slot-Light >> text:Parity import").unwrap();
+        app.press("id:theme-choice-Parity import").unwrap();
+        assert_eq!(app.screen().input_text("id:theme-editor-name").unwrap(), Some("Parity import"));
+        app.press_key("escape").unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        app.wait_for_gone("id:theme-editor", Duration::from_secs(2)).unwrap();
+        app.wait_for("label:theme-slot-Light >> text:Parity import").unwrap();
     }
 
     #[test]

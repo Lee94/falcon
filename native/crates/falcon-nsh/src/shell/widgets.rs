@@ -32,10 +32,12 @@ pub enum Glyph {
     File,
     ArrowUp,
     Refresh,
+    Copy,
 }
 
 pub fn glyph(kind: Glyph) -> impl IntoElement {
     let paths = match kind {
+        Glyph::Copy => "<rect x='8' y='8' width='13' height='13' rx='2'/><path d='M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3'/>",
         Glyph::File => "<path d='M14 2H5v20h14V7Z M14 2v5h5'/>",
         Glyph::ArrowUp => "<path d='M12 20V4 m-7 7 7-7 7 7'/>",
         Glyph::Refresh => "<path d='M20 7a9 9 0 1 0 1 8 M20 2v6h-6'/>",

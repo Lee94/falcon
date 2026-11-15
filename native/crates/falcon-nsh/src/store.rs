@@ -687,6 +687,7 @@ pub struct WorkspaceStore {
     pub editing_host: Signal<Option<falcon_proto::SshHost>>,
     pub editing_host_generation: Signal<u64>,
     pub host_delete_busy: Signal<Option<(u64, String)>>,
+    pub host_test_busy: Signal<Option<String>>,
     pub host_delete_error: Signal<Option<String>>,
     pub mobile_tab: Signal<MobileTab>,
     pub tui_passthrough: Signal<bool>,
@@ -1595,6 +1596,7 @@ impl WorkspaceStore {
             editing_host: signal(None),
             editing_host_generation: signal(0),
             host_delete_busy: signal(None),
+            host_test_busy: signal(None),
             host_delete_error: signal(None),
             mobile_tab: signal(MobileTab::Workspace),
             tui_passthrough: signal(false),
@@ -2354,6 +2356,37 @@ impl WorkspaceStore {
         }
     }
 
+    /// Re-entering host settings must reflect edits made from other clients.
+    pub fn refresh_settings_hosts(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(client) = self.client() {
+            let store = self.clone();
+            let generation = self.connection_generation.get();
+            let request_generation = self.connection_request_generation.get();
+            let origin = self.server_url.get();
+            self.spawn_root(async move {
+                loop {
+                    let revision = store.metadata_revision(&origin);
+                    let result = client.list_hosts().await;
+                    if store.connection_generation.get() != generation
+                        || store.connection_request_generation.get() != request_generation {
+                        return;
+                    }
+                    if store.metadata_revision(&origin) != revision { continue; }
+                    match result {
+                        Ok(hosts) => store.hosts.set(hosts.into_iter().map(|h| HostRecord {
+                            destination: format!("{}@{}:{}", h.username, h.host, h.port),
+                            id: h.id.clone(), name: h.name.clone(), os_label: "SSH".into(),
+                            connected: true, source: Some(h),
+                        }).collect()),
+                        Err(error) => store.show_toast(error.to_string()),
+                    }
+                    break;
+                }
+            });
+        }
+    }
+
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(client) = self.client() {
@@ -2375,6 +2408,9 @@ impl WorkspaceStore {
     }
 
     pub fn test_host_connection(&self, id: &str) {
+        if self.host_test_busy.get().is_some() {
+            return;
+        }
         // Web 端不在浏览器里探测 SSH 主机
         #[cfg(target_arch = "wasm32")]
         let _ = id;
@@ -2384,12 +2420,14 @@ impl WorkspaceStore {
             let id = id.to_string();
             let generation = self.connection_generation.get();
             let request_generation = self.connection_request_generation.get();
+            store.host_test_busy.set(Some(id.clone()));
             store.show_toast(crate::i18n::t!("host.testing"));
             self.spawn_root(async move {
                 let result = client.test_host(&id).await;
                 if store.connection_generation.get() == generation
                     && store.connection_request_generation.get() == request_generation
                 {
+                    store.host_test_busy.set(None);
                     match result {
                         Ok(falcon_proto::SshProbeResult::Reachable { .. }) => {
                             store.show_toast(crate::i18n::t!("host.testOk"))
@@ -3581,6 +3619,7 @@ impl WorkspaceStore {
         self.next_connection_generation();
         self.server_connected.set(false);
         self.host_delete_busy.set(None);
+        self.host_test_busy.set(None);
         self.host_delete_error.set(None);
         self.invalidate_host_edit_generation();
         self.editing_host.set(None);

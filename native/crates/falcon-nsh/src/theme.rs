@@ -13,7 +13,7 @@ use std::sync::Arc;
 use falcon_proto::PluginTone;
 use falcon_theme::{
     CatalogEntry, ResolvedTheme, Rgb as ThemeRgb, Rgba as ThemeRgba, StorageLike, ThemeChoice,
-    ThemeMode, ThemePref, ThemeSettings, choice_of, derive_theme, find_theme, load_catalog,
+    ThemeColors, ThemeMode, ThemePref, ThemeSettings, choice_of, derive_theme, find_theme, load_catalog,
     load_theme_settings, resolve_theme_mode, save_theme_settings,
 };
 use nsh_core::element::{FONT_MONO, FONT_SANS};
@@ -202,6 +202,7 @@ pub fn load_initial_theme(system_is_dark: bool) -> (ThemeSettings, Arc<ResolvedT
 #[derive(Clone, Copy)]
 pub struct ThemeController {
     settings: Signal<ThemeSettings>,
+    preview: Signal<Option<ThemeColors>>,
     resolved: Memo<Arc<ResolvedTheme>>,
 }
 
@@ -244,6 +245,16 @@ impl ThemeController {
     pub fn apply_settings(self, next: ThemeSettings) {
         save_theme_settings(Some(&mut PlatformStorage), &next);
         self.settings.set(next);
+        self.preview.set(None);
+        self.sync_surface();
+    }
+
+    /// Preview never writes preferences or changes either slot, including when editing the inactive slot.
+    pub fn preview(self, colors: Option<ThemeColors>) {
+        if self.preview.get_untracked() == colors {
+            return;
+        }
+        self.preview.set(colors);
         self.sync_surface();
     }
 
@@ -263,12 +274,16 @@ impl ThemeController {
 pub fn install_theme(override_settings: Option<ThemeSettings>) -> ThemeController {
     let initial = override_settings.unwrap_or_else(|| load_theme_settings(Some(&PlatformStorage)));
     let settings = signal(initial);
+    let preview = signal(None::<ThemeColors>);
     let resolved = computed(move || {
+        if let Some(colors) = preview.get() {
+            return Arc::new(derive_theme(&colors));
+        }
         let cur = settings.get();
         let slot = resolve_theme_mode(cur.mode, dark());
         Arc::new(derive_theme(&cur.slot(slot).colors))
     });
-    let ctrl = ThemeController { settings, resolved };
+    let ctrl = ThemeController { settings, preview, resolved };
     ctrl.sync_surface();
     provide_context(ctrl);
     ctrl
