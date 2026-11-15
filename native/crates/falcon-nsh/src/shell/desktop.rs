@@ -19,6 +19,7 @@ use super::sidebar::sidebar_island;
 use super::widgets::{Glyph, icon_button};
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
+use crate::shell::popups::themed_tooltip;
 use crate::store::{ActiveDialog, RightPanelKind, WorkspaceStore, use_workspace};
 use crate::terminal::falcon_terminal;
 use crate::theme::{rgb_to_hsla, use_theme};
@@ -401,7 +402,7 @@ fn render_canvas_columns(
             stage = stage.child(
                 view()
                     .label(format!("resize-column-{}", col_frame.id))
-                    .tooltip(nsh_base::tooltip().child(text(t!("pane.resizeColumn"))))
+                    .tooltip(themed_tooltip(text(t!("pane.resizeColumn")), None, resolved))
                     .absolute()
                     .left(pt_px((col_frame.x + initial) as f32))
                     .top(pt_px(0.0))
@@ -505,7 +506,7 @@ fn render_pane_island(
         .gap(zpx(8.0))
         .overflow_hidden()
         .cursor_pointer()
-        .tooltip(nsh_base::tooltip().child(text(t!("pane.dragHint"))))
+        .tooltip(themed_tooltip(text(t!("pane.dragHint")), None, resolved))
         .cursor(nsh_core::Cursor::Grab)
         .on_press_down(move |e: &PressEvent| {
             drag_origin.set((

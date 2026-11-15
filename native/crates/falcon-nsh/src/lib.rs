@@ -63,6 +63,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     };
     let theme_ctrl = install_theme(initial_theme);
     let zoom_ctrl = install_zoom();
+    shell::action_owner::ActionOwner::install();
     let store = WorkspaceStore::install(&launch_opts);
     #[cfg(all(feature = "snapshot", not(target_arch = "wasm32")))]
     install_review_scene(store.clone());
@@ -572,6 +573,70 @@ mod tests {
         app.press("仍然终止").expect("confirm force terminate");
         app.wait_for_gone("cargo check -p falcon-nsh", Duration::from_secs(2))
             .unwrap();
+    }
+
+    #[test]
+    fn project_menu_supports_escape_outside_dismissal_and_keyboard_selection() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                server_url: Some("http://127.0.0.1:4923".into()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        assert!(app.shows("用 px0 审阅"), "project menu opened");
+        app.press_key("escape").unwrap();
+        assert!(!app.shows("用 px0 审阅"), "Escape closes the menu");
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("down").unwrap();
+        app.press_key("enter").unwrap();
+        app.wait_for("label:session-sess-3")
+            .expect("the second menu action creates exactly one terminal");
+        assert!(!app.shows("用 px0 审阅"), "Enter closes the menu");
+        assert!(
+            !app.shows("label:session-sess-4"),
+            "the action is not invoked twice"
+        );
+
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("label:sidebar-settings").unwrap();
+        assert!(!app.shows("用 px0 审阅"), "outside press dismisses the menu");
+    }
+
+    #[test]
+    fn session_context_menu_detach_and_terminate_keep_existing_guards() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:sessions-toggle-proj-falcon").unwrap();
+
+        app.right_click("label:session-sess-main").unwrap();
+        assert!(app.shows("收起窗口"));
+        assert!(app.shows("终止会话…"));
+        app.press("收起窗口").unwrap();
+        app.wait_for("label:reattach-sess-main")
+            .expect("detach removes the pane but keeps the session record");
+
+        app.right_click("label:session-sess-main").unwrap();
+        assert!(app.shows("接回会话"));
+        assert!(!app.shows("收起窗口"));
+        app.press("终止会话…").unwrap();
+        app.wait_for("前台程序仍在运行")
+            .expect("terminate keeps the busy-process confirmation guard");
+        app.press("取消").unwrap();
+        app.wait_for("label:session-sess-main")
+            .expect("cancelling does not terminate the session");
     }
 
     #[test]

@@ -2,6 +2,9 @@
 
 pub mod desktop;
 pub mod mobile;
+pub(crate) mod action_owner;
+pub(crate) mod menus;
+pub(crate) mod popups;
 mod overview;
 mod sidebar;
 pub mod tui;

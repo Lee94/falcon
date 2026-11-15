@@ -1,5 +1,6 @@
 //! 桌面壳层共用的矢量图标与紧凑按钮。颜色继承语义 token，尺寸随界面缩放。
 use crate::theme::rgb_to_hsla;
+use crate::shell::popups::themed_tooltip;
 use crate::zoom::zpx;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
@@ -91,7 +92,8 @@ pub fn icon_button(
     let ui = &resolved.ui;
     view()
         .label(id.into())
-        .tooltip(nsh_base::tooltip().child(text(title)))
+        .focusable(true)
+        .tooltip(themed_tooltip(text(title), None, resolved))
         .w(zpx(28.0))
         .h(zpx(28.0))
         .flex_none()

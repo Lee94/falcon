@@ -1008,9 +1008,15 @@ fn render_terminal_tab(
     let pref = store.term_prefs();
     let fg = rgb_to_hsla(ui.foreground);
     let bg = rgb_to_hsla(ui.app);
+    let popup_bg = rgb_to_hsla(ui.popover);
+    let popup_fg = rgb_to_hsla(ui.popover_foreground);
+    let item_selected = rgb_to_hsla(ui.tint);
+    let selected_fg = rgb_to_hsla(ui.tint_foreground);
     let border = rgba_to_hsla(ui.border);
     let font_store = store.clone();
+    let action_owner = crate::shell::action_owner::ActionOwner::current();
     let font_title = t!(format!("term.font_{}", pref.font_id.as_str().replace('-', "_")).as_str());
+    let selected_font = pref.font_id.as_str().to_owned();
     let fonts = nsh_base::select()
         .items(
             TermFontId::ALL
@@ -1024,7 +1030,18 @@ fn render_terminal_tab(
                 .collect::<Vec<_>>(),
         )
         .value(pref.font_id.as_str())
-        .popup_style(move |v| v.bg(bg).rounded(zpx(8.0)).border_1().border_color(border))
+        .offset(zpx(4.0))
+        .margin(zpx(8.0))
+        .item_class("group focus:bg-muted selected:bg-tint disabled:opacity-50")
+        .popup_style(move |v| {
+            v.bg(popup_bg)
+                .text_color(popup_fg)
+                .rounded(zpx(8.0))
+                .border_1()
+                .border_color(border)
+                .p(zpx(4.0))
+                .shadow([crate::shell::popups::popup_shadow(border)])
+        })
         .trigger(
             view()
                 .w(zpx(256.0))
@@ -1042,15 +1059,29 @@ fn render_terminal_tab(
                 .child(glyph(Glyph::ChevronDown)),
         )
         .render_item(move |entry: &nsh_base::SelectEntry| {
-            view()
+            let selected = entry.value.as_ref() == selected_font.as_str();
+            let mut item = view()
+                .flex_row()
+                .items_center()
+                .gap(zpx(6.0))
                 .px(zpx(10.0))
                 .py(zpx(6.0))
-                .bg(bg)
-                .child(text(entry.title.clone()).text_xs().text_color(fg))
+                .rounded(zpx(6.0))
+                .border_1()
+                .border_color(popup_bg)
+                .group_focus_visible(move |style| style.border_color(item_selected));
+            if selected {
+                item = item.child(glyph(Glyph::Check));
+            }
+            item.child(text(entry.title.clone()).text_xs().text_color(if selected {
+                selected_fg
+            } else {
+                popup_fg
+            }))
         })
         .on_change(move |value: &Option<SharedString>| {
             if let Some(id) = value.as_deref().and_then(TermFontId::from_wire) {
-                font_store.term_prefs.update(|p| p.font_id = id);
+                action_owner.run(|| font_store.term_prefs.update(|p| p.font_id = id));
             }
         });
     let mut page = view()
@@ -1248,13 +1279,13 @@ fn render_hosts_tab(
     for host in hosts {
         let st = store.clone();
         let id = host.id.clone();
+        let test_id = id.clone();
         let auth = host
             .source
             .as_ref()
             .map(|h| h.auth_method.as_str())
             .unwrap_or("agent");
-        table = table.child(
-            view()
+        let row = view()
                 .min_h(zpx(40.0))
                 .flex_row()
                 .items_center()
@@ -1293,14 +1324,27 @@ fn render_hosts_tab(
                         .rounded(zpx(8.0))
                         .cursor_pointer()
                         .bg(rgb_to_hsla(ui.background))
-                        .on_press(move || st.test_host_connection(&id))
+                        .on_press(move || st.test_host_connection(&test_id))
                         .child(
                             text(t!("host.test"))
                                 .text_xs()
                                 .text_color(rgb_to_hsla(ui.foreground)),
                         ),
-                ),
-        );
+                )
+                .child(crate::shell::popups::overflow_menu(
+                    crate::shell::popups::menu_trigger(
+                        format!("host-settings-menu-{id}"),
+                        t!("session.moreActions"),
+                        resolved,
+                    ),
+                    crate::shell::menus::host_menu_actions(store, Some(&id)),
+                    resolved,
+                ));
+        table = table.child(crate::shell::popups::context_menu(
+            row,
+            crate::shell::menus::host_menu_actions(store, Some(&id)),
+            resolved,
+        ));
     }
     view()
         .flex_col()

@@ -1036,6 +1036,7 @@
   },
   "plugin": {
     "refresh": "刷新",
+    "confirmActionTitle": "确认插件操作",
     "loading": "正在加载…",
     "missing": "没有插件「%{id}」：它可能已经从插件目录里删掉了。",
     "disabled": "这个插件已停用，可以在设置的「插件」页里重新启用。",
