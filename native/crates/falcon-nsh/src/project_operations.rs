@@ -184,6 +184,12 @@ impl ProjectOperations {
         }
     }
 
+    fn bump_project_update_revision_for_server(&self, server_url: &str) {
+        let server_url = canonical_server_url(server_url);
+        let mut state = self.mapping_state.borrow_mut();
+        bump_project_update_revision(&mut state, &server_url);
+    }
+
     pub fn project_update_revision_is_current(&self, revision: &ProjectUpdateRevision) -> bool {
         self.task_owner.is_live()
             && revision.server_url == canonical_server_url(&self.server_url.get())
@@ -531,13 +537,22 @@ impl ProjectOperations {
             } else {
                 None
             };
+            let create_server_url = project_id
+                .is_none()
+                .then(|| canonical_server_url(&store.server_url.get()));
             let operations = store.project_operations.clone();
             let task_store = store.clone();
             store.spawn_root(async move {
+                if let Some(server_url) = create_server_url.as_deref() {
+                    operations.bump_project_update_revision_for_server(server_url);
+                }
                 let response = match project_id.as_deref() {
                     Some(id) => client.update_project(id, &input).await,
                     None => client.create_project(&input).await,
                 };
+                if let Some(server_url) = create_server_url.as_deref() {
+                    operations.bump_project_update_revision_for_server(server_url);
+                }
                 let server_is_current = operations.server_is_current(context)
                     && update_token.as_ref().map_or(true, |token| {
                         operations.project_update_server_is_current(token)
@@ -689,6 +704,7 @@ impl ProjectOperations {
                 error.set(Some(t!("project.connectionRequired").to_string()));
                 return;
             };
+            let request_server_url = canonical_server_url(&store.server_url.get());
             let operations = store.project_operations.clone();
             let task_store = store.clone();
             store.spawn_root(async move {
@@ -696,7 +712,9 @@ impl ProjectOperations {
                     WorktreeRequest::Single(input) => input.into(),
                     WorktreeRequest::Multi(input) => input.into(),
                 };
+                operations.bump_project_update_revision_for_server(&request_server_url);
                 let response = client.create_worktree(&project_id, input).await;
+                operations.bump_project_update_revision_for_server(&request_server_url);
                 if !operations.server_is_current(context) {
                     return;
                 }
