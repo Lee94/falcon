@@ -106,6 +106,27 @@ fn install(app: &mut Headless) {
 }
 
 #[test]
+fn server_update_accepts_normalized_client_address_headless() {
+    let server = mock(vec![
+        (STATUS, 200, task("idle")),
+        (CHECK, 200, check("1.0.0", true)),
+    ]);
+    let url = server.url.replacen("http://", "HTTP://", 1);
+    let mut app = headless_with_options(
+        FalconLaunchOptions {
+            server_url: Some(url.clone()),
+            test_client_url: Some(url),
+            ..Default::default()
+        },
+        ColorScheme::Dark,
+    );
+    app.first_render().unwrap();
+    open(&mut app);
+    ready(&server, &mut app);
+    server.assert_no_request_starting_with("POST ");
+}
+
+#[test]
 fn server_update_lifecycle_survives_close_reopen_and_restart_headless() {
     let server = mock(vec![
         (STATUS, 200, task("idle")),

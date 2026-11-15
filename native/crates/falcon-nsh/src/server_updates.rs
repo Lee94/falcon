@@ -14,6 +14,15 @@ pub struct ServerUpdateKey {
     pub host_id: Option<String>,
 }
 
+fn gateway_url(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw.trim()) else {
+        return crate::project_operations::canonical_server_url(raw);
+    };
+    url.set_query(None);
+    url.set_fragment(None);
+    url.as_str().trim_end_matches('/').to_owned()
+}
+
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct UpdateState {
     pub label: String,
@@ -69,8 +78,7 @@ impl ServerUpdates {
     }
 
     pub fn open(&self, store: &WorkspaceStore, host_id: Option<String>) {
-        let gateway =
-            crate::project_operations::canonical_server_url(&store.server_url.get_untracked());
+        let gateway = gateway_url(&store.server_url.get_untracked());
         let label = if let Some(id) = &host_id {
             let Some(host) = store
                 .hosts
@@ -256,9 +264,7 @@ impl ServerUpdates {
             apply_check(state, check);
         });
         // An old gateway finishing must not overwrite the currently connected gateway's metadata.
-        if crate::project_operations::canonical_server_url(&store.server_url.get_untracked())
-            == target.key.gateway
-        {
+        if gateway_url(&store.server_url.get_untracked()) == target.key.gateway {
             if target.key.host_id.is_none() {
                 if let Some(version) = version {
                     store.server_info.update(|info| {
@@ -323,15 +329,13 @@ struct Target {
 
 impl Target {
     fn capture(store: &WorkspaceStore, key: &ServerUpdateKey) -> Option<Self> {
-        if crate::project_operations::canonical_server_url(&store.server_url.get_untracked())
-            != key.gateway
-        {
+        if gateway_url(&store.server_url.get_untracked()) != key.gateway {
             return None;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let client = store.client()?;
-            if crate::project_operations::canonical_server_url(client.base_url()) != key.gateway {
+            if gateway_url(client.base_url()) != key.gateway {
                 return None;
             }
             Some(Self {
@@ -443,6 +447,36 @@ impl From<falcon_client::ApiError> for UpdateError {
         Self {
             status: error.status,
             message: error.message,
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_gateway_keys_match_client_normalization() {
+        for (input, expected) in [
+            ("HTTP://LoCaLhOsT:80/", "http://localhost"),
+            ("https://EXAMPLE.com:443/", "https://example.com"),
+            (
+                "https://EXAMPLE.com:443/prefix/?query=1#fragment",
+                "https://example.com/prefix",
+            ),
+        ] {
+            let client = falcon_client::FalconClient::new(url::Url::parse(input).unwrap());
+            assert_eq!(gateway_url(input), expected);
+            assert_eq!(gateway_url(input), client.base_url());
+        }
+        assert_eq!(gateway_url(" http://LOCALHOST:80/ "), "http://localhost");
+        for distinct in [
+            "http://localhost:81",
+            "https://localhost",
+            "http://other",
+            "http://localhost/prefix",
+        ] {
+            assert_ne!(gateway_url(distinct), gateway_url("http://localhost"));
         }
     }
 }
