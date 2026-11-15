@@ -17,8 +17,8 @@ const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
 const EN_JSON: &str = include_str!("../locales/en.json");
 
 static FLAT_ZH_CN: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
-    let root: Value = serde_json::from_str(ZH_CN_JSON)
-        .expect("falcon-nsh locales/zh-CN.json must be valid JSON");
+    let root: Value =
+        serde_json::from_str(ZH_CN_JSON).expect("falcon-nsh locales/zh-CN.json must be valid JSON");
     let mut out = HashMap::with_capacity(1024);
     flatten_json("", &root, &mut out);
     let terminal: Value = serde_json::from_str(include_str!("../locales/terminal.zh-CN.json"))

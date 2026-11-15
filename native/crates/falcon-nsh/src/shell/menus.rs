@@ -103,6 +103,16 @@ pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> 
         }
     }
 
+    let id = project.id.clone();
+    let overview = store.clone();
+    actions.push(PopupAction::new(
+        server,
+        t!("project.filterInOverview"),
+        false,
+        false,
+        move || overview.filter_overview_project(&id),
+    ));
+
     actions
 }
 

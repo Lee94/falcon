@@ -162,6 +162,10 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 foreground_cmd,
             } => render_confirm_terminate_modal(&store, &resolved, &session_id, &foreground_cmd)
                 .into_element(),
+            batch @ (ActiveDialog::ConfirmTerminateMany { .. }
+            | ActiveDialog::ConfirmClearAllDead { .. }) => {
+                crate::shell::overview::render_batch_confirmation(&store, &resolved, batch)
+            }
             ActiveDialog::RenameSession { session_id, form_id } => crate::views::rename_session()
                 .session_id(session_id)
                 .form_id(form_id)

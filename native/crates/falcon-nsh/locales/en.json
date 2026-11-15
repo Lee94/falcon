@@ -97,6 +97,55 @@
       "loading": "Loading files…",
       "empty": "No matching files",
       "truncated": "File index is truncated; more files may be available."
+    },
+    "overview": {
+      "clearProjectFilter": "Clear project filter",
+      "clearAllDeadTitle": "Clear %{n} ended session records?",
+      "clearAllDeadBody": "The following ended session records will be removed from all projects, regardless of the current filters.",
+      "clearAllDeadConfirm": "Clear all records",
+      "clearAllDeadFootnote": "Only records are deleted. No processes are affected. This cannot be undone."
     }
+  },
+  "common": {
+    "cancel": "Cancel"
+  },
+  "project": {
+    "filterInOverview": "Filter this project in overview"
+  },
+  "sidebar": {
+    "standalone": "Standalone sessions"
+  },
+  "forward": {
+    "local": "Local"
+  },
+  "session": {
+    "state_active": "Active",
+    "state_unverified": "Unverified",
+    "state_dead": "Ended",
+    "state_unknown": "Unknown",
+    "durable": "Persistent",
+    "nonDurable": "Non-persistent",
+    "notConnected": "Not connected to a server",
+    "terminateManyTitle": "Terminate the %{n} selected sessions?",
+    "terminateManyBody": "All commands running in these sessions will be killed. This cannot be undone.",
+    "terminateManyConfirm": "Terminate all"
+  },
+  "overview": {
+    "title": "Session overview",
+    "filter": "Filters",
+    "filterAll": "All sessions",
+    "all": "All",
+    "session": "Session",
+    "where": "Project · Host",
+    "state": "State",
+    "durability": "Persistence",
+    "selectAll": "Select all",
+    "selectOne": "Select session",
+    "terminateSelected": "Terminate selected (%{n})…",
+    "clearAllDead": "Clear all ended sessions",
+    "noDead": "There are no ended sessions",
+    "emptyFilteredTitle": "No sessions match these filters",
+    "emptyNoSessionTitle": "No sessions yet",
+    "emptyNoSessionBody": "Click + on a sidebar project, or use the command palette to create a terminal."
   }
 }

@@ -1782,6 +1782,9 @@ mod tests {
         cfg.environment.os = nsh_core::platform::Os::Linux;
         cfg.environment.idiom = Idiom::Desktop;
         cfg.environment.color_scheme = os_scheme;
+        let locale = nsh_core::platform::Locale::parse("zh-CN").unwrap();
+        cfg.environment.locale = locale;
+        cfg.environment.locale_settings = nsh_core::platform::LocaleSettings::of(locale);
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         Headless::start(cfg).expect("start headless FalconApp")
     }
@@ -4045,6 +4048,179 @@ mod tests {
         app.press("取消").unwrap();
         app.wait_for("label:session-sess-main")
             .expect("cancelling does not terminate the session");
+    }
+
+    #[test]
+    fn overview_selection_does_not_open_rows_and_filters_reset_selection() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions { offline_demo: true, ..Default::default() },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:open-overview").unwrap();
+        app.press("id:overview-select-sess-main").unwrap();
+        app.wait_for("终止所选（1）…").unwrap();
+        app.wait_for("label:session-overview").expect("checkbox does not open the session");
+        app.press("id:overview-select-all").unwrap();
+        app.wait_for("终止所选（2）…").unwrap();
+        app.press("id:overview-select-all").unwrap();
+        app.wait_for_gone("label:overview-terminate-selected", Duration::from_secs(2)).unwrap();
+        app.press("id:overview-select-sess-agent").unwrap();
+        app.press("label:overview-card-active").unwrap();
+        app.wait_for_gone("label:overview-terminate-selected", Duration::from_secs(2)).unwrap();
+        app.press("label:overview-card-dead").unwrap();
+        app.wait_for("没有符合筛选的会话").unwrap();
+        app.press("id:overview-select-all").unwrap();
+        assert!(!app.shows("label:overview-terminate-selected"));
+        app.press("label:overview-reset-filter").unwrap();
+        app.press("label:overview-session-sess-main").unwrap();
+        app.wait_for_gone("label:session-overview", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn overview_project_menu_filters_exact_project_and_clear_restores_rows() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions { offline_demo: true, ..Default::default() },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:open-overview").unwrap();
+        app.press("id:overview-select-all").unwrap();
+        app.press("label:overview-card-dead").unwrap();
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("在总览中筛选此项目").unwrap();
+        app.wait_for("label:overview-project-filter").unwrap();
+        app.wait_for("label:overview-session-sess-main").unwrap();
+        assert!(!app.shows("label:overview-session-sess-agent"), "derived projects are not implicitly included");
+        assert!(!app.shows("label:overview-terminate-selected"));
+        app.press("id:overview-select-all").unwrap();
+        app.wait_for("终止所选（1）…").unwrap();
+        app.press("label:overview-clear-project").unwrap();
+        app.wait_for("label:overview-session-sess-agent").unwrap();
+        app.wait_for_gone("label:overview-project-filter", Duration::from_secs(2)).unwrap();
+        assert!(!app.shows("label:overview-terminate-selected"));
+    }
+
+    #[test]
+    fn overview_terminate_many_lists_sessions_and_cancel_is_non_destructive() {
+        let mut app = headless_with_options(
+            FalconLaunchOptions { offline_demo: true, ..Default::default() },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:open-overview").unwrap();
+        app.press("id:overview-select-all").unwrap();
+        app.press("label:overview-terminate-selected").unwrap();
+        app.wait_for("终止所选的 2 个会话？").unwrap();
+        app.wait_for("label:overview-confirm-session-sess-main").unwrap();
+        app.wait_for("label:overview-confirm-session-sess-agent").unwrap();
+        app.press("label:overview-batch-cancel").unwrap();
+        app.wait_for("终止所选（2）…").unwrap();
+        app.press("label:overview-terminate-selected").unwrap();
+        app.press_key("escape").unwrap();
+        app.wait_for("label:overview-session-sess-main").unwrap();
+        app.press("label:overview-terminate-selected").unwrap();
+        app.press("label:overview-batch-confirm").unwrap();
+        app.wait_for_gone("label:overview-session-sess-main", Duration::from_secs(2)).unwrap();
+        app.wait_for_gone("label:overview-session-sess-agent", Duration::from_secs(2)).unwrap();
+        app.wait_for_gone("label:overview-terminate-selected", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn overview_failed_batch_termination_preserves_session_and_pane() {
+        let mock = MockHttpServer::new(vec![(
+            "POST /api/sessions/sess-main/terminate".into(),
+            500,
+            r#"{"error":"batch termination failed"}"#.into(),
+        )]);
+        let mut app = headless_with_options(
+            FalconLaunchOptions { offline_demo: true, test_client_url: Some(mock.url.clone()), ..Default::default() },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:open-overview").unwrap();
+        app.press("id:overview-select-sess-main").unwrap();
+        app.press("label:overview-terminate-selected").unwrap();
+        app.press("label:overview-batch-confirm").unwrap();
+        assert!(mock.wait_for_request().starts_with("POST /api/sessions/sess-main/terminate"));
+        mock.release_response();
+        app.wait_for("batch termination failed").unwrap();
+        app.wait_for("label:overview-session-sess-main").unwrap();
+        app.press("label:overview-session-sess-main").unwrap();
+        app.wait_for("id:active-pane-t:sess-main").unwrap();
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn overview_clear_all_dead_confirms_global_scope_and_retries_failure() {
+        let mut sessions: serde_json::Value = serde_json::from_str(&session_list_json("sess-active", "Keep running", "active")).unwrap();
+        let mut dead: serde_json::Value = serde_json::from_str(&session_list_json("sess-dead", "Ended elsewhere", "dead")).unwrap();
+        dead[0]["projectId"] = serde_json::json!("proj-other");
+        sessions.as_array_mut().unwrap().push(dead[0].clone());
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(vec![
+            ("DELETE /api/sessions/sess-dead".into(), 500, r#"{"error":"clear failed"}"#.into()),
+            ("DELETE /api/sessions/sess-dead".into(), 200, r#"{"ok":true}"#.into()),
+        ], sessions);
+        let mut app = headless_with_options(
+            FalconLaunchOptions {
+                offline_demo: true,
+                test_client_url: Some(mock.url.clone()),
+                test_switch_url: Some(mock.url.clone()),
+                ..Default::default()
+            },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("id:test-switch-server").unwrap();
+        app.wait_for("Keep running").unwrap();
+        app.press("label:project-menu-proj-falcon").unwrap();
+        app.press("在总览中筛选此项目").unwrap();
+        app.wait_for("label:overview-session-sess-active").unwrap();
+        assert!(!app.shows("label:overview-session-sess-dead"));
+        app.press("label:overview-clear-dead").unwrap();
+        app.wait_for("清除 1 条已结束会话记录？").unwrap();
+        app.wait_for("label:overview-confirm-session-sess-dead").unwrap();
+        assert!(!app.shows("label:overview-confirm-session-sess-active"));
+        app.wait_for("只删除记录，不影响任何进程。此操作不可撤销。").unwrap();
+        app.press("label:overview-batch-cancel").unwrap();
+        app.press("label:overview-clear-dead").unwrap();
+        app.press("label:overview-batch-confirm").unwrap();
+        assert_eq!(mock.wait_for_request(), "DELETE /api/sessions/sess-dead HTTP/1.1");
+        mock.release_response();
+        app.wait_for("清除会话记录失败").unwrap();
+        app.press("label:overview-clear-dead").unwrap();
+        app.wait_for("label:overview-confirm-session-sess-dead").unwrap();
+        app.press("label:overview-batch-confirm").unwrap();
+        assert_eq!(mock.wait_for_request(), "DELETE /api/sessions/sess-dead HTTP/1.1");
+        mock.release_response();
+        app.press("label:overview-reset-filter").unwrap();
+        app.wait_for_gone("label:overview-session-sess-dead", Duration::from_secs(2)).unwrap();
+        app.wait_for("label:overview-session-sess-active").unwrap();
+        app.press("label:overview-clear-dead").unwrap();
+        app.wait_for("没有已丢失的会话").unwrap();
+        assert!(!app.shows("label:overview-batch-confirmation"));
+        mock.assert_no_duplicate_request();
+    }
+
+    #[test]
+    fn overview_server_switch_dismisses_confirmation_and_resets_filter() {
+        let mock = MockHttpServer::with_workspace_bootstrap_and_sessions(Vec::new(),
+            serde_json::from_str(&session_list_json("sess-new", "New server session", "active")).unwrap());
+        let mut app = headless_with_options(
+            FalconLaunchOptions { offline_demo: true, test_switch_url: Some(mock.url.clone()), ..Default::default() },
+            ColorScheme::Dark,
+        );
+        app.first_render().unwrap();
+        app.press("label:project-menu-proj-falcon-nsh").unwrap();
+        app.press("在总览中筛选此项目").unwrap();
+        app.press("id:overview-select-all").unwrap();
+        app.press("label:overview-terminate-selected").unwrap();
+        app.wait_for("label:overview-confirm-session-sess-agent").unwrap();
+        app.press("id:test-modal-switch-server").unwrap();
+        app.wait_for_gone("label:overview-batch-confirmation", Duration::from_secs(2)).unwrap();
+        app.wait_for("label:overview-session-sess-new").unwrap();
+        assert!(!app.shows("label:overview-project-filter"));
+        assert!(!app.shows("label:overview-terminate-selected"));
     }
 
     #[test]
