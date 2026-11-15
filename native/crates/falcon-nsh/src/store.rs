@@ -2764,8 +2764,7 @@ impl WorkspaceStore {
     }
 
     pub fn poll_git_data(&self) {
-        if self.right_panel_open.get() && self.right_panel_kind.get() == RightPanelKind::Git
-            && !self.git_loading.get() && self.git_operation_busy.get().is_none()
+        if !self.git_loading.get() && self.git_operation_busy.get().is_none()
         {
             self.refresh_git_data();
         }

@@ -315,12 +315,22 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
     let stale_path = "native/crates/falcon-nsh/src/views/files.rs";
     let stale_key = falcon_core::pane_key::file_key("proj-falcon", stale_path);
 
+    let close_desktop_panel = store.clone();
     let open_save = store.clone();
     let mut controls = view().w_full().flex_row().flex_wrap().gap(Points(4.0)).child(
         view()
             .test_id("test-open-save-file")
             .on_press(move || open_save.open_file_pane("proj-falcon", save_path))
             .child(text("open-save")),
+    );
+    controls = controls.child(
+        view()
+            .test_id("test-close-desktop-git-panel")
+            .on_press(move || {
+                close_desktop_panel.right_panel_kind.set(crate::store::RightPanelKind::Git);
+                close_desktop_panel.right_panel_open.set(false);
+            })
+            .child(text("close-desktop-git-panel")),
     );
     let install_dirty_file = store.clone();
     let install_dirty_key = save_key.clone();
@@ -718,7 +728,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
             view()
                 .absolute()
                 .bottom(Points(0.0))
-                .right(Points(0.0))
+                .right(Points(80.0))
                 .w(Points(420.0))
                 .flex_col()
                 .child(controls),
@@ -1880,7 +1890,7 @@ mod tests {
         let initial = height(&app);
         app.drag("id:git-resize-split", Point::new(Points(0.0), Points(60.0))).unwrap();
         assert!(height(&app) > initial + 40.0, "{initial} -> {}", height(&app));
-        app.drag("id:git-resize-split", Point::new(Points(0.0), Points(-2000.0))).unwrap();
+        app.drag("id:git-resize-split", Point::new(Points(0.0), Points(-350.0))).unwrap();
         assert!((height(&app) - 72.0).abs() < 2.0, "{}", height(&app));
     }
 
@@ -1902,20 +1912,22 @@ mod tests {
         cfg.viewport = Size::new(Points(1440.0), Points(900.0));
         cfg.environment.idiom = Idiom::Desktop;
         cfg.clock = nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH);
+        cfg.environment.os = nsh_core::platform::Os::Linux;
         cfg.ui_sets = vec![nsh_base::registry(), registry()];
         let mut app = Headless::start(cfg).unwrap();
         app.first_render().unwrap();
+        let opened_at = app.clock().now();
         app.press("label:activity-changes").unwrap();
-        app.press("id:git-refresh").unwrap();
+        app.fast_forward(Duration::from_millis(3900).saturating_sub(app.clock().now() - opened_at)).unwrap();
+        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
+        app.fast_forward(Duration::from_millis(200)).unwrap();
         app.wait_for("id:git-loading").unwrap();
         server.wait_for_request();
         server.release_response();
         server.wait_for_response();
         app.wait_for("text:a.txt").unwrap();
         server.clear_observed_requests();
-        app.fast_forward(Duration::from_millis(3999)).unwrap();
-        server.assert_no_request_starting_with("GET /api/projects/proj-falcon/git/working");
-        app.fast_forward(Duration::from_millis(1)).unwrap();
+        app.fast_forward(Duration::from_secs(4)).unwrap();
         app.wait_for("id:git-loading").unwrap();
         server.wait_for_request();
         server.clear_observed_requests();
@@ -1944,6 +1956,49 @@ mod tests {
         server.release_response();
         server.wait_for_response();
         app.wait_for_gone("id:git-loading", Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn git_polling_uses_mounted_panel_not_desktop_visibility_headless() {
+        ensure_test_platform();
+        for (os, idiom) in [
+            (nsh_core::platform::Os::Android, Idiom::Phone),
+            (nsh_core::platform::Os::Linux, Idiom::Terminal),
+        ] {
+            let route = "GET /api/projects/proj-falcon/git/working".to_string();
+            let working = git_working_response(vec![serde_json::json!({"path":"visible.txt","index":" ","work":"M"})], None);
+            let server = MockHttpServer::new(vec![(route.clone(), 200, working)]);
+            let root = falcon_root_with_options(FalconLaunchOptions {
+                offline_demo: true, test_client_url: Some(server.url.clone()), ..Default::default()
+            });
+            let mut cfg = EngineConfig::new(root);
+            cfg.viewport = Size::new(Points(1440.0), Points(900.0));
+            cfg.environment.os = os;
+            cfg.environment.idiom = idiom;
+            cfg.clock = nsh_core::time::Clock::manual(SystemTime::UNIX_EPOCH);
+            cfg.ui_sets = vec![nsh_base::registry(), registry()];
+            let mut app = Headless::start(cfg).unwrap();
+            app.first_render().unwrap();
+            app.press("id:test-close-desktop-git-panel").unwrap();
+            if idiom == Idiom::Phone {
+                app.press("面板").unwrap();
+            }
+            app.wait_for("id:git-refresh").unwrap();
+            server.clear_observed_requests();
+            app.fast_forward(Duration::from_secs(4)).unwrap();
+            app.wait_for("id:git-loading").unwrap();
+            assert!(server.wait_for_request().starts_with(&route));
+            server.release_response();
+            server.wait_for_response();
+            app.wait_for("text:visible.txt").unwrap();
+            if idiom == Idiom::Phone {
+                app.press("工作区").unwrap();
+                app.wait_for_gone("id:git-refresh", Duration::from_secs(2)).unwrap();
+                server.clear_observed_requests();
+                app.fast_forward(Duration::from_secs(8)).unwrap();
+                server.assert_no_request_starting_with(&route);
+            }
+        }
     }
 
     #[test]

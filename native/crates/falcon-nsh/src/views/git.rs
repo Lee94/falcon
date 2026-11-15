@@ -21,12 +21,8 @@ pub fn GitPanel() -> impl IntoElement {
     let split_height = signal(0.0_f32);
     {
         let poll = store.clone();
-        effect(move || {
-            if poll.right_panel_open.get() && poll.right_panel_kind.get() == crate::store::RightPanelKind::Git {
-                let poll = poll.clone();
-                set_interval(std::time::Duration::from_secs(4), move || poll.poll_git_data());
-            }
-        });
+        // 三套壳层只挂载当前可见的面板；计时器随组件 owner 销毁。
+        set_interval(std::time::Duration::from_secs(4), move || poll.poll_git_data());
     }
 
     let draft = store.commit_draft;
