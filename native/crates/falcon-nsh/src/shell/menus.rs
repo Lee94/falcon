@@ -1,7 +1,7 @@
 use crate::{
     i18n::t,
     store::{ActiveDialog, SessionRecord, SettingsTab, WorkspaceStore},
-    shell::popups::PopupAction,
+    shell::popups::{PopupAction, ServerUrlGuard},
 };
 use falcon_core::pane_key::term_key;
 use falcon_proto::SessionState;
@@ -9,6 +9,7 @@ use nsh_core::prelude::*;
 use url::Url;
 
 pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> Vec<PopupAction> {
+    let server = ServerUrlGuard::capture(store);
     let Some(project) = store
         .projects
         .get()
@@ -20,13 +21,18 @@ pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> 
 
     let id = project.id.clone();
     let select = store.clone();
-    let mut actions = vec![PopupAction::new(t!("session.open"), false, false, move || {
-        select.select_project(&id);
-    })];
+    let mut actions = vec![PopupAction::new(
+        server.clone(),
+        t!("session.open"),
+        false,
+        false,
+        move || select.select_project(&id),
+    )];
 
     let id = project.id.clone();
     let create = store.clone();
     actions.push(PopupAction::new(
+        server.clone(),
         t!("sidebar.newTerminal"),
         false,
         false,
@@ -39,20 +45,35 @@ pub(crate) fn project_menu_actions(store: &WorkspaceStore, project_id: &str) -> 
     if let Some(path) = project_path(&project) {
         let copy = store.clone();
         let copied_path = path.clone();
-        actions.push(PopupAction::new(t!("files.copyPath"), false, false, move || {
-            set_clipboard(copied_path.clone());
-            copy.show_toast(t!("files.copiedPath"));
-        }));
+        actions.push(PopupAction::new(
+            server.clone(),
+            t!("files.copyPath"),
+            false,
+            false,
+            move || {
+                set_clipboard(copied_path.clone());
+                copy.show_toast(t!("files.copiedPath"));
+            },
+        ));
 
-        let base = store.server_url.get();
         let id = project.id.clone();
-        let target = format!("{}{}", base.trim_end_matches('/'), falcon_core::px0::px0_base_path(&id));
+        let target = format!(
+            "{}{}",
+            server.origin_url(),
+            falcon_core::px0::px0_base_path(&id)
+        );
         if Url::parse(&target).is_ok_and(|url| {
             matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
         }) {
-            actions.push(PopupAction::new(t!("project.px0Review"), false, false, move || {
-                let _ = open_url(target.clone());
-            }));
+            actions.push(PopupAction::new(
+                server.clone(),
+                t!("project.px0Review"),
+                false,
+                false,
+                move || {
+                    let _ = open_url(target.clone());
+                },
+            ));
         }
     }
 
@@ -63,6 +84,7 @@ pub(crate) fn session_menu_actions(
     store: &WorkspaceStore,
     session: &SessionRecord,
 ) -> Vec<PopupAction> {
+    let server = ServerUrlGuard::capture(store);
     let mut actions = Vec::new();
     let dead = session.state == SessionState::Dead;
     let attached = store.is_session_attached(&session.id);
@@ -70,7 +92,10 @@ pub(crate) fn session_menu_actions(
     if !dead {
         let st = store.clone();
         let id = session.id.clone();
+        // Parent integration owns HTTP reattach/error handling; this method is intentionally absent from this base.
+        let open = move || st.focus_palette_session(&id);
         actions.push(PopupAction::new(
+            server.clone(),
             if attached {
                 t!("session.open")
             } else {
@@ -78,7 +103,7 @@ pub(crate) fn session_menu_actions(
             },
             false,
             false,
-            move || st.focus_session(&id),
+            open,
         ));
     }
 
@@ -91,6 +116,7 @@ pub(crate) fn session_menu_actions(
         let st = store.clone();
         let project_id = session.project_id.clone();
         actions.push(PopupAction::new(
+            server.clone(),
             t!("session.duplicate"),
             false,
             false,
@@ -104,17 +130,25 @@ pub(crate) fn session_menu_actions(
     if attached {
         let st = store.clone();
         let pane = term_key(&session.id);
-        actions.push(PopupAction::new(t!("native.nsh.DetachWindow"), false, false, move || {
-            st.detach_pane(&pane);
-        }));
+        actions.push(PopupAction::new(
+            server.clone(),
+            t!("native.nsh.DetachWindow"),
+            false,
+            false,
+            move || st.detach_pane(&pane),
+        ));
     }
 
     if !dead {
         let st = store.clone();
         let id = session.id.clone();
-        actions.push(PopupAction::new(t!("session.terminate"), false, true, move || {
-            st.request_terminate_session(&id);
-        }));
+        actions.push(PopupAction::new(
+            server.clone(),
+            t!("session.terminate"),
+            false,
+            true,
+            move || st.request_terminate_session(&id),
+        ));
     }
 
     actions
@@ -124,16 +158,22 @@ pub(crate) fn host_menu_actions(
     store: &WorkspaceStore,
     host_id: Option<&str>,
 ) -> Vec<PopupAction> {
+    let server = ServerUrlGuard::capture(store);
     let mut actions = Vec::new();
     if let Some(host_id) = host_id {
         let st = store.clone();
         let id = host_id.to_string();
-        actions.push(PopupAction::new(t!("host.test"), false, false, move || {
-            st.test_host_connection(&id);
-        }));
+        actions.push(PopupAction::new(
+            server.clone(),
+            t!("host.test"),
+            false,
+            false,
+            move || st.test_host_connection(&id),
+        ));
     }
     let st = store.clone();
     actions.push(PopupAction::new(
+        server,
         t!("settings.tab_hosts"),
         false,
         false,

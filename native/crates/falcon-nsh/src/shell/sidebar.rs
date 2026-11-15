@@ -85,7 +85,9 @@ pub fn sidebar_island(
                     view()
                         .label(format!("tree-{}", group.key))
                         .tooltip(themed_tooltip(
-                            text(group.conn.clone().unwrap_or_else(|| group.name.clone())),
+                            text(crate::shell::popups::tooltip_path_text(
+                                group.conn.clone().unwrap_or_else(|| group.name.clone()),
+                            )),
                             None,
                             resolved,
                         ))
@@ -204,7 +206,9 @@ pub fn sidebar_island(
                             view()
                                 .label(format!("project-{}", p.id))
                                 .tooltip(themed_tooltip(
-                                    text(p.working_dir.clone().unwrap_or_default()),
+                                    text(crate::shell::popups::tooltip_path_text(
+                                        p.working_dir.clone().unwrap_or_default(),
+                                    )),
                                     None,
                                     resolved,
                                 ))
@@ -316,7 +320,13 @@ pub fn sidebar_island(
                         .min_w_0()
                         .cursor_pointer()
                         .label("sidebar-settings-label")
-                        .tooltip(themed_tooltip(text(store.server_url.get()), None, resolved))
+                        .tooltip(themed_tooltip(
+                            text(crate::shell::popups::tooltip_path_text(
+                                store.server_url.get(),
+                            )),
+                            None,
+                            resolved,
+                        ))
                         .on_press(move || {
                             settings_label
                                 .active_dialog
@@ -416,7 +426,9 @@ fn checkout_row(
                 view()
                     .label(format!("checkout-{id}"))
                     .tooltip(themed_tooltip(
-                        text(hint.unwrap_or_else(|| name.to_string())),
+                        text(crate::shell::popups::tooltip_path_text(
+                            hint.unwrap_or_else(|| name.to_string()),
+                        )),
                         None,
                         resolved,
                     ))
@@ -528,7 +540,11 @@ fn checkout_row(
                 .rounded(zpx(8.0))
                 .when(focused, |v| v.bg(rgb_to_hsla(ui.tint)))
                 .hover(|s| s.bg(rgb_to_hsla(ui.muted)))
-                .tooltip(themed_tooltip(text(session_path), None, resolved))
+                .tooltip(themed_tooltip(
+                    text(crate::shell::popups::tooltip_path_text(session_path)),
+                    None,
+                    resolved,
+                ))
                 .child(
                     view()
                         .flex_1()

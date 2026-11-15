@@ -3,33 +3,80 @@ use std::rc::Rc;
 use crate::{
     fonts::FONT_FAMILY_MONO,
     shell::action_owner::ActionOwner,
+    store::WorkspaceStore,
     theme::{rgb_to_hsla, rgba_to_hsla},
     zoom::zpx,
 };
 use falcon_theme::ResolvedTheme;
 use nsh_core::prelude::*;
 
+/// Binds popup actions to the server that produced their resource IDs. URL checks reject A→B,
+/// but cannot detect A→B→A; the parent connection-epoch integration is needed for that case.
+#[derive(Clone)]
+pub(crate) struct ServerUrlGuard {
+    store: WorkspaceStore,
+    origin_url: String,
+}
+
+impl ServerUrlGuard {
+    pub(crate) fn capture(store: &WorkspaceStore) -> Self {
+        let origin_url = normalized_server_url(&store.server_url.get()).to_owned();
+        Self {
+            store: store.clone(),
+            origin_url,
+        }
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        normalized_server_url(&self.store.server_url.get()) == self.origin_url.as_str()
+    }
+
+    pub(crate) fn matches_url(&self, url: &str) -> bool {
+        normalized_server_url(url) == self.origin_url.as_str()
+    }
+
+    pub(crate) fn origin_url(&self) -> &str {
+        &self.origin_url
+    }
+}
+
+fn normalized_server_url(url: &str) -> &str {
+    url.trim_end_matches('/')
+}
+
 #[derive(Clone)]
 pub(crate) struct PopupAction {
     label: SharedString,
     disabled: bool,
     danger: bool,
+    server: ServerUrlGuard,
     activate: Rc<dyn Fn()>,
 }
 
 impl PopupAction {
     pub(crate) fn new(
+        server: ServerUrlGuard,
         label: impl Into<SharedString>,
         disabled: bool,
         danger: bool,
         activate: impl Fn() + 'static,
     ) -> Self {
+        let action_server = server.clone();
         Self {
             label: label.into(),
             disabled,
             danger,
-            activate: Rc::new(activate),
+            server,
+            activate: Rc::new(move || {
+                if action_server.is_current() {
+                    activate();
+                }
+            }),
         }
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.disabled || !self.server.is_current()
     }
 }
 
@@ -97,14 +144,17 @@ fn popup_items(
     // Menu items are lazy children; retain FalconApp's owner for work that outlives the overlay.
     let owner = ActionOwner::current();
     actions.into_iter().map(move |action| {
+        // The lazy item reads server_url so an open menu becomes disabled on a server switch.
+        let disabled = action.is_disabled();
+        let server = action.server.clone();
         let label = action.label;
-        let disabled = action.disabled;
+        let danger = action.danger;
         let callback = action.activate;
         let action_owner = owner.clone();
-        let color = if action.danger {
-            danger
-        } else if disabled {
+        let color = if disabled {
             disabled_color
+        } else if danger {
+            danger
         } else {
             foreground
         };
@@ -114,7 +164,7 @@ fn popup_items(
             .focus(move |style| style.bg(muted))
             .disabled_style(|style| style.opacity(0.55))
             .on_select(move || {
-                if !disabled {
+                if !disabled && server.is_current() {
                     let callback = callback.clone();
                     action_owner.run(|| callback());
                 }
@@ -160,6 +210,7 @@ pub(crate) fn themed_tooltip(
         .max_w(zpx(320.0))
         .p(zpx(8.0))
         .text_xs()
+        // NSH currently maps both FONT_SANS and FONT_MONO to this TX-02 face.
         .font_family(FONT_FAMILY_MONO)
         .bg(background)
         .text_color(foreground)
@@ -172,6 +223,31 @@ pub(crate) fn themed_tooltip(
         .offset(zpx(6.0))
         .margin(zpx(8.0))
         .child(surface)
+}
+
+pub(crate) fn tooltip_path_text(path: impl AsRef<str>) -> SharedString {
+    const MAX_ASCII_RUN: usize = 24;
+
+    // Zero-width spaces add Unicode line-break opportunities without changing the source path.
+    let path = path.as_ref();
+    let mut wrapped = String::with_capacity(path.len() + path.len() / MAX_ASCII_RUN);
+    let mut ascii_run = 0;
+    for ch in path.chars() {
+        wrapped.push(ch);
+        if matches!(ch, '/' | '\\') {
+            wrapped.push('\u{200b}');
+            ascii_run = 0;
+        } else if ch.is_ascii_graphic() {
+            ascii_run += 1;
+            if ascii_run == MAX_ASCII_RUN {
+                wrapped.push('\u{200b}');
+                ascii_run = 0;
+            }
+        } else {
+            ascii_run = 0;
+        }
+    }
+    wrapped.into()
 }
 
 pub(crate) fn menu_trigger(
