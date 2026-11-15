@@ -38,11 +38,30 @@ impl FileContext {
             .get()
             .into_iter()
             .find(|r| r.id == session.session_id())?;
-        let project = store
-            .projects
-            .get()
-            .into_iter()
-            .find(|p| p.id == record.project_id)?;
+        let cwd = session
+            .output_cwd()
+            .or_else(|| (!record.cwd.is_empty()).then_some(record.cwd));
+        Self::for_session(&record.project_id, cwd, &store.projects.get())
+    }
+
+    fn for_session(
+        project_id: &str,
+        cwd: Option<String>,
+        projects: &[crate::store::ProjectRecord],
+    ) -> Option<Self> {
+        // Standalone owners are virtual groups, not entries in the project catalog.
+        if falcon_proto::is_standalone_project_id(project_id) {
+            let target = falcon_proto::standalone_host_id(project_id)
+                .map(|id| falcon_client::ProbeTarget::SshHost(id.to_string()))
+                .unwrap_or(falcon_client::ProbeTarget::Backend);
+            return Some(Self {
+                project_id: project_id.to_string(),
+                cwd,
+                target,
+                use_home: true,
+            });
+        }
+        let project = projects.iter().find(|p| p.id == project_id)?;
         let target = match project.source.as_ref() {
             Some(source) if source.project_type == falcon_proto::ProjectType::Ssh => {
                 falcon_proto::standalone_host_id(&project.id)
@@ -55,12 +74,9 @@ impl FileContext {
             _ => falcon_client::ProbeTarget::Backend,
         };
         let use_home = project.source.as_ref().is_none_or(|p| p.multi.is_none());
-        let cwd = session
-            .output_cwd()
-            .or_else(|| (!record.cwd.is_empty()).then_some(record.cwd))
-            .or_else(|| (!project.path.is_empty()).then_some(project.path));
+        let cwd = cwd.or_else(|| (!project.path.is_empty()).then(|| project.path.clone()));
         Some(Self {
-            project_id: project.id,
+            project_id: project.id.clone(),
             cwd,
             target,
             use_home,
@@ -240,4 +256,27 @@ pub(super) fn preview_view(preview: Signal<Preview>) -> AnyElement {
             .into_element()
     })
     .into_element()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_owners_resolve_without_catalog_projects() {
+        let local = FileContext::for_session(
+            falcon_proto::STANDALONE_LOCAL,
+            Some("/tmp/current".into()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(local.project_id, falcon_proto::STANDALONE_LOCAL);
+        assert_eq!(local.cwd.as_deref(), Some("/tmp/current"));
+        assert!(matches!(local.target, falcon_client::ProbeTarget::Backend));
+        let ssh = FileContext::for_session("standalone:host:prod", None, &[]).unwrap();
+        assert_eq!(ssh.project_id, "standalone:host:prod");
+        assert!(matches!(ssh.target, falcon_client::ProbeTarget::SshHost(ref id) if id == "prod"));
+        assert!(ssh.cwd.is_none() && ssh.use_home);
+        assert!(FileContext::for_session("deleted-project", None, &[]).is_none());
+    }
 }
