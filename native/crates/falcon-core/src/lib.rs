@@ -25,6 +25,7 @@ pub mod pane_key;
 /// 对应 React 版的 lib/projectTree.ts：侧栏「服务器 → 文件夹 → 检出」分组
 pub mod project_tree;
 pub mod project_form;
+pub mod project_actions;
 /// 对应 React 版的 lib/sessionTitle.ts：会话自动标题
 pub mod session_title;
 /// 对应 React 版的 lib/hostColor.ts：主机身份色

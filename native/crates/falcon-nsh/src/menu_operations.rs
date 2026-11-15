@@ -5,31 +5,9 @@ use crate::{
     theme::{rgb_to_hsla, rgba_to_hsla},
     zoom::zpx,
 };
-use falcon_core::project_form::ProjectFormDraft;
-use falcon_proto::{Project, ProjectType, SessionState, WorktreeStatus};
+pub use falcon_core::project_form::ProjectPreset;
+use falcon_proto::{Project, SessionState, WorktreeStatus};
 use nsh_core::prelude::*;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectPreset {
-    pub local: bool,
-    pub host_id: Option<String>,
-    pub multi: bool,
-}
-
-impl ProjectPreset {
-    pub(crate) fn draft(self) -> ProjectFormDraft {
-        ProjectFormDraft {
-            project_type: if self.local {
-                ProjectType::Local
-            } else {
-                ProjectType::Ssh
-            },
-            host_id: self.host_id,
-            multi: self.multi,
-            ..Default::default()
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CleanupWarning {
@@ -62,16 +40,10 @@ pub struct ProjectConfirmation {
 }
 
 pub(crate) fn affected_projects(project: &Project, projects: &[ProjectRecord]) -> Vec<String> {
-    let mut ids = vec![project.id.clone()];
-    if project.worktree.is_none() {
-        ids.extend(
-            projects
-                .iter()
-                .filter(|p| p.derived_from.as_deref() == Some(&project.id))
-                .map(|p| p.id.clone()),
-        );
-    }
-    ids
+    falcon_core::project_actions::affected_project_ids(
+        project,
+        projects.iter().filter_map(|p| p.source.as_ref()),
+    )
 }
 
 pub(crate) fn build_confirmation(
@@ -216,17 +188,13 @@ fn affected_snapshot(
     projects: &[ProjectRecord],
     sessions: &[SessionRecord],
 ) -> String {
-    let project_sources: Vec<_> = projects
-        .iter()
-        .filter(|p| ids.contains(&p.id))
-        .map(|p| &p.source)
-        .collect();
-    let live: Vec<_> = sessions
-        .iter()
-        .filter(|s| ids.contains(&s.project_id) && s.state != SessionState::Dead)
-        .map(|s| (&s.id, &s.project_id))
-        .collect();
-    serde_json::to_string(&(project_sources, live)).unwrap_or_default()
+    falcon_core::project_actions::project_action_snapshot(
+        ids,
+        projects.iter().filter_map(|p| p.source.as_ref()),
+        sessions
+            .iter()
+            .map(|s| (s.id.as_str(), s.project_id.as_str(), s.state)),
+    )
 }
 
 impl WorkspaceStore {

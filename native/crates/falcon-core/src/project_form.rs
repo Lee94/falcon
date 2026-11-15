@@ -4,6 +4,24 @@ use falcon_proto::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPreset {
+    pub local: bool,
+    pub host_id: Option<String>,
+    pub multi: bool,
+}
+
+impl ProjectPreset {
+    pub fn draft(self) -> ProjectFormDraft {
+        ProjectFormDraft {
+            project_type: if self.local { ProjectType::Local } else { ProjectType::Ssh },
+            host_id: self.host_id,
+            multi: self.multi,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BranchSelection {
     ExistingLocal(String),
     NewFromRemote { local_branch: String, remote_ref: String },
@@ -294,6 +312,19 @@ fn optional_secret(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use falcon_proto::{MultiRepoInfo, MultiRepoMember, SshConfig, WorktreeInfo};
+
+    #[test]
+    fn machine_presets_preserve_target_and_multi_repository_mode() {
+        for local in [true, false] {
+            for multi in [true, false] {
+                let host_id = (!local).then(|| "saved-host".to_string());
+                let draft = ProjectPreset { local, host_id: host_id.clone(), multi }.draft();
+                assert_eq!(draft.project_type, if local { ProjectType::Local } else { ProjectType::Ssh });
+                assert_eq!(draft.host_id, host_id);
+                assert_eq!(draft.multi, multi);
+            }
+        }
+    }
 
     #[test]
     fn derived_project_payload_preserves_immutable_fields() {
