@@ -76,6 +76,11 @@ mod tests {
 #[derive(Clone)]
 pub(crate) struct PopupAction {
     label: SharedString,
+    kbd: Option<SharedString>,
+    icon: Option<falcon_proto::SessionAgent>,
+    terminal_icon: bool,
+    checked: Option<bool>,
+    separated: bool,
     disabled: bool,
     danger: bool,
     server: ServerUrlGuard,
@@ -106,6 +111,11 @@ impl PopupAction {
         let action_server = server.clone();
         Self {
             label: label.into(),
+            kbd: None,
+            icon: None,
+            terminal_icon: false,
+            checked: None,
+            separated: false,
             disabled,
             danger,
             server,
@@ -115,6 +125,27 @@ impl PopupAction {
                 }
             }),
         }
+    }
+
+    pub(crate) fn kbd(mut self, chord: impl Into<SharedString>) -> Self {
+        self.kbd = Some(chord.into());
+        self
+    }
+
+    pub(crate) fn session_icon(mut self, agent: Option<falcon_proto::SessionAgent>) -> Self {
+        self.icon = agent;
+        self.terminal_icon = agent.is_none();
+        self
+    }
+
+    pub(crate) fn checked(mut self, checked: bool) -> Self {
+        self.checked = Some(checked);
+        self
+    }
+
+    pub(crate) fn sep(mut self) -> Self {
+        self.separated = true;
+        self
     }
 }
 
@@ -232,6 +263,8 @@ fn popup_items(
     let focus_foreground = rgb_to_hsla(theme.ui.tint_foreground);
     let danger_color = rgb_to_hsla(theme.ui.destructive);
     let disabled_color = rgb_to_hsla(theme.ui.muted_foreground);
+    let badge_border = rgba_to_hsla(theme.ui.border);
+    let badge_background = rgb_to_hsla(theme.ui.muted);
     // Menu items are lazy children; retain FalconApp's owner for work that outlives the overlay.
     let owner = ActionOwner::current();
     actions.into_iter().map(move |action| {
@@ -319,7 +352,26 @@ fn popup_items(
                     }
                 });
         }
-        let item = item.child(text(label).text_xs());
+        let mut content = view().w_full().flex_row().items_center().gap(zpx(8.0));
+        if action.terminal_icon || action.icon.is_some() {
+            content = content.child(super::widgets::session_icon(action.icon));
+        }
+        if let Some(checked) = action.checked {
+            content = content.child(view().w(zpx(15.0)).when(checked, |v| {
+                v.child(super::widgets::glyph(super::widgets::Glyph::Check))
+            }));
+        }
+        content = content.child(text(label).flex_1().text_xs());
+        if let Some(kbd) = action.kbd.filter(|kbd| !kbd.is_empty()) {
+            content = content.child(view().px(zpx(5.0)).py(zpx(1.0))
+                .rounded(zpx(4.0)).border_1().border_color(badge_border)
+                .bg(badge_background).text_color(disabled_color)
+                .font_family(FONT_FAMILY_MONO).child(text(kbd).text_xs()));
+        }
+        let item = item.child(content);
+        let item = view().when(action.separated, |v| {
+            v.border_t_1().border_color(badge_border).pt(zpx(4.0)).mt(zpx(4.0))
+        }).child(item);
         if let Some(popup_focused) = popup_focus_state {
             let focus_ref = element_ref();
             let focus_in = popup_focused.clone();

@@ -166,31 +166,65 @@
       "phase_restarting": "Restarting to v%{version}…",
       "phase_succeeded": "Updated to v%{version}",
       "phase_failed": "Update to v%{version} failed"
+    },
+    "nsh": {
+      "DetachWindow": "Detach window",
+      "serverNotConnected": "Not connected to the server."
+    },
+    "menus": {
+      "copyWarnings": "Copy cleanup warnings",
+      "dismissWarnings": "Dismiss warnings",
+      "checkingWorktree": "Checking worktree changes…",
+      "closeProjectFiles": "Close this project's files and finish pending file, Git or project operations before archiving or deleting it.",
+      "projectChanged": "The project or its open files changed. Review the operation again.",
+      "projectFilter": "Project: %{name}"
     }
   },
   "common": {
     "cancel": "Cancel"
   },
   "project": {
-    "filterInOverview": "Filter this project in overview"
+    "filterInOverview": "Filter by this project in overview",
+    "derive": "Derive worktree project…",
+    "delete": "Delete project…",
+    "deleteConfirm": "Delete project",
+    "deleteTitle": "Delete project “%{name}”?",
+    "deleted": "Deleted project “%{name}”",
+    "deleteBody": "This will terminate %{n} sessions and kill their running commands. This cannot be undone.",
+    "deleteBodyEmpty": "This project has no live sessions. This cannot be undone.",
+    "deleteFootnote": "The remote ~/.falcon/ directory will not be removed.",
+    "px0Review": "Review with px0",
+    "openIn": "Open in %{editor}",
+    "openInFailed": "Could not open in %{editor}",
+    "editorMissing": "%{editor} not found",
+    "editorMissingBody": "No application on this computer handles %{editor} links. Install and launch %{editor} once, then try again."
   },
   "sidebar": {
-    "standalone": "Standalone sessions"
+    "standalone": "Standalone sessions",
+    "newProject": "New project",
+    "editProject": "Edit project"
   },
   "forward": {
     "local": "Local"
   },
   "session": {
-    "state_active": "Active",
-    "state_unverified": "Unverified",
-    "state_dead": "Ended",
-    "state_unknown": "Unknown",
+    "state_active": "Running",
+    "state_unverified": "Not attached",
+    "state_dead": "Lost",
+    "state_unknown": "Unknown state",
     "durable": "Persistent",
     "nonDurable": "Non-persistent",
     "notConnected": "Not connected to a server",
     "terminateManyTitle": "Terminate the %{n} selected sessions?",
     "terminateManyBody": "All commands running in these sessions will be killed. This cannot be undone.",
-    "terminateManyConfirm": "Terminate all"
+    "terminateManyConfirm": "Terminate all",
+    "copyConn": "Copy connection information",
+    "open": "Open",
+    "reattachMenu": "Reattach session",
+    "duplicate": "New terminal in this project",
+    "rename": "Rename session…",
+    "clearRecord": "Clear record",
+    "terminate": "Terminate session…"
   },
   "overview": {
     "title": "Session overview",
@@ -233,5 +267,69 @@
     "clockWaiting": "Waiting for %{t}",
     "clockTook": "Took %{t}",
     "someoneBlocked": "A program is waiting for you"
+  },
+  "agent": {
+    "terminal": "Terminal",
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "grok": "Grok",
+    "devin": "Devin",
+    "gemini": "Gemini CLI",
+    "opencode": "OpenCode",
+    "cursor-agent": "Cursor Agent",
+    "copilot": "GitHub Copilot",
+    "aider": "Aider",
+    "amp": "Amp",
+    "qwen": "Qwen Code",
+    "droid": "Factory Droid",
+    "agy": "Antigravity CLI",
+    "omp": "Oh My Pi"
+  },
+  "files": {
+    "copyPath": "Copy path",
+    "copiedPath": "Path copied"
+  },
+  "host": {
+    "test": "Test connection",
+    "edit": "Edit",
+    "delete": "Delete…"
+  },
+  "settings": {
+    "tab_hosts": "SSH hosts"
+  },
+  "toast": {
+    "copied": "Connection information copied"
+  },
+  "multi": {
+    "newProject": "New multi-repository project…",
+    "derive": "Derive multi-repository project…",
+    "deleteFootnote": "All %{n} worktrees under this directory will be removed; repository branches will be kept.",
+    "deleteVirtualDirFootnote": "Falcon's generated virtual project directory and all its files will also be deleted. Member repositories and custom working directories will not be deleted."
+  },
+  "worktree": {
+    "archive": "Archive…",
+    "archiveTitle": "Archive worktree project “%{name}”?",
+    "archiveConfirm": "Archive",
+    "archiveBody": "Hide this project from the sidebar and delete its directory, including uncommitted changes, after %{days} days. You can restore it until then. Branch %{branch} will be kept.",
+    "archiveFootnote": "Directory %{dir} is preserved while archived.",
+    "archivedToast": "Archived “%{name}”",
+    "restore": "Restore",
+    "restored": "Restored “%{name}”",
+    "showArchived": "Show archived (%{n})",
+    "deleteNow": "Delete now…",
+    "deleteTitle": "Delete worktree project “%{name}”?",
+    "deleteConfirm": "Delete and remove directory",
+    "deleted": "Deleted worktree project “%{name}”",
+    "deleteBodyClean": "Delete directory %{dir}. The working tree is clean; branch %{branch} will be kept. This cannot be undone.",
+    "deleteBodyDirty": "Delete directory %{dir}, including uncommitted changes. Branch %{branch} will be kept. This cannot be undone.",
+    "deleteBodySessions": "This will also terminate %{n} sessions and kill their running commands.",
+    "cascadeFootnote": "All %{n} derived projects and their worktree directories will also be removed. The source project's own directory will be kept.",
+    "dirtyFile": "Uncommitted",
+    "deleteDirtyMore": "%{n} more uncommitted changes are not listed",
+    "deleteDirtyIgnored": "%{n} .gitignore files will also be deleted (.env, local databases, etc.)",
+    "deleteAhead": "%{n} commits have not been pushed to a remote",
+    "deleteMissing": "The directory is already missing; only the project record will be removed",
+    "deleteStatusUnknown": "Cannot read the worktree status or verify whether it contains unsaved changes",
+    "leftoverTitle": "Some directories could not be removed"
   }
 }

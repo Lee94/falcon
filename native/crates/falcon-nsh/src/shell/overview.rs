@@ -300,7 +300,9 @@ pub fn SessionOverview() -> impl IntoElement {
     dynamic(move || {
         let resolved = theme.resolved();
         let ui = &resolved.ui;
-        let sessions = store.sessions.get();
+        let sessions = store.sessions.get().into_iter().filter(|session| {
+            store.overview_project.get().as_ref().is_none_or(|id| id == &session.project_id)
+        }).collect::<Vec<_>>();
         let projects = store.projects.get();
         let rows: Vec<_> = sessions
             .iter()
@@ -546,6 +548,9 @@ pub fn SessionOverview() -> impl IntoElement {
                             .text_color(rgb_to_hsla(ui.foreground)),
                     )
                     .child(cards)
+                    .when_some(store.overview_project.get().and_then(|id| projects.iter().find(|p| p.id == id).map(|p| p.name.clone())), |v, name| {
+                        v.child(text(t!("native.menus.projectFilter", name = name)).text_xs().text_color(rgb_to_hsla(ui.muted_foreground)))
+                    })
                     .child(
                         view()
                             .flex_row()

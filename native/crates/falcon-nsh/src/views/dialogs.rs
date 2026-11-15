@@ -143,6 +143,11 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 render_profile_confirmation(&store, &resolved, profile_draft, dialog).into_element()
             }
             ActiveDialog::NewProject => project_form().project_id(None).into_element(),
+            ActiveDialog::NewProjectPreset(preset) => project_form().project_id(None)
+                .preset_local(Some(preset.local)).preset_host_id(preset.host_id).preset_multi(preset.multi).into_element(),
+            ActiveDialog::ProjectActionLoading { .. } => view().p(zpx(24.0))
+                .child(text(t!("native.menus.checkingWorktree")).text_sm()).into_element(),
+            ActiveDialog::ConfirmProjectAction(confirmation) => crate::menu_operations::render_confirmation(&store, &resolved, confirmation),
             ActiveDialog::EditProject(id) => project_form().project_id(Some(id)).into_element(),
             ActiveDialog::DeriveProject(id) => worktree_form().project_id(id).into_element(),
             ActiveDialog::ServerUpdate(key) => super::server_update::server_update()

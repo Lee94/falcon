@@ -73,6 +73,9 @@ pub enum ActiveDialog {
     PreviewPopup,
     Profiles,
     NewProject,
+    NewProjectPreset(crate::menu_operations::ProjectPreset),
+    ProjectActionLoading { request_id: u64 },
+    ConfirmProjectAction(crate::menu_operations::ProjectConfirmation),
     EditProject(String),
     DeriveProject(String),
     Settings(SettingsTab),
@@ -696,6 +699,10 @@ pub struct WorkspaceStore {
     pub relays: Signal<Vec<RelayRecord>>,
     relay_writes: Signal<HashMap<RelayWriteKey, u64>>,
     pub detected_agents: Signal<Vec<String>>,
+    pub(crate) project_agents: Signal<HashMap<String, Vec<falcon_proto::SessionAgent>>>,
+    pub(crate) menu_agents_request: Signal<u64>,
+    pub(crate) menu_request_id: Signal<u64>,
+    pub(crate) project_menu_busy: Signal<bool>,
 
     pub columns: Signal<Vec<ColumnLayout>>,
     pub active_canvas_id: Signal<String>,
@@ -707,6 +714,7 @@ pub struct WorkspaceStore {
     pub overview_project: Signal<Option<String>>,
     pub overview_filter: Signal<Option<SessionState>>,
     pub overview_selected: Signal<Vec<String>>,
+    pub show_archived: Signal<bool>,
     pub term_zoomed: Signal<bool>,
     pub sidebar_open: Signal<bool>,
     pub sidebar_width: Signal<f32>,
@@ -771,6 +779,7 @@ pub struct WorkspaceStore {
     pub plugin_states: Signal<HashMap<String, PluginPanelState>>,
     pub toast_banner: Signal<Option<String>>,
     toast_generation: Rc<Cell<u64>>,
+    pub(crate) project_cleanup_warnings: Signal<Vec<crate::menu_operations::CleanupWarning>>,
 
     pub project_operations: Rc<crate::project_operations::ProjectOperations>,
     pub(crate) session_operations: crate::session_operations::SessionOperations,
@@ -802,6 +811,9 @@ pub struct WorkspaceStore {
 }
 
 impl WorkspaceStore {
+    pub(crate) fn is_offline_demo(&self) -> bool {
+        self.offline_demo
+    }
     fn offline_file_operations(&self) -> bool {
         #[cfg(test)]
         {
@@ -1642,6 +1654,10 @@ impl WorkspaceStore {
             relays: signal(relays),
             relay_writes: signal(HashMap::new()),
             detected_agents: signal(vec!["claude".into(), "codex".into()]),
+            project_agents: signal(HashMap::new()),
+            menu_agents_request: signal(0),
+            menu_request_id: signal(0),
+            project_menu_busy: signal(false),
             columns: signal(vec![initial_col]),
             active_canvas_id: signal(c1),
             focused_pane_key: signal(term_key("sess-main")),
@@ -1651,6 +1667,7 @@ impl WorkspaceStore {
             overview_project: signal(None),
             overview_filter: signal(None),
             overview_selected: signal(Vec::new()),
+            show_archived: signal(false),
             term_zoomed: signal(false),
             sidebar_open: signal(true),
             sidebar_width: signal(260.0),
@@ -1720,6 +1737,7 @@ impl WorkspaceStore {
             plugin_states: signal(plugin_states),
             toast_banner: signal(None),
             toast_generation: Rc::new(Cell::new(0)),
+            project_cleanup_warnings: signal(Vec::new()),
             project_operations: Rc::new(crate::project_operations::ProjectOperations::new(
                 task_owner,
                 connection_generation.clone(),
@@ -1963,6 +1981,7 @@ impl WorkspaceStore {
                     }
                 }
                 store.projects.set(mapped);
+                store.refresh_menu_agents();
                 if !store
                     .project_operations
                     .reconcile_mapping_snapshot(&snapshot, &project_ids)
@@ -2088,6 +2107,7 @@ impl WorkspaceStore {
                     })
                     .collect();
                 store.hosts.set(mapped_hosts);
+                store.refresh_menu_agents();
             }
 
             store.queue_relay_refresh(
@@ -2587,6 +2607,7 @@ impl WorkspaceStore {
                                 hosts.push(record);
                             }
                         });
+                        store.refresh_menu_agents();
                         if let (Some(host_id), Some(editing_generation)) =
                             (host_id.as_deref(), editing_generation)
                         {
@@ -2665,6 +2686,7 @@ impl WorkspaceStore {
                 match result {
                     Ok(_) => {
                         store.hosts.update(|hosts| hosts.retain(|host| host.id != host_id));
+                        store.refresh_menu_agents();
                         let editing_generation = store.editing_host_generation.get();
                         store.clear_host_edit_if_current(&host_id, editing_generation);
                         if store.active_dialog.get() == expected_dialog {
@@ -2869,6 +2891,7 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn on_project_mapping_change_started(&self, project_id: &str) {
+        self.project_agents.update(|agents| { agents.remove(project_id); });
         if self.active_project_id.get() != project_id {
             return;
         }
@@ -2928,6 +2951,7 @@ impl WorkspaceStore {
                 projects.push(record);
             }
         });
+        self.refresh_menu_agents();
         if self.active_project_id.get() == project.id {
             self.refresh_project_data();
         }
@@ -3697,6 +3721,9 @@ impl WorkspaceStore {
         self.host_delete_error.set(None);
         self.invalidate_host_edit_generation();
         self.editing_host.set(None);
+        if matches!(self.active_dialog.get(), ActiveDialog::ProjectActionLoading { .. } | ActiveDialog::ConfirmProjectAction(_) | ActiveDialog::NewProjectPreset(_)) {
+            self.active_dialog.set(ActiveDialog::None);
+        }
         if matches!(self.active_dialog.get(), ActiveDialog::ConfirmDeleteHost { .. }) {
             self.active_dialog
                 .set(ActiveDialog::Settings(SettingsTab::Hosts));
@@ -3733,6 +3760,10 @@ impl WorkspaceStore {
         self.restore_workspace(url);
         self.server_info.set(None);
         self.detected_agents.set(Vec::new());
+        self.project_agents.set(HashMap::new());
+        self.overview_project.set(None);
+        self.overview_filter.set(None);
+        self.project_menu_busy.set(false);
         self.files_loading.set(false);
         self.file_error.set(None);
         self.file_directory.set(String::new());
@@ -3802,6 +3833,7 @@ impl WorkspaceStore {
         });
         self.collapsed.set(saved.collapsed);
         self.sessions_open.set(saved.sessions_open);
+        self.show_archived.set(saved.show_archived);
         self.term_zoomed.set(saved.term_zoomed);
     }
 
@@ -3859,6 +3891,7 @@ impl WorkspaceStore {
             },
             collapsed: self.collapsed.get(),
             sessions_open: self.sessions_open.get(),
+            show_archived: self.show_archived.get(),
             selected_project_id: (!selected.is_empty()).then_some(selected),
             term_zoomed: self.term_zoomed.get(),
             ..Default::default()

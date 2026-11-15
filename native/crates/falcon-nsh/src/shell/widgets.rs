@@ -40,6 +40,29 @@ pub enum Glyph {
     ListTree,
 }
 
+pub(crate) fn session_icon(agent: Option<falcon_proto::SessionAgent>) -> AnyElement {
+    use falcon_proto::SessionAgent;
+    let markup = match agent {
+        None => return glyph(Glyph::Terminal).into_element(),
+        Some(SessionAgent::Claude) => include_str!("../../assets/agents/claude.svg"),
+        Some(SessionAgent::Codex) => include_str!("../../assets/agents/codex.svg"),
+        Some(SessionAgent::Grok) => include_str!("../../assets/agents/grok.svg"),
+        Some(SessionAgent::Devin) => include_str!("../../assets/agents/devin.svg"),
+        Some(SessionAgent::Gemini) => include_str!("../../assets/agents/gemini.svg"),
+        Some(SessionAgent::OpenCode) => include_str!("../../assets/agents/opencode.svg"),
+        Some(SessionAgent::Cursor) => include_str!("../../assets/agents/cursor-agent.svg"),
+        Some(SessionAgent::Copilot) => include_str!("../../assets/agents/copilot.svg"),
+        Some(SessionAgent::Aider) => include_str!("../../assets/agents/aider.svg"),
+        Some(SessionAgent::Amp) => include_str!("../../assets/agents/amp.svg"),
+        Some(SessionAgent::Qwen) => include_str!("../../assets/agents/qwen.svg"),
+        Some(SessionAgent::Droid) => include_str!("../../assets/agents/droid.svg"),
+        Some(SessionAgent::Agy) => include_str!("../../assets/agents/agy.svg"),
+        Some(SessionAgent::Omp) => include_str!("../../assets/agents/omp.svg"),
+        Some(_) => return glyph(Glyph::Terminal).into_element(),
+    };
+    svg(ImageSrc::svg_markup(markup)).w(zpx(15.0)).h(zpx(15.0)).flex_none().into_element()
+}
+
 pub fn glyph(kind: Glyph) -> impl IntoElement {
     glyph_sized(kind, zpx(15.0))
 }
