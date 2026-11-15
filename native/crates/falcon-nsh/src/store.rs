@@ -36,7 +36,7 @@ use falcon_proto::{
     PluginBlock, PluginInfo, PluginKind, PluginList, PluginOption, PluginPackageInfo, PluginScope,
     PluginSeries, PluginStat, PluginTone, PluginView, ProgramState, SessionState,
 };
-use nsh_core::prelude::{Signal, effect, provide_context, signal, spawn, use_context};
+use nsh_core::prelude::{Owner, Signal, effect, provide_context, signal, spawn, use_context};
 use parking_lot::Mutex;
 
 use crate::terminal::TerminalSession;
@@ -952,11 +952,8 @@ impl WorkspaceStore {
 
         let target_url = url.to_string();
         let store = self.clone();
+        let root_owner = Owner::current();
         spawn(async move {
-            let icon_store = store.clone();
-            spawn(async move {
-                crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
-            });
             // 若连接的是本机默认服务端且平台托管了本机服务（如 macOS LaunchAgent），先按需拉起
             let is_local = target_url.trim_end_matches('/')
                 == falcon_platform::shared()
@@ -975,6 +972,12 @@ impl WorkspaceStore {
             if let Ok(info) = client.system().await {
                 store.server_info.set(Some(info));
             }
+            let icon_store = store.clone();
+            root_owner.run(move || {
+                spawn(async move {
+                    crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
+                });
+            });
             let mut proj_paths: HashMap<String, String> = HashMap::new();
 
             if let Ok(projects) = client.list_projects().await {
@@ -1195,12 +1198,15 @@ impl WorkspaceStore {
         );
 
         let store = self.clone();
+        let root_owner = Owner::current();
         spawn(async move {
             use nsh_core::prelude::{HttpRequest, fetch};
 
             let icon_store = store.clone();
-            spawn(async move {
-                crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
+            root_owner.run(move || {
+                spawn(async move {
+                    crate::appearance::app_icon::load_initial(icon_store, icon_token).await;
+                });
             });
 
             if let Ok(resp) = fetch(HttpRequest::get(format!("{base}/api/projects"))).await
