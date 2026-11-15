@@ -13,7 +13,7 @@ use falcon_client::FalconClient;
 use falcon_proto::AppIconState;
 use image::{GrayImage, ImageFormat, ImageReader, Limits, Luma, Rgba, RgbaImage, imageops};
 use nsh_core::element::ImageSrc;
-use nsh_core::prelude::{Signal, effect, signal, spawn};
+use nsh_core::prelude::{Owner, Signal, effect, signal, spawn};
 
 use crate::store::WorkspaceStore;
 
@@ -192,6 +192,7 @@ fn api_target(store: &WorkspaceStore) -> Result<ApiTarget, String> {
 }
 
 pub fn install_operations(store: WorkspaceStore) {
+    let root_owner = Owner::current();
     let controller = store.appearance.app_icon.clone();
     let pending = controller.pending;
     effect(move || {
@@ -201,8 +202,10 @@ pub fn install_operations(store: WorkspaceStore) {
         pending.set(None);
         let store = store.clone();
         let controller = controller.clone();
-        spawn(async move {
-            execute_operation(store, controller, operation).await;
+        root_owner.run(move || {
+            spawn(async move {
+                execute_operation(store, controller, operation).await;
+            });
         });
     });
 }

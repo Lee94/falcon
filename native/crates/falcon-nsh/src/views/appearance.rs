@@ -624,28 +624,39 @@ fn commit_font_field(
     revision: Signal<u64>,
     custom: bool,
 ) {
+    let raw_value = draft.get_untracked();
     let field = if custom {
         "customFamily"
     } else {
         "fallbackFamilies"
     };
     let mut raw = serde_json::Map::new();
-    raw.insert(field.to_string(), serde_json::Value::String(draft.get_untracked()));
+    raw.insert(field.to_string(), serde_json::Value::String(raw_value.clone()));
     let pref = falcon_core::term::sanitize_term_pref(&serde_json::Value::Object(raw));
     let saved = if custom {
         pref.custom_family
     } else {
         pref.fallback_families
     };
-    store.term_prefs.update(|prefs| {
-        if custom {
-            prefs.custom_family = saved.clone();
-        } else {
-            prefs.fallback_families = saved.clone();
-        }
-    });
-    draft.set(saved);
-    revision.update(|value| *value = value.wrapping_add(1));
+    let current = store.term_prefs.get_untracked();
+    let persisted_value = if custom {
+        current.custom_family
+    } else {
+        current.fallback_families
+    };
+    if persisted_value != saved {
+        store.term_prefs.update(|prefs| {
+            if custom {
+                prefs.custom_family = saved.clone();
+            } else {
+                prefs.fallback_families = saved.clone();
+            }
+        });
+    }
+    if raw_value != saved {
+        draft.set(saved);
+        revision.update(|value| *value = value.wrapping_add(1));
+    }
 }
 
 fn numeric_controls(
@@ -660,7 +671,6 @@ fn numeric_controls(
         "settings.termLineHeight"
     };
     view().child(dynamic(move || {
-        let pref = prefs.get();
         let resolved = theme.resolved();
         let ui = &resolved.ui;
         let fg = rgb_to_hsla(ui.foreground);
@@ -669,11 +679,7 @@ fn numeric_controls(
         let min = if size { 10.0 } else { 1.0 };
         let max = if size { 24.0 } else { 1.6 };
         let step = if size { 1.0 } else { 0.05 };
-        let value = if size {
-            clamp_font_size(pref.font_size)
-        } else {
-            clamp_line_height(pref.line_height)
-        };
+        let slider_prefs = prefs;
         let store = store.clone();
         setting_row(
             &resolved,
@@ -687,7 +693,15 @@ fn numeric_controls(
                         .min(min)
                         .max(max)
                         .step(step)
-                        .value(Some(nsh_base::SliderValue::Single(value)))
+                        .value(move || {
+                            let pref = slider_prefs.get();
+                            let value = if size {
+                                clamp_font_size(pref.font_size)
+                            } else {
+                                clamp_line_height(pref.line_height)
+                            };
+                            Some(nsh_base::SliderValue::Single(value))
+                        })
                         .accessibility_label(t!(label))
                         .track_style(|v| v.w(zpx(112.0)).h(zpx(20.0)).justify_center())
                         .indicator_style(move |v| v.h(zpx(4.0)).rounded_full().bg(border))
@@ -712,7 +726,13 @@ fn numeric_controls(
                             }
                         }),
                 )
-                .child(
+                .child(dynamic(move || {
+                    let pref = prefs.get();
+                    let value = if size {
+                        clamp_font_size(pref.font_size)
+                    } else {
+                        clamp_line_height(pref.line_height)
+                    };
                     text(if size {
                         format!("{value:.0}")
                     } else {
@@ -720,8 +740,8 @@ fn numeric_controls(
                     })
                     .w(zpx(40.0))
                     .text_xs()
-                    .text_color(fg),
-                ),
+                    .text_color(fg)
+                })),
         )
         .into_element()
     }))
@@ -814,10 +834,21 @@ fn preview_and_reset(
                         view()
                             .cursor_pointer()
                             .on_press(move || {
-                                reset_store.term_prefs.set(Default::default());
-                                custom_draft.set(String::new());
-                                fallback_draft.set(String::new());
-                                input_revision.update(|value| *value = value.wrapping_add(1));
+                                let default_pref = falcon_core::term::TermPref::default();
+                                if reset_store.term_prefs.get_untracked() != default_pref {
+                                    reset_store.term_prefs.set(default_pref);
+                                }
+                                let custom_changed = !custom_draft.get_untracked().is_empty();
+                                let fallback_changed = !fallback_draft.get_untracked().is_empty();
+                                if custom_changed {
+                                    custom_draft.set(String::new());
+                                }
+                                if fallback_changed {
+                                    fallback_draft.set(String::new());
+                                }
+                                if custom_changed || fallback_changed {
+                                    input_revision.update(|value| *value = value.wrapping_add(1));
+                                }
                             })
                             .child(
                                 text(t!("settings.termReset"))
