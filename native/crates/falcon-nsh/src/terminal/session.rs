@@ -223,7 +223,9 @@ impl TerminalSession {
             SessionState::Dead => ConnectionState::Dead,
             _ => ConnectionState::Unverified,
         };
-        meta.last_error = None;
+        if meta.connection == ConnectionState::Active {
+            meta.last_error = None;
+        }
         meta.reconnecting_attempt = None;
         drop(meta);
         self.bump_frame();
@@ -490,7 +492,9 @@ impl SessionSink for TerminalSession {
                     _ => ConnectionState::Unverified,
                 };
                 meta.reconnecting_attempt = None;
-                meta.last_error = None;
+                if meta.connection == ConnectionState::Active {
+                    meta.last_error = None;
+                }
                 drop(meta);
                 self.bump_frame();
             }

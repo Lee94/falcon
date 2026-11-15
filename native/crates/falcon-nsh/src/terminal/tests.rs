@@ -231,3 +231,32 @@ fn replay_preserves_observed_cwd_unless_it_supplies_a_new_one() {
         "replay resets partial OSC framing"
     );
 }
+
+#[test]
+fn unverified_state_keeps_attach_failure_until_active_recovery() {
+    use falcon_client::{SessionEvent, SessionSink};
+    let session = TerminalSession::new_offline("failed-attach", 20, 3, false);
+    session.on_event(SessionEvent::Error("remote shell unavailable".into()));
+    session.on_event(SessionEvent::State {
+        state: SessionState::Unverified,
+        dead_reason: None,
+    });
+    assert_eq!(
+        session.meta().connection,
+        session::ConnectionState::Unverified
+    );
+    assert_eq!(
+        session.meta().last_error.as_deref(),
+        Some("remote shell unavailable")
+    );
+    session.on_event(SessionEvent::Connected { reconnected: true });
+    assert_eq!(
+        session.meta().last_error.as_deref(),
+        Some("remote shell unavailable")
+    );
+    session.on_event(SessionEvent::State {
+        state: SessionState::Active,
+        dead_reason: None,
+    });
+    assert!(session.meta().last_error.is_none());
+}
