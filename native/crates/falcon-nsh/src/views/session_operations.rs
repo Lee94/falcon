@@ -35,8 +35,10 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
     let enter_session_id = session_id.clone();
     let button_draft = draft;
     let button_operations = operations.clone();
+    let button_disabled_operations = operations.clone();
     let button_store = store.clone();
     let button_session_id = session_id.clone();
+    let button_disabled_session_id = session_id.clone();
     let cancel_operations = operations.clone();
     let cancel_store = store.clone();
     let cancel_session_id = session_id.clone();
@@ -96,6 +98,7 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                 .gap(zpx(12.0))
                 .child(
                     input()
+                        .test_id("rename-session-input")
                         .w_full()
                         .px(zpx(8.0))
                         .py(zpx(7.0))
@@ -114,7 +117,7 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                             input_draft.set(value.to_string());
                             input_operations.clear_form_error(form_id);
                         })
-                        .on_submit(move |_| {
+                        .on_submit(move |_: &str| {
                             enter_operations.submit_rename(
                                 enter_store.clone(),
                                 enter_session_id.clone(),
@@ -140,6 +143,7 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                         .gap(zpx(8.0))
                         .child(
                             view()
+                                .test_id("rename-session-cancel")
                                 .px(zpx(10.0))
                                 .py(zpx(6.0))
                                 .rounded(zpx(6.0))
@@ -160,6 +164,11 @@ pub fn RenameSession(props: RenameSessionProps) -> impl IntoElement {
                         )
                         .child(
                             view()
+                                .test_id("rename-session-submit")
+                                .disabled(move || {
+                                    button_disabled_operations
+                                        .is_busy(&button_disabled_session_id)
+                                })
                                 .px(zpx(10.0))
                                 .py(zpx(6.0))
                                 .rounded(zpx(6.0))
