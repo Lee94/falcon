@@ -444,6 +444,9 @@
   "settings": {
     "tab_hosts": "SSH hosts"
   },
+  "theme": {
+    "resetThemes": "Restore default themes"
+  },
   "toast": {
     "copied": "Connection information copied"
   },

@@ -486,15 +486,22 @@ fn editor_controls(
     let resolved = theme.resolved();
     let ui = &resolved.ui;
     let parsed = resolve_custom_theme(&state.source.get(), slot, theme.catalog());
-    let hint = if let Some(base) = &parsed.unknown_base {
-        t!("native.themePicker.editorUnknownBase", name = base.as_str())
+    // GPUI 同款的提示与色调：未知底主题 muted、识别到颜色 success、什么都没识别到 destructive
+    let (hint, tone) = if let Some(base) = &parsed.unknown_base {
+        (
+            t!("native.themePicker.editorUnknownBase", name = base.as_str()),
+            ui.muted_foreground,
+        )
     } else if parsed.colors.is_some() {
-        t!(
-            "native.themePicker.editorRecognized",
-            n = parsed.recognized.to_string().as_str()
+        (
+            t!(
+                "native.themePicker.editorRecognized",
+                n = parsed.recognized.to_string().as_str()
+            ),
+            ui.success,
         )
     } else {
-        t!("native.themePicker.editorNothing")
+        (t!("native.themePicker.editorNothing"), ui.destructive)
     };
     let valid = parsed.colors.is_some();
     let preview = parsed
@@ -509,11 +516,7 @@ fn editor_controls(
             text(hint)
                 .test_id("theme-editor-hint")
                 .text_xs()
-                .text_color(rgb_to_hsla(if valid {
-                    ui.muted_foreground
-                } else {
-                    ui.destructive
-                })),
+                .text_color(rgb_to_hsla(tone)),
         )
         .children(preview)
         .child(

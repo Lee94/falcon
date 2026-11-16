@@ -1,7 +1,9 @@
 use falcon_core::app_icon::{APP_ICON_IDS, CUSTOM, DEFAULT_APP_ICON, label_key};
 use falcon_core::term::{TermCursorStyle, TermFontId, clamp_font_size, clamp_line_height};
 use falcon_core::window_background::AppBackground;
-use falcon_theme::{ThemeMode, ThemePref};
+use falcon_theme::{
+    FALCON_DARK, FALCON_LIGHT, ThemeMode, ThemePref, choice_of, is_default_theme_settings,
+};
 use nsh_core::element::input;
 use nsh_core::platform::Idiom;
 use nsh_core::prelude::*;
@@ -148,6 +150,8 @@ fn theme_settings(
                         ),
                 ));
             }
+            // GPUI 的 theme-reset：两个槽位回 Falcon 默认，明暗模式不动；已是默认则禁用
+            let reset_enabled = !is_default_theme_settings(&settings);
             page.child(
                 text(if resolved.is_dark {
                     t!("native.nsh.themeDerivedDark")
@@ -157,6 +161,34 @@ fn theme_settings(
                 .text_xs()
                 .py(zpx(6.0))
                 .text_color(rgb_to_hsla(ui.muted_foreground)),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .justify_end()
+                    .pt(zpx(6.0))
+                    .child(
+                        view()
+                            .test_id("theme-reset")
+                            .px(zpx(10.0))
+                            .py(zpx(6.0))
+                            .rounded(zpx(8.0))
+                            .bg(rgb_to_hsla(ui.app))
+                            .text_color(rgb_to_hsla(if reset_enabled {
+                                ui.foreground
+                            } else {
+                                ui.muted_foreground
+                            }))
+                            .when(reset_enabled, |v| {
+                                v.cursor_pointer().on_press(move || {
+                                    let mut next = theme.settings();
+                                    *next.slot_mut(ThemeMode::Light) = choice_of(&FALCON_LIGHT);
+                                    *next.slot_mut(ThemeMode::Dark) = choice_of(&FALCON_DARK);
+                                    theme.apply_settings(next);
+                                })
+                            })
+                            .child(text(t!("theme.resetThemes")).text_xs()),
+                    ),
             )
             .into_element()
         }))
