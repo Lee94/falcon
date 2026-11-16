@@ -15,49 +15,6 @@ pub fn external_href(href: &str) -> Option<String> {
     ok.then(|| s.to_string())
 }
 
-pub fn relative_href(href: &str) -> bool {
-    let href = js_trim(href);
-    !href.starts_with(['#', '/', '\\']) && !href.split('/').next().unwrap_or("").contains(':')
-}
-
-/// 从文档文件本身解析相对链接，保留 Unix 根、Windows 盘符与 UNC 共享目录身份。
-pub fn resolve_file_link(path: &str, href: &str) -> Option<String> {
-    if !relative_href(href) { return None; }
-    // 文件协议在 Windows 上也统一用 /。不复用导航栏的分隔符猜测，否则 POSIX 文件名
-    // notes\readme.md 会被误拆为 notes 目录；Unix 根目录则必须保留为 /。
-    let dir = match path.rsplit_once('/') {
-        Some(("", _)) => "/",
-        Some((dir, _)) => dir,
-        None => "",
-    };
-    resolve_rel(dir, href)
-}
-
-/// Markdown 图片相对 raw_path 而非宿主机路径解析。保留签发时的 token 与 scope，
-/// 绝不把 ../../ 交给 URL join 越过 token；编码只在最终 URL 上做一次。
-pub fn markdown_image_url(raw: Option<&str>, href: &str) -> Option<String> {
-    if let Some(url) = external_href(href) {
-        return (!url.to_ascii_lowercase().starts_with("mailto:")).then_some(url);
-    }
-    if !relative_href(href) { return None; }
-    let mut result = url::Url::parse(raw?).ok()?;
-    if !matches!(result.scheme(), "http" | "https") { return None; }
-    let (prefix, rest) = result.path().split_once("/raw/")?;
-    if !prefix.contains("/api/projects/") { return None; }
-    let (token, file) = rest.split_once('/')?;
-    if token.is_empty() { return None; }
-    let decoded = resolve_rel("", file)?;
-    let path = resolve_rel(&crate::file_path::rel_dir(&decoded), href)?;
-    // raw 路由会再做项目/作用域边界检查；这里也不生成带反斜杠的 URL。
-    if path.contains('\\') || path.split('/').any(|s| matches!(s, "." | "..")) { return None; }
-    let scope = format!("{prefix}/raw/{token}/");
-    result.set_path(&scope);
-    // 只丢弃 Markdown href 自身的 query（resolve_rel 已完成），保留 raw URL 的缓存修订值。
-    result.set_fragment(None);
-    result.path_segments_mut().ok()?.pop_if_empty().extend(path.split('/'));
-    result.path().starts_with(&scope).then(|| result.into())
-}
-
 /// 文档里的相对链接 → 与 dir 同一种身份的路径（项目相对，或宿主机绝对），可直接喂给查看窗口。
 ///
 /// 项目相对目录不能弹出项目；绝对目录不能弹出文件系统根、盘符或 UNC 共享根。raw 图片
@@ -107,65 +64,6 @@ pub fn resolve_rel(dir: &str, href: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn document_links_preserve_the_document_directory_at_host_roots() {
-        for (document, expected) in [
-            ("/README.md", "/guide.md"),
-            ("C:/README.md", "C:/guide.md"),
-            ("//host/share/README.md", "//host/share/guide.md"),
-            ("/outside/project/README.md", "/outside/project/guide.md"),
-            ("README.md", "guide.md"),
-            ("docs/README.md", "docs/guide.md"),
-            ("notes\\readme.md", "guide.md"),
-            ("/root/notes\\readme.md", "/root/guide.md"),
-            ("notes\\folder/readme.md", "notes\\folder/guide.md"),
-        ] {
-            assert_eq!(resolve_file_link(document, "./guide.md#start").as_deref(), Some(expected));
-        }
-        assert_eq!(resolve_file_link("/README.md", "../guide.md"), None);
-        assert_eq!(resolve_file_link("C:/README.md", "../guide.md"), None);
-        assert_eq!(resolve_file_link("//host/share/README.md", "../guide.md"), None);
-    }
-
-    #[test]
-    fn markdown_images_resolve_from_the_document_directory_without_double_encoding() {
-        let raw = Some("https://example.test/api/projects/p/raw/token/docs/nested/read%20me.md");
-        assert_eq!(markdown_image_url(raw, "../img%20dir/a%23b.png?q=1#top").as_deref(),
-            Some("https://example.test/api/projects/p/raw/token/docs/img%20dir/a%23b.png"));
-        assert_eq!(markdown_image_url(raw, "./图.png").as_deref(),
-            Some("https://example.test/api/projects/p/raw/token/docs/nested/%E5%9B%BE.png"));
-        let scoped = Some("https://example.test/prefix/api/projects/p/raw/token/readme.md");
-        assert_eq!(markdown_image_url(scoped, "image.png").as_deref(),
-            Some("https://example.test/prefix/api/projects/p/raw/token/image.png"));
-    }
-
-    #[test]
-    fn markdown_images_keep_the_immutable_token_scope() {
-        let raw = Some("https://example.test/api/projects/p/raw/token/docs/readme.md");
-        for href in ["../../secret.png", "%2e%2e/%2e%2e/secret.png", "/etc/image.png",
-            "//other.test/image.png", "file:///etc/image.png", "data:image/png,abc",
-            "javascript:alert(1)", "mailto:a@b", "#anchor", "..\\image.png", "%2f..%2f..%2fsecret.png"] {
-            assert_eq!(markdown_image_url(raw, href), None, "{href}");
-        }
-        // raw_path 对项目外文件是 token 根下的文件名，不能借相对链接跳出签发目录。
-        let absolute_scope = Some("https://example.test/api/projects/p/raw/token/readme.md");
-        assert_eq!(markdown_image_url(absolute_scope, "../image.png"), None);
-        assert_eq!(markdown_image_url(None, "image.png"), None);
-        assert_eq!(markdown_image_url(Some("file:///api/projects/p/raw/token/readme.md"), "image.png"), None);
-        assert_eq!(markdown_image_url(None, "https://other.test/image.png").as_deref(),
-            Some("https://other.test/image.png"));
-    }
-
-    #[test]
-    fn markdown_images_follow_the_raw_preview_cache_revision() {
-        let image = |revision| markdown_image_url(Some(revision), "./image.png?ignored=1#anchor").unwrap();
-        let first = image("https://example.test/api/projects/p/raw/token/docs/readme.md?_falcon_preview=1");
-        let refreshed = image("https://example.test/api/projects/p/raw/token/docs/readme.md?_falcon_preview=2");
-        assert_ne!(first, refreshed);
-        assert_eq!(first, "https://example.test/api/projects/p/raw/token/docs/image.png?_falcon_preview=1");
-        assert_eq!(refreshed, "https://example.test/api/projects/p/raw/token/docs/image.png?_falcon_preview=2");
-    }
 
     #[test]
     fn external_href_only_lets_http_s_and_mailto_through() {

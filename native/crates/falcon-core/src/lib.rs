@@ -16,22 +16,16 @@ mod js;
 
 /// 对应 shared 的 appIcon.ts（客户端用得到的部分）+ 原生 Dock 版式的像素运算（ADR 0018）
 pub mod app_icon;
-#[cfg(feature = "app-icon-image")]
-pub mod app_icon_image;
 /// 对应 React 版的 lib/layout.ts：列式工作区排布（增删移、对账、过滤、拖拽落点、几何、固定列）
 pub mod layout;
 /// 对应 React 版的 lib/paneKey.ts：窗口 key 约定
 pub mod pane_key;
 /// 对应 React 版的 lib/projectTree.ts：侧栏「服务器 → 文件夹 → 检出」分组
 pub mod project_tree;
-pub mod project_form;
-pub mod project_actions;
 /// 对应 React 版的 lib/sessionTitle.ts：会话自动标题
 pub mod session_title;
 /// 对应 React 版的 lib/hostColor.ts：主机身份色
 pub mod host_color;
-/// 从 Tailscale 设备预填 SSH 主机：搜索、识别已添加设备、显示名避重
-pub mod tailscale;
 /// 对应服务端的 sessions/relay_spec.rs：中转的同端口槽位（设置「中转」页的徽标）
 pub mod relay;
 /// 对应 React 版的 lib/filePath.ts：宿主机路径（posix / windows，不用 std::path）
@@ -49,7 +43,6 @@ pub mod editor;
 pub mod file_text;
 /// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
-pub mod image_view;
 /// 对应 React 版的 lib/multiPath.ts：多仓库成员的公共父目录
 pub mod multi_path;
 /// 对应 React 版的 lib/multiDerive.ts：批量派生的预演
@@ -76,8 +69,6 @@ pub mod term;
 pub mod window_background;
 /// 对应 React 版的 lib/shortcuts.ts：快捷键定义表
 pub mod shortcuts;
-/// Command palette grouping, prefix filtering, and keyboard selection.
-pub mod command_palette;
 /// 对应 packages/shared/src/ttlCache.ts：TTL + in-flight 合并缓存
 pub mod ttl_cache;
 /// 原生要 `Send`、浏览器不要的那层约束（MaybeSend / MaybeBoxFuture）
@@ -94,9 +85,3 @@ pub mod schtasks;
 pub mod app_update;
 /// 原生 Coding Agent 视图的命令输出 SGR 解析与文件改动行级 Diff
 pub mod agent_output;
-/// Agent 会话 TUI ↔ GUI 双向转换状态机与交互门控（ADR 0027 / 0028）
-pub mod agent_mode;
-/// 服务端配置表（`profiles.json`）模型与回环/明文判定（ADR 0015 / 0028）
-pub mod profiles;
-/// 界面缩放档位运算（`falcon.native.zoom`）
-pub mod zoom;

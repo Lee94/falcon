@@ -14,7 +14,6 @@ mod fixtures;
 mod fonts;
 mod icons;
 mod linux;
-mod nsh;
 mod pkg;
 mod server;
 mod sessiond;
@@ -27,17 +26,10 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
 
 发布与打包
   server [--target <平台>] [--skip-sessiond] [--skip-cargo]  服务端发布单文件（内嵌 4 个目标守护进程）
-  pkg [--skip-bin] [--skip-cargo]        macOS 安装包（Falcon.app = NSH 原生客户端 + Resources 里的服务端）
-  win [--skip-cargo]                     Windows 安装包（Inno Setup，NSH 原生客户端 + 同目录服务端）
+  pkg [--skip-bin] [--skip-cargo]        macOS 安装包（Falcon.app = 原生客户端 + Resources 里的服务端）
+  win [--skip-cargo]                     Windows 安装包（Inno Setup，原生客户端 + 同目录服务端）
   linux [--target <平台>] [--server <路径>] [--deb-only]  Linux 服务端安装文件：.deb / .rpm / install.sh
-  linux-desktop [--skip-cargo] [--target <平台>]          Linux GTK4 桌面客户端安装包：Falcon-v<版本>-<平台>-desktop.deb / .tar.gz
-  android [--abis <arm64-v8a|x86_64|all>] [--jni-only]    Android 安装包（默认 arm64-v8a，纯 Rust NSH + Android SDK，零 Gradle）
-  web [--skip-cargo]                     Web 静态站点打包（纯 Rust wasm32-unknown-unknown + nsh.js，产物 release/web/ 与 Falcon-v<版本>-web.tar.gz）
-
-NSH 六端统一客户端开发与验证（ADR 0028）
-  tui [参数…]                            在当前终端启动 falcon-app TUI 工作台（nsh-platform-tui）
-  nsh-check                              局部检查 falcon-nsh 与 falcon-app（含测试目标）
-  nsh-bench                              运行 FalconTerminal 30 万行 Release 帧耗时门禁基准（p95 < 4.0ms）
+  android [--abis <arm64-v8a|x86_64|all>] [--jni-only]    Android 安装包（Rust JNI + Gradle，默认 arm64-v8a，产物 release/falcon-v<版本>-android.apk）
 
 会话守护进程（ADR 0020；目标：host（默认）/ all / 逗号分隔的 Rust 三元组）
   ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库（先打 sessiond/ghostty-patches/ 的补丁），落在 native/.cache/ghostty/
@@ -67,12 +59,7 @@ fn main() {
         "pkg" => pkg::run(&args),
         "win" => win::run(&args),
         "linux" => linux::run(&args),
-        "linux-desktop" => nsh::linux_desktop(&args),
         "android" => android::run(&args),
-        "web" => nsh::web(&args),
-        "tui" => nsh::tui(&args),
-        "nsh-check" => nsh::check(&args),
-        "nsh-bench" => nsh::bench(&args),
         "ghostty" => sessiond::ghostty(&args),
         "ghostty-bindgen" => sessiond::bindgen(&args),
         "sessiond" => sessiond::run(&args),

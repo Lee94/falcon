@@ -39,18 +39,6 @@ pub struct CatalogEntry {
     pub appearance: Appearance,
 }
 
-/// Theme picker matching: stable substring matches first, then whitespace-insensitive subsequences.
-pub fn theme_match_rank(query: &str, name: &str) -> Option<u8> {
-    let needle = query.trim().to_lowercase();
-    let hay = name.to_lowercase();
-    if hay.contains(&needle) {
-        return Some(0);
-    }
-    let mut chars = hay.chars();
-    needle.chars().filter(|c| !c.is_whitespace())
-        .all(|n| chars.any(|h| h == n)).then_some(1)
-}
-
 pub const FALCON_LIGHT_NAME: &str = "Falcon Light";
 pub const FALCON_DARK_NAME: &str = "Falcon Dark";
 
@@ -232,14 +220,6 @@ pub fn resolve_custom_theme(text: &str, slot: ThemeMode, catalog: &[CatalogEntry
 mod tests {
     use super::*;
     use crate::ghostty::serialize_ghostty_theme;
-
-    #[test]
-    fn theme_search_prefers_substrings_then_subsequences() {
-        assert_eq!(theme_match_rank("  DRA  ", "Dracula"), Some(0));
-        assert_eq!(theme_match_rank("Flcn Lght", "Falcon Light"), Some(1));
-        assert_eq!(theme_match_rank("xyz", "Dracula"), None);
-        assert_eq!(theme_match_rank("  ", "Dracula"), Some(0));
-    }
 
     fn entries() -> Vec<CatalogEntry> {
         parse_catalog_data(GHOSTTY_THEMES_DATA).unwrap()

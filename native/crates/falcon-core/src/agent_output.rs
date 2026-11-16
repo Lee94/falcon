@@ -128,19 +128,17 @@ pub fn styled_output(raw: &str) -> StyledOutput {
                         }
                     }
                 } else if i < bytes.len() && bytes[i] == b']' {
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == b'\x07' {
-                            i += 1;
-                            break;
-                        }
+                    while i < bytes.len() && bytes[i] != b'\x07' {
                         if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                             i += 2;
                             break;
                         }
                         i += 1;
                     }
-                } else if i < bytes.len() && bytes[i].is_ascii() {
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                } else {
                     i += 1;
                 }
             }
@@ -331,17 +329,15 @@ pub fn line_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
 /// 将统一 diff 文本（如 Codex `fileChange` 的 diff）解析为 [`DiffLine`] 序列。
 pub fn unified_diff_lines(patch: &str) -> Vec<DiffLine> {
     let mut out = Vec::new();
-    let mut in_hunk = false;
     for line in patch.lines() {
-        if line.starts_with("diff ") {
-            in_hunk = false;
-            continue;
-        }
-        if !in_hunk && (line.starts_with("+++") || line.starts_with("---") || line.starts_with("index ")) {
+        if line.starts_with("+++")
+            || line.starts_with("---")
+            || line.starts_with("diff ")
+            || line.starts_with("index ")
+        {
             continue;
         }
         if line.starts_with("@@") {
-            in_hunk = true;
             out.push(DiffLine {
                 kind: DiffKind::Context,
                 text: line.to_string(),
@@ -371,266 +367,9 @@ pub fn unified_diff_lines(patch: &str) -> Vec<DiffLine> {
     out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnifiedDiffLineKind {
-    FileHeader,
-    HunkHeader,
-    Context,
-    Deletion,
-    Insertion,
-    Marker,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnifiedDiffLine {
-    pub kind: UnifiedDiffLineKind,
-    pub text: String,
-}
-
-/// Classifies unified diff lines without changing their order or content.
-pub fn unified_diff_display_lines(patch: &str) -> Vec<UnifiedDiffLine> {
-    let mut in_hunk = false;
-    patch.lines().map(|line| {
-        let kind = if line.starts_with("diff ") {
-            in_hunk = false;
-            UnifiedDiffLineKind::FileHeader
-        } else if line.starts_with("@@") {
-            in_hunk = true;
-            UnifiedDiffLineKind::HunkHeader
-        } else if line == "\\ No newline at end of file" {
-            UnifiedDiffLineKind::Marker
-        } else if !in_hunk {
-            UnifiedDiffLineKind::FileHeader
-        } else if line.starts_with('+') {
-            UnifiedDiffLineKind::Insertion
-        } else if line.starts_with('-') {
-            UnifiedDiffLineKind::Deletion
-        } else {
-            UnifiedDiffLineKind::Context
-        };
-        UnifiedDiffLine { kind, text: line.to_string() }
-    }).collect()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlignedDiffKind {
-    FileHeader,
-    HunkHeader,
-    Context,
-    Replacement,
-    Deletion,
-    Insertion,
-    Marker,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlignedDiffRow {
-    pub kind: AlignedDiffKind,
-    pub old_line: Option<u32>,
-    pub new_line: Option<u32>,
-    pub old_text: String,
-    pub new_text: String,
-    pub old_no_newline: bool,
-    pub new_no_newline: bool,
-}
-
-#[derive(Debug, Clone)]
-struct PendingDiffLine {
-    line: u32,
-    text: String,
-    no_newline: bool,
-}
-
-fn flush_aligned_changes(
-    deleted: &mut Vec<PendingDiffLine>,
-    inserted: &mut Vec<PendingDiffLine>,
-    output: &mut Vec<AlignedDiffRow>,
-) {
-    let paired = deleted.len().min(inserted.len());
-    for (old, new) in deleted.drain(..paired).zip(inserted.drain(..paired)) {
-        output.push(AlignedDiffRow {
-            kind: AlignedDiffKind::Replacement,
-            old_line: Some(old.line),
-            new_line: Some(new.line),
-            old_text: old.text,
-            new_text: new.text,
-            old_no_newline: old.no_newline,
-            new_no_newline: new.no_newline,
-        });
-    }
-    output.extend(deleted.drain(..).map(|line| AlignedDiffRow {
-        kind: AlignedDiffKind::Deletion,
-        old_line: Some(line.line),
-        new_line: None,
-        old_text: line.text,
-        new_text: String::new(),
-        old_no_newline: line.no_newline,
-        new_no_newline: false,
-    }));
-    output.extend(inserted.drain(..).map(|line| AlignedDiffRow {
-        kind: AlignedDiffKind::Insertion,
-        old_line: None,
-        new_line: Some(line.line),
-        old_text: String::new(),
-        new_text: line.text,
-        old_no_newline: false,
-        new_no_newline: line.no_newline,
-    }));
-}
-
-fn diff_range(header: &str, marker: char) -> Option<(u32, u32)> {
-    let range = header
-        .split_whitespace()
-        .find(|part| part.starts_with(marker))?
-        .trim_start_matches(marker);
-    let (start, count) = range.split_once(',').map_or((range, "1"), |parts| parts);
-    Some((start.parse().ok()?, count.parse().ok()?))
-}
-
-/// Parses a unified Git diff into line-numbered rows aligned for side-by-side review.
-/// Adjacent deletion/insertion runs are paired as replacements; headers and newline
-/// markers remain explicit so both unified and split renderers can preserve them.
-pub fn aligned_unified_diff(patch: &str) -> Vec<AlignedDiffRow> {
-    #[derive(Clone, Copy)]
-    enum LastChange {
-        Deleted,
-        Inserted,
-    }
-
-    let mut rows = Vec::new();
-    let mut deleted = Vec::<PendingDiffLine>::new();
-    let mut inserted = Vec::<PendingDiffLine>::new();
-    let mut old_line = 0_u32;
-    let mut new_line = 0_u32;
-    let mut in_hunk = false;
-    let mut last_change = None;
-
-    for line in patch.lines() {
-        if line.starts_with("@@") {
-            flush_aligned_changes(&mut deleted, &mut inserted, &mut rows);
-            if let (Some((old, _)), Some((new, _))) =
-                (diff_range(line, '-'), diff_range(line, '+'))
-            {
-                old_line = old;
-                new_line = new;
-                in_hunk = true;
-            }
-            rows.push(AlignedDiffRow {
-                kind: AlignedDiffKind::HunkHeader,
-                old_line: None,
-                new_line: None,
-                old_text: line.to_string(),
-                new_text: String::new(),
-                old_no_newline: false,
-                new_no_newline: false,
-            });
-            last_change = None;
-        } else if line.starts_with("diff ") {
-            flush_aligned_changes(&mut deleted, &mut inserted, &mut rows);
-            in_hunk = false;
-            rows.push(AlignedDiffRow {
-                kind: AlignedDiffKind::FileHeader,
-                old_line: None,
-                new_line: None,
-                old_text: line.to_string(),
-                new_text: String::new(),
-                old_no_newline: false,
-                new_no_newline: false,
-            });
-            last_change = None;
-        } else if !in_hunk {
-            flush_aligned_changes(&mut deleted, &mut inserted, &mut rows);
-            rows.push(AlignedDiffRow {
-                kind: AlignedDiffKind::FileHeader,
-                old_line: None,
-                new_line: None,
-                old_text: line.to_string(),
-                new_text: String::new(),
-                old_no_newline: false,
-                new_no_newline: false,
-            });
-            last_change = None;
-        } else if line == "\\ No newline at end of file" {
-            match last_change {
-                Some(LastChange::Deleted) => {
-                    if let Some(line) = deleted.last_mut() {
-                        line.no_newline = true;
-                    }
-                }
-                Some(LastChange::Inserted) => {
-                    if let Some(line) = inserted.last_mut() {
-                        line.no_newline = true;
-                    }
-                }
-                None => rows.push(AlignedDiffRow {
-                    kind: AlignedDiffKind::Marker,
-                    old_line: None,
-                    new_line: None,
-                    old_text: line.to_string(),
-                    new_text: String::new(),
-                    old_no_newline: false,
-                    new_no_newline: false,
-                }),
-            }
-        } else if let Some(text) = line.strip_prefix('-') {
-            deleted.push(PendingDiffLine {
-                line: old_line,
-                text: text.to_string(),
-                no_newline: false,
-            });
-            old_line = old_line.saturating_add(1);
-            last_change = Some(LastChange::Deleted);
-        } else if let Some(text) = line.strip_prefix('+') {
-            inserted.push(PendingDiffLine {
-                line: new_line,
-                text: text.to_string(),
-                no_newline: false,
-            });
-            new_line = new_line.saturating_add(1);
-            last_change = Some(LastChange::Inserted);
-        } else {
-            flush_aligned_changes(&mut deleted, &mut inserted, &mut rows);
-            let text = line.strip_prefix(' ').unwrap_or(line).to_string();
-            rows.push(AlignedDiffRow {
-                kind: AlignedDiffKind::Context,
-                old_line: Some(old_line),
-                new_line: Some(new_line),
-                old_text: text.clone(),
-                new_text: text,
-                old_no_newline: false,
-                new_no_newline: false,
-            });
-            old_line = old_line.saturating_add(1);
-            new_line = new_line.saturating_add(1);
-            last_change = None;
-        }
-    }
-    flush_aligned_changes(&mut deleted, &mut inserted, &mut rows);
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ansi_hyperlink_terminators_preserve_following_unicode() {
-        for terminator in ["\x07", "\x1b\\"] {
-            let raw = format!("\x1b[31m\x1b]8;;https://example.com{terminator}中文🙂\x1b]8;;{terminator}尾\x1b[0m");
-            let output = styled_output(&raw);
-            assert_eq!(output.text, "中文🙂尾");
-            assert_eq!(output.spans[0].fg, Some(AnsiColor::Red));
-        }
-        assert_eq!(styled_output("\x1b中文").text, "中文");
-    }
-
-    #[test]
-    fn unified_diff_keeps_hunk_changes_resembling_file_headers() {
-        let patch = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n---removed\n+++inserted\ndiff --git a/next b/next\n--- a/next\n+++ b/next\n@@ -1 +1 @@\n-old\n+new\n";
-        let lines = unified_diff_lines(patch);
-        assert_eq!(lines.iter().filter(|line| line.kind == DiffKind::Delete).map(|line| line.text.as_str()).collect::<Vec<_>>(), vec!["--removed", "old"]);
-        assert_eq!(lines.iter().filter(|line| line.kind == DiffKind::Insert).map(|line| line.text.as_str()).collect::<Vec<_>>(), vec!["++inserted", "new"]);
-    }
 
     #[test]
     fn compact_timeline_keeps_replies_and_actionable_entries_visible() {
@@ -735,94 +474,5 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn aligned_unified_diff_pairs_replacements_and_preserves_headers_and_markers() {
-        let patch = concat!(
-            "diff --git a/file.txt b/file.txt\n",
-            "index 1234567..89abcde 100644\n",
-            "--- a/file.txt\n",
-            "+++ b/file.txt\n",
-            "@@ -4,2 +4,2 @@ section\n",
-            " context\n",
-            "-old\n",
-            "\\ No newline at end of file\n",
-            "+new\n",
-            "\\ No newline at end of file\n",
-        );
-        let rows = aligned_unified_diff(patch);
-        assert_eq!(rows[0].kind, AlignedDiffKind::FileHeader);
-        assert_eq!(rows[0].old_text, "diff --git a/file.txt b/file.txt");
-        assert!(rows.iter().any(|row| {
-            row.kind == AlignedDiffKind::HunkHeader
-                && row.old_text == "@@ -4,2 +4,2 @@ section"
-        }));
-        let context = rows
-            .iter()
-            .find(|row| row.kind == AlignedDiffKind::Context)
-            .unwrap();
-        assert_eq!((context.old_line, context.new_line), (Some(4), Some(4)));
-        assert_eq!((context.old_text.as_str(), context.new_text.as_str()), ("context", "context"));
-        let replacement = rows
-            .iter()
-            .find(|row| row.kind == AlignedDiffKind::Replacement)
-            .unwrap();
-        assert_eq!((replacement.old_line, replacement.new_line), (Some(5), Some(5)));
-        assert_eq!((replacement.old_text.as_str(), replacement.new_text.as_str()), ("old", "new"));
-        assert!(replacement.old_no_newline && replacement.new_no_newline);
-    }
-
-    #[test]
-    fn aligned_unified_diff_keeps_hunk_content_that_looks_like_headers_and_line_numbers() {
-        let patch = concat!(
-            "diff --git a/file.txt b/file.txt\n",
-            "--- a/file.txt\n",
-            "+++ b/file.txt\n",
-            "@@ -1,2 +1,2 @@\n",
-            "--- old-content\n",
-            "+++ new-content\n",
-            "@@ -5,0 +6,1 @@\n",
-            "+inserted\n",
-            "@@ -8,1 +10,0 @@\n",
-            "-deleted\n",
-        );
-        let rows = aligned_unified_diff(patch);
-        assert!(rows.iter().any(|row| {
-            row.kind == AlignedDiffKind::Replacement
-                && row.old_text == "-- old-content"
-                && row.new_text == "++ new-content"
-                && row.old_line == Some(1)
-                && row.new_line == Some(1)
-        }));
-        assert!(rows.iter().any(|row| {
-            row.kind == AlignedDiffKind::Insertion
-                && row.new_text == "inserted"
-                && row.new_line == Some(6)
-        }));
-        assert!(rows.iter().any(|row| {
-            row.kind == AlignedDiffKind::Deletion
-                && row.old_text == "deleted"
-                && row.old_line == Some(8)
-        }));
-    }
-
-    #[test]
-    fn unified_display_keeps_original_order_colors_and_newline_markers() {
-        let patch = concat!(
-            "diff --git a/f b/f\n", "--- a/f\n", "+++ b/f\n", "@@ -1,2 +1,2 @@\n",
-            " context\n", "-old-a\n", "-old-b\n", "+new-a\n", "+new-b\n",
-            "\\ No newline at end of file\n",
-        );
-        let rows = unified_diff_display_lines(patch);
-        assert_eq!(rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(), patch.lines().collect::<Vec<_>>());
-        assert_eq!(rows[0].kind, UnifiedDiffLineKind::FileHeader);
-        assert_eq!(rows[3].kind, UnifiedDiffLineKind::HunkHeader);
-        assert_eq!(rows[4].kind, UnifiedDiffLineKind::Context);
-        assert_eq!(rows[5].kind, UnifiedDiffLineKind::Deletion);
-        assert_eq!(rows[6].kind, UnifiedDiffLineKind::Deletion);
-        assert_eq!(rows[7].kind, UnifiedDiffLineKind::Insertion);
-        assert_eq!(rows[8].kind, UnifiedDiffLineKind::Insertion);
-        assert_eq!(rows[9].kind, UnifiedDiffLineKind::Marker);
     }
 }

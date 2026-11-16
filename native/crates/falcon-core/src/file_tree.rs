@@ -4,57 +4,6 @@
 //! 只是来源不同。
 
 use crate::js::locale_compare;
-use std::collections::HashSet;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileViewMode {
-    List,
-    Tree,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum FileRow {
-    Dir { name: String, path: String, depth: usize, open: bool, paths: Vec<String> },
-    File { index: usize, depth: usize, name_only: bool },
-}
-
-/// 展平改动文件树；折叠不影响目录勾选作用的完整子树。
-pub fn build_file_rows(paths: &[String], mode: FileViewMode, root: Option<&str>, collapsed: &HashSet<String>) -> Vec<FileRow> {
-    if mode == FileViewMode::List {
-        return (0..paths.len()).map(|index| FileRow::File { index, depth: 0, name_only: false }).collect();
-    }
-    fn subtree(nodes: &[TreeNode<usize>], paths: &[String], out: &mut Vec<String>) {
-        for node in nodes {
-            match node {
-                TreeNode::File(file) => out.push(paths[file.item].clone()),
-                TreeNode::Dir(dir) => subtree(&dir.children, paths, out),
-            }
-        }
-    }
-    fn level(nodes: &[TreeNode<usize>], paths: &[String], depth: usize, collapsed: &HashSet<String>, out: &mut Vec<FileRow>) {
-        for node in nodes {
-            match node {
-                TreeNode::File(file) => out.push(FileRow::File { index: file.item, depth, name_only: true }),
-                TreeNode::Dir(dir) => {
-                    let open = !collapsed.contains(&dir.path);
-                    let mut children = Vec::with_capacity(dir.file_count);
-                    subtree(&dir.children, paths, &mut children);
-                    out.push(FileRow::Dir { name: dir.name.clone(), path: dir.path.clone(), depth, open, paths: children });
-                    if open { level(&dir.children, paths, depth + 1, collapsed, out); }
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    if let Some(root) = root {
-        let open = !collapsed.contains("");
-        out.push(FileRow::Dir { name: root.to_string(), path: String::new(), depth: 0, open, paths: paths.to_vec() });
-        if !open { return out; }
-    }
-    let tree = build_file_tree((0..paths.len()).collect(), |&index| paths[index].clone());
-    level(&tree, paths, usize::from(root.is_some()), collapsed, &mut out);
-    out
-}
 
 /// 树里的一个节点。调用方带什么额外字段（增删行数、状态）都行，泛型透传
 #[derive(Debug, Clone, PartialEq)]
@@ -203,30 +152,6 @@ pub fn base_of(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn file_rows_keep_indices_and_include_collapsed_subtree_selection() {
-        let paths = ["z.txt", "src/b.txt", "src/a.txt"].map(String::from);
-        assert_eq!(build_file_rows(&paths, FileViewMode::List, None, &HashSet::new()), vec![
-            FileRow::File { index: 0, depth: 0, name_only: false },
-            FileRow::File { index: 1, depth: 0, name_only: false },
-            FileRow::File { index: 2, depth: 0, name_only: false },
-        ]);
-        let rows = build_file_rows(&paths, FileViewMode::Tree, Some("repo"), &HashSet::from(["src".into()]));
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1], FileRow::Dir { name: "src".into(), path: "src".into(), depth: 1, open: false,
-            paths: vec!["src/a.txt".into(), "src/b.txt".into()] });
-        assert_eq!(rows[2], FileRow::File { index: 0, depth: 1, name_only: true });
-        assert_eq!(build_file_rows(&paths, FileViewMode::Tree, Some("repo"), &HashSet::from([String::new()])).len(), 1);
-    }
-
-    #[test]
-    fn tree_rows_expand_new_directories_and_compact_single_child_chains() {
-        let paths = ["src/deep/a.txt", "src/deep/b.txt"].map(String::from);
-        let rows = build_file_rows(&paths, FileViewMode::Tree, None, &HashSet::from(["old".into()]));
-        assert!(matches!(&rows[0], FileRow::Dir { name, path, open: true, .. } if name == "src/deep" && path == "src/deep"));
-        assert_eq!(rows[1], FileRow::File { index: 0, depth: 1, name_only: true });
-    }
 
     fn tree(paths: &[&str]) -> Vec<TreeNode<String>> {
         build_file_tree(paths.iter().map(|p| p.to_string()).collect(), |p| p.clone())

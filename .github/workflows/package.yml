@@ -1,16 +1,15 @@
-# 自动打安装包（NSH 六端统一客户端 ADR 0028 + 四平台独立服务端）：
-# - Windows（Inno Setup 的 setup.exe，falcon-app 原生客户端 + 同目录的 Rust 服务端）
-# - macOS（.pkg，falcon-app 原生客户端 + Resources 里的 Rust 服务端，含 TUI 模式）
-# - Linux 桌面与 Web（Falcon-v*-linux-x64-desktop.deb/.tar.gz GTK4 桌面端 + Falcon-v*-web.tar.gz 纯 Rust WASM 站点）
-# - Android（.apk，默认 arm64-v8a，纯 Rust NSH + Android SDK 原生打包，零 Gradle / 零 Kotlin）
+# 自动打安装包（GPUI 原生客户端 + Android 客户端 + 四平台独立服务端）：
+# - Windows（Inno Setup 的 setup.exe，falcon-desktop 原生客户端 + 同目录的 Rust 服务端）
+# - macOS（.pkg，falcon-desktop 原生客户端 + Resources 里的 Rust 服务端）
+# - Android（.apk，Rust JNI + Gradle 原生安卓客户端，默认只打 arm64-v8a）
 # 同时发布 Linux x64 / arm64、macOS arm64 独立服务端（Windows 那份由 windows job 出并捆进安装包），
 # Linux 服务端另有安装文件（.deb / .rpm / install.sh，只含服务端 + systemd 注册），以及汇总的 SHA256SUMS。
-# 打法与本机一样，直接调 xtask（win / pkg / linux-desktop / web / android / server / linux），xtask 是唯一真相。
+# 打法与本机一样，直接调 xtask（win / pkg / android / server / linux），xtask 是唯一真相。
 #
 # 流水线拓扑（以发版的实际耗时为第一目标）：
 # - 一开始全部并发：`sessiond-build`（四个目标各一组：Linux / Windows 目标在 Linux runner 上用 Zig 交叉编，
 #   macOS 目标在 macOS runner 上编并跑守护进程测试）、`test`、`macos` / `macos-check`、`windows` /
-#   `windows-check`、`servers`（Linux x64 / arm64）、`web-linux`、`android`；
+#   `windows-check`、`servers`（Linux x64 / arm64）、`android`；
 # - 要内嵌守护进程的 job 不 `needs` 守护进程：先用占位文件（.github/scripts/sessiond-placeholder.sh）把依赖、
 #   客户端与服务端整套编完，再用 .github/scripts/wait-sessiond.sh 等同一次运行里 sessiond-build 各组的产物，
 #   换上真文件后用同一条命令重编——include_bytes! 在 falcon-server 的 main.rs，只重编它并重新链接；
@@ -221,8 +220,8 @@ jobs:
           if-no-files-found: error
 
   test:
-    # 全工作区单元测试、Headless 界面回归与 FalconTerminal 30 万行 Release 帧耗时门禁（p95 < 4.0ms）。
-    # 先编测试目标（不依赖守护进程），再等本机 x86_64 musl 守护进程，让真 PTY 持久会话测试完整运行、不跳过
+    # 全工作区单元测试。先编测试目标（不依赖守护进程），再等本机 x86_64 musl 守护进程，
+    # 让真 PTY 持久会话测试完整运行、不跳过
     needs: gate
     if: ${{ !cancelled() && needs.gate.outputs.tagged != 'true' }}
     runs-on: ubuntu-24.04
@@ -231,6 +230,17 @@ jobs:
 
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
+
+      # 工作区里的 GPUI 客户端（falcon-platform / falcon-ui / falcon-desktop）在 Linux 上编译要链接的
+      # 系统库，与 .agents/setup 给 Linux 开发机装的那份一致（不含只在生成资源时用的命令行工具）
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev cmake libssl-dev \
+            libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-xkb-dev libxcb-imdkit-dev \
+            libvulkan-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -296,10 +306,11 @@ jobs:
       - name: Use placeholder session daemons
         run: bash .github/scripts/sessiond-placeholder.sh
 
-      # 一次 cargo build 同时编译 xtask + falcon-server + falcon-app，让 tokio / reqwest / log 等公共依赖
-      # 统一特性只编一遍；xtask 关闭离线工具特性，客户端显式保留 TUI。此时内嵌的还是占位文件。
+      # 一次 cargo build 同时编译 xtask + falcon-server + falcon-desktop，让 tokio / reqwest / log 等公共依赖
+      # 统一特性只编一遍；xtask 关闭离线工具特性。--no-default-features 对所有选中的包生效，
+      # 客户端的默认特性 webview（HTML 预览）要显式加回来。此时内嵌的还是占位文件。
       - name: Build server, client and xtask
-        run: cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-app/tui -p falcon-app
+        run: cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
 
       - name: Wait for session daemons
         env:
@@ -320,7 +331,7 @@ jobs:
       - name: Relink server with session daemons and build pkg
         run: |
           touch native/target-sessiond/embed/*.gz
-          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-app/tui -p falcon-app
+          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
           ./native/target/release/xtask server --target darwin-arm64 --skip-sessiond --skip-cargo
           ./native/target/release/xtask pkg --skip-bin --skip-cargo
 
@@ -361,7 +372,7 @@ jobs:
 
       - name: Check macOS test targets
         run: |
-          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --tests
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-desktop -p falcon-ui --tests
           cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-server --features embed-sessiond --tests
 
   windows:
@@ -399,7 +410,7 @@ jobs:
 
       - name: Build server, client and xtask
         run: |
-          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-app/tui -p falcon-app
+          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Wait for session daemons
@@ -422,7 +433,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Get-ChildItem native\target-sessiond\embed\*.gz | ForEach-Object { $_.LastWriteTime = Get-Date }
-          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-app/tui -p falcon-app
+          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\native\target\release\xtask.exe server --target win32-x64 --skip-sessiond --skip-cargo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -465,7 +476,7 @@ jobs:
 
       - name: Check Windows test targets
         run: |
-          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --tests
+          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-desktop -p falcon-ui --tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-server --features embed-sessiond --tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -536,51 +547,8 @@ jobs:
           path: release/falcon-v*-${{ matrix.platform }}*
           if-no-files-found: error
 
-  web-linux:
-    # nsh-platform-linux 要求 GTK 4.14+（Ubuntu 24.04 自带），独立于 servers 的 ubuntu-22.04（保持服务端 glibc 2.35 兼容）；
-    # 同机顺带产出纯 Rust wasm32-unknown-unknown Web 客户端归档包，不依赖守护进程
-    needs: gate
-    if: ${{ !cancelled() && needs.gate.outputs.tagged != 'true' }}
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Drop crates.io mirror
-        run: rm -f native/.cargo/config.toml
-
-      - name: Install GTK4, WebKitGTK 6 and GStreamer build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev clang llvm
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-          targets: wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: native
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build Linux GTK4 desktop and pure-Rust Web clients
-        run: |
-          cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-app --features falcon-app/linux-desktop,falcon-app/tui
-          ./native/target/release/xtask linux-desktop --skip-cargo --target linux-x64
-          ./native/target/release/xtask web
-          cargo check --release --manifest-path native/Cargo.toml --locked -p falcon-app --features linux-desktop --tests
-
-      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: falcon-web-linux
-          path: |
-            release/Falcon-v*-linux-x64-desktop.*
-            release/Falcon-v*-web.tar.gz
-          if-no-files-found: error
-
   android:
-    # 不依赖守护进程；仅打真机主流 arm64-v8a 架构
+    # 不依赖守护进程；默认只打真机主流 arm64-v8a 架构（模拟器用的 x86_64 本地传 --abis 另打）
     needs: gate
     if: ${{ !cancelled() && needs.gate.outputs.tagged != 'true' }}
     runs-on: ubuntu-latest
@@ -590,15 +558,18 @@ jobs:
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
 
-      # xtask/src/android.rs 直接调用 JDK 17 的 javac / jar / keytool 与 Android SDK 的 d8 / aapt2 / zipalign / apksigner，
-      # 仓库内已无 Gradle / Kotlin 工程，不再挂载 gradle 缓存。
+      # Gradle 8.9 + AGP 8.7.2，与 android/app/build.gradle.kts 的 jvmTarget = 17 对齐；
+      # xtask 的 android.rs 跑 gradlew --no-daemon，构建完守护进程即退出，不会锁住 ~/.gradle 缓存
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
-      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有；只改顶层条目与 platforms / build-tools / licenses
-      # 的属主（不递归几十万文件的 ndk/），再以当前用户补齐 android-35 与 build-tools 35.0.0。
+      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有，而 AGP 8.7.2 默认要
+      # build-tools;34.0.0（镜像里通常只留更新的版本），目录不可写会在构建期直接报错。
+      # 只改顶层条目与 platforms / build-tools / licenses 的属主（不递归几十万文件的 ndk/），
+      # 再以当前用户补齐缺失组件（sudo 会清掉 setup-java 设的 JAVA_HOME）
       - name: Prepare Android SDK
         run: |
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
@@ -609,7 +580,7 @@ jobs:
           [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
           MISSING=()
           [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
-          [ -d "$SDK/build-tools/35.0.0" ] || MISSING+=("build-tools;35.0.0")
+          [ -d "$SDK/build-tools/34.0.0" ] || MISSING+=("build-tools;34.0.0")
           if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
             if [ -z "$(ls -A "$SDK/ndk" 2>/dev/null)" ]; then
               MISSING+=("ndk;27.2.12479018")
@@ -620,7 +591,7 @@ jobs:
             (yes || true) | "$SDKMANAGER" --install "${MISSING[@]}"
           fi
 
-      # xtask/src/android.rs 默认仅交叉编译 arm64-v8a NSH 动态库（libnsh.so）
+      # xtask/src/android.rs 默认只交叉编译 arm64-v8a 的 falcon-android JNI 动态库
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
@@ -654,9 +625,8 @@ jobs:
       && needs.windows.result == 'success'
       && needs.windows-check.result == 'success'
       && needs.android.result == 'success'
-      && needs.servers.result == 'success'
-      && needs.web-linux.result == 'success' }}
-    needs: [sessiond, test, macos, macos-check, windows, windows-check, android, servers, web-linux]
+      && needs.servers.result == 'success' }}
+    needs: [sessiond, test, macos, macos-check, windows, windows-check, android, servers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -667,7 +637,7 @@ jobs:
           pattern: falcon-*
           merge-multiple: true
 
-      # 内嵌资源仅用于工作流内部，不作为 Release 资产（仅剔除 <triple>.gz，保留客户端 *.tar.gz）。清单对最终签名后的独立服务端求和。
+      # 内嵌资源仅用于工作流内部，不作为 Release 资产（只剔除 <triple>.gz，不碰 *.tar.gz 形式的资产）。清单对最终签名后的独立服务端求和。
       - name: 核对服务端平台并生成 SHA256SUMS
         shell: bash
         run: |

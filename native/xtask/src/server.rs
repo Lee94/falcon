@@ -69,7 +69,7 @@ fn build_opts(target: &str, skip_sessiond: bool, skip_cargo: bool) -> Result<Pat
 
     // ---- 2. cargo ----
     // 本机构建直接共用工作区的 native/target（或由 CI 外层统一执行一次多包 `cargo build --release` 后传
-    // `--skip-cargo`，避免与 falcon-app 因 tokio / reqwest 特性并集不同而重复编译整棵公共依赖树）；
+    // `--skip-cargo`，避免与 falcon-desktop 因 tokio / reqwest 特性并集不同而重复编译整棵公共依赖树）；
     // 交叉编译产物落在 target/<triple>/ 下，不冲掉宿主缓存，继续由 cargo 直接 strip。
     let target_dir = native().join("target");
     if !skip_cargo {

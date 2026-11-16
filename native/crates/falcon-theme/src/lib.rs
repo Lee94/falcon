@@ -44,7 +44,7 @@ pub mod pref;
 pub use appearance::{Appearance, appearance_from_hex, appearance_from_rgb};
 pub use catalog::{
     CatalogEntry, CustomThemeParse, FALCON_DARK, FALCON_LIGHT, FALCON_THEMES, GHOSTTY_THEMES_COUNT,
-    GHOSTTY_THEMES_ORIGIN, find_theme, load_catalog, resolve_custom_theme, theme_match_rank,
+    GHOSTTY_THEMES_ORIGIN, find_theme, load_catalog, resolve_custom_theme,
 };
 pub use color::{Oklab, Rgb, RgbF, Rgba};
 pub use derive::{ResolvedTheme, SyntaxColors, TermHint, TerminalColors, UiTokens, derive_theme};

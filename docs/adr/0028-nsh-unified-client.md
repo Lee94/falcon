@@ -63,3 +63,9 @@ NSH 默认按操作系统明暗切换静态 `theme.json` 的 `light` / `dark` �
 ## 迁移策略与后记
 
 采用特性分支分阶段推进，在完成桌面宿主集成（macOS 菜单栏状态项与多实例标记、关最后一扇窗口保活、LaunchAgent 原参数 `service install`、应用更新未保存拦截与 `.app` 备份回滚、Windows 计划任务与凭据库、Android 旧版 `falcon_android_prefs.xml` 首启自动迁移）、真服务端 REST + `/ws/sessions/:id` 实时接线与 `xtask` 六端打包（`pkg` / `win` / `linux-desktop` / `android` / `web` / `tui`）后，已完整退役 `falcon-ui`、`falcon-desktop`、`falcon-android`、`android/` 与 `gpui-kit` / `lb-wry` 依赖。
+
+## 后记（2026-11-16）：已撤回，客户端回到 GPUI 与 Kotlin
+
+本 ADR 的实施（`e5dd525` 起至 `40088dc`，版本 0.4.0–0.4.8）已整体撤回：客户端代码恢复为切换前 `b05ffe7` 的状态，即桌面端 `falcon-ui` / `falcon-desktop` / `falcon-platform`（`gpui-kit`，[ADR 0015](./0015-gpui-native-client.md)）与 Android 端 `android/` + `falcon-android`（Kotlin + Gradle）。`falcon-nsh`、`falcon-app`、Linux GTK4 桌面端、Web 端、TUI，以及服务端的 `.nshpkg` 签名插件轨道（决定五第 2、3 条）一并删除；右侧栏插件仍只有 `PluginView` 一条轨道（[ADR 0025](./0025-right-panel-plugins.md)）。撤回前工作区里未提交的 NSH 修改保存在 `archive/nsh` 分支。
+
+切换期间与客户端渲染无关的改动保留：发版流水线的并行化与缓存策略、固定 Rust 版本、守护进程按目标分组构建与占位文件重链接、`xtask server` 出包前核对内嵌守护进程、停止构建 Intel macOS、Android 默认只打 arm64-v8a（移植到 Gradle 流程，`cargo xtask android --abis`）、Windows 后台服务隐藏控制台窗口，以及两处测试稳定性修复。工作区版本号沿 0.4.x 继续递增，不退回 0.3.x，已安装 0.4.x 的客户端与服务端才会把下一版当作更新。

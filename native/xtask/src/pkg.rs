@@ -2,13 +2,13 @@
 //! postinstall 以当前登录用户跑 `falcon service install`（用户级 LaunchAgent，不能用 root
 //! 的 guid），装过服务的话带上原 plist 里的 --host / --port / --data-dir。
 //!
-//! App 的可执行文件是原生客户端（NSH `falcon-app`，ADR 0028）：
+//! App 的可执行文件是原生客户端（GPUI，设计见 docs/design/gpui-client.md）：
 //! 它启动时自己做 `service install` → 等端口，然后直接连本机服务。
 //!
 //! ```text
 //! cargo xtask pkg                            # 没有当前平台的服务端产物就先 cargo xtask server
 //! cargo xtask pkg --skip-bin                 # 必须已有 release/falcon-v*-darwin-*
-//! cargo xtask pkg --skip-bin --skip-cargo    # 同时复用已编好的 native/target/release/falcon-app
+//! cargo xtask pkg --skip-bin --skip-cargo    # 同时复用已编好的 native/target/release/falcon-desktop
 //! ```
 //!
 //! 产物 release/Falcon-v<版本>-darwin-<arch>.pkg。无开发者证书，只做 ad-hoc
@@ -92,10 +92,10 @@ fn build(skip_bin: bool, skip_cargo: bool) -> Result<()> {
     let exe = macos_dir.join("Falcon");
     if !skip_cargo {
         // 原生客户端：release 构建（crates.io 走 native/.cargo/config.toml 里的镜像配置）
-        println!("== cargo build --release -p falcon-app ==");
-        util::run("cargo", ["build", "--release", "-p", "falcon-app"], Some(&native()))?;
+        println!("== cargo build --release -p falcon-desktop ==");
+        util::run("cargo", ["build", "--release", "-p", "falcon-desktop"], Some(&native()))?;
     }
-    let built_app = native().join("target/release/falcon-app");
+    let built_app = native().join("target/release/falcon-desktop");
     if !built_app.is_file() {
         bail!("找不到 {}，先去掉 --skip-cargo 跑一遍", rel(&built_app));
     }

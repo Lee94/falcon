@@ -54,25 +54,9 @@ pub fn quote_for_prompt(p: &str) -> String {
     if has_js_whitespace(p) { format!("\"{p}\"") } else { p.to_string() }
 }
 
-/// A dropped local path as one POSIX shell argument, matching the native terminal.
-pub fn shell_quote_path(path: &str) -> String {
-    if !path.is_empty() && path.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+,:@%".contains(c)) {
-        path.to_string()
-    } else {
-        format!("'{}'", path.replace('\'', "'\\''"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dropped_paths_are_single_shell_arguments() {
-        assert_eq!(shell_quote_path("/tmp/a.txt"), "/tmp/a.txt");
-        assert_eq!(shell_quote_path("/tmp/a b's;$x"), "'/tmp/a b'\\''s;$x'");
-        assert_eq!(shell_quote_path(""), "''");
-    }
 
     struct Item(&'static str, &'static str);
     impl TransferItem for Item {

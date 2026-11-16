@@ -81,56 +81,6 @@ pub fn parent_nav_path(path: &str) -> Option<String> {
     Some(if parent.len() < root.len() { root.into() } else { parent.into() })
 }
 
-/// Whether a remote host path is rooted on Windows.
-pub fn is_windows_host_path(path: &str) -> bool {
-    path.starts_with("\\\\") || path.starts_with("//") || path.as_bytes().get(1) == Some(&b':')
-}
-
-/// Whether `candidate` is `target` or lies below it at a path-component boundary.
-pub fn host_path_contains(target: &str, candidate: &str) -> bool {
-    let target = join_host_path(None, target);
-    let candidate = join_host_path(None, candidate);
-    let windows = is_windows_host_path(&target);
-    let normalize = |path: &str| {
-        let current = (path.starts_with('/') || is_windows_host_path(path)).then_some(path);
-        let normalized = parse_nav_path(path, current).unwrap_or_else(|| path.to_owned());
-        if windows {
-            normalized.replace('\\', "/").to_lowercase()
-        } else {
-            normalized
-        }
-    };
-    let target = normalize(&target);
-    let candidate = normalize(&candidate);
-    if target == candidate {
-        return true;
-    }
-    let prefix = target.trim_end_matches('/');
-    candidate
-        .strip_prefix(prefix)
-        .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-/// Whether a path, relative to `root` or already absolute, lies within `target`.
-pub fn project_host_path_contains(root: &str, target: &str, candidate: &str) -> bool {
-    let target = join_host_path(Some(root), target);
-    let candidate = join_host_path(Some(root), candidate);
-    host_path_contains(&target, &candidate)
-}
-
-/// Whether `name` is one valid file-name segment for a remote directory.
-pub fn is_valid_file_name_segment(name: &str, directory: &str) -> bool {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.chars().any(char::is_control)
-    {
-        return false;
-    }
-    !is_windows_host_path(directory) || (!name.contains('\\') && !name.contains(':'))
-}
-
 /// 多文件夹项目没有必需的 working_dir：先打开首个成员，不误列后端的启动目录。
 pub fn project_nav_root(project: &falcon_proto::Project) -> Option<String> {
     project
@@ -372,44 +322,6 @@ mod tests {
         assert_eq!(rel_dir("a.ts"), "");
         assert!(is_hidden_name(".env"));
         assert!(!is_hidden_name("env"));
-    }
-
-    #[test]
-    fn remote_path_contains_observes_roots_separators_and_components() {
-        assert!(host_path_contains("/work/src", "/work/src/lib.rs"));
-        assert!(host_path_contains("/work/src/lib.rs", "/work/src/lib.rs"));
-        assert!(!host_path_contains("/work/src", "/work/src-old/lib.rs"));
-        assert!(host_path_contains("C:\\work\\src", "c:/WORK/src/main.rs"));
-        assert!(host_path_contains("C:\\", "c:/notes.txt"));
-        assert!(host_path_contains(
-            "\\\\server\\share",
-            "//SERVER/share/dir/file"
-        ));
-        assert!(!host_path_contains("/work/dir", "/work/dir\\child"));
-        assert!(host_path_contains("/work/dir\\name", "/work/dir\\name"));
-        assert!(project_host_path_contains("/work", "src", "src/lib.rs"));
-    }
-
-    #[test]
-    fn remote_file_name_validation_rejects_invalid_segments() {
-        assert!(is_valid_file_name_segment("reports", "/work"));
-        assert!(is_valid_file_name_segment("dir\\name", "/work"));
-        assert!(!is_valid_file_name_segment("", "/work"));
-        assert!(!is_valid_file_name_segment(".", "/work"));
-        assert!(!is_valid_file_name_segment("..", "/work"));
-        assert!(!is_valid_file_name_segment("nested/file", "/work"));
-        assert!(!is_valid_file_name_segment("C:escape", "C:\\work"));
-    }
-
-    #[test]
-    fn relative_windows_directory_keeps_windows_name_validation() {
-        let root = join_host_path(Some("C:\\work\\repo"), "");
-        assert_eq!(root, "C:\\work\\repo");
-        assert!(!is_valid_file_name_segment("bad:name", &root));
-        let directory = join_host_path(Some("C:\\work\\repo"), "src");
-        assert_eq!(directory, "C:\\work\\repo\\src");
-        assert!(!is_valid_file_name_segment("bad\\name", &directory));
-        assert!(!is_valid_file_name_segment("bad:name", &directory));
     }
 
     #[test]

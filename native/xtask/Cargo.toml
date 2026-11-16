@@ -22,11 +22,13 @@ icu_locale_core = { version = "2.3.0", optional = true }
 # fixture 生成的 WS 客户端（同步版，只连 ws://127.0.0.1）。与 falcon-client 的 tokio-tungstenite
 # 同一个版本，锁文件里现成；HTTP 是 fixtures/client.rs 里手写的 HTTP/1.1，不为它拉 hyper / tokio
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
-bytes = { workspace = true, optional = true }
+# android 把终端字体的 woff2 解成 TTF 放进 APK 的 assets（fixtures 的 WS 帧也用 bytes）
+woff2 = { package = "woff2-patched", version = "0.4" }
+bytes.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 
 [features]
 default = ["offline-tools"]
 # 主题 vendoring（ICU 排序表）与协议 fixture 采样（tungstenite）只在离线维护资源与协议样本时运行；
 # CI 发版中只承担守护进程交叉构建、APK 打包或 Linux 打包的任务可传 `--no-default-features` 跳过编译。
-offline-tools = ["dep:icu_collator", "dep:icu_locale_core", "dep:tungstenite", "dep:bytes"]
+offline-tools = ["dep:icu_collator", "dep:icu_locale_core", "dep:tungstenite"]
