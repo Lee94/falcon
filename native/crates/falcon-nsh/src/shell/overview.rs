@@ -3,14 +3,25 @@ use crate::{
     i18n::t,
     shell::{
         popups::themed_tooltip,
-        widgets::{Glyph, glyph, icon_button},
+        widgets::{Glyph, glyph, glyph_sized, icon_button},
     },
     store::{ActiveDialog, MobileTab, WorkspaceStore, use_workspace},
     theme::{rgb_to_hsla, rgba_to_hsla, use_theme},
     zoom::zpx,
 };
+use falcon_core::reason::durability_hint;
 use falcon_proto::SessionState;
 use nsh_core::prelude::*;
+
+/// falcon-core 的翻译回调：`t(key, {k: v})`。`t!` 的参数名要编译期写死，这里按 `%{k}`
+/// 手工替换（GPUI `dialogs/overview.rs` 的 `tr` 同款）。
+fn tr(key: &str, params: &[(&str, &str)]) -> String {
+    let mut s = t!(key);
+    for (k, v) in params {
+        s = s.replace(&format!("%{{{k}}}"), v);
+    }
+    s
+}
 
 impl WorkspaceStore {
     pub(crate) fn reset_overview_filter(&self) {
@@ -507,14 +518,62 @@ pub fn SessionOverview() -> impl IntoElement {
                                 .text_color(rgb_to_hsla(ui.muted_foreground)),
                             )
                             .child(
-                                text(if session.durable {
-                                    t!("session.durable")
-                                } else {
-                                    t!("session.nonDurable")
-                                })
-                                .w(zpx(120.0))
-                                .text_xs()
-                                .text_color(rgb_to_hsla(ui.muted_foreground)),
+                                // 持久性徽标（GPUI 的 durability cell）：非持久上警示色，
+                                // 悬停提示说保住了什么 / 丢了什么（原因来自 non_durable_reason）
+                                view()
+                                    .w(zpx(120.0))
+                                    .h_full()
+                                    .flex_row()
+                                    .items_center()
+                                    .child(
+                                        view()
+                                            .h(zpx(24.0))
+                                            .px(zpx(8.0))
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(zpx(4.0))
+                                            .rounded(zpx(4.0))
+                                            .tooltip(themed_tooltip(
+                                                text(durability_hint(
+                                                    &tr,
+                                                    session.durable,
+                                                    session.non_durable_reason,
+                                                    None,
+                                                ))
+                                                .text_xs(),
+                                                None,
+                                                &resolved,
+                                            ))
+                                            .text_color(rgb_to_hsla(if session.durable {
+                                                ui.muted_foreground
+                                            } else {
+                                                ui.warning
+                                            }))
+                                            .when(!session.durable, |v| {
+                                                v.bg(rgba_to_hsla(falcon_theme::Rgba {
+                                                    r: ui.warning.r,
+                                                    g: ui.warning.g,
+                                                    b: ui.warning.b,
+                                                    a: 26,
+                                                }))
+                                            })
+                                            .child(glyph_sized(
+                                                if session.durable {
+                                                    Glyph::Shield
+                                                } else {
+                                                    Glyph::Warning
+                                                },
+                                                zpx(14.0),
+                                            ))
+                                            .child(
+                                                text(if session.durable {
+                                                    t!("session.durable")
+                                                } else {
+                                                    t!("session.nonDurable")
+                                                })
+                                                .text_xs(),
+                                            ),
+                                    ),
                             ),
                     ),
             );

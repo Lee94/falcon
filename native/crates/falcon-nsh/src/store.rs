@@ -221,6 +221,8 @@ pub struct SessionRecord {
     pub auto_title: String,
     pub cwd: String,
     pub durable: bool,
+    /// durable=false 时的具体原因（协议字段），总览的持久性徽标悬停提示用它说明"为什么不持久"。
+    pub non_durable_reason: Option<falcon_proto::NonDurableReason>,
     pub state: SessionState,
     /// 若为 Coding Agent 会话（ADR 0013），记录 CLI 标识（如 `"claude"` / `"codex"`）。
     pub agent: Option<String>,
@@ -1301,6 +1303,7 @@ impl WorkspaceStore {
                 auto_title: "cargo check -p falcon-nsh".into(),
                 cwd: "/workspace/falcon/native".into(),
                 durable: true,
+                non_durable_reason: None,
                 state: SessionState::Active,
                 agent: None,
                 program_status: Some((ProgramState::Working, "cargo check · 1.2s".into())),
@@ -1318,6 +1321,7 @@ impl WorkspaceStore {
                 auto_title: "Claude Code".into(),
                 cwd: "/workspace/falcon.worktrees/nsh-client".into(),
                 durable: true,
+                non_durable_reason: None,
                 state: SessionState::Active,
                 agent: Some("claude".into()),
                 program_status: Some((ProgramState::Done, crate::i18n::t!("demo.refactorDone"))),
@@ -2099,6 +2103,7 @@ impl WorkspaceStore {
                             auto_title: s.title.clone().unwrap_or_default(),
                             cwd,
                             durable: s.durable,
+                            non_durable_reason: s.non_durable_reason,
                             state: s.state,
                             agent: s.agent.as_ref().map(|a| a.as_str().to_string()),
                             program_status: ps,
@@ -2434,6 +2439,7 @@ impl WorkspaceStore {
                         auto_title: s.title.clone().unwrap_or_default(),
                         cwd: String::new(),
                         durable: s.durable,
+                        non_durable_reason: s.non_durable_reason,
                         state: s.state,
                         agent: s.agent.as_ref().map(|a| a.as_str().to_string()),
                         program_status: s
@@ -4392,6 +4398,21 @@ impl WorkspaceStore {
             && (self.server_connected.get() || self.offline_demo)
     }
 
+    /// 命令面板「为某主机启用持久会话」（GPUI palette.enableDurable → 授权 + 部署对话框）。
+    ///
+    /// 授权 / 部署对话框（install 流程）由独立单元补齐；落地前命令先落到这个占位入口
+    /// 给个说明，落地后这里改调 `install_operations.open_for_project`。
+    pub(crate) fn request_enable_durable(&self, project_id: &str) {
+        let host = self
+            .projects
+            .get_untracked()
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.host_name.or(Some(project.name)))
+            .unwrap_or_else(|| project_id.to_string());
+        self.show_toast(crate::i18n::t!("native.install.pending", host = host));
+    }
+
     pub fn create_terminal_in_active_project(&self) -> String {
         self.create_terminal_with_request(CreateSessionRequest::default(), SessionPlacement::Focus)
     }
@@ -4446,6 +4467,7 @@ impl WorkspaceStore {
                                 auto_title: created.title.unwrap_or_default(),
                                 cwd: ppath,
                                 durable: created.durable,
+                                non_durable_reason: created.non_durable_reason,
                                 state: created.state,
                                 agent: created.agent.map(|a| a.as_str().to_string()),
                                 program_status: None,
@@ -4479,6 +4501,7 @@ impl WorkspaceStore {
             auto_title: String::new(),
             cwd: proj_path.clone(),
             durable: true,
+            non_durable_reason: None,
             state: SessionState::Active,
             agent: request
                 .agent

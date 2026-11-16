@@ -1311,6 +1311,9 @@
       "plaintextBody": "%{url} 不是本机地址，也没有 TLS：访问密码与终端里的全部内容都会以明文经过网络。建议放在反向代理后面用 https:// 访问。",
       "plaintextConfirm": "仍然连接"
     },
+    "install": {
+      "pending": "为 %{host} 启用持久会话：授权 / 部署对话框正在迁移到本客户端。"
+    },
     "nsh": {
       "hostConnection": "连接",
       "expandSidebar": "展开侧栏",

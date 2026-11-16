@@ -171,6 +171,9 @@
       "DetachWindow": "Detach window",
       "serverNotConnected": "Not connected to the server."
     },
+    "install": {
+      "pending": "Enable durable sessions on %{host}: the authorize & deploy dialog is being migrated to this client."
+    },
     "menus": {
       "copyWarnings": "Copy cleanup warnings",
       "dismissWarnings": "Dismiss warnings",
@@ -349,6 +352,9 @@
     "state_unknown": "Unknown state",
     "durable": "Persistent",
     "nonDurable": "Non-persistent",
+    "durableHint": "Reconnects after disconnects or a Falcon restart.",
+    "durableHintVersion": "Reconnects after disconnects or a Falcon restart · session daemon %{version}",
+    "nonDurableHint": "Closing the window is fine, but a dropped link or Falcon restart will lose it. Reason: %{reason}",
     "notConnected": "Not connected to a server",
     "terminateManyTitle": "Terminate the %{n} selected sessions?",
     "terminateManyBody": "All commands running in these sessions will be killed. This cannot be undone.",
@@ -486,5 +492,20 @@
     "deleteMissing": "The directory is already missing; only the project record will be removed",
     "deleteStatusUnknown": "Cannot read the worktree status or verify whether it contains unsaved changes",
     "leftoverTitle": "Some directories could not be removed"
+  },
+  "palette": {
+    "enableDurable": "Enable durable sessions on %{host}"
+  },
+  "durable": {
+    "reason_arch_unsupported": "There is no session daemon build for the host's OS / architecture",
+    "reason_dir_not_writable": "Could not create the .falcon directory in the host's home directory",
+    "reason_probe_failed": "Could not probe the host (the SSH command did not run, or the OS type was not recognized)",
+    "reason_upload_failed": "Uploading the session daemon was interrupted (SSH channel dropped or the host's disk is full)",
+    "reason_verify_failed": "The session daemon cannot run on the host (possibly a noexec mount or incompatible architecture)",
+    "reason_cancelled": "Deployment cancelled",
+    "reason_sessiond_unavailable": "This Falcon build does not contain the session daemon the host needs (development builds need cargo xtask sessiond first)",
+    "reason_not_authorized": "Deploying the session daemon to this host is not authorized yet",
+    "reason_windows_job_object": "The backend runs inside a Windows Job Object; the session daemon would be killed when the backend exits",
+    "reason_unknown": "Unknown reason (possibly a record left over from before an upgrade)"
   }
 }

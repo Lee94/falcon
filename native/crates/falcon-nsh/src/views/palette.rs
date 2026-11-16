@@ -426,6 +426,30 @@ fn render_rows(
             }),
         ));
     }
+    // 「为某主机启用持久会话」（GPUI palette.enableDurable）：只走授权 + 部署，不建会话。
+    // 部署对话框由 install 流程单元补齐，落地前经 request_enable_durable 占位入口给说明。
+    for project in store.projects.get().into_iter().filter(|project| {
+        project.source.as_ref().is_some_and(|source| {
+            source.project_type == falcon_proto::ProjectType::Ssh
+                && source
+                    .worktree
+                    .as_ref()
+                    .is_none_or(|worktree| worktree.archived_at.is_none())
+        })
+    }) {
+        let host = project
+            .host_name
+            .clone()
+            .unwrap_or_else(|| project.name.clone());
+        let st = store.clone();
+        let pid = project.id.clone();
+        commands.push((
+            format!("enable-durable:{}", project.id),
+            t!("palette.enableDurable", host = host.clone()),
+            format!("durable session {}", project.name),
+            Box::new(move || st.request_enable_durable(&pid)),
+        ));
+    }
     for plugin in store
         .plugin_list
         .get()

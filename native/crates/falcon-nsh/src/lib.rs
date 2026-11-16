@@ -649,6 +649,7 @@ fn test_workspace_harness(store: WorkspaceStore, switch_url: Option<String>) -> 
                     auto_title: String::new(),
                     cwd: "/workspace/falcon".into(),
                     durable: false,
+                    non_durable_reason: None,
                     state: falcon_proto::SessionState::Active,
                     agent: None,
                     program_status: None,
