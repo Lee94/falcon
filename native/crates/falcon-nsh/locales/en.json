@@ -257,6 +257,9 @@
       "save": "Save",
       "cancel": "Cancel",
       "defaults": "Listen on 127.0.0.1 by default. Leave the target address blank for 127.0.0.1, or the target port blank to use the listening port."
+    },
+    "forms": {
+      "installing": "Installing…"
     }
   },
   "common": {
@@ -486,5 +489,41 @@
     "deleteMissing": "The directory is already missing; only the project record will be removed",
     "deleteStatusUnknown": "Cannot read the worktree status or verify whether it contains unsaved changes",
     "leftoverTitle": "Some directories could not be removed"
+  },
+  "palette": {
+    "enableDurable": "Enable durable sessions on %{host}"
+  },
+  "durable": {
+    "enableTitle": "Enable durable sessions on %{host}?",
+    "enableBody": "Falcon's session daemon (falcon-sessiond %{version}) will be uploaded to ~/.falcon/bin/ on %{host}, pushed and verified by Falcon directly — the host does not need internet access. Once enabled, sessions survive SSH disconnects and Falcon restarts.",
+    "authNote": "Authorization is remembered per host (host + port + username); other projects on the same machine will not ask again.",
+    "authAllow": "Enable and upload",
+    "authDeny": "Not now (can be changed later from the command palette)",
+    "failTitle": "Could not enable durable sessions on %{host}",
+    "stage_probing": "Probing the host…",
+    "stage_uploading": "Uploading the session daemon…",
+    "stage_verifying": "Verifying on the host…",
+    "commandLog": "Running on the remote",
+    "installCancel": "Cancel",
+    "installRetry": "Retry",
+    "installSkip": "Skip for now (session will be non-durable)",
+    "autoRetrying": "Last attempt failed; retrying automatically (attempt %{n})…",
+    "autoRetried": "Retried automatically %{n} times and still failed — check the SSH connection to the host and its disk space.",
+    "channelError": "The deployment channel to the backend disconnected",
+    "detailToggle": "Details",
+    "skippedTitle": "Durable sessions not enabled this time",
+    "skippedBody": "You can enable durable sessions for this host later from the command palette.",
+    "readyTitle": "Durable sessions ready on %{host}",
+    "readyBody": "The %{n} existing sessions stay non-durable — only newly created sessions are managed by the session daemon.",
+    "reason_arch_unsupported": "There is no session daemon build for the host's OS / architecture",
+    "reason_dir_not_writable": "Could not create the .falcon directory in the host's home directory",
+    "reason_probe_failed": "Could not probe the host (the SSH command did not run, or the OS type was not recognized)",
+    "reason_upload_failed": "Uploading the session daemon was interrupted (SSH channel dropped or the host's disk is full)",
+    "reason_verify_failed": "The session daemon cannot run on the host (possibly a noexec mount or incompatible architecture)",
+    "reason_cancelled": "Deployment cancelled",
+    "reason_sessiond_unavailable": "This Falcon build does not contain the session daemon the host needs (development builds need cargo xtask sessiond first)",
+    "reason_not_authorized": "Deploying the session daemon to this host is not authorized yet",
+    "reason_windows_job_object": "The backend runs inside a Windows Job Object; the session daemon would be killed when the backend exits",
+    "reason_unknown": "Unknown reason (possibly a record left over from before an upgrade)"
   }
 }

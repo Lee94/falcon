@@ -123,6 +123,8 @@ pub enum ActiveDialog {
         action: FileGuardAction,
         file_keys: Vec<String>,
     },
+    /// 会话守护进程的授权 / 部署对话框（ADR 0020）；上下文在 `install_operations.state()`。
+    Install,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -827,6 +829,7 @@ pub struct WorkspaceStore {
 
     pub project_operations: Rc<crate::project_operations::ProjectOperations>,
     pub(crate) session_operations: crate::session_operations::SessionOperations,
+    pub(crate) install_operations: crate::install_operations::InstallOperations,
 
     terminals: Rc<SharedTerminals>,
     task_owner: Owner,
@@ -1808,6 +1811,7 @@ impl WorkspaceStore {
                 task_owner,
                 server_url,
             ),
+            install_operations: crate::install_operations::InstallOperations::new(task_owner),
             terminals,
             task_owner,
             offline_demo: opts.offline_demo,
@@ -3834,9 +3838,13 @@ impl WorkspaceStore {
         self.next_connection_generation();
         self.server_connected.set(false);
         self.reset_overview_filter();
+        // 部署通道挂在旧服务端上：取消并丢弃整条授权 / 安装流程
+        self.install_operations.reset();
         if matches!(
             self.active_dialog.get(),
-            ActiveDialog::ConfirmTerminateMany { .. } | ActiveDialog::ConfirmClearAllDead { .. }
+            ActiveDialog::ConfirmTerminateMany { .. }
+                | ActiveDialog::ConfirmClearAllDead { .. }
+                | ActiveDialog::Install
         ) {
             self.active_dialog.set(ActiveDialog::None);
         }
@@ -4406,6 +4414,24 @@ impl WorkspaceStore {
             self.active_dialog.set(ActiveDialog::NewProject);
             return String::new();
         }
+        // SSH 项目首次用时先走授权 + 部署会话守护进程（版本对不上时也走一遍部署，看得见
+        // 进度）；已拒绝过的主机不再打扰，直接建非持久会话（GPUI 的 new_terminal_at）
+        if self
+            .install_operations
+            .gate(self, &proj_id, request.clone(), placement)
+        {
+            return String::new();
+        }
+        self.create_terminal_now(proj_id, request, placement)
+    }
+
+    /// 直接 POST 建会话：gate 已判定不需要安装、或安装流程的续建都走这里。
+    pub(crate) fn create_terminal_now(
+        &self,
+        proj_id: String,
+        request: CreateSessionRequest,
+        placement: SessionPlacement,
+    ) -> String {
         let proj_path = self
             .projects
             .get()

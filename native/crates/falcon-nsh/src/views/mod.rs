@@ -8,6 +8,7 @@ mod file_preview;
 pub mod file_operations;
 pub mod git;
 mod host_form;
+mod install;
 pub mod palette;
 pub mod plugins;
 pub mod project_form;
@@ -26,6 +27,7 @@ pub use dialogs::{ModalLayer, modal_layer};
 pub use file_operations::{
     FileOperationLayer, FileOperationsToolbar, file_operation_layer, file_operations_toolbar,
 };
+pub use install::{InstallDialog, install_dialog};
 pub use files::{FilePaneView, FilesPanel, file_pane_view, files_panel, is_scoped_raw_preview_url};
 pub use git::{DiffPaneView, GitPanel, diff_pane_view, git_panel};
 pub use plugins::{ClientPluginVerifier, PluginPanel, plugin_panel};

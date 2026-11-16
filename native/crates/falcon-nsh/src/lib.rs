@@ -11,6 +11,7 @@
 pub(crate) mod app_update;
 pub mod fonts;
 pub mod i18n;
+pub(crate) mod install_operations;
 pub mod project_operations;
 pub(crate) mod menu_operations;
 pub(crate) mod session_operations;

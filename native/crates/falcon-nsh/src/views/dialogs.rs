@@ -228,6 +228,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             ActiveDialog::ConfirmUnsavedFiles { action, file_keys } => {
                 render_unsaved_files_modal(&store, &resolved, action, file_keys).into_element()
             }
+            ActiveDialog::Install => super::install::install_dialog().into_element(),
         };
 
         let focus_on_open = modal_focus;
@@ -330,6 +331,8 @@ fn close_modal_dialog(store: &WorkspaceStore, dialog: &ActiveDialog, project_pic
         ActiveDialog::ConfirmDeleteProfile { .. } | ActiveDialog::ConfirmPlaintextProfile { .. } => {
             store.active_dialog.set(ActiveDialog::Profiles);
         }
+        // 关掉 = 跳过：本次不装，回到用户本来想干的事（有续建就建非持久会话）
+        ActiveDialog::Install => store.install_operations.finish(store),
         _ => store.active_dialog.set(ActiveDialog::None),
     }
 }
