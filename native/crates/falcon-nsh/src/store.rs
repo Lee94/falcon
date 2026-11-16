@@ -770,6 +770,8 @@ pub struct WorkspaceStore {
     pub(crate) server_updates: crate::server_updates::ServerUpdates,
     pub editing_host: Signal<Option<falcon_proto::SshHost>>,
     pub editing_host_generation: Signal<u64>,
+    /// 命令面板「添加远端主机」置位：主机表单挂载到创建模式时自动展开，消费一次后复位。
+    pub host_create_pending: Signal<bool>,
     pub host_delete_busy: Signal<Option<(u64, String)>>,
     pub host_test_busy: Signal<Option<String>>,
     pub host_delete_error: Signal<Option<String>>,
@@ -1738,6 +1740,7 @@ impl WorkspaceStore {
             server_updates: crate::server_updates::ServerUpdates::new(task_owner),
             editing_host: signal(None),
             editing_host_generation: signal(0),
+            host_create_pending: signal(false),
             host_delete_busy: signal(None),
             host_test_busy: signal(None),
             host_delete_error: signal(None),
@@ -2613,6 +2616,16 @@ impl WorkspaceStore {
     pub fn begin_host_edit(&self, host: falcon_proto::SshHost) {
         self.invalidate_host_edit_generation();
         self.editing_host.set(Some(host));
+    }
+
+    /// 命令面板「添加远端主机」（对齐 GPUI `palette.addHost` 的主机表单对话框）：清掉进行中的
+    /// 编辑，打开设置-主机页并让创建表单自动展开。
+    pub fn request_add_host(&self) {
+        self.invalidate_host_edit_generation();
+        self.editing_host.set(None);
+        self.host_create_pending.set(true);
+        self.active_dialog
+            .set(ActiveDialog::Settings(SettingsTab::Hosts));
     }
 
     pub fn invalidate_host_edit_generation(&self) {
@@ -4394,6 +4407,16 @@ impl WorkspaceStore {
 
     pub fn create_terminal_in_active_project(&self) -> String {
         self.create_terminal_with_request(CreateSessionRequest::default(), SessionPlacement::Focus)
+    }
+
+    /// 命令面板「在 <项目> 中新建终端」（对齐 GPUI `palette.newTerminalIn`）：先切到目标项目
+    /// 的画布，再按默认方式建终端并聚焦。
+    pub fn create_terminal_in_project(&self, project_id: &str) {
+        if !self.projects.get().iter().any(|p| p.id == project_id) {
+            return;
+        }
+        self.select_project(project_id);
+        self.create_terminal_with_request(CreateSessionRequest::default(), SessionPlacement::Focus);
     }
 
     pub fn create_terminal_with_request(

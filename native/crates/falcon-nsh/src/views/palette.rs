@@ -127,6 +127,7 @@ fn render_rows(
         .iter()
         .find(|profile| profile.url.trim_end_matches('/') == server_url.trim_end_matches('/'))
         .is_some_and(|profile| profile.is_loopback());
+    let can_connect = store.server_connected.get() || store.is_offline_demo();
     for project in store.projects.get() {
         let st = store.clone();
         let id = project.id.clone();
@@ -140,6 +141,35 @@ fn render_rows(
             },
             run: Rc::new(move || st.select_project(&id)),
         });
+        // 「在 <项目> 中新建终端」（对齐 GPUI `palette.newTerminalIn`）：存档的附属项目不能开终端。
+        let archived = project
+            .source
+            .as_ref()
+            .and_then(|source| source.worktree.as_ref())
+            .is_some_and(|worktree| worktree.archived_at.is_some());
+        if can_connect && !archived {
+            let st = store.clone();
+            let id = project.id.clone();
+            let host = project
+                .host_name
+                .clone()
+                .unwrap_or_else(|| t!("forward.local"));
+            rows.push(Row {
+                entry: Entry {
+                    id: format!("project-new-terminal:{}", project.id),
+                    label: t!("palette.newTerminalIn", name = project.name.as_str()),
+                    meta: host.clone(),
+                    keywords: vec![
+                        project.name.clone(),
+                        project.path.clone(),
+                        host,
+                        t!("sidebar.newTerminal"),
+                    ],
+                    group: Group::Project,
+                },
+                run: Rc::new(move || st.create_terminal_in_project(&id)),
+            });
+        }
         if let Some(source) = project.source.as_ref()
             && let Some(target) = falcon_core::editor::editor_target(source, server_here)
         {
@@ -273,6 +303,15 @@ fn render_rows(
                     st.active_dialog
                         .set(ActiveDialog::Settings(SettingsTab::Relays))
                 })
+            },
+        ),
+        (
+            "add-host".into(),
+            t!("palette.addHost"),
+            "ssh remote host".into(),
+            {
+                let st = store.clone();
+                Box::new(move || st.request_add_host())
             },
         ),
         (

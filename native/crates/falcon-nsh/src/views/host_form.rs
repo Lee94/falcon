@@ -62,6 +62,16 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
     let form_owner = Owner::current();
     let draft = Rc::new(RefCell::new(HostDraft::from(editing_host.as_ref())));
     let expanded = signal(editing_host.is_some());
+    // 命令面板「添加远端主机」置位 host_create_pending：创建模式的表单挂载后自动展开，消费一次。
+    let expand_pending = expanded.clone();
+    let pending_store = store.clone();
+    let pending_editing = editing_id.clone();
+    effect(move || {
+        if pending_editing.is_none() && pending_store.host_create_pending.get() {
+            pending_store.host_create_pending.set(false);
+            expand_pending.set(true);
+        }
+    });
     let tailscale_open = signal(false);
     let tailscale_loading = signal(false);
     let tailscale_result = signal(None::<TailscaleDevices>);
