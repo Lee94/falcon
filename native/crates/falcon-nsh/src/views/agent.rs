@@ -30,6 +30,96 @@ pub(super) enum AgentPaneEvent {
     OpenFile(String),
 }
 
+/// 对照 GPUI canvas.rs `pane-agent-toggle` 的模式徽章状态；`None` 表示该会话不渲染徽章。
+/// `switch_mode` 下点击经 `WorkspaceStore::request_agent_gui` 走 `enableGui*` 确认框发起
+/// TUI → GUI 协议转换；否则点击只切本地排版（`AgentDisplayStyle::toggle`）。
+pub(crate) struct AgentModeBadge {
+    pub switch_mode: bool,
+    pub switching: bool,
+    pub terminal_style: bool,
+}
+
+impl AgentModeBadge {
+    pub fn new(
+        agent_kind: Option<falcon_proto::SessionAgent>,
+        view: Option<&AgentSessionView>,
+    ) -> Option<Self> {
+        let snapshot = view.and_then(|view| view.snapshot.as_ref());
+        // 权威快照缺失时用演示条目填的 `graphical` 充当 active（`display_state` 同款兜底）。
+        let has_view = snapshot.map_or_else(|| view.is_some_and(|v| v.graphical), |s| s.active);
+        let terminal_backed = snapshot.is_some_and(|s| s.terminal_backed);
+        let claude = agent_kind == Some(falcon_proto::SessionAgent::Claude);
+        if !claude && !has_view {
+            return None;
+        }
+        Some(Self {
+            switch_mode: claude && (!has_view || terminal_backed),
+            terminal_style: !has_view
+                || terminal_backed
+                || view.is_some_and(|v| v.style == AgentDisplayStyle::Compact),
+            switching: view.is_some_and(|v| v.transition.switching()),
+        })
+    }
+
+    /// 徽章正文：转换在途只显示加载态；终端模式显示当前协议，图形模式显示当前排版。
+    pub fn label(&self) -> String {
+        t!(match (self.switching, self.terminal_style, self.switch_mode) {
+            (true, _, _) => "agentView.switching",
+            (false, true, true) => "agentView.modeTerminal",
+            (false, true, false) => "agentView.styleTerminal",
+            (false, false, _) => "agentView.styleGui",
+        })
+    }
+
+    pub fn tooltip(&self) -> String {
+        t!(match (self.switch_mode, self.terminal_style) {
+            (true, true) => "agentView.switchToGui",
+            (true, false) => "agentView.switchToTerminal",
+            (false, true) => "agentView.toggleNative",
+            (false, false) => "agentView.toggleTerminal",
+        })
+    }
+}
+
+/// 徽章本体：小圆角带边框文字钮，`dimmed`（转换在途）时按下不响应。
+pub(crate) fn agent_mode_chip(
+    id: String,
+    label: String,
+    hint: String,
+    dimmed: bool,
+    theme: &ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    let ui = &theme.ui;
+    view()
+        .test_id(&id)
+        .focusable(!dimmed)
+        .disabled(dimmed)
+        .px(zpx(7.0))
+        .py(zpx(2.0))
+        .rounded(zpx(4.0))
+        .border_1()
+        .border_color(rgba_to_hsla(ui.border))
+        .bg(rgb_to_hsla(ui.app))
+        .cursor_pointer()
+        .tooltip(themed_tooltip(text(hint), None, theme))
+        .hover({
+            let fg = rgb_to_hsla(ui.foreground);
+            move |style| style.text_color(fg)
+        })
+        .when(dimmed, |v| v.opacity(0.6))
+        .on_press(move || {
+            if !dimmed {
+                action();
+            }
+        })
+        .child(
+            text(label)
+                .text_size(zpx(10.5))
+                .text_color(rgb_to_hsla(ui.muted_foreground)),
+        )
+}
+
 #[derive(Clone)]
 pub(super) struct EntryControls {
     folded: Signal<HashSet<String>>,
@@ -79,11 +169,7 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                 AgentPaneEvent::Command(command) => {
                     terminal.send_agent_command(command);
                 }
-                AgentPaneEvent::ToggleStyle => store.agent_views.update(|views| {
-                    if let Some(agent) = views.get_mut(&sid) {
-                        agent.style = agent.style.toggle();
-                    }
-                }),
+                AgentPaneEvent::ToggleStyle => store.toggle_agent_view_style(&sid),
                 AgentPaneEvent::OpenFile(path) => {
                     if let Some(session) = store
                         .sessions
@@ -166,21 +252,11 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                 dispatch: dispatch.clone(),
                 can_approve: enabled,
             };
-            let style_dispatch = dispatch.clone();
-            let topbar = view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(zpx(10.0))
-                .py(zpx(6.0))
-                .bg(rgb_to_hsla(ui.card))
-                .child(
-                    text(agent.agent_name.clone())
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb_to_hsla(ui.foreground)),
-                )
-                .child(icon_button(
+            let mut right = view().flex_row().items_center().gap(zpx(4.0));
+            // 排版切换只在有图形时间线可排时有意义（对照 GPUI：镜像/纯终端态没有 AgentPane 内排版钮）。
+            if state.active {
+                let style_dispatch = dispatch.clone();
+                right = right.child(icon_button(
                     format!("agent-style-{sid}"),
                     t!(if compact {
                         "native.agentView.toggleNative"
@@ -196,6 +272,37 @@ pub fn AgentPaneView(props: AgentPaneViewProps) -> impl IntoElement {
                     &resolved,
                     move || style_dispatch(AgentPaneEvent::ToggleStyle),
                 ));
+            }
+            // 官方终端模式（含只读镜像）的 Claude 会话显示「切换为图形界面」徽章，
+            // 点击弹 enableGui* 确认框后发起协议转换（对照 GPUI request_agent_mode_switch）。
+            if let Some(badge) = AgentModeBadge::new(Some(state.agent), Some(&agent))
+                && badge.switch_mode
+            {
+                let mode_store = store.clone();
+                let mode_sid = sid.clone();
+                right = right.child(agent_mode_chip(
+                    format!("agent-mode-{sid}"),
+                    badge.label(),
+                    badge.tooltip(),
+                    badge.switching,
+                    &resolved,
+                    move || mode_store.request_agent_gui(&mode_sid),
+                ));
+            }
+            let topbar = view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px(zpx(10.0))
+                .py(zpx(6.0))
+                .bg(rgb_to_hsla(ui.card))
+                .child(
+                    text(agent.agent_name.clone())
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb_to_hsla(ui.foreground)),
+                )
+                .child(right);
             if !state.active {
                 return view()
                     .size_full()
