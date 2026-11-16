@@ -555,7 +555,9 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                     let host_id = test_editing_id.clone();
                     let callback_store = test_store.clone();
                     let callback_owner = test_owner.clone();
-                    spawn(async move {
+                    // 挂到 store 的根 owner：本区域会随 test_probing 翻转重建，
+                    // 区域 owner 一收摊任务就被取消、界面永远停在 Connecting。
+                    test_store.spawn_root(async move {
                         let result = client
                             .test_host_draft(&input, host_id.as_deref())
                             .await;
