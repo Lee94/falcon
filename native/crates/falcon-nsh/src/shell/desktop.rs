@@ -733,16 +733,7 @@ fn render_right_panel_island(
 }
 
 fn project_columns(store: &WorkspaceStore) -> Vec<falcon_core::layout::ColumnLayout> {
-    let selected = store.active_project_id.get();
-    let sessions = store.sessions.get();
-    falcon_core::layout::visible_columns(&store.columns.get(), |key| match parse_pane_key(key) {
-        Some(PaneItem::Terminal { id, .. }) => sessions
-            .iter()
-            .any(|s| s.id == id && (selected.is_empty() || s.project_id == selected)),
-        Some(PaneItem::File { project_id, .. }) => selected.is_empty() || project_id == selected,
-        Some(PaneItem::Diff { .. }) => true,
-        None => false,
-    })
+    store.visible_columns()
 }
 
 fn panel_resize_handle(store: &WorkspaceStore, right: bool) -> impl IntoElement {

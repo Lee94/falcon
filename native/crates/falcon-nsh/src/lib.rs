@@ -23,6 +23,7 @@ pub mod theme;
 pub mod views;
 pub mod zoom;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use falcon_core::pane_key::parse_pane_key;
@@ -40,7 +41,7 @@ use nsh_core::prelude::*;
 use crate::i18n::t;
 use crate::shell::{desktop_shell, mobile_shell, tui_shell};
 pub use crate::store::FalconLaunchOptions;
-use crate::store::{ActiveDialog, SettingsTab, WorkspaceStore};
+use crate::store::{ActiveDialog, SessionPlacement, SettingsTab, WorkspaceStore};
 #[cfg(test)]
 use crate::store::SessionRecord;
 use crate::terminal::{FalconTerminal, bind_safe_key, bind_safe_key_when};
@@ -67,15 +68,18 @@ pub struct FalconAppProps {
     pub test_live_file_operations: bool,
 }
 
-fn bind_primary_command(command: ShortcutCommand, handler: impl Fn() + 'static) {
-    let Some(binding) = shortcut_bindings(command, apple_keys())
-        .into_iter()
-        .find(|binding| binding.role == BindingRole::Primary)
-    else {
-        return;
-    };
-    let spec = binding.keystroke.gpui().replace('-', "+");
-    bind_safe_key_when(&spec, false, nsh_core::keymap::When::Always, handler);
+/// 绑定一个全局命令的全部原生键位（主键位 + 额外入口；`BrowserAlias` 是给浏览器绕保留键
+/// 的别名，原生不注册——对齐 GPUI `init` 里 `role != BindingRole::BrowserAlias` 的过滤）。
+fn bind_command(command: ShortcutCommand, handler: impl Fn() + 'static) {
+    let handler = Rc::new(handler);
+    for binding in shortcut_bindings(command, apple_keys()) {
+        if binding.role == BindingRole::BrowserAlias {
+            continue;
+        }
+        let spec = binding.keystroke.gpui().replace('-', "+");
+        let handler = Rc::clone(&handler);
+        bind_safe_key_when(&spec, false, nsh_core::keymap::When::Always, move || handler());
+    }
 }
 
 /// 跨六端统一根组件。
@@ -115,8 +119,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     // 同步深色/浅色与缩放全局快捷键
     {
         let st_pal = store.clone();
-        let st_pal_secondary = store.clone();
-        bind_primary_command(ShortcutCommand::Palette, move || {
+        bind_command(ShortcutCommand::Palette, move || {
             let next = if st_pal.active_dialog.get() == ActiveDialog::Palette {
                 ActiveDialog::None
             } else {
@@ -124,26 +127,18 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
             };
             st_pal.active_dialog.set(next);
         });
-        if apple_keys() {
-            bind_safe_key_when("cmd+k", false, nsh_core::keymap::When::Always, move || {
-                let next = if st_pal_secondary.active_dialog.get() == ActiveDialog::Palette {
-                    ActiveDialog::None
-                } else {
-                    ActiveDialog::Palette
-                };
-                st_pal_secondary.active_dialog.set(next);
-            });
-        }
     }
     {
         let st_quick_open = store.clone();
-        bind_primary_command(ShortcutCommand::QuickOpen, move || {
+        bind_command(ShortcutCommand::QuickOpen, move || {
             st_quick_open.open_quick_open();
         });
     }
+    // 表外的命令（设置、缩放、退出、⌘⇧⏎）：mac 是 ⌘，其余 Ctrl+Shift——对齐 GPUI `init`
+    let m = if apple_keys() { "cmd" } else { "ctrl+shift" };
     {
         let st_set = store.clone();
-        bind_safe_key_when("mod+,", false, nsh_core::keymap::When::Always, move || {
+        bind_safe_key_when(&format!("{m}+,"), false, nsh_core::keymap::When::Always, move || {
             st_set
                 .active_dialog
                 .set(ActiveDialog::Settings(SettingsTab::Appearance));
@@ -151,8 +146,46 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     }
     {
         let st_new = store.clone();
-        bind_primary_command(ShortcutCommand::NewTerminal, move || {
+        bind_command(ShortcutCommand::NewTerminal, move || {
             st_new.create_terminal_in_active_project();
+        });
+    }
+    {
+        let st_right = store.clone();
+        bind_command(ShortcutCommand::SplitRight, move || {
+            st_right.create_terminal_with_request(
+                falcon_proto::CreateSessionRequest::default(),
+                SessionPlacement::Right,
+            );
+        });
+        let st_down = store.clone();
+        bind_command(ShortcutCommand::SplitDown, move || {
+            st_down.create_terminal_with_request(
+                falcon_proto::CreateSessionRequest::default(),
+                SessionPlacement::Down,
+            );
+        });
+    }
+    {
+        let st_relays = store.clone();
+        bind_command(ShortcutCommand::OpenRelays, move || {
+            st_relays
+                .active_dialog
+                .set(ActiveDialog::Settings(SettingsTab::Relays));
+        });
+        let st_reattach = store.clone();
+        bind_command(ShortcutCommand::Reattach, move || {
+            let fk = st_reattach.focused_pane_key.get();
+            if let Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) =
+                parse_pane_key(&fk)
+                && st_reattach
+                    .sessions
+                    .get()
+                    .iter()
+                    .any(|s| s.id == id && s.state == falcon_proto::SessionState::Unverified)
+            {
+                st_reattach.focus_palette_session(&id);
+            }
         });
     }
     {
@@ -176,7 +209,7 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     }
     {
         let st_close = store.clone();
-        bind_primary_command(ShortcutCommand::CloseTab, move || {
+        bind_command(ShortcutCommand::CloseTab, move || {
             let fk = st_close.focused_pane_key.get();
             if let Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) = parse_pane_key(&fk)
             {
@@ -188,23 +221,55 @@ pub fn FalconApp(props: FalconAppProps) -> impl IntoElement {
     }
     {
         let sidebar = store.sidebar_open;
-        bind_primary_command(ShortcutCommand::ToggleSidebar, move || {
+        bind_command(ShortcutCommand::ToggleSidebar, move || {
             sidebar.update(|v| *v = !*v)
         });
         let files = store.clone();
-        bind_primary_command(ShortcutCommand::ToggleFilesPanel, move || {
+        bind_command(ShortcutCommand::ToggleFilesPanel, move || {
             files.toggle_right_panel(crate::store::RightPanelKind::Files)
         });
         let changes = store.clone();
-        bind_primary_command(ShortcutCommand::ToggleChangesPanel, move || {
+        bind_command(ShortcutCommand::ToggleChangesPanel, move || {
             changes.toggle_right_panel(crate::store::RightPanelKind::Git)
         });
     }
     {
-        bind_safe_key("mod+=", false, move || zoom_ctrl.step_in());
-        bind_safe_key("mod+-", false, move || zoom_ctrl.step_out());
+        // 界面缩放（⌘+ / ⌘−）：「+」与「=」同一个键，带不带 Shift 都认（GPUI 绑 m-= 与
+        // m-+）。非 mac 上 Ctrl+Shift+= 本身已带 Shift，「+」变体拼出来重复、解析不了，
+        // `bind_safe_key` 会静默跳过——真正多出来的只有 mac 的 ⌘⇧=。
+        bind_safe_key(&format!("{m}+="), false, move || zoom_ctrl.step_in());
+        bind_safe_key(&format!("{m}+shift+="), false, move || zoom_ctrl.step_in());
+        bind_safe_key(&format!("{m}+-"), false, move || zoom_ctrl.step_out());
         let overview = store.overview_open;
-        bind_primary_command(ShortcutCommand::Overview, move || overview.set(true));
+        bind_command(ShortcutCommand::Overview, move || overview.set(true));
+    }
+    {
+        // 窗口 / 画布导航：⌘⇧] [ 前后切窗、⌘⌥] [ 切画布、⌘1…9 直达第 N 扇（非 mac 见表）
+        let st_next = store.clone();
+        bind_command(ShortcutCommand::NextTab, move || st_next.cycle_pane(1));
+        let st_prev = store.clone();
+        bind_command(ShortcutCommand::PrevTab, move || st_prev.cycle_pane(-1));
+        let st_next_canvas = store.clone();
+        bind_command(ShortcutCommand::NextCanvas, move || st_next_canvas.step_canvas(1));
+        let st_prev_canvas = store.clone();
+        bind_command(ShortcutCommand::PrevCanvas, move || st_prev_canvas.step_canvas(-1));
+        for n in 1..=9u8 {
+            let st_tab = store.clone();
+            bind_command(ShortcutCommand::Tab(n), move || {
+                st_tab.focus_pane_at(usize::from(n - 1))
+            });
+        }
+    }
+    if apple_keys() {
+        // ⌘⇧⏎ 当前窗口独占画布（GPUI 只在 mac 绑这颗键）
+        let st_zoom = store.clone();
+        bind_safe_key("cmd+shift+enter", false, move || st_zoom.toggle_term_zoom());
+    }
+    {
+        // ⌘Q 退出（走未保存文件的确认护栏）。mac 上 ⌘Q 是系统保留键，平台自己退出、
+        // 绑不进去——`bind_safe_key` 会静默跳过；其余平台注册的是 Super+Q，对齐 GPUI。
+        let st_quit = store.clone();
+        bind_safe_key("cmd+q", false, move || st_quit.request_quit());
     }
 
     // 处理 `falcon://` URL Scheme 深链（打开指定服务端或会话）

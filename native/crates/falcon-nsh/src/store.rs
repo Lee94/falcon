@@ -21,8 +21,8 @@ use falcon_client::{FalconClient, raw_url};
 use falcon_core::agent_mode::{AgentDisplayStyle, AgentModeTransition};
 use falcon_core::file_text::{TextShape, for_disk, for_editor};
 use falcon_core::layout::{
-    ColumnLayout, column, find_pane, insert_column, insert_pane, new_canvas_id, pane_keys,
-    remove_pane,
+    ColumnLayout, canvas_groups, canvas_index, column, find_pane, insert_column, insert_pane,
+    is_pinned, new_canvas_id, order_by_canvas, pane_keys, remove_pane,
 };
 use falcon_core::pane_key::{DIFF_KEY, file_key, parse_pane_key, term_key};
 use falcon_core::profiles::{ProfilesFile, ServerProfile};
@@ -4381,6 +4381,118 @@ impl WorkspaceStore {
         }
     }
 
+    /// 当前项目下看得见、该画出来的列（与桌面画布同一套过滤：本项目的终端 / 文件窗口，
+    /// 差异窗口恒在）。只是查——别的项目的排布原样等在那，不写回。
+    pub fn visible_columns(&self) -> Vec<ColumnLayout> {
+        let selected = self.active_project_id.get();
+        let sessions = self.sessions.get();
+        falcon_core::layout::visible_columns(&self.columns.get(), |key| {
+            match parse_pane_key(key) {
+                Some(falcon_core::pane_key::PaneItem::Terminal { id, .. }) => sessions
+                    .iter()
+                    .any(|s| s.id == id && (selected.is_empty() || s.project_id == selected)),
+                Some(falcon_core::pane_key::PaneItem::File { project_id, .. }) => {
+                    selected.is_empty() || project_id == selected
+                }
+                Some(falcon_core::pane_key::PaneItem::Diff { .. }) => true,
+                None => false,
+            }
+        })
+    }
+
+    /// 切窗口快捷键（⌘1…9 / 上一个 / 下一个）走的排布序：画布一块接一块、固定列在最后
+    /// （GPUI `layout_columns` + `pane_keys`）。
+    fn ordered_pane_keys(&self) -> Vec<String> {
+        pane_keys(&order_by_canvas(&self.visible_columns()))
+    }
+
+    /// 焦点交给某扇窗口：总览收起，画布跟着切到它所在的那块（固定列不属于任何画布，
+    /// 焦点落过去不动画布）。
+    fn focus_ordered_pane(&self, key: &str) {
+        self.overview_open.set(false);
+        let cols = self.columns.get();
+        if let Some(at) = find_pane(&cols, key)
+            && !cols[at.col].pinned
+            && let Some(canvas) = cols[at.col].canvas.as_ref()
+        {
+            self.active_canvas_id.set(canvas.clone());
+        }
+        self.focused_pane_key.set(key.to_string());
+    }
+
+    /// 前后切窗口（React 版 `cycleTab`，回绕）：焦点不在排布里时，往后切落第一扇、
+    /// 往前切落最后一扇。
+    pub fn cycle_pane(&self, delta: i64) {
+        let keys = self.ordered_pane_keys();
+        if keys.is_empty() {
+            return;
+        }
+        let len = keys.len() as i64;
+        let focused = self.focused_pane_key.get();
+        let from = match keys.iter().position(|key| *key == focused) {
+            Some(i) => i as i64,
+            None if delta > 0 => -1,
+            None => 0,
+        };
+        let next = keys[(from + delta + len).rem_euclid(len) as usize].clone();
+        self.focus_ordered_pane(&next);
+    }
+
+    /// 切到第 index 扇（从 0 起，按排布顺序；React 版 `focusTabAt`）。
+    pub fn focus_pane_at(&self, index: usize) {
+        if let Some(key) = self.ordered_pane_keys().into_iter().nth(index) {
+            self.focus_ordered_pane(&key);
+        }
+    }
+
+    /// 切到左 / 右一块画布，不回绕（React 版 `stepCanvas` → `showCanvas`）：焦点交给它
+    /// 最左一列的第一扇窗口；焦点在固定列里就只换画布、焦点不动。
+    pub fn step_canvas(&self, delta: i64) {
+        let groups = canvas_groups(&order_by_canvas(&self.visible_columns()));
+        if groups.is_empty() {
+            return;
+        }
+        // 总览打开时焦点视为不在任何画布上（对齐 GPUI：active = Overview 没有窗口 key）
+        let focused = self.focused_pane_key.get();
+        let key = (!self.overview_open.get() && !focused.is_empty()).then_some(focused.as_str());
+        let remembered = self.active_canvas_id.get();
+        let at = canvas_index(&groups, key, Some(remembered.as_str())) as i64 + delta;
+        let Some(group) = usize::try_from(at).ok().and_then(|i| groups.get(i)) else {
+            return;
+        };
+        let gid = group.id.clone();
+        let shown = |k: &str| {
+            group
+                .columns
+                .iter()
+                .any(|c| !c.pinned && c.panes.iter().any(|p| p.key == k))
+        };
+        if key.is_some_and(shown) {
+            return; // 焦点已在目标画布上
+        }
+        let cols = self.columns.get();
+        if key.is_some_and(|k| is_pinned(&cols, k)) && group.columns.iter().any(|c| c.pinned) {
+            self.active_canvas_id.set(gid);
+            return;
+        }
+        self.overview_open.set(false);
+        self.active_canvas_id.set(gid);
+        if let Some(next) = group
+            .columns
+            .iter()
+            .find(|c| !c.pinned)
+            .and_then(|c| c.panes.first())
+            .map(|p| p.key.clone())
+        {
+            self.focused_pane_key.set(next);
+        }
+    }
+
+    /// 当前窗口独占画布 ⇄ 多列并排（React 版 `toggleTermZoom`）。
+    pub fn toggle_term_zoom(&self) {
+        self.term_zoomed.update(|v| *v = !*v);
+    }
+
     /// 新建一扇当前焦点项目的持久终端窗口并排入当前画布。
     pub fn can_create_session(&self) -> bool {
         !self.active_project_id.get().is_empty()
@@ -5362,5 +5474,100 @@ mod file_buffer_tests {
         assert!(!buffer.save_succeeded(7, "stale".into(), 0, "stale-hash".into()));
         assert_eq!(buffer.disk_hash, "");
         assert_eq!(buffer.state, FileBufferState::Loading);
+    }
+}
+
+#[cfg(test)]
+mod keynav_tests {
+    use super::*;
+    use nsh_core::{element::Root, prelude::*};
+
+    fn project_session(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project_id: "proj-falcon".into(),
+            name: String::new(),
+            auto_title: String::new(),
+            cwd: "/workspace/falcon".into(),
+            durable: true,
+            state: SessionState::Active,
+            agent: None,
+            program_status: None,
+            program_summary: None,
+            foreground_cmd: None,
+        }
+    }
+
+    #[component]
+    fn KeyNavTest() -> impl IntoElement {
+        crate::theme::install_theme(None);
+        crate::zoom::install_zoom();
+        let store = WorkspaceStore::install(&FalconLaunchOptions {
+            offline_demo: true,
+            ..Default::default()
+        });
+        store.sessions.update(|list| {
+            list.push(project_session("s2"));
+            list.push(project_session("s3"));
+            list.push(project_session("s4"));
+        });
+        // 前两列没分画布：归到左边最近一块；第三列是另一块画布
+        let c2 = new_canvas_id();
+        let mut second_canvas = column([term_key("s3"), term_key("s4")], None);
+        second_canvas.canvas = Some(c2.clone());
+        store.columns.set(vec![
+            column([term_key("sess-main")], None),
+            column([term_key("s2")], None),
+            second_canvas,
+        ]);
+        store.focused_pane_key.set(term_key("sess-main"));
+
+        // cycleTab：按排布序走、回绕
+        store.cycle_pane(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s2"));
+        store.cycle_pane(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s3"));
+        store.cycle_pane(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s4"));
+        store.cycle_pane(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("sess-main"));
+        store.cycle_pane(-1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s4"));
+
+        // focusTabAt：第 N 扇、越界不动
+        store.focus_pane_at(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s2"));
+        store.focus_pane_at(9);
+        assert_eq!(store.focused_pane_key.get(), term_key("s2"));
+
+        // stepCanvas：切到下一块画布的最左一扇，到头不回绕
+        store.focused_pane_key.set(term_key("sess-main"));
+        store.step_canvas(1);
+        assert_eq!(store.active_canvas_id.get(), c2);
+        assert_eq!(store.focused_pane_key.get(), term_key("s3"));
+        store.step_canvas(1);
+        assert_eq!(store.focused_pane_key.get(), term_key("s3"));
+        store.step_canvas(-1);
+        assert_eq!(store.focused_pane_key.get(), term_key("sess-main"));
+
+        // 切窗口会收起总览；固定列里的焦点换画布不动
+        store.overview_open.set(true);
+        store.cycle_pane(1);
+        assert!(!store.overview_open.get());
+        assert_eq!(store.focused_pane_key.get(), term_key("s2"));
+
+        assert!(!store.term_zoomed.get());
+        store.toggle_term_zoom();
+        assert!(store.term_zoomed.get());
+
+        view().child(text("keynav ok"))
+    }
+
+    #[test]
+    fn pane_and_canvas_keynav_follow_layout_order() {
+        let config = nsh_engine::EngineConfig::new(Root::of::<KeyNavTest>());
+        let mut app = nsh_testing::Headless::start(config).unwrap();
+        app.first_render().unwrap();
+        app.wait_for("keynav ok").unwrap();
     }
 }
