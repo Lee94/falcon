@@ -140,9 +140,9 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         let ui = &resolved.ui;
 
         // 目录选择器开着时筛选框自己 auto_focus（GPUI 打开选择器时聚焦 filter），
-        // 卡片别把焦点抢回去
-        let focus_card_on_open =
-            !dialog_uses_input_autofocus(&dialog) && !project_picker.get_untracked();
+        // 卡片别把焦点抢回去。project_picker 必须在 on_open 触发时再读：
+        // 表单挂载后才打开选择器，渲染期读到的还是旧值。
+        let focus_card_on_open = !dialog_uses_input_autofocus(&dialog);
         let cancel_store = store.clone();
         let cancel_dialog = dialog.clone();
         let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));
@@ -286,7 +286,7 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
             .close_on_backdrop_press(false)
             .close_on_swipe(false)
             .on_open(move || {
-                if focus_card_on_open {
+                if focus_card_on_open && !project_picker.get_untracked() {
                     focus_on_open.focus();
                 }
             })
