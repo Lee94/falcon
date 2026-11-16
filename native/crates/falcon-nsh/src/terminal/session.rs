@@ -415,9 +415,35 @@ impl TerminalSession {
         let _ = visible;
     }
 
+    /// 发起 TUI ↔ GUI 协议切换的 HTTP 请求：在服务端回包与目标模式快照落地前，
+    /// `send_input` 与结构化命令一律锁定（对应 GPUI `agent_mode_switching`，规则见 `agent_mode` 模块头）。
+    pub fn begin_agent_mode_switch(&self, graphical: bool) {
+        {
+            let mut agent = self.agent.lock();
+            agent.transition = agent.transition.start(graphical);
+        }
+        self.agent_revision.fetch_add(1, Ordering::Release);
+        self.bump_frame();
+    }
+
+    /// 切换 HTTP 请求结束。失败时按状态机约定解除 `synchronized`，必须等重连快照恢复；
+    /// 成功时转入 `awaiting_snapshot`，由随后的 `AgentSnapshot` 解锁输入。
+    pub fn finish_agent_mode_switch(&self, succeeded: bool) {
+        {
+            let mut agent = self.agent.lock();
+            agent.transition = agent.transition.finish(succeeded);
+        }
+        self.agent_revision.fetch_add(1, Ordering::Release);
+        self.bump_frame();
+    }
+
     /// 键盘 / IME 上屏 / 粘贴向会话输入字符串。
     pub fn send_input(&self, text: &str) {
         if text.is_empty() || !self.can_input() {
+            return;
+        }
+        // TUI ↔ GUI 协议转换期间严禁向旧 PTY 漏发字节（`can_send_pty_input` 同款门控）。
+        if self.agent.lock().transition.switching() {
             return;
         }
         #[cfg(test)]

@@ -583,7 +583,40 @@ fn render_pane_island(
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(zpx(2.0))
+        .gap(zpx(2.0));
+    // 对照 GPUI canvas.rs 的 pane-agent-toggle：Claude 终端（含只读镜像）点击经
+    // enableGui* 确认框发起协议转换，可交互 GUI 下只切本地排版样式。
+    if let Some(id) = &term_session_id {
+        let agent_kind = sessions
+            .iter()
+            .find(|s| &s.id == id)
+            .and_then(|s| s.agent.as_deref())
+            .and_then(falcon_proto::SessionAgent::from_wire);
+        let agent_view = store.agent_views.get().get(id).cloned();
+        if let Some(badge) =
+            crate::views::agent::AgentModeBadge::new(agent_kind, agent_view.as_ref())
+        {
+            let switch_mode = badge.switch_mode;
+            let dimmed = badge.switching;
+            let chip = store.clone();
+            let sid = id.clone();
+            right = right.child(crate::views::agent::agent_mode_chip(
+                format!("pane-agent-toggle-{pane_key}"),
+                badge.label(),
+                badge.tooltip(),
+                dimmed,
+                resolved,
+                move || {
+                    if switch_mode {
+                        chip.request_agent_gui(&sid);
+                    } else {
+                        chip.toggle_agent_view_style(&sid);
+                    }
+                },
+            ));
+        }
+    }
+    right = right
         .child(icon_button(
             format!("pin-{pane_key}"),
             t!("pane.pinRight"),
