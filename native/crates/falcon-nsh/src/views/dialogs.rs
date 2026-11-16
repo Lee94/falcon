@@ -704,7 +704,7 @@ fn render_hosts_tab(
         let testing = store.host_test_busy.get();
         if hosts.is_empty() {
             return view().py(zpx(24.0)).child(
-                text(t!("native.settingsParity.noHosts")).text_xs()
+                text(t!("host.empty")).text_xs()
                     .text_color(rgb_to_hsla(ui.muted_foreground)),
             ).into_element();
         }
@@ -780,8 +780,8 @@ fn render_hosts_tab(
                     .text_color(rgb_to_hsla(ui.muted_foreground)))
                     .when_some(host_source.as_ref(), |v, source| v.child(
                         text(if source.project_count > 0 {
-                            t!("native.settingsParity.usedBy", n = source.project_count.to_string().as_str())
-                        } else { t!("native.settingsParity.unused") })
+                            t!("host.usedBy", n = source.project_count.to_string().as_str())
+                        } else { t!("host.unused") })
                         .text_xs().text_color(rgb_to_hsla(ui.muted_foreground)),
                     )),
                 )

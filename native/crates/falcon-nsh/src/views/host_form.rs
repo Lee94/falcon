@@ -71,6 +71,18 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
     let form_revision = signal(0_u64);
     let busy = signal(false);
     let form_error = signal(None::<String>);
+    // 「检测连接」对表单草稿的试连结果（ok, 文案）；改连接字段即作废——同 GPUI
+    // `SshFields::on_change` 清 `probe` 的语义。
+    let probe = signal(None::<(bool, String)>);
+    // Web 端不探测 SSH 主机，试连按钮只在原生端渲染。
+    #[cfg(not(target_arch = "wasm32"))]
+    let probing = signal(false);
+    // 地址与用户名都非空才可试连（GPUI 的 `can_test`）。草稿存在 RefCell 里、
+    // 文本输入不 bump revision，这里单独用 signal 跟踪可连性让按钮实时禁用。
+    let testable = signal({
+        let draft = draft.borrow();
+        !draft.address.trim().is_empty() && !draft.username.trim().is_empty()
+    });
 
     let fetch_store = store.clone();
     effect(move || {
@@ -186,6 +198,8 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
     let fields_expanded = expanded.clone();
     let fields_revision = form_revision.clone();
     let fields_busy = busy.clone();
+    let fields_probe = probe.clone();
+    let fields_testable = testable.clone();
     let fields = dynamic(move || {
         let _revision = fields_revision.get();
         let is_busy = fields_busy.get();
@@ -226,6 +240,8 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
         ] {
             let field_draft = fields_draft.clone();
             let field_busy = fields_busy.clone();
+            let field_probe = fields_probe.clone();
+            let field_testable = fields_testable.clone();
             fields = fields.child(
                 view()
                     .flex_row()
@@ -260,6 +276,13 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                                     2 => draft.port = value.to_string(),
                                     _ => draft.username = value.to_string(),
                                 }
+                                if field != 0 {
+                                    field_probe.set(None);
+                                    field_testable.set(
+                                        !draft.address.trim().is_empty()
+                                            && !draft.username.trim().is_empty(),
+                                    );
+                                }
                             }),
                     ),
             );
@@ -277,6 +300,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                 let field_draft = fields_draft.clone();
                 let revision = fields_revision.clone();
                 let field_busy = fields_busy.clone();
+                let field_probe = fields_probe.clone();
                 view()
                     .label(format!("host-auth-{}", method.as_str()))
                     .px(zpx(8.0))
@@ -290,6 +314,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                             return;
                         }
                         field_draft.borrow_mut().auth = method.clone();
+                        field_probe.set(None);
                         revision.update(|revision| *revision = revision.wrapping_add(1));
                     })
                     .child(
@@ -303,6 +328,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
         if values.auth == SshAuthMethod::Key {
             let field_draft = fields_draft.clone();
             let field_busy = fields_busy.clone();
+            let field_probe = fields_probe.clone();
             fields = fields.child(
                 input()
                     .test_id("host-form-key-path")
@@ -319,6 +345,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                     .on_change(move |value: &str| {
                         if !field_busy.get() {
                             field_draft.borrow_mut().key = value.to_string();
+                            field_probe.set(None);
                         }
                     }),
             );
@@ -326,6 +353,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
         if values.auth != SshAuthMethod::Agent {
             let field_draft = fields_draft.clone();
             let field_busy = fields_busy.clone();
+            let field_probe = fields_probe.clone();
             let secret_placeholder = if fields_editing_id.is_some() {
                 t!("host.secretPreserve")
             } else {
@@ -348,6 +376,7 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                     .on_change(move |value: &str| {
                         if !field_busy.get() {
                             field_draft.borrow_mut().secret = value.to_string();
+                            field_probe.set(None);
                         }
                     }),
             );
@@ -362,6 +391,11 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
     let action_error = form_error.clone();
     let action_expanded = expanded.clone();
     let action_editing_id = editing_id.clone();
+    let action_probe = probe.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let action_probing = probing.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    let action_testable = testable.clone();
     let actions = dynamic(move || {
         if !action_expanded.get() {
             return view().into_element();
@@ -471,6 +505,99 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
             .text_color(rgb_to_hsla(ui.tint_foreground)),
         );
         let mut footer = view().flex_row().items_center().gap(zpx(8.0));
+        // Web 端不在浏览器里探测 SSH 主机（同 `WorkspaceStore::test_host_connection`）。
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let can_test = !is_busy && !action_probing.get() && action_testable.get();
+            let test_store = action_store.clone();
+            let test_draft = action_draft.clone();
+            let test_busy = action_busy.clone();
+            let test_error = action_error.clone();
+            let test_probe = action_probe.clone();
+            let test_probing = action_probing.clone();
+            let test_testable = action_testable.clone();
+            let test_editing_id = action_editing_id.clone();
+            let test_owner = form_owner.clone();
+            let mut test_button = view()
+                .test_id("host-form-test")
+                .px(zpx(10.0))
+                .py(zpx(6.0))
+                .rounded(zpx(8.0))
+                .bg(rgb_to_hsla(ui.secondary));
+            if can_test {
+                test_button = test_button.cursor_pointer().on_press(move || {
+                    if test_busy.get() || test_probing.get() || !test_testable.get() {
+                        return;
+                    }
+                    let Some(client) = test_store.client() else {
+                        return;
+                    };
+                    // 试的是表单里还没保存的凭据；编辑已有主机时带 host_id，
+                    // 留空的 secret / keyPath 服务端沿用已保存的（GPUI `input()` 语义）。
+                    let draft = test_draft.borrow().clone();
+                    let input = SshHostInput {
+                        name: if draft.name.trim().is_empty() {
+                            "test".to_string()
+                        } else {
+                            draft.name.trim().to_string()
+                        },
+                        host: draft.address.trim().to_string(),
+                        port: draft.port.trim().parse().unwrap_or(0),
+                        username: draft.username.trim().to_string(),
+                        auth_method: draft.auth,
+                        key_path: (draft.auth == SshAuthMethod::Key).then_some(draft.key),
+                        secret: (!draft.secret.is_empty()).then_some(draft.secret),
+                    };
+                    test_probing.set(true);
+                    test_probe.set(None);
+                    test_error.set(None);
+                    let generation = test_store.connection_generation();
+                    let host_id = test_editing_id.clone();
+                    let callback_store = test_store.clone();
+                    let callback_owner = test_owner.clone();
+                    spawn(async move {
+                        let result = client
+                            .test_host_draft(&input, host_id.as_deref())
+                            .await;
+                        if !callback_owner.is_live()
+                            || callback_store.connection_generation() != generation
+                        {
+                            return;
+                        }
+                        test_probing.set(false);
+                        match result {
+                            Ok(falcon_proto::SshProbeResult::Reachable { kind, home }) => {
+                                let kind = match kind {
+                                    falcon_proto::HostKind::Windows => {
+                                        t!("host.testKind_windows")
+                                    }
+                                    _ => t!("host.testKind_posix"),
+                                };
+                                test_probe.set(Some((
+                                    true,
+                                    format!("{} · {kind} · {home}", t!("host.testOk")),
+                                )));
+                            }
+                            Ok(falcon_proto::SshProbeResult::Failed { error }) => {
+                                test_probe.set(Some((false, error)));
+                            }
+                            Err(error) => {
+                                test_probe.set(Some((false, error.to_string())));
+                            }
+                        }
+                    });
+                });
+            }
+            footer = footer.child(test_button.child(
+                text(if action_probing.get() {
+                    t!("host.testing")
+                } else {
+                    t!("host.test")
+                })
+                .text_xs()
+                .text_color(rgb_to_hsla(ui.secondary_foreground)),
+            ));
+        }
         if let Some(error) = error {
             footer = footer.child(
                 text(error)
@@ -513,7 +640,19 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
                     .text_color(rgb_to_hsla(ui.secondary_foreground)),
             ));
         }
-        view().flex_col().gap(zpx(8.0)).child(footer).into_element()
+        view()
+            .flex_col()
+            .gap(zpx(8.0))
+            .when_some(action_probe.get(), |column, (ok, message)| {
+                column.child(
+                    text(message)
+                        .test_id("host-form-probe")
+                        .text_xs()
+                        .text_color(rgb_to_hsla(if ok { ui.success } else { ui.destructive })),
+                )
+            })
+            .child(footer)
+            .into_element()
     });
 
     let pick_store = store.clone();
@@ -522,6 +661,8 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
     let pick_expanded = expanded.clone();
     let pick_tailscale_open = tailscale_open.clone();
     let pick_result = tailscale_result.clone();
+    let pick_probe = probe.clone();
+    let pick_testable = testable.clone();
     let on_pick = move |device: TailscaleDevice| {
         let hosts: Vec<SshHost> = pick_store
             .hosts
@@ -541,7 +682,11 @@ pub fn HostForm(props: HostFormProps) -> impl IntoElement {
         draft.auth = SshAuthMethod::Agent;
         draft.key.clear();
         draft.secret.clear();
+        let testable =
+            !draft.address.trim().is_empty() && !draft.username.trim().is_empty();
         drop(draft);
+        pick_probe.set(None);
+        pick_testable.set(testable);
         pick_revision.update(|revision| *revision = revision.wrapping_add(1));
         pick_tailscale_open.set(false);
         pick_expanded.set(true);

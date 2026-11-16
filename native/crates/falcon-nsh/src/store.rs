@@ -2597,13 +2597,37 @@ impl WorkspaceStore {
                 {
                     store.host_test_busy.set(None);
                     match result {
-                        Ok(falcon_proto::SshProbeResult::Reachable { .. }) => {
-                            store.show_toast(crate::i18n::t!("host.testOk"))
+                        Ok(falcon_proto::SshProbeResult::Reachable { kind, home }) => {
+                            // GPUI toast：标题 host.testOk + 正文「系统类型 · $HOME」
+                            let kind = match kind {
+                                falcon_proto::HostKind::Windows => {
+                                    crate::i18n::t!("host.testKind_windows")
+                                }
+                                _ => crate::i18n::t!("host.testKind_posix"),
+                            };
+                            let body = crate::i18n::t!(
+                                "host.testOkBody",
+                                kind = kind.as_str(),
+                                home = home.as_str()
+                            );
+                            store.show_toast(format!(
+                                "{} · {}",
+                                crate::i18n::t!("host.testOk"),
+                                body
+                            ))
                         }
                         Ok(falcon_proto::SshProbeResult::Failed { error }) => {
-                            store.show_toast(error)
+                            store.show_toast(format!(
+                                "{} · {}",
+                                crate::i18n::t!("host.testFail"),
+                                error
+                            ))
                         }
-                        Err(error) => store.show_toast(error.to_string()),
+                        Err(error) => store.show_toast(format!(
+                            "{} · {}",
+                            crate::i18n::t!("host.testFail"),
+                            error
+                        )),
                     }
                 }
             });

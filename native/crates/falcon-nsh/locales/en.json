@@ -340,7 +340,10 @@
     "shareHint_local": "Publish the HTTP service on this machine's 127.0.0.1 to the internet. Anyone with the link can access it.",
     "shareHint_remote": "Connect the HTTP service on this host's 127.0.0.1 over SSH, then publish it. Anyone with the link can access it.",
     "shareCopy": "Copy URL",
-    "shareCopied": "Copied"
+    "shareCopied": "Copied",
+    "shareOpen": "Open in browser",
+    "shareDelete": "Stop and delete",
+    "delete": "Delete"
   },
   "session": {
     "state_active": "Running",
@@ -438,6 +441,15 @@
   },
   "host": {
     "test": "Test connection",
+    "testing": "Connecting…",
+    "testOk": "Connection succeeded",
+    "testOkBody": "%{kind} · %{home}",
+    "testFail": "Connection failed",
+    "testKind_posix": "Linux / macOS",
+    "testKind_windows": "Windows",
+    "unused": "Not referenced",
+    "usedBy": "Used by %{n} projects",
+    "empty": "No saved remote hosts yet.",
     "edit": "Edit",
     "delete": "Delete…"
   },

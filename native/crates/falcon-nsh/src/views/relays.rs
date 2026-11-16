@@ -393,7 +393,9 @@ pub fn RelayRow(props: RelayRowProps) -> impl IntoElement {
         }
         if let Some(url) = rule.public_url.clone().filter(|url| !url.is_empty()) {
             let open = url.clone();
+            let open_again = url.clone();
             let copy_owner = row_owner.clone();
+            let shown = url.strip_prefix("https://").unwrap_or(&url).to_string();
             main = main
                 .child(
                     view()
@@ -403,7 +405,7 @@ pub fn RelayRow(props: RelayRowProps) -> impl IntoElement {
                             let _ = open_url(open.clone());
                         })
                         .child(
-                            text(url.clone())
+                            text(shown)
                                 .text_xs()
                                 .text_color(rgb_to_hsla(ui.primary)),
                         ),
@@ -432,6 +434,16 @@ pub fn RelayRow(props: RelayRowProps) -> impl IntoElement {
                                 copied.set(false);
                             });
                         });
+                    },
+                ))
+                .child(icon_button(
+                    format!("relay-open-{}", rule.id),
+                    t!("forward.shareOpen"),
+                    Glyph::ExternalLink,
+                    false,
+                    &resolved,
+                    move || {
+                        let _ = open_url(open_again.clone());
                     },
                 ));
         }
@@ -493,7 +505,11 @@ pub fn RelayRow(props: RelayRowProps) -> impl IntoElement {
                     ))
                     .child(icon_button(
                         format!("relay-delete-{}", rule.id),
-                        t!("native.relays.delete"),
+                        if share {
+                            t!("forward.shareDelete")
+                        } else {
+                            t!("forward.delete")
+                        },
                         Glyph::Trash,
                         false,
                         &resolved,

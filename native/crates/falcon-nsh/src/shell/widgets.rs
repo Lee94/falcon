@@ -40,6 +40,7 @@ pub enum Glyph {
     ListTree,
     Copy,
     Edit,
+    ExternalLink,
 }
 
 pub(crate) fn session_icon(agent: Option<falcon_proto::SessionAgent>) -> AnyElement {
@@ -113,6 +114,9 @@ pub fn glyph_sized(kind: Glyph, size: Points) -> impl IntoElement {
         Glyph::Box => "<path d='m3 7 9-5 9 5v10l-9 5-9-5Z M3 7l9 5 9-5 M12 12v10'/>",
         Glyph::Branch => {
             "<circle cx='6' cy='4' r='2'/><circle cx='18' cy='6' r='2'/><circle cx='6' cy='20' r='2'/><path d='M6 6v12 M18 8c0 6-12 2-12 8'/>"
+        }
+        Glyph::ExternalLink => {
+            "<path d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/><path d='M15 3h6v6'/><path d='M10 14 21 3'/>"
         }
     };
     let markup = format!(
