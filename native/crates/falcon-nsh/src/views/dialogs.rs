@@ -205,6 +205,9 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
                 foreground_cmd,
             } => render_confirm_terminate_modal(&store, &resolved, &session_id, &foreground_cmd)
                 .into_element(),
+            ActiveDialog::ConfirmEnableAgentGui { session_id } => {
+                render_confirm_enable_agent_gui(&store, &resolved, &session_id).into_element()
+            }
             batch @ (ActiveDialog::ConfirmTerminateMany { .. }
             | ActiveDialog::ConfirmClearAllDead { .. }) => {
                 crate::shell::overview::render_batch_confirmation(&store, &resolved, batch)
@@ -1359,6 +1362,83 @@ fn render_confirm_terminate_modal(
                                         .text_xs()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb_to_hsla(ui.destructive_foreground)),
+                                ),
+                        ),
+                ),
+        )
+}
+
+/// Claude 会话启用可交互 GUI 前的说明确认框（对照 GPUI `enableGui*` 确认块）。
+fn render_confirm_enable_agent_gui(
+    store: &WorkspaceStore,
+    resolved: &falcon_theme::ResolvedTheme,
+    session_id: &str,
+) -> impl IntoElement {
+    let ui = &resolved.ui;
+    let st_cancel = store.clone();
+    let st_confirm = store.clone();
+    let sid_confirm = session_id.to_string();
+
+    view()
+        .flex_col()
+        .child(modal_header(
+            store,
+            resolved,
+            t!("agentView.enableGuiTitle"),
+        ))
+        .child(
+            view()
+                .flex_col()
+                .p(zpx(14.0))
+                .gap(zpx(12.0))
+                .child(
+                    text(t!("agentView.enableGuiBody"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(
+                    text(t!("agentView.enableGuiFootnote"))
+                        .text_xs()
+                        .text_color(rgb_to_hsla(ui.muted_foreground)),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .justify_end()
+                        .gap(zpx(8.0))
+                        .child(
+                            view()
+                                .test_id("agent-gui-cancel")
+                                .px(zpx(10.0))
+                                .py(zpx(5.0))
+                                .rounded(zpx(6.0))
+                                .cursor_pointer()
+                                .bg(rgb_to_hsla(ui.secondary))
+                                .on_press(move || {
+                                    st_cancel.active_dialog.set(ActiveDialog::None)
+                                })
+                                .child(
+                                    text(t!("common.cancel"))
+                                        .text_xs()
+                                        .text_color(rgb_to_hsla(ui.secondary_foreground)),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .test_id("agent-gui-confirm")
+                                .px(zpx(10.0))
+                                .py(zpx(5.0))
+                                .rounded(zpx(6.0))
+                                .cursor_pointer()
+                                .bg(rgb_to_hsla(ui.tint))
+                                .on_press(move || {
+                                    st_confirm.confirm_enable_agent_gui(&sid_confirm)
+                                })
+                                .child(
+                                    text(t!("agentView.enableGuiConfirm"))
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb_to_hsla(ui.tint_foreground)),
                                 ),
                         ),
                 ),

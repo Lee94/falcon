@@ -95,6 +95,10 @@ pub enum ActiveDialog {
         session_id: String,
         foreground_cmd: String,
     },
+    /// Claude 会话从官方终端切换到可交互 GUI 前的 `enableGui*` 说明确认框。
+    ConfirmEnableAgentGui {
+        session_id: String,
+    },
     ConfirmTerminateMany {
         session_ids: Vec<String>,
         connection_generation: u64,
@@ -4280,6 +4284,132 @@ impl WorkspaceStore {
                 entry.snapshot = Some(snapshot);
             });
         }
+    }
+
+    /// 顶栏「终端 ↔ 图形」徽章的点击入口（对照 GPUI `request_agent_mode_switch`）：
+    /// 已是可交互 GUI 时只切本地排版；官方终端模式的 Claude 会话先弹 `enableGui*` 确认框。
+    pub fn request_agent_gui(&self, session_id: &str) {
+        let Some(terminal) = self.terminals.map.lock().get(session_id).cloned() else {
+            return;
+        };
+        let runtime = terminal.agent_runtime();
+        if falcon_core::agent_mode::is_interactive_gui(runtime.state.as_ref()) {
+            self.toggle_agent_view_style(session_id);
+            return;
+        }
+        let meta = terminal.meta();
+        if runtime.transition.switching()
+            || meta.state != SessionState::Active
+            || meta.connection != crate::terminal::session::ConnectionState::Active
+        {
+            return;
+        }
+        self.active_dialog.set(ActiveDialog::ConfirmEnableAgentGui {
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// `enableGuiConfirm` 同意后发起 `POST /api/sessions/:id/agent-mode`（`gui-control`）。
+    /// 输入锁定到 HTTP 回包且目标模式快照落地；失败提示区分旧服务端 `agent_gui_unsupported`。
+    /// 模式一律以 WS 权威快照为准，HTTP 成功不乐观改视图（GPUI `enable_agent_gui` 同款约定）。
+    pub fn confirm_enable_agent_gui(&self, session_id: &str) {
+        self.active_dialog.set(ActiveDialog::None);
+        let Some(terminal) = self.terminals.map.lock().get(session_id).cloned() else {
+            return;
+        };
+        {
+            let runtime = terminal.agent_runtime();
+            let meta = terminal.meta();
+            if runtime.transition.switching()
+                || meta.state != SessionState::Active
+                || meta.connection != crate::terminal::session::ConnectionState::Active
+            {
+                return;
+            }
+        }
+        terminal.begin_agent_mode_switch(true);
+        let generation = self.connection_generation.get();
+        let sid = session_id.to_string();
+        let store = self.clone();
+        self.spawn_root(async move {
+            let result = store.post_enable_agent_gui(&sid).await;
+            terminal.finish_agent_mode_switch(result.is_ok());
+            if let Err(message) = result
+                && store.connection_generation.get() == generation
+            {
+                let body = if message == "agent_gui_unsupported" {
+                    crate::i18n::t!("agentView.switchUnsupported").to_string()
+                } else {
+                    message
+                };
+                store.show_toast(format!(
+                    "{}: {}",
+                    crate::i18n::t!("agentView.switchFailed"),
+                    body
+                ));
+            }
+        });
+    }
+
+    /// 可交互 GUI 内部的本地排版切换（`Rich ↔ Compact`），不触碰底层 CLI。
+    pub fn toggle_agent_view_style(&self, session_id: &str) {
+        self.agent_views.update(|views| {
+            if let Some(agent) = views.get_mut(session_id) {
+                agent.style = agent.style.toggle();
+            }
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn post_enable_agent_gui(&self, session_id: &str) -> Result<(), String> {
+        let Some(client) = self.client() else {
+            return Err("agent_gui_unsupported".to_string());
+        };
+        client
+            .enable_agent_gui(session_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message)
+    }
+
+    /// Web 端走浏览器 `fetch`，能力探测与 `falcon-client` 的 `enable_agent_gui` 保持一致。
+    #[cfg(target_arch = "wasm32")]
+    async fn post_enable_agent_gui(&self, session_id: &str) -> Result<(), String> {
+        use nsh_core::prelude::{HttpRequest, fetch};
+        let unsupported = || "agent_gui_unsupported".to_string();
+        let base = self.server_url.get().trim_end_matches('/').to_string();
+        let path = format!(
+            "{base}/api/sessions/{}/agent-mode",
+            crate::session_operations::encode_path_segment(session_id)
+        );
+        let capability = fetch(HttpRequest::get(path.clone()))
+            .await
+            .map_err(|_| unsupported())?;
+        let capability: serde_json::Value = if capability.ok() {
+            serde_json::from_slice(&capability.body).map_err(|_| unsupported())?
+        } else {
+            return Err(unsupported());
+        };
+        if capability["interactiveGui"].as_bool() != Some(true) {
+            return Err(unsupported());
+        }
+        let response = fetch(
+            HttpRequest::post(path, br#"{"mode":"gui-control"}"#.to_vec())
+                .header("Content-Type", "application/json"),
+        )
+        .await
+        .map_err(|error| error)?;
+        if response.ok() {
+            return Ok(());
+        }
+        Err(serde_json::from_slice::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|body| {
+                body.get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("HTTP {}", response.status())))
     }
 
     /// 判断某条会话此刻是否挂在工作区的任意列上（未挂即处于 Detach 后台运行态）。
