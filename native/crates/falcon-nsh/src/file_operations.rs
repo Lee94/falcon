@@ -975,6 +975,13 @@ impl FileOperations {
             return;
         }
         let skipped_dirs = selected_entries.len().saturating_sub(files.len());
+        // 与 GPUI `download_paths` 一致：派发时就提示有文件夹被跳过；结束汇总里还会再记一次。
+        if skipped_dirs > 0 {
+            store.show_toast(
+                crate::i18n::t!("files.downloadSkipDirs", count = skipped_dirs.to_string())
+                    .to_string(),
+            );
+        }
         let Some(client) = store.client() else {
             store.show_toast(crate::i18n::t!("files.operations.backendUnavailable").to_string());
             return;

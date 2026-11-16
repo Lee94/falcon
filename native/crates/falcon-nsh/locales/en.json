@@ -421,8 +421,20 @@
     "omp": "Oh My Pi"
   },
   "files": {
+    "backToFolder": "Back to folder",
+    "selectAll": "Select all",
+    "open": "Open",
+    "openFolder": "Open",
     "copyPath": "Copy path",
     "copiedPath": "Path copied",
+    "download": "Download",
+    "downloadMany": "Download selected files",
+    "downloadSkipDirs": "Skipped %{count} folders (only files can be downloaded)",
+    "rename": "Rename",
+    "delete": "Delete",
+    "prevFile": "Previous file",
+    "nextFile": "Next file",
+    "imageDims": "Image dimensions",
     "operations": {
       "uploadAction": "Upload",
       "downloadAction": "Download",

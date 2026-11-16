@@ -3,6 +3,7 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
+use crate::shell::popups::themed_tooltip;
 use crate::shell::widgets::{Glyph, check_indicator, glyph};
 use crate::store::{ActiveDialog, ConfirmationKind, FileJob, JobKind, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
@@ -87,14 +88,22 @@ pub fn FileOperationsToolbar() -> impl IntoElement {
                     move || st.file_operations.upload_folder(&st),
                 ));
                 let st = store.clone();
-                controls = controls.child(action_button(
-                    t!("files.operations.download").to_string(),
-                    "file-operations-download",
-                    !ready || files_selected == 0,
-                    &resolved,
-                    false,
-                    move || st.file_operations.download_selected(&st),
-                ));
+                controls = controls.child(
+                    view()
+                        .tooltip(themed_tooltip(
+                            text(t!("files.downloadMany")),
+                            None,
+                            &resolved,
+                        ))
+                        .child(action_button(
+                            t!("files.operations.download").to_string(),
+                            "file-operations-download",
+                            !ready || files_selected == 0,
+                            &resolved,
+                            false,
+                            move || st.file_operations.download_selected(&st),
+                        )),
+                );
 
                 view()
                     .flex_col()

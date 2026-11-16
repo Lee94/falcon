@@ -6,15 +6,20 @@
 //!      触发时弹出磁盘冲突保护横幅，拒绝静默覆盖；
 //!   2. HTML 预览严格遵循 ADR 0007：仅允许加载 `/api/projects/<id>/raw/` 只读原始字节路由。
 
+use std::collections::HashMap;
+
+use falcon_core::file_path::join_host_path;
 use falcon_core::pane_key::file_key;
 use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, icon_button};
-use crate::shell::popups::themed_tooltip;
-use crate::store::{ActiveDialog, FileBufferState, FilePreviewKind, use_workspace};
+use crate::shell::widgets::{CheckState, Glyph, check_state_indicator, icon_button};
+use crate::shell::popups::{PopupAction, ServerUrlGuard, context_menu, themed_tooltip};
+use crate::store::{
+    ActiveDialog, FileBufferState, FilePreviewKind, WorkspaceStore, use_workspace,
+};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::views::file_operations::file_operations_toolbar;
 use crate::views::file_operations::{selection_icon, selection_indicator};
@@ -215,19 +220,29 @@ pub fn FilesPanel() -> impl IntoElement {
 
             let visible_paths: Vec<String> =
                 filtered.iter().map(|entry| entry.path.clone()).collect();
+            // 右键菜单判定行类别用（GPUI row_menu 的 targets 按可见顺序取勾选子集）。
+            let entry_kinds: HashMap<String, bool> = filtered
+                .iter()
+                .map(|entry| (entry.path.clone(), entry.is_dir))
+                .collect();
+            let menu_guard = ServerUrlGuard::capture(&store);
             let selected_paths = store.file_operations.selected.get();
             let selected_visible = visible_paths
                 .iter()
                 .filter(|path| selected_paths.contains(*path))
                 .count();
-            let all_visible_selected = selected_visible == visible_paths.len();
+            let all_visible_selected =
+                !visible_paths.is_empty() && selected_visible == visible_paths.len();
+            // 部分勾选时表头框显示半选（GPUI Check::Mixed）。
+            let header_state = if all_visible_selected {
+                CheckState::On
+            } else if selected_visible > 0 {
+                CheckState::Mixed
+            } else {
+                CheckState::Off
+            };
             let bulk_store = store.clone();
             let bulk_paths = visible_paths.clone();
-            let bulk_label = if all_visible_selected {
-                t!("files.operations.deselectVisible")
-            } else {
-                t!("files.operations.selectVisible")
-            };
 
             view()
                 .flex_col()
@@ -242,6 +257,7 @@ pub fn FilesPanel() -> impl IntoElement {
                         .py(zpx(4.0))
                         .child(
                             view()
+                                .test_id("files-select-all")
                                 .w(zpx(24.0))
                                 .flex_none()
                                 .flex_row()
@@ -251,8 +267,12 @@ pub fn FilesPanel() -> impl IntoElement {
                                 .on_press(move || {
                                     bulk_store.file_operations.select_visible(&bulk_paths)
                                 })
-                                .child(selection_indicator(all_visible_selected, &resolved))
-                                .tooltip(themed_tooltip(text(bulk_label), None, &resolved)),
+                                .child(check_state_indicator(header_state, &resolved))
+                                .tooltip(themed_tooltip(
+                                    text(t!("files.selectAll")),
+                                    None,
+                                    &resolved,
+                                )),
                         )
                         .child(
                             text(t!("native.files.name"))
@@ -269,6 +289,7 @@ pub fn FilesPanel() -> impl IntoElement {
                     let st = store.clone();
                     let pid = proj_id.clone();
                     let path = entry.path.clone();
+                    let menu_path = path.clone();
                     let is_dir = entry.is_dir;
                     let size_label = falcon_core::file_path::format_size(Some(entry.size_bytes as f64));
                     let mtime = format_mtime(entry.mtime);
@@ -280,7 +301,7 @@ pub fn FilesPanel() -> impl IntoElement {
                     let row_path = path.clone();
                     let row_visible = visible_paths.clone();
                     let file_open_blocked = !is_dir && row_store.blocks_file_open(&store);
-                    view()
+                    let row = view()
                         .flex_row()
                         .items_center()
                         .px(zpx(8.0))
@@ -358,7 +379,19 @@ pub fn FilesPanel() -> impl IntoElement {
                             text(mtime).w(zpx(152.0)).flex_none().text_xs()
                                 .font_family(FONT_FAMILY_MONO)
                                 .text_color(rgb_to_hsla(ui.muted_foreground)),
-                        ))
+                        ));
+                    context_menu(
+                        row,
+                        file_row_actions(
+                            &store,
+                            &menu_guard,
+                            &menu_path,
+                            is_dir,
+                            &visible_paths,
+                            &entry_kinds,
+                        ),
+                        &resolved,
+                    )
                 }))
                 .into_element()
         })))
@@ -805,6 +838,138 @@ pub fn FilePaneView(props: FilePaneViewProps) -> impl IntoElement {
                 })
                 .into_element()
         }))
+}
+
+/// 行右键菜单（GPUI `FilesPanel::row_menu`）：右键只开菜单、不改勾选——勾中的多选组仍对整组
+/// 生效，点到未勾的项只对这一项动手。NSH 的文件操作以勾选集为目标，动作执行前先把勾选
+/// 同步成目标集，让工具栏计数与确认框列出的是同一批路径。
+fn file_row_actions(
+    store: &WorkspaceStore,
+    guard: &ServerUrlGuard,
+    entry_path: &str,
+    entry_is_dir: bool,
+    visible_paths: &[String],
+    kinds: &HashMap<String, bool>,
+) -> Vec<PopupAction> {
+    let selected = store.file_operations.selected.get();
+    let multi = selected.contains(entry_path) && selected.len() > 1;
+    let targets: Vec<String> = if multi {
+        visible_paths
+            .iter()
+            .filter(|path| selected.contains(*path))
+            .cloned()
+            .collect()
+    } else {
+        vec![entry_path.to_string()]
+    };
+    let files: Vec<String> = targets
+        .iter()
+        .filter(|path| !kinds.get(*path).copied().unwrap_or(false))
+        .cloned()
+        .collect();
+    let mut items = Vec::new();
+
+    if !multi {
+        let st = store.clone();
+        let path = entry_path.to_string();
+        let label = if entry_is_dir {
+            t!("files.openFolder")
+        } else {
+            t!("files.open")
+        };
+        items.push(PopupAction::new(guard.clone(), label, false, false, move || {
+            if entry_is_dir {
+                st.browse_directory(&path);
+            } else if st.file_operations.blocks_file_open(&st) {
+                st.show_toast(
+                    st.file_operations
+                        .file_open_lock_message(&st)
+                        .unwrap_or_else(|| t!("files.operations.busy").to_string()),
+                );
+            } else {
+                let pid = st.active_project_id.get();
+                st.open_file_pane(&pid, &path);
+            }
+        }));
+    }
+    {
+        // 与 GPUI `copy_paths` 一致：工作目录 + 条目路径拼成宿主机路径，一行一个。
+        let st = store.clone();
+        let paths = targets.clone();
+        items.push(PopupAction::new(
+            guard.clone(),
+            t!("files.copyPath"),
+            false,
+            false,
+            move || {
+                let root = st
+                    .projects
+                    .get()
+                    .into_iter()
+                    .find(|p| p.id == st.active_project_id.get())
+                    .map(|p| p.path);
+                let text = paths
+                    .iter()
+                    .map(|p| join_host_path(root.as_deref(), p))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                set_clipboard(text);
+                st.show_toast(t!("files.copiedPath"));
+            },
+        ));
+    }
+    if !files.is_empty() {
+        // 只下载文件：目标里的目录不进勾选，也就不会算进跳过提示（同 GPUI 右键下载）。
+        let st = store.clone();
+        items.push(PopupAction::new(
+            guard.clone(),
+            t!("files.download"),
+            false,
+            false,
+            move || {
+                st.file_operations
+                    .selected
+                    .set(files.iter().cloned().collect());
+                st.file_operations.download_selected(&st);
+            },
+        ));
+    }
+    if !multi {
+        let st = store.clone();
+        let path = entry_path.to_string();
+        items.push(PopupAction::new(
+            guard.clone(),
+            t!("files.rename"),
+            false,
+            false,
+            move || {
+                st.file_operations
+                    .selected
+                    .set(std::collections::BTreeSet::from([path.clone()]));
+                st.file_operations.begin_rename(&st);
+            },
+        ));
+    }
+    {
+        let st = store.clone();
+        let paths = targets;
+        items.push(
+            PopupAction::new(
+                guard.clone(),
+                t!("files.delete"),
+                false,
+                true,
+                move || {
+                    st.file_operations
+                        .selected
+                        .set(paths.iter().cloned().collect());
+                    st.file_operations.delete_selected(&st);
+                },
+            )
+            .sep(),
+        );
+    }
+    items
 }
 
 fn format_mtime(sec: Option<i64>) -> String {

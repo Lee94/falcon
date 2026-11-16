@@ -12,7 +12,7 @@ use nsh_core::element::input;
 use nsh_core::prelude::*;
 
 use crate::i18n::t;
-use crate::shell::widgets::{Glyph, glyph, icon_button};
+use crate::shell::widgets::{Glyph, glyph, icon_button, icon_button_disabled};
 use crate::store::{ActiveDialog, WorkspaceStore, use_workspace};
 use crate::terminal::bind_safe_key_when;
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
@@ -173,14 +173,84 @@ pub(crate) fn PreviewPopup() -> impl IntoElement {
             .text_sm()
             .text_color(rgb_to_hsla(resolved.ui.foreground)),
         )
-        .child(icon_button(
-            "preview-close",
-            t!("native.preview.close"),
-            Glyph::Close,
-            false,
-            &resolved,
-            move || close(&close_store),
-        ));
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(zpx(4.0))
+                // 上一个 / 下一个文件（GPUI 浮层工具条的 fv-popup-prev/next）：沿文件栏
+                // 当前可见顺序翻页，到两端禁用；差异浮层的翻页在差异头里（git.prevFile/nextFile）。
+                .child(dynamic({
+                    let store = store.clone();
+                    move || {
+                        if diff {
+                            return view().into_element();
+                        }
+                        let resolved = theme.resolved();
+                        let Some(current) = store
+                            .preview_popup
+                            .get()
+                            .and_then(|target| target.path)
+                        else {
+                            return view().into_element();
+                        };
+                        let files = navigable_paths(
+                            &store,
+                            &query.get(),
+                            tree.get(),
+                            hidden.get(),
+                            &collapsed.get(),
+                        );
+                        let index = files.iter().position(|p| *p == current);
+                        let has_prev = index.is_some_and(|i| i > 0);
+                        let has_next = index.is_some_and(|i| i + 1 < files.len());
+                        let prev_store = store.clone();
+                        let prev_files = files.clone();
+                        let next_store = store.clone();
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(zpx(4.0))
+                            .child(icon_button_disabled(
+                                "preview-prev-file",
+                                t!("files.prevFile"),
+                                Glyph::ChevronUp,
+                                false,
+                                !has_prev,
+                                &resolved,
+                                move || {
+                                    if let Some(i) = index.filter(|i| *i > 0) {
+                                        activate(&prev_store, &prev_files[i - 1], false);
+                                    }
+                                },
+                            ))
+                            .child(icon_button_disabled(
+                                "preview-next-file",
+                                t!("files.nextFile"),
+                                Glyph::ChevronDown,
+                                false,
+                                !has_next,
+                                &resolved,
+                                move || {
+                                    if let Some(i) =
+                                        index.filter(|i| *i + 1 < files.len())
+                                    {
+                                        activate(&next_store, &files[i + 1], false);
+                                    }
+                                },
+                            ))
+                            .into_element()
+                    }
+                }))
+                .child(icon_button(
+                    "preview-close",
+                    t!("native.preview.close"),
+                    Glyph::Close,
+                    false,
+                    &resolved,
+                    move || close(&close_store),
+                )),
+        );
     view()
         .test_id("preview-popup")
         .size_full()
@@ -214,9 +284,33 @@ pub(crate) fn PreviewPopup() -> impl IntoElement {
                                 move || tree.update(|value| *value = !*value),
                             ));
                     if !diff {
+                        // 返回文件夹（GPUI 预览条的 files.backToFolder）：文件栏浏览到别处后，
+                        // 一键回到正在预览的文件所在的目录。
+                        let back_dir = store
+                            .preview_popup
+                            .get()
+                            .and_then(|target| target.path)
+                            .and_then(|path| parent_nav_path(&path));
+                        let back_disabled = back_dir.is_none()
+                            || back_dir.as_deref() == Some(store.file_directory.get().as_str());
+                        let back = store.clone();
+                        let back_to = back_dir.clone();
                         let up = store.clone();
                         let refresh = store.clone();
                         tools = tools
+                            .child(icon_button_disabled(
+                                "preview-back-folder",
+                                t!("files.backToFolder"),
+                                Glyph::ArrowLeft,
+                                false,
+                                back_disabled,
+                                &resolved,
+                                move || {
+                                    if let Some(dir) = back_to.clone() {
+                                        back.browse_directory(&dir);
+                                    }
+                                },
+                            ))
                             .child(icon_button(
                                 "preview-parent",
                                 t!("native.preview.parent"),
@@ -596,4 +690,42 @@ fn render_list(
         .min_h_0()
         .child(list)
         .into_element()
+}
+
+/// 文件栏当前可翻页的文件顺序（GPUI `navigable_files`）：与 `render_list` 的行序一致，
+/// 目录行只作展开停靠点，不是翻页目标（同文件栏搜索框的方向键行为）。
+fn navigable_paths(
+    store: &WorkspaceStore,
+    query: &str,
+    tree: bool,
+    hidden: bool,
+    collapsed: &HashSet<String>,
+) -> Vec<String> {
+    let searching = !query.trim().is_empty();
+    if searching || tree {
+        let paths: Vec<String> = store
+            .quick_open_paths
+            .get()
+            .into_iter()
+            .filter(|path| hidden || !path.split('/').any(is_hidden_name))
+            .collect();
+        if searching {
+            return filter_files(&paths, query, FILE_SEARCH_LIMIT);
+        }
+        let mut rows = Vec::new();
+        tree_rows(build_file_tree(paths, Clone::clone), collapsed, 0, &mut rows);
+        return rows
+            .into_iter()
+            .filter(|(_, _, directory, _)| !directory)
+            .map(|(path, _, _, _)| path)
+            .collect();
+    }
+    store
+        .file_entries
+        .get()
+        .into_iter()
+        .filter(|entry| !entry.is_dir)
+        .filter(|entry| hidden || !is_hidden_name(&entry.name))
+        .map(|entry| entry.path)
+        .collect()
 }

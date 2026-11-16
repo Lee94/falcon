@@ -235,6 +235,31 @@ pub fn ImagePreview(props: ImagePreviewProps) -> impl IntoElement {
                         .flex_row()
                         .items_center()
                         .gap(zpx(4.0))
+                        // 图片尺寸（GPUI 缩放条左侧的 `image-dims`）：解码完成才有固有尺寸。
+                        .when(loaded.get() && !failed.get(), |bar| {
+                            let g = geometry.get();
+                            bar.child(
+                                text(format!(
+                                    "{} × {}",
+                                    g.natural.0.round(),
+                                    g.natural.1.round()
+                                ))
+                                .test_id("image-dims")
+                                .tooltip(themed_tooltip(
+                                    text(t!("files.imageDims")),
+                                    None,
+                                    &resolved,
+                                ))
+                                .text_xs()
+                                .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+                            )
+                            .child(
+                                view()
+                                    .w(zpx(1.0))
+                                    .h(zpx(14.0))
+                                    .bg(rgba_to_hsla(resolved.ui.border)),
+                            )
+                        })
                         .child(icon_button(
                             "image-zoom-out",
                             t!("native.files.zoomOut"),

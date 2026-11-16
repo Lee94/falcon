@@ -40,6 +40,8 @@ pub enum Glyph {
     ListTree,
     Copy,
     Edit,
+    ArrowLeft,
+    ChevronUp,
 }
 
 pub(crate) fn session_icon(agent: Option<falcon_proto::SessionAgent>) -> AnyElement {
@@ -93,6 +95,8 @@ pub fn glyph_sized(kind: Glyph, size: Points) -> impl IntoElement {
         Glyph::Terminal => "<path d='m4 5 6 6-6 6 M13 18h7'/>",
         Glyph::ChevronRight => "<path d='m9 5 7 7-7 7'/>",
         Glyph::ChevronDown => "<path d='m5 9 7 7 7-7'/>",
+        Glyph::ChevronUp => "<path d='m5 15 7-7 7 7'/>",
+        Glyph::ArrowLeft => "<path d='M20 12H4 M11 5 4 12 11 19'/>",
         Glyph::Minus => "<path d='M5 12h14'/>",
         Glyph::Plus => "<path d='M12 5v14 M5 12h14'/>",
         Glyph::Settings => {
@@ -144,10 +148,38 @@ pub fn icon_button_with_shortcut(
     resolved: &falcon_theme::ResolvedTheme,
     action: impl Fn() + 'static,
 ) -> impl IntoElement {
+    icon_button_full(id, title, icon, active, false, shortcut, resolved, action)
+}
+
+/// `icon_button` 的禁用版（GPUI `tool_button.disabled`）：禁用态变淡、无按压反馈，动作不触发。
+pub fn icon_button_disabled(
+    id: impl Into<String>,
+    title: String,
+    icon: Glyph,
+    active: bool,
+    disabled: bool,
+    resolved: &falcon_theme::ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    icon_button_full(id, title, icon, active, disabled, None, resolved, action)
+}
+
+fn icon_button_full(
+    id: impl Into<String>,
+    title: String,
+    icon: Glyph,
+    active: bool,
+    disabled: bool,
+    shortcut: Option<&str>,
+    resolved: &falcon_theme::ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
     let ui = &resolved.ui;
     view()
         .label(id.into())
         .focusable(true)
+        .disabled(disabled)
+        .disabled_style(|s| s.opacity(0.5))
         .tooltip(themed_tooltip(text(title), shortcut.map(shortcut_label).map(Into::into), resolved))
         .w(zpx(28.0))
         .h(zpx(28.0))
@@ -155,18 +187,26 @@ pub fn icon_button_with_shortcut(
         .items_center()
         .justify_center()
         .rounded(zpx(8.0))
-        .cursor_pointer()
+        .when(!disabled, |v| v.cursor_pointer())
         .text_color(rgb_to_hsla(if active {
             ui.tint_foreground
         } else {
             ui.muted_foreground
         }))
         .when(active, |v| v.bg(rgb_to_hsla(ui.tint)))
-        .hover(|s| {
-            s.bg(rgb_to_hsla(ui.muted))
-                .text_color(rgb_to_hsla(ui.foreground))
+        .hover(move |s| {
+            if disabled {
+                s
+            } else {
+                s.bg(rgb_to_hsla(ui.muted))
+                    .text_color(rgb_to_hsla(ui.foreground))
+            }
         })
-        .on_press(action)
+        .on_press(move || {
+            if !disabled {
+                action();
+            }
+        })
         .child(glyph(icon))
 }
 
@@ -186,8 +226,20 @@ pub fn button_caption(label: String, spec: &str, resolved: &falcon_theme::Resolv
             .child(text(shortcut_label(spec)).text_size(zpx(10.0))))
 }
 
+/// 三态勾选（GPUI `Check::Off/On/Mixed`）：表头全选要有半选态。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Off,
+    On,
+    Mixed,
+}
+
 /// 勾选状态用矢量绘制，避免等宽字体的 Unicode 方框在不同平台上显示成细小字形。
 pub fn check_indicator(checked: bool, resolved: &falcon_theme::ResolvedTheme) -> impl IntoElement {
+    check_state_indicator(if checked { CheckState::On } else { CheckState::Off }, resolved)
+}
+
+pub fn check_state_indicator(state: CheckState, resolved: &falcon_theme::ResolvedTheme) -> impl IntoElement {
     let ui = &resolved.ui;
     view()
         .w(zpx(14.0))
@@ -198,9 +250,9 @@ pub fn check_indicator(checked: bool, resolved: &falcon_theme::ResolvedTheme) ->
         .rounded(zpx(4.0))
         .border_1()
         .border_color(crate::theme::rgba_to_hsla(ui.border))
-        .when(checked, |v| {
+        .when(state != CheckState::Off, |v| {
             v.bg(rgb_to_hsla(ui.foreground))
                 .text_color(rgb_to_hsla(ui.background))
-                .child(glyph(Glyph::Check))
+                .child(glyph(if state == CheckState::Mixed { Glyph::Minus } else { Glyph::Check }))
         })
 }
