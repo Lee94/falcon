@@ -139,7 +139,10 @@ pub fn ModalLayer(props: ModalLayerProps) -> impl IntoElement {
         };
         let ui = &resolved.ui;
 
-        let focus_card_on_open = !dialog_uses_input_autofocus(&dialog);
+        // 目录选择器开着时筛选框自己 auto_focus（GPUI 打开选择器时聚焦 filter），
+        // 卡片别把焦点抢回去
+        let focus_card_on_open =
+            !dialog_uses_input_autofocus(&dialog) && !project_picker.get_untracked();
         let cancel_store = store.clone();
         let cancel_dialog = dialog.clone();
         let settings_dialog = matches!(dialog, ActiveDialog::Settings(_));

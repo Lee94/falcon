@@ -1,5 +1,8 @@
 //! Host-side probes shared by the project form's embedded directory browser and shell menu.
+use std::cell::RefCell;
+
 use super::*;
+use crate::terminal::bind_safe_key_when;
 use falcon_proto::{FsListing, ShellsInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +119,10 @@ pub(super) struct FolderBrowser {
     path: Signal<String>,
     filter: Signal<String>,
     selected: Signal<Vec<String>>,
+    /// 高亮行（GPUI FolderPicker 的 highlight）：↑↓ 移动、悬停同步、回车进入
+    highlight: Signal<usize>,
+    /// 已确认、外层正在创建：两个按钮禁用防重复提交（GPUI 的 confirming）
+    confirming: Signal<bool>,
     busy: Signal<bool>,
     error: Signal<Option<String>>,
     request: Signal<u64>,
@@ -140,6 +147,8 @@ impl FolderBrowser {
             path: signal(String::new()),
             filter: signal(String::new()),
             selected: signal(Vec::new()),
+            highlight: signal(0),
+            confirming: signal(false),
             busy: signal(false),
             error: signal(None),
             request: signal(0),
@@ -158,6 +167,8 @@ impl FolderBrowser {
         self.listing.set(None);
         self.navigation.set(None);
         self.selected.set(Vec::new());
+        self.highlight.set(0);
+        self.confirming.set(false);
         self.path.set(initial.clone());
         self.open.set(true);
         self.load((!initial.trim().is_empty()).then(|| initial.trim().to_string()));
@@ -205,6 +216,7 @@ impl FolderBrowser {
                         }));
                         browser.path.set(listing.path.clone());
                         browser.filter.set(String::new());
+                        browser.highlight.set(0);
                         browser.listing.set(Some(listing));
                         browser.error.set(fallback_error);
                     }
@@ -223,6 +235,74 @@ impl FolderBrowser {
         self.guard.is_current()
             && self.open.get_untracked()
             && self.request.get_untracked() == request
+    }
+
+    /// 筛选后可见的条目，与渲染同一套过滤（GPUI FolderPicker 的 `visible()`）。
+    fn visible_entries(&self) -> Vec<falcon_proto::FsDirEntry> {
+        let query = self.filter.get_untracked().trim().to_lowercase();
+        self.listing
+            .get_untracked()
+            .map(|listing| {
+                listing
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.name.to_lowercase().contains(&query))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// ↑↓ 移动高亮条并把该行滚进视野（GPUI `move_highlight`：到边即停，不环绕）。
+    /// `rows` 是渲染时按可见顺序记下的行元素引用。
+    fn move_highlight(
+        &self,
+        delta: isize,
+        rows: &Rc<RefCell<Vec<nsh_core::element::ElementRef>>>,
+    ) {
+        if !self.guard.is_current() || !self.open.get_untracked() {
+            return;
+        }
+        let count = self.visible_entries().len();
+        if count == 0 {
+            return;
+        }
+        let next = (self.highlight.get_untracked() as isize + delta)
+            .clamp(0, count as isize - 1) as usize;
+        self.highlight.set(next);
+        if let Some(row) = rows.borrow().get(next) {
+            row.reveal(Default::default());
+        }
+    }
+
+    /// 筛选框里的回车：进入高亮的目录（GPUI 在 filter 上 capture Enter）。
+    fn enter_highlighted(&self) {
+        if !self.guard.is_current() || !self.open.get_untracked() {
+            return;
+        }
+        let entries = self.visible_entries();
+        let at = self
+            .highlight
+            .get_untracked()
+            .min(entries.len().saturating_sub(1));
+        if let Some(hit) = entries.get(at) {
+            self.load(Some(hit.path.clone()));
+        }
+    }
+
+    /// 筛选为空时的退格：回上一级；有字时交给输入框照常删字（GPUI 的 Backspace-on-empty）。
+    /// `on_key_press` 在文本变化之前报键，此刻筛选框还是空就是要回上级。
+    fn back_up_on_empty_filter(&self, key: &str) {
+        if key != "Backspace"
+            || !self.filter.get_untracked().is_empty()
+            || !self.guard.is_current()
+            || !self.open.get_untracked()
+        {
+            return;
+        }
+        if let Some(parent) = self.navigation.get_untracked().and_then(|nav| nav.parent) {
+            self.load(Some(parent));
+        }
     }
 
     pub fn render(
@@ -262,15 +342,58 @@ impl FolderBrowser {
                         jump.load(Some(path.get_untracked().trim().to_string()))
                     }),
             );
-        let filter_input = text_field(
-            t!("project.pickFilter"),
-            self.filter,
-            t!("project.pickFilter"),
-            resolved,
-            false,
-            false,
-        );
+        // 筛选框自带按键路径：打开即聚焦（GPUI `focus()` 落在 filter 上），回车进高亮
+        // 目录、空串退格回上级走 `on_submit` / `on_key_press`——键在文本变化之前到达。
+        let filter = self.filter;
+        let filter_owner = Owner::current();
+        let filter_guard = self.guard.clone();
+        let filter_submit = self.clone();
+        let filter_key = self.clone();
+        let filter_input = view()
+            .flex_col()
+            .gap(zpx(4.0))
+            .child(
+                text(t!("project.pickFilter"))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(resolved.ui.muted_foreground)),
+            )
+            .child(
+                input()
+                    .label(t!("project.pickFilter"))
+                    .auto_focus(true)
+                    .w_full()
+                    .px(zpx(8.0))
+                    .py(zpx(6.0))
+                    .rounded(zpx(6.0))
+                    .bg(rgba_to_hsla(resolved.ui.input))
+                    .text_xs()
+                    .text_color(rgb_to_hsla(resolved.ui.foreground))
+                    .placeholder(t!("project.pickFilter"))
+                    .placeholder_color(rgb_to_hsla(resolved.ui.muted_foreground))
+                    // 回车进目录后焦点留在筛选框（GPUI 截走 Enter，输入框保持焦点）
+                    .submit_behavior(nsh_core::SubmitBehavior::Submit)
+                    .value(move || filter.get())
+                    .on_change(move |next: &str| {
+                        if filter_owner.is_live() && filter_guard.is_current() {
+                            filter.set(next.to_string());
+                        }
+                    })
+                    .on_submit(move |_: &str| filter_submit.enter_highlighted())
+                    .on_key_press(move |key: &str| filter_key.back_up_on_empty_filter(key)),
+            );
+        // ↑↓ 移动高亮条（GPUI 在 filter 上 capture MoveUp/MoveDown）：与主题选择器、
+        // 快开同用窗口级绑定，选择器收起时随这块区域解绑。
+        let row_refs: Rc<RefCell<Vec<nsh_core::element::ElementRef>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        for (spec, delta) in [("down", 1isize), ("up", -1)] {
+            let keys = self.clone();
+            let rows = row_refs.clone();
+            bind_safe_key_when(spec, false, nsh_core::keymap::When::Always, move || {
+                keys.move_highlight(delta, &rows);
+            });
+        }
         let resolved = resolved.clone();
+        let content_rows = row_refs.clone();
         let content = dynamic(move || {
             let listing = browser.listing.get();
             let navigation = browser.navigation.get();
@@ -342,12 +465,36 @@ impl FolderBrowser {
                     .text_xs(),
                 );
             }
-            for entry in visible {
-                let mut row = view().flex_row().items_center().gap(zpx(6.0));
+            // 高亮钳在可见范围里：筛选变短时回收（GPUI 在筛选 Change 时 clamp）
+            let highlighted = browser
+                .highlight
+                .get()
+                .min(visible.len().saturating_sub(1));
+            browser.highlight.set(highlighted);
+            let mut rows = Vec::with_capacity(visible.len());
+            for (index, entry) in visible.into_iter().enumerate() {
+                let on = index == highlighted;
+                let row_ref = element_ref();
+                let hover = browser.highlight;
+                let mut row = view()
+                    .flex_row()
+                    .items_center()
+                    .gap(zpx(6.0))
+                    .rounded(zpx(6.0))
+                    .cursor_pointer()
+                    .element_ref(&row_ref)
+                    // 悬停同步高亮条（GPUI 行的 on_mouse_move 联动）
+                    .on_mouse_move(move |_: &nsh_core::element::MouseEvent| {
+                        if hover.get_untracked() != index {
+                            hover.set(index);
+                        }
+                    })
+                    .when(on, |v| v.bg(rgb_to_hsla(resolved.ui.tint)));
                 if multiple {
                     let checked = selected.contains(&entry.path);
                     let path = entry.path.clone();
                     let select = browser.selected;
+                    let submitting = browser.confirming;
                     let guard = browser.guard.clone();
                     row = row.child(
                         view()
@@ -365,7 +512,7 @@ impl FolderBrowser {
                                 &resolved,
                             ))
                             .on_press(move || {
-                                if !busy && guard.is_current() {
+                                if !busy && !submitting.get_untracked() && guard.is_current() {
                                     select.update(|paths| {
                                         if let Some(index) = paths.iter().position(|p| p == &path) {
                                             paths.remove(index);
@@ -383,20 +530,25 @@ impl FolderBrowser {
                 let enter = browser.clone();
                 row = row.child(glyph(Glyph::Folder)).child(choice_button(
                     entry.name,
-                    false,
+                    on,
                     busy,
                     &resolved,
                     move || enter.load(Some(entry.path.clone())),
                 ));
                 entries = entries.child(row);
+                rows.push(row_ref);
             }
+            *content_rows.borrow_mut() = rows;
+            let confirming = browser.confirming.get();
             let can_select = !busy
+                && !confirming
                 && (!selected.is_empty()
                     || listing.as_ref().is_some_and(|l| {
                         !l.path.is_empty() && l.path == browser.path.get().trim()
                     }));
             let accept = confirm.clone();
             let cancel = browser.open;
+            let select_guard = browser.clone();
             let mut body = view()
                 .flex_col()
                 .gap(zpx(10.0))
@@ -420,12 +572,14 @@ impl FolderBrowser {
                     .child(choice_button(
                         t!("common.cancel"),
                         false,
-                        false,
+                        confirming,
                         &resolved,
                         move || cancel.set(false),
                     ))
                     .child(choice_button(
-                        if multiple && !selected.is_empty() {
+                        if confirming {
+                            t!("project.creating")
+                        } else if multiple && !selected.is_empty() {
                             t!("project.pickSelected", n = selected.len().to_string())
                         } else {
                             t!("project.pickSelect")
@@ -434,10 +588,24 @@ impl FolderBrowser {
                         !can_select,
                         &resolved,
                         move || {
-                            if !selected.is_empty() {
-                                accept(selected.clone());
+                            // 确认防重（GPUI `select()` 的 busy || confirming 前置返回）
+                            if select_guard.busy.get_untracked()
+                                || select_guard.confirming.get_untracked()
+                            {
+                                return;
+                            }
+                            let paths = if !selected.is_empty() {
+                                selected.clone()
                             } else if let Some(listing) = &listing {
-                                accept(vec![listing.path.clone()]);
+                                vec![listing.path.clone()]
+                            } else {
+                                return;
+                            };
+                            select_guard.confirming.set(true);
+                            accept(paths);
+                            // 回调没有关掉选择器（表单守卫失效等）：解锁，别锁死按钮
+                            if select_guard.open.get_untracked() {
+                                select_guard.confirming.set(false);
                             }
                         },
                     )),

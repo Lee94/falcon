@@ -452,3 +452,50 @@ fn project_shell_target_switch_ignores_late_response_and_keeps_custom_commands()
         Some("/custom/fish --login")
     );
 }
+
+#[test]
+fn folder_picker_arrows_enter_backspace_and_hover_move_highlight() {
+    let mut responses = vec![
+        (
+            "GET /api/shells".into(),
+            200,
+            r#"{"kind":"posix","default":"/bin/zsh","shells":["/bin/zsh","/bin/fish"]}"#.into(),
+        ),
+        (
+            "GET /api/fs/list?path=%2Fsrv%2Frepos%2Fbeta".into(),
+            200,
+            listing(
+                "/srv/repos/beta",
+                Some("/srv/repos"),
+                &[("inner", "/srv/repos/beta/inner")],
+            ),
+        ),
+    ];
+    responses.extend(probe_responses());
+    let mock = MockHttpServer::new_with_auto_responses(vec![], responses);
+    let mut app = probe_app(&mock);
+    app.press("label:new-project-s:local").unwrap();
+    app.wait_for("beta").unwrap();
+    // The headless host does not apply `autoFocus`; focusing the filter stands in
+    // for what real platforms do when the picker opens.
+    app.type_text("label:筛选当前目录", "").unwrap();
+    // ↓ 移动高亮，到末行钳住不环绕；回车进入高亮目录（高亮停在 alpha 上会进 nested）
+    app.press_key("down").unwrap();
+    app.press_key("down").unwrap();
+    app.press_key("enter").unwrap();
+    app.wait_for("inner").unwrap();
+    assert!(!app.shows("alpha"));
+    // 筛选有字时退格照常删字；删空后再退格回上一级
+    app.type_text("label:筛选当前目录", "x").unwrap();
+    assert!(!app.shows("inner"));
+    app.press_key("backspace").unwrap();
+    assert!(app.shows("inner"));
+    app.press_key("backspace").unwrap();
+    app.wait_for("alpha").unwrap();
+    assert!(app.shows("beta"));
+    // 悬停行同步高亮：回车进悬停那行（beta），不是第一行（alpha）
+    app.hover("beta").unwrap();
+    app.press_key("enter").unwrap();
+    app.wait_for("inner").unwrap();
+    assert!(!app.shows("nested"));
+}
