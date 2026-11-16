@@ -420,9 +420,15 @@
     "agy": "Antigravity CLI",
     "omp": "Oh My Pi"
   },
+  "git": {
+    "prevFile": "Previous file",
+    "nextFile": "Next file",
+    "refresh": "Refresh"
+  },
   "files": {
     "copyPath": "Copy path",
     "copiedPath": "Path copied",
+    "toggleFileList": "Show or hide the file list",
     "operations": {
       "uploadAction": "Upload",
       "downloadAction": "Download",

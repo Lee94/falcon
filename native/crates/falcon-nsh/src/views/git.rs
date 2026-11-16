@@ -7,7 +7,7 @@ use falcon_core::file_tree::{FileRow, FileViewMode, build_file_rows};
 use crate::fonts::FONT_FAMILY_MONO;
 use crate::i18n::t;
 use crate::shell::popups::themed_tooltip;
-use crate::shell::widgets::{Glyph, check_indicator, glyph, icon_button};
+use crate::shell::widgets::{Glyph, check_indicator, glyph, icon_button, icon_button_disabled};
 use crate::store::{GitConfirmedOperation, git_change_is_conflicted, use_workspace};
 use crate::theme::{rgb_to_hsla, rgba_to_hsla, use_theme};
 use crate::zoom::zpx;
@@ -131,6 +131,24 @@ pub fn GitPanel() -> impl IntoElement {
             let list_mode = body_store.clone();
             let tree_mode = body_store.clone();
             let file_view_mode = body_store.git_file_view_mode.get();
+            // px0 审阅（ADR 0017）：多仓库项目直接进面板顶上选着的成员；与项目菜单那一项一样
+            // 交给系统浏览器，不嵌进界面（GPUI 修改面板的 changes-px0 按钮）。
+            let px0_guard = crate::shell::popups::ServerUrlGuard::capture(&body_store);
+            let px0_url = body_store
+                .projects
+                .get()
+                .into_iter()
+                .find(|record| record.id == body_store.active_project_id.get())
+                .and_then(|record| record.source)
+                .and_then(|source| {
+                    falcon_core::px0::px0_review_path(&source, selected_repo.as_deref())
+                })
+                .map(|path| format!("{}{}", px0_guard.origin_url(), path))
+                .filter(|target| {
+                    url::Url::parse(target).is_ok_and(|url| {
+                        matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+                    })
+                });
             let header = view()
                 .h(zpx(40.0))
                 .flex_none()
@@ -147,6 +165,13 @@ pub fn GitPanel() -> impl IntoElement {
                         &resolved, move || list_mode.set_git_file_view_mode(FileViewMode::List)))
                     .child(icon_button("git-view-tree", t!("native.git.viewTree"), Glyph::Folder, file_view_mode == FileViewMode::Tree,
                         &resolved, move || tree_mode.set_git_file_view_mode(FileViewMode::Tree)))
+                    .when_some(px0_url, |row, url| row.child(icon_button(
+                        "git-px0", t!("project.px0Review"), Glyph::ExternalLink, false, &resolved,
+                        move || {
+                            if px0_guard.is_current() {
+                                let _ = nsh_core::element::open_url(url.clone());
+                            }
+                        })))
                     .child(action_button("git-refresh", t!("git.refresh"), ui, false, move || refresh.refresh_git_data())));
 
             let mut content = view().size_full().flex_col().child(header);
@@ -414,16 +439,46 @@ pub fn DiffPaneView() -> impl IntoElement {
         let selected = store.selected_git_path.get().unwrap_or_default();
         let changes = store.git_changes.get();
         let item = changes.iter().find(|change| change.path == selected).cloned();
+        let index = changes.iter().position(|change| change.path == selected);
+        let has_prev = index.is_some_and(|i| i > 0);
+        let has_next = index.is_some_and(|i| i + 1 < changes.len());
         let split = store.git_diff_split.get();
+        let diff_loading = store.git_diff_loading.get();
         let toggle = store.clone();
         let expand = store.clone();
-        let mut header = view().flex_none().flex_row().items_center().justify_between()
-            .px(zpx(10.0)).py(zpx(5.0)).border_b_1().border_color(rgba_to_hsla(ui.border))
+        let prev = store.clone();
+        let next = store.clone();
+        let refresh = store.clone();
+        let mut header = view().flex_none().flex_row().items_center().gap(zpx(4.0))
+            .px(zpx(10.0)).py(zpx(5.0)).border_b_1().border_color(rgba_to_hsla(ui.border));
+        // 浮层 diff 才有可关的文件栏（GPUI `popup_chrome` 的 sidebar 开关）。
+        if store.active_dialog.get() == crate::store::ActiveDialog::PreviewPopup
+            && store.preview_popup.get().is_some_and(|target| target.path.is_none())
+        {
+            let sidebar = store.preview_sidebar_open;
+            header = header.child(icon_button(
+                "git-diff-file-list", t!("files.toggleFileList"), Glyph::Sidebar, sidebar.get(),
+                &resolved, move || sidebar.update(|open| *open = !*open),
+            ));
+        }
+        header = header
             .child(text(item.as_ref().map(|change| change.path.clone()).unwrap_or(selected))
                 .flex_1().min_w_0().number_of_lines(1)
                 .text_xs().font_family(FONT_FAMILY_MONO).text_color(rgb_to_hsla(ui.foreground)))
-                    .child(view().test_id("git-diff-mode").cursor_pointer().on_press(move || toggle.git_diff_split.set(!split))
-                .child(text(if split { t!("git.viewUnified") } else { t!("git.viewSplit") }).text_xs().text_color(rgb_to_hsla(ui.tint_strong))));
+            .child(icon_button_disabled(
+                "git-diff-prev", t!("git.prevFile"), Glyph::ChevronUp, false, !has_prev,
+                &resolved, move || prev.step_git_diff(-1),
+            ))
+            .child(icon_button_disabled(
+                "git-diff-next", t!("git.nextFile"), Glyph::ChevronDown, false, !has_next,
+                &resolved, move || next.step_git_diff(1),
+            ))
+            .child(view().test_id("git-diff-mode").cursor_pointer().on_press(move || toggle.git_diff_split.set(!split))
+                .child(text(if split { t!("git.viewUnified") } else { t!("git.viewSplit") }).text_xs().text_color(rgb_to_hsla(ui.tint_strong))))
+            .child(icon_button_disabled(
+                "git-diff-refresh", t!("git.refresh"), Glyph::Refresh, diff_loading, index.is_none(),
+                &resolved, move || refresh.refresh_git_diff(),
+            ));
         if store.active_dialog.get() != crate::store::ActiveDialog::PreviewPopup {
             header = header.child(icon_button(
                 "git-diff-expand", t!("native.preview.expandDiff"), Glyph::Maximize, false,

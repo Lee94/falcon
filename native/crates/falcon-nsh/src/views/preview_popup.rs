@@ -127,7 +127,8 @@ pub(crate) fn PreviewPopup() -> impl IntoElement {
         return view().into_element();
     };
     let diff = target.path.is_none();
-    let sidebar = signal(true);
+    // 文件栏开合归 store：差异头部那枚开关（GPUI popup chrome）与浮层头部这枚共用。
+    let sidebar = store.preview_sidebar_open;
     let query = signal(String::new());
     let tree = signal(diff);
     let hidden = signal(false);

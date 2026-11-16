@@ -791,6 +791,8 @@ pub struct WorkspaceStore {
     pub quick_open_error: Signal<Option<String>>,
     pub quick_open_project: Signal<String>,
     pub(crate) preview_popup: Signal<Option<crate::views::preview_popup::PreviewTarget>>,
+    /// 放大浮层文件栏的开合（GPUI `DiffPopupChrome.sidebar_open`）；浮层头部与差异头部共用。
+    pub(crate) preview_sidebar_open: Signal<bool>,
     pub term_prefs: Signal<TermPref>,
     pub agent_views: Signal<HashMap<String, AgentSessionView>>,
     pub file_entries: Signal<Vec<FileEntryItem>>,
@@ -1760,6 +1762,7 @@ impl WorkspaceStore {
             quick_open_error: signal(None),
             quick_open_project: signal(String::new()),
             preview_popup: signal(None),
+            preview_sidebar_open: signal(true),
             term_prefs: signal(falcon_core::term::load_term_pref(
                 crate::theme::load_pref_item("falcon.term").as_deref(),
             )),
@@ -4801,6 +4804,33 @@ impl WorkspaceStore {
         };
         self.selected_git_path.set(Some(path.to_string()));
         self.load_git_diff(item);
+    }
+
+    /// 在修改列表里把选中差异前移 / 后移 `step` 项（GPUI diff 浮层头部的上一 / 下一文件）。
+    /// 到列表两端就停住，不回绕；选中项不在列表里时不动。
+    pub fn step_git_diff(&self, step: isize) {
+        let Some(path) = self.selected_git_path.get() else {
+            return;
+        };
+        let changes = self.git_changes.get();
+        let Some(index) = changes.iter().position(|change| change.path == path) else {
+            return;
+        };
+        let Some(next) = index.checked_add_signed(step) else {
+            return;
+        };
+        let Some(item) = changes.get(next) else {
+            return;
+        };
+        let path = item.path.clone();
+        self.preview_git_path(&path);
+    }
+
+    /// 手动重拉当前选中的文件差异，修改列表不动（GPUI diff 工具条的刷新按钮）。
+    pub fn refresh_git_diff(&self) {
+        if let Some(path) = self.selected_git_path.get() {
+            self.preview_git_path(&path);
+        }
     }
 
     fn clear_git_diff(&self) {

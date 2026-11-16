@@ -40,6 +40,8 @@ pub enum Glyph {
     ListTree,
     Copy,
     Edit,
+    ChevronUp,
+    ExternalLink,
 }
 
 pub(crate) fn session_icon(agent: Option<falcon_proto::SessionAgent>) -> AnyElement {
@@ -93,6 +95,10 @@ pub fn glyph_sized(kind: Glyph, size: Points) -> impl IntoElement {
         Glyph::Terminal => "<path d='m4 5 6 6-6 6 M13 18h7'/>",
         Glyph::ChevronRight => "<path d='m9 5 7 7-7 7'/>",
         Glyph::ChevronDown => "<path d='m5 9 7 7 7-7'/>",
+        Glyph::ChevronUp => "<path d='m5 15 7-7 7 7'/>",
+        Glyph::ExternalLink => {
+            "<path d='M15 3h6v6 M10 14 21 3 M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/>"
+        }
         Glyph::Minus => "<path d='M5 12h14'/>",
         Glyph::Plus => "<path d='M12 5v14 M5 12h14'/>",
         Glyph::Settings => {
@@ -144,10 +150,38 @@ pub fn icon_button_with_shortcut(
     resolved: &falcon_theme::ResolvedTheme,
     action: impl Fn() + 'static,
 ) -> impl IntoElement {
+    icon_button_full(id, title, icon, active, false, shortcut, resolved, action)
+}
+
+/// `icon_button` 的禁用版（GPUI `tool_button.disabled`）：禁用态无按压反馈、读屏报 disabled。
+pub fn icon_button_disabled(
+    id: impl Into<String>,
+    title: String,
+    icon: Glyph,
+    active: bool,
+    disabled: bool,
+    resolved: &falcon_theme::ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
+    icon_button_full(id, title, icon, active, disabled, None, resolved, action)
+}
+
+fn icon_button_full(
+    id: impl Into<String>,
+    title: String,
+    icon: Glyph,
+    active: bool,
+    disabled: bool,
+    shortcut: Option<&str>,
+    resolved: &falcon_theme::ResolvedTheme,
+    action: impl Fn() + 'static,
+) -> impl IntoElement {
     let ui = &resolved.ui;
     view()
         .label(id.into())
         .focusable(true)
+        .disabled(disabled)
+        .disabled_style(|s| s.opacity(0.5))
         .tooltip(themed_tooltip(text(title), shortcut.map(shortcut_label).map(Into::into), resolved))
         .w(zpx(28.0))
         .h(zpx(28.0))
@@ -155,18 +189,26 @@ pub fn icon_button_with_shortcut(
         .items_center()
         .justify_center()
         .rounded(zpx(8.0))
-        .cursor_pointer()
+        .when(!disabled, |v| v.cursor_pointer())
         .text_color(rgb_to_hsla(if active {
             ui.tint_foreground
         } else {
             ui.muted_foreground
         }))
         .when(active, |v| v.bg(rgb_to_hsla(ui.tint)))
-        .hover(|s| {
-            s.bg(rgb_to_hsla(ui.muted))
-                .text_color(rgb_to_hsla(ui.foreground))
+        .hover(move |s| {
+            if disabled {
+                s
+            } else {
+                s.bg(rgb_to_hsla(ui.muted))
+                    .text_color(rgb_to_hsla(ui.foreground))
+            }
         })
-        .on_press(action)
+        .on_press(move || {
+            if !disabled {
+                action();
+            }
+        })
         .child(glyph(icon))
 }
 
