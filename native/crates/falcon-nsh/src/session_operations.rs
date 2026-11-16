@@ -526,7 +526,7 @@ impl ApiTarget {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn encode_path_segment(segment: &str) -> String {
+pub(crate) fn encode_path_segment(segment: &str) -> String {
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
