@@ -5,7 +5,9 @@ plugins {
 
 android {
     namespace = "com.falcon.android"
-    compileSdk = 36
+    // compose-bom 2026.09.00、core-ktx 1.19.1、lifecycle 2.11.0、okhttp 5.5.1 的 AAR 元数据
+    // 要求 compileSdk ≥ 37，低于它 checkReleaseAarMetadata 直接失败；targetSdk 与它分开升，仍是 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.falcon.android"

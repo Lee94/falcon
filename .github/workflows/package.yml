@@ -558,7 +558,7 @@ jobs:
       - name: Drop crates.io mirror
         run: rm -f native/.cargo/config.toml
 
-      # Gradle 8.9 + AGP 8.7.2，与 android/app/build.gradle.kts 的 jvmTarget = 17 对齐；
+      # Gradle 9.9.1 + AGP 9.5.1，与 android/app/build.gradle.kts 的 jvmTarget = 17 对齐；
       # xtask 的 android.rs 跑 gradlew --no-daemon，构建完守护进程即退出，不会锁住 ~/.gradle 缓存
       - uses: actions/setup-java@v4
         with:
@@ -566,8 +566,9 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有，而 AGP 8.7.2 默认要
-      # build-tools;34.0.0（镜像里通常只留更新的版本），目录不可写会在构建期直接报错。
+      # runner 预装的 /usr/local/lib/android/sdk 归 root 所有，AGP 缺组件时要往里下载，
+      # 目录不可写会在构建期直接报错。compileSdk 37 的平台包名带次版本号（android-37.0），
+      # 这里显式装好，不依赖 AGP 构建期自动下载。
       # 只改顶层条目与 platforms / build-tools / licenses 的属主（不递归几十万文件的 ndk/），
       # 再以当前用户补齐缺失组件（sudo 会清掉 setup-java 设的 JAVA_HOME）
       - name: Prepare Android SDK
@@ -579,7 +580,7 @@ jobs:
           SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
           [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
           MISSING=()
-          [ -d "$SDK/platforms/android-35" ] || MISSING+=("platforms;android-35")
+          [ -d "$SDK/platforms/android-37.0" ] || MISSING+=("platforms;android-37.0")
           [ -d "$SDK/build-tools/34.0.0" ] || MISSING+=("build-tools;34.0.0")
           if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME}" ]; then
             if [ -z "$(ls -A "$SDK/ndk" 2>/dev/null)" ]; then
