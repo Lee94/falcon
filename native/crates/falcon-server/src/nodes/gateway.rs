@@ -60,7 +60,7 @@ impl Gateway {
             .clone()
     }
 
-    async fn remote(&self, state: &AppState, host_id: &str) -> anyhow::Result<Remote> {
+    pub(super) async fn remote(&self, state: &AppState, host_id: &str) -> anyhow::Result<Remote> {
         let lock = self.lock(&format!("host:{host_id}"));
         let _turn = lock.lock().await;
         let host = state
@@ -637,6 +637,9 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
         req = Request::from_parts(parts, Body::from(bytes));
     }
     let uri = req.uri().clone();
+    if let Some((host_id, remote_path)) = host_update_request(&uri) {
+        return super::update::handle_host(state, host_id, req.method().clone(), &remote_path, payload).await;
+    }
     match destination(&state, &uri, payload.as_ref()).await {
         Ok(Some((remote, remote_path))) => {
             if matches!(
@@ -793,6 +796,21 @@ async fn canonical_request(state: &AppState, request: &mut Request) -> anyhow::R
         }
     }
     Ok(())
+}
+
+fn host_update_request(uri: &Uri) -> Option<(String, String)> {
+    let segments: Vec<String> = uri.path().split('/').map(decode_segment).collect();
+    if segments.get(1).is_some_and(|s| s == "api")
+        && segments.get(2).is_some_and(|s| s == "hosts")
+        && segments.get(4).is_some_and(|s| s == "node")
+        && segments.get(5).is_some_and(|s| s == "system")
+        && segments.get(6).is_some_and(|s| s == "update")
+        && matches!(segments.len(), 7 | 8)
+        && (segments.len() == 7 || segments.get(7).is_some_and(|s| s == "status"))
+    {
+        return Some((segments[3].clone(), format!("/api/{}", segments[5..].join("/"))));
+    }
+    None
 }
 
 async fn destination(
@@ -1172,6 +1190,16 @@ fn failure(error: impl std::fmt::Display) -> Response {
 mod tests {
     use super::*;
     use crate::api::test_support::{TestApp, json_of};
+
+    #[test]
+    fn host_update_route_is_handled_before_node_discovery() {
+        let uri: Uri = "/api/hosts/host%20a/node/system/update".parse().unwrap();
+        assert_eq!(host_update_request(&uri), Some(("host a".into(), "/api/system/update".into())));
+        let status: Uri = "/api/hosts/h/node/system/update/status".parse().unwrap();
+        assert_eq!(host_update_request(&status), Some(("h".into(), "/api/system/update/status".into())));
+        assert!(host_update_request(&"/api/hosts/h/node/system/update/staged".parse().unwrap()).is_none());
+        assert!(host_update_request(&"/api/hosts/h/node/projects".parse().unwrap()).is_none());
+    }
 
     fn attach(gateway: &TestApp, owner: &TestApp, address: std::net::SocketAddr, host_id: &str) {
         let host = SshHostRow {

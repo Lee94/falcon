@@ -58,7 +58,7 @@ WS 上是混合协议：**终端字节走二进制帧**（1 字节类型头 `TER
 
 `falcon node ensure --data-dir <绝对目录>` 按需启动并复用回环节点；常规启动在打开数据库前取得节点进程锁，bind 后写 `node.json`。节点数据目录必须隔离，测试不得探测或部署到真实家目录。`falcon version --json` / `--version` 只打印版本与协议，不启动服务。
 
-服务端升级是 `/api/system/update` 与 `/api/system/update/status`，桌面应用更新仍按 ADR 0026。SSH 节点允许由入口下载、校验后传入节点；独立帮手完成替换与健康确认。候选服务先在维护状态完成迁移，开放业务写入之后不得恢复旧数据库覆盖新写入。项目创建、会话创建与派生请求的 `Idempotency-Key` 在节点持久化；执行中断留下 pending 时返回结果未确认，不重复执行。
+服务端升级是 `/api/system/update` 与 `/api/system/update/status`，桌面应用更新仍按 ADR 0026。SSH 节点允许由入口下载、校验后传入节点；独立帮手完成替换与健康确认。兼容节点的候选服务先在维护状态完成迁移，开放业务写入之后不得恢复旧数据库覆盖新写入。没有 `node.json` 的旧服务只在用户显式确认远端升级时走 `node upgrade`：入口下载最新稳定 Release，新二进制在远端本机停服、备份、保留原 argv 与托管方式后替换重启；普通 `ensure` 仍拒绝覆盖旧服务。候选启动结果不确定或已经启动后不得恢复旧数据库覆盖新写入。项目创建、会话创建与派生请求的 `Idempotency-Key` 在节点持久化；执行中断留下 pending 时返回结果未确认，不重复执行。
 
 ### server（`native/crates/falcon-server`，路径都相对 `src/`）
 

@@ -322,7 +322,9 @@ impl Render for ServerUpdate {
                 div().child(
                     t!(
                         "serverUpdate.versions",
-                        current = check.current_version.clone(),
+                        current = falcon_core::app_update::parse_version(&check.current_version)
+                            .map(|_| format!("v{}", check.current_version))
+                            .unwrap_or_else(|| check.current_version.clone()),
                         latest = check.latest_version.clone().unwrap_or_else(|| "—".into()),
                         platform = check.platform.clone()
                     )

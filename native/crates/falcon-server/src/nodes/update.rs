@@ -207,10 +207,312 @@ pub(super) async fn handle(state: AppState, remote: Remote, method: Method, path
     StatusCode::METHOD_NOT_ALLOWED.into_response()
 }
 
+fn legacy_record_path(state: &AppState, host_id: &str) -> PathBuf {
+    record_path(state, &format!("legacy-host:{host_id}"))
+}
+
+async fn inspect_legacy(state: &AppState, host: crate::db::SshHostRow) -> Result<Option<super::transport::LegacyTarget>> {
+    state.engine.call(move |engine| async move {
+        super::transport::legacy_target(engine.sessions.get_host_link(&host)).await
+    }).await?
+}
+
+async fn legacy_recovery(state: &AppState, host: crate::db::SshHostRow) -> Result<crate::nodes::transport::LegacyRecovery> {
+    state.engine.call(move |engine| async move {
+        super::transport::legacy_recovery(engine.sessions.get_host_link(&host)).await
+    }).await?
+}
+
+/// 远端更新必须在节点网关之前分流：旧版没有节点身份，不能先要求 `remote()` 成功。
+/// 已有兼容节点仍走原有在线更新；只有探测明确认出同数据目录的旧进程才走 SSH 替换。
+pub(super) async fn handle_host(
+    state: AppState,
+    host_id: String,
+    method: Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Response {
+    let Some(host) = state.db.get_host(&host_id) else { return ApiError::not_found("远端主机不存在").into_response() };
+    let legacy_path = legacy_record_path(&state, &host_id);
+    let previous = match load(&legacy_path) {
+        Ok(record) => record,
+        Err(error) => return ApiError::conflict(format!("旧服务升级任务记录无法读取：{error:#}")).into_response(),
+    };
+    if method == Method::GET && path == "/api/system/update/status" && previous.is_some() {
+        return match legacy_status(&state, &host, &legacy_path).await {
+            Ok(task) => Json(task).into_response(),
+            Err(error) => ApiError::new(StatusCode::BAD_GATEWAY, format!("{error:#}")).into_response(),
+        };
+    }
+    if let Some(previous) = previous {
+        return handle_existing_legacy(state, host, previous, method, path, payload).await;
+    }
+    let original = match state.nodes.remote(&state, &host_id).await {
+        Ok(remote) => return handle(state, remote, method, path, payload).await,
+        Err(error) => error,
+    };
+    let legacy = match inspect_legacy(&state, host.clone()).await {
+        Ok(Some(target)) => target,
+        Ok(None) => return ApiError::new(StatusCode::BAD_GATEWAY, format!("{original:#}")).into_response(),
+        Err(error) => return ApiError::new(StatusCode::BAD_GATEWAY, format!("{original:#}；旧服务识别失败：{error:#}")).into_response(),
+    };
+    handle_legacy_target(state, host, legacy, method, path, payload).await
+}
+
+async fn handle_existing_legacy(
+    state: AppState,
+    host: crate::db::SshHostRow,
+    previous: Record,
+    method: Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Response {
+    match legacy_recovery(&state, host.clone()).await {
+        Ok(crate::nodes::transport::LegacyRecovery::Node(node)) => {
+            if node.node_id == state.db.instance_id() {
+                return ApiError::conflict("这个 SSH 主机指向当前节点，请直接使用本机升级").into_response();
+            }
+            if previous.stage == Stage::Finished {
+                let _ = std::fs::remove_file(legacy_record_path(&state, &host.id));
+            }
+            let remote = Remote {
+                host,
+                node_id: node.node_id,
+                port: node.port,
+                token: node.token,
+                version: node.version,
+                #[cfg(test)]
+                direct: None,
+            };
+            handle(state, remote, method, path, payload).await
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::OldService) => {
+            if previous.task.phase == Phase::Succeeded {
+                return ApiError::new(StatusCode::BAD_GATEWAY, "升级记录已成功，但现场仍是旧服务；请检查远端进程，未重复执行升级").into_response();
+            }
+            match inspect_legacy(&state, host.clone()).await {
+                Ok(Some(target)) => handle_legacy_target(state, host, target, method, path, payload).await,
+                Ok(None) => ApiError::conflict("旧服务现场在检查期间发生变化，请重新查询").into_response(),
+                Err(error) => ApiError::new(StatusCode::BAD_GATEWAY, format!("旧服务识别失败：{error:#}")).into_response(),
+            }
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::Starting) => {
+            if method == Method::GET && path == "/api/system/update" {
+                return Json(ServerUpdateCheck {
+                    current_version: "未知（旧版升级中）".into(),
+                    error: Some("远端升级进程仍在运行，请等待任务结果".into()),
+                    ..Default::default()
+                }).into_response();
+            }
+            ApiError::conflict("旧服务升级仍在执行，不会重复提交").into_response()
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::Missing) => {
+            if method == Method::GET && path == "/api/system/update" {
+                return Json(ServerUpdateCheck {
+                    current_version: "未运行".into(),
+                    error: Some("旧服务与新节点均未运行；不会借更新检查自动部署，请检查远端升级备份".into()),
+                    ..Default::default()
+                }).into_response();
+            }
+            ApiError::conflict("旧服务与新节点均未运行，不能重复提交升级；请先检查远端现场").into_response()
+        }
+        Err(error) => ApiError::new(StatusCode::BAD_GATEWAY, format!("旧服务升级现场查询失败：{error:#}")).into_response(),
+    }
+}
+
+async fn handle_legacy_target(
+    state: AppState,
+    host: crate::db::SshHostRow,
+    target: super::transport::LegacyTarget,
+    method: Method,
+    path: &str,
+    payload: Option<Value>,
+) -> Response {
+    if method == Method::GET && path == "/api/system/update" {
+        return Json(check_legacy(&target).await).into_response();
+    }
+    if method == Method::GET && path == "/api/system/update/status" {
+        return Json(ServerUpdateTask::default()).into_response();
+    }
+    if method == Method::POST && path == "/api/system/update" {
+        let version = payload.as_ref().and_then(|body| body.get("version")).and_then(Value::as_str);
+        let Some(version) = version else { return ApiError::bad_request("version 必须是稳定 Release 的版本号").into_response() };
+        return match start_legacy(state, host, target, version).await {
+            Ok(task) => Json(task).into_response(),
+            Err(error) => ApiError::conflict(format!("{error:#}")).into_response(),
+        };
+    }
+    StatusCode::METHOD_NOT_ALLOWED.into_response()
+}
+
+async fn check_legacy(target: &super::transport::LegacyTarget) -> ServerUpdateCheck {
+    let platform = super::transport::platform(target.target).to_string();
+    let mut result = ServerUpdateCheck { current_version: "未知（旧版无节点接口）".into(), platform, ..Default::default() };
+    let check = async {
+        let release = server_update::fetch_release(None).await?;
+        result.latest_version = Some(release.version.clone());
+        result.available = server_update::release_available("0.0.0", &release, &result.platform)?;
+        Ok::<_, anyhow::Error>(())
+    }.await;
+    if let Err(error) = check { result.error = Some(format!("检查旧版服务端更新失败：{error:#}")); }
+    result
+}
+
+async fn legacy_status(state: &AppState, host: &crate::db::SshHostRow, path: &Path) -> Result<ServerUpdateTask> {
+    let Some(mut record) = load(path)? else { return Ok(ServerUpdateTask::default()) };
+    if record.stage == Stage::Finished || busy(path) { return Ok(record.task); }
+    if record.stage == Stage::Downloading {
+        record.task.phase = Phase::Failed;
+        record.task.error = Some("入口在下载期间重新启动，尚未向旧服务提交安装".into());
+        record.stage = Stage::Finished;
+        save(path, &record)?;
+        return Ok(record.task);
+    }
+    // 提交后只读核对现场，不执行 ensure。新节点身份与目标对上才算成功；
+    // 旧服务仍在且升级进程已退出则是可重试失败，避免永远卡在 restarting。
+    apply_legacy_recovery(&mut record, legacy_recovery(state, host.clone()).await);
+    save(path, &record)?;
+    Ok(record.task)
+}
+
+fn apply_legacy_recovery(record: &mut Record, recovery: Result<crate::nodes::transport::LegacyRecovery>) {
+    match recovery {
+        Ok(crate::nodes::transport::LegacyRecovery::Node(node))
+            if Some(node.version.as_str()) == record.task.target_version.as_deref() =>
+        {
+            record.task.phase = Phase::Succeeded;
+            record.task.error = None;
+            record.stage = Stage::Finished;
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::OldService) => {
+            record.task.phase = Phase::Failed;
+            record.task.error = Some("旧服务仍在运行，升级进程已经退出；请核对远端日志后重试".into());
+            record.stage = Stage::Finished;
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::Missing) => {
+            record.task.phase = Phase::Failed;
+            record.task.error = Some("升级后未检测到旧服务或新节点；请检查远端服务状态与升级备份".into());
+            record.stage = Stage::Finished;
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::Starting) => {
+            record.task.phase = Phase::Restarting;
+            record.task.error = Some("远端升级进程仍在运行，正在等待新节点".into());
+        }
+        Ok(crate::nodes::transport::LegacyRecovery::Node(node)) => {
+            record.task.phase = Phase::Failed;
+            record.task.error = Some(format!("检测到节点 v{}，与本次目标版本不符；请重新检查后操作", node.version));
+            record.stage = Stage::Finished;
+        }
+        Err(error) => {
+            record.task.phase = Phase::Restarting;
+            record.task.error = Some(format!("旧服务安装结果尚未确认：{error:#}；不会重复提交安装"));
+        }
+    }
+}
+
+async fn start_legacy(
+    state: AppState,
+    host: crate::db::SshHostRow,
+    target: super::transport::LegacyTarget,
+    version: &str,
+) -> Result<ServerUpdateTask> {
+    let parsed = app_update::parse_version(version).context("升级版本必须是三段稳定版本号")?;
+    let version = app_update::version_string(parsed);
+    let latest = server_update::fetch_release(None).await?;
+    ensure!(latest.version == version, "旧版服务的当前版本无法验证，只允许升级到最新稳定 Release {}", latest.version);
+    let path = legacy_record_path(&state, &host.id);
+    if load(&path)?.is_some_and(|record| record.stage == Stage::Submitted) {
+        let task = legacy_status(&state, &host, &path).await?;
+        ensure!(task.phase != Phase::Succeeded, "旧服务已经升级，请重新检查节点版本");
+        ensure!(load(&path)?.is_some_and(|record| record.stage == Stage::Finished), "上次安装结果尚未确认，请先查询目标节点状态");
+    }
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    ensure!(!running.contains(&path), "此入口已有该旧服务的升级任务");
+    let record = Record { task: ServerUpdateTask { phase: Phase::Downloading, target_version: Some(version.clone()), error: None }, stage: Stage::Downloading };
+    save(&path, &record)?;
+    running.insert(path.clone());
+    drop(running);
+    let task = record.task.clone();
+    tokio::spawn(async move {
+        let result = download_and_upgrade_legacy(state, host, target, &version, &path).await;
+        if let Err(error) = result {
+            if let Ok(Some(mut record)) = load(&path) {
+                if record.stage == Stage::Submitted {
+                    record.task.phase = Phase::Restarting;
+                    record.task.error = Some(format!("旧服务安装响应未确认，后续仅查询节点：{error:#}"));
+                } else {
+                    record.stage = Stage::Finished;
+                    record.task.phase = Phase::Failed;
+                    record.task.error = Some(format!("旧服务升级准备失败：{error:#}"));
+                }
+                let _ = save(&path, &record);
+            }
+        }
+        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).remove(&path);
+    });
+    Ok(task)
+}
+
+async fn download_and_upgrade_legacy(
+    state: AppState,
+    host: crate::db::SshHostRow,
+    target: super::transport::LegacyTarget,
+    version: &str,
+    path: &Path,
+) -> Result<()> {
+    let binary = super::transport::download_release_binary(target.target, version).await?;
+    let mut record = load(path)?.context("旧服务升级任务丢失")?;
+    record.task.phase = Phase::Verifying;
+    save(path, &record)?;
+    record.task.phase = Phase::Installing;
+    save(path, &record)?;
+    // 上传内容命名的候选文件不会停止旧服务；此阶段失败可以明确标记失败并允许重试。
+    let prepare_host = host.clone();
+    let prepare_target = target.clone();
+    let remote_bin = state.engine.call(move |engine| async move {
+        super::transport::prepare_legacy(engine.sessions.get_host_link(&prepare_host), &prepare_target, binary).await
+    }).await??;
+    // 在停服命令的第一次网络发送之前持久化。此后即使入口断线也只能查询，不能重发。
+    record.stage = Stage::Submitted;
+    save(path, &record)?;
+    let expected = version.to_string();
+    let execute_version = expected.clone();
+    let execute_target = target.clone();
+    let outcome = state.engine.call(move |engine| async move {
+        super::transport::run_legacy_upgrade(engine.sessions.get_host_link(&host), &execute_target, &execute_version, remote_bin).await
+    }).await;
+    let endpoint = match outcome {
+        Ok(Ok(endpoint)) => endpoint,
+        Ok(Err(error)) if error.downcast_ref::<super::transport::LegacyUpgradeRejected>().is_some() => {
+            // 远端已完整返回非零退出码，这次安装有确定结果，不进入永久等待。
+            record.task.phase = Phase::Failed;
+            record.task.error = Some(format!("{error:#}"));
+            record.stage = Stage::Finished;
+            save(path, &record)?;
+            return Ok(());
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(endpoint.version == expected, "旧服务升级后的版本不符");
+    let mut record = load(path)?.context("旧服务升级任务丢失")?;
+    record.task.phase = Phase::Succeeded;
+    record.task.error = None;
+    record.stage = Stage::Finished;
+    save(path, &record)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::test_support::TestApp;
+
+    fn recovered_node(version: &str) -> crate::nodes::transport::LegacyRecovery {
+        crate::nodes::transport::LegacyRecovery::Node(crate::nodes::transport::NodeEndpoint {
+            node_id: "node-a".into(), port: 4949, version: version.into(), token: "a".repeat(64),
+        })
+    }
 
     #[tokio::test]
     async fn submitted_tasks_only_query_node_and_persist_its_final_result() {
@@ -240,6 +542,46 @@ mod tests {
         assert_eq!(load(&path).unwrap().unwrap().stage, Stage::Finished);
         assert_eq!(installs.load(Ordering::SeqCst), 0);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_download_interrupted_before_submission_is_a_retryable_failure() {
+        let app = TestApp::new();
+        let host = crate::db::SshHostRow { id: "legacy-interrupted".into(), ..Default::default() };
+        let path = legacy_record_path(&app.state, &host.id);
+        save(&path, &Record {
+            task: ServerUpdateTask { phase: Phase::Downloading, target_version: Some("9.9.9".into()), error: None },
+            stage: Stage::Downloading,
+        }).unwrap();
+        let task = legacy_status(&app.state, &host, &path).await.unwrap();
+        assert_eq!(task.phase, Phase::Failed);
+        assert!(task.error.unwrap().contains("尚未向旧服务提交安装"));
+        assert_eq!(load(&path).unwrap().unwrap().stage, Stage::Finished);
+    }
+
+    #[test]
+    fn legacy_recovery_has_terminal_success_and_retryable_failure_states() {
+        let mut record = Record {
+            task: ServerUpdateTask { phase: Phase::Installing, target_version: Some("9.9.9".into()), error: None },
+            stage: Stage::Submitted,
+        };
+        apply_legacy_recovery(&mut record, Ok(crate::nodes::transport::LegacyRecovery::OldService));
+        assert_eq!(record.task.phase, Phase::Failed);
+        assert_eq!(record.stage, Stage::Finished);
+
+        record.stage = Stage::Submitted;
+        record.task.phase = Phase::Installing;
+        apply_legacy_recovery(&mut record, Ok(crate::nodes::transport::LegacyRecovery::Starting));
+        assert_eq!(record.task.phase, Phase::Restarting);
+        assert_eq!(record.stage, Stage::Submitted);
+
+        apply_legacy_recovery(&mut record, Ok(recovered_node("9.9.9")));
+        assert_eq!(record.task.phase, Phase::Succeeded);
+        assert_eq!(record.stage, Stage::Finished);
+
+        apply_legacy_recovery(&mut record, Ok(recovered_node("9.9.10")));
+        assert_eq!(record.task.phase, Phase::Failed);
+        assert_eq!(record.stage, Stage::Finished);
     }
 
     #[test]

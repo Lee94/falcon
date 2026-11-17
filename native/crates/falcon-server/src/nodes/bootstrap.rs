@@ -17,6 +17,8 @@ use crate::db::Db;
 pub(super) const DESCRIPTOR: &str = "node.json";
 /// 部署前在二进制中检查此标识：旧入口会把未知子命令当普通服务启动，不能试运行探测。
 pub(super) const CAPABILITY_MARKER: &[u8] = b"FALCON_NODE_PROTOCOL_1";
+/// 旧服务替换比节点协议后加，发布产物必须单独证明它认识 `node upgrade`。
+pub(super) const LEGACY_UPGRADE_CAPABILITY_MARKER: &[u8] = b"FALCON_NODE_LEGACY_UPGRADE_1";
 const STARTING: &str = "node-starting.json";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -135,19 +137,25 @@ pub fn publish(config: &ServerConfig, actual_port: u16, db: &Db) -> anyhow::Resu
 
 /// main 对 `node` 分流后传剩余参数（`ensure --data-dir <root>`）。stdout 只输出一行 JSON。
 pub fn run_node_cli(argv: &[String]) -> i32 {
-    match ensure_cli(argv) {
+    let upgrade = argv.first().map(String::as_str) == Some("upgrade");
+    let result = if upgrade {
+        super::legacy_update::run_cli(&argv[1..])
+    } else {
+        ensure_cli(argv)
+    };
+    match result {
         Ok(descriptor) => match serde_json::to_string(&descriptor) {
             Ok(json) => {
                 println!("{json}");
                 0
             }
             Err(e) => {
-                eprintln!("node ensure: {e}");
+                eprintln!("node {}: {e}", if upgrade { "upgrade" } else { "ensure" });
                 1
             }
         },
         Err(e) => {
-            eprintln!("node ensure: {e:#}");
+            eprintln!("node {}: {e:#}", if upgrade { "upgrade" } else { "ensure" });
             1
         }
     }
@@ -192,14 +200,16 @@ fn ensure_cli(argv: &[String]) -> anyhow::Result<Descriptor> {
             root.display()
         );
     }
-    if let Some((pid, unknown_root)) = legacy_server(&root) {
+    if let Some(server) = legacy_server(&root) {
         ensure!(
-            !unknown_root,
-            "已有 Falcon 进程 {pid}，但系统不允许确定它的数据目录；请先确认现有服务，拒绝另起节点"
+            !server.unknown_root,
+            "已有 Falcon 进程 {}，但系统不允许确定它的数据目录；请先确认现有服务，拒绝另起节点",
+            server.pid
         );
         bail!(
-            "数据目录 {} 已有 Falcon 服务进程 {pid}，但没有可验证的节点描述；请先手动升级该服务，不会另起节点或覆盖现有服务",
-            root.display()
+            "数据目录 {} 已有 Falcon 服务进程 {}，但没有可验证的节点描述；请先手动升级该服务，不会另起节点或覆盖现有服务",
+            root.display(),
+            server.pid
         );
     }
     let pending = serde_json::json!({ "pid": std::process::id(), "createdAt": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs() });
@@ -232,7 +242,7 @@ fn ensure_cli(argv: &[String]) -> anyhow::Result<Descriptor> {
     }
 }
 
-fn canonical_root(root: &Path) -> anyhow::Result<PathBuf> {
+pub(super) fn canonical_root(root: &Path) -> anyhow::Result<PathBuf> {
     std::fs::canonicalize(root).with_context(|| format!("解析节点目录 {} 失败", root.display()))
 }
 
@@ -247,7 +257,7 @@ pub(super) fn read_descriptor(root: &Path) -> anyhow::Result<Option<Descriptor>>
     }
 }
 
-fn live_descriptor(root: &Path) -> anyhow::Result<Option<Descriptor>> {
+pub(super) fn live_descriptor(root: &Path) -> anyhow::Result<Option<Descriptor>> {
     let Some(node) = read_descriptor(root)? else {
         return Ok(None);
     };
@@ -382,7 +392,7 @@ fn starting_recent(root: &Path) -> bool {
         .is_some_and(|age| age < READY_TIMEOUT + Duration::from_secs(10))
 }
 
-fn lock(root: &Path, name: &str, timeout: Duration) -> anyhow::Result<NodeProcessLock> {
+pub(super) fn lock(root: &Path, name: &str, timeout: Duration) -> anyhow::Result<NodeProcessLock> {
     let file = private_open(&root.join(name))?;
     let deadline = Instant::now() + timeout;
     loop {
@@ -447,7 +457,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     result
 }
 
-fn process_alive(pid: u32) -> bool {
+pub(super) fn process_alive(pid: u32) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, System};
     if pid == 0 {
         return false;
@@ -462,9 +472,24 @@ fn process_alive(pid: u32) -> bool {
         .is_some_and(|p| !matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead))
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct LegacyServer {
+    pub pid: u32,
+    pub exe: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+    pub environ: Vec<std::ffi::OsString>,
+    pub cwd: Option<PathBuf>,
+    pub unknown_root: bool,
+}
+
 /// 旧版没有描述文件时也不允许在它的数据目录另起一份。只认 Falcon 主服务，排除
-/// sessiond、桌面客户端和 node/service/respawn 帮手；显式目录优先，默认目录才看 HOME。
-fn legacy_server(root: &Path) -> Option<(u32, bool)> {
+/// sessiond、桌面客户端和 node/service/respawn/update-helper 帮手；显式目录优先，默认目录才看 HOME。
+/// 显式升级还需要原 argv、环境与工作目录，确保替换后按原来的配置启动。
+pub(super) fn legacy_server(root: &Path) -> Option<LegacyServer> {
+    legacy_servers(root).into_iter().next()
+}
+
+pub(super) fn legacy_servers(root: &Path) -> Vec<LegacyServer> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
     let Ok(mut system) = System::new_with_specifics(
         RefreshKind::nothing().with_processes(
@@ -475,10 +500,10 @@ fn legacy_server(root: &Path) -> Option<(u32, bool)> {
                 .with_cwd(UpdateKind::Always),
         ),
     ) else {
-        return None;
+        return Vec::new();
     };
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system.processes().iter().find_map(|(pid, p)| {
+    system.processes().iter().filter_map(|(pid, p)| {
         if pid.as_u32() == std::process::id() {
             return None;
         }
@@ -495,14 +520,43 @@ fn legacy_server(root: &Path) -> Option<(u32, bool)> {
             return None;
         }
         let candidates = process_roots(args, p.environ(), p.cwd(), exe);
-        if candidates.is_empty() {
-            return Some((pid.as_u32(), true));
+        let base = LegacyServer {
+            pid: pid.as_u32(),
+            exe: exe.to_path_buf(),
+            args: args.to_vec(),
+            environ: p.environ().to_vec(),
+            cwd: p.cwd().map(Path::to_path_buf),
+            unknown_root: candidates.is_empty(),
+        };
+        if base.unknown_root {
+            return Some(base);
         }
         candidates
             .into_iter()
             .any(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate) == root)
-            .then_some((pid.as_u32(), false))
-    })
+            .then_some(base)
+    }).collect()
+}
+
+/// 旧版的 `respawn` 帮手不持有新节点锁。升级前必须识别等待旧 pid 的帮手，
+/// 否则旧服务停止后它可能在本备份期间重新打开数据库。
+pub(super) fn respawn_helpers(target_pid: u32) -> Vec<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+    let Ok(mut system) = System::new_with_specifics(RefreshKind::nothing().with_processes(
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always),
+    )) else {
+        return Vec::new();
+    };
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let expected = target_pid.to_string();
+    system.processes().values().filter_map(|process| {
+        let exe = process.exe()?.file_name()?.to_string_lossy();
+        let args = process.cmd();
+        (is_server_name(&exe)
+            && args.get(1).is_some_and(|arg| arg == "respawn")
+            && args.get(2).is_some_and(|arg| arg == expected.as_str()))
+            .then_some(process.pid().as_u32())
+    }).collect()
 }
 
 /// 必须解析目标进程自己的 HOME 和 FALCON_DATA_DIR，不能拿 ensure 的 HOME 猜别的服务。
@@ -633,16 +687,22 @@ fn launch(root: &Path) -> anyhow::Result<Launched> {
 
 #[cfg(windows)]
 fn wmi_launch(exe: &Path, root: &Path) -> anyhow::Result<u32> {
+    wmi_launch_with_args(exe, &serve_args(root), root)
+}
+
+/// Windows OpenSSH 的 Job 可能禁止 breakaway；旧服务升级与 ensure 共用 WMI 回退。
+#[cfg(windows)]
+pub(super) fn wmi_launch_with_args(exe: &Path, args: &[String], cwd: &Path) -> anyhow::Result<u32> {
     use base64::Engine as _;
     let args = std::iter::once(exe.to_string_lossy().into_owned())
-        .chain(serve_args(root))
+        .chain(args.iter().cloned())
         .map(|s| crate::sessiond::command::windows_quote_arg(&s))
         .collect::<Vec<_>>()
         .join(" ");
     let script = format!(
         "$ErrorActionPreference = 'Stop'; $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = {}; CurrentDirectory = {} }}; if ($r.ReturnValue -ne 0) {{ throw ('Win32_Process.Create failed: ' + $r.ReturnValue) }}; $r.ProcessId",
         crate::host::quote_powershell(&args),
-        crate::host::quote_powershell(&root.to_string_lossy())
+        crate::host::quote_powershell(&cwd.to_string_lossy())
     );
     let encoded = base64::engine::general_purpose::STANDARD.encode(
         script
@@ -677,7 +737,7 @@ fn wmi_launch(exe: &Path, root: &Path) -> anyhow::Result<u32> {
         .context("WMI 未返回节点进程ID")
 }
 
-fn log_tail(root: &Path) -> String {
+pub(super) fn log_tail(root: &Path) -> String {
     let path = root.join("node.log");
     let text = (|| {
         use std::io::{Seek, SeekFrom};

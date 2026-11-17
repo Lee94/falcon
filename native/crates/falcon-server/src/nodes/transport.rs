@@ -17,6 +17,13 @@ use crate::host::{encode_powershell, quote_posix, quote_powershell};
 use crate::sessiond::command::{self, SessiondTarget};
 use crate::sessions::ssh::SshLink;
 
+#[derive(Clone, Debug)]
+pub(super) struct LegacyTarget {
+    pub kind: HostKind,
+    pub root: String,
+    pub target: SessiondTarget,
+}
+
 #[derive(Clone)]
 pub struct NodeEndpoint {
     pub node_id: String,
@@ -93,48 +100,7 @@ pub async fn ensure_remote(link: Rc<SshLink>) -> anyhow::Result<NodeEndpoint> {
         .target
         .context("宿主机系统或架构没有 Falcon 节点构建")?;
     let binary = binary_for(target).await?;
-    ensure!(
-        binary
-            .windows(bootstrap::CAPABILITY_MARKER.len())
-            .any(|w| w == bootstrap::CAPABILITY_MARKER),
-        "所选 Falcon 二进制尚不支持节点协议1；请发布包含节点模块的稳定版或设置 FALCON_NODE_BIN_DIR，不会运行旧版的未知子命令"
-    );
-    let hash = hex::encode(Sha256::digest(&binary));
-    let name = format!(
-        "falcon-node-{}{}",
-        hash,
-        if target.is_windows() { ".exe" } else { "" }
-    );
-    let remote_bin = join_path(kind, &[root, "bin", &name]);
-    let exists = timed_exec(&link, &command::exists_command(kind, &remote_bin)).await?;
-    if !exists.ok() || !exists.stdout.lines().any(|l| l.trim() == "yes") {
-        let (cmd, input) = match kind {
-            HostKind::Windows => {
-                let mut encoder = crate::transfer::Base64LineEncoder::new();
-                let mut lines = encoder.feed(&binary);
-                lines.extend(encoder.finish());
-                (
-                    command::windows_install_command(&remote_bin, binary.len() as u64),
-                    lines,
-                )
-            }
-            _ => (command::posix_install_command(&remote_bin), binary),
-        };
-        let result =
-            tokio::time::timeout(Duration::from_secs(180), link.exec_with_input(&cmd, &input))
-                .await
-                .context("推送宿主机节点二进制超时")??;
-        if !result.ok() {
-            // A、C 可以同时部署同一内容；Windows 已执行的目标文件无法再次 rename 覆盖。
-            // 另一方已完成落位时继续 node ensure，让宿主机文件锁合并启动。
-            let installed = timed_exec(&link, &command::exists_command(kind, &remote_bin)).await?;
-            ensure!(
-                installed.ok() && installed.stdout.lines().any(|l| l.trim() == "yes"),
-                "推送宿主机节点二进制失败：{}",
-                output_detail(&result)
-            );
-        }
-    }
+    let remote_bin = install_binary(&link, kind, &root, target, binary).await?;
     let args = ensure_argv(&remote_bin, root);
     let result = tokio::time::timeout(
         Duration::from_secs(80),
@@ -150,6 +116,155 @@ pub async fn ensure_remote(link: Rc<SshLink>) -> anyhow::Result<NodeEndpoint> {
         "节点返回的进程已经退出"
     );
     verify_endpoint(&link, descriptor, root).await
+}
+
+/// 仅供显式升级入口识别没有节点描述的旧服务。任何已有描述、读取失败或正在启动的
+/// 进程都不走这条路径，避免把普通连接故障误判成可以停服替换的旧版。
+pub(super) async fn legacy_target(link: Rc<SshLink>) -> anyhow::Result<Option<LegacyTarget>> {
+    let probe = link.probe(None, 1).await.context("无法探测旧服务的系统信息")?;
+    let root = canonical_remote_root(&link, probe.kind, &probe.root).await?;
+    let descriptor_path = join_path(probe.kind, &[&root, bootstrap::DESCRIPTOR]);
+    let existing = timed_exec(&link, &read_command(probe.kind, &descriptor_path)).await?;
+    if existing.ok() {
+        return Ok(None);
+    }
+    ensure!(existing.code == Some(3), "读取旧服务节点描述失败：{}", output_detail(&existing));
+    let legacy = timed_exec(&link, &legacy_probe_command(probe.kind, &root)).await?;
+    ensure!(legacy.ok(), "无法检查宿主机旧服务：{}", output_detail(&legacy));
+    if !legacy.stdout.lines().any(|line| line.trim() == "FALCON_NODE_LEGACY") {
+        return Ok(None);
+    }
+    let target = probe.target.context("宿主机系统或架构没有 Falcon 服务端构建")?;
+    Ok(Some(LegacyTarget { kind: probe.kind, root, target }))
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum LegacyRecovery {
+    Node(NodeEndpoint),
+    OldService,
+    Starting,
+    Missing,
+}
+
+/// 已提交任务的只读恢复探测：不选择、不下载二进制，也不执行 `node ensure`。
+pub(super) async fn legacy_recovery(link: Rc<SshLink>) -> anyhow::Result<LegacyRecovery> {
+    let probe = link.probe(None, 1).await.context("无法探测升级后的系统信息")?;
+    let root = canonical_remote_root(&link, probe.kind, &probe.root).await?;
+    let descriptor_path = join_path(probe.kind, &[&root, bootstrap::DESCRIPTOR]);
+    let existing = timed_exec(&link, &read_command(probe.kind, &descriptor_path)).await?;
+    if existing.ok() {
+        let descriptor = parse_descriptor(&existing.stdout).context("升级后的节点描述无法识别")?;
+        if remote_pid_alive(&link, probe.kind, descriptor.pid).await? {
+            return verify_endpoint(&link, descriptor, &root).await.map(LegacyRecovery::Node);
+        }
+    } else {
+        ensure!(existing.code == Some(3), "读取升级后的节点描述失败：{}", output_detail(&existing));
+    }
+    let legacy = timed_exec(&link, &legacy_probe_command(probe.kind, &root)).await?;
+    ensure!(legacy.ok(), "无法读取旧服务升级现场：{}", output_detail(&legacy));
+    if legacy.stdout.lines().any(|line| line.trim() == "FALCON_NODE_STARTING") {
+        return Ok(LegacyRecovery::Starting);
+    }
+    if legacy.stdout.lines().any(|line| line.trim() == "FALCON_NODE_LEGACY") {
+        return Ok(LegacyRecovery::OldService);
+    }
+    Ok(LegacyRecovery::Missing)
+}
+
+/// 显式升级旧服务：入口只下载并校验官方 Release，远端不访问公网。新二进制在远端
+/// 本机完成停服、备份与替换，避免旧服务停止后入口失去执行升级命令的通道。
+#[derive(Debug)]
+pub(super) struct LegacyUpgradeRejected(pub String);
+impl std::fmt::Display for LegacyUpgradeRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+impl std::error::Error for LegacyUpgradeRejected {}
+
+pub(super) async fn prepare_legacy(
+    link: Rc<SshLink>,
+    target: &LegacyTarget,
+    binary: Vec<u8>,
+) -> anyhow::Result<String> {
+    ensure!(
+        binary.windows(bootstrap::LEGACY_UPGRADE_CAPABILITY_MARKER.len()).any(|w| w == bootstrap::LEGACY_UPGRADE_CAPABILITY_MARKER),
+        "所选 Release 尚不支持旧服务升级；请使用包含 node upgrade 的新版本"
+    );
+    install_binary(&link, target.kind, &target.root, target.target, binary).await
+}
+
+pub(super) async fn run_legacy_upgrade(
+    link: Rc<SshLink>,
+    target: &LegacyTarget,
+    version: &str,
+    remote_bin: String,
+) -> anyhow::Result<NodeEndpoint> {
+    let args = upgrade_argv(&remote_bin, &target.root);
+    let result = tokio::time::timeout(
+        Duration::from_secs(200),
+        link.exec(&command::exec_command(target.kind, &args), None),
+    )
+    .await
+    .context("等待旧服务升级与重启超时")??;
+    if !result.ok() {
+        return Err(anyhow::Error::new(LegacyUpgradeRejected(format!("旧服务升级失败：{}", output_detail(&result)))));
+    }
+    let descriptor = parse_descriptor(&result.stdout).context("旧服务升级没有返回有效节点描述")?;
+    ensure!(descriptor.version == version, "升级后节点版本与目标版本不符");
+    ensure!(remote_pid_alive(&link, target.kind, descriptor.pid).await?, "升级后的节点进程已经退出");
+    verify_endpoint(&link, descriptor, &target.root).await
+}
+
+pub(super) async fn download_release_binary(target: SessiondTarget, version: &str) -> anyhow::Result<Vec<u8>> {
+    let platform = platform(target);
+    let release = crate::server_update::fetch_release(Some(version)).await?;
+    let download = DownloadDir::new()?;
+    let file = download.0.join(crate::server_update::asset_name(&release.version, platform));
+    crate::server_update::download_verified_release(&release, platform, &file).await?;
+    let bytes = std::fs::read(&file)?;
+    ensure!(!bytes.is_empty(), "官方服务端二进制为空");
+    Ok(bytes)
+}
+
+async fn install_binary(
+    link: &Rc<SshLink>,
+    kind: HostKind,
+    root: &str,
+    target: SessiondTarget,
+    binary: Vec<u8>,
+) -> anyhow::Result<String> {
+    ensure!(
+        binary.windows(bootstrap::CAPABILITY_MARKER.len()).any(|w| w == bootstrap::CAPABILITY_MARKER),
+        "所选 Falcon 二进制尚不支持节点协议1；请发布包含节点模块的稳定版或设置 FALCON_NODE_BIN_DIR，不会运行旧版的未知子命令"
+    );
+    let hash = hex::encode(Sha256::digest(&binary));
+    let name = format!("falcon-node-{}{}", hash, if target.is_windows() { ".exe" } else { "" });
+    let remote_bin = join_path(kind, &[root, "bin", &name]);
+    let exists = timed_exec(link, &command::exists_command(kind, &remote_bin)).await?;
+    if !exists.ok() || !exists.stdout.lines().any(|l| l.trim() == "yes") {
+        let (cmd, input) = match kind {
+            HostKind::Windows => {
+                let mut encoder = crate::transfer::Base64LineEncoder::new();
+                let mut lines = encoder.feed(&binary);
+                lines.extend(encoder.finish());
+                (command::windows_install_command(&remote_bin, binary.len() as u64), lines)
+            }
+            _ => (command::posix_install_command(&remote_bin), binary),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(180), link.exec_with_input(&cmd, &input))
+            .await
+            .context("推送宿主机节点二进制超时")??;
+        if !result.ok() {
+            // A、C 可以同时部署同一内容；Windows 已执行的目标文件无法再次 rename 覆盖。
+            // 另一方已完成落位时继续 node ensure/upgrade，让宿主机文件锁合并操作。
+            let installed = timed_exec(link, &command::exists_command(kind, &remote_bin)).await?;
+            ensure!(
+                installed.ok() && installed.stdout.lines().any(|l| l.trim() == "yes"),
+                "推送宿主机节点二进制失败：{}",
+                output_detail(&result)
+            );
+        }
+    }
+    Ok(remote_bin)
 }
 
 async fn wait_for_remote_node(
@@ -318,12 +433,16 @@ fn ensure_argv(bin: &str, root: &str) -> Vec<String> {
     ]
 }
 
+fn upgrade_argv(bin: &str, root: &str) -> Vec<String> {
+    vec![bin.into(), "node".into(), "upgrade".into(), "--data-dir".into(), root.into()]
+}
+
 /// 只做读取，既不调用旧二进制的未知参数，也不使用 service install/start。未知参数会让
 /// 旧服务按默认配置启动，因此探测不能靠 `falcon --version` 或 `falcon node ...`。
 fn legacy_probe_command(kind: HostKind, root: &str) -> String {
     if kind == HostKind::Windows {
         return encode_powershell(&format!(
-            r#"$ErrorActionPreference = 'Stop'; $root = {}; $found = Get-CimInstance Win32_Process | Where-Object {{ $_.Name -match '^falcon(?:-server|-v[^ ]+|-node-[0-9a-f]+)?\.exe$' -and $_.CommandLine -and $_.CommandLine -notmatch '\s(node|service|respawn)\s' }}; foreach ($p in $found) {{ $dirs = [regex]::Matches($p.CommandLine, '(?:^|\s)--data-dir\s+(?:"([^"]+)"|(\S+))'); $owns = $false; if ($dirs.Count) {{ $m = $dirs[$dirs.Count - 1]; $d = $m.Groups[1].Value; if (-not $d) {{ $d = $m.Groups[2].Value }}; $owns = $d.TrimEnd('\', '/') -ieq $root.TrimEnd('\', '/') }} elseif ($p.ExecutablePath) {{ $owns = $p.ExecutablePath.StartsWith((Join-Path $root 'bin') + '\', [StringComparison]::OrdinalIgnoreCase) }}; if ($owns) {{ if ($p.Name -like 'falcon-node-*') {{ 'FALCON_NODE_STARTING' }} else {{ 'FALCON_NODE_LEGACY' }} }} }}"#,
+            r#"$ErrorActionPreference = 'Stop'; $root = {}; $found = Get-CimInstance Win32_Process | Where-Object {{ $_.Name -match '^falcon(?:-server|-v[^ ]+|-node-[0-9a-f]+)?\.exe$' -and $_.CommandLine -and ($_.CommandLine -notmatch '\s(node|service|respawn)\s' -or $_.CommandLine -match '\snode\s+upgrade\s') }}; foreach ($p in $found) {{ $dirs = [regex]::Matches($p.CommandLine, '(?:^|\s)--data-dir\s+(?:"([^"]+)"|(\S+))'); $owns = $false; if ($dirs.Count) {{ $m = $dirs[$dirs.Count - 1]; $d = $m.Groups[1].Value; if (-not $d) {{ $d = $m.Groups[2].Value }}; $owns = $d.TrimEnd('\', '/') -ieq $root.TrimEnd('\', '/') }} elseif ($p.ExecutablePath) {{ $owns = $p.ExecutablePath.StartsWith((Join-Path $root 'bin') + '\', [StringComparison]::OrdinalIgnoreCase) }}; if (-not $owns -and $dirs.Count -eq 0 -and $env:USERPROFILE) {{ $owns = $root -ieq (Join-Path $env:USERPROFILE '.falcon') -or $root -ieq (Join-Path $env:USERPROFILE '.mojito') }}; if ($owns) {{ if ($p.Name -like 'falcon-node-*') {{ 'FALCON_NODE_STARTING' }} else {{ 'FALCON_NODE_LEGACY' }} }} }}"#,
             quote_powershell(root)
         ));
     }
@@ -335,13 +454,13 @@ fn legacy_probe_command(kind: HostKind, root: &str) -> String {
          x=${{c%% *}}; e=${{x##*/}}; marker=FALCON_NODE_LEGACY; case \"$e\" in falcon-node-*) marker=FALCON_NODE_STARTING;; esac; \
          case \"$e\" in falcon|falcon-server|falcon-v*|falcon-node-*) \
          case \"$c\" in *'--data-dir '*) d=${{c##*--data-dir }}; case \"$d\" in \"$r\"|\"$r \"*) printf '%s\\n' \"$marker\";; esac;; \
-         *) case \"$x\" in \"$r\"/bin/*) printf '%s\\n' \"$marker\";; esac;; esac;; esac; done",
+         *) case \"$x\" in \"$r\"/bin/*) printf '%s\\n' \"$marker\";; *) case \"$r\" in \"$HOME/.falcon\"|\"$HOME/.mojito\") printf '%s\\n' \"$marker\";; esac;; esac;; esac; done",
         quote_posix(root)
     );
     format!("sh -c {}", quote_posix(&script))
 }
 
-fn platform(target: SessiondTarget) -> &'static str {
+pub(super) fn platform(target: SessiondTarget) -> &'static str {
     match target {
         SessiondTarget::X86_64Linux => "linux-x64",
         SessiondTarget::Aarch64Linux => "linux-arm64",
@@ -431,6 +550,12 @@ mod tests {
         assert!(command::exec_command(HostKind::Posix, &argv).contains("'\\''"));
         let cmd = command::exec_command(HostKind::Windows, &argv);
         assert!(cmd.starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
+        let upgrade = upgrade_argv("/tmp/a'b/falcon-node-new", "/tmp/a b/.falcon");
+        assert_eq!(&upgrade[1..4], ["node", "upgrade", "--data-dir"]);
+        assert!(command::exec_command(HostKind::Posix, &upgrade).contains("'\\''"));
+        let windows = command::exec_command(HostKind::Windows, &upgrade);
+        assert!(windows.starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "));
+        assert!(!windows.contains(" & "));
     }
 
     #[test]
@@ -545,5 +670,6 @@ mod tests {
         assert!(cmd.contains("ps -ax"));
         assert!(!cmd.contains("--version"));
         assert!(!cmd.contains("service start"));
+        assert!(cmd.contains("$HOME/.falcon"));
     }
 }

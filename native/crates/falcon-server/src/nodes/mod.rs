@@ -5,6 +5,7 @@
 
 pub mod bootstrap;
 mod gateway;
+mod legacy_update;
 pub mod migration;
 pub mod transport;
 mod update;
