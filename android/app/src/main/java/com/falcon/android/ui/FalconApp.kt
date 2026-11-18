@@ -47,6 +47,7 @@ private fun loadSavedServers(context: Context): Pair<List<ServerProfile>, String
         } catch (_: Exception) {
         }
     }
+    // 默认条目只在首次启动（没有任何保存记录）时填充；用户删除或改地址后不得再自动补回。
     if (list.isEmpty()) {
         list.add(
             ServerProfile(
@@ -69,18 +70,9 @@ private fun loadSavedServers(context: Context): Pair<List<ServerProfile>, String
                 url = "http://10.0.2.2:4923"
             )
         )
-    } else if (list.none { it.url.contains("10.233.21.9") }) {
-        list.add(
-            0,
-            ServerProfile(
-                id = "default-mac-lan",
-                name = "Mac 局域网 (10.233.21.9)",
-                url = "http://10.233.21.9:4923"
-            )
-        )
     }
     val savedActive = prefs.getString(KEY_ACTIVE_SERVER_ID, null)
-    val activeId = if (savedActive == null || savedActive == "default-emu") {
+    val activeId = if (savedActive == null || list.none { it.id == savedActive }) {
         list.first().id
     } else {
         savedActive
@@ -202,19 +194,30 @@ fun FalconApp() {
                     refreshTrigger++
                 },
                 onAddOrUpdateServer = { name, url, editId ->
+                    val normalized = FalconApiClient.normalizeBaseUrl(url)
                     if (editId != null) {
-                        serverProfiles = serverProfiles.map {
-                            if (it.id == editId) it.copy(name = name, url = url) else it
+                        // 编辑后若与另一条同地址，以正在编辑的为准，去掉那条旧的，避免同地址两条并存。
+                        serverProfiles = serverProfiles.filter { it.id == editId || it.url != normalized }.map {
+                            if (it.id == editId) it.copy(name = name, url = normalized) else it
                         }
                         activeServerId = editId
                     } else {
-                        val newProfile = ServerProfile(
-                            id = UUID.randomUUID().toString(),
-                            name = name,
-                            url = url
-                        )
-                        serverProfiles = serverProfiles + newProfile
-                        activeServerId = newProfile.id
+                        val existing = serverProfiles.firstOrNull { it.url == normalized }
+                        if (existing != null) {
+                            // 同地址已存在：只更新名称并切换过去，不再重复建条目。
+                            serverProfiles = serverProfiles.map {
+                                if (it.id == existing.id) it.copy(name = name) else it
+                            }
+                            activeServerId = existing.id
+                        } else {
+                            val newProfile = ServerProfile(
+                                id = UUID.randomUUID().toString(),
+                                name = name,
+                                url = normalized
+                            )
+                            serverProfiles = serverProfiles + newProfile
+                            activeServerId = newProfile.id
+                        }
                     }
                     saveServersToPrefs(context, serverProfiles, activeServerId)
                     refreshTrigger++

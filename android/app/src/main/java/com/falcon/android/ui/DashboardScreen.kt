@@ -709,15 +709,15 @@ fun DashboardScreen(
                         enabled = !scanningLan,
                         onClick = {
                             scanningLan = true
-                            scanHint = "正在扫描当前 Wi-Fi 网段 (:4923)…"
+                            scanHint = "正在扫描本机各网卡的 /24 网段（含 Tailscale，:4923）…"
                             scope.launch {
                                 val found = FalconApiClient.scanLanServers(4923)
                                 discoveredServers = found
                                 scanningLan = false
                                 scanHint = if (found.isEmpty()) {
-                                    "未发现开启局域网访问的 Falcon (:4923)"
+                                    "未发现 Falcon 服务端 (:4923)；Tailscale 其他节点若不在同一 /24 段，请手动添加地址"
                                 } else {
-                                    "发现 ${found.size} 台局域网服务端，点击即连"
+                                    "发现 ${found.size} 台服务端，点击即连"
                                 }
                             }
                         }
@@ -742,8 +742,14 @@ fun DashboardScreen(
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(theme.tint)
                                 .clickable {
-                                    val label = "局域网 ${disc.platform} (${disc.url.removePrefix("http://")})"
-                                    onAddOrUpdateServer(label, disc.url, null)
+                                    // 同地址已在列表里就直接切换，保留用户起好的名字，不重复建条目。
+                                    val existing = serverProfiles.firstOrNull { it.url == disc.url }
+                                    if (existing != null) {
+                                        onSelectServer(existing)
+                                    } else {
+                                        val label = "局域网 ${disc.platform} (${disc.url.removePrefix("http://")})"
+                                        onAddOrUpdateServer(label, disc.url, null)
+                                    }
                                     showServerDialog = false
                                 }
                                 .padding(horizontal = 8.dp, vertical = 6.dp),

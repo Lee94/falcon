@@ -453,15 +453,20 @@ object FalconApiClient {
                 val nif = interfaces.nextElement()
                 if (!nif.isUp || nif.isLoopback || nif.isVirtual) continue
                 val name = nif.name.lowercase()
-                if (name.startsWith("tun") || name.startsWith("rmnet") || name.startsWith("dummy")) continue
+                // 蜂窝与空接口不扫；tun 不能一刀切——Tailscale 在 Android 上就是 tun 网卡，
+                // 其地址属于 CGNAT 段 100.64.0.0/10，在下方按地址放行；其它 tun（代理等）仍跳过。
+                if (name.startsWith("rmnet") || name.startsWith("dummy")) continue
                 val addrs = nif.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val addr = addrs.nextElement()
                     if (addr is Inet4Address && !addr.isLoopbackAddress && !addr.isLinkLocalAddress) {
                         val parts = (addr.hostAddress ?: continue).split('.')
-                        if (parts.size == 4 && !(parts[0] == "198" && (parts[1] == "18" || parts[1] == "19"))) {
-                            prefixes.add("${parts[0]}.${parts[1]}.${parts[2]}")
-                        }
+                        if (parts.size != 4) continue
+                        if (parts[0] == "198" && (parts[1] == "18" || parts[1] == "19")) continue
+                        val second = parts[1].toIntOrNull() ?: continue
+                        val isTailscale = parts[0] == "100" && second in 64..127
+                        if (name.startsWith("tun") && !isTailscale) continue
+                        prefixes.add("${parts[0]}.${parts[1]}.${parts[2]}")
                     }
                 }
             }
