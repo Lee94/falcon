@@ -57,8 +57,8 @@ pub struct ServerGroup {
 
 /// 第二层：一个文件夹项目。
 ///
-/// 普通源项目的第三层是当前检出，再加缩进在它下面的单仓库附属项目。多仓库项目
-/// （含批量派生出来的）自己就是这一层：`worktrees` 为空，会话直接挂在项目行上，
+/// 有附属 worktree 的普通源项目，第三层是当前检出与各附属项目。没有附属 worktree 的普通源项目、
+/// 多仓库项目（含批量派生出来的）自己就是这一层：`worktrees` 为空，会话直接挂在项目行上，
 /// 派生产物按全局顺序另占一行，不嵌在源项目下面。
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderGroup {

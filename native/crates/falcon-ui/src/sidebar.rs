@@ -1,7 +1,7 @@
-//! 侧栏：服务器 → 文件夹 → 检出 → 会话（旧 React 版的 `components/Sidebar.tsx`）。
+//! 侧栏：服务器 → 项目 →（多个 worktree 时的检出 →）会话（旧 React 版的 `components/Sidebar.tsx`）。
 //!
-//! 多仓库项目不再往下挂检出：项目行自己承接会话，批量派生出来的项目与源项目同级。
-//! 单仓库的附属项目仍缩进在源项目的检出下面。
+//! 多仓库项目与没有附属 worktree 的单仓库项目不往下挂检出：项目行自己承接会话。
+//! 单仓库有附属 worktree 时才显示各条检出，批量派生出来的多仓库项目与源项目同级。
 //!
 //! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
@@ -355,8 +355,8 @@ impl Sidebar {
 
     /// `group` / `index`：所在服务器分组的键与组内下标，拖拽排序用
     fn folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        if folder.project.multi.is_some() {
-            return self.multi_folder_node(folder, group, index, cx);
+        if folder.project.multi.is_some() || folder.worktrees.is_empty() {
+            return self.flat_folder_node(folder, group, index, cx);
         }
         let ws = self.ws.read(cx);
         let project = folder.project.clone();
@@ -424,11 +424,13 @@ impl Sidebar {
         node.into_any_element()
     }
 
-    /// 多仓库项目：没有检出这一层。会话直接挂在项目行上；批量派生出来的也是这样一行，
-    /// 与源项目同级（分组在 [`group_servers`]）。存档的仍置灰，恢复走右键。
-    fn multi_folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// 不需要检出这一层的项目：多仓库项目，以及没有附属 worktree 的单仓库项目。
+    /// 会话直接挂在项目行上；有附属 worktree 的单仓库项目才保留「项目 → 检出 → 会话」。
+    /// 批量派生的多仓库项目与源项目同级（分组在 [`group_servers`]）。存档的仍置灰，恢复走右键。
+    fn flat_folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.ws.read(cx);
         let project = folder.project;
+        let is_multi = project.multi.is_some();
         let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
         let member_names: Vec<String> = project
             .multi
@@ -455,13 +457,15 @@ impl Sidebar {
                 parts.push(dir.clone());
             }
             parts.join(" · ")
-        } else {
+        } else if is_multi {
             let names = member_names.join(" · ");
             if names.is_empty() {
                 project.name.clone()
             } else {
                 names
             }
+        } else {
+            project.working_dir.clone().unwrap_or_else(|| project.name.clone())
         };
         let count = mine.len() + mine_pending.len();
         let expandable = archived_at.is_none() && count > 0;
@@ -500,7 +504,13 @@ impl Sidebar {
                 id: format!("fld-{pid}"),
                 depth: 1,
                 expanded: expandable.then_some(sessions_open),
-                icon: if archived_at.is_some() { IconName::Archive } else { IconName::Folders },
+                icon: if archived_at.is_some() {
+                    IconName::Archive
+                } else if is_multi {
+                    IconName::Folders
+                } else {
+                    IconName::Folder
+                },
                 label: project.name.clone(),
                 meta,
                 changes,
