@@ -615,7 +615,10 @@ impl SessionManager {
         entries
             .into_iter()
             .filter(|e| e.alive && e.owner == me && now - e.created_at > ORPHAN_GRACE_MS)
-            .filter(|e| self.db.get_session(&e.session_id).is_none())
+            .filter(|e| self.db.is_session_orphan_candidate(&e.session_id).unwrap_or_else(|error| {
+                log::warn!("无法确认会话 {} 是否为孤儿：{error}", e.session_id);
+                false
+            }))
             .map(|e| e.sid)
             .collect()
     }

@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use falcon_proto::{PluginBlock, PluginOption};
 
-use crate::db::{Db, ProjectRow, SshHostRow};
+use super::{PluginError, resolve_project};
+use crate::api::AppState;
+use crate::db::{ProjectRow, SshHostRow};
 use crate::engine::EngineHandle;
 use crate::exec::{Exec as _, ExecResult};
 use crate::sessions::ssh_host::HostFacts;
@@ -56,34 +58,63 @@ pub struct Resolved {
     pub choice: MachineChoice,
 }
 
-pub fn resolve(db: &Db, params: &BTreeMap<String, String>, project_id: Option<&str>) -> Resolved {
+#[derive(Debug)]
+pub struct Unresolved {
+    /// 即使焦点项目连不上，面板也要保留机器选择，让用户能切到另一台。
+    pub choice: MachineChoice,
+    pub error: PluginError,
+}
+
+pub async fn resolve(
+    state: &AppState,
+    params: &BTreeMap<String, String>,
+    project_id: Option<&str>,
+) -> Result<Resolved, Unresolved> {
+    let db = &state.db;
     let value = params.get(PARAM).cloned().unwrap_or_else(|| "auto".into());
     let mut options = vec![
         PluginOption { value: "auto".into(), label: "跟随当前项目".into() },
         PluginOption { value: "local".into(), label: LOCAL_LABEL.into() },
     ];
     options.extend(db.list_hosts().into_iter().map(|h| PluginOption { value: format!("host:{}", h.id), label: h.name }));
-    let local = |value: String, options: Vec<PluginOption>| Resolved {
+    let local = |value, options| Resolved {
         key: "local".into(),
         target: Target::Local,
         choice: MachineChoice { value, options, label: LOCAL_LABEL.into() },
     };
     if value == "local" {
-        return local(value, options);
+        return Ok(local(value, options));
     }
     if let Some(host) = value.strip_prefix("host:").and_then(|id| db.get_host(id)) {
-        return Resolved {
+        return Ok(Resolved {
             key: format!("host:{}", host.id),
             choice: MachineChoice { value, options, label: host.name.clone() },
             target: Target::Host(host),
-        };
+        });
     }
-    // auto（以及选过的主机后来被删了）：跟着焦点项目
+    // auto（以及选过的主机后来被删了）：跟着焦点项目。远端项目解析失败不能退回本机，
+    // 否则点 Docker 的启停或清理可能会作用在另一台机器上。
     let value = "auto".to_string();
-    let project = project_id.and_then(|id| db.get_project(id).or_else(|| crate::nodes::cached_project(db, id)))
-        .filter(|p| p.project_type == "ssh");
-    let Some(project) = project else { return local(value, options) };
+    let mut choice = MachineChoice { value, options, label: "跟随当前项目".into() };
+    let project = match resolve_project(state, project_id).await {
+        Ok(project) => project.filter(|p| p.project_type == "ssh"),
+        Err(error) => return Err(Unresolved { choice, error }),
+    };
+    let Some(project) = project else { return Ok(local(choice.value, choice.options)) };
     let bound = project.host_id.as_deref().and_then(|id| db.get_host(id));
+    // 节点项目走网关已经用来验证身份的主机链路，无须再建一条按项目 id 索引的 SSH 连接。
+    if project.id.starts_with("node:") {
+        let Some(host) = bound.filter(|h| {
+            project.ssh_host.as_deref() == Some(h.host.as_str())
+                && project.ssh_port == Some(h.port)
+                && project.ssh_username.as_deref() == Some(h.username.as_str())
+        }) else {
+            let error = PluginError::Failed("远端主机配置已改变，请重新选择机器".into());
+            return Err(Unresolved { choice, error });
+        };
+        choice.label = host.name.clone();
+        return Ok(Resolved { key: format!("host:{}", host.id), target: Target::Host(host), choice });
+    }
     let conn = format!(
         "{}@{}",
         project.ssh_username.as_deref().unwrap_or(""),
@@ -93,7 +124,8 @@ pub fn resolve(db: &Db, params: &BTreeMap<String, String>, project_id: Option<&s
         Some(h) => (format!("host:{}", h.id), h.name),
         None => (format!("ssh:{conn}:{}", project.ssh_port.unwrap_or(22)), conn),
     };
-    Resolved { key, target: Target::Project(project), choice: MachineChoice { value, options, label } }
+    choice.label = label;
+    Ok(Resolved { key, target: Target::Project(project), choice })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,16 +177,16 @@ mod tests {
         machine.map(|m| BTreeMap::from([(PARAM.to_string(), m.to_string())])).unwrap_or_default()
     }
 
-    #[test]
-    fn resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(dir.path()).unwrap();
-        // 没选、选了本机、选了不存在的主机：都是本机（后两种之一回到 auto）
-        let r = resolve(&db, &params(None), None);
+    #[tokio::test]
+    async fn resolution() {
+        let app = crate::api::test_support::TestApp::new();
+        let offline = crate::nodes::resource_id("offline-node", "p");
+        // 没选机器、没有焦点项目时看本机。显式选机器与焦点节点是否在线无关。
+        let r = resolve(&app.state, &params(None), None).await.unwrap();
         assert_eq!((r.key.as_str(), r.choice.value.as_str(), r.choice.label.as_str()), ("local", "auto", "本机"));
         assert!(matches!(r.target, Target::Local));
-        assert_eq!(resolve(&db, &params(Some("local")), Some("nope")).choice.value, "local");
-        assert_eq!(resolve(&db, &params(Some("host:gone")), None).choice.value, "auto");
+        assert_eq!(resolve(&app.state, &params(Some("local")), Some(&offline)).await.unwrap().choice.value, "local");
+        assert_eq!(resolve(&app.state, &params(Some("host:gone")), None).await.unwrap().choice.value, "auto");
         assert_eq!(
             r.choice.options.iter().map(|o| o.value.as_str()).collect::<Vec<_>>(),
             vec!["auto", "local"],

@@ -375,8 +375,7 @@ impl SingleForm {
                             branch = created.worktree.as_ref().map(|w| w.branch.clone()).unwrap_or(branch.clone())
                         );
                         this.ws.update(cx, |w, cx| {
-                            w.refresh_projects(cx);
-                            w.refresh_hosts(cx);
+                            w.refresh_inventory(cx);
                             w.toast(
                                 ToastKind::Success,
                                 t!("worktree.created", name = created.name.clone()).to_string(),
@@ -638,8 +637,7 @@ impl MultiForm {
                             branch = created.worktree.as_ref().map(|w| w.branch.clone()).unwrap_or(branch.clone())
                         );
                         this.ws.update(cx, |w, cx| {
-                            w.refresh_projects(cx);
-                            w.refresh_hosts(cx);
+                            w.refresh_inventory(cx);
                             w.toast(
                                 ToastKind::Success,
                                 t!("worktree.created", name = created.name.clone()).to_string(),

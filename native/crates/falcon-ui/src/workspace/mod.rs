@@ -26,7 +26,7 @@ pub use falcon_core::workspace::{
     ActiveView, DiffTabTarget, FileTabTarget, NewTerminalPlace, PendingSession, RightPanelId,
     WorkspaceState, is_pending_id,
 };
-use falcon_proto::{AppIconState, AuthStatus, PluginList, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
+use falcon_proto::{AppIconState, AuthStatus, NodeStatus, PluginList, Project, SessionAgent, SessionWithProject, SshHost, SystemInfo};
 use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::profiles::ServerProfile;
@@ -115,6 +115,12 @@ pub struct Workspace {
     pub projects: Vec<Project>,
     pub hosts: Vec<SshHost>,
     pub sessions: Vec<SessionWithProject>,
+    // 旧服务端没有 /api/nodes，继续使用原有列表。
+    nodes: Option<HashMap<String, NodeStatus>>,
+    inventory_in_flight: bool,
+    inventory_requested: bool,
+    inventory_loaded: bool,
+    session_revision: u64,
     /// 正在终止时保存会话以便失败后恢复。确认后只保留 ID（值为 None），避免迟到的轮询或网关缓存重新显示它。
     hidden_sessions: HashMap<String, Option<SessionWithProject>>,
     /// 后端本机检测到的 CLI；首次检测完成前只显示普通终端。
@@ -197,6 +203,11 @@ impl Workspace {
             projects: Vec::new(),
             hosts: Vec::new(),
             sessions: Vec::new(),
+            nodes: None,
+            inventory_in_flight: false,
+            inventory_requested: false,
+            inventory_loaded: false,
+            session_revision: 0,
             hidden_sessions: HashMap::new(),
             local_agents: Vec::new(),
             agents_in_flight: false,
@@ -253,9 +264,9 @@ impl Workspace {
     fn start(&mut self, cx: &mut Context<Self>) {
         // 会话列表与项目/主机列表 5s、askpass 1.5s、侧栏 git 计数 8s：沿用 React 版的节奏
         self._tasks.push(Self::poll(cx, Duration::from_secs(5), |this, cx| {
-            this.refresh_sessions(cx);
-            this.refresh_projects(cx);
-            this.refresh_hosts(cx);
+            if !this.inventory_in_flight {
+                this.refresh_inventory(cx);
+            }
         }));
         self._tasks.push(Self::poll(cx, Duration::from_millis(1500), |this, cx| this.pull_askpass(cx)));
         self._tasks.push(Self::poll(cx, Duration::from_secs(8), |this, cx| this.refresh_changes(cx)));
@@ -293,9 +304,7 @@ impl Workspace {
             view.read(cx).reconnect_now();
         }
         if self.auth_phase == AuthPhase::Ready {
-            self.refresh_projects(cx);
-            self.refresh_hosts(cx);
-            self.refresh_sessions(cx);
+            self.refresh_inventory(cx);
             self.refresh_changes(cx);
         }
     }
@@ -351,41 +360,19 @@ impl Workspace {
     }
 
     fn load_all(&mut self, cx: &mut Context<Self>) {
+        self.refresh_inventory(cx);
+        self.load_app_icon(cx);
+        self.refresh_plugins(cx);
+        self.refresh_agents(cx);
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
-            let (system, projects, hosts, sessions) =
-                futures::join!(client.system(), client.list_projects(), client.list_hosts(), client.list_sessions());
-            this.update(cx, |this, cx| {
-                if let Ok(s) = system {
-                    this.system = Some(s);
-                }
-                if let Ok(h) = hosts {
-                    this.hosts = h;
-                }
-                if let Ok(p) = projects {
-                    this.set_projects(p, cx);
-                }
-                match sessions {
-                    Ok(s) => this.apply_sessions(s, cx),
-                    Err(err) => this.handle_error(&err, cx),
-                }
-                // 选中的项目还在就重新选一次（把它的会话补进 tabs），不在了就回总览
-                if let Some(sel) = this.state.selected_project_id.clone() {
-                    if this.owner_project(&sel).is_some() {
-                        this.select_project(&sel, cx);
-                    } else {
-                        this.state.selected_project_id = None;
-                    }
-                }
-                this.refresh_changes(cx);
-                this.load_app_icon(cx);
-                this.refresh_plugins(cx);
-                this.refresh_agents(cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            if let Ok(system) = client.system().await {
+                this.update(cx, |this, cx| {
+                    this.system = Some(system);
+                    cx.notify();
+                }).ok();
+            }
+        }).detach();
     }
 
     /// 重启连着的服务端：POST /api/system/restart 返回后它就会退出重起，连接走自动重连。
@@ -444,17 +431,144 @@ impl Workspace {
 
     // ---------------- 数据刷新 ----------------
 
-    pub fn refresh_projects(&mut self, cx: &mut Context<Self>) {
+    /// 两个列表都会更新网关观测到的节点状态。等列表回来再读状态，并在同一次 UI 更新中应用，
+    /// 避免迟到的旧列表把已离线主机的子项放回来。用户动作发生在途中时，完成后补拉一次。
+    pub fn refresh_inventory(&mut self, cx: &mut Context<Self>) {
+        if self.inventory_in_flight {
+            self.inventory_requested = true;
+            return;
+        }
+        self.inventory_in_flight = true;
+        let session_revision = self.session_revision;
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
-            let result = client.list_projects().await;
-            this.update(cx, |this, cx| match result {
-                Ok(p) => this.set_projects(p, cx),
-                Err(err) => this.handle_error(&err, cx),
-            })
-            .ok();
-        })
-        .detach();
+            let (hosts, projects, sessions) =
+                futures::join!(client.list_hosts(), client.list_projects(), client.list_sessions());
+            let nodes = client.list_nodes().await;
+            this.update(cx, |this, cx| {
+                this.inventory_in_flight = false;
+                let hosts_changed = match hosts {
+                    Ok(hosts) if this.hosts != hosts => {
+                        this.hosts = hosts;
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(err) => {
+                        this.handle_error(&err, cx);
+                        false
+                    }
+                };
+                let status_current = match &nodes {
+                    Ok(_) => true,
+                    Err(err) => matches!(err.status(), Some(404 | 405)),
+                };
+                let mut stable_nodes = HashSet::new();
+                let nodes_changed = match nodes {
+                    Ok(nodes) => {
+                        // 列表截止后，后台发现仍可能恰好成功。刚变为在线的节点这一轮未必列到，
+                        // 下一轮它仍在线时才能用列表里的缺席判定会话已删除。
+                        for node in &nodes {
+                            if let Some(id) = node.node_id.as_ref().filter(|_| node.online)
+                                && this.node_status(&node.host_id).is_some_and(|old| {
+                                    old.online && old.node_id.as_ref() == Some(id)
+                                })
+                            {
+                                stable_nodes.insert(id.clone());
+                            }
+                        }
+                        let next = Some(nodes.into_iter().map(|node| (node.host_id.clone(), node)).collect());
+                        let changed = this.nodes != next;
+                        this.nodes = next;
+                        changed
+                    }
+                    // 服务端可能刚升级，每轮重试能力探测。其它错误保留最近一次状态，不当成兼容模式。
+                    Err(err) if matches!(err.status(), Some(404 | 405)) => this.nodes.take().is_some(),
+                    Err(err) => {
+                        this.handle_error(&err, cx);
+                        false
+                    }
+                };
+                let fresh_projects = projects.is_ok();
+                let mut projects = match projects {
+                    Ok(projects) => projects,
+                    Err(err) => {
+                        this.handle_error(&err, cx);
+                        this.projects.clone()
+                    }
+                };
+                projects.retain(|project| {
+                    project.project_type != falcon_proto::ProjectType::Ssh
+                        || status_current && this.nodes.as_ref().is_none_or(|_| {
+                            fresh_projects && project.host_id.as_deref().is_none_or(|host| this.host_lists_available(host))
+                        })
+                });
+                this.set_projects(projects, cx);
+                // 独立会话的 owner 不在项目列表中，需另行清理已经看不见的主机选择。
+                if let Some(id) = this.state.selected_project_id.as_deref().and_then(falcon_proto::standalone_host_id)
+                    && !this.host_lists_available(id)
+                {
+                    this.state.selected_project_id = None;
+                    if this.state.active == ActiveView::Project {
+                        this.state.active = ActiveView::Overview;
+                    }
+                    cx.notify();
+                }
+                let (mut sessions, fresh_sessions) = match sessions {
+                    Ok(sessions) if this.session_revision == session_revision => (sessions, true),
+                    Ok(_) => (this.sessions.clone(), false),
+                    Err(err) => {
+                        this.handle_error(&err, cx);
+                        let sessions = this.sessions.iter().filter(|session| {
+                            this.nodes.is_none() || session.project_type != falcon_proto::ProjectType::Ssh
+                        }).cloned().collect();
+                        (sessions, false)
+                    }
+                };
+                let lists_current = status_current && fresh_sessions;
+                if !status_current {
+                    sessions.retain(|session| session.project_type != falcon_proto::ProjectType::Ssh);
+                }
+                this.apply_sessions(sessions, fresh_projects, lists_current, &stable_nodes, cx);
+                if !this.inventory_loaded && fresh_projects && lists_current {
+                    this.inventory_loaded = true;
+                    if let Some(sel) = this.state.selected_project_id.clone() {
+                        if this.owner_project(&sel).is_some() {
+                            this.select_project(&sel, cx);
+                        } else {
+                            this.state.selected_project_id = None;
+                        }
+                    }
+                    this.refresh_changes(cx);
+                    cx.notify();
+                }
+                if hosts_changed || nodes_changed {
+                    this.refresh_remote_agents(cx);
+                    cx.notify();
+                }
+                if std::mem::take(&mut this.inventory_requested) {
+                    this.refresh_inventory(cx);
+                }
+            }).ok();
+        }).detach();
+    }
+
+    pub fn node_status(&self, host_id: &str) -> Option<&NodeStatus> {
+        self.nodes.as_ref()?.get(host_id)
+    }
+
+    fn host_lists_available(&self, host_id: &str) -> bool {
+        self.nodes.as_ref().is_none_or(|nodes| nodes.get(host_id).is_some_and(|node| node.online))
+    }
+
+    /// 列表里的 SSH 会话从项目或独立会话 owner 判归属。旧服务端没有节点状态时沿用原列表。
+    fn session_visible(&self, session: &SessionWithProject) -> bool {
+        if self.nodes.is_none() || session.project_type != falcon_proto::ProjectType::Ssh {
+            return true;
+        }
+        if let Some(host) = falcon_proto::standalone_host_id(&session.project_id) {
+            return self.host_lists_available(host);
+        }
+        self.project(&session.project_id).is_some()
     }
 
     fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
@@ -466,25 +580,6 @@ impl Workspace {
         self.refresh_remote_agents(cx);
         self.refresh_heads(cx);
         cx.notify();
-    }
-
-    pub fn refresh_hosts(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
-            let result = client.list_hosts().await;
-            this.update(cx, |this, cx| match result {
-                Ok(h) => {
-                    if this.hosts != h {
-                        this.hosts = h;
-                        this.refresh_remote_agents(cx);
-                        cx.notify();
-                    }
-                }
-                Err(err) => this.handle_error(&err, cx),
-            })
-            .ok();
-        })
-        .detach();
     }
 
     /// CLI 清单来自会话实际所在的机器；没有检测结果时不显示候选项。
@@ -506,7 +601,7 @@ impl Workspace {
             return;
         }
         // 同一主机的项目共用一份清单；未绑定已保存主机的旧 SSH 项目按项目探测。
-        let mut targets: Vec<_> = self.hosts.iter().map(|host| {
+        let mut targets: Vec<_> = self.hosts.iter().filter(|host| self.host_lists_available(&host.id)).map(|host| {
             (format!("host:{}", host.id), ProbeTarget::SshHost(host.id.clone()))
         }).collect();
         targets.extend(self.projects.iter().filter(|p| {
@@ -517,13 +612,11 @@ impl Workspace {
             if !self.remote_agents_in_flight.insert(key.clone()) {
                 continue;
             }
-            let is_host_target = matches!(target, ProbeTarget::SshHost(_));
             let fut = self.client.agents(&target);
             cx.spawn(async move |this, cx| {
                 let result = fut.await;
                 this.update(cx, |this, cx| {
                     this.remote_agents_in_flight.remove(&key);
-                    let ok = result.is_ok();
                     let agents: Vec<_> = match result {
                         Ok(agents) => agents.into_iter().filter(|a| *a != SessionAgent::Unknown).collect(),
                         Err(err) => {
@@ -535,10 +628,6 @@ impl Workspace {
                     if this.remote_agents.get(&key) != Some(&agents) {
                         this.remote_agents.insert(key, agents);
                         cx.notify();
-                    }
-                    if is_host_target && ok {
-                        this.refresh_projects(cx);
-                        this.refresh_hosts(cx);
                     }
                 }).ok();
             }).detach();
@@ -572,19 +661,6 @@ impl Workspace {
         }).detach();
     }
 
-    pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
-            let result = client.list_sessions().await;
-            this.update(cx, |this, cx| match result {
-                Ok(s) => this.apply_sessions(s, cx),
-                Err(err) => this.handle_error(&err, cx),
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     fn filter_hidden_sessions(&mut self, sessions: &mut Vec<SessionWithProject>) {
         sessions.retain(|session| match self.hidden_sessions.get_mut(&session.id) {
             None => true,
@@ -597,7 +673,24 @@ impl Workspace {
         });
     }
 
-    fn apply_sessions(&mut self, mut sessions: Vec<SessionWithProject>, cx: &mut Context<Self>) {
+    fn apply_sessions(
+        &mut self,
+        mut sessions: Vec<SessionWithProject>,
+        fresh_projects: bool,
+        fresh_sessions: bool,
+        stable_nodes: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // 项目和会话请求之间可能跨过一次断线。已返回但此刻不可见的会话不能作为删除布局的依据。
+        let mut unavailable = HashSet::new();
+        sessions.retain(|session| {
+            if self.session_visible(session) {
+                true
+            } else {
+                unavailable.insert(session.id.clone());
+                false
+            }
+        });
         self.filter_hidden_sessions(&mut sessions);
         // 开着窗口、WS 推过程序状态的会话以推来的全集为准：这次轮询的请求可能发在推送之前、
         // 响应却晚到，拿它覆盖会让刚清掉的 blocked 徽标又冒出来，一直挂到下一轮轮询
@@ -621,25 +714,42 @@ impl Workspace {
             .observe_all(sessions.iter().map(|s| (s.id.as_str(), s.program_status.as_ref())));
         let now = self.clock_now();
         self.program_clock.observe_all(sessions.iter().map(|s| (s.id.as_str(), s.program_status.as_ref())), now);
-        // 内容没变就整个跳过（React 版的 sameFlatArray）：tabs / active 在上一轮已经收敛。
-        // 提醒照发（它读的是换上之后的列表，没变时新旧一样）
-        let unchanged = self.sessions == sessions;
-        if !unchanged {
+        // 提醒读的是换上之后的列表。即使列表没变，也要按最新的节点状态对账排布。
+        let changed = self.sessions != sessions;
+        if changed {
             self.sessions = sessions;
         }
         for (id, change) in changes {
             self.emit_program_alert(&id, change, cx);
         }
         self.chime_finished(&finished, cx);
-        if unchanged {
-            return;
+        let preserve = |id: &str| {
+            if !fresh_sessions || unavailable.contains(id) {
+                return true;
+            }
+            let Some(node_id) = id.strip_prefix("node:").and_then(|id| id.split_once(':').map(|(node, _)| node)) else {
+                return false;
+            };
+            // 离线状态可能不带节点 ID，冷启动也没有旧列表可供对照。无法确认归属时宁可留下
+            // 布局 ID，等所属节点重新出现再对账。同一节点也可能通过其它在线别名列出。
+            !fresh_projects || self.nodes.as_ref().is_none_or(|nodes| {
+                !stable_nodes.contains(node_id) && nodes.values().any(|node| {
+                    !node.online || node.node_id.is_none() || node.node_id.as_deref() == Some(node_id)
+                })
+            })
+        };
+        let layout_changed = self.state.apply_sessions(&self.sessions, preserve);
+        if changed {
+            let alive: HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
+            self.selected.retain(|id| alive.contains(id.as_str()));
         }
-        self.state.apply_sessions(&self.sessions);
-        let alive: HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
-        self.selected.retain(|id| alive.contains(id.as_str()));
-        self.sync_terminals();
-        self.persist();
-        cx.notify();
+        if changed || layout_changed {
+            self.sync_terminals();
+            cx.notify();
+        }
+        if layout_changed {
+            self.persist();
+        }
     }
 
     /// WS 推来的状态立刻写进列表，不等 5s 轮询——否则接回后侧栏仍显示「待接回」
@@ -970,10 +1080,11 @@ impl Workspace {
 
     // ---------------- 终端视图 ----------------
 
-    /// 不在 tabs 里的视图丢掉（关 WS）；缺的由窗口在 [`Self::ensure_terminal_views`] 里补建
+    /// 不在 tabs 或实时列表里的视图 Detach（关 WS）；重新出现时按原排布补建。
     pub fn sync_terminals(&mut self) {
-        let wanted: HashSet<&String> = self.state.tabs.iter().filter(|t| !is_pending_id(t)).collect();
-        self.terminals.retain(|id, _| wanted.contains(id));
+        let wanted: HashSet<&String> = self.state.tabs.iter().collect();
+        let live: HashSet<&String> = self.sessions.iter().map(|s| &s.id).collect();
+        self.terminals.retain(|id, _| wanted.contains(id) && live.contains(id));
     }
 
     /// 在窗口上下文里补建缺的终端视图（Workspace 本身拿不到 Window）
@@ -983,7 +1094,7 @@ impl Workspace {
             .state
             .tabs
             .iter()
-            .filter(|t| !is_pending_id(t) && !self.terminals.contains_key(*t))
+            .filter(|t| self.session(t).is_some() && !self.terminals.contains_key(*t))
             .cloned()
             .collect();
         for id in ids {
@@ -1001,7 +1112,7 @@ impl Workspace {
                 TerminalViewEvent::StateChanged => cx.notify(),
                 TerminalViewEvent::State { state, dead_reason } => this.apply_session_state(&sid, *state, *dead_reason, cx),
                 TerminalViewEvent::Terminated => this.on_session_terminated(&sid, cx),
-                TerminalViewEvent::Reconnected => this.refresh_sessions(cx),
+                TerminalViewEvent::Reconnected => this.refresh_inventory(cx),
                 TerminalViewEvent::NewTerminal => {
                     if let Some(pid) = this.tab_project_id(&sid) {
                         this.new_terminal(&pid, None, None, cx);

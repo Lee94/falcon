@@ -10,7 +10,7 @@ use std::time::Duration;
 use falcon_client::MoveProjectInput;
 use falcon_core::layout::DropSpot;
 use falcon_core::pane_key::{self, PaneItem};
-use falcon_proto::{SessionAgent, SessionState};
+use falcon_proto::{SessionAgent, SessionState, SessionWithProject};
 use gpui_kit::Context;
 use rust_i18n::t;
 
@@ -43,7 +43,7 @@ impl Workspace {
     // ---------------- 选择与焦点 ----------------
 
     pub fn open_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.hidden_sessions.contains_key(session_id) {
+        if self.session(session_id).is_none() || self.hidden_sessions.contains_key(session_id) {
             return;
         }
         self.state.open_session(session_id, &self.sessions);
@@ -234,15 +234,17 @@ impl Workspace {
                         // 如果已收到宿主机的终止通知，迟到的请求错误不再改变结果。
                         let Some(session) = this.hidden_sessions.get_mut(&id).and_then(Option::take) else { return };
                         this.hidden_sessions.remove(&id);
-                        this.sessions.push(session);
-                        cx.notify();
+                        if this.session_visible(&session) {
+                            this.sessions.push(session);
+                            cx.notify();
+                        }
                         this.handle_error(&err, cx);
                         this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
                     }
                 })
                 .ok();
             }
-            this.update(cx, |this, cx| this.refresh_sessions(cx)).ok();
+            this.update(cx, |this, cx| this.refresh_inventory(cx)).ok();
         })
         .detach();
     }
@@ -287,7 +289,7 @@ impl Workspace {
                 if let Err(err) = result {
                     this.handle_error(&err, cx);
                 }
-                this.refresh_sessions(cx);
+                this.refresh_inventory(cx);
             })
             .ok();
         })
@@ -303,7 +305,7 @@ impl Workspace {
                 if let Err(err) = result {
                     this.handle_error(&err, cx);
                 }
-                this.refresh_sessions(cx);
+                this.refresh_inventory(cx);
             })
             .ok();
         })
@@ -399,7 +401,7 @@ impl Workspace {
         self.commit(false, cx);
     }
 
-    /// 侧栏拖拽排序：先在本地挪（松手就看得到），再落到服务端，服务端回的整份列表覆盖本地那份。
+    /// 侧栏拖拽排序：先在本地挪（松手就看得到），再落到服务端，完成后与节点状态一起刷新列表。
     /// 失败就提示并重新拉一次，乐观挪过的作废。挪的规则与服务端是同一个函数（`move_in_order`）
     pub fn move_project(&mut self, id: &str, target: &str, after: bool, cx: &mut Context<Self>) {
         let Some(order) = falcon_core::project_tree::move_in_order(&self.projects, |p| p.id.as_str(), id, target, after)
@@ -411,13 +413,12 @@ impl Workspace {
         let request = self.client.move_project(id, &MoveProjectInput { target: target.to_string(), after });
         cx.spawn(async move |this, cx| {
             let result = request.await;
-            this.update(cx, |this, cx| match result {
-                Ok(projects) => this.set_projects(projects, cx),
-                Err(err) => {
+            this.update(cx, |this, cx| {
+                if let Err(err) = result {
                     this.handle_error(&err, cx);
                     this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
-                    this.refresh_projects(cx);
                 }
+                this.refresh_inventory(cx);
             })
             .ok();
         })
@@ -506,6 +507,11 @@ impl Workspace {
 
     fn spawn_create(&mut self, pending_id: String, project_id: String, agent: Option<SessionAgent>, cx: &mut Context<Self>) {
         let client = self.client.clone();
+        let Some(owner) = self.owner_project(&project_id) else {
+            self.state.fail_pending(&pending_id, &t!("sidebar.hostOffline"));
+            cx.notify();
+            return;
+        };
         let hint = crate::theme::TerminalLook::global(cx).appearance.clone();
         cx.spawn(async move |this, cx| {
             let request = falcon_proto::CreateSessionRequest {
@@ -517,17 +523,23 @@ impl Workspace {
                 foreground: hint.foreground.clone(),
             };
             let result = client.create_session(&project_id, &request).await;
-            let sessions = client.list_sessions().await;
             this.update(cx, |this, cx| match result {
                 Ok(session) => {
-                    if let Ok(mut list) = sessions {
-                        this.filter_hidden_sessions(&mut list);
-                        this.sessions = list;
+                    let id = session.id.clone();
+                    let row = SessionWithProject {
+                        session,
+                        project_name: owner.name,
+                        project_type: owner.project_type,
+                    };
+                    if this.session_visible(&row) && !this.hidden_sessions.contains_key(&id) && this.session(&id).is_none() {
+                        this.sessions.push(row);
                     }
+                    // 途中那轮可能在创建之前已取回会话列表，不能拿它覆盖刚完成的创建。
+                    this.session_revision += 1;
                     let was_active = this.state.active == ActiveView::Terminal { session_id: pending_id.clone() };
-                    this.state.resolve_pending(&pending_id, &session.id);
-                    this.state.apply_sessions(&this.sessions);
+                    this.state.resolve_pending(&pending_id, &id);
                     this.commit(was_active, cx);
+                    this.refresh_inventory(cx);
                 }
                 Err(err) => {
                     this.handle_error(&err, cx);

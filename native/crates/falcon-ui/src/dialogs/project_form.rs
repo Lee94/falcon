@@ -708,8 +708,7 @@ impl ProjectForm {
                                 }
                                 w.select_project(&project.id, cx);
                             }
-                            w.refresh_projects(cx);
-                            w.refresh_hosts(cx);
+                            w.refresh_inventory(cx);
                         });
                         window.close_dialog(cx);
                     }

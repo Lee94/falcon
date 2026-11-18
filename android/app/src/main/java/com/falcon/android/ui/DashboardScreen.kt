@@ -61,11 +61,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.falcon.android.R
 import com.falcon.android.bridge.FalconNative
 import com.falcon.android.model.AgentCatalog
 import com.falcon.android.model.DashboardData
@@ -503,6 +505,7 @@ fun DashboardScreen(
             } else {
                 AllSessionsOverview(
                     allSessions = dashboard.allSessions,
+                    unavailableHosts = dashboard.servers.filter { it.unavailableNode != null },
                     filter = sessionFilter,
                     theme = theme,
                     monoFont = monoFont,
@@ -1154,6 +1157,10 @@ private fun ProjectTreeList(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         items(servers, key = { it.key }) { server ->
+            if (server.unavailableNode != null) {
+                UnavailableHostRow(server, theme, monoFont)
+                return@items
+            }
             val isCollapsed = collapsedServers[server.key] == true
             val totalServerSessions = remember(server) {
                 server.standaloneSessions.size +
@@ -1549,8 +1556,62 @@ private fun CompactProjectBlock(
 }
 
 @Composable
+private fun UnavailableHostRow(server: ServerGroupUi, theme: FalconThemeTokens, monoFont: FontFamily) {
+    val node = server.unavailableNode ?: return
+    val isOffline = !node.error.isNullOrBlank()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(theme.app.copy(alpha = 0.55f))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(
+            Icons.Default.Dns,
+            contentDescription = null,
+            tint = theme.mutedForeground,
+            modifier = Modifier.size(13.dp)
+        )
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                server.name,
+                color = theme.foreground,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            server.conn?.let { conn ->
+                Text(
+                    conn,
+                    color = theme.mutedForeground,
+                    fontFamily = monoFont,
+                    fontSize = 10.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Text(
+            text = stringResource(if (isOffline) R.string.ssh_host_offline else R.string.ssh_host_connecting),
+            color = if (isOffline) theme.destructive else theme.mutedForeground,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
 private fun AllSessionsOverview(
     allSessions: List<SessionUi>,
+    unavailableHosts: List<ServerGroupUi>,
     filter: String,
     theme: FalconThemeTokens,
     monoFont: FontFamily,
@@ -1597,7 +1658,7 @@ private fun AllSessionsOverview(
             }
         }
 
-        if (filtered.isEmpty()) {
+        if (filtered.isEmpty() && unavailableHosts.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("没有符合筛选的会话", color = theme.mutedForeground, fontSize = 12.sp)
             }
@@ -1606,6 +1667,9 @@ private fun AllSessionsOverview(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(3.dp)
             ) {
+                items(unavailableHosts, key = { it.key }) { host ->
+                    UnavailableHostRow(host, theme, monoFont)
+                }
                 items(filtered, key = { it.id }) { s ->
                     SessionItemRow(
                         session = s,

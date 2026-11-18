@@ -137,7 +137,7 @@ pub fn reattach(ws: &Entity<Workspace>, session_id: &str, cx: &mut App) {
                 }
                 Err(err) => fail(&ws, &err, cx),
             }
-            ws.update(cx, |w, cx| w.refresh_sessions(cx));
+            ws.update(cx, |w, cx| w.refresh_inventory(cx));
         });
     })
     .detach();
@@ -220,7 +220,7 @@ pub fn clear_all_dead(ws: &Entity<Workspace>, cx: &mut App) {
                 for id in &dead {
                     w.drop_tab(id, cx);
                 }
-                w.refresh_sessions(cx);
+                w.refresh_inventory(cx);
             });
             toast(&ws, ToastKind::Info, t!("overview.clearedDead", n = n).to_string(), Some(t!("overview.clearedDeadBody").to_string()), cx);
         });
@@ -524,9 +524,7 @@ fn report_leftovers(ws: &Entity<Workspace>, warnings: Option<Vec<String>>, cx: &
 
 fn finish_delete(ws: &Entity<Workspace>, cx: &mut App) {
     ws.update(cx, |w, cx| {
-        w.refresh_projects(cx);
-        w.refresh_sessions(cx);
-        w.refresh_hosts(cx);
+        w.refresh_inventory(cx);
     });
 }
 
@@ -803,7 +801,7 @@ pub fn restore_worktree_project(ws: &Entity<Workspace>, project: &Project, cx: &
                 Ok(_) => toast(&ws, ToastKind::Success, t!("worktree.restored", name = p.name.clone()).to_string(), None, cx),
                 Err(err) => fail(&ws, &err, cx),
             }
-            ws.update(cx, |w, cx| w.refresh_projects(cx));
+            ws.update(cx, |w, cx| w.refresh_inventory(cx));
         });
     })
     .detach();
@@ -837,7 +835,7 @@ pub fn delete_host(ws: &Entity<Workspace>, host: &SshHost, window: &mut Window, 
                         Ok(_) => toast(&ws3, ToastKind::Success, t!("host.deleted", name = h.name.clone()).to_string(), None, cx),
                         Err(err) => fail(&ws3, &err, cx),
                     }
-                    ws3.update(cx, |w, cx| w.refresh_hosts(cx));
+                    ws3.update(cx, |w, cx| w.refresh_inventory(cx));
                 });
             })
             .detach();

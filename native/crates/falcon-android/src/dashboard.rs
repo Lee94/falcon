@@ -1,10 +1,13 @@
 //! 安卓端列表、项目树、会话自动标题与主题语义色导出：复用 [`falcon_core`] 与 [`falcon_theme`]。
 
+use std::collections::HashMap;
+
 use falcon_core::program_status::{BadgeTone, badge};
 use falcon_core::project_tree::group_servers;
 use falcon_core::session_title::session_label;
 use falcon_proto::{
     DeadReason, NonDurableReason, ProgramStatusSummary, Project, SessionWithProject, SshHost,
+    standalone_host_id,
 };
 use falcon_theme::{Appearance, load_catalog};
 use serde_json::{Value, json};
@@ -19,8 +22,15 @@ pub fn build_dashboard_view(projects_json: &str, sessions_json: &str, hosts_json
     let hosts: Vec<SshHost> = serde_json::from_str(hosts_json).unwrap_or_default();
 
     let groups = group_servers(&projects, &hosts, "本机", false);
+    // 全部会话也有存档项目的会话，需从原始项目列表查所属 SSH 主机。
+    let project_hosts: HashMap<&str, &str> = projects
+        .iter()
+        .filter_map(|p| p.host_id.as_deref().map(|host_id| (p.id.as_str(), host_id)))
+        .collect();
 
     let session_to_json = |s: &SessionWithProject| -> Value {
+        let host_id = standalone_host_id(&s.session.project_id)
+            .or_else(|| project_hosts.get(s.session.project_id.as_str()).copied());
         let label = session_label(&s.session, &projects);
         let status_badge = s.session.program_status.as_ref().and_then(badge_to_json);
         let dead_reason_text = s.session.dead_reason.map(dead_reason_label);
@@ -30,6 +40,7 @@ pub fn build_dashboard_view(projects_json: &str, sessions_json: &str, hosts_json
             "projectId": s.session.project_id,
             "projectName": s.project_name,
             "projectType": s.project_type.as_str(),
+            "hostId": host_id,
             "name": s.session.name,
             "title": s.session.title,
             "displayLabel": label,
@@ -90,6 +101,7 @@ pub fn build_dashboard_view(projects_json: &str, sessions_json: &str, hosts_json
             json!({
                 "key": g.key,
                 "kind": g.kind.as_str(),
+                "hostId": g.host.as_ref().map(|host| &host.id),
                 "name": g.name,
                 "conn": g.conn,
                 "standaloneId": g.standalone_id,
@@ -259,6 +271,26 @@ mod tests {
             parsed["servers"][0]["folders"][0]["project"]["name"].as_str(),
             Some("mojito")
         );
+    }
+
+    #[test]
+    fn dashboard_keeps_ssh_host_ids_for_archived_and_standalone_sessions() {
+        let projects = r#"[{"id":"archived","name":"Archived","type":"ssh","hostId":"h1","createdAt":1,
+            "worktree":{"sourceProjectId":"source","branch":"old","repoDir":"/repo","createdByFalcon":true,"archivedAt":1}}]"#;
+        let sessions = r#"[
+            {"id":"s1","projectId":"archived","name":"","state":"active","durable":true,"createdAt":1,"lastActiveAt":2,"projectName":"Archived","projectType":"ssh"},
+            {"id":"s2","projectId":"standalone:host:h1","name":"","state":"active","durable":true,"createdAt":1,"lastActiveAt":2,"projectName":"?","projectType":"ssh"},
+            {"id":"s3","projectId":"standalone:local","name":"","state":"active","durable":true,"createdAt":1,"lastActiveAt":2,"projectName":"?","projectType":"local"}
+        ]"#;
+        let hosts = r#"[{"id":"h1","name":"dev","host":"dev.local","port":22,"username":"u","authMethod":"agent","hasSecret":false,"projectCount":1,"createdAt":1}]"#;
+        let result: Value = serde_json::from_str(&build_dashboard_view(projects, sessions, hosts)).unwrap();
+        let host = &result["servers"][1];
+        assert_eq!(host["hostId"], "h1");
+        assert_eq!(host["folders"], json!([]));
+        let sessions = &result["allSessions"];
+        assert_eq!(sessions[0]["hostId"], "h1");
+        assert_eq!(sessions[1]["hostId"], "h1");
+        assert!(sessions[2]["hostId"].is_null());
     }
 
     #[test]

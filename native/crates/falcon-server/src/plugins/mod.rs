@@ -35,8 +35,8 @@ use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 
 use self::manifest::{BUILTIN_IDS, MAX_MANIFEST_BYTES, MAX_PLUGINS, Manifest, Output, valid_action, valid_id, valid_param};
-use crate::db::Db;
-use crate::engine::EngineHandle;
+use crate::api::AppState;
+use crate::db::{Db, ProjectRow};
 use crate::sessions::local::BaseEnvFn;
 
 /// settings 表里记停用了哪些插件（JSON 字符串数组）。记"停用的"而不是"启用的"：新放进去的插件
@@ -55,7 +55,7 @@ pub enum PluginError {
     Unavailable(String),
     /// 400：参数 / 动作 id 不合法
     BadInput(String),
-    /// 502：插件跑了但失败了（退出码非零、超时、输出不是合法 JSON）
+    /// 502：插件执行失败，或无法读取需要的远端项目
     Failed(String),
 }
 
@@ -200,10 +200,24 @@ fn check_params(params: &BTreeMap<String, String>) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// 每次按焦点项目解析一次。迁移后的旧 id 也交给所属节点，不能再读入口处的旧项目行。
+async fn resolve_project(state: &AppState, project_id: Option<&str>) -> Result<Option<ProjectRow>, PluginError> {
+    let Some(id) = project_id else { return Ok(None) };
+    let remote_id = if id.starts_with("node:") {
+        id.to_string()
+    } else {
+        let target = state.db.migrated_project_target(id).map_err(|e| PluginError::Failed(format!("读不到项目所属节点：{e:#}")))?;
+        let Some((node, raw)) = target else { return Ok(state.db.get_project(id)) };
+        crate::nodes::resource_id(&node, &raw)
+    };
+    let row = state.nodes.live_project(state, &remote_id).await
+        .map_err(|e| PluginError::Failed(format!("读不到远端项目：{e:#}")))?
+        .ok_or_else(|| PluginError::Failed("远端项目已不存在".into()))?;
+    Ok(Some(row))
+}
+
 /// 焦点项目 → 插件看得到的那部分（不含凭据）
-fn project_context(db: &Db, project_id: Option<&str>) -> Option<PluginProject> {
-    let id = project_id?;
-    let row = db.get_project(id).or_else(|| crate::nodes::cached_project(db, id))?;
+fn project_context(row: ProjectRow) -> PluginProject {
     let ssh = (row.project_type == "ssh").then(|| {
         format!(
             "{}@{}:{}",
@@ -212,7 +226,7 @@ fn project_context(db: &Db, project_id: Option<&str>) -> Option<PluginProject> {
             row.ssh_port.unwrap_or(22)
         )
     });
-    Some(PluginProject { id: row.id, name: row.name, project_type: row.project_type, working_dir: row.working_dir, ssh })
+    PluginProject { id: row.id, name: row.name, project_type: row.project_type, working_dir: row.working_dir, ssh }
 }
 
 impl PluginHost {
@@ -297,30 +311,30 @@ impl PluginHost {
     /// 画一次面板
     pub async fn render(
         &self,
-        db: &Arc<Db>,
-        engine: &EngineHandle,
+        state: &AppState,
         id: &str,
         input: PluginRenderInput,
     ) -> Result<PluginView, PluginError> {
         check_params(&input.params)?;
-        match self.usable(db, id).await? {
+        match self.usable(&state.db, id).await? {
             Found::Builtin(info) => {
                 let view = match info.id.as_str() {
-                    docker::ID => self.inner.docker.render(db, engine, &input).await,
-                    tokens::ID => self.inner.tokens.render(db, &input).await,
-                    _ => self.inner.sysmon.render(db, engine, &input).await,
+                    docker::ID => self.inner.docker.render(state, &input).await,
+                    tokens::ID => self.inner.tokens.render(&state.db, &input).await,
+                    _ => self.inner.sysmon.render(state, &input).await,
                 };
                 Ok(view::sanitize(view))
             }
             Found::Command { manifest, dir, .. } => {
                 let manifest = manifest.expect("usable 已经挡掉了清单坏的");
+                let project = resolve_project(state, input.project_id.as_deref()).await?.map(project_context);
                 let req = PluginRequest {
                     api: PLUGIN_API,
                     event: PluginEvent::Render,
                     action: None,
                     value: None,
                     params: input.params,
-                    project: project_context(db, input.project_id.as_deref()),
+                    project,
                 };
                 self.run_shared(id.to_string(), dir, manifest, req).await
             }
@@ -330,8 +344,7 @@ impl PluginHost {
     /// 点了面板上的 invoke 按钮：带着动作再跑一次插件，回新的面板
     pub async fn action(
         &self,
-        db: &Arc<Db>,
-        engine: &EngineHandle,
+        state: &AppState,
         id: &str,
         input: PluginActionInput,
     ) -> Result<PluginView, PluginError> {
@@ -342,9 +355,9 @@ impl PluginHost {
         if input.value.as_ref().is_some_and(|v| v.len() > MAX_PARAM_VALUE) {
             return Err(PluginError::BadInput("动作的 value 太长".into()));
         }
-        match self.usable(db, id).await? {
+        match self.usable(&state.db, id).await? {
             Found::Builtin(info) if info.id == docker::ID => {
-                Ok(view::sanitize(self.inner.docker.action(db, engine, &input).await?))
+                Ok(view::sanitize(self.inner.docker.action(state, &input).await?))
             }
             Found::Builtin(info) => Err(PluginError::BadInput(format!("「{}」没有动作 {}", info.name, input.action))),
             Found::Command { manifest, dir, .. } => {
@@ -352,13 +365,14 @@ impl PluginHost {
                 if manifest.output == Output::Text {
                     return Err(PluginError::BadInput("纯文字输出的插件没有动作".into()));
                 }
+                let project = resolve_project(state, input.project_id.as_deref()).await?.map(project_context);
                 let req = PluginRequest {
                     api: PLUGIN_API,
                     event: PluginEvent::Action,
                     action: Some(input.action),
                     value: input.value,
                     params: input.params,
-                    project: project_context(db, input.project_id.as_deref()),
+                    project,
                 };
                 run_command(self.inner.clone(), id.to_string(), dir, manifest, req).await
             }

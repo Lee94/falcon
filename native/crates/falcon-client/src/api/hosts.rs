@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use falcon_proto::{OkResponse, SshHost, SshHostInput, SshProbeResult};
+use falcon_proto::{NodeStatus, OkResponse, SshHost, SshHostInput, SshProbeResult};
 use reqwest::Method;
 use serde::Serialize;
 
@@ -14,6 +14,11 @@ use crate::runtime::MaybeSend;
 impl FalconClient {
     pub fn list_hosts(&self) -> impl Future<Output = ApiResult<Vec<SshHost>>> + MaybeSend + 'static {
         self.get("/api/hosts".to_owned())
+    }
+
+    /// 入口服务观测到的远端节点连接状态（旧服务端没有此端点）。
+    pub fn list_nodes(&self) -> impl Future<Output = ApiResult<Vec<NodeStatus>>> + MaybeSend + 'static {
+        self.get("/api/nodes".to_owned())
     }
 
     /// 同名主机是 409。

@@ -568,8 +568,10 @@ impl WorkspaceState {
 
     /// 侧栏选中项目时，主区只显示这个项目下的会话
     pub fn visible_tabs(&self, sessions: &[SessionWithProject]) -> Vec<String> {
-        let Some(sel) = &self.selected_project_id else { return self.tabs.clone() };
-        self.tabs.iter().filter(|id| tab_project_id(id, sessions, &self.pending) == Some(sel.as_str())).cloned().collect()
+        self.tabs.iter().filter(|id| {
+            tab_project_id(id, sessions, &self.pending)
+                .is_some_and(|owner| self.selected_project_id.as_deref().is_none_or(|sel| sel == owner))
+        }).cloned().collect()
     }
 
     /// 工作区里**所有**窗口的 key（含别的项目的）。排布与数据源的对账认它：不在这里面
@@ -706,16 +708,28 @@ impl WorkspaceState {
 
     /// 服务端的会话列表变了之后的收敛（React 版 `refreshSessions` 里的 `set`）。
     /// dead 会话仍在列表里，因此恢复出来的窗口不会被静默丢弃，只是显示为已丢失。
-    /// 此后落盘。
-    pub fn apply_sessions(&mut self, sessions: &[SessionWithProject]) {
+    /// 暂时列不出会话的节点可保留窗口排布，窗口等会话重新出现在列表里才显示。
+    /// 返回排布或活动窗口是否变了，供调用方落盘。
+    pub fn apply_sessions(
+        &mut self,
+        sessions: &[SessionWithProject],
+        may_be_unavailable: impl Fn(&str) -> bool,
+    ) -> bool {
         let alive: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
-        let keep = |id: &str| is_pending_id(id) || alive.contains(id);
-        self.tabs.retain(|t| keep(t));
-        self.resync();
+        let visible = |id: &str| is_pending_id(id) || alive.contains(id);
+        let previous_len = self.tabs.len();
+        self.tabs.retain(|t| visible(t) || may_be_unavailable(t));
+        let removed = self.tabs.len() != previous_len;
+        if removed {
+            self.resync();
+        }
         if let ActiveView::Terminal { session_id } = &self.active
-            && !keep(session_id) {
-                self.active = self.idle_view();
-            }
+            && !visible(session_id)
+        {
+            self.active = self.idle_view();
+            return true;
+        }
+        removed
     }
 
     /// 服务端的项目列表变了之后的收敛（React 版 `refreshProjects` 里的 `set`）：被存档的项目
@@ -1460,17 +1474,42 @@ mod tests {
     }
 
     #[test]
+    fn missing_offline_session_keeps_its_saved_column_until_the_node_can_be_queried() {
+        let remote = "node:remote:c2Vzc2lvbg";
+        let sessions = [session("local", "p", 1), session(remote, "q", 2)];
+        let mut ws = WorkspaceState::default();
+        ws.open_session(remote, &sessions);
+        let column_id = ws.columns[0].id.clone();
+        ws.set_column_width(&column_id, Some(680.));
+        ws.selected_project_id = None;
+        let saved = ws.persisted().columns;
+
+        assert!(ws.apply_sessions(&sessions[..1], |id| id == remote));
+        assert_eq!(ws.active, ActiveView::Overview);
+        assert!(ws.layout_columns(&sessions[..1]).is_empty());
+        assert_eq!(ws.persisted().columns, saved);
+
+        let mut restored = WorkspaceState::from_persisted(&ws.persisted());
+        restored.apply_sessions(&sessions, |_| false);
+        assert_eq!(pane_keys(&restored.layout_columns(&sessions)), [term_key(remote)]);
+        assert_eq!(restored.persisted().columns, saved);
+
+        assert!(restored.apply_sessions(&sessions[..1], |_| false));
+        assert!(restored.persisted().columns.is_empty());
+    }
+
+    #[test]
     fn session_list_changes_prune_dead_tabs_and_projects_drop_archived_selection() {
         let mut ws = WorkspaceState::default();
         let sessions = vec![session("a", "p", 1), session("b", "p", 2)];
         ws.open_session("a", &sessions);
         ws.open_session("b", &sessions);
         let pid = ws.begin_pending("p", None, None, &sessions);
-        ws.apply_sessions(&sessions[..1]);
+        ws.apply_sessions(&sessions[..1], |_| false);
         assert_eq!(ws.tabs, ["a", pid.as_str()]);
         assert_eq!(pane_keys(&ws.columns), ["t:a", "t:pending:1"]);
         ws.active = ActiveView::Terminal { session_id: "b".into() };
-        ws.apply_sessions(&sessions[..1]);
+        ws.apply_sessions(&sessions[..1], |_| false);
         assert_eq!(ws.active, ActiveView::Project);
         let archived: Project = serde_json::from_value(json!({
             "id": "p", "name": "p", "type": "local", "createdAt": 0,

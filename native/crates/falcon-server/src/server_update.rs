@@ -701,6 +701,13 @@ fn wait_health(plan: &Plan, version: &str, maintenance: bool) -> Result<UpdateHe
     })
 }
 
+/// 普通启动与升级候选使用同一套迁移。调用方已取得节点进程锁；候选启动前升级帮手已完成备份。
+pub fn prepare_startup_db(db: &Db, data_dir: &Path) -> Result<()> {
+    // 先去掉入口复制行，首次导入本机清单时的迁移备份也只含本节点的资源。
+    db.purge_legacy_gateway_resources()?;
+    crate::nodes::migration::migrate_local(db, data_dir)
+}
+
 /// main 在 Db::open、SecretBox 与引擎初始化之前调用。普通启动不会创建升级目录或更换程序。
 pub fn startup_gate(config: &mut ServerConfig) -> Result<()> {
     let task = status(&config.data_dir)?;
@@ -737,9 +744,8 @@ pub fn startup_gate(config: &mut ServerConfig) -> Result<()> {
     plan.save()?;
     // 只迁移并核对身份；引擎、存档清扫、会话恢复均未启动，因此回滚不会遗漏后台用户数据写入。
     let db = Db::open(&config.data_dir)?;
-    crate::nodes::migration::migrate_local(&db, &config.data_dir)?;
-    crate::nodes::migration::bind_legacy_hosts(&db)?;
-    ensure!(db.instance_id() == plan.instance_id, "迁移后的实例身份不一致");
+    ensure!(db.instance_id() == plan.instance_id, "候选数据库的实例身份不一致");
+    prepare_startup_db(&db, &config.data_dir)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         use axum::{Json, Router, http::StatusCode, routing::get};
@@ -860,6 +866,7 @@ mod tests {
         {
             let db = Db::open(dir.path()).unwrap();
             db.set_setting("accepted-write", "before-maintenance");
+            db.set_setting("nodes.cache.old-host.projects", "[]");
         }
         backup_databases(&mut plan).unwrap();
         std::fs::copy(&plan.exe, plan.backup_exe()).unwrap();
@@ -867,12 +874,15 @@ mod tests {
         {
             let db = Db::open(dir.path()).unwrap();
             db.set_setting("accepted-write", "candidate-migration");
+            prepare_startup_db(&db, dir.path()).unwrap();
+            assert!(db.get_setting("nodes.cache.old-host.projects").is_none());
         }
         restore_files(&plan).unwrap();
         assert_eq!(std::fs::read(&plan.exe).unwrap(), b"old-program");
         {
             let db = Db::open(dir.path()).unwrap();
             assert_eq!(db.get_setting("accepted-write").as_deref(), Some("before-maintenance"));
+            assert_eq!(db.get_setting("nodes.cache.old-host.projects").as_deref(), Some("[]"));
             db.set_setting("accepted-write", "accepted-after-commit");
         }
         plan.committed = true;
@@ -887,13 +897,37 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let mut plan = fixture_plan(dir.path(), port);
+        {
+            let db = Db::open(dir.path()).unwrap();
+            db.set_setting("nodes.cache.old-host.sessions", "[]");
+            db.insert_session(&crate::db::SessionRow { id: "old-remote".into(), project_id: "standalone:host:old-host".into(),
+                state: "active".into(), durable: 1, ..Default::default() });
+            db.insert_session(&crate::db::SessionRow { id: "local".into(), project_id: "standalone:local".into(),
+                state: "active".into(), durable: 1, ..Default::default() });
+        }
+        backup_databases(&mut plan).unwrap();
         plan.new_digest = sha_file(&std::env::current_exe().unwrap()).unwrap();
         plan.save().unwrap();
         atomic_json(&task_path(dir.path()), &ServerUpdateTask { phase: Phase::Restarting, target_version: Some(VERSION.into()), error: None }).unwrap();
         let mut config = ServerConfig { host: "127.0.0.1".into(), port: 0, data_dir: dir.path().into() };
-        let worker = std::thread::spawn(move || { startup_gate(&mut config).unwrap(); config.port });
+        let worker = std::thread::spawn(move || {
+            let _node_lock = crate::nodes::bootstrap::lock_node_process(&config.data_dir).unwrap();
+            startup_gate(&mut config).unwrap();
+            config.port
+        });
         let health = wait_health(&plan, VERSION, true).unwrap();
         assert_eq!(health.instance_id, plan.instance_id);
+        {
+            let db = Db::open(dir.path()).unwrap();
+            assert!(db.get_setting("nodes.cache.old-host.sessions").is_none());
+            assert!(db.get_session("old-remote").is_none());
+            assert!(!db.is_session_orphan_candidate("old-remote").unwrap());
+            assert_eq!(db.get_session("local").unwrap().state, "active");
+            let backup = db.get_setting("migration.nodes.local-projects.v1").unwrap();
+            let conn = rusqlite::Connection::open(backup).unwrap();
+            let old_rows: i64 = conn.query_row("SELECT COUNT(*) FROM sessions WHERE id = 'old-remote'", [], |r| r.get(0)).unwrap();
+            assert_eq!(old_rows, 0, "首次导入本机清单的备份不保留入口复制行");
+        }
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let response = http_builder().unwrap().no_proxy().build().unwrap()

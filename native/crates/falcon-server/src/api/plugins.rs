@@ -6,7 +6,7 @@
 //! - `PUT /api/plugins/:id/enabled`：启用 / 停用，回整份列表。
 //!
 //! 错误码：没有这个插件 404；停用了 / 清单坏了 409（客户端据此重新拉列表）；参数不合法 400；
-//! 插件跑了但失败（退出码、超时、输出不合法）502，`error` 里是给插件作者看的原话。
+//! 插件运行失败（退出码、超时、输出不合法）或需要的远端项目无法读取时回 502。
 
 use std::collections::BTreeMap;
 
@@ -62,7 +62,7 @@ fn params_of(body: &Value) -> BTreeMap<String, String> {
 
 async fn render(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<PluginView>> {
     let input = PluginRenderInput { project_id: trimmed_non_empty(&body.0, "projectId"), params: params_of(&body.0) };
-    Ok(Json(state.plugins.render(&state.db, &state.engine, &id, input).await?))
+    Ok(Json(state.plugins.render(&state, &id, input).await?))
 }
 
 async fn action(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<PluginView>> {
@@ -75,7 +75,7 @@ async fn action(State(state): State<AppState>, Path(id): Path<String>, body: Len
         action,
         value: body.str("value").map(str::to_string),
     };
-    Ok(Json(state.plugins.action(&state.db, &state.engine, &id, input).await?))
+    Ok(Json(state.plugins.action(&state, &id, input).await?))
 }
 
 async fn enabled(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<PluginList>> {
@@ -337,6 +337,31 @@ esac
 
         fn find<'a>(v: &'a serde_json::Value, ty: &str) -> Vec<&'a serde_json::Value> {
             v["blocks"].as_array().unwrap().iter().filter(|b| b["type"] == ty).collect()
+        }
+
+        #[tokio::test]
+        async fn offline_focused_node_cannot_run_docker_locally() {
+            let app = TestApp::new();
+            fake_docker(&app);
+            let project = crate::nodes::resource_id("offline-node", "p1");
+
+            let (status, v) = json_of(app.post_json("/api/plugins/docker/render", json!({ "projectId": project })).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(find(&v, "select")[0]["value"], "auto");
+            assert!(find(&v, "notice")[0]["text"].as_str().unwrap().contains("读不到远端项目"), "{v}");
+
+            let (status, v) = json_of(app.post_json("/api/plugins/docker/action", json!({
+                "projectId": project, "action": "containers.prune"
+            })).await).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(v["error"].as_str().unwrap().contains("读不到远端项目"), "{v}");
+            assert!(!app.bin.join("docker.log").exists());
+
+            let (status, v) = json_of(app.post_json("/api/plugins/docker/render", json!({
+                "projectId": project, "params": { "machine": "local" }
+            })).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(v["title"], "本机 · FakeOS · Docker 29.8.2");
         }
 
         #[tokio::test]

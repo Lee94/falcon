@@ -164,7 +164,8 @@ impl Sidebar {
     fn server_node(&self, server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
-        let expanded = !ws.state.collapsed.get(&server.key).copied().unwrap_or(false);
+        let unavailable = server.host.as_ref().and_then(|host| ws.node_status(&host.id)).filter(|node| !node.online);
+        let expanded = unavailable.is_none() && !ws.state.collapsed.get(&server.key).copied().unwrap_or(false);
         let key = server.key.clone();
         let ws_toggle = self.ws.clone();
         let icon_name = if server.kind == ServerKind::Local { IconName::Monitor } else { IconName::Server };
@@ -172,7 +173,7 @@ impl Sidebar {
         // 空的「无项目」不占一行。有会话、正在创建，或当前选中它（主区还停在这上面）才画。
         // 没画出来时，开终端的入口接到机器行菜单前面。
         let standalone_id = server.standalone_id.clone();
-        let show_standalone = standalone_id.as_deref().is_some_and(|id| {
+        let show_standalone = unavailable.is_none() && standalone_id.as_deref().is_some_and(|id| {
             ws.sessions.iter().any(|s| s.project_id == id)
                 || ws.state.pending.iter().any(|p| p.project_id == id)
                 || ws.state.selected_project_id.as_deref() == Some(id)
@@ -197,7 +198,18 @@ impl Sidebar {
             (ServerKind::Local, _) => crate::dialogs::project_form::Preset::local(false),
             _ => crate::dialogs::project_form::Preset::ssh(None, false),
         };
-        let title: SharedString = server.conn.clone().unwrap_or_else(|| server.name.clone()).into();
+        let offline = unavailable.is_some_and(|node| node.error.is_some());
+        let status = unavailable.map(|_| {
+            if offline { t!("sidebar.hostOffline") } else { t!("sidebar.hostConnecting") }.to_string()
+        });
+        let mut title = server.conn.clone().unwrap_or_else(|| server.name.clone());
+        if let Some(status) = &status {
+            title.push_str(&format!(" · {status}"));
+            if let Some(error) = unavailable.and_then(|node| node.error.as_deref()) {
+                title.push_str(&format!("\n{error}"));
+            }
+        }
+        let title: SharedString = title.into();
 
         let mut row = div()
             .id(SharedString::from(format!("srv-{}", server.key)))
@@ -211,12 +223,20 @@ impl Sidebar {
             .rounded(radius::SM)
             .hover(|s| s.bg(ui.muted))
             .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
-            .child(chevron(format!("srv-toggle-{key}"), expanded, cx, move |cx| {
-                ws_toggle.update(cx, |w, cx| w.toggle_collapsed(&key, cx))
-            }))
+            .when(unavailable.is_none(), |row| {
+                row.child(chevron(format!("srv-toggle-{key}"), expanded, cx, move |cx| {
+                    ws_toggle.update(cx, |w, cx| w.toggle_collapsed(&key, cx))
+                }))
+            })
+            .when(unavailable.is_some(), |row| row.child(div().w(zpx(18.)).flex_none()))
             .child(host_bar(server.bar, zpx(16.), cx))
             .child(icon(icon_name).size(zpx(14.)).text_color(ui.muted_foreground))
             .child(div().flex_1().min_w_0().truncate().pl_1().font_weight(FontWeight::MEDIUM).child(server.name.clone()))
+            .when_some(status, |row, label| {
+                row.child(div().flex_none().text_xs()
+                    .text_color(if offline { ui.warning } else { ui.muted_foreground })
+                    .child(label))
+            })
             .child(
                 div().opacity(0.).group_hover("srv-row", |s| s.opacity(1.)).child(
                     Button::new(SharedString::from(format!("srv-new-{}", server.key)))

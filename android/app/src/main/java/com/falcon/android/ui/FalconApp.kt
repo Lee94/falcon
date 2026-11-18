@@ -120,11 +120,11 @@ fun FalconApp() {
         mutableStateOf(prefs.getString(KEY_THEME_NAME, "Falcon Dark") ?: "Falcon Dark")
     }
 
-    var dashboard by remember { mutableStateOf(DashboardData(emptyList(), emptyList())) }
+    var dashboard by remember(activeServer.url) { mutableStateOf(DashboardData(emptyList(), emptyList())) }
     // 网关可能返回终止前的列表缓存。按服务端地址和会话 ID 过滤已确认终止的条目。
     var terminatedSessions by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var connectionError by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember(activeServer.url) { mutableStateOf(true) }
+    var connectionError by remember(activeServer.url) { mutableStateOf<String?>(null) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
     var openedSession by remember { mutableStateOf<SessionUi?>(null) }
@@ -142,22 +142,20 @@ fun FalconApp() {
         }
     }
 
-    // 刷新服务端项目与会话列表
-    LaunchedEffect(activeServer.url, refreshTrigger) {
+    // 手动刷新重启轮询，避免较早发出的请求晚返回后把 SSH 主机状态覆盖回去。
+    val showingDashboard = openedSession == null
+    LaunchedEffect(activeServer.url, refreshTrigger, showingDashboard) {
+        if (!showingDashboard) return@LaunchedEffect
         isLoading = true
-        val res = FalconApiClient.fetchDashboard(activeServer.url)
-        isLoading = false
-        res.onSuccess { data ->
+        FalconApiClient.fetchDashboard(activeServer.url).onSuccess { data ->
             dashboard = data
             connectionError = null
         }.onFailure { err ->
             connectionError = err.message ?: "连接失败"
         }
-    }
+        isLoading = false
 
-    // 在列表页时每 5 秒自动轮询一次会话与程序状态（与桌面端 5s 轮询一致）
-    LaunchedEffect(activeServer.url, openedSession) {
-        if (openedSession != null) return@LaunchedEffect
+        // 列表页每 5 秒轮询 SSH 主机、会话与程序状态。
         while (true) {
             delay(5000L)
             FalconApiClient.fetchDashboard(activeServer.url).onSuccess { data ->

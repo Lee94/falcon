@@ -1,4 +1,4 @@
-//! 宿主机节点网关：资源只在所属节点写入，入口服务仅缓存列表并转发请求。
+//! 宿主机节点网关：资源只在所属节点管理，入口服务实时读取列表并转发请求。
 //!
 //! SSH 凭据留在入口服务；节点 ID 来自宿主数据库的 instance_id，与连接地址无关。
 //! 内部请求带 SSH 读取的节点令牌，只列节点本地资源，避免两台节点互连时递归聚合。
@@ -66,33 +66,6 @@ pub fn map_resource_fields(value: &mut Value, map: &impl Fn(&str) -> String) {
         }
         _ => {}
     }
-}
-
-/// 插件只读项目缓存。命令插件仍在入口本机执行，缓存不能被用来执行项目的写入或删除。
-pub(crate) fn cached_project(db: &crate::db::Db, id: &str) -> Option<crate::db::ProjectRow> {
-    let (node, _) = split_resource(id)?;
-    let host_id = db.get_setting(&format!("nodes.route.{node}"))?;
-    let host = db.get_host(&host_id)?;
-    let text = db.get_setting(&format!("nodes.cache.{host_id}.projects"))?;
-    let projects: Vec<falcon_proto::Project> = serde_json::from_str(&text).ok()?;
-    let project = projects.into_iter().find(|p| p.id == id)?;
-    Some(crate::db::ProjectRow {
-        id: project.id,
-        name: project.name,
-        project_type: "ssh".into(),
-        working_dir: project.working_dir,
-        shell: project.shell,
-        created_at: project.created_at,
-        host_id: Some(host_id),
-        ssh_host: Some(host.host),
-        ssh_port: Some(host.port),
-        ssh_username: Some(host.username),
-        ssh_auth_method: Some(host.auth_method),
-        ssh_key_path: host.key_path,
-        ssh_secret_enc: host.secret_enc,
-        // 删除护栏字段刻意不从缓存重建；这个行只能用于插件上下文和非项目写入的机器探测。
-        ..Default::default()
-    })
 }
 
 #[cfg(test)]

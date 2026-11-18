@@ -34,7 +34,8 @@ data class SessionUi(
     val deadReasonText: String?,
     val badge: ProgramBadgeUi?,
     val createdAt: Long,
-    val lastActiveAt: Long
+    val lastActiveAt: Long,
+    val hostId: String? = null
 )
 
 data class ProjectUi(
@@ -60,13 +61,32 @@ data class ServerGroupUi(
     val conn: String?,
     val standaloneId: String?,
     val standaloneSessions: List<SessionUi>,
-    val folders: List<FolderGroupUi>
+    val folders: List<FolderGroupUi>,
+    val hostId: String? = null,
+    val unavailableNode: NodeStatus? = null
 )
 
 data class DashboardData(
     val servers: List<ServerGroupUi>,
     val allSessions: List<SessionUi>
 ) {
+    fun withNodeStatuses(nodes: List<NodeStatus>): DashboardData {
+        // 旧网关可能仍返回断线前的列表。没有节点状态的旧服务端继续使用原来的列表。
+        val unavailable = nodes.filter { it.hostId != null && !it.online }.associateBy { it.hostId }
+        if (unavailable.isEmpty()) return this
+        return copy(
+            servers = servers.map { server ->
+                val node = unavailable[server.hostId]
+                if (node == null) server else server.copy(
+                    standaloneSessions = emptyList(),
+                    folders = emptyList(),
+                    unavailableNode = node
+                )
+            },
+            allSessions = allSessions.filterNot { it.hostId in unavailable }
+        )
+    }
+
     fun withoutSessions(ids: Set<String>): DashboardData {
         if (ids.isEmpty()) return this
         fun List<SessionUi>.visible() = filterNot { it.id in ids }
@@ -295,7 +315,8 @@ object JsonParsers {
             deadReasonText = deadReasonText,
             badge = badge,
             createdAt = obj.optLong("createdAt", 0L),
-            lastActiveAt = obj.optLong("lastActiveAt", 0L)
+            lastActiveAt = obj.optLong("lastActiveAt", 0L),
+            hostId = if (obj.isNull("hostId")) null else obj.optString("hostId")
         )
     }
 
@@ -359,7 +380,8 @@ object JsonParsers {
                         conn = conn,
                         standaloneId = standaloneId,
                         standaloneSessions = parseSessionList(sObj.optJSONArray("standaloneSessions")),
-                        folders = folders
+                        folders = folders,
+                        hostId = if (sObj.isNull("hostId")) null else sObj.optString("hostId")
                     )
                 )
             }

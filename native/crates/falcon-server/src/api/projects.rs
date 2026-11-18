@@ -197,10 +197,13 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
     if let Some(err) = validate_project_input(input, repos.is_some()) {
         return Err(ApiError::bad_request(err));
     }
-    let ssh = resolve_project_ssh(&state, input, None).map_err(ApiError::bad_request)?;
+    if str_field(input, "type") == Some("ssh") {
+        // 网关只转发绑定到已保存主机的创建请求，不能把旧客户端的内联 SSH 项目落到入口库。
+        return Err(ApiError::bad_request("请通过已保存的远端主机创建 SSH 项目"));
+    }
     let default_worktree_branch = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).unwrap_or(None);
 
-    let mut row = ProjectRow {
+    let row = ProjectRow {
         id: uuid_v4(),
         name: trimmed(input, "name").unwrap_or_default().to_string(),
         project_type: str_field(input, "type").unwrap_or_default().to_string(),
@@ -220,7 +223,6 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         default_worktree_branch,
         ..Default::default()
     };
-    ssh.apply(&mut row);
     state.db.insert_project(&row);
     sync_after_project_change(&state, &row.project_type, row.host_id.as_deref()).await;
     Ok(Json(Db::to_project(&row)))

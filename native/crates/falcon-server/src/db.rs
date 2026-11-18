@@ -512,6 +512,9 @@ impl Db {
                     remote_id TEXT NOT NULL,
                     migrated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS legacy_detached_sessions (
+                    session_id TEXT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS node_requests (
                     scope TEXT NOT NULL,
                     request_key TEXT NOT NULL,
@@ -1125,6 +1128,51 @@ impl Db {
         Ok(())
     }
 
+    /// 入口数据库只保留本节点的项目和会话。必须在进程锁内、会话恢复与归档清扫之前调用。
+    pub(crate) fn purge_legacy_gateway_resources(&self) -> anyhow::Result<()> {
+        // 没有项目行的旧会话，只有保留的旧 ID 映射或合成的 SSH owner 能证明归属。
+        const LEGACY_SESSIONS: &str = "project_id IN (SELECT id FROM projects WHERE type = 'ssh')
+            OR project_id GLOB 'standalone:host:?*'
+            OR project_id GLOB 'machine:host:?*'
+            OR (project_id IN (SELECT project_id FROM node_migrated_projects)
+                AND NOT EXISTS (SELECT 1 FROM projects WHERE id = sessions.project_id))";
+        let mut conn = self.lock();
+        let pending: bool = conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM projects WHERE type = 'ssh')
+                OR EXISTS(SELECT 1 FROM sessions WHERE {LEGACY_SESSIONS})
+                OR EXISTS(SELECT 1 FROM settings WHERE key GLOB 'nodes.cache.*')"),
+            [], |r| r.get(0),
+        )?;
+        if !pending { return Ok(()); }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // 没有已保存主机的手写 SSH 项目，先保留仍可使用的连接配置（含原密文）。
+        let unbound = {
+            let mut stmt = tx.prepare("SELECT * FROM projects WHERE type = 'ssh' AND (host_id IS NULL OR host_id = '') ORDER BY created_at, id")?;
+            stmt.query_map([], project_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !unbound.is_empty() {
+            let mut hosts = {
+                let mut stmt = tx.prepare("SELECT * FROM ssh_hosts ORDER BY created_at, id")?;
+                stmt.query_map([], host_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for row in unbound {
+                match legacy_host_from_project(&row) {
+                    Ok(host) => { save_legacy_ssh_host(&tx, &mut hosts, host)?; }
+                    Err(error) => log::warn!("清理入口项目时跳过无效的旧 SSH 配置：{error}"),
+                }
+            }
+        }
+        // 原 holder 继续运行。留最小的 ID 保护，防止后续同实例的孤儿清扫把已摘除的会话杀掉。
+        tx.execute(&format!("INSERT OR IGNORE INTO legacy_detached_sessions (session_id)
+            SELECT id FROM sessions WHERE durable = 1 AND ({LEGACY_SESSIONS})"), [])?;
+        tx.execute(&format!("DELETE FROM sessions WHERE {LEGACY_SESSIONS}"), [])?;
+        // 直接删入口的复制行，避免生成宿主项目的删除记录；旧 ID 映射仍可用于路由。
+        tx.execute("DELETE FROM projects WHERE type = 'ssh'", [])?;
+        tx.execute("DELETE FROM settings WHERE key GLOB 'nodes.cache.*'", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 为没有 host_id 的旧 SSH 项目补已保存主机。只改 host_id，其他字段（包括密文、
     /// remote_id、source、时间戳、排序与 worktree 删除判据）原样保留，不能复用普通 update_project。
     pub(crate) fn node_bind_legacy_hosts(&self) -> anyhow::Result<()> {
@@ -1145,7 +1193,6 @@ impl Db {
             let mut stmt = tx.prepare("SELECT * FROM ssh_hosts ORDER BY created_at, id")?;
             stmt.query_map([], host_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut created = Vec::new();
         let mut bindings = std::collections::HashMap::<String, String>::new();
         for row in projects.iter().filter(|p| p.host_id.as_deref().is_none_or(str::is_empty)) {
             let candidate = legacy_host_from_project(row)?;
@@ -1163,29 +1210,13 @@ impl Db {
                 }
             }
             anyhow::ensure!(preferred.len() <= 1, "旧 SSH 项目 {} 的同连接派生项目绑定了不同主机，请先统一主机绑定", row.id);
-            let host_id = if let Some(id) = preferred.into_iter().next() { id }
-            else if let Some(saved) = hosts.iter().find(|h| same_ssh_connection(h, &candidate)) { saved.id.clone() }
-            else {
-                let mut host = candidate;
-                let base = host.name.clone();
-                let mut suffix = 2;
-                while hosts.iter().any(|h| h.name.eq_ignore_ascii_case(&host.name)) {
-                    host.name = format!("{base} ({suffix})");
-                    suffix += 1;
-                }
-                let id = host.id.clone();
-                hosts.push(host.clone());
-                created.push(host);
-                id
+            let host_id = match preferred.into_iter().next() {
+                Some(id) => id,
+                None => save_legacy_ssh_host(&tx, &mut hosts, candidate)?,
             };
             bindings.insert(row.id.clone(), host_id);
         }
-        // 全部校验完才执行写操作，且一笔事务提交；磁盘或后续语句失败也不会只绑定一半。
-        for h in created {
-            tx.execute("INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![h.id, h.name, h.host, h.port, h.username, h.auth_method, h.key_path, h.secret_enc, h.created_at])?;
-        }
+        // 一笔事务提交；校验、磁盘或后续语句失败也不会只绑定一半。
         for (project, host) in bindings {
             tx.execute("UPDATE projects SET host_id = ? WHERE id = ? AND type = 'ssh' AND (host_id IS NULL OR host_id = '')",
                 params![host, project])?;
@@ -1565,6 +1596,16 @@ impl Db {
         self.exec("DELETE FROM sessions WHERE id = ?", [id]);
     }
 
+    /// 只有确实不存在的记录才允许孤儿清扫；旧入口主动摘除的持久会话仍受保护。
+    pub(crate) fn is_session_orphan_candidate(&self, session_id: &str) -> rusqlite::Result<bool> {
+        self.lock().query_row(
+            "SELECT NOT (EXISTS(SELECT 1 FROM sessions WHERE id = ?1)
+                OR EXISTS(SELECT 1 FROM legacy_detached_sessions WHERE session_id = ?1))",
+            [session_id],
+            |r| r.get(0),
+        )
+    }
+
     /// 启动恢复：上次仍 active 的会话，持久 → unverified，非持久 → dead
     pub fn recover_sessions_on_startup(&self) {
         self.exec("UPDATE sessions SET state = 'unverified' WHERE state = 'active' AND durable = 1", []);
@@ -1658,20 +1699,41 @@ impl SettingsStore for std::sync::Arc<Db> {
 fn legacy_host_from_project(row: &ProjectRow) -> anyhow::Result<SshHostRow> {
     let required = |value: Option<&str>, field: &str| -> anyhow::Result<String> {
         let value = value.filter(|s| !s.trim().is_empty() && !s.chars().any(char::is_control))
-            .with_context(|| format!("旧 SSH 项目 {} 的 {field} 缺失或无效，项目记录已保留", row.id))?;
+            .with_context(|| format!("旧 SSH 项目 {} 的 {field} 缺失或无效", row.id))?;
         Ok(value.to_string())
     };
     let host = required(row.ssh_host.as_deref(), "host")?;
     let username = required(row.ssh_username.as_deref(), "username")?;
     let port = row.ssh_port.filter(|p| (1..=65535).contains(p))
-        .with_context(|| format!("旧 SSH 项目 {} 的 port 缺失或无效，项目记录已保留", row.id))?;
+        .with_context(|| format!("旧 SSH 项目 {} 的 port 缺失或无效", row.id))?;
     let method = required(row.ssh_auth_method.as_deref(), "authMethod")?;
     anyhow::ensure!(matches!(method.as_str(), "agent" | "key" | "password"),
-        "旧 SSH 项目 {} 的 authMethod 无效，项目记录已保留", row.id);
+        "旧 SSH 项目 {} 的 authMethod 无效", row.id);
     if method == "key" { required(row.ssh_key_path.as_deref(), "keyPath")?; }
     Ok(SshHostRow { id: crate::askpass::hub::uuid_v4(), name: host.clone(), host, port, username,
         auth_method: method, key_path: row.ssh_key_path.clone(), secret_enc: row.ssh_secret_enc.clone(),
         created_at: crate::auth::now_ms() })
+}
+
+fn save_legacy_ssh_host(
+    tx: &rusqlite::Transaction<'_>, hosts: &mut Vec<SshHostRow>, mut host: SshHostRow,
+) -> rusqlite::Result<String> {
+    if let Some(saved) = hosts.iter().find(|saved| same_ssh_connection(saved, &host)) {
+        return Ok(saved.id.clone());
+    }
+    let base = host.name.clone();
+    let mut suffix = 2;
+    while hosts.iter().any(|h| h.name.eq_ignore_ascii_case(&host.name)) {
+        host.name = format!("{base} ({suffix})");
+        suffix += 1;
+    }
+    tx.execute("INSERT INTO ssh_hosts (id, name, host, port, username, auth_method, key_path, secret_enc, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![host.id, host.name, host.host, host.port, host.username, host.auth_method,
+            host.key_path, host.secret_enc, host.created_at])?;
+    let id = host.id.clone();
+    hosts.push(host);
+    Ok(id)
 }
 
 fn same_ssh_connection(a: &SshHostRow, b: &SshHostRow) -> bool {
@@ -1795,6 +1857,96 @@ mod tests {
         assert!(!db.is_host_migrated("not-yet-migrated").unwrap());
         assert_eq!(db.list_archived_expired(2).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["local-child"]);
         assert_eq!(db.list_projects().len(), 3);
+    }
+
+    #[test]
+    fn gateway_purge_preserves_local_resources_host_config_and_detached_durable_ids() {
+        let (dir, db) = tmp_db();
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
+        let saved = SshHostRow {
+            id: "saved-host".into(), name: "Saved host".into(), host: "saved.example".into(),
+            port: 22, username: "user".into(), auth_method: "key".into(),
+            key_path: Some("/ssh/saved-key".into()), secret_enc: Some("saved-ciphertext".into()),
+            created_at: 1,
+        };
+        db.insert_host(&saved);
+        db.save_known_host(&saved.host, 22, "saved-fingerprint");
+        db.set_setting("nodes.cache.saved-host.projects", "[]");
+        db.set_setting("nodes.cache.saved-host.sessions", "[]");
+        db.set_setting("nodes.cache.saved-host.askpass/pending", "[]");
+        db.set_setting("nodes.cache-other", "keep");
+        db.set_setting("nodes.routing.saved-host", "keep");
+        db.insert_project(&project_row());
+        db.insert_project(&ProjectRow {
+            id: "cached-project".into(), project_type: "ssh".into(), host_id: Some(saved.id.clone()),
+            working_dir: Some(worktree.to_string_lossy().into_owned()), source_project_id: Some("ssh-source".into()),
+            worktree_created_by_mojito: Some(1), worktree_archived_at: Some(1), ..project_row()
+        });
+        db.insert_project(&ProjectRow {
+            id: "inline-project".into(), project_type: "ssh".into(), ssh_host: Some("inline.example".into()),
+            ssh_port: Some(2222), ssh_username: Some("user".into()), ssh_auth_method: Some("password".into()),
+            ssh_secret_enc: Some("inline-ciphertext".into()), ..project_row()
+        });
+        db.insert_project(&ProjectRow { id: "invalid-project".into(), project_type: "ssh".into(), ..project_row() });
+        db.node_mark_host_migrated(&saved.id, "node-id").unwrap();
+        for (id, owner, durable) in [
+            ("ssh-project-session", "cached-project", 1),
+            ("ssh-standalone", "standalone:host:saved-host", 1),
+            ("ssh-machine", "machine:host:saved-host", 0),
+            ("local-project-session", "p1", 1),
+            ("local-standalone", "standalone:local", 1),
+            ("local-machine", "machine:local", 1),
+            ("unknown-owner", "absent-project", 1),
+        ] {
+            db.insert_session(&SessionRow { id: id.into(), project_id: owner.into(), state: "active".into(), durable, ..Default::default() });
+        }
+
+        db.purge_legacy_gateway_resources().unwrap();
+        db.purge_legacy_gateway_resources().unwrap();
+        drop(db);
+        let db = Db::open(dir.path()).unwrap();
+        assert_eq!(db.list_projects(), [project_row()]);
+        assert!(worktree.is_dir());
+        assert_eq!(db.get_host(&saved.id), Some(saved.clone()));
+        let hosts = db.list_host_rows();
+        assert_eq!(hosts.len(), 2);
+        let inline = hosts.iter().find(|h| h.id != saved.id).unwrap();
+        assert_eq!((&*inline.host, inline.port, inline.secret_enc.as_deref()), ("inline.example", 2222, Some("inline-ciphertext")));
+        assert_eq!(db.get_known_host(&saved.host, 22).as_deref(), Some("saved-fingerprint"));
+        assert_eq!(db.migrated_project_target("cached-project").unwrap(), Some(("node-id".into(), "cached-project".into())));
+        assert!(db.list_deleted_projects("host:saved-host").is_empty());
+        assert_eq!(db.get_setting("nodes.cache-other").as_deref(), Some("keep"));
+        assert_eq!(db.get_setting("nodes.routing.saved-host").as_deref(), Some("keep"));
+        for kind in ["projects", "sessions", "askpass/pending"] {
+            assert!(db.get_setting(&format!("nodes.cache.saved-host.{kind}")).is_none());
+        }
+        for id in ["local-project-session", "local-standalone", "local-machine", "unknown-owner"] {
+            assert_eq!(db.get_session(id).unwrap().state, "active");
+            assert!(!db.is_session_orphan_candidate(id).unwrap());
+        }
+        for id in ["ssh-project-session", "ssh-standalone", "ssh-machine"] {
+            assert!(db.get_session(id).is_none());
+        }
+        assert!(!db.is_session_orphan_candidate("ssh-project-session").unwrap());
+        assert!(!db.is_session_orphan_candidate("ssh-standalone").unwrap());
+        assert!(db.is_session_orphan_candidate("ssh-machine").unwrap());
+    }
+
+    #[test]
+    fn gateway_purge_rolls_back_on_sql_failure() {
+        let (_dir, db) = tmp_db();
+        db.insert_project(&ProjectRow { project_type: "ssh".into(), ..project_row() });
+        db.insert_session(&SessionRow { id: "ssh-session".into(), project_id: "p1".into(), durable: 1, ..Default::default() });
+        db.set_setting("nodes.cache.old.projects", "[]");
+        db.lock().execute_batch("CREATE TRIGGER reject_purge BEFORE DELETE ON settings
+            WHEN OLD.key GLOB 'nodes.cache.*' BEGIN SELECT RAISE(ABORT, 'simulated database failure'); END").unwrap();
+        assert!(db.purge_legacy_gateway_resources().is_err());
+        assert!(db.get_project("p1").is_some());
+        assert!(db.get_session("ssh-session").is_some());
+        assert_eq!(db.get_setting("nodes.cache.old.projects").as_deref(), Some("[]"));
+        let exemptions: i64 = db.lock().query_row("SELECT COUNT(*) FROM legacy_detached_sessions", [], |r| r.get(0)).unwrap();
+        assert_eq!(exemptions, 0);
     }
 
     #[test]

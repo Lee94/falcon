@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Falcon</string>
+    <string name="ssh_host_connecting">连接中…</string>
+    <string name="ssh_host_offline">离线</string>
     <string name="agent_mode_to_gui">TUI → GUI</string>
     <string name="agent_mode_to_tui">GUI → TUI</string>
     <string name="agent_mode_switching">切换中…</string>

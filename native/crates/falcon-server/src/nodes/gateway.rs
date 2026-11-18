@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{FromRequestParts as _, Request, State, ws::WebSocketUpgrade};
@@ -23,6 +24,8 @@ use crate::api::error::ApiError;
 use crate::db::SshHostRow;
 
 const JSON_LIMIT: usize = 32 * 1024 * 1024;
+const DISCOVERY_WAIT: Duration = Duration::from_millis(1200);
+const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 type Stream = crate::px0::manager::Px0Stream;
 
 #[derive(Clone)]
@@ -39,8 +42,6 @@ pub(super) struct Remote {
 #[derive(Default)]
 struct Cache {
     nodes: HashMap<String, Remote>,
-    projects: HashMap<String, Vec<Value>>,
-    sessions: HashMap<String, Vec<Value>>,
     errors: HashMap<String, String>,
 }
 
@@ -60,25 +61,59 @@ impl Gateway {
             .clone()
     }
 
+    fn endpoint(&self, host: &SshHostRow) -> Option<Remote> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .nodes
+            .get(&host.id)
+            .filter(|node| node.host == *host)
+            .cloned()
+    }
+
     pub(super) async fn remote(&self, state: &AppState, host_id: &str) -> anyhow::Result<Remote> {
         let lock = self.lock(&format!("host:{host_id}"));
         let _turn = lock.lock().await;
+        self.discover(state, host_id).await
+    }
+
+    /// 发现节点可能涉及首次部署。列表只短暂等端点，超时后由同一个任务继续发现。
+    async fn list_endpoint(&self, state: &AppState, host: &SshHostRow) -> Option<Remote> {
+        if let Some(remote) = self.endpoint(host) {
+            return Some(remote);
+        }
+        let lock = self.lock(&format!("host:{}", host.id));
+        if let Ok(turn) = lock.clone().try_lock_owned() {
+            let state = state.clone();
+            let host_id = host.id.clone();
+            tokio::spawn(async move {
+                let _turn = turn;
+                let _ = state.nodes.discover(&state, &host_id).await;
+            });
+        }
+        let _turn = tokio::time::timeout(DISCOVERY_WAIT, lock.lock()).await.ok()?;
+        self.endpoint(host)
+    }
+
+    /// 调用者持有主机锁。这里仅建立访问权威节点的连接，旧网关记录不参与发现。
+    async fn discover(&self, state: &AppState, host_id: &str) -> anyhow::Result<Remote> {
         let host = state
             .db
             .get_host(host_id)
             .ok_or_else(|| anyhow::anyhow!("远端主机不存在"))?;
-        if let Some(node) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .nodes
-            .get(host_id)
-            .cloned()
-        {
-            if node.host == host {
-                return Ok(node);
+        if let Some(node) = self.endpoint(&host) {
+            return Ok(node);
+        }
+        match self.discover_uncached(state, host).await {
+            Ok(remote) => Ok(remote),
+            Err(error) => {
+                self.failed(host_id, &format!("{error:#}"));
+                Err(error)
             }
         }
+    }
+
+    async fn discover_uncached(&self, state: &AppState, host: SshHostRow) -> anyhow::Result<Remote> {
         let target = host.clone();
         let endpoint = state
             .engine
@@ -99,39 +134,15 @@ impl Gateway {
             #[cfg(test)]
             direct: None,
         };
-        if !state.db.is_host_migrated(host_id)? {
-            let entries = migration::try_export_host(&state.db, &remote.host)?;
-            if !entries.is_empty() {
-                let body = serde_json::to_vec(&entries)?;
-                let (status, _, bytes) = buffered(
-                    state,
-                    &remote,
-                    Method::POST,
-                    "/api/node/import-projects",
-                    HeaderMap::new(),
-                    Body::from(body),
-                )
-                .await?;
-                anyhow::ensure!(
-                    status.is_success(),
-                    "项目迁移失败：{}",
-                    String::from_utf8_lossy(&bytes)
-                );
-            }
-            migration::mark_migrated(&state.db, host_id, &remote.node_id)?;
-        }
-        state
-            .db
-            .set_setting(&format!("nodes.route.{}", remote.node_id), host_id);
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .nodes
-            .insert(host_id.to_string(), remote.clone());
+        let host_id = &remote.host.id;
+        state.db.set_setting(&format!("nodes.route.{}", remote.node_id), host_id);
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.errors.remove(host_id);
+        cache.nodes.insert(host_id.clone(), remote.clone());
         Ok(remote)
     }
 
-    async fn by_node(&self, state: &AppState, node_id: &str) -> anyhow::Result<Remote> {
+    fn host_for_node(&self, state: &AppState, node_id: &str) -> anyhow::Result<String> {
         let cached = self
             .cache
             .lock()
@@ -140,15 +151,51 @@ impl Gateway {
             .values()
             .find(|n| n.node_id == node_id)
             .map(|n| n.host.id.clone());
-        let host = cached
-            .or_else(|| state.db.get_setting(&format!("nodes.route.{node_id}")))
-            .ok_or_else(|| anyhow::anyhow!("尚未连接这个资源所属的节点，请刷新主机列表"))?;
+        cached.or_else(|| state.db.get_setting(&format!("nodes.route.{node_id}")))
+            .ok_or_else(|| anyhow::anyhow!("尚未连接这个资源所属的节点，请刷新主机列表"))
+    }
+
+    async fn by_node(&self, state: &AppState, node_id: &str) -> anyhow::Result<Remote> {
+        let host = self.host_for_node(state, node_id)?;
         let remote = self.remote(state, &host).await?;
-        anyhow::ensure!(
-            remote.node_id == node_id,
-            "连接的节点身份已改变，请重新检查主机配置"
-        );
-        Ok(remote)
+        verify_node(remote, node_id)
+    }
+
+    /// 插件在入口执行，只为当前请求从拥有项目的节点取上下文。
+    pub(crate) async fn live_project(
+        &self, state: &AppState, id: &str,
+    ) -> anyhow::Result<Option<crate::db::ProjectRow>> {
+        let target = match split_resource(id) {
+            Some((node, raw)) => Some((node.to_string(), raw)),
+            None => state.db.migrated_project_target(id)?,
+        };
+        let Some((node_id, raw_id)) = target else {
+            return Ok(state.db.get_project(id).filter(|project| project.project_type == "local"));
+        };
+        let host = state.db.get_host(&self.host_for_node(state, &node_id)?)
+            .ok_or_else(|| anyhow::anyhow!("远端主机不存在"))?;
+        let remote = self.list_endpoint(state, &host).await
+            .ok_or_else(|| anyhow::anyhow!("远端节点当前不可用"))?;
+        let remote = verify_node(remote, &node_id)?;
+        // 旧节点也支持同一列表接口。仅在本次插件请求内使用结果。
+        let projects: Vec<falcon_proto::Project> = remote_list(state, &remote, "projects").await?;
+        let host = remote.host;
+        Ok(projects.into_iter().find(|p| p.id == raw_id).map(|project| crate::db::ProjectRow {
+            id: resource_id(&node_id, &project.id),
+            name: project.name,
+            project_type: "ssh".into(),
+            working_dir: project.working_dir,
+            shell: project.shell,
+            created_at: project.created_at,
+            host_id: Some(host.id),
+            ssh_host: Some(host.host),
+            ssh_port: Some(host.port),
+            ssh_username: Some(host.username),
+            ssh_auth_method: Some(host.auth_method),
+            ssh_key_path: host.key_path,
+            ssh_secret_enc: host.secret_enc,
+            ..Default::default()
+        }))
     }
 
     fn failed(&self, host_id: &str, error: &str) {
@@ -156,6 +203,11 @@ impl Gateway {
         cache.nodes.remove(host_id);
         cache.errors.insert(host_id.to_string(), error.to_string());
     }
+}
+
+fn verify_node(remote: Remote, node_id: &str) -> anyhow::Result<Remote> {
+    anyhow::ensure!(remote.node_id == node_id, "连接的节点身份已改变，请重新检查主机配置");
+    Ok(remote)
 }
 
 pub fn router() -> Router<AppState> {
@@ -174,9 +226,10 @@ async fn node_info(State(state): State<AppState>) -> Json<falcon_proto::NodeInfo
 }
 
 async fn node_status(State(state): State<AppState>) -> Json<Vec<falcon_proto::NodeStatus>> {
+    let hosts = state.db.list_host_rows();
     let cache = state.nodes.cache.lock().unwrap_or_else(|e| e.into_inner());
-    Json(state.db.list_host_rows().iter().map(|host| {
-        let node = cache.nodes.get(&host.id);
+    Json(hosts.iter().map(|host| {
+        let node = cache.nodes.get(&host.id).filter(|node| node.host == *host);
         falcon_proto::NodeStatus {
             node_id: node.map(|n|n.node_id.clone()), host_id: host.id.clone(), name: host.name.clone(),
             version: node.map(|n|n.version.clone()), online: node.is_some(), error: cache.errors.get(&host.id).cloned(),
@@ -414,119 +467,54 @@ pub(super) async fn buffered(
     Ok((parts.status, parts.headers, bytes.to_vec()))
 }
 
-async fn aggregate(state: &AppState, kind: &str, local: Vec<Value>) -> Value {
-    let hosts = state.db.list_host_rows();
-    let mut tasks = Vec::new();
-    for host in &hosts {
-        let lock = state.nodes.lock(&format!("list:{kind}:{}", host.id));
-        let Ok(turn) = lock.try_lock_owned() else {
-            continue;
-        };
-        let state = state.clone();
-        let host = host.clone();
-        let kind = kind.to_string();
-        tasks.push(tokio::spawn(async move {
-            let _turn = turn;
-            let result = async {
-                let remote = state.nodes.remote(&state, &host.id).await?;
-                let path = format!("/api/{kind}");
-                let (status, _, bytes) = buffered(
-                    &state,
-                    &remote,
-                    Method::GET,
-                    &path,
-                    HeaderMap::new(),
-                    Body::empty(),
-                )
-                .await?;
-                anyhow::ensure!(status.is_success(), "节点列表请求失败：{status}");
-                let values: Vec<Value> = serde_json::from_slice(&bytes)?;
-                Ok::<Vec<Value>, anyhow::Error>(
-                    values
-                        .into_iter()
-                        .map(|mut value| {
-                            if kind == "askpass/pending" {
-                                if let Some(id) =
-                                    value.get("id").and_then(Value::as_str).map(str::to_string)
-                                {
-                                    value["id"] = json!(resource_id(&remote.node_id, &id));
-                                }
-                                value
-                            } else {
-                                project_json(value, &remote)
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            .await;
-            match result {
-                Ok(values) => {
-                    // 列表缓存跨入口重启保留；离线时不会因临时空列表丢失客户端布局。
-                    state.db.set_setting(
-                        &format!("nodes.cache.{}.{kind}", host.id),
-                        &serde_json::to_string(&values).unwrap_or_else(|_| "[]".into()),
-                    );
-                    let mut cache = state.nodes.cache.lock().unwrap_or_else(|e| e.into_inner());
-                    cache.errors.remove(&host.id);
-                    if kind == "projects" {
-                        cache.projects.insert(host.id, values);
-                    } else {
-                        cache.sessions.insert(format!("{}:{kind}", host.id), values);
-                    }
-                }
-                Err(error) => state.nodes.failed(&host.id, &error.to_string()),
-            }
-        }));
+async fn remote_list<T: serde::de::DeserializeOwned>(
+    state: &AppState, remote: &Remote, kind: &str,
+) -> anyhow::Result<Vec<T>> {
+    let path = format!("/api/{kind}");
+    let result = tokio::time::timeout(LIST_TIMEOUT, async {
+        let (status, _, bytes) = buffered(
+            state, remote, Method::GET, &path, HeaderMap::new(), Body::empty(),
+        ).await?;
+        anyhow::ensure!(status.is_success(), "节点列表请求失败：{status}");
+        Ok(serde_json::from_slice(&bytes)?)
+    }).await.unwrap_or_else(|_| Err(anyhow::anyhow!("读取节点列表超时")));
+    if let Err(error) = &result {
+        state.nodes.failed(&remote.host.id, &format!("{error:#}"));
     }
-    // 部署/连接继续在后台完成，列表不会被一台离线主机阻塞几十秒。
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(1200),
-        futures::future::join_all(tasks),
-    )
-    .await;
-    let mut output = local;
-    let cache = state.nodes.cache.lock().unwrap_or_else(|e| e.into_inner());
-    for host in hosts {
-        let cached = if kind == "projects" {
-            cache.projects.get(&host.id)
-        } else {
-            cache.sessions.get(&format!("{}:{kind}", host.id))
-        };
-        let mut values = cached
-            .cloned()
-            .or_else(|| {
-                state
-                    .db
-                    .get_setting(&format!("nodes.cache.{}.{kind}", host.id))
-                    .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-            })
-            .unwrap_or_default();
-        if cache.errors.contains_key(&host.id) {
-            if kind == "sessions" {
-                for value in &mut values {
-                    if value.get("state").and_then(Value::as_str) == Some("active") {
-                        value["state"] = json!("unverified");
-                    }
-                }
-            }
+    result
+}
+
+async fn aggregate(state: &AppState, kind: &str, mut local: Vec<Value>) -> Value {
+    let lists = state.db.list_host_rows().into_iter().map(|host| async move {
+        let remote = state.nodes.list_endpoint(state, &host).await?;
+        let values = remote_list::<Value>(state, &remote, kind).await.ok()?;
+        Some((remote, values))
+    });
+    // 每台主机的本轮结果独立，按保存顺序合并。同一节点可由多条 SSH 配置发现。
+    for (remote, values) in futures::future::join_all(lists).await.into_iter().flatten() {
+        for mut value in values {
             if kind == "askpass/pending" {
-                values.clear();
+                if let Some(id) = value.get("id").and_then(Value::as_str) {
+                    value["id"] = json!(resource_id(&remote.node_id, id));
+                }
+            } else {
+                value = project_json(value, &remote);
             }
-        }
-        for value in values {
-            if !output.iter().any(|v| v.get("id") == value.get("id")) {
-                output.push(value);
+            if !local.iter().any(|v| v.get("id") == value.get("id")) {
+                local.push(value);
             }
         }
     }
-    Value::Array(output)
+    Value::Array(local)
 }
 
 /// 所有路由外层统一按资源归属转发；原始文件字节和 WebSocket 不经过 JSON 变换。
 pub async fn middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let local_only = req.headers().get(LOCAL_HEADER).is_some() && internal(&state, req.headers());
+    let local_only = req.headers().contains_key(LOCAL_HEADER);
+    if local_only && !internal(&state, req.headers()) {
+        return ApiError::unauthorized().into_response();
+    }
     if req.method() == Method::GET && path == "/api/projects" {
         let values = state
             .db
@@ -536,34 +524,11 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
             .map(crate::db::Db::to_project)
             .filter_map(|p| serde_json::to_value(p).ok())
             .collect();
-        let mut result = if local_only {
+        return Json(if local_only {
             Value::Array(values)
         } else {
             aggregate(&state, "projects", values).await
-        };
-        if !local_only {
-            // 连接失败或导入冲突时保留尚未迁移的旧项目；任何操作仍须先成功连接所属节点。
-            if let Some(list) = result.as_array_mut() {
-                for project in state
-                    .db
-                    .list_projects()
-                    .into_iter()
-                    .filter(|p| p.project_type == "ssh")
-                {
-                    let migrated = project
-                        .host_id
-                        .as_deref()
-                        .is_some_and(|id| state.db.is_host_migrated(id).unwrap_or(false));
-                    if !migrated {
-                        if let Ok(value) = serde_json::to_value(crate::db::Db::to_project(&project))
-                        {
-                            list.push(value);
-                        }
-                    }
-                }
-            }
-        }
-        return Json(result).into_response();
+        }).into_response();
     }
     if req.method() == Method::GET && path == "/api/sessions" {
         let response = next.run(req).await;
@@ -1487,27 +1452,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_initial_connection_keeps_unmigrated_projects_visible() {
-        let app = TestApp::new();
-        let host = SshHostRow {
-            id: "h".into(),
-            name: "offline".into(),
-            host: "isolated.invalid".into(),
+    async fn lists_use_owner_even_when_legacy_metadata_conflicts_and_return_no_offline_copy() {
+        let gateway = TestApp::new();
+        let owner = TestApp::new();
+        gateway.local_project("own");
+        owner.local_project("shared");
+        let mut project = owner.state.db.get_project("shared").unwrap();
+        project.name = "host value".into();
+        owner.state.db.update_project(&project);
+        owner.state.db.insert_session(&crate::db::SessionRow {
+            id: "remote-session".into(),
+            project_id: "shared".into(),
+            state: "active".into(),
             ..Default::default()
-        };
-        app.state.db.insert_host(&host);
-        app.state.db.insert_project(&crate::db::ProjectRow {
-            id: "legacy".into(),
-            name: "keep".into(),
+        });
+        let (address, task) = serve(&owner).await;
+        attach(&gateway, &owner, address, "h");
+        gateway.state.db.insert_project(&crate::db::ProjectRow {
+            id: "shared".into(),
+            name: "gateway value".into(),
             project_type: "ssh".into(),
             host_id: Some("h".into()),
             ..Default::default()
         });
-        let lock = app.state.nodes.lock("list:projects:h");
-        let _ongoing = lock.lock().await;
-        let (status, projects) = json_of(app.get("/api/projects").await).await;
+        let project_id = resource_id(&owner.state.db.instance_id(), "shared");
+        let (_, projects) = json_of(gateway.get("/api/projects").await).await;
+        assert_eq!(projects.as_array().unwrap().len(), 2);
+        assert_eq!(projects[1]["id"], project_id);
+        assert_eq!(projects[1]["name"], "host value");
+        let (_, sessions) = json_of(gateway.get("/api/sessions").await).await;
+        assert_eq!(sessions[0]["projectId"], project_id);
+        assert_eq!(gateway.state.nodes.live_project(&gateway.state, &project_id).await.unwrap().unwrap().name, "host value");
+        assert!(!gateway.state.db.is_host_migrated("h").unwrap());
+        for kind in ["projects", "sessions"] {
+            assert!(gateway.state.db.get_setting(&format!("nodes.cache.h.{kind}")).is_none());
+        }
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let lock = gateway.state.nodes.lock("host:h");
+        let _turn = lock.lock().await; // 禁止在测试中尝试真实 SSH 重新发现。
+        let (projects, sessions) = tokio::join!(gateway.get("/api/projects"), gateway.get("/api/sessions"));
+        let (status, projects) = json_of(projects).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(projects[0]["id"], "legacy");
+        assert_eq!(projects.as_array().unwrap().len(), 1);
+        assert_eq!(projects[0]["id"], "own");
+        assert_eq!(json_of(sessions).await.1, json!([]));
+        let (_, nodes) = json_of(gateway.get("/api/nodes").await).await;
+        assert_eq!(nodes[0]["online"], false);
+        assert!(nodes[0]["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn unbound_ssh_creation_cannot_write_gateway_database() {
+        let app = TestApp::new();
+        let (status, _) = json_of(app.post_json("/api/projects", json!({
+            "name": "legacy", "type": "ssh", "workingDir": "/tmp",
+            "ssh": { "host": "isolated.invalid", "username": "test", "authMethod": "agent" }
+        })).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(app.state.db.list_projects().is_empty());
     }
 
     #[tokio::test]

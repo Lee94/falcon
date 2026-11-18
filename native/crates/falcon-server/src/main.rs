@@ -75,8 +75,7 @@ fn main() -> anyhow::Result<()> {
     let loopback = is_loopback(&config.host);
 
     let db = Arc::new(Db::open(&config.data_dir)?);
-    falcon_server::nodes::migration::migrate_local(&db, &config.data_dir)?;
-    falcon_server::nodes::migration::bind_legacy_hosts(&db)?;
+    falcon_server::server_update::prepare_startup_db(&db, &config.data_dir)?;
     let secrets = Arc::new(SecretBox::open(&config.data_dir)?);
 
     let askpass = Arc::new(AskpassHub::new());

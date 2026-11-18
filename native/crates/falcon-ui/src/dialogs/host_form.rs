@@ -289,8 +289,7 @@ impl HostForm {
                                 Some(h) => *h = saved2.clone(),
                                 None => w.hosts.push(saved2.clone()),
                             }
-                            w.refresh_hosts(cx);
-                            w.refresh_projects(cx);
+                            w.refresh_inventory(cx);
                             let title = if editing {
                                 t!("host.saved", name = saved2.name.clone())
                             } else {

@@ -30,7 +30,7 @@ use self::render::{CONTAINER, Header, LOG_CHARS, LOG_LINES, Tab};
 use super::PluginError;
 use super::machine::{RemoteError, Resolved, Target, remote_exec, resolve};
 use super::runner::{self, Ended, Spawn};
-use crate::db::Db;
+use crate::api::AppState;
 use crate::engine::EngineHandle;
 use crate::host::build_command_line;
 use crate::sessions::local::BaseEnvFn;
@@ -242,9 +242,12 @@ impl Docker {
         Some(d)
     }
 
-    pub async fn render(&self, db: &Db, engine: &EngineHandle, input: &PluginRenderInput) -> PluginView {
-        let r = resolve(db, &input.params, input.project_id.as_deref());
-        let Some(runner) = self.runner(engine, &r.target).await else {
+    pub async fn render(&self, state: &AppState, input: &PluginRenderInput) -> PluginView {
+        let r = match resolve(state, &input.params, input.project_id.as_deref()).await {
+            Ok(r) => r,
+            Err(e) => return render::link_view(&Header { machine: &e.choice, daemon: None }, e.error.message()),
+        };
+        let Some(runner) = self.runner(&state.engine, &r.target).await else {
             return render::failure_view(&Header { machine: &r.choice, daemon: None }, &Failure::NotInstalled, true);
         };
         self.view(&r, &runner, &input.params).await
@@ -341,10 +344,10 @@ impl Docker {
     }
 
     /// 点了面板上的按钮：跑那条命令，再按（可能改过的）参数重画，带一条 toast 说结果
-    pub async fn action(&self, db: &Db, engine: &EngineHandle, input: &PluginActionInput) -> Result<PluginView, PluginError> {
+    pub async fn action(&self, state: &AppState, input: &PluginActionInput) -> Result<PluginView, PluginError> {
         let spec = cli::action_spec(&input.action, input.value.as_deref()).map_err(PluginError::BadInput)?;
-        let r = resolve(db, &input.params, input.project_id.as_deref());
-        let Some(runner) = self.runner(engine, &r.target).await else {
+        let r = resolve(state, &input.params, input.project_id.as_deref()).await.map_err(|e| e.error)?;
+        let Some(runner) = self.runner(&state.engine, &r.target).await else {
             return Ok(render::failure_view(&Header { machine: &r.choice, daemon: None }, &Failure::NotInstalled, true));
         };
         let st = self.machine(&r.key);

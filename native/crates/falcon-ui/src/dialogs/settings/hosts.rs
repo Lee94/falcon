@@ -34,7 +34,7 @@ impl HostsPane {
     pub fn new(ws: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         cx.observe(&ws, |_, _, cx| cx.notify()).detach();
         // 打开设置时顺手刷一遍：别的窗口 / 浏览器版刚加的主机、引用计数都要是新的
-        ws.update(cx, |w, cx| w.refresh_hosts(cx));
+        ws.update(cx, |w, cx| w.refresh_inventory(cx));
         Self { ws, testing: None }
     }
 

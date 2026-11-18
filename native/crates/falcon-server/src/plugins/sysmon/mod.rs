@@ -24,7 +24,7 @@ use self::local::LocalSampler;
 use self::render::{HISTORY, Point};
 use self::sample::Snapshot;
 use super::machine::{RemoteError, Target, remote_exec, resolve};
-use crate::db::Db;
+use crate::api::AppState;
 use crate::engine::EngineHandle;
 use crate::host::build_command_line;
 
@@ -79,8 +79,11 @@ impl Sysmon {
         lock(&self.machines).entry(key.to_string()).or_default().clone()
     }
 
-    pub async fn render(&self, db: &Db, engine: &EngineHandle, input: &PluginRenderInput) -> PluginView {
-        let r = resolve(db, &input.params, input.project_id.as_deref());
+    pub async fn render(&self, state: &AppState, input: &PluginRenderInput) -> PluginView {
+        let r = match resolve(state, &input.params, input.project_id.as_deref()).await {
+            Ok(r) => r,
+            Err(e) => return render::notice_view(&e.choice, PluginTone::Danger, e.error.message().to_string()),
+        };
         // 同一台机器的采样排队：后到的请求等前一个采完，再按 REUSE 直接用它的结果
         let cell = self.machine(&r.key);
         let mut st = cell.lock().await;
@@ -104,7 +107,7 @@ impl Sysmon {
                     Err(e) => return render::notice_view(&r.choice, PluginTone::Danger, format!("采样失败：{e}")),
                 }
             }
-            target => match sample_remote(engine, target, &mut st).await {
+            target => match sample_remote(&state.engine, target, &mut st).await {
                 Ok(s) => s,
                 Err(RemoteError::Unsupported(os)) => {
                     let text = format!("{label} 是 {os}。系统监控暂时只看得了 falcon 后端本机与 Linux 远端主机。");

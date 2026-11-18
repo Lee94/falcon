@@ -137,7 +137,7 @@ object FalconApiClient {
             (0 until list.length()).map { i ->
                 val node = list.getJSONObject(i)
                 NodeStatus(if (node.isNull("hostId")) null else node.optString("hostId"),
-                    if (node.isNull("version")) null else node.optString("version"), node.optBoolean("online"),
+                    if (node.isNull("version")) null else node.optString("version"), node.getBoolean("online"),
                     if (node.isNull("error")) null else node.optString("error"))
             }
         }
@@ -148,8 +148,10 @@ object FalconApiClient {
             val projectsJson = getRaw(baseUrl, "/api/projects")
             val sessionsJson = getRaw(baseUrl, "/api/sessions")
             val hostsJson = runCatching { getRaw(baseUrl, "/api/hosts") }.getOrDefault("[]")
+            // 列表请求会触发节点探测，因此随后读取状态。旧服务端没有 /api/nodes 时仍可使用列表。
+            val nodes = fetchNodeStatus(baseUrl).getOrDefault(emptyList())
             val enrichedJson = FalconNative.buildDashboardView(projectsJson, sessionsJson, hostsJson)
-            JsonParsers.parseDashboard(enrichedJson)
+            JsonParsers.parseDashboard(enrichedJson).withNodeStatuses(nodes)
         }
     }
 
