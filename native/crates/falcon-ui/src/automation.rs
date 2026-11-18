@@ -236,7 +236,7 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
             }
         }
         "key" => {
-            let ks = Keystroke::parse(arg).map_err(|e| format!("{e:#}"))?;
+            let ks = Keystroke::parse_with_os(arg, cx.update(|cx| cx.platform_info().os)).map_err(|e| format!("{e:#}"))?;
             let _ = window.update(cx, |_, window, cx| {
                 window.dispatch_keystroke(ks, cx);
             });
@@ -328,7 +328,8 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                     cx,
                 );
                 window.dispatch_event(
-                    PlatformInput::ScrollWheel(gpui_kit::ScrollEvent {
+                    PlatformInput::Scroll(gpui_kit::ScrollEvent {
+                        source: gpui_kit::ScrollSource::Pointer,
                         position,
                         delta: gpui_kit::ScrollDelta::Pixels(Point::new(px(v[2]), px(v[3]))),
                         modifiers: Modifiers::default(),

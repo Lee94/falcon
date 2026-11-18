@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::Root;
+use gpui_kit::component::{Root, WindowExt};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -188,6 +188,7 @@ pub struct ServerWindow {
     rightbar: Entity<RightBar>,
     panels: Entity<PanelHost>,
     focus: FocusHandle,
+    requested_pane_focus: Option<String>,
     /// 拖侧栏 / 右面板宽度中（旧 React 版的 ResizableSlot）
     panel_resize: Option<PanelDrag>,
     /// macOS：按下了标题条的空白处，下一记移动才开始拖窗口。缩略图不在这块里，点它不会拖窗口
@@ -291,6 +292,7 @@ impl ServerWindow {
             rightbar,
             panels,
             focus: cx.focus_handle(),
+            requested_pane_focus: None,
             panel_resize: None,
             title_drag: false,
             sidebar_anim: None,
@@ -305,8 +307,9 @@ impl ServerWindow {
             WorkspaceEvent::Toast(toast) => dialogs::show_toast(toast, window, cx),
             WorkspaceEvent::Askpass => dialogs::askpass::open_head(&self.ws, window, cx),
             WorkspaceEvent::FocusPane(key) => {
-                let key = key.clone();
-                self.canvas.update(cx, |c, cx| c.focus_pane(&key, window, cx));
+                // 新建会话的通知可能早于终端视图创建，等渲染时视图就绪再交接焦点。
+                self.requested_pane_focus = Some(key.clone());
+                cx.notify();
             }
             WorkspaceEvent::NeedsInstall { project_id, agent } => {
                 dialogs::install::open(&self.ws, project_id, Some(*agent), window, cx)
@@ -675,8 +678,15 @@ impl Render for ServerWindow {
         let ui = Ui::global(cx).clone();
         let phase = self.ws.read(cx).auth_phase.clone();
         // 缺的终端视图在窗口上下文里补建（Workspace 自己拿不到 Window）
+        let requested_focus = self.requested_pane_focus.take();
         if phase == AuthPhase::Ready {
             self.ws.update(cx, |w, cx| w.ensure_terminal_views(window, cx));
+            if let Some(key) = requested_focus
+                && self.ws.read(cx).active_key().as_ref() == Some(&key)
+                && !window.has_active_dialog(cx) && !window.has_active_sheet(cx)
+            {
+                self.canvas.update(cx, |c, cx| c.focus_pane(&key, window, cx));
+            }
         }
 
         // 缩略图跟着标题条走。连上之后才有画布可切；总览时 title_switcher 自己返回 None
