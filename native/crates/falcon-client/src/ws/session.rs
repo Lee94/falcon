@@ -50,6 +50,8 @@ pub enum SessionEvent {
     /// 会话状态变化。连上时服务端会先推一次当前状态（等 resize 的持久会话推
     /// unverified，已死的会话推 dead + 原因）。
     State { state: SessionState, dead_reason: Option<DeadReason> },
+    /// 宿主机已终止会话并移除记录，连接随之结束。
+    Terminated,
     /// 服务端与远端主机之间的 SSH 断线自动重连中（不是这条 WS 在重连，那个看
     /// `Disconnected`）
     Reconnecting { attempt: u32 },
@@ -591,8 +593,11 @@ impl Driver {
                         }
                         WsMsg::Text(text) => {
                             // 坏 JSON 与看不懂的消息都安静忽略（React 版的 switch 没有 default）
-                            if let Ok(m) = serde_json::from_str::<ServerMessage>(&text) {
-                                self.dispatch(m);
+                            if let Ok(m) = serde_json::from_str::<ServerMessage>(&text)
+                                && let Some(next) = self.dispatch(m)
+                            {
+                                ws.close().await;
+                                return next;
                             }
                         }
                         WsMsg::Close(code) => {
@@ -692,9 +697,13 @@ impl Driver {
         self.backoff()
     }
 
-    fn dispatch(&mut self, msg: ServerMessage) {
+    fn dispatch(&self, msg: ServerMessage) -> Option<Next> {
         let ev = match msg {
             ServerMessage::State { state, dead_reason } => SessionEvent::State { state, dead_reason },
+            ServerMessage::Terminated => {
+                self.emit(SessionEvent::Terminated);
+                return Some(Next::Stop);
+            }
             ServerMessage::Reconnecting { attempt } => SessionEvent::Reconnecting { attempt },
             ServerMessage::Error { message } => SessionEvent::Error(message),
             ServerMessage::Title { title } => SessionEvent::Title(title),
@@ -729,9 +738,10 @@ impl Driver {
             },
             // pong 只是心跳的回话：收到任何消息都已经把"活着"记下了，没有事件可报。
             // 老服务端的 scroll（ADR 0019，已退役）在这里也是 Unknown
-            ServerMessage::Pong | ServerMessage::Unknown => return,
+            ServerMessage::Pong | ServerMessage::Unknown => return None,
         };
         self.emit(ev);
+        None
     }
 }
 

@@ -115,6 +115,8 @@ pub struct Workspace {
     pub projects: Vec<Project>,
     pub hosts: Vec<SshHost>,
     pub sessions: Vec<SessionWithProject>,
+    /// 正在终止时保存会话以便失败后恢复。确认后只保留 ID（值为 None），避免迟到的轮询或网关缓存重新显示它。
+    hidden_sessions: HashMap<String, Option<SessionWithProject>>,
     /// 后端本机检测到的 CLI；首次检测完成前只显示普通终端。
     pub local_agents: Vec<SessionAgent>,
     agents_in_flight: bool,
@@ -195,6 +197,7 @@ impl Workspace {
             projects: Vec::new(),
             hosts: Vec::new(),
             sessions: Vec::new(),
+            hidden_sessions: HashMap::new(),
             local_agents: Vec::new(),
             agents_in_flight: false,
             remote_agents: HashMap::new(),
@@ -582,7 +585,20 @@ impl Workspace {
         .detach();
     }
 
+    fn filter_hidden_sessions(&mut self, sessions: &mut Vec<SessionWithProject>) {
+        sessions.retain(|session| match self.hidden_sessions.get_mut(&session.id) {
+            None => true,
+            Some(snapshot) => {
+                if snapshot.is_some() {
+                    *snapshot = Some(session.clone());
+                }
+                false
+            }
+        });
+    }
+
     fn apply_sessions(&mut self, mut sessions: Vec<SessionWithProject>, cx: &mut Context<Self>) {
+        self.filter_hidden_sessions(&mut sessions);
         // 开着窗口、WS 推过程序状态的会话以推来的全集为准：这次轮询的请求可能发在推送之前、
         // 响应却晚到，拿它覆盖会让刚清掉的 blocked 徽标又冒出来，一直挂到下一轮轮询
         for s in sessions.iter_mut() {
@@ -984,6 +1000,7 @@ impl Workspace {
                 }
                 TerminalViewEvent::StateChanged => cx.notify(),
                 TerminalViewEvent::State { state, dead_reason } => this.apply_session_state(&sid, *state, *dead_reason, cx),
+                TerminalViewEvent::Terminated => this.on_session_terminated(&sid, cx),
                 TerminalViewEvent::Reconnected => this.refresh_sessions(cx),
                 TerminalViewEvent::NewTerminal => {
                     if let Some(pid) = this.tab_project_id(&sid) {

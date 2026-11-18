@@ -1875,12 +1875,14 @@ impl SessionManager {
             b.destroy();
         }
 
+        self.db.delete_session(session_id);
         if let Some(e) = &entry {
+            self.broadcast(e, &ServerMessage::Terminated);
+            // 旧客户端会忽略 terminated，仍给它发原有的结束状态。
             self.broadcast(e, &ServerMessage::State { state: SessionState::Dead, dead_reason: Some(DeadReason::Exited) });
             self.drop_output(e);
             self.entries.borrow_mut().remove(session_id);
         }
-        self.db.delete_session(session_id);
     }
 
     /// 清除 dead 会话记录

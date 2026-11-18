@@ -358,7 +358,7 @@ fn size_follows_the_latest_visible_typist_and_is_pushed_to_every_viewer() {
 }
 
 #[test]
-fn terminate_broadcasts_dead_and_forgets_the_row() {
+fn terminate_notifies_viewers_and_forgets_the_row() {
     run(async {
         let h = harness();
         let s = new_session(&h).await;
@@ -366,7 +366,9 @@ fn terminate_broadcasts_dead_and_forgets_the_row() {
         h.mgr.add_viewer(&s.id, a.viewer.clone());
         h.mgr.terminate(&s.id, false).await;
         a.drain();
-        assert!(has_state("dead")(&a.seen));
+        let terminated = a.seen.iter().position(|got| matches!(got, Got::Msg(m) if m["type"] == "terminated"));
+        let dead = a.seen.iter().position(|got| matches!(got, Got::Msg(m) if m["type"] == "state" && m["state"] == "dead"));
+        assert!(matches!((terminated, dead), (Some(terminated), Some(dead)) if terminated < dead));
         assert!(h.db.get_session(&s.id).is_none());
         assert!(h.mgr.entry(&s.id).is_none());
         // 已经不存在的会话

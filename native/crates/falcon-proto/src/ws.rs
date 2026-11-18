@@ -194,6 +194,9 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dead_reason: Option<DeadReason>,
     },
+    /// 会话已被终止，记录已移除；观看端可以直接关闭视图。
+    #[serde(rename = "terminated")]
+    Terminated,
     /// SSH 断线自动重连中
     #[serde(rename = "reconnecting")]
     Reconnecting { attempt: u32 },

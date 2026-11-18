@@ -184,27 +184,7 @@ pub fn terminate_many(ws: &Entity<Workspace>, ids: Vec<String>, window: &mut Win
             ..Default::default()
         },
         move |_, cx| {
-            let client = ws2.read(cx).client.clone();
-            let ws3 = ws2.clone();
-            let ids: Vec<String> = picked.iter().map(|s| s.id.clone()).collect();
-            ws2.update(cx, |w, cx| {
-                for id in &ids {
-                    w.drop_tab(id, cx);
-                }
-            });
-            cx.spawn(async move |cx| {
-                for id in &ids {
-                    let _ = client.terminate_session(id).await;
-                }
-                cx.update(|cx| {
-                    // 总览里的勾选跟着清掉（React 版的 setSelected([])），否则剩下的行还勾着
-                    ws3.update(cx, |w, cx| {
-                        w.selected.clear();
-                        w.refresh_sessions(cx);
-                    });
-                });
-            })
-            .detach();
+            ws2.update(cx, |w, cx| w.terminate_many(&ids, cx));
         },
         window,
         cx,

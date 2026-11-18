@@ -853,6 +853,7 @@ pub fn parse_server_control_message(raw_json: &str) -> String {
             "deadReason": dead_reason.map(|r| r.as_str()),
         })
         .to_string(),
+        ServerMessage::Terminated => serde_json::json!({ "kind": "terminated" }).to_string(),
         ServerMessage::Reconnecting { attempt } => serde_json::json!({
             "kind": "reconnecting",
             "attempt": attempt,

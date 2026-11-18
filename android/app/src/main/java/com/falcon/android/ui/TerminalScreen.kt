@@ -95,6 +95,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TERM_PREFS = "falcon_android_prefs"
 private const val KEY_FONT_SIZE_SP = "term_font_size_sp"
@@ -150,6 +151,7 @@ fun TerminalScreen(
     var showRenameDialog by remember { mutableStateOf(false) }
     var renameInput by remember { mutableStateOf(initialSession.name) }
     var showTerminateDialog by remember { mutableStateOf(false) }
+    var terminatingSession by remember { mutableStateOf(false) }
     var busyCommand by remember { mutableStateOf<String?>(null) }
     var uploadingImage by remember { mutableStateOf(false) }
 
@@ -167,7 +169,7 @@ fun TerminalScreen(
     val agentModeSwitching = agentTransition.switching
     val agentComposerFocus = remember(initialSession.id) { androidx.compose.ui.focus.FocusRequester() }
     val hasAgentView = agentState?.interactive == true
-    val sessionAvailable = wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0
+    val sessionAvailable = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0
     val canSwitchAgentMode = session.agent == "claude" && sessionAvailable && !agentModeSwitching &&
         (!hasAgentView || agentState?.status == "idle" || agentState?.status == "error")
 
@@ -213,7 +215,7 @@ fun TerminalScreen(
         { msgs ->
             val ws = activeWebSocket
             if (ws != null) {
-                val inputAllowed = wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0 &&
+                val inputAllowed = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0 &&
                     !agentTransition.switching && agentState?.interactive != true
                 for (m in msgs) {
                     // 转换期间保留尺寸与外观上报，但键盘、粘贴及终端查询回复不能进入控制通道。
@@ -226,7 +228,7 @@ fun TerminalScreen(
         { payload ->
             val current = agentState
             val configuring = payload.optString("type") in listOf("agent_set_model", "agent_set_reasoning_effort")
-            val allowed = wsConnected && agentTransition.synchronized && sessionState == "active" &&
+            val allowed = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" &&
                 sshReconnectAttempt == 0 && !agentTransition.switching && current?.interactive == true &&
                 current.status != "unknown" && (!configuring || current.status == "idle" || current.status == "error")
             val sent = allowed && activeWebSocket?.send(payload.toString()) == true
@@ -253,11 +255,11 @@ fun TerminalScreen(
             agentState?.interactive == true
         }
         var currentWs: WebSocket? = null
-        var closedByEffect = false
+        val socketFinished = AtomicBoolean()
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                if (closedByEffect) {
+                if (socketFinished.get()) {
                     webSocket.close(1000, "Effect disposed")
                     return
                 }
@@ -275,7 +277,7 @@ fun TerminalScreen(
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (closedByEffect) return
+                if (socketFinished.get()) return
                 val h = nativeHandle
                 if (h == 0L) return
                 val resultJson = FalconNative.onBinaryFrame(h, bytes.toByteArray())
@@ -310,7 +312,7 @@ fun TerminalScreen(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                if (closedByEffect) return
+                if (socketFinished.get()) return
                 val h = nativeHandle
                 if (h == 0L) return
                 val parsedStr = FalconNative.parseServerMessage(text)
@@ -325,6 +327,11 @@ fun TerminalScreen(
                                 null
                             }
                             sshReconnectAttempt = 0
+                        }
+                        "terminated" -> {
+                            socketFinished.set(true)
+                            webSocket.close(1000, "Session terminated")
+                            scope.launch { onSessionTerminated() }
                         }
                         "reconnecting" -> {
                             sshReconnectAttempt = obj.optInt("attempt", 1)
@@ -428,16 +435,16 @@ fun TerminalScreen(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (closedByEffect) return
+                if (socketFinished.get()) return
                 wsConnected = false
                 updateAgentTransition { it.disconnected() }
-                if (!closedByEffect && sessionState != "dead" && code != 4401) {
+                if (!socketFinished.get() && sessionState != "dead" && code != 4401) {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
                         wsRetryAttempt = nextAttempt
                         val waitMs = (1000L * (1 shl nextAttempt.coerceAtMost(4))).coerceAtMost(10000L)
                         delay(waitMs)
-                        if (!closedByEffect) {
+                        if (!socketFinished.get()) {
                             reconnectTrigger++
                         }
                     }
@@ -445,16 +452,16 @@ fun TerminalScreen(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (closedByEffect) return
+                if (socketFinished.get()) return
                 wsConnected = false
                 updateAgentTransition { it.disconnected() }
-                if (!closedByEffect && sessionState != "dead") {
+                if (!socketFinished.get() && sessionState != "dead") {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
                         wsRetryAttempt = nextAttempt
                         val waitMs = (1200L * (1 shl nextAttempt.coerceAtMost(4))).coerceAtMost(10000L)
                         delay(waitMs)
-                        if (!closedByEffect) {
+                        if (!socketFinished.get()) {
                             reconnectTrigger++
                         }
                     }
@@ -468,7 +475,7 @@ fun TerminalScreen(
         try {
             kotlinx.coroutines.awaitCancellation()
         } finally {
-            closedByEffect = true
+            socketFinished.set(true)
             currentWs.close(1000, "Effect disposed")
         }
     }
@@ -581,6 +588,7 @@ fun TerminalScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val dotColor = when {
+                        terminatingSession -> theme.mutedForeground
                         sessionState == "dead" -> theme.destructive
                         !wsConnected || sessionState == "unverified" || sshReconnectAttempt > 0 -> theme.warning
                         programBadge?.tone == "blocked" -> theme.warning
@@ -607,6 +615,7 @@ fun TerminalScreen(
                     val metaText = buildString {
                         append(session.projectName)
                         when {
+                            terminatingSession -> append(" · 正在终止")
                             !wsConnected -> append(" · 重连($wsRetryAttempt)")
                             sshReconnectAttempt > 0 -> append(" · SSH($sshReconnectAttempt)")
                             sessionState == "unverified" -> append(" · 待接回")
@@ -744,7 +753,7 @@ fun TerminalScreen(
                 }
 
                 // 断线或 unverified 时提供立即重连/接回按钮
-                if (!wsConnected || sessionState == "unverified") {
+                if (!terminatingSession && (!wsConnected || sessionState == "unverified")) {
                     TerminalHeaderIconButton(
                         icon = Icons.Default.Refresh,
                         contentDescription = "立即接回",
@@ -1201,7 +1210,7 @@ fun TerminalScreen(
     // 终止会话确认框（含前台运行中命令检测提示）
     if (showTerminateDialog) {
         AlertDialog(
-            onDismissRequest = { showTerminateDialog = false },
+            onDismissRequest = { if (!terminatingSession) showTerminateDialog = false },
             containerColor = theme.card,
             title = {
                 Text(
@@ -1228,25 +1237,26 @@ fun TerminalScreen(
             },
             confirmButton = {
                 Button(
+                    enabled = !terminatingSession,
                     colors = ButtonDefaults.buttonColors(containerColor = theme.destructive),
                     onClick = {
-                        showTerminateDialog = false
+                        terminatingSession = true
                         scope.launch {
                             FalconApiClient.terminateSession(baseUrl, session.id)
-                                .onSuccess {
-                                    onSessionTerminated()
-                                }
+                                .onSuccess { onSessionTerminated() }
                                 .onFailure { e ->
+                                    terminatingSession = false
+                                    showTerminateDialog = false
                                     onToast("终止会话失败：${e.message}")
                                 }
                         }
                     }
                 ) {
-                    Text("终止会话", color = Color.White, fontSize = 13.sp)
+                    Text(if (terminatingSession) "正在终止…" else "终止会话", color = Color.White, fontSize = 13.sp)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showTerminateDialog = false }) {
+                TextButton(enabled = !terminatingSession, onClick = { showTerminateDialog = false }) {
                     Text("取消", color = theme.mutedForeground, fontSize = 13.sp)
                 }
             }

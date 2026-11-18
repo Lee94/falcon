@@ -126,6 +126,7 @@ fn table() -> Vec<(&'static str, Check)> {
         "paste-image" => PasteImageResult,
         // WebSocket 控制消息（文本帧，按到达顺序）
         "ws-session-messages" => Vec<ServerMessage>,
+        "ws-session-terminated" => Vec<ServerMessage>,
         "ws-session-exit" => Vec<ServerMessage>,
         "ws-session-dead" => Vec<ServerMessage>,
         "ws-session-missing" => Vec<ServerMessage>,
@@ -267,11 +268,12 @@ fn fixture_semantics() {
     let s: Session = serde_json::from_str(&de("session-create")).unwrap();
     assert_eq!(s.state, SessionState::Active);
     assert!(s.durable);
+    let dead = ServerMessage::State { state: SessionState::Dead, dead_reason: Some(DeadReason::Exited) };
     let exit: Vec<ServerMessage> = serde_json::from_str(&de("ws-session-exit")).unwrap();
-    assert!(exit.contains(&ServerMessage::State {
-        state: SessionState::Dead,
-        dead_reason: Some(DeadReason::Exited)
-    }));
+    assert!(exit.contains(&dead));
+    assert!(!exit.contains(&ServerMessage::Terminated));
+    let terminated: Vec<ServerMessage> = serde_json::from_str(&de("ws-session-terminated")).unwrap();
+    assert_eq!(terminated, vec![ServerMessage::Terminated, dead]);
     let msgs: Vec<ServerMessage> = serde_json::from_str(&de("ws-session-messages")).unwrap();
     assert_eq!(msgs[0], ServerMessage::State { state: SessionState::Active, dead_reason: None });
     assert!(!msgs.contains(&ServerMessage::Unknown), "服务端发了本版本不认识的控制消息：{msgs:?}");

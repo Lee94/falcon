@@ -437,7 +437,9 @@ fn capture(api: &mut Api, out: &mut Out) -> Result<()> {
         .json,
     )?;
     out.save("session-reattach", &api.bare("POST", &format!("/api/sessions/{session_id}/reattach"))?)?;
-    out.save("session-terminate", &api.bare("POST", &format!("/api/sessions/{session_id}/terminate"))?)?;
+    let (response, messages) = capture_session_terminate(api, &session_id)?;
+    out.save("session-terminate", &response)?;
+    out.save("ws-session-terminated", &Js::Arr(messages))?;
     // Terminate 直接删行：之后既不在列表里，也清除不了（清除只认 dead 的行）
     out.save("sessions-after-terminate", &api.get("/api/sessions")?)?;
     out.save(
@@ -560,6 +562,35 @@ fn capture_session_ws(api: &Api, id: &str) -> Result<(Vec<Js>, Js)> {
         bail!("会话 WS 没收到输入回显：{}\n控制消息：{}", Js::Str(tail).compact(), Js::Arr(text).compact());
     }
     Ok((text, busy))
+}
+
+/// 保持观看端连接，从另一条 HTTP 连接终止会话，采集通知及旧客户端使用的兼容状态。
+fn capture_session_terminate(api: &Api, id: &str) -> Result<(Js, Vec<Js>)> {
+    let mut ws = api.ws(&format!("/ws/sessions/{id}"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let attached = ws.pump(deadline, &mut |frame| match frame {
+        Frame::Text(s) => Ok(parse_msg(&s)?.get("type") == Some(&Js::str("state"))),
+        Frame::Binary(_) => Ok(false),
+    })?;
+    anyhow::ensure!(attached == Pumped::Stopped, "终止前未收到会话状态");
+
+    let response = api.bare("POST", &format!("/api/sessions/{id}/terminate"))?;
+    let mut messages = Vec::new();
+    ws.pump(Instant::now() + Duration::from_secs(5), &mut |frame| {
+        if let Frame::Text(s) = frame {
+            let msg = parse_msg(&s)?;
+            let kind = msg.get("type");
+            let dead = kind == Some(&Js::str("state")) && msg.get("state") == Some(&Js::str("dead"));
+            if dead || kind == Some(&Js::str("terminated")) {
+                messages.push(msg);
+            }
+            return Ok(dead);
+        }
+        Ok(false)
+    })?;
+    ws.close();
+    anyhow::ensure!(messages.len() == 2, "未收到终止通知和兼容状态");
+    Ok((response, messages))
 }
 
 /// 连上会话敲 `exit`，收集控制消息直到服务端推 dead。

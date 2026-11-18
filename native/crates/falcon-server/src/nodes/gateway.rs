@@ -1367,7 +1367,6 @@ mod tests {
         .await
         .expect("经第二入口接入终端并收到实际输出");
         assert!(output.contains("node-shared-7"), "{output}");
-        let _ = viewer.close(None).await;
         let (status, _) = json_of(
             a.post_json(
                 &format!(
@@ -1380,6 +1379,29 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            use falcon_proto::{ServerMessage, SessionState};
+            while let Some(Ok(message)) = viewer.next().await {
+                match message {
+                    Message::Text(text) => match serde_json::from_str::<ServerMessage>(&text) {
+                        Ok(event @ (ServerMessage::Terminated | ServerMessage::State {
+                            state: SessionState::Dead | SessionState::Unverified, ..
+                        })) => return Some(event),
+                        _ => {}
+                    },
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            None
+        })
+        .await
+        .expect("经第二入口收到终止通知");
+        assert_eq!(event, Some(falcon_proto::ServerMessage::Terminated));
+        assert!(b.state.db.get_session(&raw_session).is_none());
+        let (_, sessions_c) = json_of(c.get("/api/sessions").await).await;
+        assert_eq!(sessions_c, json!([]));
+        let _ = viewer.close(None).await;
         c_task.abort();
         b_task.abort();
     }

@@ -78,6 +78,23 @@ fn every_new_socket_sends_appearance_then_forced_resize() {
 }
 
 #[test]
+fn terminated_session_closes_without_reporting_disconnect_or_retrying() {
+    let mock = plain_server();
+    let (sink, events) = Events::new();
+    let socket = SessionSocket::open_with(&mock.client(), "s-1", sink, fast());
+    let conn = mock.next_ws();
+    accept(&conn, &events);
+
+    conn.send_text(r#"{"type":"terminated"}"#);
+    conn.send_text(r#"{"type":"state","state":"dead","deadReason":"exited"}"#);
+    assert_eq!(events.next(), SessionEvent::Terminated);
+    assert_eq!(conn.recv_raw(Duration::from_secs(2)), Some(WsIn::Closed));
+    socket.reconnect_now();
+    assert!(events.try_next(Duration::from_millis(150)).is_none());
+    assert!(mock.next_ws_within(Duration::from_millis(150)).is_none());
+}
+
+#[test]
 fn terminal_mirror_capability_is_opt_in_and_repeated_after_reconnect() {
     let mock = plain_server();
     let (sink, events) = Events::new();

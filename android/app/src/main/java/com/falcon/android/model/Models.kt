@@ -66,7 +66,24 @@ data class ServerGroupUi(
 data class DashboardData(
     val servers: List<ServerGroupUi>,
     val allSessions: List<SessionUi>
-)
+) {
+    fun withoutSessions(ids: Set<String>): DashboardData {
+        if (ids.isEmpty()) return this
+        fun List<SessionUi>.visible() = filterNot { it.id in ids }
+        fun ProjectUi.visible() = copy(sessions = sessions.visible())
+        return copy(
+            allSessions = allSessions.visible(),
+            servers = servers.map { server ->
+                server.copy(
+                    standaloneSessions = server.standaloneSessions.visible(),
+                    folders = server.folders.map { folder ->
+                        folder.copy(project = folder.project.visible(), worktrees = folder.worktrees.map { it.visible() })
+                    }
+                )
+            }
+        )
+    }
+}
 
 data class AskpassPromptUi(
     val id: String,

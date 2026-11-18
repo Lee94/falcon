@@ -43,6 +43,9 @@ impl Workspace {
     // ---------------- 选择与焦点 ----------------
 
     pub fn open_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.hidden_sessions.contains_key(session_id) {
+            return;
+        }
         self.state.open_session(session_id, &self.sessions);
         self.commit(true, cx);
     }
@@ -204,21 +207,57 @@ impl Workspace {
     }
 
     pub fn terminate(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.drop_tab(id, cx);
+        self.terminate_many(&[id.to_string()], cx);
+    }
+
+    pub fn terminate_many(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        let mut requests = Vec::new();
+        for id in ids {
+            let Some(session) = self.session(id).cloned() else { continue };
+            self.hidden_sessions.insert(id.clone(), Some(session));
+            self.remove_session_from_view(id, cx);
+            requests.push(id.clone());
+        }
+        if requests.is_empty() {
+            return;
+        }
+        self.commit(false, cx);
         let client = self.client.clone();
-        let id = id.to_string();
         cx.spawn(async move |this, cx| {
-            let result = client.terminate_session(&id).await;
-            this.update(cx, |this, cx| {
-                if let Err(err) = result {
-                    this.handle_error(&err, cx);
-                    this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
-                }
-                this.refresh_sessions(cx);
-            })
-            .ok();
+            for id in requests {
+                let result = client.terminate_session(&id).await;
+                this.update(cx, |this, cx| match result {
+                    Ok(_) => {
+                        this.hidden_sessions.insert(id, None);
+                    }
+                    Err(err) => {
+                        // 如果已收到宿主机的终止通知，迟到的请求错误不再改变结果。
+                        let Some(session) = this.hidden_sessions.get_mut(&id).and_then(Option::take) else { return };
+                        this.hidden_sessions.remove(&id);
+                        this.sessions.push(session);
+                        cx.notify();
+                        this.handle_error(&err, cx);
+                        this.toast(ToastKind::Danger, t!("toast.failed").to_string(), Some(err.to_string()), cx);
+                    }
+                })
+                .ok();
+            }
+            this.update(cx, |this, cx| this.refresh_sessions(cx)).ok();
         })
         .detach();
+    }
+
+    pub(super) fn on_session_terminated(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.hidden_sessions.insert(id.to_string(), None);
+        self.remove_session_from_view(id, cx);
+        self.commit(false, cx);
+    }
+
+    fn remove_session_from_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.sessions.retain(|session| session.id != id);
+        self.selected.retain(|selected| selected != id);
+        self.state.drop_tab(id, &self.sessions);
+        self.dismiss_program_alert(id, cx);
     }
 
     /// Detach：只收起窗口，会话留在后台继续跑（Shift+关闭）
@@ -481,7 +520,8 @@ impl Workspace {
             let sessions = client.list_sessions().await;
             this.update(cx, |this, cx| match result {
                 Ok(session) => {
-                    if let Ok(list) = sessions {
+                    if let Ok(mut list) = sessions {
+                        this.filter_hidden_sessions(&mut list);
                         this.sessions = list;
                     }
                     let was_active = this.state.active == ActiveView::Terminal { session_id: pending_id.clone() };

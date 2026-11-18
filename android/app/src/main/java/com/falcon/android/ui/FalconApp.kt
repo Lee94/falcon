@@ -121,11 +121,20 @@ fun FalconApp() {
     }
 
     var dashboard by remember { mutableStateOf(DashboardData(emptyList(), emptyList())) }
+    // 网关可能返回终止前的列表缓存。按服务端地址和会话 ID 过滤已确认终止的条目。
+    var terminatedSessions by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
     var isLoading by remember { mutableStateOf(false) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
     var openedSession by remember { mutableStateOf<SessionUi?>(null) }
+
+    fun sessionTerminated(baseUrl: String, sessionId: String) {
+        val ids = terminatedSessions[baseUrl].orEmpty()
+        if (sessionId in ids) return
+        terminatedSessions = terminatedSessions + (baseUrl to (ids + sessionId))
+        refreshTrigger++
+    }
 
     val showToast: (String) -> Unit = remember {
         { msg ->
@@ -174,17 +183,21 @@ fun FalconApp() {
                     refreshTrigger++
                 },
                 onSessionTerminated = {
-                    openedSession = null
-                    refreshTrigger++
-                    showToast("已终止会话")
+                    sessionTerminated(activeServer.url, currentSession.id)
+                    if (openedSession?.id == currentSession.id) {
+                        openedSession = null
+                        showToast("已终止会话")
+                    }
                 },
                 onToast = showToast
             )
         } else {
+            val terminatedIds = terminatedSessions[activeServer.url].orEmpty()
+            val visibleDashboard = remember(dashboard, terminatedIds) { dashboard.withoutSessions(terminatedIds) }
             DashboardScreen(
                 serverProfiles = serverProfiles,
                 activeServer = activeServer,
-                dashboard = dashboard,
+                dashboardData = visibleDashboard,
                 isLoading = isLoading,
                 connectionError = connectionError,
                 themeName = themeName,
@@ -246,6 +259,7 @@ fun FalconApp() {
                 onOpenSession = { session ->
                     openedSession = session
                 },
+                onSessionTerminated = { id -> sessionTerminated(activeServer.url, id) },
                 onToast = showToast
             )
         }

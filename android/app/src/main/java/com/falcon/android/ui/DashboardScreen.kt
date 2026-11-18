@@ -82,7 +82,7 @@ import kotlinx.coroutines.launch
 fun DashboardScreen(
     serverProfiles: List<ServerProfile>,
     activeServer: ServerProfile,
-    dashboard: DashboardData,
+    dashboardData: DashboardData,
     isLoading: Boolean,
     connectionError: String?,
     themeName: String,
@@ -92,6 +92,7 @@ fun DashboardScreen(
     onSelectTheme: (String) -> Unit,
     onRefresh: () -> Unit,
     onOpenSession: (SessionUi) -> Unit,
+    onSessionTerminated: (String) -> Unit,
     onToast: (String) -> Unit
 ) {
     val theme = LocalFalconTheme.current
@@ -136,6 +137,8 @@ fun DashboardScreen(
     var renameInput by remember { mutableStateOf("") }
     var terminateTarget by remember { mutableStateOf<SessionUi?>(null) }
     var terminateBusyCmd by remember { mutableStateOf<String?>(null) }
+    var terminatingIds by remember(activeServer.url) { mutableStateOf(emptySet<String>()) }
+    val dashboard = remember(dashboardData, terminatingIds) { dashboardData.withoutSessions(terminatingIds) }
 
     val openCreateSessionDialog: (projectId: String, title: String) -> Unit = { pid, title ->
         createTargetProjectId = pid
@@ -1054,10 +1057,15 @@ fun DashboardScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = theme.destructive),
                     onClick = {
                         terminateTarget = null
+                        terminatingIds = terminatingIds + tTarget.id
                         scope.launch {
-                            FalconApiClient.terminateSession(activeServer.url, tTarget.id)
-                                .onSuccess { onRefresh() }
-                                .onFailure { e -> onToast("终止失败：${e.message}") }
+                            try {
+                                FalconApiClient.terminateSession(activeServer.url, tTarget.id)
+                                    .onSuccess { onSessionTerminated(tTarget.id) }
+                                    .onFailure { e -> onToast("终止失败：${e.message}") }
+                            } finally {
+                                terminatingIds = terminatingIds - tTarget.id
+                            }
                         }
                     }
                 ) {

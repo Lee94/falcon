@@ -343,6 +343,8 @@ pub enum TerminalViewEvent {
     StateChanged,
     /// WS 推来的会话状态：立刻写进工作区的列表，不等 5s 轮询
     State { state: falcon_proto::SessionState, dead_reason: Option<falcon_proto::DeadReason> },
+    /// 宿主机已终止会话并移除记录。
+    Terminated,
     /// 断线重连上了：补拉一次会话列表
     Reconnected,
     /// 已丢失提示条上的"新建终端"：在同一个项目里开一个新的
@@ -696,6 +698,7 @@ impl TerminalView {
                 self.set_conn(conn, cx);
                 cx.emit(TerminalViewEvent::State { state, dead_reason });
             }
+            SessionEvent::Terminated => cx.emit(TerminalViewEvent::Terminated),
             SessionEvent::Reconnecting { attempt } => self.set_conn(ConnState::Reconnecting(attempt), cx),
             SessionEvent::Error(message) => self.set_conn(ConnState::Error(message), cx),
             SessionEvent::Title(title) => {
