@@ -22,8 +22,12 @@ pub mod fs;
 pub mod git;
 pub mod host;
 pub mod host_projects;
+/// 日志出口：默认 stderr，没有控制台时（Windows 服务）写 `<dataDir>/logs/falcon.log`
+pub mod logging;
 /// 宿主机节点：SSH 部署、项目迁移与按资源归属转发。
 pub mod nodes;
+/// 起子进程时抑制 Windows 控制台窗口（GUI 子系统的服务端必须处处带上）
+pub mod no_window;
 pub mod paste;
 /// 右侧栏插件：内置的系统监控与用户放进数据目录的命令插件（ADR 0025）
 pub mod plugins;

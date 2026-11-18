@@ -24,6 +24,7 @@ use super::command::{
     version_matches, windows_install_command,
 };
 use crate::exec::Exec as _;
+use crate::no_window::NoWindow as _;
 use crate::sessions::ssh::SshLink;
 
 /// 阶段回调：(阶段, 第几轮, 可读的远端命令)。attempt 从 1 起，>1 表示这一轮是自动重试
@@ -128,6 +129,7 @@ pub async fn ensure_local(data_dir: &Path) -> Result<Deployed, InstallError> {
     let bin = binary(target)?;
     let path = install_local(data_dir, &bin).map_err(|e| InstallError::new(InstallFailure::DirNotWritable, Some(e.to_string())))?;
     let out = tokio::process::Command::new(&path)
+        .no_window()
         .args(["version", "--json"])
         .stdin(std::process::Stdio::null())
         .output()

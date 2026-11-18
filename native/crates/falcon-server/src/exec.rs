@@ -15,6 +15,9 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+use crate::no_window::NoWindow as _;
+
 /// 一次执行的结果。stdout / stderr 是整段收完后一次按 UTF-8 解码的（逐块解码会切坏多字节字符）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecResult {
@@ -65,8 +68,8 @@ pub fn shell_command(command_line: &str) -> tokio::process::Command {
     {
         let mut cmd = tokio::process::Command::new(std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()));
         cmd.raw_arg(format!("/d /s /c \"{command_line}\""));
-        // windowsHide：别闪出一个黑色控制台窗口
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // 别闪出一个黑色控制台窗口（服务端是 GUI 子系统，没有控制台可继承）
+        cmd.no_window();
         cmd
     }
     #[cfg(not(windows))]

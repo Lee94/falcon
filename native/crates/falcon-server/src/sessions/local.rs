@@ -30,6 +30,7 @@ use super::ssh_host::{AttachOptions, spawn_spec};
 use crate::askpass::install::{askpass_session_env, prepend_path};
 use crate::exec::{LocalBoxFuture, Utf8Decoder, local_exec};
 use crate::host::{encode_powershell, merge_env};
+use crate::no_window::NoWindow as _;
 use crate::sessiond::backend::{ConnectError, SessiondBackend, Transport, connect};
 use crate::sessiond::command::{kill_argv, list_argv, spawn_argv};
 use crate::sessiond::deploy::{Deployed, ensure_local};
@@ -195,6 +196,7 @@ pub(super) async fn resolve_base_env() -> Vec<(String, String)> {
 /// 等价于 VS Code 的 VSCODE_RESOLVING_ENVIRONMENT。
 async fn run_login_shell(shell: &str) -> Option<String> {
     let mut child = tokio::process::Command::new(shell)
+        .no_window()
         .args(login_env_probe_args())
         // rc 文件普遍假设从 home 起步；也避免探测把仓库目录当 cwd 产生副作用
         .current_dir(home_dir())
@@ -416,6 +418,7 @@ fn endpoint(deployed: &Deployed, sid: &str) -> String {
 pub(super) async fn run_sessiond(argv: &[String]) -> Result<String, String> {
     let (bin, args) = argv.split_first().expect("argv");
     let child = tokio::process::Command::new(bin)
+        .no_window()
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

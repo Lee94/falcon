@@ -13,6 +13,7 @@ use falcon_proto::TailscaleDevices;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+use crate::no_window::NoWindow as _;
 use crate::sessions::local::local_base_env;
 
 pub use command::{StatusRun, assemble, candidate_paths, resolve_bin, status_args, suggested_username};
@@ -60,8 +61,7 @@ async fn run_status(program: &Path, env: &[(String, String)]) -> StatusRun {
     // 单独成组。超时只结束这个 CLI；本机的 tailscaled 是另一个服务，不能跟着被结束
     #[cfg(unix)]
     cmd.process_group(0);
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.no_window();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return StatusRun::NotFound,

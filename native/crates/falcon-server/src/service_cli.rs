@@ -21,6 +21,8 @@ use anyhow::{Context, bail};
 use crate::config::home_dir;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use crate::config::{ServerConfig, parse_args};
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+use crate::no_window::NoWindow as _;
 use crate::service::{ServiceCli, parse_service_cli};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use crate::service::{install_service_binary, service_bin_path};
@@ -92,7 +94,7 @@ fn install_program_arguments(server_args: &[String]) -> anyhow::Result<Vec<Strin
 /// 跑一条命令拿 stdout。失败时 can_fail 返回空串，否则报错（Node 版 execFileSync 抛出）
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn run(program: &str, args: &[&str], can_fail: bool) -> anyhow::Result<String> {
-    let out = Command::new(program).args(args).stdin(std::process::Stdio::null()).output();
+    let out = Command::new(program).no_window().args(args).stdin(std::process::Stdio::null()).output();
     match out {
         Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
         _ if can_fail => Ok(String::new()),
@@ -295,6 +297,7 @@ fn schtasks_exec(args: &[&str], can_fail: bool) -> anyhow::Result<String> {
 fn existing_task_args() -> Option<Vec<String>> {
     let tn = falcon_core::schtasks::schtasks_name();
     let out = Command::new("schtasks")
+        .no_window()
         .args(["/Query", "/TN", tn.as_str(), "/XML"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -320,6 +323,7 @@ fn current_user_principal() -> Option<String> {
 fn task_installed() -> bool {
     let tn = falcon_core::schtasks::schtasks_name();
     Command::new("schtasks")
+        .no_window()
         .args(["/Query", "/TN", tn.as_str()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -342,6 +346,7 @@ fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
     );
     for _ in 0..30 {
         let running = Command::new("powershell")
+            .no_window()
             .args(["-NoProfile", "-Command", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -356,8 +361,10 @@ fn wait_service_stopped(bin: &Path) -> anyhow::Result<()> {
     anyhow::bail!("服务进程未退出（{}），手动结束后重试", bin.display())
 }
 
-/// 计划任务在程序路径后带一个内部标记，让服务端最早隐藏自己的控制台。它不属于
-/// ServerConfig；升级时 existing_task_args 经 parse_service_args 过滤，不会把它重复带入
+/// 计划任务在程序路径后带一个内部标记，让服务端认出「我是服务实例」：日志落
+/// `<dataDir>/logs/falcon.log`（release 是 GUI 子系统，没有控制台可写），debug 构建还顺手
+/// 隐藏自己的控制台。它不属于 ServerConfig；升级时 existing_task_args 经 parse_service_args
+/// 过滤，不会把它重复带入
 #[cfg(any(windows, test))]
 fn windows_task_program_arguments(program_args: &[String]) -> Vec<String> {
     let mut args = program_args.to_vec();

@@ -16,6 +16,15 @@
 // 无害，而且不是我们能改的参数
 #![allow(linker_messages)]
 
+// Windows release：GUI 子系统。holder 本来就用 DETACHED_PROCESS 起（没有控制台），但 Job
+// 不允许脱离时走 WMI Win32_Process.Create 拉起——那条路在交互会话里给控制台程序新开一个
+// **可见**窗口，事后隐藏对 Windows Terminal 当默认终端的机器无效。GUI 子系统让系统压根不
+// 分配控制台，两条路都没有窗口。代价：没有控制台时 println!/eprintln! 的输出被 std 静默
+// 丢弃（不 panic），holder 的日志本来就写 <root>/sessiond/log/<sid>.log（log.rs），不受影响；
+// spawn / bridge / version 由服务端接成管道，照常收得到输出。人手跑 list / history 要重定向
+// 或管道才看得见（`… list --json > out.json`）；attach 要切控制台模式，用 debug 构建（仍是控制台程序）。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod attach;
 mod bridge;
 #[cfg(test)]

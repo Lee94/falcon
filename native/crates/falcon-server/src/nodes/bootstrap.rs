@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ServerConfig;
 use crate::db::Db;
+#[cfg(windows)]
+use crate::no_window::NoWindow as _;
 
 pub(super) const DESCRIPTOR: &str = "node.json";
 /// 部署前在二进制中检查此标识：旧入口会把未知子命令当普通服务启动，不能试运行探测。
@@ -711,6 +713,7 @@ pub(super) fn wmi_launch_with_args(exe: &Path, args: &[String], cwd: &Path) -> a
             .collect::<Vec<_>>(),
     );
     let mut helper = Command::new("powershell")
+        .no_window()
         .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

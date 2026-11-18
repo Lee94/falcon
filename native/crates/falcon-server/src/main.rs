@@ -3,6 +3,16 @@
 //! 已接上：配置、数据库、加密、鉴权、静态资源（S2），会话引擎与会话 / WS / askpass 路由（S4）。
 //! git、文件、中转等路由随 S5–S6 逐步接上（docs/design/rust-unification.md）。
 
+// Windows release：GUI 子系统，计划任务（InteractiveToken）起服务端时系统压根不给它分配控制台。
+// 控制台窗口是系统在跑到 main 之前就建好的，事后 ShowWindow(SW_HIDE) 只在传统 conhost 下有效：
+// Windows Terminal 当默认终端时 GetConsoleWindow 拿到的不是那个可见窗口，隐藏是空操作。
+// 代价与对策：① 每个控制台子进程都要 CREATE_NO_WINDOW（no_window.rs），否则它们各自弹一个窗口；
+// ② 没有控制台时 stderr 句柄无效，输出被 std 静默丢弃，服务日志改写 <dataDir>/logs/falcon.log
+// （logging.rs）；③ 手动跑 release 二进制的 CLI 时 shell 不再等它退出、输出也看不见，要重定向
+// 或管道（`… service status > out.txt`）；管道调用不受影响。
+// debug 构建仍是控制台程序：`cargo run -p falcon-server` 照旧在终端里看日志。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -15,19 +25,22 @@ use falcon_server::engine::{self, EngineDeps};
 
 fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // 计划任务启动时带的内部标记：取走它（不属于 ServerConfig），并记下「这是服务实例」——
+    // 它的日志要落文件。debug 构建仍是控制台程序，顺手把那个控制台隐藏掉
     #[cfg(windows)]
-    let argv = {
+    let (argv, service_run) = {
         let mut argv = argv;
-        if argv.first().is_some_and(|arg| arg == falcon_core::schtasks::SERVICE_RUN_ARG) {
+        let service_run = argv.first().is_some_and(|arg| arg == falcon_core::schtasks::SERVICE_RUN_ARG);
+        if service_run {
             hide_service_console();
             argv.remove(0);
         }
-        argv
+        (argv, service_run)
     };
     // 先于一切子命令：service / node / update-helper 也可能要往宿主机释放或推送守护进程
     #[cfg(feature = "embed-sessiond")]
     falcon_server::sessiond::bin::register_embedded(embedded_sessiond);
-    init_logging();
+    falcon_server::logging::init();
     // `falcon service <install|…>`：注册/管理系统服务（launchd / systemd 守护），不启动服务器
     if argv.first().map(String::as_str) == Some("service") {
         std::process::exit(falcon_server::service_cli::run_service_cli(&argv[1..]));
@@ -51,6 +64,12 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut config = parse_args(&argv, |k| std::env::var(k).ok())?;
+    // 服务实例、或任何拿不到 stderr 的处境（双击 release 二进制）：日志落文件，位置与 macOS
+    // launchd 的 StandardOutPath 一致。macOS / Linux 不用管：launchd / journald 自己收 stderr
+    #[cfg(windows)]
+    if service_run || !falcon_server::logging::stderr_usable() {
+        falcon_server::logging::redirect_to_file(&config.data_dir);
+    }
     let _node_process_lock = falcon_server::nodes::bootstrap::lock_node_process(&config.data_dir)?;
     falcon_server::server_update::startup_gate(&mut config)?;
     let loopback = is_loopback(&config.host);
@@ -148,8 +167,10 @@ fn embedded_sessiond(target: falcon_server::sessiond::command::SessiondTarget) -
     }
 }
 
-/// Windows 计划任务是 InteractiveToken：直接启动控制台程序会留下一个黑色终端窗口。
+/// debug 构建的兜底：它仍是控制台程序，计划任务起它时会有一个控制台窗口，隐藏掉。
 /// 只隐藏、不 FreeConsole：后代控制台进程继续继承这个不可见的控制台，不会各自再开窗口。
+/// release 是 GUI 子系统，根本没有控制台，GetConsoleWindow 返回 NULL，这里是空操作；
+/// 默认终端是 Windows Terminal 时隐藏也不生效——那条路靠子系统解决，不靠这里
 #[cfg(windows)]
 fn hide_service_console() {
     use windows_sys::Win32::System::Console::GetConsoleWindow;
@@ -160,26 +181,4 @@ fn hide_service_console() {
             ShowWindow(window, SW_HIDE);
         }
     }
-}
-
-/// 日志写 stderr。`FALCON_LOG=debug` 打开调试日志（与原生客户端同一个开关）
-fn init_logging() {
-    struct Logger(log::LevelFilter);
-    impl log::Log for Logger {
-        fn enabled(&self, m: &log::Metadata) -> bool {
-            m.level() <= self.0
-        }
-        fn log(&self, r: &log::Record) {
-            if self.enabled(r.metadata()) {
-                eprintln!("[{} {}] {}", r.level(), r.target(), r.args());
-            }
-        }
-        fn flush(&self) {}
-    }
-    let level = if std::env::var("FALCON_LOG").is_ok_and(|v| v == "debug") {
-        log::LevelFilter::Debug
-    } else {
-        log::LevelFilter::Info
-    };
-    let _ = log::set_boxed_logger(Box::new(Logger(level))).map(|()| log::set_max_level(level));
 }

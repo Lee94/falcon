@@ -142,6 +142,7 @@ fn launch(layout: &Layout, sid: &str) -> Result<Launched> {
 #[cfg(windows)]
 fn wmi_launch(exe: &std::path::Path, layout: &Layout, sid: &str) -> Result<u32> {
     use base64::Engine as _;
+    use std::os::windows::process::CommandExt as _;
     let q = |s: &str| format!("'{}'", s.replace('\'', "''"));
     // CreateProcess 的命令行：路径里不会有双引号（Windows 不允许），整体加双引号即可
     let cmdline = format!("\"{}\" hold --root \"{}\" --id {sid}", exe.display(), layout.root.display());
@@ -155,10 +156,13 @@ fn wmi_launch(exe: &std::path::Path, layout: &Layout, sid: &str) -> Result<u32> 
     );
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
-        .output()
-        .context("起不来 powershell")?;
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded]);
+    // CREATE_NO_WINDOW：本进程没有控制台（DETACHED_PROCESS / GUI 子系统），powershell 是
+    // 控制台程序，不带这个标志系统会给它新开一个可见窗口。output() 已经把 stdout/stderr
+    // 接成管道，这里只压窗口
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.output().context("起不来 powershell")?;
     if !out.status.success() {
         bail!("WMI 拉起 holder 失败：{}", String::from_utf8_lossy(&out.stderr).trim());
     }

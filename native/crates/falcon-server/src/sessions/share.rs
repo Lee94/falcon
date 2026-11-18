@@ -48,13 +48,14 @@ use super::relay::{LinkForOf, RelayLink, bind_local, or_empty, spawn_tunnel_list
 use super::relay_spec::{ShareSlotRow, displaced_by, share_slot};
 use super::share_spec::validate_share_input;
 use super::ssh::SshLink;
-use crate::cloudflared::bin::{CloudflaredBinError, ensure_cloudflared, hide_window};
+use crate::cloudflared::bin::{CloudflaredBinError, ensure_cloudflared};
 use crate::cloudflared::command::{
     TunnelArgs, extract_metrics_addr, extract_quick_tunnel_url, http_host_header, last_log_lines, origin_url,
     parse_quick_tunnel_metrics, tunnel_args,
 };
 use crate::db::{Db, HostShareRow};
 use crate::exec::{LocalBoxFuture, Utf8Decoder};
+use crate::no_window::NoWindow as _;
 
 pub use super::relay::{LinkFor, RelayError, WantReconnect};
 
@@ -758,7 +759,7 @@ impl Proc {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        hide_window(&mut cmd);
+        cmd.no_window();
         let mut child = cmd.spawn().map_err(|e| spawn_error(bin, &e))?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

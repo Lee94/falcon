@@ -389,10 +389,11 @@ fn upgrade_vt(&self, _binary: &str) {}
 - **ConPTY**：holder 用 portable-pty 的 ConPTY；resize 走 `ResizePseudoConsole`。shell 退出后 ConPTY 不关就不会 EOF，holder 靠 500 ms 的宽限收尾（2.4）。
 - **脱离调用方**（守护进程的 `spawn.rs`）：`CreateProcess` 带 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB`；Job 不允许脱离时返回拒绝访问，改用 PowerShell 的 `Invoke-CimMethod Win32_Process Create`（WMI 提供者进程不在调用方的 Job 里，Zellij 时代实测能熬过 SSH 断开）。WMI 拉起的进程没有我们的句柄，就绪判定靠轮询 meta 与命名管道。两条都失败时 spawn 报错，服务端把会话退成非持久（本机且后端在 Job 里时原因是 `windows-job-object`）。
 - **命名管道**：同步句柄上的 I/O 会被系统串行化（一条线程阻塞在 ReadFile 上，另一条的 WriteFile 也得等），所以一律重叠 I/O、每次操作自带事件；从外面断开连接用 `CancelIoEx` + `DisconnectNamedPipe`。服务端本机连接时对 `ERROR_PIPE_BUSY` 重试。
+- **不弹终端窗口**：release 构建是 GUI 子系统（`main.rs` 的 `windows_subsystem`），系统压根不分配控制台。holder 走 `DETACHED_PROCESS` 本来就没有控制台，但上面那条 WMI 路在交互会话里给控制台程序新开的是**可见**窗口，事后 `ShowWindow(SW_HIDE)` 对 Windows Terminal 当默认终端的机器无效。代价：没有控制台时 `println!` / `eprintln!` 的输出被 std 静默丢弃（**不 panic**）——holder 的日志本来就写 `<root>/sessiond/log/<sid>.log`（`log.rs`），不受影响；`spawn` / `bridge` / `version` 由服务端接成管道，照常收得到输出；人手跑 `list` / `history` 要重定向或管道才看得见（`… list --json > out.json`）。本机起的子进程（WMI 的 powershell、VT 进程）都带 `CREATE_NO_WINDOW`。
 - **SSH**：bridge 经 .NET Process 继承句柄（10.4）；`spawn` 在 sshd 的 Job 里跑，靠上面的 breakaway / WMI 脱离。
 - **首次真实断线验证**：建一个后台会话（`spawn`，跑 `Start-Sleep 600`）→ 断开 SSH → 重连 → `list` 看它还活着没 → `kill`。结果存进 `session_hosts.verified_durable`，只对当前版本有效。验证不过就是非持久（原因 `verify-failed`，详情写明）。
 - **前台命令**：进程树启发（9）。**OSC 7501**：收不到（8）。**推送**：base64 行协议（10.5）。
-- **attach**：控制台切到 VT 输入 / 输出、UTF-8 代码页，尺寸从 `GetConsoleScreenBufferInfo` 取。
+- **attach**：控制台切到 VT 输入 / 输出、UTF-8 代码页，尺寸从 `GetConsoleScreenBufferInfo` 取。release 是 GUI 子系统、没有控制台可切，人手 attach 用 debug 构建（仍是控制台程序）。
 
 ---
 

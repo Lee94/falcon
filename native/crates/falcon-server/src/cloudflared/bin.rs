@@ -31,6 +31,7 @@ use futures::future::Shared;
 
 use super::command::{CLOUDFLARED_VERSION, CloudflaredAssetKind, cloudflared_asset, download_url, parse_cloudflared_version};
 use crate::exec::{LocalBoxFuture, local_exec};
+use crate::no_window::NoWindow as _;
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -260,7 +261,7 @@ fn http_status_of(stderr: &str) -> Option<&str> {
 /// 跑一条命令收输出，超时就杀（kill_on_drop）。起不来（没装）是 Err
 async fn run(mut cmd: tokio::process::Command, limit: Duration) -> Result<std::process::Output, String> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    hide_window(&mut cmd);
+    cmd.no_window();
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(Ok(out)) => Ok(out),
@@ -277,14 +278,6 @@ fn failure_detail(out: &std::process::Output) -> String {
         (None, Some(code)) => format!("退出码 {code}"),
         (None, None) => "被信号终止".into(),
     }
-}
-
-/// windowsHide：别闪出一个黑色控制台窗口
-pub(crate) fn hide_window(cmd: &mut tokio::process::Command) {
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    #[cfg(not(windows))]
-    let _ = cmd;
 }
 
 /// `<bin> --version` 报的版本；跑不起来 / 8s 没回 / 认不出都是 None

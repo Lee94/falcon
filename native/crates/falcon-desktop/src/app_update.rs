@@ -81,12 +81,22 @@ fn user_agent() -> String {
     format!("falcon-native/{}", env!("CARGO_PKG_VERSION"))
 }
 
-fn curl() -> &'static str {
-    if cfg!(windows) { "curl" } else { "/usr/bin/curl" }
+/// curl 是控制台程序，而客户端是 GUI 子系统（没有控制台可继承）：不带 CREATE_NO_WINDOW
+/// 起它，Windows 会替它新开一个可见窗口——检查更新时闪一个黑框
+fn curl_command() -> Command {
+    let cmd = Command::new(if cfg!(windows) { "curl" } else { "/usr/bin/curl" });
+    #[cfg(windows)]
+    let cmd = {
+        use std::os::windows::process::CommandExt as _;
+        let mut cmd = cmd;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    };
+    cmd
 }
 
 fn http_get(url: &str) -> Result<String, UpdateFailure> {
-    let out = Command::new(curl())
+    let out = curl_command()
         .args([
             "-sS",
             "-L",
@@ -130,7 +140,7 @@ fn download(url: &str, dest: &Path) -> Result<(), UpdateFailure> {
         std::fs::create_dir_all(parent).map_err(|err| UpdateFailure::Install(err.to_string()))?;
     }
     let part = part_path(dest);
-    let out = Command::new(curl())
+    let out = curl_command()
         .args([
             "-fL",
             "--proto",

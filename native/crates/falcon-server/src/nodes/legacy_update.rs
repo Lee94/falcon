@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail, ensure};
 
 use super::bootstrap::{self, Descriptor, LegacyServer};
+#[cfg(windows)]
+use crate::no_window::NoWindow as _;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
@@ -350,7 +352,7 @@ fn terminate(pid: u32) -> anyhow::Result<()> {
         return Ok(());
     }
     ensure!(
-        Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status()?.success(),
+        Command::new("taskkill").no_window().args(["/PID", &pid.to_string(), "/T", "/F"]).status()?.success(),
         "终止旧服务进程失败"
     );
     Ok(())
@@ -411,7 +413,7 @@ fn managed_process(server: &LegacyServer) -> anyhow::Result<bool> {
 #[cfg(windows)]
 fn managed_process(server: &LegacyServer) -> anyhow::Result<bool> {
     let name = falcon_core::schtasks::schtasks_name();
-    let output = match Command::new("schtasks").args(["/Query", "/TN", name.as_str(), "/XML"]).stdin(Stdio::null()).output() {
+    let output = match Command::new("schtasks").no_window().args(["/Query", "/TN", name.as_str(), "/XML"]).stdin(Stdio::null()).output() {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error).context("无法检查 Falcon 的计划任务"),

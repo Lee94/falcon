@@ -70,7 +70,7 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["c
 libc = "0.2.190"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 # 把 4 个目标的会话守护进程（falcon-sessiond，ADR 0020）编进二进制（发布构建用）。构建时用

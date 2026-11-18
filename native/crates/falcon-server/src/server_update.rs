@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::api::AppState;
 use crate::config::{ServerConfig, local_connect_host};
 use crate::db::Db;
+use crate::no_window::NoWindow as _;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEADLINE: Duration = Duration::from_secs(90);
@@ -406,7 +407,8 @@ async fn verify_candidate(plan: &Plan, version: &str) -> Result<()> {
     let isolated = plan.work().join("probe");
     // 老版本不认识子命令时可能启动服务器；显式临时目录、回环地址和随机端口使它无法碰真实服务。
     let mut cmd = tokio::process::Command::new(plan.candidate());
-    cmd.args(["update-helper", "--probe", "--host", "127.0.0.1", "--port", "0", "--data-dir"])
+    cmd.no_window()
+        .args(["update-helper", "--probe", "--host", "127.0.0.1", "--port", "0", "--data-dir"])
         .arg(&isolated).env_remove("FALCON_SESSION_ID").kill_on_drop(true).stdin(Stdio::null());
     let output = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await.context("候选程序不支持升级维护协议")??;
     ensure!(output.status.success(), "候选程序自检失败");
@@ -653,7 +655,7 @@ fn stop_pid(pid: u32) -> Result<()> {
     #[cfg(unix)]
     unsafe { ensure!(libc::kill(pid as i32, libc::SIGTERM) == 0, "终止候选进程失败"); }
     #[cfg(windows)]
-    ensure!(Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status()?.success(), "终止候选进程失败");
+    ensure!(Command::new("taskkill").no_window().args(["/PID", &pid.to_string(), "/T", "/F"]).status()?.success(), "终止候选进程失败");
     wait_dead(pid)
 }
 

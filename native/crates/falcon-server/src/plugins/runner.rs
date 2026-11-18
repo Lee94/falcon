@@ -14,6 +14,8 @@ use falcon_proto::{PLUGIN_API, PluginEvent, PluginRequest};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::no_window::NoWindow as _;
+
 /// stdout 的上限：一份面板文档有几十 KB 已经很大了
 pub const MAX_STDOUT: usize = 1024 * 1024;
 /// 失败时附上的 stderr 尾巴
@@ -119,9 +121,8 @@ pub async fn run(spec: Spawn) -> Result<RunOutput, String> {
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    // windowsHide：别闪出一个黑色控制台窗口
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    // 别闪出一个黑色控制台窗口（服务端是 GUI 子系统，没有控制台可继承）
+    cmd.no_window();
     let mut child = cmd.spawn().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("找不到要跑的程序 {}", spec.program.display()),
         std::io::ErrorKind::PermissionDenied => format!("{} 没有执行权限（chmod +x？）", spec.program.display()),
