@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -21,6 +23,28 @@ android {
         }
     }
 
+    val keystoreFilePath = System.getenv("ANDROID_KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+    val releaseSigningConfig = if (keystoreFilePath != null) {
+        val keystoreFile = File(keystoreFilePath).let {
+            if (it.isAbsolute) it else rootProject.file(keystoreFilePath)
+        }
+        require(keystoreFile.isFile) { "ANDROID_KEYSTORE_FILE 不存在: $keystoreFilePath" }
+        val storePasswordValue = System.getenv("ANDROID_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: error("已设置 ANDROID_KEYSTORE_FILE，但缺少 ANDROID_KEYSTORE_PASSWORD")
+        val keyAliasValue = System.getenv("ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+            ?: error("已设置 ANDROID_KEYSTORE_FILE，但缺少 ANDROID_KEY_ALIAS")
+        val keyPasswordValue = System.getenv("ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: storePasswordValue
+        signingConfigs.create("release") {
+            storeFile = keystoreFile
+            storePassword = storePasswordValue
+            keyAlias = keyAliasValue
+            keyPassword = keyPasswordValue
+        }
+    } else {
+        signingConfigs.getByName("debug")
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -28,8 +52,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 使用 debug 签名以便直接安装 release APK 进行真机/模拟器测试
-            signingConfig = signingConfigs.getByName("debug")
+            // 已配置环境变量时使用固定发布证书（保证跨版本覆盖安装），否则回退 debug 签名
+            signingConfig = releaseSigningConfig
         }
     }
 

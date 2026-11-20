@@ -30,8 +30,8 @@
 # - 失败或被取消的 job 不写缓存（不开 cache-on-failure）：rust-cache 的键不含工作区成员版本号，键完全命中时
 #   也不再保存，一份编到一半就被取消的残缺缓存会一直顶着这个键，后面完整的永远写不进去（v0.4.6 实测）。
 #
-# 都没有正式证书签名：Windows 上 SmartScreen、macOS 上 Gatekeeper 会拦，Android 用 debug 签名
-# （手机上允许未知来源即可安装），与本机打的包一样。
+# Windows / macOS 没有正式证书签名（SmartScreen / Gatekeeper 会拦）；Android 在配置了
+# ANDROID_KEYSTORE_* Secrets 时用固定自签证书以支持跨版本覆盖安装，未配置时回退 debug 签名。
 name: package
 
 on:
@@ -603,7 +603,26 @@ jobs:
           workspaces: native
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Decode Android release keystore
+        id: keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            KEYSTORE_PATH="${RUNNER_TEMP}/falcon-release.keystore"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "$KEYSTORE_PATH"
+            chmod 600 "$KEYSTORE_PATH"
+            echo "path=$KEYSTORE_PATH" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::未配置 ANDROID_KEYSTORE_BASE64 Secret，本次 APK 将使用临时 debug 签名（安装新版本前需先卸载旧版）"
+          fi
+
       - name: Build APK
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: cargo run --release --manifest-path native/Cargo.toml --locked -p xtask --no-default-features -- android
 
       - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
