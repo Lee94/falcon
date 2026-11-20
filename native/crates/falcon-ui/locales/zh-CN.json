@@ -22,7 +22,6 @@
     "hostOffline": "离线",
     "hostConnecting": "连接中",
     "standalone": "无项目",
-    "standaloneHint": "不绑定具体项目目录的独立终端会话",
     "ageNow": "刚刚",
     "ageMin": "%{n}分钟",
     "ageHour": "%{n}小时",

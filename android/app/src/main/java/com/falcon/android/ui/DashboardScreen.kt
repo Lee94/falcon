@@ -1276,31 +1276,25 @@ private fun ProjectTreeList(
                 }
 
                 if (!isCollapsed) {
-                    // 无项目独立会话（仅在非空时展示，不占空位）
+                    // 独立会话直接显示在机器下面，不单独套「无项目」分组
                     if (server.standaloneSessions.isNotEmpty()) {
-                        val stdKey = "std:${server.key}"
-                        val stdCollapsed = collapsedProjects[stdKey] == true
-                        CompactProjectBlock(
-                            icon = Icons.Default.Terminal,
-                            title = "无项目独立会话",
-                            branchTag = null,
-                            pathHint = null,
-                            sessions = server.standaloneSessions,
-                            isWorktree = false,
-                            collapsed = stdCollapsed,
-                            onToggleCollapse = { collapsedProjects[stdKey] = !stdCollapsed },
-                            onNewSession = {
-                                server.standaloneId?.let { sid ->
-                                    onNewSession(sid, "${server.name} · 无项目")
-                                }
-                            },
-                            theme = theme,
-                            monoFont = monoFont,
-                            onClickSession = onClickSession,
-                            onRenameSession = onRenameSession,
-                            onTerminateSession = onTerminateSession,
-                            onDeleteDeadSession = onDeleteDeadSession
-                        )
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            for (s in server.standaloneSessions) {
+                                SessionItemRow(
+                                    session = s,
+                                    showProjectName = false,
+                                    theme = theme,
+                                    monoFont = monoFont,
+                                    onClick = { onClickSession(s) },
+                                    onRename = { onRenameSession(s) },
+                                    onTerminate = { onTerminateSession(s) },
+                                    onDeleteDead = { onDeleteDeadSession(s) }
+                                )
+                            }
+                        }
                     }
 
                     // 各项目文件夹及其附属 worktree

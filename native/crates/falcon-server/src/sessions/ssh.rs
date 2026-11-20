@@ -17,10 +17,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::FutureExt as _;
@@ -29,8 +33,9 @@ use russh::client::{self, Msg};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard, WaitForCancellationFutureOwned};
 
 use crate::crypto::SecretBox;
 use crate::db::{Db, ProjectRow};
@@ -136,9 +141,72 @@ impl client::Handler for Handler {
     }
 }
 
+/// russh 在 KEX 未完成时会忽略 Handle 侧关闭，握手超时若不主动打断底层流会泄漏后台任务与 TCP 句柄
+struct CancelStream<S> {
+    inner: S,
+    cancel: CancellationToken,
+    cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
+}
+
+impl<S> CancelStream<S> {
+    fn new(inner: S, cancel: CancellationToken) -> Self {
+        let cancelled = Box::pin(cancel.clone().cancelled_owned());
+        Self { inner, cancel, cancelled }
+    }
+}
+
+fn stream_cancelled() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "ssh stream cancelled")
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for CancelStream<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        if self.cancel.is_cancelled() {
+            return Poll::Ready(Err(stream_cancelled()));
+        }
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Pending if self.cancelled.as_mut().poll(cx).is_ready() => Poll::Ready(Err(stream_cancelled())),
+            other => other,
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for CancelStream<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        if self.cancel.is_cancelled() {
+            return Poll::Ready(Err(stream_cancelled()));
+        }
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Pending if self.cancelled.as_mut().poll(cx).is_ready() => Poll::Ready(Err(stream_cancelled())),
+            other => other,
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.cancel.is_cancelled() {
+            return Poll::Ready(Err(stream_cancelled()));
+        }
+        match Pin::new(&mut self.inner).poll_flush(cx) {
+            Poll::Pending if self.cancelled.as_mut().poll(cx).is_ready() => Poll::Ready(Err(stream_cancelled())),
+            other => other,
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.cancel.is_cancelled() {
+            return Poll::Ready(Ok(()));
+        }
+        match Pin::new(&mut self.inner).poll_shutdown(cx) {
+            Poll::Pending if self.cancelled.as_mut().poll(cx).is_ready() => Poll::Ready(Ok(())),
+            other => other,
+        }
+    }
+}
+
 /// 一条建好的连接
 pub struct Connection {
     handle: client::Handle<Handler>,
+    _cancel: DropGuard,
 }
 
 type Connecting = Shared<LocalBoxFuture<'static, Result<Rc<Connection>, LinkError>>>;
@@ -261,8 +329,13 @@ impl SshLink {
             ..Default::default()
         });
 
+        let cancel = CancellationToken::new();
+        let cancel_guard = cancel.clone().drop_guard();
         let attempt = async {
-            let mut handle = client::connect(config, (host.as_str(), port), handler).await?;
+            let socket = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+            let _ = socket.set_nodelay(true);
+            let stream = CancelStream::new(socket, cancel.clone());
+            let mut handle = client::connect_stream(config, stream, handler).await?;
             authenticate(&mut handle, &p, &username, secret.as_deref()).await?;
             anyhow::Ok(handle)
         };
@@ -278,7 +351,7 @@ impl SshLink {
             Err(_) => return Err(LinkError::new("Timed out while waiting for handshake")),
         };
 
-        let conn = Rc::new(Connection { handle });
+        let conn = Rc::new(Connection { handle, _cancel: cancel_guard });
         *self.conn.borrow_mut() = Some(conn.clone());
         // 断线：只认这一条还是当前连接的时候（dispose 之后的旧连接断开不算）
         let me = self.me.clone();
@@ -549,5 +622,61 @@ mod tests {
         let expected = hex::encode(Sha256::digest(&blob));
         let ours = host_key_fingerprint(&PublicKeyOrCertificate::PublicKey { key, hash_alg: None });
         assert_eq!(ours, expected);
+    }
+
+    struct DummyHandler;
+    impl client::Handler for DummyHandler {
+        type Error = russh::Error;
+        async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn kex_timeout_closes_tcp_socket() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(b"SSH-2.0-OpenSSH_9.9\r\n").await.unwrap();
+            let mut buf = [0u8; 4096];
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) => return true,
+                    Ok(_) => continue,
+                    Err(_) => return true,
+                }
+            }
+        });
+
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(KEEPALIVE_INTERVAL),
+            keepalive_max: KEEPALIVE_MAX,
+            inactivity_timeout: None,
+            nodelay: true,
+            ..Default::default()
+        });
+
+        {
+            let cancel = CancellationToken::new();
+            let _guard = cancel.clone().drop_guard();
+            let sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let stream = CancelStream::new(sock, cancel);
+            let res = tokio::time::timeout(
+                Duration::from_millis(150),
+                client::connect_stream(config, stream, DummyHandler),
+            )
+            .await;
+            assert!(res.is_err(), "blackholed KEX should time out");
+        }
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("peer should observe EOF after timeout drops cancel guard")
+            .unwrap();
+        assert!(closed);
     }
 }

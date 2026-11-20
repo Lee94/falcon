@@ -869,8 +869,7 @@ pub fn host_menu_items(ws: &Entity<Workspace>, host: &SshHost) -> Vec<MenuItemSp
     ]
 }
 
-/// 「无项目」行没画出来时，把在这台机器上开终端的入口接到机器菜单前面。
-/// 有那一行时不走这里，避免和行尾的 ＋ 各列一份。
+/// 把在这台机器上开独立终端的入口接到机器菜单前面。
 pub fn with_machine_terminal(
     ws: &Entity<Workspace>,
     standalone_id: &str,
