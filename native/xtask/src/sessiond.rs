@@ -28,6 +28,13 @@ const ZIG_TARBALLS: [(&str, &str); 3] = [
     ("aarch64-linux", "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"),
 ];
 
+/// ghostty 05dcf88 的 translate-c 依赖只给了 Codeberg 地址。该域名在 2026-11-18 返回
+/// 域名不存在（NXDOMAIN），而 Actions 的 Zig 缓存达到仓库配额后也会被淘汰，不能让构建
+/// 只能依赖缓存命中。这里保存 `zig fetch` 规范化后的 91 KiB 归档；文件名是 Zig 包哈希，
+/// `zig build` 取包时仍会校验内容。
+const TRANSLATE_C_ARCHIVE: &str = "translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr.tar.gz";
+const TRANSLATE_C_SHA256: &str = "f59dab4e74b399e9d00c44f5d667c5c0d212ddfaf72537b593d76514dd59ec8c";
+
 /// 守护进程的 4 个目标：(Rust 三元组, Zig 目标)。
 ///
 /// macOS 的 Zig 目标带上最低系统版本，与 Rust 的缺省部署目标 arm64 11.0 对齐。
@@ -104,6 +111,20 @@ fn cache() -> PathBuf {
 fn sha256_hex(path: &Path) -> Result<String> {
     let data = std::fs::read(path)?;
     Ok(hex::encode(sha2::Sha256::digest(&data)))
+}
+
+/// 把入库的 translate-c 包放进 Zig 0.16 的全局缓存。每次都复制可以同时修复上次失败下载
+/// 留下的残缺缓存；归档只有 91 KiB。复制前另查 SHA-256，避免把仓库里意外损坏的文件交给 Zig。
+fn seed_translate_c() -> Result<()> {
+    let source = native().join("sessiond/vendor").join(TRANSLATE_C_ARCHIVE);
+    let got = sha256_hex(&source).with_context(|| format!("读不到 {}", source.display()))?;
+    if got != TRANSLATE_C_SHA256 {
+        bail!("{} 校验不过：期望 {TRANSLATE_C_SHA256}，实际 {got}", source.display());
+    }
+    let dir = cache().join("zig-global").join("p");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::copy(&source, dir.join(TRANSLATE_C_ARCHIVE))?;
+    Ok(())
 }
 
 /// 宿主平台在 Zig 下载页上的名字
@@ -217,6 +238,7 @@ fn build_lib(zig: &Path, pin: &Pin, triple: &str, zig_target: &str, force: bool)
     if dest.is_file() && prefix.join("include/ghostty/vt.h").is_file() && !force {
         return Ok(prefix);
     }
+    seed_translate_c()?;
     let src = ensure_ghostty_src(pin)?;
     println!("== libghostty-vt：{triple}（zig -Dtarget={zig_target}）==");
     let env = zig_env(zig, &src);

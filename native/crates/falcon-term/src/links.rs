@@ -1,5 +1,5 @@
-//! 终端里的链接：OSC 8 超链接（cell 上的 hyperlink）、正文 URL 与宿主机文件路径。URL 正则照
-//! `@xterm/addon-web-links` 的默认正则（旧 React 版用的那个），认出的链接范围与那时一致。
+//! 终端里的链接：OSC 8 超链接（cell 上的 hyperlink）、正文 URL 与宿主机文件路径。正文 URL
+//! 以 `@xterm/addon-web-links` 的识别范围为底，另补成对括号、IPv6 方括号与中文标点边界。
 //!
 //! 正文 URL / 路径沿软折行（行尾格带 WRAPLINE）拼成逻辑行再认——长链接折到下一行是
 //! 常态（`git push` 给的 PR 地址、OAuth 登录地址），只认一行时点上半截开的是截断的地址、点下半截
@@ -14,28 +14,62 @@ use regex::Regex;
 
 use crate::core::Snapshot;
 
-/// addon-web-links 的 strictUrlRegex：`https?://` 开头，结尾不收常见的收尾标点与括号。
+/// 先取 URL 的宽松候选范围，再由 `trim_url` 去掉正文边界。正则不能只看最后一个字符：
+/// Wikipedia 等地址里有合法的成对括号，IPv6 主机也要求保留方括号。
 fn url_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(https?|HTTPS?)://[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~\[\]`()<>]"#,
+            r#"(?i:https?)://[^\s"'<>\\^`|，。；：！？、（）【】《》“”‘’]*"#,
         )
         .expect("url regex")
     })
 }
 
+/// 去掉 URL 后面的行文标点与不成对的收尾括号。Markdown 的 `](` 是链接文字与目标之间的硬边界，
+/// 不能把它留给括号平衡规则。
+fn trim_url(candidate: &str) -> &str {
+    let candidate = candidate.split("](").next().unwrap_or(candidate);
+    let mut parens = (candidate.matches('(').count(), candidate.matches(')').count());
+    let mut brackets = (candidate.matches('[').count(), candidate.matches(']').count());
+    let mut braces = (candidate.matches('{').count(), candidate.matches('}').count());
+    let mut end = candidate.len();
+    while let Some(last) = candidate[..end].chars().next_back() {
+        let unmatched_closer = match last {
+            ')' if parens.1 > parens.0 => { parens.1 -= 1; true }
+            ']' if brackets.1 > brackets.0 => { brackets.1 -= 1; true }
+            '}' if braces.1 > braces.0 => { braces.1 -= 1; true }
+            _ => false,
+        };
+        if !unmatched_closer && !matches!(last, ',' | '.' | ';' | ':' | '!' | '?' | '*') {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    &candidate[..end]
+}
+
 /// 一行文本里的全部 URL，返回 (起始列, 结束列（不含）, URL)。列按 char 计——调用方给的行文本
 /// 要一格一个 char（宽字符的占位格已跳过时，列号要调用方自己换算）。
 pub fn find_urls(line: &str) -> Vec<(usize, usize, String)> {
-    url_regex()
-        .find_iter(line)
-        .map(|m| {
-            let start = line[..m.start()].chars().count();
-            let len = m.as_str().chars().count();
-            (start, start + len, m.as_str().to_string())
-        })
-        .collect()
+    let mut found = Vec::new();
+    let mut offset = 0;
+    while offset < line.len() {
+        let Some(m) = url_regex().find(&line[offset..]) else { break };
+        let start = offset + m.start();
+        let url = trim_url(m.as_str());
+        let end = start + url.len();
+        // 候选被裁短时从裁断处继续找：`[https://a/label](https://a/target)` 的两个地址都能认出来。
+        // 即使只有 scheme，它也自带非零长度，下一轮仍会前进。
+        offset = end;
+        if url.len() == url.find("://").expect("URL scheme") + 3 {
+            continue;
+        }
+        let char_start = line[..start].chars().count();
+        let len = url.chars().count();
+        found.push((char_start, char_start + len, url.to_string()));
+    }
+    found
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +229,23 @@ mod tests {
     fn counts_columns_in_chars() {
         let found = find_urls("中文 https://a.b");
         assert_eq!(found[0].0, 3);
+    }
+
+    #[test]
+    fn url_boundaries_keep_balanced_delimiters_and_stop_at_prose() {
+        for (line, expected) in [
+            ("https://en.wikipedia.org/wiki/Rust_(programming_language)", "https://en.wikipedia.org/wiki/Rust_(programming_language)"),
+            ("(https://a.io/a_(b)).", "https://a.io/a_(b)"),
+            ("https://[::1]:8080/a", "https://[::1]:8080/a"),
+            ("见 https://a.io/中文。下一句", "https://a.io/中文"),
+            ("hTTpS://Example.COM/A", "hTTpS://Example.COM/A"),
+        ] {
+            let found = find_urls(line);
+            assert_eq!(found.len(), 1, "{line}");
+            assert_eq!(found[0].2, expected, "{line}");
+        }
+        let found = find_urls("[https://a.io/label](https://a.io/target)");
+        assert_eq!(found.iter().map(|m| m.2.as_str()).collect::<Vec<_>>(), ["https://a.io/label", "https://a.io/target"]);
     }
 
     #[test]
