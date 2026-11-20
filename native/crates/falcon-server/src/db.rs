@@ -438,8 +438,10 @@ impl Db {
             add_column(&conn, "sessions", "cols", "INTEGER")?;
             add_column(&conn, "sessions", "rows", "INTEGER")?;
             add_column(&conn, "sessions", "agent", "TEXT")?;
-            // NULL 沿用默认真实终端；显式模式代表用户授权过重启，之后只准续接固定启动 UUID。
-            add_column(&conn, "sessions", "agent_mode", "TEXT")?;
+            // 旧版 gui 的持久进程只接受结构化协议，不能作为交互终端接回。
+            if conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='agent_mode')", [], |r| r.get::<_, bool>(0))? {
+                conn.execute("UPDATE sessions SET state='dead', dead_reason='backend-restart' WHERE agent_mode='gui' AND state!='dead'", [])?;
+            }
             // v1 用 tmux，接不回来的会话原因是 tmux-gone；改用 Zellij 后统一为 session-gone
             conn.execute("UPDATE sessions SET dead_reason = 'session-gone' WHERE dead_reason = 'tmux-gone'", [])?;
         }
@@ -1570,16 +1572,6 @@ impl Db {
         self.exec("UPDATE sessions SET agent = ? WHERE id = ?", params![agent, id]);
     }
 
-    /// NULL/terminal 是官方终端，transcript 仅开启其只读图形镜像；gui 保留旧 stream 协议语义。
-    /// 不能把旧 gui 当镜像直接接回，也不能为了转换它而结束原进程。
-    pub fn session_agent_mode(&self, id: &str) -> Option<String> {
-        self.lock().query_row("SELECT agent_mode FROM sessions WHERE id = ?", [id], |r| r.get(0)).ok().flatten()
-    }
-
-    pub fn update_session_agent_mode(&self, id: &str, mode: &str) {
-        self.exec("UPDATE sessions SET agent_mode = ? WHERE id = ?", params![mode, id]);
-    }
-
     pub fn rename_session(&self, id: &str, name: &str) {
         self.exec("UPDATE sessions SET name = ? WHERE id = ?", [name, id]);
     }
@@ -2182,6 +2174,25 @@ mod tests {
         db.delete_relays_of_host("h1");
         assert_eq!(db.list_forwards().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["f2"]);
         assert_eq!(db.list_shares().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2"]);
+    }
+
+    #[test]
+    fn retires_legacy_gui_sessions_on_upgrade() {
+        let (dir, db) = tmp_db();
+        db.lock().execute("ALTER TABLE sessions ADD COLUMN agent_mode TEXT", []).unwrap();
+        for mode in ["gui", "transcript", "terminal"] {
+            db.insert_session(&SessionRow {
+                id: mode.into(), state: "active".into(), durable: 1, ..Default::default()
+            });
+            db.exec("UPDATE sessions SET agent_mode=?1 WHERE id=?1", [mode]);
+        }
+        drop(db);
+        let db = Db::open(dir.path()).unwrap();
+        db.recover_sessions_on_startup();
+        assert_eq!(db.get_session("gui").unwrap().state, "dead");
+        for mode in ["transcript", "terminal"] {
+            assert_eq!(db.get_session(mode).unwrap().state, "unverified");
+        }
     }
 
     #[test]

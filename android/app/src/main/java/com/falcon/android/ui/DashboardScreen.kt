@@ -76,7 +76,6 @@ import com.falcon.android.model.ProjectUi
 import com.falcon.android.model.ServerGroupUi
 import com.falcon.android.model.ServerProfile
 import com.falcon.android.model.SessionUi
-import com.falcon.android.net.AgentModeUnsupportedException
 import com.falcon.android.net.FalconApiClient
 import kotlinx.coroutines.launch
 
@@ -100,10 +99,9 @@ fun DashboardScreen(
     val theme = LocalFalconTheme.current
     val monoFont = LocalFalconMonoFont.current
     val scope = rememberCoroutineScope()
-    val guiUnsupported = t("agentView.createGuiUnsupported")
     val createFailed = t("session.createFailed")
     val onCreateFailure: (Throwable) -> Unit = { error ->
-        onToast(if (error is AgentModeUnsupportedException) guiUnsupported else "$createFailed：${error.message}")
+        onToast("$createFailed：${error.message}")
     }
 
     var currentTab by remember { mutableIntStateOf(0) } // 0 = 项目树, 1 = 全部会话

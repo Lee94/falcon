@@ -37,28 +37,6 @@ pub fn agent_bin(agent: SessionAgent) -> &'static str {
 /// 脚本从这两个环境变量知道要不要钉对话 id、是不是接着上次的对话（[`launch_env`]）
 pub const AGENT_SESSION_ENV: &str = "FALCON_AGENT_SESSION";
 pub const AGENT_RESUME_ENV: &str = "FALCON_AGENT_RESUME";
-/// 旧版已选定运行协议的会话严格续接，失败时不能另建一段同 UUID 的对话。
-pub const AGENT_RESUME_ONLY_ENV: &str = "FALCON_AGENT_RESUME_ONLY";
-/// 原生结构化双向流模式开关与流控哨兵。
-pub const AGENT_NATIVE_ENV: &str = "FALCON_AGENT_NATIVE";
-/// 同 PTY 转换由现有 shell 调用；CLI 退出后返回调用者，不能再嵌一层登录 shell。
-pub const AGENT_RETURN_ENV: &str = "FALCON_AGENT_RETURN";
-/// 实时启动脚本提供实际 CLI pid；前台进程组通常属于包装 shell，不能拿它当 CLI 结束。
-pub const AGENT_PROCESS_SENTINEL_PREFIX: &str = "__FALCON_AGENT_PROCESS__:";
-pub const AGENT_START_SENTINEL_PREFIX: &str = "__FALCON_AGENT_START__:";
-pub const AGENT_EXIT_SENTINEL: &str = "__FALCON_AGENT_EXIT__";
-/// 新启动脚本退出 CLI 后先清理协议输入，再等服务端确认，防止迟到 JSON 被回落 shell 执行。
-pub const AGENT_EXIT_ACK: &str = "__FALCON_AGENT_EXIT_ACK__";
-/// 显式 GUI 启动先等后端连好再起 CLI，确保 START/EXIT 都是实时协议，绝不从 VT 截图补读。
-pub const AGENT_CONNECT_SENTINEL: &str = "__FALCON_AGENT_CONNECT__";
-pub const AGENT_READY_SENTINEL: &str = "__FALCON_AGENT_READY__";
-/// 新建 GUI 的 READY 可能早于 holder 订阅；由创建方在连接完成后主动放行。
-pub const AGENT_CREATE_GUI_ENV: &str = "FALCON_AGENT_CREATE_GUI";
-
-/// 是否支持基于结构化双向流（`stream-json` / `app-server`）的原生画布视图。
-pub fn supports_native_stream(agent: SessionAgent) -> bool {
-    matches!(agent, SessionAgent::Claude | SessionAgent::Codex)
-}
 
 /// 这个 CLI 能不能由我们指定对话 id、事后按 id 接着聊。claude 与 grok 都有
 /// `--session-id <uuid>`（新对话用这个 id）和 `--resume <uuid>`；按 id 找不到对话时两个都是
@@ -154,13 +132,10 @@ fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
             format!(
                 "if [ -z \"${AGENT_SESSION_ENV}\" ]; then {bin}; \
                  elif [ -n \"${AGENT_RESUME_ENV}\" ]; then \
-                 {bin} --resume \"${AGENT_SESSION_ENV}\" || {{ \
-                   if [ -z \"${AGENT_RESUME_ONLY_ENV}\" ]; then {bin} --session-id \"${AGENT_SESSION_ENV}\"; \
-                   else printf '%s\\n' 'falcon: resume failed; the conversation was not recreated.' >&2; fi; \
-                 }}; \
+                 {bin} --resume \"${AGENT_SESSION_ENV}\" || {bin} --session-id \"${AGENT_SESSION_ENV}\"; \
                  else {bin} --session-id \"${AGENT_SESSION_ENV}\"; fi"
             ),
-            format!("unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV} {AGENT_RESUME_ONLY_ENV}; "),
+            format!("unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV}; "),
         )
     } else {
         (bin.to_string(), String::new())
@@ -245,148 +220,6 @@ pub fn write_remote_launcher_command(kind: HostKind, dir: &str, agent: SessionAg
 /// 远端脚本的绝对路径（写入成功后交给 --default-shell）
 pub fn remote_launcher_path(kind: HostKind, root: &str, agent: SessionAgent) -> String {
     join_path(kind, &[launcher_dir(kind, root), launcher_name(agent, kind)])
-}
-
-/// 原生结构化模式的环境变量（在 [`launch_env`] 基础上附带 [`AGENT_NATIVE_ENV`]）。
-pub fn native_launch_env(agent: Option<SessionAgent>, session_id: &str, resume: bool) -> Vec<(String, String)> {
-    let mut env = launch_env(agent, session_id, resume);
-    if agent.is_some_and(supports_native_stream) {
-        env.push((AGENT_NATIVE_ENV.to_string(), "1".to_string()));
-    }
-    env
-}
-
-/// 原生结构化模式启动脚本的文件名。与常规 TUI 脚本分文件存储，互不覆盖。
-pub fn native_launcher_name(agent: SessionAgent, kind: HostKind) -> String {
-    if kind == HostKind::Posix && supports_native_stream(agent) {
-        format!("falcon-{}-native.sh", agent.as_str())
-    } else {
-        launcher_name(agent, kind)
-    }
-}
-
-/// POSIX 原生结构化模式启动脚本（支持 `claude` `stream-json` 与 `codex` `app-server`）。
-///
-/// 通过 FIFO 将 PTY 输入转发给 CLI 的非 TTY 标准输入（规避 `claude -p` 对 `stdin.isTTY` 的拦截，
-/// 同时配合 `stty -echo -icanon -opost` 消除回显与 POSIX 1024 字节行长上限）。
-/// CLI 自行退出后先等服务端确认已停止发送 JSON，再恢复 `stty` 并回到登录 shell。
-/// 显式 GUI 创建/转换与已有结构化会话使用这份脚本；未指定运行模式的新建仍运行官方 CLI。
-fn posix_native_launcher_body(agent: SessionAgent, shell: &str) -> String {
-    if !supports_native_stream(agent) {
-        return posix_launcher_body(agent, shell);
-    }
-    let bin = agent_bin(agent);
-    let cli_invocation = match agent {
-        SessionAgent::Claude => format!(
-            "if [ -z \"${AGENT_SESSION_ENV}\" ]; then \
-               _falcon_run claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages; \
-             elif [ -n \"${AGENT_RESUME_ENV}\" ]; then \
-               _falcon_run claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --resume \"${AGENT_SESSION_ENV}\" \
-               || {{ if [ -z \"${AGENT_RESUME_ONLY_ENV}\" ]; then \
-                 _falcon_run claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --session-id \"${AGENT_SESSION_ENV}\"; \
-                 else printf '%s\\n' 'falcon: resume failed; the conversation was not recreated.' >&2; fi; }}; \
-             else \
-               _falcon_run claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --session-id \"${AGENT_SESSION_ENV}\"; \
-             fi"
-        ),
-        SessionAgent::Codex => "_falcon_run codex app-server".to_string(),
-        _ => unreachable!(),
-    };
-    let sh_body = format!(
-        "_stty=$(stty -g 2>/dev/null || true); \
-         stty -echo -icanon -opost 2>/dev/null || true; \
-         if [ -n \"${AGENT_RESUME_ONLY_ENV}\" ]; then \
-           if [ -z \"${AGENT_CREATE_GUI_ENV}\" ]; then printf '\\n{AGENT_READY_SENTINEL}\\n'; fi; \
-           IFS= read -r _connect; [ \"$_connect\" = '{AGENT_CONNECT_SENTINEL}' ] || exit 1; \
-         fi; \
-         _falcon_run() {{ \
-           _fifo=\"${{TMPDIR:-/tmp}}/falcon-agent-$$.fifo\"; \
-           rm -f \"$_fifo\" && mkfifo \"$_fifo\"; \
-           exec 3<&0; \
-           \"$@\" < \"$_fifo\" 2>&1 & \
-           _cli_pid=$!; \
-           cat <&3 > \"$_fifo\" & \
-           _cat_pid=$!; \
-           exec 3<&-; \
-           printf '\\n{AGENT_PROCESS_SENTINEL_PREFIX}%s\\n' \"$_cli_pid\"; \
-           printf '\\n{AGENT_START_SENTINEL_PREFIX}{bin}:guarded\\n'; \
-           wait \"$_cli_pid\" 2>/dev/null; \
-           _rc=$?; \
-           kill \"$_cat_pid\" 2>/dev/null || true; \
-           wait \"$_cat_pid\" 2>/dev/null || true; \
-           rm -f \"$_fifo\"; \
-           return $_rc; \
-         }}; \
-         {cli_invocation}; \
-         printf '\\n{AGENT_EXIT_SENTINEL}\\n'; \
-         while IFS= read -r _line; do [ \"$_line\" = '{AGENT_EXIT_ACK}' ] && break; done; \
-         [ -n \"$_stty\" ] && stty \"$_stty\" 2>/dev/null || stty sane 2>/dev/null || true; \
-         printf '\\033[2J\\033[3J\\033[H'"
-    );
-    let inner = format!(
-        "{askpass}if [ -n \"${AGENT_NATIVE_ENV}\" ] && command -v {bin} >/dev/null 2>&1; then \
-           sh -c {}; \
-         elif command -v {bin} >/dev/null 2>&1; then \
-           {bin}; \
-         else \
-           printf '%s\\n' {} >&2; \
-         fi; \
-         if [ -n \"${AGENT_RETURN_ENV}\" ]; then exit; fi; \
-         unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV} {AGENT_RESUME_ONLY_ENV} {AGENT_NATIVE_ENV} {AGENT_CREATE_GUI_ENV}; \
-         exec {} -i -l",
-        quote_posix(&sh_body),
-        quote_posix(&format!("falcon: PATH 里找不到 {bin}，先装好它再开这种会话。")),
-        quote_posix(shell),
-        askpass = restore_askpass_path(),
-    );
-    [
-        "#!/bin/sh".to_string(),
-        format!("# falcon: 以 {bin} (native stream) 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。"),
-        format!("exec {} -i -l -c {}", quote_posix(shell), quote_posix(&inner)),
-        String::new(),
-    ]
-    .join("\n")
-}
-
-pub fn native_launcher_body(agent: SessionAgent, kind: HostKind, shell: &str) -> String {
-    if kind == HostKind::Posix && supports_native_stream(agent) {
-        posix_native_launcher_body(agent, shell)
-    } else {
-        launcher_body(agent, kind, shell)
-    }
-}
-
-pub fn write_local_native_launcher(data_dir: &Path, agent: SessionAgent, shell: &str) -> std::io::Result<PathBuf> {
-    if cfg!(windows) || !supports_native_stream(agent) {
-        return write_local_launcher(data_dir, agent, shell);
-    }
-    let dir = local_launcher_dir(data_dir);
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join(native_launcher_name(agent, HostKind::Posix));
-    std::fs::write(&file, native_launcher_body(agent, HostKind::Posix, shell))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(file)
-}
-
-pub fn write_remote_native_launcher_command(kind: HostKind, dir: &str, agent: SessionAgent, shell: &str) -> String {
-    if kind == HostKind::Windows || !supports_native_stream(agent) {
-        return write_remote_launcher_command(kind, dir, agent, shell);
-    }
-    let name = native_launcher_name(agent, kind);
-    let body = native_launcher_body(agent, kind, shell);
-    format!(
-        "d={}; mkdir -p \"$d\" && printf %s {} > \"$d\"/{name} && chmod 755 \"$d\"/{name}",
-        quote_posix(dir),
-        quote_posix(&body),
-    )
-}
-
-pub fn remote_native_launcher_path(kind: HostKind, root: &str, agent: SessionAgent) -> String {
-    join_path(kind, &[launcher_dir(kind, root), native_launcher_name(agent, kind)])
 }
 
 #[cfg(test)]
@@ -666,11 +499,6 @@ mod tests {
         assert_eq!(
             run(&[(AGENT_SESSION_ENV, ID), (AGENT_RESUME_ENV, "1")]),
             format!("claude --resume {ID}\nclaude --session-id {ID}\n{back}")
-        );
-        // 模式切换后的真实终端也只准续接：任何 resume 错误都不能静默创建新对话。
-        assert_eq!(
-            run(&[(AGENT_SESSION_ENV, ID), (AGENT_RESUME_ENV, "1"), (AGENT_RESUME_ONLY_ENV, "1")]),
-            format!("claude --resume {ID}\n{back}")
         );
     }
 }

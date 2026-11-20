@@ -1,7 +1,9 @@
 package com.falcon.android.ui
 
 import android.content.Context
-import android.graphics.Typeface
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -46,7 +48,11 @@ data class FalconThemeTokens(
     val sidebar: Color,
     val sidebarForeground: Color,
     val terminalBackground: Color,
-    val terminalForeground: Color
+    val terminalForeground: Color,
+    val terminalCursor: Color = terminalForeground,
+    val terminalCursorText: Color = terminalBackground,
+    val terminalSelection: Color = tint,
+    val terminalPalette: List<Color>? = null
 )
 
 fun parseHexColor(hex: String, fallback: Color = Color(0xFF0A0A0A)): Color {
@@ -127,7 +133,13 @@ fun loadFalconThemeTokens(themeName: String): FalconThemeTokens {
         sidebar = parseHexColor(ui.getString("sidebar")),
         sidebarForeground = parseHexColor(ui.getString("sidebarForeground")),
         terminalBackground = parseHexColor(term.getString("background")),
-        terminalForeground = parseHexColor(term.getString("foreground"))
+        terminalForeground = parseHexColor(term.getString("foreground")),
+        terminalCursor = parseHexColor(term.getString("cursor")),
+        terminalCursorText = parseHexColor(term.getString("cursorAccent")),
+        terminalSelection = parseHexColor(term.getString("selectionBackground")),
+        terminalPalette = term.optJSONArray("palette")?.let { colors ->
+            List(colors.length()) { parseHexColor(colors.getString(it)) }
+        }
     )
 }
 
@@ -141,8 +153,13 @@ val LocalFalconMonoFont = staticCompositionLocalOf<FontFamily> {
 
 private fun loadBerkeleyMonoFontFamily(context: Context): FontFamily {
     return try {
-        val tf = Typeface.createFromAsset(context.assets, "fonts/TX-02-Regular.ttf")
-        FontFamily(tf)
+        val assets = context.assets
+        FontFamily(
+            Font("fonts/TX-02-Regular.ttf", assets),
+            Font("fonts/TX-02-Bold.ttf", assets, weight = FontWeight.Bold),
+            Font("fonts/TX-02-Oblique.ttf", assets, style = FontStyle.Italic),
+            Font("fonts/TX-02-BoldOblique.ttf", assets, weight = FontWeight.Bold, style = FontStyle.Italic),
+        )
     } catch (_: Exception) {
         FontFamily.Monospace
     }

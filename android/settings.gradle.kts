@@ -22,3 +22,18 @@ dependencyResolutionManagement {
 
 rootProject.name = "FalconAndroid"
 include(":app")
+
+listOf(
+    "vtfx-compose",
+    "vtfx-core",
+    "vtfx-font",
+    "vtfx-font-gate",
+    "vtfx-font-gate-android",
+    "vtfx-gate",
+    "vtfx-gate-android",
+    "vtfx-input",
+    "vtfx-session",
+).forEach { module ->
+    include(":$module")
+    project(":$module").projectDir = file("vtfx/$module")
+}

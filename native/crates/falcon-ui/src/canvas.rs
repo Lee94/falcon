@@ -1129,67 +1129,6 @@ impl Canvas {
         if pinned {
             header = header.child(icon(IconName::Pin).size(zpx(12.)).text_color(ui.muted_foreground));
         }
-        if let PaneItem::Terminal { id, .. } = &item
-            && let Some(term_ent) = ws.terminals.get(id).cloned()
-            && (ws.session(id).is_some_and(|s| s.agent == Some(falcon_proto::SessionAgent::Claude))
-                || term_ent.read(cx).has_agent_view())
-        {
-            // 只有可交互的结构化通道才显示「图形」。官方终端与旧只读镜像需显式转换，
-            // 已有 GUI 则只切换本地排版，不影响执行中的任务。
-            let term = term_ent.read(cx);
-            let switch_mode = ws.session(id).is_some_and(|s| s.agent == Some(falcon_proto::SessionAgent::Claude))
-                && (!term.has_agent_view() || term.is_terminal_backed_agent());
-            let terminal_style = !term.has_agent_view() || term.is_terminal_backed_agent() || term.is_agent_terminal_style();
-            let switching = term_ent.read(cx).is_switching_agent_mode();
-            let switch_label = t!(match (switch_mode, terminal_style) {
-                (true, true) => "agentView.switchToGui",
-                (true, false) => "agentView.switchToTerminal",
-                (false, true) => "agentView.toggleNative",
-                (false, false) => "agentView.toggleTerminal",
-            }).to_string();
-            let toggle_id = SharedString::from(format!("pane-agent-toggle-{key}"));
-            header = header.child(
-                div()
-                    .id(toggle_id.clone())
-                    .relative()
-                    .flex_none()
-                    .px(zpx(7.))
-                    .py(zpx(2.))
-                    .rounded(radius::SM)
-                    .bg(ui.app.opacity(0.6))
-                    .border_1()
-                    .border_color(ui.border)
-                    .text_size(zpx(10.5))
-                    .text_color(ui.muted_foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(ui.foreground))
-                    .active(|s| s.opacity(0.75))
-                    .child(crate::ui::hover_fade(
-                        SharedString::from(format!("pane-agent-toggle-hover-{key}")),
-                        ui.muted,
-                        radius::SM,
-                    ))
-                    .tooltip(move |window, cx| Tooltip::new(switch_label.clone()).build(window, cx))
-                    .on_mouse_down(MouseButton::Left, isolate)
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        term_ent.update(cx, |t, cx| {
-                            if switch_mode {
-                                t.request_agent_mode_switch(window, cx);
-                            } else {
-                                t.toggle_agent_style(window, cx);
-                            }
-                        });
-                    })
-                    .when(switching, |d| d.opacity(0.6))
-                    .child(t!(match (switching, terminal_style, switch_mode) {
-                        (true, _, _) => "agentView.switching",
-                        (false, true, true) => "agentView.modeTerminal",
-                        (false, true, false) => "agentView.styleTerminal",
-                        (false, false, _) => "agentView.styleGui",
-                    }).to_string()),
-            );
-        }
         if zoomable {
             header = header.child(crate::ui::icon_button(
                 SharedString::from(format!("pane-zoom-{key}")),

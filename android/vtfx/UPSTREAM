@@ -1,0 +1,6 @@
+https://github.com/google/vtfx
+7c71324392fb49c4acebd3fc400fbd9c1dc5ed00
+Production sources only. Falcon supplies the Gradle build files.
+Falcon additions in TerminalSession.kt: answerHostQueries for durable sessions,
+followGrid to keep the remote PTY size independent of the local viewport.
+TerminalFont.Bundled accepts the font family packaged in Falcon assets.

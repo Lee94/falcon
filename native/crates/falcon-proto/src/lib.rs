@@ -54,7 +54,6 @@
 
 mod wire;
 
-pub mod agent_view;
 pub mod files;
 pub mod forward;
 pub mod git;
@@ -77,7 +76,6 @@ pub mod ws;
 /// 会话守护进程的部署（推二进制）与宿主机的持久能力
 pub mod install;
 
-pub use agent_view::*;
 pub use files::*;
 pub use forward::*;
 pub use git::*;

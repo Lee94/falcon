@@ -11,10 +11,10 @@ android {
 
     defaultConfig {
         applicationId = "com.falcon.android"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
-        versionCode = 412
-        versionName = "0.4.12"
+        versionCode = 413
+        versionName = "0.4.13"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -59,6 +59,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":vtfx-compose"))
     val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     implementation("androidx.core:core-ktx:1.19.1")

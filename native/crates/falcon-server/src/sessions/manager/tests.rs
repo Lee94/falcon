@@ -113,7 +113,7 @@ fn has_state(state: &'static str) -> impl Fn(&[Got]) -> bool {
 }
 
 async fn new_session(h: &Harness) -> Session {
-    h.mgr.create_session(&h.project, String::new(), OscColorHint::default(), None, false).await.unwrap()
+    h.mgr.create_session(&h.project, String::new(), OscColorHint::default(), None).await.unwrap()
 }
 
 /// 真 PTY 验证默认开场契约：CLI 直接连接终端，原始输出与按键不经过结构化驱动器。
@@ -151,29 +151,19 @@ done
             h.mgr.local.set_base_env(env);
             let project = ProjectRow { shell: Some(shell.to_string_lossy().into_owned()), ..h.project.clone() };
             h.db.insert_project(&project);
-            let session = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(agent), false).await.unwrap();
-            let entry = h.mgr.entry(&session.id).unwrap();
-            assert!(entry.s.borrow().agent_driver.is_none());
-            let original_backend = entry.backend().unwrap();
+            let session = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(agent)).await.unwrap();
             let mut first = Peer::new();
             h.mgr.add_viewer(&session.id, first.viewer.clone());
             first.wait("CLI 自带终端输出", has_output("CLI_READY")).await;
             assert!(first.output().contains("\x1b[32mCLI_READY\x1b[0m"));
             h.mgr.input(&session.id, first.id(), "hello\tworld\n");
             first.wait("按键直接交给 CLI", has_output("CLI_INPUT:<hello\tworld>")).await;
-            // 多端附着与旧客户端的切换消息不能重新启动 CLI 或启用结构化显示层。
-            h.mgr.agent_switch_terminal(&session.id);
-            assert!(Rc::ptr_eq(&original_backend, &entry.backend().unwrap()));
             h.mgr.remove_viewer(&session.id, first.id());
             let mut second = Peer::new();
             h.mgr.add_viewer(&session.id, second.viewer.clone());
             second.drain();
             assert!(second.output().contains("CLI_READY"));
-            let snapshots = second.msgs("agent_snapshot");
-            assert_eq!(snapshots.len(), 1, "支持 GUI 的 CLI 每次附着都提供权威模式快照");
-            assert_eq!(snapshots[0]["state"]["agent"], agent.as_str());
-            assert_eq!(snapshots[0]["state"]["active"], false);
-            assert_eq!(snapshots[0]["state"]["terminalBacked"], true);
+            assert!(second.msgs("agent_snapshot").is_empty());
             h.mgr.input(&session.id, second.id(), "another turn\n");
             second.wait("重新附着后仍可输入", has_output("CLI_INPUT:<another turn>")).await;
             let expected_args = if agent == SessionAgent::Claude { format!("--session-id {}\n", session.id) } else { "\n".into() };
@@ -184,76 +174,6 @@ done
             second.wait("回落 shell 仍可使用", has_output("shell-2-ready")).await;
             assert_eq!(h.db.get_session(&session.id).unwrap().state, "active");
             h.mgr.terminate(&session.id, false).await;
-        }
-    });
-}
-
-/// 新建 GUI 必须直接完成结构化交互，而不是先开官方 CLI 再尝试转换。
-/// 替身同样是 chmod 过的 `/bin/sh` 脚本，只在 unix 上编译运行
-#[cfg(unix)]
-#[test]
-fn agents_can_start_directly_in_gui() {
-    run(async {
-        use std::os::unix::fs::PermissionsExt;
-        for (agent, durable) in [
-            (SessionAgent::Claude, false), (SessionAgent::Codex, false),
-            (SessionAgent::Claude, true), (SessionAgent::Codex, true),
-        ] {
-            if durable && !sessiond_available() { continue; }
-            let h = if durable { durable_harness("create-gui").await } else { harness() };
-            let bin = h.dir.path().join("fake-bin");
-            std::fs::create_dir(&bin).unwrap();
-            let executable = |path: &std::path::Path, body: &str| {
-                std::fs::write(path, body).unwrap();
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            };
-            executable(&bin.join(agent.as_str()), r#"#!/bin/sh
-[ "$FALCON_AGENT_NATIVE" = 1 ] && [ ! -t 0 ] || exit 91
-printf '%s\n' "$*" >> "$HOME/args"
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$HOME/protocol"
-  request=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
-  case "$line" in
-    *'"subtype":"initialize"'*) printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"models":[]}}}\n' "$request" ;;
-    *'"subtype":"get_settings"'*) printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"applied":{"model":"test-model"}}}}\n' "$request" ;;
-    *'"type":"user"'*) printf '%s\n' '{"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"GUI reply"}]}}' '{"type":"result","is_error":false}' ;;
-    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
-    *'"method":"thread/start"'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"test-thread"},"model":"test-model"}}' ;;
-    *'"method":"turn/start"'*) printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"reply","text":"GUI reply"}}}' '{"method":"turn/completed","params":{"turn":{"id":"turn","status":"completed"}}}' ;;
-  esac
-done
-"#);
-            let shell = h.dir.path().join("login-sh");
-            executable(&shell, "#!/bin/sh\nif [ \"$3\" = -c ]; then exec /bin/sh -c \"$4\"; fi\nexec /bin/sh\n");
-            let mut env = test_env();
-            env[0].1 = format!("{}:{}", bin.display(), env[0].1);
-            env[1].1 = h.dir.path().to_string_lossy().into_owned();
-            h.mgr.local.set_base_env(env);
-            let project = ProjectRow { shell: Some(shell.to_string_lossy().into_owned()), ..h.project.clone() };
-            h.db.insert_project(&project);
-            let session = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(agent), true).await.unwrap();
-            let mut peer = Peer::new();
-            h.mgr.add_viewer(&session.id, peer.viewer.clone());
-            h.mgr.resize(&session.id, peer.id(), 100, 30);
-            h.mgr.agent_prompt(&session.id, "test direct GUI");
-            peer.wait("GUI 直接回复", |seen| seen.iter().any(|g| matches!(g, Got::Msg(m)
-                if m["type"] == "agent_entry" && m["entry"]["text"] == "GUI reply"))).await;
-            let snapshots = peer.msgs("agent_snapshot");
-            assert_eq!(snapshots[0]["state"]["agent"], agent.as_str());
-            assert_eq!(snapshots[0]["state"]["active"], true);
-            assert_ne!(snapshots[0]["state"]["terminalBacked"], true);
-            assert!(!peer.output().contains("\"type\":"), "结构化 JSON 不得泄漏到终端");
-            assert_eq!(h.db.session_agent_mode(&session.id).as_deref(), Some("gui"));
-            let args = std::fs::read_to_string(h.dir.path().join("args")).unwrap();
-            assert_eq!(args.lines().count(), 1, "不得先启动 TUI 再重启");
-            if agent == SessionAgent::Claude {
-                assert!(args.contains("--input-format stream-json"));
-                assert!(args.contains(&format!("--session-id {}", session.id)));
-                assert!(!args.contains("--resume"));
-            } else { assert_eq!(args, "app-server\n"); }
-            assert!(std::fs::read_to_string(h.dir.path().join("protocol")).unwrap().contains("test direct GUI"));
-            h.mgr.terminate(&session.id, true).await;
-            if durable { kill_all(&h).await; }
         }
     });
 }
@@ -485,8 +405,6 @@ fn host_rows_become_fake_projects() {
 
 // 图形 / 终端互转的用例大多跑在 mode_harness 上：chmod 过的 `/bin/sh` 假 shell、libc::kill 查进程，
 // 只在 unix 上编译运行；其余用录制后端的用例与平台无关，在 Linux / macOS 的测试里照样覆盖
-#[cfg(unix)]
-mod agent_mode;
 
 // ---------------------------------------------------------------- 守护进程会话（ADR 0020）
 
@@ -685,7 +603,7 @@ fn killed_holder_is_revived_and_resumes_the_agent_conversation() {
         let project = ProjectRow { id: "p2".into(), shell: Some(shell.to_string_lossy().into_owned()), ..h.project.clone() };
         h.db.insert_project(&project);
 
-        let s = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(SessionAgent::Claude), false).await.unwrap();
+        let s = h.mgr.create_session(&project, String::new(), OscColorHint::default(), Some(SessionAgent::Claude)).await.unwrap();
         assert!(s.durable, "{s:?}");
         let mut a = Peer::new();
         h.mgr.add_viewer(&s.id, a.viewer.clone());
@@ -704,10 +622,7 @@ fn killed_holder_is_revived_and_resumes_the_agent_conversation() {
         a.wait("待接回", has_state("unverified")).await;
         a.wait("重开后 active", has_state("active")).await;
         a.wait("新的提示符", has_output("$")).await;
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap(),
-            format!("--session-id {id}\n--resume {id}\n", id = s.id),
-        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), format!("--session-id {id}\n--resume {id}\n", id = s.id));
         let row = h.db.get_session(&s.id).unwrap();
         assert_eq!((row.state.as_str(), row.agent.as_deref()), ("active", Some("claude")));
         let new = holder(crate::sessions::local::local_list_sessions(&d).await.unwrap()).unwrap();
@@ -971,7 +886,7 @@ fn ssh_durable_session_round_trip() {
         assert!(prep.durable, "{:?} {:?}", prep.reason, prep.detail);
         eprintln!("部署阶段：{:?}，二进制：{}", stages.borrow(), prep.deployed.as_ref().unwrap().bin);
 
-        let s = mgr.create_session(&project, String::new(), OscColorHint::default(), None, false).await.unwrap();
+        let s = mgr.create_session(&project, String::new(), OscColorHint::default(), None).await.unwrap();
         assert!(s.durable);
         let mut a = Peer::new();
         mgr.add_viewer(&s.id, a.viewer.clone());
@@ -1005,7 +920,7 @@ fn ssh_durable_session_round_trip() {
         assert_eq!(db.get_session(&s.id).unwrap().dead_reason.as_deref(), Some("exited"));
 
         // 再建一个，终止它
-        let s2 = mgr.create_session(&project, String::new(), OscColorHint::default(), None, false).await.unwrap();
+        let s2 = mgr.create_session(&project, String::new(), OscColorHint::default(), None).await.unwrap();
         mgr.terminate(&s2.id, true).await;
         let link = mgr.get_link(&project);
         let list = link.list_sessions(prep.deployed.as_ref().unwrap()).await.unwrap();
@@ -1059,7 +974,7 @@ fn ssh_durable_two_projects_on_one_host_resume_together() {
         let marks = [("echo a$((1+1))lpha\n", "a2lpha"), ("echo b$((2+2))eta\n", "b4eta")];
         let mut ids = Vec::new();
         for (p, (cmd, mark)) in projects.iter().zip(marks) {
-            let s = mgr.create_session(p, String::new(), OscColorHint::default(), None, false).await.unwrap();
+            let s = mgr.create_session(p, String::new(), OscColorHint::default(), None).await.unwrap();
             assert!(s.durable, "{s:?}");
             let mut a = Peer::new();
             mgr.add_viewer(&s.id, a.viewer.clone());
@@ -1142,7 +1057,7 @@ fn ssh_noexec_reports_verify_failed() {
         assert_eq!(prep.reason, Some(NonDurableReason::VerifyFailed), "{:?}", prep.detail);
         eprintln!("详情：{:?}", prep.detail);
         // 建会话照样能建：非持久，原因写明
-        let s = mgr.create_session(&project, String::new(), OscColorHint::default(), None, false).await.unwrap();
+        let s = mgr.create_session(&project, String::new(), OscColorHint::default(), None).await.unwrap();
         assert_eq!((s.durable, s.non_durable_reason), (false, Some(NonDurableReason::VerifyFailed)));
         mgr.terminate(&s.id, false).await;
     });

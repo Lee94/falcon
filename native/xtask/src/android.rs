@@ -31,13 +31,13 @@ const ALL_TARGETS: &[AndroidTarget] = &[
         "aarch64-linux-android",
         "arm64-v8a",
         "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER",
-        "aarch64-linux-android26-clang",
+        "aarch64-linux-android29-clang",
     ),
     (
         "x86_64-linux-android",
         "x86_64",
         "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER",
-        "x86_64-linux-android26-clang",
+        "x86_64-linux-android29-clang",
     ),
 ];
 

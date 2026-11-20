@@ -1,0 +1,85 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.vtfx.font.gate.android
+
+import android.graphics.Typeface
+import android.graphics.fonts.Font
+import android.graphics.fonts.FontFamily
+import android.graphics.fonts.FontStyle
+import com.google.vtfx.core.InternalVtfxApi
+import com.google.vtfx.font.gate.SanitizedFamily
+import com.google.vtfx.font.gate.SanitizedFont
+import java.io.IOException
+
+// This is the only file of vtfx that makes typefaces from font data (config/boundaries.toml), and
+// its module is under security review (config/protected-paths.toml). It takes only SanitizedFont,
+// whose bytes passed the verifier of vtfx-font-gate, so the platform's native font code reads no
+// font file from outside the app as it is (docs/decisions/0086).
+
+/**
+ * Makes the typefaces of sanitized fonts for vtfx-compose. An object rather than a top-level
+ * function, so that its annotation keeps it out of the dump of the public API.
+ *
+ * Thread-safe.
+ *
+ * @suppress
+ */
+@InternalVtfxApi
+public object SanitizedTypefaces {
+    /**
+     * The regular typeface of [families]: each family in turn, then the system's monospace font.
+     * The other styles are derived from it with `Typeface.create`, which reads no font data.
+     */
+    public fun regular(families: List<SanitizedFamily>): Typeface {
+        require(families.isNotEmpty()) { "no families" }
+        val platformFamilies = families.map(::platformFamily)
+        val builder = Typeface.CustomFallbackBuilder(platformFamilies.first())
+        for (family in platformFamilies.drop(1)) builder.addCustomFallback(family)
+        return builder
+            .setSystemFallback("monospace")
+            .setStyle(FontStyle(FontStyle.FONT_WEIGHT_NORMAL, FontStyle.FONT_SLANT_UPRIGHT))
+            .build()
+    }
+}
+
+private fun platformFamily(family: SanitizedFamily): FontFamily {
+    val builder =
+        FontFamily.Builder(
+            platformFont(family.regular, FontStyle.FONT_WEIGHT_NORMAL, FontStyle.FONT_SLANT_UPRIGHT)
+        )
+    family.bold?.let {
+        builder.addFont(platformFont(it, FontStyle.FONT_WEIGHT_BOLD, FontStyle.FONT_SLANT_UPRIGHT))
+    }
+    family.italic?.let {
+        builder.addFont(platformFont(it, FontStyle.FONT_WEIGHT_NORMAL, FontStyle.FONT_SLANT_ITALIC))
+    }
+    family.boldItalic?.let {
+        builder.addFont(platformFont(it, FontStyle.FONT_WEIGHT_BOLD, FontStyle.FONT_SLANT_ITALIC))
+    }
+    return builder.build()
+}
+
+/**
+ * The platform's font of [font], which reads the font's bytes in place. A font that it rejects is a
+ * bug in the canonical form, not a bad file, so it fails loudly rather than falling back.
+ */
+private fun platformFont(font: SanitizedFont, weight: Int, slant: Int): Font =
+    try {
+        Font.Builder(font.toByteBuffer()).setWeight(weight).setSlant(slant).build()
+    } catch (e: IOException) {
+        throw IllegalStateException("the platform rejected a sanitized font: $font", e)
+    }

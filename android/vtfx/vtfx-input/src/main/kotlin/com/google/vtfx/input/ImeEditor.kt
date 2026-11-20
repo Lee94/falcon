@@ -1,0 +1,701 @@
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.vtfx.input
+
+import com.google.vtfx.core.InternalVtfxApi
+import com.google.vtfx.core.KeyStroke
+import com.google.vtfx.core.TerminalKey
+
+/**
+ * The IME editing model of docs/design/ime-contract.md, independent of Android.
+ *
+ * The edit buffer that the IME sees is the input history followed by the composing text, with the
+ * cursor always at the end (invariant 1). The input history is what was committed and sent since
+ * the last reset. Edits to it are turned into DEL and new text by comparing it with what was sent,
+ * when the outermost batch edit ends (section 4.1).
+ *
+ * The methods mirror `InputConnection`, with the same return values, so that the Android adapter
+ * only delegates. Offsets are in UTF-16 code units, as in `InputConnection`.
+ *
+ * Not thread-safe: calls must not overlap. They may come from any thread; the Android adapter makes
+ * them on the UI thread, where the IME calls arrive (section 8). [Listener] is called during the
+ * calls, on the same thread.
+ *
+ * @suppress
+ */
+@InternalVtfxApi
+public class ImeEditor(
+    private val listener: Listener,
+    /** The longest input history, in code points, before a reset (invariant 5). */
+    private val maxHistoryLength: Int = DEFAULT_MAX_HISTORY_LENGTH,
+) {
+    /** Receives the effects of edits. */
+    @InternalVtfxApi
+    public interface Listener {
+        /** Sends [input] to the host. */
+        public fun send(input: HostInput)
+
+        /**
+         * Tells the IME that the edit buffer was reset and that it must start its input again, by
+         * calling `InputMethodManager.restartInput` on Android: it may still have composing text
+         * that the editor committed, or it must read what it reads only when its input starts
+         * (section 5.2).
+         */
+        public fun restartInput()
+
+        /**
+         * Tells the IME that the edit buffer was reset, by reporting the new selection with
+         * `InputMethodManager.updateSelection` on Android, after which the IME reads the edit
+         * buffer again. Unlike a restart, this keeps the IME's connection open, so an edit that the
+         * IME makes meanwhile is not lost (section 5.2, docs/decisions/0102).
+         */
+        public fun updateSelection()
+    }
+
+    init {
+        require(maxHistoryLength > 0) { "maxHistoryLength must be positive" }
+    }
+
+    private var history = ""
+
+    /**
+     * The composing text and its colored ranges, which the terminal displays at its cursor (section
+     * 7, docs/decisions/0103). Held as one value so that every change of the composing text other
+     * than [setComposingText] drops the ranges.
+     */
+    public var composing: ComposingText = ComposingText.Empty
+        private set
+
+    /** The input history as last sent to the host. */
+    private var sentHistory = ""
+
+    /**
+     * DELs for text before the start of the input history, which the history cannot express. At
+     * most [maxHistoryLength]: the IME cannot see that text, so a larger count is not a user's
+     * intent, and an untrusted IME must not make the host receive an unbounded number of DELs.
+     */
+    private var pendingDeletes = 0
+    private var batchDepth = 0
+    private var resetPending = false
+
+    /**
+     * Whether a paste was sent in the batch edit in progress, after which a line feed alone that
+     * the IME commits is pasted too, rather than Enter (section 4.2).
+     */
+    private var pastedInBatch = false
+
+    /**
+     * Whether the next reset restarts the IME's input instead of telling it the new selection: the
+     * editor committed composing text that the IME may still have, which only a restart makes it
+     * drop, or the IME must read what it reads only when its input starts (section 5.2).
+     */
+    private var restartNeeded = false
+
+    /**
+     * The start of a selection that ends at the cursor, or -1 if the selection is collapsed. Only
+     * set while there is no composing text (docs/decisions/0082).
+     */
+    private var selectionFrom = -1
+
+    /** The edit buffer: the input history followed by the composing text. */
+    public val text: String
+        get() = history + composing.text
+
+    /** The cursor, which is always at the end of [text]. It is also the end of the selection. */
+    public val cursor: Int
+        get() = history.length + composing.text.length
+
+    /**
+     * The start of the selection, which always ends at [cursor]. Equal to [cursor] unless the IME
+     * selected text with [setSelection].
+     */
+    public val selectionStart: Int
+        get() = if (selectionFrom >= 0) selectionFrom else cursor
+
+    /** The selected text, or null if the selection is collapsed. */
+    public val selectedText: String?
+        get() = if (selectionFrom >= 0) history.substring(selectionFrom) else null
+
+    /** The start of the composing text in [text], or -1 if there is none. */
+    public val composingStart: Int
+        get() = if (composing.text.isEmpty()) -1 else history.length
+
+    /** The end of the composing text in [text], or -1 if there is none. */
+    public val composingEnd: Int
+        get() = if (composing.text.isEmpty()) -1 else cursor
+
+    /**
+     * Whether a batch edit is in progress. The IME is told about selection changes only outside
+     * batch edits (section 7).
+     */
+    public val isBatchEditInProgress: Boolean
+        get() = batchDepth > 0
+
+    // --- Edits (section 6.1) ---
+
+    /**
+     * Replaces the composing text, or the selection if there is one, with [text] and [colors]
+     * (docs/decisions/0103). At most [MAX_COLORED_RANGES] ranges are kept, in order, clipped to
+     * [text] with empty ones dropped; if removing dropped control characters changed the length of
+     * [text], all ranges are dropped.
+     */
+    public fun setComposingText(
+        text: CharSequence,
+        colors: List<ColoredRange> = emptyList(),
+    ) {
+        removeSelectedText()
+        val sanitized = withoutDroppedControls(text)
+        composing = ComposingText(sanitized, boundColors(text.length, sanitized, colors))
+        endOperation()
+    }
+
+    /**
+     * Replaces the composing text, or the selection if there is one, with [text] and commits it.
+     * Text with a line break, other than a line feed alone, is pasted, and so is a line feed alone
+     * after a paste in the same batch edit (section 4.2).
+     */
+    public fun commitText(text: CharSequence) {
+        removeSelectedText()
+        composing = ComposingText.Empty
+        commit(withoutDroppedControls(text))
+        endOperation()
+    }
+
+    /**
+     * Adds [committed], text that the IME commits, to the input history. Text with a line break,
+     * other than a line feed alone, is pasted instead, and so is a line feed alone after a paste in
+     * the same batch edit; a line feed alone is otherwise Enter (section 4.2). Every edit that
+     * commits text goes through here, also the composing text, which may have line breaks too:
+     * otherwise its lines would run one by one. So no line break reaches the input history, and the
+     * gate refuses text with one, rather than let its lines run.
+     */
+    private fun commit(committed: String) {
+        when {
+            isPaste(committed) || (committed == "\n" && pastedInBatch) ->
+                sendPaste(HostInput.Paste(committed))
+            committed == "\n" -> sendEnter()
+            else -> history += committed
+        }
+    }
+
+    /**
+     * Commits the composing text and sends [text] after it, as typed: each line break is sent as
+     * Enter. For text from the app, which is not a paste. Both are sent at once, even during a
+     * batch edit, since the app's call is not part of the IME's edit, and the input history is then
+     * reset, so that the IME never sees the app's text, which may be a secret such as a saved
+     * password (docs/decisions/0082).
+     */
+    public fun typeText(text: String) {
+        takeComposingText()
+        flush()
+        val typed = withoutDroppedControls(text)
+        var start = 0
+        var i = 0
+        while (i < typed.length) {
+            val c = typed[i]
+            if (c != '\n' && c != '\r') {
+                i++
+                continue
+            }
+            history += typed.substring(start, i)
+            flush()
+            listener.send(HostInput.Key(KeyStroke.Special(TerminalKey.Enter)))
+            clearHistory()
+            i += if (c == '\r' && i + 1 < typed.length && typed[i + 1] == '\n') 2 else 1
+            start = i
+        }
+        history += typed.substring(start)
+        // The IME never sees the app's text: the reset empties the history before it is told.
+        requestReset()
+    }
+
+    /** Commits the composing text, which is sent to the host. */
+    public fun finishComposingText() {
+        commitComposingText()
+        endOperation()
+    }
+
+    /**
+     * Makes [start, end) the composing text. Only a region that ends at the cursor is accepted,
+     * since text after the composing text would break invariant 1. An empty region finishes the
+     * composition, as in `BaseInputConnection`.
+     */
+    public fun setComposingRegion(start: Int, end: Int): Boolean {
+        selectionFrom = -1
+        val buffer = text
+        val from = minOf(start, end)
+        val to = maxOf(start, end)
+        if (from < 0 || to > buffer.length || splitsSurrogatePair(buffer, from)) return false
+        if (from == to) {
+            finishComposingText()
+            return true
+        }
+        if (to != buffer.length) return false
+        if (from < history.length) {
+            history = buffer.substring(0, from)
+            composing = ComposingText(buffer.substring(from))
+        } else {
+            // The composing text before the region is committed.
+            val committed = composing.text.substring(0, from - history.length)
+            composing = ComposingText(composing.text.substring(from - history.length))
+            commit(committed)
+        }
+        endOperation()
+        return true
+    }
+
+    /**
+     * Deletes [beforeLength] code units before the composing text, or before the cursor if there is
+     * none, as `BaseInputConnection` does: the composing text stays. What reaches before the input
+     * history is sent as DEL, since it is what the user meant by pressing BS. [afterLength] is
+     * ignored: there is no text after the cursor.
+     */
+    public fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+        if (beforeLength < 0 || afterLength < 0) return false
+        selectionFrom = -1
+        var cut = maxOf(0, history.length - beforeLength)
+        if (splitsSurrogatePair(history, cut)) cut--
+        deleteHistoryFrom(cut, outside = maxOf(0, beforeLength - history.length))
+        return true
+    }
+
+    /** Same as [deleteSurroundingText], in code points. */
+    public fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+        if (beforeLength < 0 || afterLength < 0) return false
+        selectionFrom = -1
+        val available = history.codePointCount(0, history.length)
+        val count = minOf(beforeLength, available)
+        val cut = history.offsetByCodePoints(history.length, -count)
+        deleteHistoryFrom(cut, outside = beforeLength - count)
+        return true
+    }
+
+    /**
+     * Deletes the input history from [cut], keeping the composing text after it, and [outside] code
+     * units before the input history as DELs.
+     */
+    private fun deleteHistoryFrom(cut: Int, outside: Int) {
+        // A character whose halves are split between the input history and the composing text is
+        // one character in the edit buffer that the IME sees, so it goes whole.
+        if (
+            cut < history.length &&
+                history.last().isHighSurrogate() &&
+                composing.text.firstOrNull()?.isLowSurrogate() == true
+        ) {
+            composing = ComposingText(composing.text.substring(1))
+        }
+        history = history.substring(0, cut)
+        // Added as Long, since both may be near Int.MAX_VALUE.
+        pendingDeletes = minOf(pendingDeletes.toLong() + outside, maxHistoryLength.toLong()).toInt()
+        endOperation()
+    }
+
+    /**
+     * Replaces [start, end) with [text]. A range outside the edit buffer is rejected, since its
+     * content is unknown. The composing text is finished first. The text that the replacement
+     * commits is from the start of the range, or of the composing text if the range starts after
+     * it, to the end of the edit buffer; if it has a line break, other than a line feed alone, it
+     * is pasted, after deleting from that start (section 4.2).
+     */
+    public fun replaceText(start: Int, end: Int, text: CharSequence): Boolean {
+        val buffer = this.text
+        val from = minOf(start, end)
+        val to = maxOf(start, end)
+        if (from < 0 || to > buffer.length) return false
+        if (splitsSurrogatePair(buffer, from) || splitsSurrogatePair(buffer, to)) return false
+        selectionFrom = -1
+        val kept = minOf(from, history.length)
+        history = buffer.substring(0, kept)
+        composing = ComposingText.Empty
+        commit(buffer.substring(kept, from) + withoutDroppedControls(text) + buffer.substring(to))
+        endOperation()
+        return true
+    }
+
+    /**
+     * Accepts a selection that ends at the cursor, without composing text, so that invariant 1
+     * holds. The next [commitText] or [setComposingText] replaces the selected text; any other edit
+     * collapses the selection first. Gboard selects a trailing space this way to replace it with ".
+     * " (docs/decisions/0082).
+     */
+    public fun setSelection(start: Int, end: Int): Boolean {
+        val from = minOf(start, end)
+        val to = maxOf(start, end)
+        if (to != cursor || from < 0) return false
+        if (from == to) {
+            selectionFrom = -1
+            return true
+        }
+        if (composing.text.isNotEmpty() || splitsSurrogatePair(history, from)) return false
+        selectionFrom = from
+        return true
+    }
+
+    private fun removeSelectedText() {
+        if (selectionFrom < 0) return
+        history = history.substring(0, selectionFrom)
+        selectionFrom = -1
+    }
+
+    /** Starts a batch edit: nothing is sent to the host until the outermost batch ends. */
+    public fun beginBatchEdit() {
+        batchDepth++
+    }
+
+    /**
+     * Returns whether a batch edit is still in progress, as `InputConnection.endBatchEdit` does.
+     */
+    public fun endBatchEdit(): Boolean {
+        if (batchDepth == 0) return false
+        batchDepth--
+        if (batchDepth == 0) {
+            pastedInBatch = false
+            flush()
+        }
+        return batchDepth > 0
+    }
+
+    /** Finishes the composing text, which would otherwise be lost (section 6.4). */
+    public fun closeConnection() {
+        commitComposingText()
+        // The next connection starts the IME's input anew.
+        restartNeeded = false
+        batchDepth = 0
+        pastedInBatch = false
+        flush()
+    }
+
+    // --- Queries (section 6.2) ---
+
+    /**
+     * Returns up to [length] code units before the selection; nothing if [length] is not positive.
+     */
+    public fun textBeforeCursor(length: Int): String {
+        // InputConnection's callers check the length, but the IME is not trusted.
+        if (length <= 0) return ""
+        val buffer = text.substring(0, selectionStart)
+        var start = maxOf(0, buffer.length - length)
+        if (splitsSurrogatePair(buffer, start)) start++
+        return buffer.substring(start)
+    }
+
+    // --- Keys (section 6.3) ---
+
+    /**
+     * Handles a key pressed down, from the IME or a hardware keyboard. Key releases must not be
+     * passed: they have no effect.
+     *
+     * A character without Ctrl, Alt, or Meta is committed like [commitText]. Other keys first
+     * finish and send the composing text, so that the host receives them in the order typed. A
+     * character key of HT or a line break is the Tab or Enter key, which the key encoding has with
+     * every modifier: it drops a control character with modifiers, which would send nothing.
+     */
+    public fun onKeyDown(stroke: KeyStroke) {
+        val key = asKey(stroke)
+        val hadComposingText = composing.text.isNotEmpty()
+        takeComposingText()
+        if (
+            key is KeyStroke.Character &&
+                !key.modifiers.ctrl &&
+                !key.modifiers.alt &&
+                !key.modifiers.meta
+        ) {
+            history += withoutDroppedControls(String(Character.toChars(key.codePoint)))
+            endOperation()
+            // The IME still has the composing text, which the host received (docs/decisions/0082).
+            if (hadComposingText) requestReset()
+            return
+        }
+        flush()
+        listener.send(HostInput.Key(key))
+        if (key == KeyStroke.Special(TerminalKey.Backspace)) {
+            // The DEL deletes the last character of the history at the host too.
+            if (history.isNotEmpty()) {
+                history = history.substring(0, history.offsetByCodePoints(history.length, -1))
+                sentHistory = history
+            }
+            if (hadComposingText) requestReset()
+        } else {
+            requestReset()
+        }
+    }
+
+    /**
+     * Pastes [text] (section 6.4). The composing text is finished, and it and the edits not sent
+     * yet are sent before the paste, even during a batch edit, so that the host receives them in
+     * the order made. Resets afterwards, since the host's line no longer matches the history.
+     */
+    public fun paste(text: String) {
+        takeComposingText()
+        sendPaste(HostInput.Paste(text))
+    }
+
+    /**
+     * Pastes the text on the clipboard, which only the gate reads, as [paste] pastes text
+     * (docs/decisions/0091).
+     */
+    public fun pasteClipboard() {
+        takeComposingText()
+        sendPaste(HostInput.ClipboardPaste)
+    }
+
+    /**
+     * Sends the edits not sent yet, even during a batch edit, and then [paste], and resets (section
+     * 6.4).
+     */
+    private fun sendPaste(paste: HostInput) {
+        flush()
+        listener.send(paste)
+        if (batchDepth > 0) pastedInBatch = true
+        requestReset()
+    }
+
+    /**
+     * Sends the edits not sent yet, even during a batch edit, and then Enter, for a line feed that
+     * the IME commits alone, and resets (sections 4.2 and 5.2): a later edit in the batch must not
+     * take back the line break before it reaches the host, or delete across it.
+     */
+    private fun sendEnter() {
+        flush()
+        listener.send(HostInput.Key(KeyStroke.Special(TerminalKey.Enter)))
+        requestReset()
+    }
+
+    /** Handles `performEditorAction`, which the contract treats as Enter (section 6.4). */
+    public fun performEditorAction() {
+        onKeyDown(KeyStroke.Special(TerminalKey.Enter))
+    }
+
+    /**
+     * Commits the composing text and sends it with the edits not sent yet, even during a batch
+     * edit, so that a change that applies to later input, such as the app arming sticky modifiers,
+     * does not apply to it (section 6.3). Then resets, so that the IME can no longer correct the
+     * text typed before, which would be sent again with the change; the reset restarts the IME only
+     * if it had composing text, and otherwise tells it the new selection (docs/decisions/0082,
+     * docs/decisions/0102).
+     */
+    public fun sendPendingInput() {
+        takeComposingText()
+        requestReset()
+    }
+
+    // --- Resets (section 5) ---
+
+    /**
+     * Resets the input history, for example because the host moved the cursor to another line
+     * (section 5.1). The edits not sent yet are sent first, and the history is emptied at once,
+     * even during a batch edit, so that the IME's later edits do not apply to text the host's line
+     * may no longer end with. Telling the IME waits for the end of the batch edit, and for the
+     * composing text to finish, since restarting the input would commit it (docs/decisions/0082).
+     * The IME is then told the new selection, or restarted if it may still have composing text that
+     * the editor committed (docs/decisions/0102).
+     */
+    public fun requestReset() {
+        flush()
+        clearHistory()
+        tellResetIfReady()
+    }
+
+    /**
+     * Commits the composing text and resets as [requestReset] does, and restarts the IME's input
+     * rather than telling it the new selection, for a change that the IME reads only when its input
+     * starts, such as the input type of direct input (section 3). The restart waits for the end of
+     * the batch edit, as any restart does.
+     */
+    public fun requestRestart() {
+        commitComposingText()
+        restartNeeded = true
+        requestReset()
+    }
+
+    private fun endOperation() {
+        if (isHistoryOverLimit()) {
+            // Past the limit, the history is sent and reset at once, even during a batch edit and
+            // with composing text, which is committed as restarting the input would commit it.
+            // Otherwise an IME that does not end its batch, or that moves its composing text into
+            // the history bit by bit with setComposingRegion, could make the buffer grow without
+            // bound (invariant 5).
+            takeComposingText()
+            flush()
+        } else if (batchDepth == 0 || '\t' in history) {
+            // HT resets after it is sent (section 5.1), which sends the edits made before it and
+            // empties the history at once, also during a batch edit (section 5.2). Otherwise a
+            // later edit in the batch could delete the HT before it reached the host, or delete
+            // across it.
+            flush()
+        }
+    }
+
+    /**
+     * Commits the composing text, which is added to the input history or pasted (section 4.2), and
+     * collapses the selection.
+     */
+    private fun commitComposingText() {
+        selectionFrom = -1
+        val committed = composing.text
+        composing = ComposingText.Empty
+        commit(committed)
+    }
+
+    /**
+     * Commits the composing text as [commitComposingText] does, for a call that is not the IME's
+     * own: the IME may still have the composing text, so the next reset restarts its input, which
+     * makes it drop the composition. Telling it the new selection does not (docs/decisions/0082).
+     */
+    private fun takeComposingText() {
+        if (composing.text.isNotEmpty()) restartNeeded = true
+        commitComposingText()
+    }
+
+    private fun isHistoryOverLimit(): Boolean =
+        history.length > maxHistoryLength &&
+            history.codePointCount(0, history.length) > maxHistoryLength
+
+    /** Sends the difference between the sent and the current input history (section 4.1). */
+    private fun flush() {
+        // DELs for text before the history reach it only after all of the sent history is deleted,
+        // so then nothing of it can be kept.
+        val prefix = if (pendingDeletes > 0) 0 else commonPrefixLength(sentHistory, history)
+        val deletes = sentHistory.codePointCount(prefix, sentHistory.length) + pendingDeletes
+        pendingDeletes = 0
+        if (deletes > 0) listener.send(HostInput.Delete(deletes))
+        val added = history.substring(prefix)
+        sentHistory = history
+        if (added.isNotEmpty()) listener.send(HostInput.Text(added))
+        // A committed HT resets as the Tab key does: the shell may complete the word, and the
+        // history no longer predicts the host's line (docs/decisions/0082).
+        if ('\t' in added || isHistoryOverLimit()) clearHistory()
+        tellResetIfReady()
+    }
+
+    /** Empties the input history, and tells the IME once it can (section 5.2). */
+    private fun clearHistory() {
+        selectionFrom = -1
+        history = ""
+        sentHistory = ""
+        resetPending = true
+    }
+
+    /**
+     * Tells the IME about a reset that waits for it, outside batch edits and without composing
+     * text: restarts its input if [restartNeeded], and otherwise tells it the new selection, which
+     * keeps its connection open, so that an edit it makes meanwhile, such as the commit of a key
+     * typed as the host's output arrives, is not lost (docs/decisions/0102). What was committed
+     * since the reset is dropped from the history too, since the IME reads the empty edit buffer.
+     */
+    private fun tellResetIfReady() {
+        if (!resetPending || batchDepth > 0 || composing.text.isNotEmpty()) return
+        resetPending = false
+        selectionFrom = -1
+        history = ""
+        sentHistory = ""
+        if (restartNeeded) {
+            restartNeeded = false
+            listener.restartInput()
+        } else {
+            listener.updateSelection()
+        }
+    }
+
+    @InternalVtfxApi
+    public companion object {
+        /** The default limit of the input history, in code points (ime-contract.md section 10). */
+        public const val DEFAULT_MAX_HISTORY_LENGTH: Int = 1024
+
+        /** The most colored ranges kept with the composing text (docs/decisions/0103). */
+        public const val MAX_COLORED_RANGES: Int = 16
+
+        private fun boundColors(
+            rawLength: Int,
+            text: String,
+            colors: List<ColoredRange>,
+        ): List<ColoredRange> {
+            if (text.length != rawLength) return emptyList()
+            return colors
+                .asSequence()
+                .mapNotNull { range ->
+                    val start = range.start.coerceIn(0, text.length)
+                    val end = range.end.coerceIn(0, text.length)
+                    if (start >= end) {
+                        null
+                    } else {
+                        when (range) {
+                            is ColoredRange.Background -> range.copy(start = start, end = end)
+                            is ColoredRange.Foreground -> range.copy(start = start, end = end)
+                        }
+                    }
+                }
+                .take(MAX_COLORED_RANGES)
+                .toList()
+        }
+
+        /**
+         * Removes the controls that the gate drops (ime-contract.md section 4.2), so that the edit
+         * buffer holds only what the host receives (invariant 3). Line breaks and HT are kept.
+         * Otherwise a later edit would send DEL for characters that never reached the host, and
+         * delete the host's text before the input history.
+         *
+         * A copy of the rule in the gate's `OutboundText`, which must not depend on this module or
+         * on any other code outside security review. `DroppedControlsAgreementTest` in vtfx-session
+         * pins that the two agree for every UTF-16 code unit; change both together.
+         */
+        private fun withoutDroppedControls(text: CharSequence): String =
+            text
+                .filterNot {
+                    (it < ' ' && it != '\t' && it != '\n' && it != '\r') || it in '\u007f'..'\u009f'
+                }
+                .toString()
+
+        /**
+         * Whether committed [text] is a paste rather than typing: it has a line break, and is not a
+         * line feed alone, which is how an IME commits Enter. An IME commits a clipboard suggestion
+         * as text, and its lines must not run one by one (docs/decisions/0082).
+         */
+        private fun isPaste(text: String): Boolean =
+            text != "\n" && text.any { it == '\n' || it == '\r' }
+
+        /**
+         * Returns the Tab or Enter key for a character key of HT or a line break, with its
+         * modifiers.
+         */
+        private fun asKey(stroke: KeyStroke): KeyStroke =
+            when (stroke) {
+                is KeyStroke.Special -> stroke
+                is KeyStroke.Character ->
+                    when (stroke.codePoint) {
+                        '\t'.code -> KeyStroke.Special(TerminalKey.Tab, stroke.modifiers)
+                        '\n'.code,
+                        '\r'.code -> KeyStroke.Special(TerminalKey.Enter, stroke.modifiers)
+                        else -> stroke
+                    }
+            }
+
+        private fun splitsSurrogatePair(text: String, index: Int): Boolean =
+            index in 1 until text.length &&
+                Character.isLowSurrogate(text[index]) &&
+                Character.isHighSurrogate(text[index - 1])
+
+        /** The length of the common prefix of [a] and [b], not splitting a surrogate pair. */
+        private fun commonPrefixLength(a: String, b: String): Int {
+            var i = 0
+            val n = minOf(a.length, b.length)
+            while (i < n && a[i] == b[i]) i++
+            if (splitsSurrogatePair(a, i) || splitsSurrogatePair(b, i)) i--
+            return i
+        }
+    }
+}

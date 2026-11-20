@@ -9,3 +9,5 @@
 - [本地原生客户端更新](.agents/memory/native-client-update.md)：客户端单独更新、应用备份与签名校验，以及服务端版本探测的注意事项。
 
 - [本地 coding agent CLI 检测](.agents/memory/agent-cli-detection.md)：检测范围、刷新与菜单共用规则，以及新增 CLI 的修改位置。
+
+Android 终端使用 Google vtfx，最低支持 Android 10（API 29）。生产源码、许可证、上游提交和本地适配记录在 `android/vtfx/`。修改终端时可运行 Android Gradle 任务 `:app:testDebugUnitTest --tests '*VtfxSessionTest'`。构建前通过 `cargo xtask android --jni-only` 准备字体和原生库。

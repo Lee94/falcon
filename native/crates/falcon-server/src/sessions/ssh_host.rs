@@ -468,17 +468,6 @@ impl SshLink {
         let _ = self.exec(&exec_command(deployed.kind, &kill_argv(&deployed.bin, &deployed.root, sids)), None).await;
     }
 
-    /// 结构化模式不允许脚本准备失败后静默落回真实终端。
-    pub async fn ensure_native_agent_launcher(self: &Rc<Self>, agent: SessionAgent, shell: Option<&str>) -> Option<String> {
-        let probe = self.probe(None, 1).await.ok()?;
-        if probe.kind != HostKind::Posix { return None; }
-        let dir = launcher_dir(probe.kind, &probe.root);
-        let shell = shell.unwrap_or(&probe.shell);
-        let command = super::agent::write_remote_native_launcher_command(probe.kind, &dir, agent, shell);
-        let res = self.exec(&command, None).await.ok()?;
-        res.ok().then(|| super::agent::remote_native_launcher_path(probe.kind, &probe.root, agent))
-    }
-
     // ---- 附着 ----
 
     /// 持久会话：经 bridge 连上宿主机上的 holder（新建时带 `--create`，由它拉起会话）

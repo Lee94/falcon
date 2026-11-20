@@ -281,21 +281,13 @@ pub fn icon_button(
 /// 折叠三角（0° ↔ 90° 顺滑旋转 160ms）：初次挂载直接落在目标角度，只有点击切换后才播过渡，
 /// 避免列表或对话初次出现时整排箭头一起转一下
 pub fn disclosure_chevron(id: impl Into<ElementId>, expanded: bool, size: Pixels) -> DisclosureChevron {
-    DisclosureChevron { id: id.into(), expanded, size, color: None }
+    DisclosureChevron { id: id.into(), expanded, size }
 }
 
 pub struct DisclosureChevron {
     id: ElementId,
     expanded: bool,
     size: Pixels,
-    color: Option<Hsla>,
-}
-
-impl DisclosureChevron {
-    pub fn text_color(mut self, color: Hsla) -> Self {
-        self.color = Some(color);
-        self
-    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -333,7 +325,6 @@ impl Element for DisclosureChevron {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let expanded = self.expanded;
         let size = self.size;
-        let color = self.color;
         let id = self.id.clone();
         window.with_element_state(global_id.expect("DisclosureChevron 总有 id"), |state: Option<ChevronState>, window| {
             let mut state = state.unwrap_or_default();
@@ -345,9 +336,7 @@ impl Element for DisclosureChevron {
                 }
                 _ => {}
             }
-            let base = icon(IconName::ChevronRight)
-                .size(size)
-                .when_some(color, |i, c| i.text_color(c));
+            let base = icon(IconName::ChevronRight).size(size);
             let mut el = if state.animated {
                 base.with_animation(
                     (id, if expanded { "open" } else { "closed" }),

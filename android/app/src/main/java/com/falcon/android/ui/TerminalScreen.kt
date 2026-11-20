@@ -1,6 +1,5 @@
 package com.falcon.android.ui
 
-import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
@@ -53,7 +52,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,11 +60,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -74,19 +70,29 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import com.google.vtfx.compose.*
+import com.google.vtfx.core.KeyModifiers
+import com.google.vtfx.core.KeyStroke
+import com.google.vtfx.core.TerminalKey
+import com.google.vtfx.core.TerminalLimits
+import com.google.vtfx.session.TerminalSession
+import com.google.vtfx.session.TerminalSessionListener
+import com.google.vtfx.gate.GatePolicy
+import com.google.vtfx.gate.android.AndroidClipboard
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.falcon.android.R
 import com.falcon.android.bridge.FalconNative
-import com.falcon.android.model.AgentCatalog
-import com.falcon.android.model.AgentModeTransition
-import com.falcon.android.model.AgentViewStateUi
 import com.falcon.android.model.AskpassPromptUi
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.ProgramBadgeUi
 import com.falcon.android.model.SessionUi
-import com.falcon.android.net.AgentModeUnsupportedException
 import com.falcon.android.net.FalconApiClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,10 +148,16 @@ fun TerminalScreen(
     var altLocked by remember { mutableStateOf(false) }
     var shiftLocked by remember { mutableStateOf(false) }
 
-    var selectedText by remember { mutableStateOf<String?>(null) }
-    var isScrolledUp by remember { mutableStateOf(false) }
-    var isSizeOwner by remember { mutableStateOf(true) }
-    var gridSize by remember { mutableStateOf(80 to 24) }
+    val terminalState = rememberTerminalState()
+    var viewport by remember { mutableStateOf(80 to 24) }
+    var serverGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    val isSizeOwner = serverGrid == null
+    val gridSize = serverGrid ?: viewport
+    var fontSize by remember { mutableStateOf(prefs.getFloat(KEY_FONT_SIZE_SP, 12f)) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val terminalFocus = remember { FocusRequester() }
+    val view = LocalView.current
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -155,105 +167,44 @@ fun TerminalScreen(
     var busyCommand by remember { mutableStateOf<String?>(null) }
     var uploadingImage by remember { mutableStateOf(false) }
 
-    var agentState by remember { mutableStateOf<AgentViewStateUi?>(null) }
-    // 紧凑/图形只改变排版；GUI/TUI 转换走服务端并以 WS 快照为准，不能靠本地标记隐藏 CLI。
-    var agentTerminalStyle by remember(initialSession.id) { mutableStateOf(false) }
-    var pendingAgentMode by remember(initialSession.id) { mutableStateOf<Boolean?>(null) }
-    var agentTransition by remember(initialSession.id) { mutableStateOf(AgentModeTransition()) }
-    var agentDraft by remember(initialSession.id) { mutableStateOf("") }
-    val transitionLock = remember(initialSession.id) { Any() }
-    // WS 回调与 HTTP 完成位于不同线程，原子更新避免快照与响应互相覆盖转换进度。
-    fun updateAgentTransition(update: (AgentModeTransition) -> AgentModeTransition) {
-        synchronized(transitionLock) { agentTransition = update(agentTransition) }
-    }
-    val agentModeSwitching = agentTransition.switching
-    val agentComposerFocus = remember(initialSession.id) { androidx.compose.ui.focus.FocusRequester() }
-    val hasAgentView = agentState?.interactive == true
-    val sessionAvailable = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0
-    val canSwitchAgentMode = session.agent == "claude" && sessionAvailable && !agentModeSwitching &&
-        (!hasAgentView || agentState?.status == "idle" || agentState?.status == "error")
-
-    // 另一 Viewer 改变模式时撤销旧确认；迟到的 HTTP 响应不覆盖新的 WS 状态。
-    LaunchedEffect(hasAgentView) {
-        pendingAgentMode = null
-        if (hasAgentView) agentTerminalStyle = false
-    }
-    LaunchedEffect(hasAgentView, agentModeSwitching, sessionAvailable, agentState?.status == "unknown") {
-        if (hasAgentView && !agentModeSwitching && sessionAvailable && agentState?.status != "unknown") {
-            agentComposerFocus.requestFocus()
-        }
-    }
-
-    var canvasViewRef by remember { mutableStateOf<TerminalCanvasView?>(null) }
     var activeWebSocket by remember { mutableStateOf<WebSocket?>(null) }
-    var nativeHandle by remember { mutableLongStateOf(0L) }
+    val appearance by rememberUpdatedState(JSONObject().put("type", "appearance")
+        .put("appearance", theme.appearance).put("background", theme.backgroundHex)
+        .put("foreground", theme.foregroundHex).toString())
+    LaunchedEffect(themeName) { activeWebSocket?.send(appearance) }
 
-    // 创建与销毁 Rust 侧 TermCore 实例
-    DisposableEffect(initialSession.id) {
-        val handle = FalconNative.createSession(80, 24, initialSession.durable, themeName)
-        nativeHandle = handle
-        onDispose {
-            activeWebSocket?.close(1000, "detach")
-            activeWebSocket = null
-            FalconNative.destroySession(handle)
-            nativeHandle = 0L
-        }
-    }
-
-    // 主题切换同步给 TermCore 与服务端
-    LaunchedEffect(themeName, nativeHandle) {
-        if (nativeHandle != 0L) {
-            val appearanceJson = FalconNative.setSessionTheme(nativeHandle, themeName)
-            if (appearanceJson.isNotEmpty()) {
-                activeWebSocket?.send(appearanceJson)
-            }
-            canvasViewRef?.invalidate()
-        }
-    }
-
-    val sendWsMessages: (List<String>) -> Unit = remember {
-        { msgs ->
+    fun createTerminal(): TerminalSession = TerminalSession(
+        columns = viewport.first, rows = viewport.second,
+        connection = { bytes ->
             val ws = activeWebSocket
-            if (ws != null) {
-                val inputAllowed = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" && sshReconnectAttempt == 0 &&
-                    !agentTransition.switching && agentState?.interactive != true
-                for (m in msgs) {
-                    // 转换期间保留尺寸与外观上报，但键盘、粘贴及终端查询回复不能进入控制通道。
-                    if (inputAllowed || JSONObject(m).optString("type") != "input") ws.send(m)
-                }
+            if (ws != null && !terminatingSession && wsConnected && sessionState == "active" && sshReconnectAttempt == 0) {
+                sendTerminalInput(bytes, ws::send)
+            }
+        },
+        clipboard = AndroidClipboard(context.applicationContext),
+        policy = GatePolicy(allowClipboardWrite = true),
+        answerHostQueries = !initialSession.durable,
+        listener = object : TerminalSessionListener {
+            override fun onResize(columns: Int, rows: Int) {
+                if (viewport == (columns to rows)) return
+                viewport = columns to rows
+                activeWebSocket?.send("""{"type":"resize","cols":$columns,"rows":$rows}""")
+            }
+            override fun onBell() {
+                view.post { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS) }
+            }
+            override fun onStickyModifiersChanged(modifiers: KeyModifiers) {
+                ctrlLocked = modifiers.ctrl
+                altLocked = modifiers.alt
+                shiftLocked = modifiers.shift
             }
         }
-    }
-    val sendAgentMessage: (JSONObject) -> Boolean = remember {
-        { payload ->
-            val current = agentState
-            val configuring = payload.optString("type") in listOf("agent_set_model", "agent_set_reasoning_effort")
-            val allowed = !terminatingSession && wsConnected && agentTransition.synchronized && sessionState == "active" &&
-                sshReconnectAttempt == 0 && !agentTransition.switching && current?.interactive == true &&
-                current.status != "unknown" && (!configuring || current.status == "idle" || current.status == "error")
-            val sent = allowed && activeWebSocket?.send(payload.toString()) == true
-            if (sent) activeWebSocket?.send("""{"type":"status_seen"}""")
-            sent
-        }
-    }
+    ).also { it.followGrid(serverGrid) }
 
+    var terminal by remember(initialSession.id) { mutableStateOf(createTerminal()) }
     // 建立并维护 `/ws/sessions/:id` 连接
-    LaunchedEffect(initialSession.id, reconnectTrigger, nativeHandle) {
-        if (nativeHandle == 0L) return@LaunchedEffect
-
+    LaunchedEffect(initialSession.id, reconnectTrigger) {
         wsConnected = false
-        updateAgentTransition { it.disconnected() }
-        if (agentState?.interactive == true) agentState = agentState?.copy(status = "unknown")
-        val requiresModeSnapshot = if (AgentCatalog.supportsGui(initialSession.agent)) {
-            FalconApiClient.agentModeSnapshotSupported(baseUrl, initialSession.id, initialSession.agent).getOrElse { error ->
-                onToast(context.getString(R.string.agent_mode_sync_failed, error.message.orEmpty()))
-                delay(1000)
-                reconnectTrigger++
-                return@LaunchedEffect
-            } || agentState?.interactive == true
-        } else {
-            agentState?.interactive == true
-        }
         var currentWs: WebSocket? = null
         val socketFinished = AtomicBoolean()
 
@@ -263,58 +214,29 @@ fun TerminalScreen(
                     webSocket.close(1000, "Effect disposed")
                     return
                 }
-                updateAgentTransition { it.connected(requiresModeSnapshot) }
                 wsConnected = true
                 wsRetryAttempt = 0
                 sshReconnectAttempt = 0
-                val (cols, rows) = canvasViewRef?.currentViewportGrid() ?: (80 to 24)
-                val handshakeJson = FalconNative.handshakeMessages(nativeHandle, cols, rows, true)
-                val msgs = JsonParsers.parseStringArray(handshakeJson)
-                for (m in msgs) {
-                    webSocket.send(m)
-                }
+                val (cols, rows) = viewport
+                webSocket.send(appearance)
+                webSocket.send("""{"type":"resize","cols":$cols,"rows":$rows}""")
                 webSocket.send("""{"type":"status_seen"}""")
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (socketFinished.get()) return
-                val h = nativeHandle
-                if (h == 0L) return
-                val resultJson = FalconNative.onBinaryFrame(h, bytes.toByteArray())
-                canvasViewRef?.requestRender()
-                if (!resultJson.contains("\"type\"")) return
-                try {
-                    val obj = JSONObject(resultJson)
-                    val effects = obj.optJSONArray("effects")
-                    if (effects != null && effects.length() > 0) {
-                        for (i in 0 until effects.length()) {
-                            val eff = effects.optJSONObject(i) ?: continue
-                            when (eff.optString("type")) {
-                                "sendWs" -> {
-                                    val json = eff.optString("json")
-                                    if (json.isNotEmpty()) sendWsMessages(listOf(json))
-                                }
-                                "clipboard" -> {
-                                    val text = eff.optString("text")
-                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                    cm?.setPrimaryClip(ClipData.newPlainText("Falcon Terminal", text))
-                                }
-                                "bell" -> {
-                                    canvasViewRef?.post {
-                                        canvasViewRef?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
+                val current = terminal
+                val next = applyTerminalFrame(current, bytes.toByteArray(), ::createTerminal)
+                if (next !== current && !socketFinished.get()) {
+                    ctrlLocked = false
+                    altLocked = false
+                    shiftLocked = false
+                    terminal = next
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (socketFinished.get()) return
-                val h = nativeHandle
-                if (h == 0L) return
                 val parsedStr = FalconNative.parseServerMessage(text)
                 try {
                     val obj = JSONObject(parsedStr)
@@ -361,69 +283,9 @@ fun TerminalScreen(
                             val c = obj.optInt("cols", 80)
                             val r = obj.optInt("rows", 24)
                             val owner = obj.optBoolean("owner", true)
-                            FalconNative.onServerSize(h, c, r, owner)
-                            canvasViewRef?.requestRender()
-                        }
-                        "agentSnapshot" -> {
-                            JsonParsers.parseAgentSnapshot(obj.optJSONObject("state"))?.let { snap ->
-                                agentState = snap
-                                updateAgentTransition { it.snapshot(
-                                    graphical = snap.interactive,
-                                    ready = !snap.active || snap.terminalBacked || snap.status != "unknown"
-                                ) }
-                            }
-                        }
-                        "agentEntry" -> {
-                            JsonParsers.parseAgentEntry(obj.optJSONObject("entry"))?.let { entry ->
-                                agentState = agentState?.upsertEntry(entry)
-                            }
-                        }
-                        "agentDelta" -> {
-                            val id = obj.optString("id")
-                            val dKind = obj.optString("deltaKind")
-                            val delta = obj.optString("delta")
-                            agentState = agentState?.applyDelta(id, dKind, delta)
-                        }
-                        "agentMeta" -> {
-                            agentState?.let { cur ->
-                                val model = if (obj.has("model") && !obj.isNull("model")) obj.optString("model") else cur.model
-                                val perm = if (obj.has("permissionMode") && !obj.isNull("permissionMode")) obj.optString("permissionMode") else cur.permissionMode
-                                val cwd = if (obj.has("cwd") && !obj.isNull("cwd")) obj.optString("cwd") else cur.cwd
-                                val cmds = if (obj.has("commands") && !obj.isNull("commands")) {
-                                    JsonParsers.parseSlashCommands(obj.optJSONArray("commands"))
-                                } else {
-                                    cur.commands
-                                }
-                                val models = if (obj.has("models") && !obj.isNull("models")) {
-                                    JsonParsers.parseStringList(obj.optJSONArray("models"))
-                                } else {
-                                    cur.models
-                                }
-                                val options = if (obj.has("modelOptions") && !obj.isNull("modelOptions")) {
-                                    JsonParsers.parseModelOptions(obj.optJSONArray("modelOptions"))
-                                } else {
-                                    cur.modelOptions
-                                }
-                                val nextActive = obj.optBoolean("active", cur.active)
-                                val next = cur.copy(
-                                    active = nextActive,
-                                    status = obj.optString("status", cur.status),
-                                    model = model,
-                                    permissionMode = perm,
-                                    cwd = cwd,
-                                    commands = cmds,
-                                    models = models,
-                                    modelOptions = options,
-                                    reasoningEffort = if (obj.isNull("reasoningEffort")) null else obj.optString("reasoningEffort")
-                                )
-                                agentState = next
-                                if (agentTransition.synchronized) {
-                                    updateAgentTransition { it.snapshot(
-                                        graphical = next.interactive,
-                                        ready = !next.active || next.terminalBacked || next.status != "unknown"
-                                    ) }
-                                }
-                            }
+                            serverGrid = if (owner) null else
+                                c.coerceIn(1, TerminalLimits.MAX_DIMENSION) to r.coerceIn(1, TerminalLimits.MAX_DIMENSION)
+                            terminal.followGrid(serverGrid)
                         }
                     }
                 } catch (_: Exception) {
@@ -437,7 +299,6 @@ fun TerminalScreen(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (socketFinished.get()) return
                 wsConnected = false
-                updateAgentTransition { it.disconnected() }
                 if (!socketFinished.get() && sessionState != "dead" && code != 4401) {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
@@ -454,7 +315,6 @@ fun TerminalScreen(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (socketFinished.get()) return
                 wsConnected = false
-                updateAgentTransition { it.disconnected() }
                 if (!socketFinished.get() && sessionState != "dead") {
                     scope.launch {
                         val nextAttempt = wsRetryAttempt + 1
@@ -476,15 +336,8 @@ fun TerminalScreen(
             kotlinx.coroutines.awaitCancellation()
         } finally {
             socketFinished.set(true)
+            if (activeWebSocket === currentWs) activeWebSocket = null
             currentWs.close(1000, "Effect disposed")
-        }
-    }
-
-    // 成功响应迟于/早于 WS 都不能放开旧模式。缺少目标快照时重连以重新取得权威状态，不超时解锁。
-    LaunchedEffect(agentTransition.awaitingSnapshot, wsConnected) {
-        if (agentTransition.awaitingSnapshot && wsConnected) {
-            delay(5000)
-            if (agentTransition.awaitingSnapshot) reconnectTrigger++
         }
     }
 
@@ -527,7 +380,7 @@ fun TerminalScreen(
             val res = FalconApiClient.pasteImage(baseUrl, session.id, mimeType, bytes)
             uploadingImage = false
             res.onSuccess { remotePath ->
-                canvasViewRef?.sendPaste("$remotePath ")
+                terminal.paste("$remotePath ")
                 onToast("已粘贴图片路径：$remotePath")
             }.onFailure { e ->
                 onToast("图片粘贴失败：${e.message}")
@@ -545,10 +398,8 @@ fun TerminalScreen(
     }
 
     val updateAndSaveFontSize: (Float) -> Unit = { newSp ->
-        canvasViewRef?.let { view ->
-            view.setFontSizeSp(newSp)
-            prefs.edit().putFloat(KEY_FONT_SIZE_SP, view.getFontSizeSp()).apply()
-        }
+        fontSize = newSp.coerceIn(8.5f, 28f)
+        prefs.edit().putFloat(KEY_FONT_SIZE_SP, fontSize).apply()
     }
 
     Column(
@@ -669,69 +520,36 @@ fun TerminalScreen(
                 }
 
                 // 若处于历史翻阅状态，提供一键回到底部按钮
-                if (isScrolledUp) {
+                if (terminalState.isScrolledBack) {
                     TerminalHeaderIconButton(
                         icon = Icons.Default.KeyboardArrowDown,
                         contentDescription = "回到底部",
                         tint = theme.tintStrong,
                         onClick = {
-                            if (nativeHandle != 0L) {
-                                FalconNative.scrollToBottom(nativeHandle)
-                                canvasViewRef?.requestRender()
-                            }
+                            terminalState.scrollToBottom()
                         }
                     )
                 }
 
                 // 选区存在时显示复制按钮
-                if (!selectedText.isNullOrEmpty()) {
+                if (terminalState.hasSelection) {
                     TerminalHeaderIconButton(
                         icon = Icons.Default.ContentCopy,
                         contentDescription = "复制选中内容",
                         tint = theme.tintStrong,
                         onClick = {
-                            val text = selectedText ?: return@TerminalHeaderIconButton
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            cm?.setPrimaryClip(ClipData.newPlainText("Falcon Terminal", text))
-                            FalconNative.clearSelection(nativeHandle)
-                            selectedText = null
-                            canvasViewRef?.requestRender()
+                            if (!terminalState.copySelection()) return@TerminalHeaderIconButton
+                            terminalState.clearSelection()
                             onToast("已复制选中文本")
                         }
                     )
-                }
-
-                if (session.agent == "claude") {
-                    Box(
-                        modifier = Modifier
-                            .height(22.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(if (hasAgentView) theme.tint else theme.secondary)
-                            .clickable(enabled = canSwitchAgentMode) { pendingAgentMode = !hasAgentView }
-                            .padding(horizontal = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = stringResource(
-                                when {
-                                    agentModeSwitching -> R.string.agent_mode_switching
-                                    hasAgentView -> R.string.agent_mode_to_tui
-                                    else -> R.string.agent_mode_to_gui
-                                }
-                            ),
-                            color = if (canSwitchAgentMode) theme.tintStrong else theme.mutedForeground,
-                            fontSize = 10.sp,
-                            fontFamily = monoFont,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
                 }
 
                 Box(
                     modifier = Modifier
                         .size(26.dp)
                         .clip(RoundedCornerShape(5.dp))
-                        .clickable(enabled = !uploadingImage && !hasAgentView && sessionAvailable && !agentModeSwitching) {
+                        .clickable(enabled = !uploadingImage && !terminatingSession && wsConnected && sessionState == "active" && sshReconnectAttempt == 0) {
                             imagePickerLauncher.launch("image/*")
                         },
                     contentAlignment = Alignment.Center
@@ -788,7 +606,7 @@ fun TerminalScreen(
                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                 val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
                                 if (!text.isNullOrEmpty()) {
-                                    canvasViewRef?.sendPaste(text)
+                                    terminal.paste(text)
                                 } else {
                                     onToast("剪贴板为空")
                                 }
@@ -798,14 +616,14 @@ fun TerminalScreen(
                             text = { Text("放大字号 (+)", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
-                                canvasViewRef?.let { updateAndSaveFontSize(it.getFontSizeSp() + 1.0f) }
+                                updateAndSaveFontSize(fontSize + 1f)
                             }
                         )
                         DropdownMenuItem(
                             text = { Text("缩小字号 (−)", color = theme.foreground, fontSize = 13.sp) },
                             onClick = {
                                 showMoreMenu = false
-                                canvasViewRef?.let { updateAndSaveFontSize(it.getFontSizeSp() - 1.0f) }
+                                updateAndSaveFontSize(fontSize - 1f)
                             }
                         )
                         DropdownMenuItem(
@@ -877,229 +695,64 @@ fun TerminalScreen(
             )
         }
 
-        if (hasAgentView) {
-            val currentAgentState = agentState!!
-            AgentSessionView(
-                state = currentAgentState,
-                terminalStyle = agentTerminalStyle,
-                available = sessionAvailable && !agentModeSwitching,
-                composerFocus = agentComposerFocus,
-                theme = theme,
-                monoFont = monoFont,
-                inputText = agentDraft,
-                onInputChange = { agentDraft = it },
-                onSendPrompt = { prompt ->
-                    val payload = JSONObject().apply {
-                        put("type", "agent_prompt")
-                        put("text", prompt)
-                    }
-                    sendAgentMessage(payload)
-                },
-                onInterrupt = {
-                    sendAgentMessage(JSONObject().put("type", "agent_interrupt"))
-                },
-                onApprovePermission = { callId, decision ->
-                    val payload = JSONObject().apply {
-                        put("type", "agent_permission")
-                        put("callId", callId)
-                        put("decision", decision)
-                    }
-                    sendAgentMessage(payload)
-                },
-                onSelectModel = { model ->
-                    val payload = JSONObject().apply {
-                        put("type", "agent_set_model")
-                        put("model", model)
-                    }
-                    sendAgentMessage(payload)
-                },
-                onSelectReasoningEffort = { effort ->
-                    val payload = JSONObject().apply {
-                        put("type", "agent_set_reasoning_effort")
-                        put("effort", effort ?: JSONObject.NULL)
-                    }
-                    sendAgentMessage(payload)
-                },
-                onToggleStyle = {
-                    agentTerminalStyle = !agentTerminalStyle
-                    agentComposerFocus.requestFocus()
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            )
-        } else {
-            // 中部：终端网格 Canvas 视图
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .background(theme.terminalBackground)
-            ) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        TerminalCanvasView(ctx).apply {
-                            val savedFontSp = prefs.getFloat(KEY_FONT_SIZE_SP, 12.0f)
-                            this.setFontSizeSp(savedFontSp)
-                            this.sessionHandle = nativeHandle
-                            this.outsideAreaColor = theme.app.toArgb()
-                            this.onSendWsMessages = sendWsMessages
-                            this.onViewportGridChanged = { c, r ->
-                                gridSize = c to r
-                            }
-                            this.onFontSizeChanged = { sp ->
-                                prefs.edit().putFloat(KEY_FONT_SIZE_SP, sp).apply()
-                            }
-                            this.onSelectionChanged = { sel ->
-                                selectedText = sel
-                            }
-                            this.onRenderStateUpdated = { scrolledUp, owner, gCols, gRows ->
-                                post {
-                                    isScrolledUp = scrolledUp
-                                    isSizeOwner = owner
-                                    gridSize = gCols to gRows
-                                }
-                            }
-                            this.consumeStickyModifiers = {
-                                val current = Triple(ctrlLocked, altLocked, shiftLocked)
-                                if (ctrlLocked || altLocked || shiftLocked) {
-                                    ctrlLocked = false
-                                    altLocked = false
-                                    shiftLocked = false
-                                }
-                                current
-                            }
-                            canvasViewRef = this
-                            post { requestFocus() }
-                        }
-                    },
-                    update = { view ->
-                        view.sessionHandle = nativeHandle
-                        view.outsideAreaColor = theme.app.toArgb()
-                        view.onSendWsMessages = sendWsMessages
-                    },
-                    onRelease = { view ->
-                        view.onSendWsMessages = null
-                        if (canvasViewRef === view) canvasViewRef = null
-                    }
+        // vtfx 原生终端
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(theme.terminalBackground)
+        ) {
+            val colors = if (theme.isDark) TerminalColors.Dark else TerminalColors.Light
+            Terminal(
+                terminal, Modifier.fillMaxSize().focusRequester(terminalFocus), state = terminalState,
+                style = TerminalStyle(
+                    colors = colors.copy(foreground = theme.terminalForeground,
+                        background = theme.terminalBackground, cursor = theme.terminalCursor,
+                        cursorText = theme.terminalCursorText, selection = theme.terminalSelection,
+                        palette = theme.terminalPalette ?: colors.palette),
+                    fontSize = fontSize.sp,
+                    font = TerminalFont.Bundled(monoFont)
                 )
-            }
-
-            // 底部：高密度移动端扩展按键栏（支持单/双排折叠，右侧固定软键盘与折叠开关）
-            MobileTerminalKeyBar(
-                theme = theme,
-                monoFont = monoFont,
-                expanded = extraKeysExpanded,
-                ctrlLocked = ctrlLocked,
-                altLocked = altLocked,
-                shiftLocked = shiftLocked,
-                onToggleExpanded = {
-                    extraKeysExpanded = !extraKeysExpanded
-                    prefs.edit().putBoolean(KEY_EXTRA_KEYS_EXPANDED, extraKeysExpanded).apply()
-                },
-                onToggleCtrl = { ctrlLocked = !ctrlLocked },
-                onToggleAlt = { altLocked = !altLocked },
-                onToggleShift = { shiftLocked = !shiftLocked },
-                onSendKey = { key, forceCtrl, forceAlt, forceShift ->
-                    val c = forceCtrl || ctrlLocked
-                    val a = forceAlt || altLocked
-                    val s = forceShift || shiftLocked
-                    ctrlLocked = false
-                    altLocked = false
-                    shiftLocked = false
-                    canvasViewRef?.sendKey(key, ctrl = c, alt = a, shift = s)
-                },
-                onSendText = { txt ->
-                    if (ctrlLocked || altLocked) {
-                        val c = ctrlLocked
-                        val a = altLocked
-                        val s = shiftLocked
-                        ctrlLocked = false
-                        altLocked = false
-                        shiftLocked = false
-                        canvasViewRef?.sendKey(txt, ctrl = c, alt = a, shift = s)
-                    } else {
-                        val h = nativeHandle
-                        if (h != 0L) {
-                            val chunks = FalconNative.encodeText(h, txt)
-                            sendWsMessages(JsonParsers.parseStringArray(chunks))
-                            canvasViewRef?.requestRender()
-                        }
-                    }
-                },
-                onPasteClipboard = {
-                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-                    if (!text.isNullOrEmpty()) {
-                        canvasViewRef?.sendPaste(text)
-                    } else {
-                        onToast("剪贴板为空")
-                    }
-                },
-                onToggleIme = {
-                    canvasViewRef?.toggleSoftKeyboard()
-                }
             )
+            LaunchedEffect(Unit) { terminalFocus.requestFocus() }
         }
-    }
 
-    val targetAgentMode = pendingAgentMode
-    if (targetAgentMode != null && askpassQueue.isEmpty()) {
-        AlertDialog(
-            onDismissRequest = { pendingAgentMode = null },
-            containerColor = theme.card,
-            title = {
-                Text(
-                    stringResource(if (targetAgentMode) R.string.agent_mode_gui_title else R.string.agent_mode_tui_title),
-                    color = theme.foreground,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+        // 底部：高密度移动端扩展按键栏（支持单/双排折叠，右侧固定软键盘与折叠开关）
+        MobileTerminalKeyBar(
+            theme = theme,
+            monoFont = monoFont,
+            expanded = extraKeysExpanded,
+            ctrlLocked = ctrlLocked,
+            altLocked = altLocked,
+            shiftLocked = shiftLocked,
+            onToggleExpanded = {
+                extraKeysExpanded = !extraKeysExpanded
+                prefs.edit().putBoolean(KEY_EXTRA_KEYS_EXPANDED, extraKeysExpanded).apply()
             },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        stringResource(if (targetAgentMode) R.string.agent_mode_gui_body else R.string.agent_mode_tui_body),
-                        color = theme.foreground,
-                        fontSize = 13.sp
-                    )
-                    Text(stringResource(R.string.agent_mode_conditions), color = theme.mutedForeground, fontSize = 12.sp)
+            onToggleCtrl = { terminal.stickyModifiers = KeyModifiers.of(shiftLocked, altLocked, !ctrlLocked) },
+            onToggleAlt = { terminal.stickyModifiers = KeyModifiers.of(shiftLocked, !altLocked, ctrlLocked) },
+            onToggleShift = { terminal.stickyModifiers = KeyModifiers.of(!shiftLocked, altLocked, ctrlLocked) },
+            onSendKey = { key, ctrl, alt, shift ->
+                val modifiers = KeyModifiers.of(shift, alt, ctrl)
+                val special = TerminalKey.entries.find { it.name.equals(key, ignoreCase = true) }
+                val stroke = if (special != null) KeyStroke.Special(special, modifiers)
+                    else KeyStroke.Character(key.codePointAt(0), modifiers, key.codePointAt(0), null)
+                terminal.sendKey(stroke)
+            },
+            onSendText = { terminal.sendText(it) },
+            onPasteClipboard = {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                if (!text.isNullOrEmpty()) {
+                    terminal.paste(text)
+                } else {
+                    onToast("剪贴板为空")
                 }
             },
-            confirmButton = {
-                Button(
-                    enabled = canSwitchAgentMode,
-                    onClick = {
-                        pendingAgentMode = null
-                        if (!canSwitchAgentMode || agentTransition.switching || targetAgentMode == hasAgentView) return@Button
-                        updateAgentTransition { it.start(targetAgentMode) }
-                        scope.launch {
-                            var succeeded = false
-                            try {
-                                val result = FalconApiClient.switchAgentMode(baseUrl, session.id, targetAgentMode)
-                                succeeded = result.isSuccess
-                                result.onFailure { error ->
-                                        val message = if (error is AgentModeUnsupportedException) {
-                                            context.getString(R.string.agent_mode_unsupported)
-                                        } else {
-                                            error.message.orEmpty()
-                                        }
-                                        onToast(context.getString(R.string.agent_mode_failed, message))
-                                        reconnectTrigger++
-                                    }
-                            } finally {
-                                updateAgentTransition { it.finish(succeeded) }
-                            }
-                        }
-                    }
-                ) {
-                    Text(stringResource(R.string.agent_mode_confirm), fontSize = 13.sp)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingAgentMode = null }) {
-                    Text(stringResource(R.string.agent_mode_cancel), color = theme.mutedForeground, fontSize = 13.sp)
+            onToggleIme = {
+                if (imeVisible) keyboard?.hide() else {
+                    terminalFocus.requestFocus()
+                    keyboard?.show()
                 }
             }
         )

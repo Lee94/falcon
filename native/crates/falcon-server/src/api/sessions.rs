@@ -32,11 +32,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/projects/{id}/host", get(host_status).post(host_update))
         .route("/api/sessions", get(list))
         .route("/api/agents", get(super::system::agents))
-        .route("/api/projects/{id}/sessions", get(agent_mode_capabilities).post(create))
+        .route("/api/projects/{id}/sessions", post(create))
         .route("/api/sessions/{id}/reattach", post(reattach))
         .route("/api/sessions/{id}/foreground", get(foreground))
         .route("/api/sessions/{id}/terminate", post(terminate))
-        .route("/api/sessions/{id}/agent-mode", get(agent_mode_capabilities).post(agent_mode))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
         .route("/api/sessions/{id}/paste-image", post(paste_image))
 }
@@ -150,23 +149,18 @@ async fn create(State(state): State<AppState>, Path(id): Path<String>, body: Len
     if project.worktree_archived_at.is_some() {
         return Err(ApiError::conflict("项目已存档，请先恢复再新建终端"));
     }
+    if body.str("agentMode").is_some_and(|mode| mode != "terminal") {
+        return Err(ApiError::bad_request("仅支持终端会话"));
+    }
     // 认不出的 agent 一律当普通终端：宁可开出一个 shell，也不要 400 一个新会话
     let agent = body.str("agent").and_then(SessionAgent::from_wire).filter(|a| *a != SessionAgent::Unknown);
-    let graphical = match body.str("agentMode") {
-        None | Some("terminal") => false,
-        Some("gui") => true,
-        _ => return Err(ApiError::bad_request("agentMode 必须是 gui 或 terminal")),
-    };
-    if graphical && !agent.is_some_and(crate::sessions::agent::supports_native_stream) {
-        return Err(ApiError::bad_request("该 CLI 不支持结构化 Agent 协议"));
-    }
     // 不起名（空串）是常态：UI 显示的是前台命令 / agent / 工作目录，
     // 编号名（"Terminal 3"）既没信息量，序号还会随删除重号
     let name = js::trim(body.str("name").unwrap_or("")).to_string();
     let hint = sanitize_color_hint(&body.0);
     let res = state
         .engine
-        .call(move |engine| async move { engine.sessions.create_session(&project, name, hint, agent, graphical).await })
+        .call(move |engine| async move { engine.sessions.create_session(&project, name, hint, agent).await })
         .await?;
     res.map(Json).map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("创建会话失败：{e}")))
 }
@@ -193,24 +187,6 @@ async fn foreground(State(state): State<AppState>, Path(id): Path<String>) -> Ap
 async fn terminate(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     state.engine.call(move |engine| async move { engine.sessions.terminate(&id, false).await }).await?;
     Ok(ok())
-}
-
-/// 新客户端必须先探测，避免旧服务端把模式请求解释成结束原进程后续接。
-async fn agent_mode_capabilities() -> Json<Value> {
-    Json(json!({ "preservesProcess": true, "interactiveGui": true, "interactiveTerminal": true, "agentModeSnapshot": true, "createGui": true }))
-}
-
-async fn agent_mode(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<falcon_proto::OkResponse>> {
-    let mode = body.str("mode").filter(|m| matches!(*m, "gui" | "terminal" | "gui-control" | "terminal-control"))
-        .ok_or_else(|| ApiError::bad_request("mode 必须是 gui、terminal、gui-control 或 terminal-control"))?.to_string();
-    let result = state.engine.call(move |engine| async move {
-        engine.sessions.switch_agent_mode(&id, &mode).await
-    }).await?;
-    result.map_err(|error| match error {
-        crate::sessions::manager::SessionError::NotFound(message) => ApiError::not_found(message),
-        other => ApiError::conflict(other.to_string()),
-    })?;
-    Ok(Json(falcon_proto::OkResponse { ok: true }))
 }
 
 async fn delete_dead(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -305,59 +281,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn agent_mode_route_validates_mode_missing_session_and_supported_cli() {
+    async fn rejects_legacy_gui_creation() {
         use crate::api::test_support::{TestApp, json_of};
+
         let app = TestApp::new();
-        let (status, capabilities) = json_of(app.get("/api/sessions/missing/agent-mode").await).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(capabilities["preservesProcess"], true);
-        assert_eq!(capabilities["interactiveGui"], true, "新转换必须具有独立能力标记");
-        assert_eq!(capabilities["interactiveTerminal"], true, "返回官方 CLI 必须独立协商能力");
-        assert_eq!(capabilities["agentModeSnapshot"], true, "每次连接均提供权威模式快照");
-        assert_eq!(capabilities["createGui"], true);
-        app.local_project("create-agent");
-        let (status, capabilities) = json_of(app.get("/api/projects/create-agent/sessions").await).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(capabilities["createGui"], true, "新建能力按项目路由到所属节点");
-        for body in [
-            json!({"agent":"grok","agentMode":"gui"}),
-            json!({"agentMode":"gui"}),
-            json!({"agent":"claude","agentMode":"compact"}),
-        ] {
-            let (status, _) = json_of(app.post_json("/api/projects/create-agent/sessions", body).await).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(app.state.db.list_sessions().is_empty(), "非法模式不能留下会话");
-        }
-        for body in [json!({}), json!({"mode":true}), json!({"mode":"compact"})] {
-            let (status, value) = json_of(app.post_json("/api/sessions/missing/agent-mode", body).await).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(value["error"].as_str().unwrap().contains("mode"));
-        }
-        let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":"gui"})).await).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        for mode in ["gui-control", "terminal-control"] {
-            let (status, _) = json_of(app.post_json("/api/sessions/missing/agent-mode", json!({"mode":mode})).await).await;
-            assert_eq!(status, StatusCode::NOT_FOUND);
-        }
-        app.state.db.insert_session(&crate::db::SessionRow {
-            id: "codex".into(), project_id: "p".into(), agent: Some("codex".into()), state: "active".into(), durable: 1,
-            ..Default::default()
-        });
-        let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":"gui"})).await).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
-        for mode in ["gui-control", "terminal-control"] {
-            let (status, value) = json_of(app.post_json("/api/sessions/codex/agent-mode", json!({"mode":mode})).await).await;
-            assert_eq!(status, StatusCode::CONFLICT);
-            assert!(value["error"].as_str().unwrap().contains("仅 Claude"));
-        }
-        app.state.db.insert_session(&crate::db::SessionRow {
-            id: "disconnected-claude".into(), project_id: "p".into(), agent: Some("claude".into()), state: "unverified".into(), durable: 1,
-            ..Default::default()
-        });
-        let (status, value) = json_of(app.post_json("/api/sessions/disconnected-claude/agent-mode", json!({"mode":"terminal-control"})).await).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(value["error"].as_str().unwrap().contains("连接"));
+        app.local_project("p");
+        let (status, _) = json_of(app.post_json("/api/projects/p/sessions", json!({"agent":"codex","agentMode":"gui"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(app.state.db.list_sessions_by_project("p").is_empty());
     }
 
     #[test]

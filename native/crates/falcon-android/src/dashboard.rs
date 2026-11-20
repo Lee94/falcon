@@ -226,6 +226,7 @@ pub fn export_theme_tokens(theme_name: &str) -> String {
             "cursor": term.cursor.to_hex(),
             "cursorAccent": term.cursor_accent.to_hex(),
             "selectionBackground": term.selection_background.to_hex(),
+            "palette": term.ansi.map(|color| color.to_hex()),
         }
     })
     .to_string()

@@ -16,3 +16,4 @@ android/local.properties
 android/app/src/main/jniLibs/
 android/app/src/main/assets/fonts/*.ttf
 .amp/portals/*
+android/vtfx/*/build/
