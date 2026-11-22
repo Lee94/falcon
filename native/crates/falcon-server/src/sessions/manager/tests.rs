@@ -226,6 +226,32 @@ fn non_durable_session_round_trip() {
     });
 }
 
+#[test]
+fn viewer_attach_does_not_refresh_last_active() {
+    run(async {
+        let h = harness();
+        let s = new_session(&h).await;
+        h.db.touch_session(&s.id, 1);
+
+        let a = Peer::new();
+        h.mgr.add_viewer(&s.id, a.viewer.clone());
+        assert_eq!(h.db.get_session(&s.id).unwrap().last_active_at, 1, "首次接入不算用户活动");
+        h.mgr.remove_viewer(&s.id, a.id());
+
+        let b = Peer::new();
+        h.mgr.add_viewer(&s.id, b.viewer.clone());
+        h.mgr.resize(&s.id, b.id(), 80, 24);
+        assert_eq!(h.db.get_session(&s.id).unwrap().last_active_at, 1, "重连与随之到来的 resize 不算用户活动");
+
+        h.mgr.input(&s.id, b.id(), "\x1b[?62;22c");
+        assert_eq!(h.db.get_session(&s.id).unwrap().last_active_at, 1, "终端自动查询应答不算用户活动");
+
+        h.mgr.input(&s.id, b.id(), "a");
+        assert!(h.db.get_session(&s.id).unwrap().last_active_at > 1, "终端输入仍刷新最近活动时间");
+        h.mgr.terminate(&s.id, false).await;
+    });
+}
+
 /// 收到的最后一条 size：(cols, rows, owner)
 fn last_size(p: &Peer) -> Option<(u64, u64, bool)> {
     let m = p.msgs("size").into_iter().last()?;

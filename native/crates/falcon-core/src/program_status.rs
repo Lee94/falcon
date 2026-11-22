@@ -252,7 +252,7 @@ pub struct RowReading {
     pub age: Option<u64>,
 }
 
-/// 多久没操作算「很久没碰」（会话的 `last_active_at`：服务端在接上窗口、敲键时记）
+/// 多久没操作算「很久没碰」（会话的 `last_active_at`：服务端只按真实终端输入记，接入 / 重连不算）
 pub const INACTIVE_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// 终端标题栏上的计时：各会话的程序状态是**本客户端亲眼看到**从什么时候变的。
