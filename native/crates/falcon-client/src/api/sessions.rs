@@ -7,8 +7,8 @@ use std::future::Future;
 
 use bytes::Bytes;
 use falcon_proto::{
-    CreateSessionRequest, OkResponse, PasteImageResult, Session, SessionForeground,
-    SessionWithProject, SessionAgent,
+    BrowserLogPage, CreateSessionRequest, OkResponse, PasteImageResult, Session, SessionAgent,
+    SessionForeground, SessionWithProject,
 };
 use reqwest::Method;
 use serde::Serialize;
@@ -99,5 +99,28 @@ impl FalconClient {
             let res: PasteImageResult = inner.fetch_json(&Req::new(Method::POST, path, body)).await?;
             Ok(res.path)
         })
+    }
+
+    /// `GET /api/sessions/:id/browser/log?before=&limit=`：分页拉取 agent 浏览器操作记录（ADR 0029）。
+    pub fn browser_log(
+        &self,
+        session_id: &str,
+        before: Option<u64>,
+        limit: Option<usize>,
+    ) -> impl Future<Output = ApiResult<BrowserLogPage>> + MaybeSend + 'static {
+        let mut q = Query::new();
+        if let Some(b) = before {
+            q = q.push("before", &b.to_string());
+        }
+        if let Some(l) = limit {
+            q = q.push("limit", &l.to_string());
+        }
+        let query = q.finish();
+        self.get(format!("/api/sessions/{}/browser/log{query}", seg(session_id)))
+    }
+
+    /// 浏览器记录缩略图的站内路径，交给 [`FalconClient::raw_bytes`] 取 JPEG 字节。
+    pub fn browser_thumb_path(session_id: &str, thumb_id: &str) -> String {
+        format!("/api/sessions/{}/browser/thumbs/{}", seg(session_id), seg(thumb_id))
     }
 }

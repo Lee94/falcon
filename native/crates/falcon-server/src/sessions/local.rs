@@ -276,7 +276,11 @@ pub(crate) async fn is_process_in_job() -> bool {
 // ---- 附着 ----
 
 /// 非持久会话：后端自己开 PTY 跑 shell
-pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCallbacks) -> anyhow::Result<AttachResult> {
+pub async fn attach_local(
+    host: &LocalHost,
+    opts: &AttachOptions,
+    cb: BackendCallbacks,
+) -> anyhow::Result<(AttachResult, crate::agent_browser::env::InjectOutcome)> {
     let base = host.base_env().await;
     let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
     let program = opts.shell.clone().unwrap_or_else(default_local_shell);
@@ -285,6 +289,7 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
         prepend_path(&mut env, bin);
         merge_env(&mut env, askpass_session_env(bin, &opts.session_id));
     }
+    let browser_env = crate::agent_browser::env::inject_session_env(host.data_dir(), &opts.session_id, &mut env);
     merge_env(&mut env, opts.env.iter().cloned());
 
     let pair = native_pty_system().openpty(PtySize { rows: opts.rows, cols: opts.cols, pixel_width: 0, pixel_height: 0 })?;
@@ -350,7 +355,7 @@ pub async fn attach_local(host: &LocalHost, opts: &AttachOptions, cb: BackendCal
         // Windows 上问不到前台进程，报出去只会造成误弹确认
         report_process: cfg!(unix),
     };
-    Ok(AttachResult { backend: Rc::new(backend), durable: false })
+    Ok((AttachResult { backend: Rc::new(backend), durable: false }, browser_env))
 }
 
 // ---- 守护进程会话 ----
@@ -448,9 +453,10 @@ pub async fn open_local_sessiond(
     host: &LocalHost,
     opts: &AttachOptions,
     cb: BackendCallbacks,
-) -> Result<(Rc<SessiondBackend>, Welcome), ConnectError> {
+) -> Result<(Rc<SessiondBackend>, Welcome, Option<crate::agent_browser::env::InjectOutcome>), ConnectError> {
     let deployed = opts.deployed.as_ref().ok_or_else(|| ConnectError::Failed("缺少本机的守护进程".into()))?;
     let sid = sid_of(&opts.session_id);
+    let mut browser_env = None;
     if !opts.reattach {
         let base = host.base_env().await;
         let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
@@ -458,6 +464,7 @@ pub async fn open_local_sessiond(
             prepend_path(&mut env, bin);
             merge_env(&mut env, askpass_session_env(bin, &opts.session_id));
         }
+        browser_env = Some(crate::agent_browser::env::inject_session_env(host.data_dir(), &opts.session_id, &mut env));
         merge_env(&mut env, [("FALCON_SESSIOND_ID", sid.as_str())]);
         merge_env(&mut env, opts.env.iter().cloned());
         let shell = opts.shell.clone().unwrap_or_else(default_local_shell);
@@ -471,7 +478,7 @@ pub async fn open_local_sessiond(
         }
     }
     match connect(Transport::Local(endpoint(deployed, &sid)), cb.clone()).await {
-        Ok(c) => Ok(c),
+        Ok((backend, welcome)) => Ok((backend, welcome, browser_env)),
         // 连不上：看 holder 留下的文件判断是退出了、不在了，还是暂时连不上
         Err(ConnectError::Unavailable(e)) | Err(ConnectError::Failed(e)) => match local_session_state(deployed, &opts.session_id) {
             LocalSessionState::Exited => Err(ConnectError::Exited),
@@ -601,7 +608,7 @@ pub(crate) mod tests {
                     rows: 30,
                     ..Default::default()
                 };
-                let r = attach_local(&host, &opts, cb).await.unwrap();
+                let (r, _) = attach_local(&host, &opts, cb).await.unwrap();
                 r.backend.write("printf '%s|%s\\n' \"$TERM\" 中文; stty size; exit\n");
                 tokio::time::timeout(Duration::from_secs(10), exit_rx).await.unwrap().unwrap();
                 let text = out.borrow().clone();

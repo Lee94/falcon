@@ -4,6 +4,7 @@
 //! 每个面板都是一个 GPUI 视图：`new(ws, window, cx)` 建出来，observe 工作区自己刷新。
 //! 右侧栏开着时切走不卸载，关掉右侧栏才卸。
 
+pub mod browser_view;
 pub mod changes;
 pub mod diff_view;
 pub mod file_view;

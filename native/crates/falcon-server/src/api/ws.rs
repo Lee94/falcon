@@ -13,18 +13,25 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::get;
-use falcon_proto::{InstallServerMessage, NonDurableReason, ServerMessage, WS_CLOSE_UNAUTHORIZED, WS_MAX_PAYLOAD_BYTES};
+use falcon_proto::{
+    BrowserClientMessage, InstallServerMessage, NonDurableReason, ServerMessage, WS_CLOSE_UNAUTHORIZED,
+    WS_MAX_PAYLOAD_BYTES,
+};
 use futures::{SinkExt as _, StreamExt as _};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::AppState;
+use crate::agent_browser::manager::BrowserViewer;
 use crate::sessions::viewer::{Viewer, ViewerFrame};
 use crate::term_env::sanitize_color_hint;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/ws/install/{project_id}", get(install)).route("/ws/sessions/{id}", get(session))
+    Router::new()
+        .route("/ws/install/{project_id}", get(install))
+        .route("/ws/sessions/{id}", get(session))
+        .route("/ws/browser/{id}", get(browser))
 }
 
 /// 写端一次 flush 最多攒几帧
@@ -290,6 +297,77 @@ async fn run_session(state: AppState, id: String, socket: WebSocket) {
 fn positive_int(v: &Value) -> Option<u16> {
     let f = v.as_f64()?;
     (f.is_finite() && f.trunc() == f && f > 0.0 && f <= f64::from(u16::MAX)).then_some(f as u16)
+}
+
+async fn browser(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let authed = state.authenticated(&headers);
+    upgrade(ws).on_upgrade(move |socket| async move {
+        if !authed {
+            return close_unauthorized(socket).await;
+        }
+        run_browser(state, id, socket).await;
+    })
+}
+
+async fn run_browser(state: AppState, id: String, socket: WebSocket) {
+    let (mut sink, mut stream) = socket.split();
+    let (viewer, mut rx) = BrowserViewer::new();
+    let viewer_id = viewer.id;
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let writer = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop_rx => break,
+                ctrl = rx.ctrl_rx.recv() => match ctrl {
+                    Some(text) => {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                frame = rx.frame_slot.next() => {
+                    if sink.send(Message::Binary(frame)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        sink
+    });
+
+    {
+        let id = id.clone();
+        state.engine.send(move |engine| engine.browser.add_viewer(&id, Rc::new(viewer)));
+    }
+
+    while let Some(Ok(msg)) = stream.next().await {
+        if matches!(msg, Message::Close(_)) {
+            break;
+        }
+        let text = match &msg {
+            Message::Text(t) => t.as_str(),
+            _ => continue,
+        };
+        let Ok(parsed) = serde_json::from_str::<BrowserClientMessage>(text) else { continue };
+        let id = id.clone();
+        state
+            .engine
+            .send(move |engine| engine.browser.handle_client_message(&id, viewer_id, parsed));
+    }
+
+    let _ = stop_tx.send(());
+    state.engine.send(move |engine| engine.browser.remove_viewer(&id, viewer_id));
+    if let Ok(Ok(mut sink)) = tokio::time::timeout(std::time::Duration::from_secs(5), writer).await {
+        let _ = sink.close().await;
+    }
 }
 
 #[cfg(test)]

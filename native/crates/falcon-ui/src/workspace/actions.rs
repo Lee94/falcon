@@ -85,6 +85,24 @@ impl Workspace {
         cx.emit(WorkspaceEvent::Confirm(spec));
     }
 
+    // ---------------- 浏览器窗口（ADR 0029） ----------------
+
+    pub fn open_browser(&mut self, session_id: &str, focus: bool, cx: &mut Context<Self>) {
+        if self.session(session_id).is_none() || self.hidden_sessions.contains_key(session_id) {
+            return;
+        }
+        self.auto_opened_browsers.insert(session_id.to_string());
+        if self.state.open_browser(session_id, focus, &self.sessions) {
+            self.commit(focus, cx);
+        }
+    }
+
+    pub fn close_browser(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.state.close_browser(session_id, &self.sessions) {
+            self.commit(false, cx);
+        }
+    }
+
     // ---------------- 文件 / 差异窗口 ----------------
 
     /// 打开一个文件（文件窗口就地换内容）。正开着的文件有没存的修改时先问一句
@@ -272,6 +290,7 @@ impl Workspace {
         for key in keys {
             match pane_key::parse_pane_key(&key) {
                 Some(PaneItem::Terminal { id, .. }) => self.close_tab(&id, cx),
+                Some(PaneItem::Browser { session_id, .. }) => self.close_browser(&session_id, cx),
                 Some(PaneItem::File { .. }) => self.close_file(cx),
                 Some(PaneItem::Diff { .. }) => self.close_diff(cx),
                 None => {}

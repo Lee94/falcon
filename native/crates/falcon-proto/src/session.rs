@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::browser::BrowserBrief;
 use crate::project::ProjectType;
 use crate::term_env::TermAppearance;
 use crate::wire::wire_enum;
@@ -108,6 +109,9 @@ pub struct Session {
     /// 在列表上显示「在等你授权」
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_status: Option<ProgramStatusSummary>,
+    /// 该会话当前打开的 agent 浏览器摘要（ADR 0029）；没有浏览器时缺省
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<BrowserBrief>,
     /// unix 毫秒
     pub created_at: i64,
     /// unix 毫秒

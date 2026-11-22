@@ -651,7 +651,10 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
                 Ok(response) => {
                     if remote_path.starts_with("/px0/") {
                         rewrite_px0_response(response, &remote).await
-                    } else if remote_path.contains("/raw/") || remote_path.ends_with("/download") {
+                    } else if remote_path.contains("/raw/")
+                        || remote_path.ends_with("/download")
+                        || remote_path.contains("/browser/")
+                    {
                         response
                     } else {
                         rewrite_response(response, &remote).await
@@ -802,7 +805,7 @@ async fn destination(
     let resource_index = if segments.get(1).is_some_and(|s| s == "api" || s == "ws")
         && segments
             .get(2)
-            .is_some_and(|s| matches!(s.as_str(), "projects" | "sessions" | "install" | "askpass"))
+            .is_some_and(|s| matches!(s.as_str(), "projects" | "sessions" | "install" | "askpass" | "browser"))
     {
         Some(3)
     } else if segments.get(1).is_some_and(|s| s == "px0") {

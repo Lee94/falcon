@@ -383,6 +383,8 @@ pub struct SessionManager {
     /// 端口转发与公网发布（ADR 0016）：挂主机链路，不挂项目链路
     pub forwards: Rc<ForwardManager>,
     pub shares: Rc<ShareManager>,
+    /// Agent 浏览器（ADR 0029）
+    pub browser: Rc<crate::agent_browser::manager::BrowserManager>,
     me: Weak<SessionManager>,
 }
 
@@ -409,6 +411,7 @@ impl SessionManager {
             SessionManager {
                 forwards: ForwardManager::new(db.clone(), link_for.clone(), want_reconnect.clone()),
                 shares: ShareManager::new(db.clone(), data_dir.clone(), link_for, want_reconnect),
+                browser: crate::agent_browser::manager::BrowserManager::new(data_dir.clone()),
                 local: LocalHost::new(data_dir.clone()),
                 db,
                 secrets,
@@ -1198,7 +1201,11 @@ impl SessionManager {
 
         let backend: Rc<dyn Backend> = if entry.durable {
             let (backend, welcome) = if project.project_type == "local" {
-                open_local_sessiond(&self.local, &opts, cb).await?
+                let (b, w, browser_env) = open_local_sessiond(&self.local, &opts, cb).await?;
+                if let Some(out) = browser_env {
+                    self.browser.record_session_policy_enforced(&opts.session_id, out.policy_enforced);
+                }
+                (b, w)
             } else {
                 self.get_link(project).open_sessiond(&opts, cb).await?
             };
@@ -1222,7 +1229,9 @@ impl SessionManager {
             backend
         } else {
             let result = if project.project_type == "local" {
-                attach_local(&self.local, &opts, cb).await?
+                let (res, browser_env) = attach_local(&self.local, &opts, cb).await?;
+                self.browser.record_session_policy_enforced(&opts.session_id, browser_env.policy_enforced);
+                res
             } else {
                 self.get_link(project).attach_session(&opts, cb).await?
             };
@@ -1653,6 +1662,7 @@ impl SessionManager {
         }
 
         self.db.delete_session(session_id);
+        self.browser.cleanup_session(session_id);
         if let Some(e) = &entry {
             self.broadcast(e, &ServerMessage::Terminated);
             // 旧客户端会忽略 terminated，仍给它发原有的结束状态。
@@ -1673,6 +1683,7 @@ impl SessionManager {
             self.drop_output(&e);
         }
         self.db.delete_session(session_id);
+        self.browser.cleanup_session(session_id);
         true
     }
 

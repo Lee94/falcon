@@ -55,6 +55,7 @@ pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
 pub use runtime::{MaybeSend, block_in_place, runtime};
+pub use ws::browser::{BrowserSink, BrowserSocket, BrowserSocketEvent};
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 

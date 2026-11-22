@@ -57,6 +57,8 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 # 内置插件「系统监控」的本机采样（ADR 0025）。与客户端经 GPUI 间接依赖的是同一版，
 # 不多拉一份；只开要用的几项（不要 component / user，也不要 multithread 的 rayon 线程池）
 sysinfo = { version = "0.40", default-features = false, features = ["system", "disk", "network"] }
+# 监听 agent-browser 的 run/ 目录发现浏览器会话（ADR 0029）
+notify = "8.2"
 
 [dev-dependencies]
 tempfile = "3"

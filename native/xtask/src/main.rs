@@ -17,6 +17,7 @@ mod linux;
 mod pkg;
 mod server;
 mod sessiond;
+mod tailnet;
 #[cfg(feature = "offline-tools")]
 mod themes;
 mod util;
@@ -35,6 +36,9 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
   ghostty [--targets …] [--force]        钉死版本的 Zig 编 libghostty-vt 静态库（先打 sessiond/ghostty-patches/ 的补丁），落在 native/.cache/ghostty/
   ghostty-bindgen                        从钉死 commit 的头文件重新生成 ghostty-vt-sys 的绑定（升 pin 时跑）
   sessiond [--targets …] [--pack-embed] [--check|--test]  编 falcon-sessiond（cargo-zigbuild 交叉编），产物 native/target-sessiond/
+
+客户端内置 Tailscale 节点（ADR 0030；目标：host（默认）/ all / android / 逗号分隔的 Rust 三元组）
+  tailnet [--targets …] [--check|--tidy]  钉死版本的 Go 编 libfalcon_tailnet 动态库，产物 native/target-tailnet/；--check 跑 go vet，--tidy 升依赖时重写 go.sum
 
 资源（产物都已进仓库，只在要换时跑）
   icons                                  生成全部内置应用图标（原生 Dock 图标与 Windows exe 图标）
@@ -63,6 +67,7 @@ fn main() {
         "ghostty" => sessiond::ghostty(&args),
         "ghostty-bindgen" => sessiond::bindgen(&args),
         "sessiond" => sessiond::run(&args),
+        "tailnet" => tailnet::run(&args),
         "icons" => icons::run(&args),
         "vendor-fonts" => fonts::run(&args),
         #[cfg(feature = "offline-tools")]

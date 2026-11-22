@@ -1,7 +1,7 @@
-//! 窗口（pane）的 key 约定：`t:<sessionId>` / `f:<projectId>:<path>` / `d`。
+//! 窗口（pane）的 key 约定：`t:<sessionId>` / `b:<sessionId>` / `f:<projectId>:<path>` / `d`。
 //!
 //! 对应旧 React 版的 `lib/paneKey.ts`。工作区的排布（[`crate::layout`]）只搬运这一个字符串，
-//! 具体是终端、文件还是差异，靠解析 key 得到——列里混排三种视图，再给每种各存一份
+//! 具体是终端、浏览器、文件还是差异，靠解析 key 得到——列里混排多种视图，再给每种各存一份
 //! 顺序必然漂移。
 //!
 //! path 里可以有冒号（相对路径里极少见但合法），所以 file key 只在 projectId 后切一次。
@@ -10,6 +10,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneItem {
     Terminal { key: String, id: String },
+    Browser { key: String, session_id: String },
     File { key: String, project_id: String, path: String },
     Diff { key: String },
 }
@@ -17,7 +18,10 @@ pub enum PaneItem {
 impl PaneItem {
     pub fn key(&self) -> &str {
         match self {
-            PaneItem::Terminal { key, .. } | PaneItem::File { key, .. } | PaneItem::Diff { key } => key,
+            PaneItem::Terminal { key, .. }
+            | PaneItem::Browser { key, .. }
+            | PaneItem::File { key, .. }
+            | PaneItem::Diff { key } => key,
         }
     }
 }
@@ -27,6 +31,10 @@ pub const DIFF_KEY: &str = "d";
 
 pub fn term_key(id: &str) -> String {
     format!("t:{id}")
+}
+
+pub fn browser_key(session_id: &str) -> String {
+    format!("b:{session_id}")
 }
 
 pub fn file_key(project_id: &str, path: &str) -> String {
@@ -39,6 +47,10 @@ pub fn parse_pane_key(key: &str) -> Option<PaneItem> {
     }
     if let Some(id) = key.strip_prefix("t:") {
         return (!id.is_empty()).then(|| PaneItem::Terminal { key: key.to_string(), id: id.to_string() });
+    }
+    if let Some(session_id) = key.strip_prefix("b:") {
+        return (!session_id.is_empty())
+            .then(|| PaneItem::Browser { key: key.to_string(), session_id: session_id.to_string() });
     }
     if let Some(rest) = key.strip_prefix("f:") {
         // projectId 不能为空（cut <= 0 在 TS 里一并挡掉）
@@ -67,6 +79,10 @@ mod tests {
         assert_eq!(
             parse_pane_key(&term_key("s1")),
             Some(PaneItem::Terminal { key: "t:s1".into(), id: "s1".into() })
+        );
+        assert_eq!(
+            parse_pane_key(&browser_key("s1")),
+            Some(PaneItem::Browser { key: "b:s1".into(), session_id: "s1".into() })
         );
         assert_eq!(
             parse_pane_key(&file_key("p1", "src/a:b.ts")),

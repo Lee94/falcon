@@ -104,11 +104,11 @@ fn pin() -> Result<Pin> {
     Ok(Pin { commit, sha256, patches, patches_sha256 })
 }
 
-fn cache() -> PathBuf {
+pub(crate) fn cache() -> PathBuf {
     native().join(".cache")
 }
 
-fn sha256_hex(path: &Path) -> Result<String> {
+pub(crate) fn sha256_hex(path: &Path) -> Result<String> {
     let data = std::fs::read(path)?;
     Ok(hex::encode(sha2::Sha256::digest(&data)))
 }
@@ -138,7 +138,7 @@ fn zig_host() -> Result<&'static str> {
 }
 
 /// 确保钉死版本的 Zig 就绪，返回 zig 可执行文件
-fn ensure_zig() -> Result<PathBuf> {
+pub(crate) fn ensure_zig() -> Result<PathBuf> {
     let host = zig_host()?;
     let name = format!("zig-{host}-{ZIG_VERSION}");
     let dir = cache().join("zig").join(&name);

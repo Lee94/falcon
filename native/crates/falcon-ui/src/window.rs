@@ -774,6 +774,7 @@ impl Render for ServerWindow {
                 let active = this.ws.read(cx).state.active.clone();
                 this.ws.update(cx, |w, cx| match active {
                     ActiveView::Terminal { session_id: id } => w.close_tab(&id, cx),
+                    ActiveView::Browser { session_id } => w.close_browser(&session_id, cx),
                     ActiveView::File { .. } => w.close_file(cx),
                     ActiveView::Diff => w.close_diff(cx),
                     _ => {}

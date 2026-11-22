@@ -6,12 +6,14 @@
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::extract::{Path, Query, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use falcon_proto::{
-    HostInstallStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground, SessionWithProject,
+    BrowserLogPage, HostInstallStatus, PASTE_IMAGE_MAX_BYTES, ProjectType, Session, SessionAgent, SessionForeground,
+    SessionWithProject,
 };
 use serde_json::{Value, json};
 
@@ -38,6 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}/terminate", post(terminate))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
         .route("/api/sessions/{id}/paste-image", post(paste_image))
+        .route("/api/sessions/{id}/browser/log", get(browser_log))
+        .route("/api/sessions/{id}/browser/thumbs/{thumb_id}", get(browser_thumb))
 }
 
 /// JS 的真值判断（`authorized ? 1 : 0`）
@@ -115,6 +119,8 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                     session.title = engine.sessions.title_of(&row.id);
                     // 程序状态同理：守护进程推来的，没人在看的会话也靠它在列表上显示
                     session.program_status = engine.sessions.program_status_of(&row.id);
+                    // Agent 浏览器在场摘要（ADR 0029）
+                    session.browser = engine.browser.brief_of(&row.id);
                     let (project_name, project_type) = if falcon_proto::is_standalone_project_id(&row.project_id) {
                         (
                             "无项目".into(),
@@ -205,6 +211,44 @@ async fn rename(State(state): State<AppState>, Path(id): Path<String>, body: Len
     // 空串是合法的：清掉名字就回到自动标题，这是"取消重命名"的唯一出口
     state.db.rename_session(&id, js::trim(name));
     Ok(ok())
+}
+
+#[derive(serde::Deserialize, Default)]
+struct BrowserLogQuery {
+    before: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn browser_log(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<BrowserLogQuery>,
+) -> ApiResult<Json<BrowserLogPage>> {
+    let limit = q.limit.unwrap_or(crate::agent_browser::log::DEFAULT_LOG_LIMIT);
+    let page = state
+        .engine
+        .call(move |engine| async move { engine.browser.log_page(&id, q.before, limit) })
+        .await?;
+    Ok(Json(page))
+}
+
+async fn browser_thumb(
+    State(state): State<AppState>,
+    Path((id, thumb_id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let data = state
+        .engine
+        .call(move |engine| async move { engine.browser.read_thumb(&id, &thumb_id) })
+        .await?;
+    let Some(bytes) = data else {
+        return Err(ApiError::not_found("缩略图不存在"));
+    };
+    Ok((
+        StatusCode::OK,
+        [(CONTENT_TYPE, "image/jpeg"), (CACHE_CONTROL, "private, max-age=3600")],
+        bytes,
+    )
+        .into_response())
 }
 
 /// 粘贴图片：写进会话宿主机的 <falcon 根>/paste，返回绝对路径。

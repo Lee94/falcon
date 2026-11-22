@@ -6,6 +6,8 @@
 //! `git show fd9022a:packages/server/src/<路径>`。
 //! 协议类型一律用 falcon-proto（与客户端同一份），不在这里另起一套。
 
+/// Agent 浏览器：环境变量注入、被动发现、流转发、接管锁与记录（ADR 0029）
+pub mod agent_browser;
 pub mod api;
 pub mod app_icon;
 pub mod archive;

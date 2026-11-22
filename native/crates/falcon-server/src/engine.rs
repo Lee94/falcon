@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent_browser::manager::BrowserManager;
 use crate::askpass::hub::AskpassHub;
 use crate::crypto::SecretBox;
 use crate::db::{Db, ProjectRow};
@@ -76,6 +77,8 @@ pub struct Engine {
     pub data_dir: PathBuf,
     pub askpass: Arc<AskpassHub>,
     pub sessions: Rc<SessionManager>,
+    /// Agent 浏览器管理器（ADR 0029）
+    pub browser: Rc<BrowserManager>,
     /// px0 审阅实例（ADR 0017）：SSH 项目复用项目链路
     pub px0: Rc<Px0Manager>,
 }
@@ -118,6 +121,7 @@ pub fn spawn(
 impl Engine {
     pub fn new(deps: EngineDeps) -> Rc<Self> {
         let sessions = SessionManager::new(deps.db.clone(), deps.secrets.clone(), deps.data_dir.clone(), deps.askpass.clone());
+        let browser = sessions.browser.clone();
         let px0 = {
             let sessions = Rc::downgrade(&sessions);
             Px0Manager::new(
@@ -131,6 +135,7 @@ impl Engine {
             data_dir: deps.data_dir,
             askpass: deps.askpass,
             sessions,
+            browser,
             px0,
         })
     }
@@ -155,6 +160,7 @@ impl Engine {
     /// 进程退出前收尸：cloudflared 与本机 px0 是子进程，不杀的话 Quick Tunnel 还会在公网挂着、
     /// px0 还占着端口；远端的 px0 随 SSH 通道关闭（pty 挂断）自己退出
     pub async fn shutdown(&self) {
+        self.browser.shutdown();
         futures::future::join(self.sessions.shares.shutdown(), self.px0.shutdown()).await;
     }
 }

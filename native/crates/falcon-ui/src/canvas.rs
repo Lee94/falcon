@@ -172,13 +172,22 @@ impl Canvas {
         }
     }
 
-    /// 把输入焦点交给某扇窗口（终端才有键盘焦点）
+    /// 把输入焦点交给某扇窗口（终端与浏览器窗口有键盘焦点）
     pub fn focus_pane(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(PaneItem::Terminal { id, .. }) = parse_pane_key(key)
-            && let Some(view) = self.ws.read(cx).terminals.get(&id).cloned()
-        {
-            let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
-            window.focus(&handle, cx);
+        match parse_pane_key(key) {
+            Some(PaneItem::Terminal { id, .. }) => {
+                if let Some(view) = self.ws.read(cx).terminals.get(&id).cloned() {
+                    let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
+                    window.focus(&handle, cx);
+                }
+            }
+            Some(PaneItem::Browser { session_id, .. }) => {
+                if let Some(view) = self.ws.read(cx).browsers.get(&session_id).cloned() {
+                    let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
+                    window.focus(&handle, cx);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -347,7 +356,10 @@ impl Canvas {
                 && c.panes.iter().any(|p| {
                     y >= p.y
                         && y <= p.y + p.height
-                        && matches!(parse_pane_key(&p.key), Some(PaneItem::File { .. } | PaneItem::Diff { .. }))
+                        && matches!(
+                            parse_pane_key(&p.key),
+                            Some(PaneItem::File { .. } | PaneItem::Diff { .. } | PaneItem::Browser { .. })
+                        )
                 })
         })
     }
@@ -801,6 +813,11 @@ fn pane_label(ws: &Workspace, key: &str) -> String {
             .session(&id)
             .map(|s| crate::labels::session_title(s).unwrap_or_else(|| s.project_name.clone()))
             .unwrap_or_else(|| t!("tab.creating").to_string()),
+        Some(PaneItem::Browser { session_id, .. }) => ws
+            .session(&session_id)
+            .and_then(|s| s.browser.as_ref())
+            .and_then(|b| crate::panels::browser_view::url_domain(&b.url))
+            .unwrap_or_else(|| t!("browser.title").to_string()),
         Some(PaneItem::File { path, .. }) => basename(&path),
         Some(PaneItem::Diff { .. }) => ws
             .state
@@ -884,6 +901,11 @@ impl Round {
 /// 不放进圆角裁剪里：裁的是内缘，1px 描边正好压在边上，抗锯齿会被裁掉一半
 fn active_ring(round: Round, ui: &Ui) -> Div {
     round.apply(div(), radius::LG).absolute().inset_0().border_1().border_color(ui.tint_strong)
+}
+
+/// 接管中的浏览器窗口描边（ADR 0029：强调色描边，非活动态也保持可见）
+fn takeover_ring(round: Round, ui: &Ui) -> Div {
+    round.apply(div(), radius::LG).absolute().inset_0().border_2().border_color(ui.primary)
 }
 
 /// 非活动窗格沿列外沿的 `app_border` 细线（同样绝对定位不占布局；同列叠放时顺带在上下窗格交界处留一道细缝）
@@ -996,6 +1018,7 @@ impl Canvas {
 
         let project_id = match &item {
             PaneItem::Terminal { id, .. } => ws.tab_project_id(id),
+            PaneItem::Browser { session_id, .. } => ws.tab_project_id(session_id),
             PaneItem::File { project_id, .. } => Some(project_id.clone()),
             PaneItem::Diff { .. } => ws.state.diff_tab.as_ref().map(|d| d.project_id.clone()),
         };
@@ -1044,6 +1067,41 @@ impl Canvas {
                     );
                 }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));
+            }
+            PaneItem::Browser { session_id, .. } => {
+                let session = ws.session(session_id);
+                let host_label = ws
+                    .browsers
+                    .get(session_id)
+                    .and_then(|v| crate::panels::browser_view::url_domain(v.read(cx).current_url()))
+                    .or_else(|| {
+                        session
+                            .and_then(|s| s.browser.as_ref())
+                            .and_then(|b| crate::panels::browser_view::url_domain(&b.url))
+                    });
+                let session_name = session
+                    .and_then(crate::labels::session_title)
+                    .or_else(|| session.map(|s| s.project_name.clone()));
+                info = info
+                    .child(icon(IconName::Globe).size(zpx(14.)).text_color(ui.muted_foreground))
+                    .child(
+                        div()
+                            .flex_none()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(host_label.unwrap_or_else(|| t!("browser.title").to_string())),
+                    );
+                if let Some(name) = session_name {
+                    info = info.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(zpx(11.))
+                            .text_color(where_color)
+                            .child(name),
+                    );
+                }
             }
             PaneItem::File { path, .. } => {
                 info = info
@@ -1113,6 +1171,48 @@ impl Canvas {
             }))
             .child(info)
             .children(edge);
+        // 终端标题栏上的浏览器标记（ADR 0029）：显示当前页面域名，点击打开或聚焦浏览器窗口
+        if let PaneItem::Terminal { id, .. } = &item
+            && let Some(brief) = ws.session(id).and_then(|s| s.browser.as_ref())
+        {
+            let domain = crate::panels::browser_view::url_domain(&brief.url)
+                .unwrap_or_else(|| t!("browser.badge").to_string());
+            let is_human = brief.control == falcon_proto::BrowserControlHolder::Human;
+            let ws_browser = self.ws.clone();
+            let sid = id.clone();
+            let tip: SharedString = if brief.url.is_empty() {
+                t!("browser.openHint").to_string().into()
+            } else {
+                brief.url.clone().into()
+            };
+            header = header.child(
+                div()
+                    .id(SharedString::from(format!("pane-browser-badge-{id}")))
+                    .flex_none()
+                    .h(zpx(20.))
+                    .max_w(zpx(160.))
+                    .px(zpx(6.))
+                    .rounded(radius::SM)
+                    .flex()
+                    .items_center()
+                    .gap(zpx(4.))
+                    .text_size(zpx(11.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if is_human { ui.primary } else { ui.border })
+                    .bg(if is_human { ui.primary.opacity(0.14) } else { ui.app.opacity(0.6) })
+                    .text_color(if is_human { ui.primary } else { ui.foreground })
+                    .hover(|s| s.bg(ui.tint))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .on_mouse_down(MouseButton::Left, isolate)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        ws_browser.update(cx, |w, cx| w.open_browser(&sid, true, cx));
+                    })
+                    .child(icon(IconName::Globe).size(zpx(11.)).flex_none())
+                    .child(div().min_w_0().truncate().child(domain)),
+            );
+        }
         // PTY 的尺寸跟着别的窗口（ADR 0022）：字缩小了、四周有空白，标出来免得当成显示出错
         if let PaneItem::Terminal { id, .. } = &item
             && let Some((cols, rows)) = ws.terminals.get(id).and_then(|v| v.read(cx).following_size())
@@ -1163,6 +1263,7 @@ impl Canvas {
                 ws_close.update(cx, |w, cx| match &item_close {
                     PaneItem::Terminal { id, .. } if shift => w.detach_tab(id, cx),
                     PaneItem::Terminal { id, .. } => w.close_tab(id, cx),
+                    PaneItem::Browser { session_id, .. } => w.close_browser(session_id, cx),
                     PaneItem::File { .. } => w.close_file(cx),
                     PaneItem::Diff { .. } => w.close_diff(cx),
                 });
@@ -1177,12 +1278,25 @@ impl Canvas {
             header.into_any_element()
         };
 
+        let browser_human = match &item {
+            PaneItem::Browser { session_id, .. } => ws
+                .browsers
+                .get(session_id)
+                .is_some_and(|v| v.read(cx).is_human_control()),
+            _ => false,
+        };
+
         // ---- 内容 ----
         let body: AnyElement = match &item {
             PaneItem::Terminal { id, .. } => match ws.terminals.get(id) {
                 Some(view) => view.clone().into_any_element(),
                 None => self.pending_body(id, cx),
             },
+            PaneItem::Browser { session_id, .. } => ws
+                .browsers
+                .get(session_id)
+                .map(|v| v.clone().into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
             PaneItem::File { .. } => self
                 .file_view
                 .clone()
@@ -1235,7 +1349,9 @@ impl Canvas {
                             .child(body),
                     ),
             )
-            .child(if is_active {
+            .child(if browser_human {
+                takeover_ring(round, &ui).into_any_element()
+            } else if is_active {
                 crate::ui::border_fade(format!("pane-ring-{key}"), active_ring(round, &ui), ui.tint_strong).into_any_element()
             } else {
                 inactive_ring(round, &ui).into_any_element()
@@ -1436,6 +1552,7 @@ impl Canvas {
                 MenuItemSpec::new(label.to_string(), move |_, cx| {
                     ws.update(cx, |w, cx| match &it {
                         PaneItem::Terminal { id, .. } => w.close_tab(id, cx),
+                        PaneItem::Browser { session_id, .. } => w.close_browser(session_id, cx),
                         PaneItem::File { .. } => w.close_file(cx),
                         PaneItem::Diff { .. } => w.close_diff(cx),
                     })

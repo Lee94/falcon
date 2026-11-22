@@ -200,7 +200,7 @@ fn unpack_fonts(native_dir: &Path, android_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_android_sdk() -> Result<PathBuf> {
+pub(crate) fn find_android_sdk() -> Result<PathBuf> {
     for env_key in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
         if let Some(val) = std::env::var_os(env_key) {
             let p = PathBuf::from(val);
@@ -226,7 +226,7 @@ fn find_android_sdk() -> Result<PathBuf> {
     bail!("未找到 Android SDK，请设置 ANDROID_HOME 或将 SDK 安装在 ~/Library/Android/sdk")
 }
 
-fn find_ndk_clang_bin(sdk_dir: &Path) -> Result<PathBuf> {
+pub(crate) fn find_ndk_clang_bin(sdk_dir: &Path) -> Result<PathBuf> {
     let env_ndk = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT"]
         .into_iter()
         .find_map(|key| std::env::var_os(key).map(PathBuf::from));

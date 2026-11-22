@@ -54,6 +54,8 @@
 
 mod wire;
 
+/// Agent 浏览器协议：在场摘要、控制权、流画面帧与记录（ADR 0029）
+pub mod browser;
 pub mod files;
 pub mod forward;
 pub mod git;
@@ -76,6 +78,7 @@ pub mod ws;
 /// 会话守护进程的部署（推二进制）与宿主机的持久能力
 pub mod install;
 
+pub use browser::*;
 pub use files::*;
 pub use forward::*;
 pub use git::*;

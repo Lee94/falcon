@@ -1,0 +1,21 @@
+[package]
+name = "falcon-tailnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "客户端内置 Tailscale 节点（ADR 0030）：dlopen libfalcon_tailnet，包成安全的 Rust 接口"
+
+[dependencies]
+falcon-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# 浏览器版（wasm）没有动态库可加载，只编类型
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libloading = "0.8"
+
+[dev-dependencies]
+libloading = "0.8"
+serde_json.workspace = true

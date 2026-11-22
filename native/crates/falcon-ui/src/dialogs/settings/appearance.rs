@@ -17,6 +17,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Sizable};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -337,6 +338,27 @@ impl AppearancePane {
         section(t!("settings.terminalTitle").to_string(), None, children, cx)
             .into_any_element()
     }
+
+    fn render_browser_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = crate::panels::browser_view::auto_open_enabled(cx);
+        let toggle = Switch::new("browser-auto-open")
+            .checked(on)
+            .on_click(cx.listener(|_, checked: &bool, _, cx| {
+                crate::panels::browser_view::set_auto_open_enabled(*checked, cx);
+                cx.notify();
+            }));
+        section(
+            t!("settings.browserTitle").to_string(),
+            None,
+            rows(
+                vec![(t!("settings.browserAutoOpen").to_string(), None, toggle.into_any_element())],
+                false,
+                cx,
+            ),
+            cx,
+        )
+        .into_any_element()
+    }
 }
 
 /// 界面缩放：− 百分比 +，不在 100% 时多一个复原（⌘+ / ⌘− 与「视图」菜单走同一组函数）
@@ -443,5 +465,6 @@ impl Render for AppearancePane {
             .child(self.render_theme_section(cx))
             .child(self.app_icon.clone())
             .child(self.render_term_section(cx))
+            .child(self.render_browser_section(cx))
     }
 }
