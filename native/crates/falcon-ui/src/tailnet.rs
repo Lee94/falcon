@@ -186,7 +186,7 @@ impl TailnetController {
             return;
         };
         self.op_gen += 1;
-        let gen = self.op_gen;
+        let generation = self.op_gen;
         self.busy = true;
         self.poll_task = None;
         self.config.enabled = false;
@@ -212,7 +212,7 @@ impl TailnetController {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.op_gen != gen {
+                if this.op_gen != generation {
                     return;
                 }
                 this.busy = false;
@@ -242,7 +242,7 @@ impl TailnetController {
             return;
         };
         self.op_gen += 1;
-        let gen = self.op_gen;
+        let generation = self.op_gen;
         self.busy = true;
         self.last_error = None;
         self.poll_task = None;
@@ -278,7 +278,7 @@ impl TailnetController {
                 .await;
 
             let _ = this.update(cx, |this, cx| {
-                if this.op_gen != gen {
+                if this.op_gen != generation {
                     return;
                 }
                 this.busy = false;
@@ -289,7 +289,7 @@ impl TailnetController {
                             this.platform.store_password(AUTH_KEY_SECRET_ID, None);
                         }
                         this.apply_poll(st, prox, cx);
-                        this.ensure_polling(gen, cx);
+                        this.ensure_polling(generation, cx);
                     }
                     Err(StartFailure::Load(LoadError::NotFound { .. })) => {
                         this.library = LibraryState::Missing;
@@ -323,7 +323,7 @@ impl TailnetController {
 
     fn stop_node(&mut self, cx: &mut Context<Self>) {
         self.op_gen += 1;
-        let gen = self.op_gen;
+        let generation = self.op_gen;
         self.busy = true;
         self.poll_task = None;
         self.last_error = None;
@@ -338,7 +338,7 @@ impl TailnetController {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.op_gen != gen {
+                if this.op_gen != generation {
                     return;
                 }
                 this.busy = false;
@@ -348,7 +348,7 @@ impl TailnetController {
         .detach();
     }
 
-    fn ensure_polling(&mut self, gen: u64, cx: &mut Context<Self>) {
+    fn ensure_polling(&mut self, generation: u64, cx: &mut Context<Self>) {
         self.poll_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let delay = this
@@ -379,7 +379,7 @@ impl TailnetController {
                     .await;
                 let keep_going = this
                     .update(cx, |this, cx| {
-                        if this.op_gen != gen || !this.config.enabled {
+                        if this.op_gen != generation || !this.config.enabled {
                             return false;
                         }
                         if let Some((st, prox)) = polled {

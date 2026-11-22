@@ -162,13 +162,13 @@ impl ConnectView {
             (proxy, tn.status().peers.clone())
         };
         self.probe_gen += 1;
-        let gen = self.probe_gen;
+        let generation = self.probe_gen;
         self.probing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let hits = falcon_client::probe_tailnet_servers(proxy, peers, DEFAULT_FALCON_PORT).await;
             let _ = this.update(cx, |this, cx| {
-                if this.probe_gen != gen {
+                if this.probe_gen != generation {
                     return;
                 }
                 this.probing = false;
