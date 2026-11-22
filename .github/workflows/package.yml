@@ -303,6 +303,19 @@ jobs:
           workspaces: native
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Restore Go tailnet cache
+        id: cache-go-tailnet
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.tar.gz
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: go-tailnet-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/tailnet/go.mod', 'native/tailnet/go.sum', 'native/xtask/src/tailnet.rs') }}
+          restore-keys: |
+            go-tailnet-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Use placeholder session daemons
         run: bash .github/scripts/sessiond-placeholder.sh
 
@@ -311,6 +324,20 @@ jobs:
       # 客户端的默认特性 webview（HTML 预览）要显式加回来。此时内嵌的还是占位文件。
       - name: Build server, client and xtask
         run: cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
+
+      - name: Build built-in Tailscale library
+        run: ./native/target/release/xtask tailnet --targets aarch64-apple-darwin
+
+      - name: Save Go tailnet cache
+        if: github.ref == 'refs/heads/main' && steps.cache-go-tailnet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.tar.gz
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: ${{ steps.cache-go-tailnet.outputs.cache-primary-key }}
 
       - name: Wait for session daemons
         env:
@@ -404,6 +431,19 @@ jobs:
           workspaces: native
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Restore Go tailnet cache
+        id: cache-go-tailnet
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.zip
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: go-tailnet-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/tailnet/go.mod', 'native/tailnet/go.sum', 'native/xtask/src/tailnet.rs') }}
+          restore-keys: |
+            go-tailnet-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Use placeholder session daemons
         shell: bash
         run: bash .github/scripts/sessiond-placeholder.sh
@@ -412,6 +452,26 @@ jobs:
         run: |
           cargo build --release --manifest-path native/Cargo.toml --locked --no-default-features -p xtask -p falcon-server --features falcon-server/embed-sessiond,falcon-desktop/webview -p falcon-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build built-in Tailscale library
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path "C:\msys64\mingw64\bin\gcc.exe") {
+            $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          }
+          .\native\target\release\xtask.exe tailnet --targets x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save Go tailnet cache
+        if: github.ref == 'refs/heads/main' && steps.cache-go-tailnet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.zip
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: ${{ steps.cache-go-tailnet.outputs.cache-primary-key }}
 
       - name: Wait for session daemons
         shell: bash
@@ -603,6 +663,19 @@ jobs:
           workspaces: native
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Restore Go tailnet cache
+        id: cache-go-tailnet
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.tar.gz
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: go-tailnet-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/tailnet/go.mod', 'native/tailnet/go.sum', 'native/xtask/src/tailnet.rs') }}
+          restore-keys: |
+            go-tailnet-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Decode Android release keystore
         id: keystore
         env:
@@ -617,13 +690,29 @@ jobs:
             echo "::warning::未配置 ANDROID_KEYSTORE_BASE64 Secret，本次 APK 将使用临时 debug 签名（安装新版本前需先卸载旧版）"
           fi
 
+      - name: Build xtask and built-in Tailscale library
+        run: |
+          cargo build --release --manifest-path native/Cargo.toml --locked -p xtask --no-default-features
+          ./native/target/release/xtask tailnet --targets aarch64-linux-android
+
+      - name: Save Go tailnet cache
+        if: github.ref == 'refs/heads/main' && steps.cache-go-tailnet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            native/.cache/go/go*
+            !native/.cache/go/*.tar.gz
+            native/.cache/go/mod
+            native/.cache/go/build
+          key: ${{ steps.cache-go-tailnet.outputs.cache-primary-key }}
+
       - name: Build APK
         env:
           ANDROID_KEYSTORE_FILE: ${{ steps.keystore.outputs.path }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: cargo run --release --manifest-path native/Cargo.toml --locked -p xtask --no-default-features -- android
+        run: ./native/target/release/xtask android
 
       - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4

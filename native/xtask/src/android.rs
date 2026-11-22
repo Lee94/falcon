@@ -144,6 +144,19 @@ pub fn run(args: &[String]) -> Result<()> {
             let _ = util::run(&strip_bin, [OsStr::new("--strip-unneeded"), dst_so.as_os_str()], None);
         }
         println!("  已生成 {}", dst_so.strip_prefix(&root).unwrap_or(&dst_so).display());
+        let tailnet_so = native_dir
+            .join("target-tailnet")
+            .join(rust_target)
+            .join("libfalcon_tailnet.so");
+        let dst_tailnet = dst_dir.join("libfalcon_tailnet.so");
+        if tailnet_so.is_file() {
+            std::fs::copy(&tailnet_so, &dst_tailnet).with_context(|| {
+                format!("复制 {} -> {} 失败", tailnet_so.display(), dst_tailnet.display())
+            })?;
+            println!("  已打包 {}", dst_tailnet.strip_prefix(&root).unwrap_or(&dst_tailnet).display());
+        } else if dst_tailnet.exists() {
+            let _ = std::fs::remove_file(&dst_tailnet);
+        }
     }
 
     if jni_only {

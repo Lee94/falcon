@@ -5,6 +5,7 @@ pub(crate) mod install;
 pub(crate) mod session;
 
 mod native;
+mod socks5;
 
 use std::time::Duration;
 

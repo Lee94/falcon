@@ -3,11 +3,14 @@ package com.falcon.android.net
 import com.falcon.android.bridge.FalconNative
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.JsonParsers
+import com.falcon.android.model.ServerProfile
+import com.falcon.android.model.ServerRoute
 import com.falcon.android.model.SessionUi
 import com.falcon.android.model.ServerUpdateCheck
 import com.falcon.android.model.ServerUpdateTask
 import com.falcon.android.model.NodeUpdateTarget
 import com.falcon.android.model.NodeStatus
+import com.falcon.android.model.TailnetProxy
 import com.falcon.android.ui.FalconThemeTokens
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -38,6 +41,43 @@ object FalconApiClient {
         .writeTimeout(25, TimeUnit.SECONDS)
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
+
+    private val serverRoutes = java.util.concurrent.ConcurrentHashMap<String, ServerRoute>()
+    private val tailnetClientLock = Any()
+    private var cachedTailnetProxy: TailnetProxy? = null
+    private var cachedTailnetClient: OkHttpClient? = null
+
+    fun updateServerRoutes(profiles: List<ServerProfile>) {
+        serverRoutes.clear()
+        for (p in profiles) {
+            serverRoutes[normalizeBaseUrl(p.url)] = p.route
+        }
+    }
+
+    fun routeFor(baseUrl: String): ServerRoute =
+        serverRoutes[normalizeBaseUrl(baseUrl)] ?: ServerRoute.AUTO
+
+    fun clientFor(baseUrl: String, route: ServerRoute = routeFor(baseUrl)): OkHttpClient {
+        return when (val resolved = TailnetManager.resolveRoute(baseUrl, route)) {
+            is ResolvedRoute.Direct -> httpClient
+            is ResolvedRoute.Unavailable -> throw RuntimeException(resolved.message)
+            is ResolvedRoute.Tailnet -> tailnetHttpClient(resolved.proxy)
+        }
+    }
+
+    private fun tailnetHttpClient(proxy: TailnetProxy): OkHttpClient = synchronized(tailnetClientLock) {
+        val existing = cachedTailnetClient
+        if (existing != null && cachedTailnetProxy == proxy) {
+            return existing
+        }
+        val built = httpClient.newBuilder()
+            .dns(TailnetDns)
+            .socketFactory(TailnetSocketFactory(proxy))
+            .build()
+        cachedTailnetProxy = proxy
+        cachedTailnetClient = built
+        built
+    }
 
     fun normalizeBaseUrl(raw: String): String {
         var trimmed = raw.trim().trimEnd('/')
@@ -75,7 +115,7 @@ object FalconApiClient {
     private fun getRaw(baseUrl: String, path: String): String {
         val url = "${normalizeBaseUrl(baseUrl)}$path"
         val req = Request.Builder().url(url).get().build()
-        httpClient.newCall(req).execute().use { resp ->
+        clientFor(baseUrl).newCall(req).execute().use { resp ->
             val bodyStr = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
                 throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -105,7 +145,7 @@ object FalconApiClient {
                 val req = Request.Builder().url("${normalizeBaseUrl(baseUrl)}${updatePath(hostId)}")
                     .post(JSONObject().put("version", version).toString().toRequestBody(jsonMediaType)).build()
                 // 升级 POST 只发送一次；重启丢失应答时由调用方查询状态，不能由传输层重发。
-                httpClient.newBuilder().retryOnConnectionFailure(false).build().newCall(req).execute().use { resp ->
+                clientFor(baseUrl).newBuilder().retryOnConnectionFailure(false).build().newCall(req).execute().use { resp ->
                     val body = resp.body?.string().orEmpty()
                     if (!resp.isSuccessful) {
                         val message = extractErrorMessage(body, resp.code)
@@ -188,7 +228,7 @@ object FalconApiClient {
                 .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(baseUrl).newCall(req).execute().use { resp ->
                 val bodyStr = resp.body?.string() ?: ""
                 if (!resp.isSuccessful) {
                     throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -212,7 +252,7 @@ object FalconApiClient {
                     .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId/reattach")
                     .post("{}".toRequestBody(jsonMediaType))
                     .build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientFor(baseUrl).newCall(req).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
                         throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -243,7 +283,7 @@ object FalconApiClient {
                     .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId/terminate")
                     .post("{}".toRequestBody(jsonMediaType))
                     .build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientFor(baseUrl).newCall(req).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
                         throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -260,7 +300,7 @@ object FalconApiClient {
                     .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId")
                     .delete()
                     .build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientFor(baseUrl).newCall(req).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
                         throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -278,7 +318,7 @@ object FalconApiClient {
                     .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId")
                     .patch(payload.toString().toRequestBody(jsonMediaType))
                     .build()
-                httpClient.newCall(req).execute().use { resp ->
+                clientFor(baseUrl).newCall(req).execute().use { resp ->
                     val bodyStr = resp.body?.string() ?: ""
                     if (!resp.isSuccessful) {
                         throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -300,7 +340,7 @@ object FalconApiClient {
                 .url("${normalizeBaseUrl(baseUrl)}/api/sessions/$encodedId/paste-image")
                 .post(bytes.toRequestBody(mediaType))
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(baseUrl).newCall(req).execute().use { resp ->
                 val bodyStr = resp.body?.string() ?: ""
                 if (!resp.isSuccessful) {
                     throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -332,7 +372,7 @@ object FalconApiClient {
                 .url("${normalizeBaseUrl(baseUrl)}/api/askpass/$encodedId/answer")
                 .post(payload.toString().toRequestBody(jsonMediaType))
                 .build()
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(baseUrl).newCall(req).execute().use { resp ->
                 val bodyStr = resp.body?.string() ?: ""
                 if (!resp.isSuccessful) {
                     throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
@@ -367,7 +407,21 @@ object FalconApiClient {
         val encodedId = URLEncoder.encode(sessionId, "UTF-8")
         val wsUrl = toWebSocketUrl(baseUrl, "/ws/sessions/$encodedId")
         val req = Request.Builder().url(wsUrl).build()
-        return httpClient.newWebSocket(req, listener)
+        val client = try {
+            clientFor(baseUrl)
+        } catch (e: RuntimeException) {
+            val dummy = object : WebSocket {
+                override fun request(): Request = req
+                override fun queueSize(): Long = 0L
+                override fun send(text: String): Boolean = false
+                override fun send(bytes: okio.ByteString): Boolean = false
+                override fun close(code: Int, reason: String?): Boolean = false
+                override fun cancel() = Unit
+            }
+            listener.onFailure(dummy, e, null)
+            return dummy
+        }
+        return client.newWebSocket(req, listener)
     }
 
     data class DiscoveredServer(

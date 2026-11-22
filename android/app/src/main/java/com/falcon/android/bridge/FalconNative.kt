@@ -124,4 +124,22 @@ object FalconNative {
 
     @JvmStatic
     external fun listAvailableThemes(query: String): String
+
+    @JvmStatic
+    external fun tailnetStart(cfgJson: String): String
+
+    @JvmStatic
+    external fun tailnetStatus(): String
+
+    @JvmStatic
+    external fun tailnetProxy(): String
+
+    @JvmStatic
+    external fun tailnetStop(): String
+
+    @JvmStatic
+    external fun tailnetLogout(stateDir: String): String
+
+    @JvmStatic
+    external fun tailnetSetInterfaces(json: String): String
 }

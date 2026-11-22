@@ -79,20 +79,24 @@ pub fn run(args: &[String]) -> Result<()> {
     let base = format!("Falcon-v{ver}-{}-setup", host_platform());
     let iss = native().join("xtask/assets/windows-installer/Falcon.iss");
     println!("== ISCC {} ==", rel(&iss));
-    util::run(
-        &iscc,
-        [
-            "/Qp".to_string(),
-            format!("/DAppVersion={ver}"),
-            format!("/DSourceExe={}", exe.display()),
-            format!("/DSourceServer={}", server.display()),
-            format!("/DSourceIcon={}", icon.display()),
-            format!("/DOutputDir={}", release.display()),
-            format!("/DOutputBaseFilename={base}"),
-            iss.display().to_string(),
-        ],
-        Some(&root()),
-    )?;
+    let mut iscc_args = vec![
+        "/Qp".to_string(),
+        format!("/DAppVersion={ver}"),
+        format!("/DSourceExe={}", exe.display()),
+        format!("/DSourceServer={}", server.display()),
+        format!("/DSourceIcon={}", icon.display()),
+        format!("/DOutputDir={}", release.display()),
+        format!("/DOutputBaseFilename={base}"),
+    ];
+    let tailnet_dll = native().join("target-tailnet/x86_64-pc-windows-msvc/falcon_tailnet.dll");
+    if tailnet_dll.is_file() {
+        println!("== 已打包 {} ==", rel(&tailnet_dll));
+        iscc_args.push(format!("/DSourceTailnet={}", tailnet_dll.display()));
+    } else {
+        println!("== 未找到 {}，本次安装包不含内置 Tailscale（可先运行 cargo xtask tailnet） ==", rel(&tailnet_dll));
+    }
+    iscc_args.push(iss.display().to_string());
+    util::run(&iscc, iscc_args, Some(&root()))?;
 
     let out = release.join(format!("{base}.exe"));
     let mb = std::fs::metadata(&out)?.len() as f64 / 1024.0 / 1024.0;

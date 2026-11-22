@@ -14,6 +14,7 @@ mod appearance;
 mod hosts;
 mod plugins;
 mod relays;
+mod tailscale;
 mod widgets;
 
 use gpui_kit::assets::IconName;
@@ -37,6 +38,8 @@ pub enum Tab {
     #[default]
     Appearance,
     Notifications,
+    /// 客户端内置 Tailscale 节点（ADR 0030）
+    Tailscale,
     Hosts,
     Relays,
     /// 右侧栏插件（ADR 0025）
@@ -51,11 +54,12 @@ enum Group {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::Appearance,
         Tab::Notifications,
         Tab::Plugins,
         Tab::About,
+        Tab::Tailscale,
         Tab::Hosts,
         Tab::Relays,
     ];
@@ -64,6 +68,7 @@ impl Tab {
         match self {
             Tab::Appearance => "appearance",
             Tab::Notifications => "notifications",
+            Tab::Tailscale => "tailscale",
             Tab::Hosts => "hosts",
             Tab::Relays => "relays",
             Tab::Plugins => "plugins",
@@ -73,7 +78,7 @@ impl Tab {
 
     fn group(self) -> Group {
         match self {
-            Tab::Hosts | Tab::Relays => Group::Connection,
+            Tab::Tailscale | Tab::Hosts | Tab::Relays => Group::Connection,
             _ => Group::General,
         }
     }
@@ -82,6 +87,7 @@ impl Tab {
         match self {
             Tab::Appearance => IconName::Palette,
             Tab::Notifications => IconName::Bell,
+            Tab::Tailscale => IconName::Globe,
             Tab::Hosts => IconName::Server,
             Tab::Relays => IconName::ArrowLeftRight,
             Tab::Plugins => IconName::Puzzle,
@@ -141,6 +147,7 @@ struct SettingsView {
     tab: Tab,
     search: Entity<InputState>,
     appearance: Entity<appearance::AppearancePane>,
+    tailscale: Entity<tailscale::TailscalePane>,
     hosts: Entity<hosts::HostsPane>,
     /// 只在停在中转页时存在（见模块注释）
     relays: Option<Entity<relays::RelaysPane>>,
@@ -161,7 +168,9 @@ impl SettingsView {
         let updates = crate::app_update::observe(cx);
         cx.observe(&updates, |_, _, cx| cx.notify()).detach();
         // 插件目录是用户手动改的：每次打开设置都重新扫一遍，插件页看到的就是现状
-        ws.update(cx, |w, cx| w.refresh_plugins(cx));
+        if ws.read(cx).ready() {
+            ws.update(cx, |w, cx| w.refresh_plugins(cx));
+        }
         if ws.read(cx).profile.is_loopback()
             && let Some(svc) = falcon_platform::get(cx).local_service()
         {
@@ -175,8 +184,9 @@ impl SettingsView {
             .detach();
         }
         let appearance = cx.new(|cx| appearance::AppearancePane::new(ws.clone(), window, cx));
+        let tailscale = cx.new(|cx| tailscale::TailscalePane::new(ws.clone(), window, cx));
         let hosts = cx.new(|cx| hosts::HostsPane::new(ws.clone(), cx));
-        Self { ws, tab, search, appearance, hosts, relays: None, lan_access: None, lan_busy: false }
+        Self { ws, tab, search, appearance, tailscale, hosts, relays: None, lan_access: None, lan_busy: false }
     }
 
     /// 按名字 / 分组名 / 关键字（`settings.tab_*_keys`）筛模块
@@ -501,6 +511,7 @@ impl Render for SettingsView {
         let pane = match active {
             Tab::Appearance => self.appearance.clone().into_any_element(),
             Tab::Notifications => self.render_notifications(cx).into_any_element(),
+            Tab::Tailscale => self.tailscale.clone().into_any_element(),
             Tab::Hosts => self.hosts.clone().into_any_element(),
             Tab::Relays => self.relays_pane(window, cx).into_any_element(),
             Tab::Plugins => plugins::render(&self.ws, cx).into_any_element(),

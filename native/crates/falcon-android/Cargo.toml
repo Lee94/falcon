@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 falcon-proto.workspace = true
+falcon-tailnet.workspace = true
 falcon-term.workspace = true
 falcon-theme.workspace = true
 falcon-core.workspace = true

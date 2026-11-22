@@ -174,6 +174,18 @@ pub trait Platform {
         let _ = bundle;
         Err("这个平台不会在退出后重新打开应用".into())
     }
+
+    // ---------------- 内置 Tailscale 节点（ADR 0030）----------------
+
+    /// 节点身份状态目录（桌面 `<数据目录>/tailnet/`）。不支持内置节点的平台返回 None
+    fn tailnet_state_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// 本机设备名，用于生成默认 tailnet 节点名 `falcon-<主机名>`
+    fn device_hostname(&self) -> Option<String> {
+        None
+    }
 }
 
 /// 一份可以安装的 GitHub Release

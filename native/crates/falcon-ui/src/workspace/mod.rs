@@ -195,7 +195,10 @@ impl EventEmitter<WorkspaceEvent> for Workspace {}
 impl Workspace {
     pub fn new(profile: ServerProfile, cx: &mut Context<Self>) -> Self {
         let platform = falcon_platform::get(cx);
-        let client = FalconClient::new(profile.url.parse().expect("服务端基址在配置里校验过"));
+        let client = FalconClient::new_with_route(
+            profile.url.parse().expect("服务端基址在配置里校验过"),
+            profile.route,
+        );
         let state = WorkspaceState::from_persisted(&persist::load(&*platform, &profile));
         let auto_opened_browsers: HashSet<String> = state.browsers.iter().cloned().collect();
         let mut this = Self {
@@ -252,8 +255,48 @@ impl Workspace {
             this.sync_terminal_visibility(cx);
         })
         .detach();
+        let tailnet = crate::tailnet::entity(cx);
+        let was_running = std::cell::Cell::new(
+            tailnet.read(cx).status().state == falcon_tailnet::State::Running
+                && tailnet.read(cx).proxy().is_some(),
+        );
+        cx.observe(&tailnet, move |this, tn, cx| {
+            let tn_ref = tn.read(cx);
+            let now_running =
+                tn_ref.status().state == falcon_tailnet::State::Running && tn_ref.proxy().is_some();
+            let became_ready = !was_running.replace(now_running) && now_running;
+            if this.profile.is_local() {
+                return;
+            }
+            if became_ready && this.profile.route != falcon_client::ServerRoute::Direct {
+                if matches!(this.auth_phase, AuthPhase::Unreachable(_)) {
+                    this.auth_phase = AuthPhase::Checking;
+                    this.init(cx);
+                } else if this.auth_phase == AuthPhase::Ready {
+                    this.resume(cx);
+                }
+            }
+            cx.notify();
+        })
+        .detach();
         this.start(cx);
         this
+    }
+
+    /// 切换这扇窗口对应服务端的网络路由，并按需要立即重连。
+    pub fn set_route(&mut self, route: falcon_client::ServerRoute, cx: &mut Context<Self>) {
+        if self.profile.route == route {
+            return;
+        }
+        self.profile.route = route;
+        self.client.set_route(route);
+        cx.notify();
+        if matches!(self.auth_phase, AuthPhase::Unreachable(_)) {
+            self.auth_phase = AuthPhase::Checking;
+            self.init(cx);
+        } else if self.auth_phase == AuthPhase::Ready {
+            self.resume(cx);
+        }
     }
 
     /// 还没分画布的列分好（排不下就自动另起一块），记下当前画布与每块的焦点。分了画布就

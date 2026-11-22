@@ -7,6 +7,7 @@
 //! - 复用 [`falcon_core`]（项目与附属项目分组树、会话自动标题、OSC 7501 程序状态徽标）。
 
 pub mod dashboard;
+pub mod tailnet;
 pub mod term;
 
 use jni::errors::{Result as JniResult, ThrowRuntimeExAndDefault};
@@ -464,6 +465,84 @@ pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_listAvailable
     env.with_env(|env| -> JniResult<jstring> {
         let q = jstr_to_string(env, &query);
         let out = list_available_themes(&q);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetStart(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    cfg_json: JString<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let cfg = jstr_to_string(env, &cfg_json);
+        let out = tailnet::start(&cfg);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetStatus(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let out = tailnet::status();
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetProxy(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let out = tailnet::proxy();
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetStop(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let out = tailnet::stop();
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetLogout(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    state_dir: JString<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let dir = jstr_to_string(env, &state_dir);
+        let out = tailnet::logout(&dir);
+        Ok(string_to_jstr(env, &out))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_falcon_android_bridge_FalconNative_tailnetSetInterfaces(
+    mut env: EnvUnowned<'_>,
+    _class: JClass<'_>,
+    json: JString<'_>,
+) -> jstring {
+    env.with_env(|env| -> JniResult<jstring> {
+        let raw = jstr_to_string(env, &json);
+        let out = tailnet::set_interfaces(&raw);
         Ok(string_to_jstr(env, &out))
     })
     .resolve::<ThrowRuntimeExAndDefault>()

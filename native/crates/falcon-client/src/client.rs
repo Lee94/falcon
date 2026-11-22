@@ -35,8 +35,12 @@ pub(crate) struct Inner {
     base: String,
     /// 同一个地址换成 `ws(s)://`
     ws_base: String,
+    host: String,
+    route: RwLock<crate::tailnet::ServerRoute>,
     /// 建不起来（TLS 初始化失败）时把原因存下，每个请求都如实报出来
-    http: Result<reqwest::Client, String>,
+    http_direct: Result<reqwest::Client, String>,
+    /// 走内置 Tailscale 回环 SOCKS5 代理时的缓存客户端（代理地址 / 口令变了就重建）
+    http_proxy: Mutex<Option<(falcon_tailnet::ProxyInfo, reqwest::Client)>>,
     pub(crate) auth: Auth,
 }
 
@@ -200,20 +204,47 @@ impl FalconClient {
     /// 不会失败：TLS 初始化不了、基址协议不对这类问题留到发请求时如实报错，
     /// 窗口照样能开起来显示"连不上"。
     pub fn new(base_url: Url) -> Self {
+        Self::new_with_route(base_url, crate::tailnet::ServerRoute::Auto)
+    }
+
+    pub fn new_with_route(base_url: Url, route: crate::tailnet::ServerRoute) -> Self {
         let mut url = base_url;
         url.set_query(None);
         url.set_fragment(None);
+        let host = url.host_str().unwrap_or("").to_owned();
         let base = url.as_str().trim_end_matches('/').to_owned();
         let ws_base = match url.scheme() {
             "https" => format!("wss{}", &base["https".len()..]),
             "http" => format!("ws{}", &base["http".len()..]),
             _ => base.clone(),
         };
-        let http = match url.scheme() {
-            "http" | "https" => build_http(),
+        let http_direct = match url.scheme() {
+            "http" | "https" => build_http(None),
             other => Err(format!("不支持的协议 {other}://，服务端地址应当是 http(s)://host:port")),
         };
-        FalconClient { inner: Arc::new(Inner { base, ws_base, http, auth: Auth::new() }) }
+        FalconClient {
+            inner: Arc::new(Inner {
+                base,
+                ws_base,
+                host,
+                route: RwLock::new(route),
+                http_direct,
+                http_proxy: Mutex::new(None),
+                auth: Auth::new(),
+            }),
+        }
+    }
+
+    pub fn route(&self) -> crate::tailnet::ServerRoute {
+        *self.inner.route.read()
+    }
+
+    pub fn set_route(&self, route: crate::tailnet::ServerRoute) {
+        *self.inner.route.write() = route;
+    }
+
+    pub fn is_using_tailnet(&self) -> bool {
+        matches!(self.inner.resolve_route(), crate::tailnet::ResolvedRoute::Tailnet(_))
     }
 
     /// 规范化之后的基址（末尾不带 `/`）。
@@ -313,13 +344,13 @@ pub(crate) fn json_body<B: Serialize + ?Sized>(body: &B) -> ApiResult<ReqBody> {
         .map_err(|e| ApiError::internal(format!("请求体序列化失败：{e}")))
 }
 
-fn build_http() -> Result<reqwest::Client, String> {
+fn build_http(proxy: Option<&falcon_tailnet::ProxyInfo>) -> Result<reqwest::Client, String> {
     use crate::error::error_chain;
     use crate::runtime::runtime;
     let tls = crate::tls::client_config()?;
     // hyper 的连接池在 build 时就要一个 tokio 上下文来挂后台任务
     let _guard = runtime().enter();
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls((*tls).clone())
         .user_agent(concat!("falcon-native/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
@@ -328,12 +359,14 @@ fn build_http() -> Result<reqwest::Client, String> {
         .pool_idle_timeout(Duration::from_secs(55))
         // 按键延迟敏感的是 WS，但 REST 也没理由等 Nagle
         .tcp_nodelay(true)
-        // 不走代理：WS 那边是自己连 TCP 的，不认代理；REST 走代理、WS 不走只会制造
-        // "列表能刷、终端连不上"这种更难查的状况。开发机上的 https_proxy 环境变量
-        // 还会把 127.0.0.1 也劫走。
-        .no_proxy()
-        .build()
-        .map_err(|e| error_chain(&e))
+        // 不读系统/环境代理变量：开发机上的 https_proxy 会把 127.0.0.1 劫走；
+        // 经内置 Tailscale 时下面再显式挂 socks5h:// 代理。
+        .no_proxy();
+    if let Some(p) = proxy {
+        let reqwest_proxy = reqwest::Proxy::all(p.socks5h_url()).map_err(|e| error_chain(&e))?;
+        builder = builder.proxy(reqwest_proxy);
+    }
+    builder.build().map_err(|e| error_chain(&e))
 }
 
 impl Inner {
@@ -341,8 +374,29 @@ impl Inner {
         format!("{}{}", self.ws_base, path)
     }
 
-    fn http(&self) -> ApiResult<&reqwest::Client> {
-        self.http.as_ref().map_err(|e| ApiError::internal(e.clone()))
+    pub(crate) fn resolve_route(&self) -> crate::tailnet::ResolvedRoute {
+        let route = *self.route.read();
+        crate::tailnet::resolve_route_for_host(&self.host, route)
+    }
+
+    fn http(&self) -> ApiResult<reqwest::Client> {
+        // 先保留协议/TLS 校验错误
+        let direct = self.http_direct.as_ref().map_err(|e| ApiError::internal(e.clone()))?;
+        match self.resolve_route() {
+            crate::tailnet::ResolvedRoute::Direct => Ok(direct.clone()),
+            crate::tailnet::ResolvedRoute::Tailnet(proxy) => {
+                let mut cache = self.http_proxy.lock();
+                if let Some((cached, client)) = cache.as_ref()
+                    && cached == &proxy
+                {
+                    return Ok(client.clone());
+                }
+                let client = build_http(Some(&proxy)).map_err(ApiError::internal)?;
+                *cache = Some((proxy, client.clone()));
+                Ok(client)
+            }
+            crate::tailnet::ResolvedRoute::TailnetUnavailable(msg) => Err(ApiError::network_msg(msg)),
+        }
     }
 
     async fn build(&self, req: &Req) -> ApiResult<reqwest::RequestBuilder> {

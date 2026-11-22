@@ -408,6 +408,19 @@ impl ServerWindow {
             identity = identity
                 .child(div().flex_none().child(display_name(profile, cx)))
                 .child(div().min_w_0().flex_1().truncate().child(profile.url.clone()));
+            if profile.is_routed_via_tailnet() {
+                identity = identity.child(
+                    div()
+                        .flex_none()
+                        .px(zpx(6.))
+                        .py(zpx(1.))
+                        .rounded_full()
+                        .bg(ui.primary.opacity(0.14))
+                        .text_size(zpx(11.))
+                        .text_color(ui.primary)
+                        .child(t!("tailnet.badgeVia").to_string()),
+                );
+            }
             if profile.is_insecure() {
                 identity = identity.child(
                     div().flex_none().text_color(ui.warning).child(t!("native.server.plaintext").to_string()),
@@ -705,6 +718,37 @@ impl Render for ServerWindow {
                 .into_any_element(),
             AuthPhase::Unreachable(err) => {
                 let ws = self.ws.clone();
+                let ws_settings = self.ws.clone();
+                let tailnet_hint = {
+                    let p = &self.ws.read(cx).profile;
+                    falcon_client::tailnet_failure_hint(&p.url, p.route)
+                };
+                let mut actions = div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("retry-connect")
+                            .primary()
+                            .label(t!("native.server.retry").to_string())
+                            .on_click(move |_, _, cx| ws.update(cx, |w, cx| w.init(cx))),
+                    )
+                    // Windows 上 set_menus 不出原生菜单栏，又没有本机服务（首次启动"本机"必然连不上），
+                    // 不在这里给入口就只能干等重试
+                    .child(
+                        Button::new("connect-other")
+                            .label(t!("native.menu.connect").to_string())
+                            .on_click(|_, _, cx| crate::dialogs::connect::open_connect_window(cx)),
+                    );
+                if tailnet_hint.is_some() {
+                    actions = actions.child(
+                        Button::new("open-tailscale-settings")
+                            .outline()
+                            .label(t!("tailnet.openSettings").to_string())
+                            .on_click(move |_, window, cx| {
+                                dialogs::settings::open(&ws_settings, dialogs::settings::Tab::Tailscale, window, cx);
+                            }),
+                    );
+                }
                 div()
                     .flex_1()
                     .flex()
@@ -714,25 +758,11 @@ impl Render for ServerWindow {
                     .justify_center()
                     .text_sm()
                     .child(t!("native.server.unreachable").to_string())
+                    .when_some(tailnet_hint, |d, hint| {
+                        d.child(div().text_xs().text_color(ui.warning).child(hint))
+                    })
                     .child(div().text_xs().text_color(ui.muted_foreground).child(err))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("retry-connect")
-                                    .primary()
-                                    .label(t!("native.server.retry").to_string())
-                                    .on_click(move |_, _, cx| ws.update(cx, |w, cx| w.init(cx))),
-                            )
-                            // Windows 上 set_menus 不出原生菜单栏，又没有本机服务（首次启动"本机"必然连不上），
-                            // 不在这里给入口就只能干等重试
-                            .child(
-                                Button::new("connect-other")
-                                    .label(t!("native.menu.connect").to_string())
-                                    .on_click(|_, _, cx| crate::dialogs::connect::open_connect_window(cx)),
-                            ),
-                    )
+                    .child(actions)
                     .into_any_element()
             }
         };

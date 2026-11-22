@@ -22,8 +22,10 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccountTree
@@ -49,6 +51,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -75,8 +78,11 @@ import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.ProjectUi
 import com.falcon.android.model.ServerGroupUi
 import com.falcon.android.model.ServerProfile
+import com.falcon.android.model.ServerRoute
 import com.falcon.android.model.SessionUi
+import com.falcon.android.model.TailnetProbeHit
 import com.falcon.android.net.FalconApiClient
+import com.falcon.android.net.TailnetManager
 import kotlinx.coroutines.launch
 
 @Composable
@@ -88,7 +94,7 @@ fun DashboardScreen(
     connectionError: String?,
     themeName: String,
     onSelectServer: (ServerProfile) -> Unit,
-    onAddOrUpdateServer: (name: String, url: String, editId: String?) -> Unit,
+    onAddOrUpdateServer: (name: String, url: String, route: ServerRoute, editId: String?) -> Unit,
     onDeleteServer: (String) -> Unit,
     onSelectTheme: (String) -> Unit,
     onRefresh: () -> Unit,
@@ -111,13 +117,16 @@ fun DashboardScreen(
     var editingServer by remember { mutableStateOf<ServerProfile?>(null) }
     var serverNameInput by remember { mutableStateOf("") }
     var serverUrlInput by remember { mutableStateOf("") }
+    var serverRouteInput by remember { mutableStateOf(ServerRoute.AUTO) }
 
     var showThemeDialog by remember { mutableStateOf(false) }
     var themeSearchQuery by remember { mutableStateOf("") }
     var showSettingsMenu by remember { mutableStateOf(false) }
+    var showTailscaleDialog by remember { mutableStateOf(false) }
     var showAbout by remember(activeServer.url) { mutableStateOf(false) }
     var showNodeSettings by remember(activeServer.url) { mutableStateOf(false) }
     var updateTarget by remember { mutableStateOf<UpdateTarget?>(null) }
+    val tailnetState by TailnetManager.state.collectAsState()
 
     // 折叠状态（默认全部展开，点击可收起）
     val collapsedServers = remember { mutableStateMapOf<String, Boolean>() }
@@ -241,6 +250,19 @@ fun DashboardScreen(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
+                    if (TailnetManager.isRoutedViaTailnet(activeServer.url, activeServer.route)) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "经 Tailscale",
+                            color = theme.tintStrong,
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(theme.tint)
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
                         text = "▾",
@@ -259,6 +281,10 @@ fun DashboardScreen(
                         onClick = { showSettingsMenu = true }
                     )
                     DropdownMenu(expanded = showSettingsMenu, onDismissRequest = { showSettingsMenu = false }) {
+                        DropdownMenuItem(text = { Text("Tailscale") }, onClick = {
+                            showSettingsMenu = false
+                            showTailscaleDialog = true
+                        })
                         DropdownMenuItem(text = { Text(t("settings.aboutTitle")) }, onClick = {
                             showSettingsMenu = false
                             showAbout = true
@@ -333,26 +359,29 @@ fun DashboardScreen(
             }
 
             if (connectionError != null) {
+                val tailnetHint = TailnetManager.failureHint(activeServer.url, activeServer.route)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(6.dp))
                         .background(theme.destructive.copy(alpha = 0.14f))
-                        .clickable { showServerDialog = true }
+                        .clickable {
+                            if (tailnetHint != null) showTailscaleDialog = true else showServerDialog = true
+                        }
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "连接失败：$connectionError",
+                        text = if (tailnetHint != null) "$tailnetHint（$connectionError）" else "连接失败：$connectionError",
                         color = theme.destructive,
                         fontSize = 11.sp,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "切换/扫描 ▸",
+                        text = if (tailnetHint != null) "Tailscale 设置 ▸" else "切换/扫描 ▸",
                         color = theme.tintStrong,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold
@@ -682,6 +711,9 @@ fun DashboardScreen(
         )
     }
 
+    if (showTailscaleDialog) {
+        TailscaleSettingsDialog(onDismiss = { showTailscaleDialog = false }, onToast = onToast)
+    }
     if (showAbout) {
         ServerAboutDialog(activeServer, onDismiss = { showAbout = false }, onUpdate = { updateTarget = it })
     }
@@ -695,6 +727,9 @@ fun DashboardScreen(
         var scanningLan by remember { mutableStateOf(false) }
         var discoveredServers by remember { mutableStateOf<List<FalconApiClient.DiscoveredServer>>(emptyList()) }
         var scanHint by remember { mutableStateOf<String?>(null) }
+        var showTailscalePicker by remember { mutableStateOf(false) }
+        var probingTailscale by remember { mutableStateOf(false) }
+        var tailscaleHits by remember { mutableStateOf<Map<String, TailnetProbeHit>>(emptyMap()) }
 
         AlertDialog(
             onDismissRequest = {
@@ -709,29 +744,180 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("服务端连接", color = theme.foreground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    TextButton(
-                        enabled = !scanningLan,
-                        onClick = {
-                            scanningLan = true
-                            scanHint = "正在扫描本机各网卡的 /24 网段（含 Tailscale，:4923）…"
-                            scope.launch {
-                                val found = FalconApiClient.scanLanServers(4923)
-                                discoveredServers = found
-                                scanningLan = false
-                                scanHint = if (found.isEmpty()) {
-                                    "未发现 Falcon 服务端 (:4923)；Tailscale 其他节点若不在同一 /24 段，请手动添加地址"
-                                } else {
-                                    "发现 ${found.size} 台服务端，点击即连"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = {
+                                showTailscalePicker = !showTailscalePicker
+                                if (showTailscalePicker && tailnetState.status.state == "running" && !probingTailscale) {
+                                    probingTailscale = true
+                                    scope.launch {
+                                        val hits = TailnetManager.probeTailnetServers(4923)
+                                        tailscaleHits = hits.associateBy { it.deviceId }
+                                        probingTailscale = false
+                                    }
                                 }
                             }
+                        ) {
+                            Text("从 Tailscale", fontSize = 11.5.sp)
                         }
-                    ) {
-                        Text(if (scanningLan) "扫描中…" else "扫描局域网", fontSize = 12.sp)
+                        TextButton(
+                            enabled = !scanningLan,
+                            onClick = {
+                                scanningLan = true
+                                scanHint = "正在扫描本机各网卡的 /24 网段（含 Tailscale，:4923）…"
+                                scope.launch {
+                                    val found = FalconApiClient.scanLanServers(4923)
+                                    discoveredServers = found
+                                    scanningLan = false
+                                    scanHint = if (found.isEmpty()) {
+                                        "未发现 Falcon 服务端 (:4923)；Tailscale 其他节点若不在同一 /24 段，请点「从 Tailscale」或手动添加"
+                                    } else {
+                                        "发现 ${found.size} 台服务端，点击即连"
+                                    }
+                                }
+                            }
+                        ) {
+                            Text(if (scanningLan) "扫描中…" else "扫描局域网", fontSize = 11.5.sp)
+                        }
                     }
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (showTailscalePicker) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(theme.background)
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            when {
+                                !tailnetState.libraryAvailable -> {
+                                    Text("此构建未包含 Tailscale", color = theme.mutedForeground, fontSize = 11.5.sp)
+                                }
+                                tailnetState.status.state != "running" -> {
+                                    Text(
+                                        text = when (tailnetState.status.state) {
+                                            "starting" -> "内置 Tailscale 正在连接…"
+                                            "needs_login" -> "内置 Tailscale 尚未登录，请前往 Tailscale 设置完成登录"
+                                            "needs_approval" -> "内置 Tailscale 等待管理员审批"
+                                            "error" -> "内置 Tailscale 出错：${tailnetState.status.error ?: "未知错误"}"
+                                            else -> "内置 Tailscale 未开启，请先前往 Tailscale 设置开启"
+                                        },
+                                        color = theme.mutedForeground,
+                                        fontSize = 11.5.sp
+                                    )
+                                    TextButton(onClick = {
+                                        showServerDialog = false
+                                        showTailscaleDialog = true
+                                    }) {
+                                        Text("打开 Tailscale 设置", fontSize = 12.sp)
+                                    }
+                                }
+                                else -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = if (probingTailscale) "正在探测运行中的 Falcon…" else "点击设备自动填入地址",
+                                            color = theme.mutedForeground,
+                                            fontSize = 11.sp
+                                        )
+                                        TextButton(
+                                            enabled = !probingTailscale,
+                                            onClick = {
+                                                probingTailscale = true
+                                                scope.launch {
+                                                    val hits = TailnetManager.probeTailnetServers(4923)
+                                                    tailscaleHits = hits.associateBy { it.deviceId }
+                                                    probingTailscale = false
+                                                }
+                                            }
+                                        ) {
+                                            Text("重新探测", fontSize = 11.sp)
+                                        }
+                                    }
+                                    val peers = tailnetState.status.peers.sortedWith(
+                                        compareByDescending<com.falcon.android.model.TailnetPeer> { tailscaleHits.containsKey(it.id) }
+                                            .thenByDescending { it.online }
+                                            .thenBy { it.name.lowercase() }
+                                    )
+                                    if (peers.isEmpty()) {
+                                        Text("当前 tailnet 中没有其他设备", color = theme.mutedForeground, fontSize = 11.5.sp)
+                                    }
+                                    for (peer in peers) {
+                                        val hit = tailscaleHits[peer.id]
+                                        val targetHost = (peer.dnsName?.takeIf { it.isNotBlank() }
+                                            ?: peer.ipv4?.takeIf { it.isNotBlank() }
+                                            ?: peer.host).trimEnd('.')
+                                        if (targetHost.isEmpty()) continue
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(if (hit != null) theme.tint else theme.card)
+                                                .clickable {
+                                                    editingServer = null
+                                                    serverNameInput = peer.name
+                                                    serverUrlInput = "http://$targetHost:${hit?.port ?: 4923}"
+                                                    serverRouteInput = ServerRoute.AUTO
+                                                    showTailscalePicker = false
+                                                }
+                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            Box(
+                                                Modifier
+                                                    .size(7.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (peer.online) theme.success else theme.mutedForeground.copy(alpha = 0.4f))
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    Text(
+                                                        text = peer.name,
+                                                        color = theme.foreground,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    if (hit != null) {
+                                                        Text(
+                                                            text = if (hit.version.isNotBlank()) "Falcon v${hit.version}" else "Falcon",
+                                                            color = theme.success,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                }
+                                                Text(
+                                                    text = if (!peer.os.isNullOrBlank()) "$targetHost · ${peer.os}" else targetHost,
+                                                    color = theme.mutedForeground,
+                                                    fontSize = 10.5.sp,
+                                                    fontFamily = monoFont,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if (scanHint != null) {
                         Text(
                             text = scanHint!!,
@@ -752,7 +938,7 @@ fun DashboardScreen(
                                         onSelectServer(existing)
                                     } else {
                                         val label = "局域网 ${disc.platform} (${disc.url.removePrefix("http://")})"
-                                        onAddOrUpdateServer(label, disc.url, null)
+                                        onAddOrUpdateServer(label, disc.url, ServerRoute.AUTO, null)
                                     }
                                     showServerDialog = false
                                 }
@@ -779,6 +965,7 @@ fun DashboardScreen(
 
                     for (profile in serverProfiles) {
                         val isCurrent = profile.id == activeServer.id
+                        val viaTailnet = TailnetManager.isRoutedViaTailnet(profile.url, profile.route)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -792,14 +979,30 @@ fun DashboardScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = profile.name,
-                                    color = if (isCurrent) theme.tintForeground else theme.foreground,
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = profile.name,
+                                        color = if (isCurrent) theme.tintForeground else theme.foreground,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (viaTailnet) {
+                                        Text(
+                                            text = "经 Tailscale",
+                                            color = theme.tintStrong,
+                                            fontSize = 9.5.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    } else if (profile.route != ServerRoute.AUTO) {
+                                        Text(
+                                            text = profile.route.label,
+                                            color = theme.mutedForeground,
+                                            fontSize = 9.5.sp
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = profile.url,
                                     color = theme.mutedForeground,
@@ -819,6 +1022,7 @@ fun DashboardScreen(
                                         editingServer = profile
                                         serverNameInput = profile.name
                                         serverUrlInput = profile.url
+                                        serverRouteInput = profile.route
                                     }
                                     .padding(horizontal = 6.dp, vertical = 3.dp)
                             )
@@ -861,6 +1065,27 @@ fun DashboardScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("路由", color = theme.mutedForeground, fontSize = 11.5.sp)
+                        for (candidate in ServerRoute.entries) {
+                            val selected = serverRouteInput == candidate
+                            Text(
+                                text = candidate.label,
+                                color = if (selected) theme.tintForeground else theme.mutedForeground,
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (selected) theme.tint else theme.background)
+                                    .clickable { serverRouteInput = candidate }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -871,10 +1096,12 @@ fun DashboardScreen(
                             onAddOrUpdateServer(
                                 name,
                                 FalconApiClient.normalizeBaseUrl(serverUrlInput),
+                                serverRouteInput,
                                 editingServer?.id
                             )
                             serverNameInput = ""
                             serverUrlInput = ""
+                            serverRouteInput = ServerRoute.AUTO
                             editingServer = null
                             showServerDialog = false
                         } else {
@@ -892,6 +1119,7 @@ fun DashboardScreen(
                             editingServer = null
                             serverNameInput = ""
                             serverUrlInput = ""
+                            serverRouteInput = ServerRoute.AUTO
                         }
                     ) {
                         Text("取消编辑", color = theme.mutedForeground, fontSize = 13.sp)

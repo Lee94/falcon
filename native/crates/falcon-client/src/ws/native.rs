@@ -80,12 +80,18 @@ async fn connect_inner(inner: &Inner, path: &str) -> Result<WsStream, ConnectErr
     let port = url.port_or_known_default().ok_or_else(|| other("地址缺端口".to_owned()))?;
     let host = url.host().ok_or_else(|| other("地址缺主机名".to_owned()))?;
 
-    let tcp = match host {
-        Host::Domain(d) => TcpStream::connect((d, port)).await,
-        Host::Ipv4(ip) => TcpStream::connect((IpAddr::V4(ip), port)).await,
-        Host::Ipv6(ip) => TcpStream::connect((IpAddr::V6(ip), port)).await,
-    }
-    .map_err(|e| other(format!("连不上 {host}:{port}：{e}")))?;
+    let tcp = match inner.resolve_route() {
+        crate::tailnet::ResolvedRoute::Direct => match host {
+            Host::Domain(d) => TcpStream::connect((d, port)).await,
+            Host::Ipv4(ip) => TcpStream::connect((IpAddr::V4(ip), port)).await,
+            Host::Ipv6(ip) => TcpStream::connect((IpAddr::V6(ip), port)).await,
+        }
+        .map_err(|e| other(format!("连不上 {host}:{port}：{e}")))?,
+        crate::tailnet::ResolvedRoute::Tailnet(proxy) => {
+            super::socks5::connect(&proxy, &host, port).await.map_err(other)?
+        }
+        crate::tailnet::ResolvedRoute::TailnetUnavailable(msg) => return Err(other(msg)),
+    };
     let _ = tcp.set_nodelay(true);
 
     let io: Box<dyn Io> = if secure {

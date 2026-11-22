@@ -10,6 +10,7 @@
 
 use std::rc::Rc;
 
+use falcon_client::ServerRoute;
 use falcon_platform::Platform;
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,9 @@ pub struct ServerProfile {
     /// 用户确认过"非回环地址走明文 HTTP"（只问一次）
     #[serde(default)]
     pub plaintext_ok: bool,
+    /// 网络路由：自动 / 直连 / 经内置 Tailscale（ADR 0030 决定四）
+    #[serde(default)]
+    pub route: ServerRoute,
 }
 
 impl ServerProfile {
@@ -40,9 +44,18 @@ impl ServerProfile {
             .is_some_and(|h| h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]")
     }
 
-    /// 非回环的明文 HTTP：密码与终端内容都在网上裸奔，要让用户知道
+    /// 当前是否经内置 Tailscale 路由（ADR 0030 决定四）
+    pub fn is_routed_via_tailnet(&self) -> bool {
+        falcon_client::is_url_routed_via_tailnet(&self.url, self.route)
+    }
+
+    /// 非回环的明文 HTTP：密码与终端内容都在网上裸奔，要让用户知道。
+    /// 经内置 Tailscale 时由 WireGuard 加密，不再弹明文警告（ADR 0030）。
     pub fn is_insecure(&self) -> bool {
-        self.url.starts_with("http://") && !self.is_loopback()
+        self.url.starts_with("http://")
+            && !self.is_loopback()
+            && self.route != ServerRoute::Tailnet
+            && !self.is_routed_via_tailnet()
     }
 }
 
@@ -83,6 +96,7 @@ impl Profiles {
                     name: String::new(),
                     url: local_url,
                     plaintext_ok: true,
+                    route: ServerRoute::Direct,
                 },
             );
         }

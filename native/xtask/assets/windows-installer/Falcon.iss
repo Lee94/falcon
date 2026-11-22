@@ -68,6 +68,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "Falcon.exe"; Flags: ignoreversion
 Source: "{#SourceServer}"; DestDir: "{app}"; DestName: "falcon-server.exe"; Flags: ignoreversion
+#ifdef SourceTailnet
+Source: "{#SourceTailnet}"; DestDir: "{app}"; DestName: "falcon_tailnet.dll"; Flags: ignoreversion
+#endif
 
 [Icons]
 Name: "{autoprograms}\Falcon"; Filename: "{app}\Falcon.exe"

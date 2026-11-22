@@ -491,6 +491,15 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
         });
         let w = ws_entity.clone();
         actions.push(PickItem {
+            key: format!(">{} tailscale tailnet vpn", t!("palette.openTailscale")),
+            label: t!("palette.openTailscale").to_string(),
+            meta: None,
+            icon: icon(IconName::Globe),
+            tone: None,
+            run: run(move |window, cx| crate::dialogs::settings::open(&w, crate::dialogs::settings::Tab::Tailscale, window, cx)),
+        });
+        let w = ws_entity.clone();
+        actions.push(PickItem {
             key: format!(">{}", t!("palette.openRelays")),
             label: t!("palette.openRelays").to_string(),
             meta: Some(chord("openRelays").to_string()),

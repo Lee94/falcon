@@ -44,6 +44,7 @@ mod client;
 mod error;
 mod external;
 mod runtime;
+mod tailnet;
 mod tls;
 mod ws;
 
@@ -55,6 +56,11 @@ pub use client::{AuthEvent, AuthEvents, AuthState, FalconClient};
 pub use error::{ApiError, ApiErrorKind, ApiResult};
 pub use external::{EXTERNAL_MAX_BYTES, ExternalResponse, fetch_external};
 pub use runtime::{MaybeSend, block_in_place, runtime};
+pub use tailnet::{
+    ResolvedRoute, ServerRoute, TailnetProbeHit, is_url_routed_via_tailnet, looks_like_tailnet_host,
+    probe_tailnet_servers, resolve_route_for_host, resolve_route_for_url, set_tailnet_state,
+    tailnet_failure_hint, tailnet_proxy, tailnet_status,
+};
 pub use ws::browser::{BrowserSink, BrowserSocket, BrowserSocketEvent};
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};

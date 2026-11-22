@@ -101,6 +101,17 @@ fn build(skip_bin: bool, skip_cargo: bool) -> Result<()> {
     }
     copy_exec(&built_app, &exe)?;
 
+    // 客户端内置 Tailscale 动态库（ADR 0030 决定七）：存在就打进 Frameworks，缺省允许不带 Go 的开发构建
+    let tailnet_lib = native().join("target-tailnet/aarch64-apple-darwin/libfalcon_tailnet.dylib");
+    if tailnet_lib.is_file() {
+        let frameworks = contents.join("Frameworks");
+        std::fs::create_dir_all(&frameworks)?;
+        copy_exec(&tailnet_lib, &frameworks.join("libfalcon_tailnet.dylib"))?;
+        println!("== 已打包 {} ==", rel(&tailnet_lib));
+    } else {
+        println!("== 未找到 {}，本次安装包不含内置 Tailscale（可先运行 cargo xtask tailnet） ==", rel(&tailnet_lib));
+    }
+
     let plist = std::fs::read_to_string(templates.join("Info.plist"))?.replace("__VERSION__", ver);
     std::fs::write(contents.join("Info.plist"), plist)?;
 

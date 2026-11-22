@@ -26,6 +26,7 @@ mod rightbar;
 mod session_icon;
 mod sidebar;
 mod snapshot;
+mod tailnet;
 mod terminal;
 mod theme;
 mod toasts;
@@ -53,6 +54,7 @@ pub fn init(platform: Rc<dyn Platform>, cx: &mut App) {
     toasts::init(cx);
     fonts::register(cx);
     prefs::Prefs::init(cx);
+    tailnet::init(cx);
     zoom::init(cx);
     profiles::Profiles::init(cx);
     theme::init(cx);

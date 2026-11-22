@@ -3,10 +3,142 @@ package com.falcon.android.model
 import org.json.JSONArray
 import org.json.JSONObject
 
+enum class ServerRoute(val wire: String, val label: String) {
+    AUTO("auto", "自动"),
+    DIRECT("direct", "直连"),
+    TAILNET("tailnet", "经内置 Tailscale");
+
+    companion object {
+        fun fromWire(raw: String?): ServerRoute = when (raw?.lowercase()) {
+            "direct" -> DIRECT
+            "tailnet" -> TAILNET
+            else -> AUTO
+        }
+    }
+}
+
 data class ServerProfile(
     val id: String,
     val name: String,
-    val url: String
+    val url: String,
+    val route: ServerRoute = ServerRoute.AUTO
+)
+
+data class TailnetSelfNode(
+    val name: String,
+    val dnsName: String?,
+    val ipv4: String?,
+    val tailnet: String?,
+    val magicDnsSuffix: String?
+)
+
+data class TailnetPeer(
+    val id: String,
+    val name: String,
+    val host: String,
+    val dnsName: String?,
+    val ipv4: String?,
+    val os: String?,
+    val online: Boolean
+)
+
+data class TailnetStatus(
+    val state: String,
+    val loginUrl: String?,
+    val selfNode: TailnetSelfNode?,
+    val peers: List<TailnetPeer>,
+    val error: String?
+) {
+    fun hasPeer(host: String): Boolean {
+        if (state != "running") return false
+        val cleaned = host.trim().trimEnd('.').removePrefix("[").removeSuffix("]")
+        if (cleaned.isEmpty()) return false
+        return peers.any { p ->
+            val dns = p.dnsName.orEmpty()
+            val short = dns.substringBefore('.')
+            listOf(dns, short, p.ipv4.orEmpty(), p.host).any { cand ->
+                cand.isNotEmpty() && cand.equals(cleaned, ignoreCase = true)
+            }
+        }
+    }
+
+    companion object {
+        val STOPPED = TailnetStatus("stopped", null, null, emptyList(), null)
+
+        fun parse(raw: String): TailnetStatus {
+            if (raw.isBlank()) return STOPPED
+            return try {
+                val obj = JSONObject(raw)
+                val selfObj = obj.optJSONObject("self")
+                val selfNode = selfObj?.let { s ->
+                    TailnetSelfNode(
+                        name = s.optString("name", ""),
+                        dnsName = s.optString("dnsName").takeIf { it.isNotBlank() },
+                        ipv4 = s.optString("ipv4").takeIf { it.isNotBlank() },
+                        tailnet = s.optString("tailnet").takeIf { it.isNotBlank() },
+                        magicDnsSuffix = s.optString("magicDnsSuffix").takeIf { it.isNotBlank() }
+                    )
+                }
+                val peersArr = obj.optJSONArray("peers") ?: JSONArray()
+                val peers = ArrayList<TailnetPeer>(peersArr.length())
+                for (i in 0 until peersArr.length()) {
+                    val p = peersArr.optJSONObject(i) ?: continue
+                    peers.add(
+                        TailnetPeer(
+                            id = p.optString("id"),
+                            name = p.optString("name"),
+                            host = p.optString("host"),
+                            dnsName = p.optString("dnsName").takeIf { it.isNotBlank() },
+                            ipv4 = p.optString("ipv4").takeIf { it.isNotBlank() },
+                            os = p.optString("os").takeIf { it.isNotBlank() },
+                            online = p.optBoolean("online", false)
+                        )
+                    )
+                }
+                TailnetStatus(
+                    state = obj.optString("state", "stopped"),
+                    loginUrl = obj.optString("loginUrl").takeIf { it.isNotBlank() },
+                    selfNode = selfNode,
+                    peers = peers,
+                    error = obj.optString("error").takeIf { it.isNotBlank() }
+                )
+            } catch (e: Exception) {
+                TailnetStatus("error", null, null, emptyList(), e.message ?: "状态解析失败")
+            }
+        }
+    }
+}
+
+data class TailnetProxy(
+    val addr: String,
+    val user: String,
+    val pass: String
+) {
+    val host: String get() = addr.substringBeforeLast(':')
+    val port: Int get() = addr.substringAfterLast(':').toIntOrNull() ?: 0
+
+    override fun toString(): String = "TailnetProxy(addr=$addr, user=$user, pass=<redacted>)"
+
+    companion object {
+        fun parse(raw: String): TailnetProxy? {
+            if (raw.isBlank()) return null
+            return try {
+                val obj = JSONObject(raw)
+                val addr = obj.optString("addr")
+                if (addr.isBlank()) null else TailnetProxy(addr, obj.optString("user"), obj.optString("pass"))
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+}
+
+data class TailnetProbeHit(
+    val deviceId: String,
+    val host: String,
+    val port: Int,
+    val version: String,
+    val platform: String
 )
 
 data class ProgramBadgeUi(

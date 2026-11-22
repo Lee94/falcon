@@ -5,6 +5,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -14,8 +15,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.ServerProfile
+import com.falcon.android.model.ServerRoute
 import com.falcon.android.model.SessionUi
 import com.falcon.android.net.FalconApiClient
+import com.falcon.android.net.TailnetManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -40,7 +43,8 @@ private fun loadSavedServers(context: Context): Pair<List<ServerProfile>, String
                     ServerProfile(
                         id = o.optString("id"),
                         name = o.optString("name"),
-                        url = o.optString("url")
+                        url = o.optString("url"),
+                        route = ServerRoute.fromWire(o.optString("route", "auto"))
                     )
                 )
             }
@@ -92,6 +96,7 @@ private fun saveServersToPrefs(
                 put("id", s.id)
                 put("name", s.name)
                 put("url", s.url)
+                put("route", s.route.wire)
             }
         )
     }
@@ -111,6 +116,16 @@ fun FalconApp() {
     var serverProfiles by remember { mutableStateOf(initialServers.first) }
     var activeServerId by remember { mutableStateOf(initialServers.second) }
 
+    LaunchedEffect(Unit) {
+        TailnetManager.init(context)
+    }
+
+    LaunchedEffect(serverProfiles) {
+        FalconApiClient.updateServerRoutes(serverProfiles)
+    }
+
+    val tailnetState by TailnetManager.state.collectAsState()
+
     val activeServer = remember(serverProfiles, activeServerId) {
         serverProfiles.find { it.id == activeServerId } ?: serverProfiles.first()
     }
@@ -128,6 +143,14 @@ fun FalconApp() {
     var refreshTrigger by remember { mutableIntStateOf(0) }
 
     var openedSession by remember { mutableStateOf<SessionUi?>(null) }
+
+    // 内置 Tailscale 就绪后自动重连当前依赖它的服务端（ADR 0030）
+    val tailnetReady = tailnetState.status.state == "running" && tailnetState.proxy != null
+    LaunchedEffect(tailnetReady) {
+        if (tailnetReady && connectionError != null && activeServer.route != ServerRoute.DIRECT) {
+            refreshTrigger++
+        }
+    }
 
     fun sessionTerminated(baseUrl: String, sessionId: String) {
         val ids = terminatedSessions[baseUrl].orEmpty()
@@ -204,32 +227,34 @@ fun FalconApp() {
                     saveServersToPrefs(context, serverProfiles, activeServerId)
                     refreshTrigger++
                 },
-                onAddOrUpdateServer = { name, url, editId ->
+                onAddOrUpdateServer = { name, url, route, editId ->
                     val normalized = FalconApiClient.normalizeBaseUrl(url)
                     if (editId != null) {
                         // 编辑后若与另一条同地址，以正在编辑的为准，去掉那条旧的，避免同地址两条并存。
                         serverProfiles = serverProfiles.filter { it.id == editId || it.url != normalized }.map {
-                            if (it.id == editId) it.copy(name = name, url = normalized) else it
+                            if (it.id == editId) it.copy(name = name, url = normalized, route = route) else it
                         }
                         activeServerId = editId
                     } else {
                         val existing = serverProfiles.firstOrNull { it.url == normalized }
                         if (existing != null) {
-                            // 同地址已存在：只更新名称并切换过去，不再重复建条目。
+                            // 同地址已存在：只更新名称和路由并切换过去，不再重复建条目。
                             serverProfiles = serverProfiles.map {
-                                if (it.id == existing.id) it.copy(name = name) else it
+                                if (it.id == existing.id) it.copy(name = name, route = route) else it
                             }
                             activeServerId = existing.id
                         } else {
                             val newProfile = ServerProfile(
                                 id = UUID.randomUUID().toString(),
                                 name = name,
-                                url = normalized
+                                url = normalized,
+                                route = route
                             )
                             serverProfiles = serverProfiles + newProfile
                             activeServerId = newProfile.id
                         }
                     }
+                    FalconApiClient.updateServerRoutes(serverProfiles)
                     saveServersToPrefs(context, serverProfiles, activeServerId)
                     refreshTrigger++
                 },

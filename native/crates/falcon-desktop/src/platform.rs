@@ -166,4 +166,29 @@ impl Platform for Desktop {
     fn schedule_relaunch(&self, bundle: &std::path::Path) -> Result<(), String> {
         crate::app_update::schedule_relaunch(bundle)
     }
+
+    fn tailnet_state_dir(&self) -> Option<PathBuf> {
+        Some(self.data_dir.join("tailnet"))
+    }
+
+    fn device_hostname(&self) -> Option<String> {
+        static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        HOST.get_or_init(|| {
+            for key in ["COMPUTERNAME", "HOSTNAME"] {
+                if let Ok(v) = std::env::var(key) {
+                    let v = v.trim().to_owned();
+                    if !v.is_empty() {
+                        return Some(v);
+                    }
+                }
+            }
+            let out = std::process::Command::new("hostname").output().ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            (!s.is_empty()).then_some(s)
+        })
+        .clone()
+    }
 }
