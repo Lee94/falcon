@@ -7,7 +7,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{browser_session_name, is_valid_session_id, policy_dir, run_dir};
+use super::{is_valid_session_id, policy_dir, run_dir};
 
 pub const ALLOW_POLICY_JSON: &str = r#"{"default":"allow"}"#;
 pub const TAKEOVER_POLICY_JSON: &str = r#"{"default":"deny","allow":["snapshot","get","read","wait"]}"#;
@@ -85,25 +85,24 @@ pub fn remove_policy(data_dir: &Path, session_id: &str) {
     let _ = std::fs::remove_file(policy_path(data_dir, session_id));
 }
 
-/// 检查 `<runDir>/falcon-<id>.settings` 里是否存了不同于 falcon 的 actionPolicy。
-/// 守护进程重启后会优先用 `.settings` 里的 policy，导致锁失效。
-pub fn settings_overrides_policy(data_dir: &Path, session_id: &str) -> bool {
-    if !is_valid_session_id(session_id) {
-        return false;
-    }
-    let settings = run_dir(data_dir).join(format!("{}.settings", browser_session_name(session_id)));
-    let Ok(text) = std::fs::read_to_string(&settings) else { return false };
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
-    let Some(stored) = val
-        .get("actionPolicy")
-        .or_else(|| val.get("action_policy"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    else {
-        return false;
-    };
+pub(super) fn read_policy_setting(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("action_policy")
+        .or_else(|| value.get("actionPolicy"))
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+/// 当前守护进程的 `.config` 和重启时沿用的 `.settings` 都可能指定另一份 policy。
+pub(super) fn settings_overrides_browser_policy(data_dir: &Path, session_id: &str, browser_session: &str) -> bool {
+    let run = run_dir(data_dir);
     let expected = policy_path(data_dir, session_id);
-    Path::new(stored) != expected.as_path()
+    ["config", "settings"].iter().any(|ext| {
+        read_policy_setting(&run.join(format!("{browser_session}.{ext}")))
+            .is_some_and(|path| Path::new(&path) != expected.as_path())
+    })
 }
 
 pub fn is_allowed_during_takeover(action: &str) -> bool {
@@ -136,13 +135,13 @@ mod tests {
             serde_json::json!({ "actionPolicy": expected.to_string_lossy() }).to_string(),
         )
         .unwrap();
-        assert!(!settings_overrides_policy(dir.path(), "s1"));
+        assert!(!settings_overrides_browser_policy(dir.path(), "s1", "falcon-s1"));
 
         std::fs::write(
             run.join("falcon-s1.settings"),
             serde_json::json!({ "actionPolicy": "/other/policy.json" }).to_string(),
         )
         .unwrap();
-        assert!(settings_overrides_policy(dir.path(), "s1"));
+        assert!(settings_overrides_browser_policy(dir.path(), "s1", "falcon-s1"));
     }
 }

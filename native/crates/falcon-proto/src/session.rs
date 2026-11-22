@@ -109,9 +109,13 @@ pub struct Session {
     /// 在列表上显示「在等你授权」
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_status: Option<ProgramStatusSummary>,
-    /// 该会话当前打开的 agent 浏览器摘要（ADR 0029）；没有浏览器时缺省
+    /// 该会话当前打开的默认 agent 浏览器摘要（ADR 0029）；没有默认实例时缺省。
+    /// 保留给旧客户端；多浏览器客户端读取 `browsers`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<BrowserBrief>,
+    /// 该终端在宿主机上当前存活的全部 agent-browser 实例，按名称排序。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<BrowserBrief>,
     /// unix 毫秒
     pub created_at: i64,
     /// 最近一次真实终端输入的 unix 毫秒；接入、重连、resize 与终端自动查询应答不算用户活动

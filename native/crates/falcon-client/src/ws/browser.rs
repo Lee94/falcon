@@ -12,7 +12,7 @@ use falcon_proto::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use super::{ConnectError, WsMsg};
-use crate::api::seg;
+use crate::api::{Query, seg};
 use crate::client::{AuthEvent, AuthEvents, FalconClient, Relogin};
 use crate::runtime;
 use crate::ws::session::SocketOptions;
@@ -69,14 +69,34 @@ impl BrowserSocket {
         opts: SocketOptions,
         sink: impl BrowserSink,
     ) -> Self {
-        let session_id = session_id.into();
+        Self::open_path(client, browser_path(&session_id.into(), None), initial_visible, opts, sink)
+    }
+
+    pub fn open_instance(
+        client: &FalconClient,
+        session_id: &str,
+        browser_session: Option<&str>,
+        initial_visible: bool,
+        sink: impl BrowserSink,
+    ) -> Self {
+        let path = browser_path(session_id, browser_session);
+        Self::open_path(client, path, initial_visible, SocketOptions::default(), sink)
+    }
+
+    fn open_path(
+        client: &FalconClient,
+        path: String,
+        initial_visible: bool,
+        opts: SocketOptions,
+        sink: impl BrowserSink,
+    ) -> Self {
         let (tx, rx) = unbounded_channel();
         let closed = Arc::new(AtomicBool::new(false));
         let inner = client.inner.clone();
         let auth = client.subscribe_auth();
         let closed_task = closed.clone();
         runtime::spawn(async move {
-            drive(inner, auth, session_id, initial_visible, opts, rx, sink, closed_task).await;
+            drive(inner, auth, path, initial_visible, opts, rx, sink, closed_task).await;
         });
         Self { cmd: tx, closed }
     }
@@ -162,17 +182,21 @@ impl Drop for BrowserSocket {
     }
 }
 
+fn browser_path(session_id: &str, browser_session: Option<&str>) -> String {
+    let query = Query::new().opt("browserSession", browser_session).finish();
+    format!("/ws/browser/{}{query}", seg(session_id))
+}
+
 async fn drive(
     inner: Arc<crate::client::Inner>,
     mut auth: AuthEvents,
-    session_id: String,
+    path: String,
     mut visible: bool,
     opts: SocketOptions,
     mut rx: UnboundedReceiver<Cmd>,
     sink: impl BrowserSink,
     closed: Arc<AtomicBool>,
 ) {
-    let path = format!("/ws/browser/{}", seg(&session_id));
     let mut attempt: u32 = 0;
     let mut ever_connected = false;
 

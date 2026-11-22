@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use falcon_proto::{GitFileChange, Project, SessionAgent, SessionState, SessionWithProject, DeadReason};
+use falcon_proto::{BrowserBrief, DeadReason, GitFileChange, Project, Session, SessionAgent, SessionState, SessionWithProject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,7 +23,7 @@ use crate::layout::{
     new_canvas_id, order_by_canvas, pane_keys, pin_edge, pin_pane, remove_pane, replace_pane, resolve_spot,
     set_column_basis, set_pane_basis, sync_columns, unpin_all, visible_columns,
 };
-use crate::pane_key::{DIFF_KEY, PaneItem, browser_key, file_key, parse_pane_key, term_key};
+use crate::pane_key::{BrowserTarget, DIFF_KEY, PaneItem, file_key, parse_pane_key, term_key};
 use crate::panel_width::{PANEL_WIDTH_DEFAULT, clamp_panel_width_default, parse_panel_width};
 
 pub const PENDING_PREFIX: &str = "pending:";
@@ -39,7 +39,12 @@ pub fn is_pending_id(id: &str) -> bool {
 pub enum ActiveView {
     Overview,
     Terminal { session_id: String },
-    Browser { session_id: String },
+    Browser {
+        session_id: String,
+        /// 空串 = 旧持久化里的默认浏览器；构造 pane key 时规范化为 falcon-<sessionId>。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        browser_session: String,
+    },
     /// 选中了项目但还没有可显示的终端
     Project,
     /// 「修改」面板点开的文件差异（见 [`WorkspaceState::diff_tab`]）
@@ -177,6 +182,42 @@ pub struct PersistedColumn {
     pub canvas: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NamedBrowserTarget {
+    session_id: String,
+    browser_session: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum BrowserTargetWire {
+    Legacy(String),
+    Named(NamedBrowserTarget),
+}
+
+impl Serialize for BrowserTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.is_default() {
+            return serializer.serialize_str(&self.session_id);
+        }
+        BrowserTargetWire::Named(NamedBrowserTarget {
+            session_id: self.session_id.clone(),
+            browser_session: self.browser_session.clone(),
+        })
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BrowserTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match BrowserTargetWire::deserialize(deserializer)? {
+            BrowserTargetWire::Legacy(session_id) => BrowserTarget::default_for(&session_id),
+            BrowserTargetWire::Named(target) => BrowserTarget::new(&target.session_id, &target.browser_session),
+        })
+    }
+}
+
 /// `falcon.workspace` 的形状（字段名、嵌套、顺序照 React 版 `JSON.stringify` 的输出：浏览器版沿用
 /// 同一个 localStorage 键，老用户的排布原样读回）
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -185,7 +226,7 @@ pub struct PersistedWorkspace {
     pub tabs: Vec<String>,
     /// 打开着的 agent 浏览器窗口所属会话 id（ADR 0029）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub browsers: Vec<String>,
+    pub browsers: Vec<BrowserTarget>,
     /// 主区排布：列 → 窗口。与 tabs / browsers 对账后才使用（见 [`sync_columns`]）
     pub columns: Vec<PersistedColumn>,
     pub active: ActiveView,
@@ -241,9 +282,10 @@ pub fn parse_persisted_columns(raw: Option<&Value>) -> Vec<PersistedColumn> {
             let Some(pane) = pane.as_object() else { continue };
             // pending id 活不过重启；文件 / 差异也不落盘，这里一并挡住
             let Some(key) = pane.get("key").and_then(Value::as_str) else { continue };
-            let keep = match key.strip_prefix("t:").or_else(|| key.strip_prefix("b:")) {
-                Some(id) => !id.is_empty() && !is_pending_id(id),
-                None => false,
+            let keep = match parse_pane_key(key) {
+                Some(PaneItem::Terminal { id, .. }) => !is_pending_id(&id),
+                Some(PaneItem::Browser { session_id, .. }) => !is_pending_id(&session_id),
+                _ => false,
             };
             if !keep {
                 continue;
@@ -299,23 +341,21 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
         Some(_) => return fallback,
     };
     let columns = parse_persisted_columns(get("columns"));
-    let mut browsers: Vec<String> = match get("browsers") {
+    let mut browsers: Vec<BrowserTarget> = match get("browsers") {
         Some(Value::Array(items)) => items
             .iter()
-            .filter_map(Value::as_str)
-            .filter(|id| !id.is_empty() && !is_pending_id(id))
-            .map(str::to_string)
+            .filter_map(|item| serde_json::from_value::<BrowserTarget>(item.clone()).ok())
+            .filter(|target| !target.session_id.is_empty() && !is_pending_id(&target.session_id))
             .collect(),
         _ => Vec::new(),
     };
     for col in &columns {
         for p in &col.panes {
-            if let Some(id) = p.key.strip_prefix("b:")
-                && !id.is_empty()
-                && !is_pending_id(id)
-                && !browsers.iter().any(|b| b == id)
-            {
-                browsers.push(id.to_string());
+            if let Some(PaneItem::Browser { session_id, browser_session, .. }) = parse_pane_key(&p.key) {
+                let target = BrowserTarget::new(&session_id, &browser_session);
+                if !is_pending_id(&target.session_id) && !browsers.contains(&target) {
+                    browsers.push(target);
+                }
             }
         }
     }
@@ -324,7 +364,14 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
         let kind = a.and_then(|a| a.get("kind")).and_then(Value::as_str);
         match (kind, a.and_then(|a| a.get("sessionId")).and_then(Value::as_str)) {
             (Some("terminal"), Some(id)) => ActiveView::Terminal { session_id: id.to_string() },
-            (Some("browser"), Some(id)) => ActiveView::Browser { session_id: id.to_string() },
+            (Some("browser"), Some(id)) => ActiveView::Browser {
+                session_id: id.to_string(),
+                browser_session: a
+                    .and_then(|a| a.get("browserSession"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
             (Some("project"), _) => ActiveView::Project,
             _ => ActiveView::Overview,
         }
@@ -366,11 +413,26 @@ pub fn restore_columns(ws: &PersistedWorkspace) -> Vec<ColumnLayout> {
         })
         .collect();
     let mut live: Vec<String> = ws.tabs.iter().map(|t| term_key(t)).collect();
-    live.extend(ws.browsers.iter().map(|b| browser_key(b)));
+    live.extend(ws.browsers.iter().map(BrowserTarget::key));
     sync_columns(&columns, &live)
 }
 
 // ---------------- selector ----------------
+
+/// 新服务端返回全部实例；旧服务端只有单个 `browser`，回退成一项且不走重复合并。
+pub fn browser_briefs(session: &Session) -> &[BrowserBrief] {
+    if session.browsers.is_empty() { session.browser.as_slice() } else { &session.browsers }
+}
+
+pub fn browser_target_for_brief(session_id: &str, brief: &BrowserBrief) -> BrowserTarget {
+    BrowserTarget::new(session_id, &brief.browser_session)
+}
+
+pub fn browser_brief_for_target<'a>(session: &'a Session, target: &BrowserTarget) -> Option<&'a BrowserBrief> {
+    browser_briefs(session)
+        .iter()
+        .find(|brief| browser_target_for_brief(&session.id, brief) == *target)
+}
 
 /// 窗口（会话 / pending）属于哪个项目
 pub fn tab_project_id<'a>(tab_id: &str, sessions: &'a [SessionWithProject], pending: &'a [PendingSession]) -> Option<&'a str> {
@@ -384,7 +446,7 @@ pub fn tab_project_id<'a>(tab_id: &str, sessions: &'a [SessionWithProject], pend
 pub fn active_key(active: &ActiveView) -> Option<String> {
     match active {
         ActiveView::Terminal { session_id } => Some(term_key(session_id)),
-        ActiveView::Browser { session_id } => Some(browser_key(session_id)),
+        ActiveView::Browser { session_id, browser_session } => Some(BrowserTarget::new(session_id, browser_session).key()),
         ActiveView::File { project_id, path } => Some(file_key(project_id, path)),
         ActiveView::Diff => Some(DIFF_KEY.to_string()),
         ActiveView::Overview | ActiveView::Project => None,
@@ -395,7 +457,13 @@ pub fn active_key(active: &ActiveView) -> Option<String> {
 pub fn pane_view(key: &str) -> Option<ActiveView> {
     Some(match parse_pane_key(key)? {
         PaneItem::Terminal { id, .. } => ActiveView::Terminal { session_id: id },
-        PaneItem::Browser { session_id, .. } => ActiveView::Browser { session_id },
+        PaneItem::Browser { session_id, browser_session, .. } => {
+            let target = BrowserTarget::new(&session_id, &browser_session);
+            ActiveView::Browser {
+                session_id,
+                browser_session: if target.is_default() { String::new() } else { browser_session },
+            }
+        }
         PaneItem::File { project_id, path, .. } => ActiveView::File { project_id, path },
         PaneItem::Diff { .. } => ActiveView::Diff,
     })
@@ -454,7 +522,7 @@ pub struct WorkspaceState {
     /// 打开的终端窗口（手动关掉 = 结束会话），可能含 pending id
     pub tabs: Vec<String>,
     /// 打开的 agent 浏览器窗口所属会话 id（持久化，ADR 0029）
-    pub browsers: Vec<String>,
+    pub browsers: Vec<BrowserTarget>,
     /// 主区排布：列 → 窗口（终端 / 浏览器 / 文件 / 差异混排）。含**所有**项目的窗口，画之前按
     /// 当前项目过滤（[`WorkspaceState::layout_columns`]）；终端与浏览器部分持久化。
     pub columns: Vec<ColumnLayout>,
@@ -549,10 +617,11 @@ impl WorkspaceState {
                     .panes
                     .iter()
                     .filter(|p| {
-                        p.key
-                            .strip_prefix("t:")
-                            .or_else(|| p.key.strip_prefix("b:"))
-                            .is_some_and(|id| !id.is_empty() && !is_pending_id(id))
+                        match parse_pane_key(&p.key) {
+                            Some(PaneItem::Terminal { id, .. }) => !is_pending_id(&id),
+                            Some(PaneItem::Browser { session_id, .. }) => !is_pending_id(&session_id),
+                            _ => false,
+                        }
                     })
                     .cloned()
                     .collect();
@@ -564,12 +633,12 @@ impl WorkspaceState {
         let active = match &self.active {
             ActiveView::Diff | ActiveView::File { .. } => self.idle_view(),
             ActiveView::Terminal { session_id } if is_pending_id(session_id) => self.idle_view(),
-            ActiveView::Browser { session_id } if is_pending_id(session_id) => self.idle_view(),
+            ActiveView::Browser { session_id, .. } if is_pending_id(session_id) => self.idle_view(),
             other => other.clone(),
         };
         PersistedWorkspace {
             tabs: self.tabs.iter().filter(|t| !is_pending_id(t)).cloned().collect(),
-            browsers: self.browsers.iter().filter(|b| !is_pending_id(b)).cloned().collect(),
+            browsers: self.browsers.iter().filter(|b| !is_pending_id(&b.session_id)).cloned().collect(),
             columns,
             active,
             sidebar_open: self.sidebar_open,
@@ -623,12 +692,12 @@ impl WorkspaceState {
         }).cloned().collect()
     }
 
-    /// 当前项目下可见的浏览器窗口所属会话 id
-    pub fn visible_browsers(&self, sessions: &[SessionWithProject]) -> Vec<String> {
+    /// 当前项目下可见的远端浏览器实例
+    pub fn visible_browsers(&self, sessions: &[SessionWithProject]) -> Vec<BrowserTarget> {
         self.browsers
             .iter()
-            .filter(|id| {
-                tab_project_id(id, sessions, &self.pending)
+            .filter(|target| {
+                tab_project_id(&target.session_id, sessions, &self.pending)
                     .is_some_and(|owner| self.selected_project_id.as_deref().is_none_or(|sel| sel == owner))
             })
             .cloned()
@@ -639,7 +708,7 @@ impl WorkspaceState {
     /// 的窗口一律从列里摘掉，在这里面却没排布的各自接一列。
     pub fn live_pane_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self.tabs.iter().map(|t| term_key(t)).collect();
-        keys.extend(self.browsers.iter().map(|b| browser_key(b)));
+        keys.extend(self.browsers.iter().map(BrowserTarget::key));
         if let Some(f) = &self.file_tab {
             keys.push(f.key());
         }
@@ -652,7 +721,7 @@ impl WorkspaceState {
     /// 当前项目下该画出来的窗口 key
     pub fn visible_pane_keys(&self, sessions: &[SessionWithProject]) -> HashSet<String> {
         let mut keys: HashSet<String> = self.visible_tabs(sessions).iter().map(|t| term_key(t)).collect();
-        keys.extend(self.visible_browsers(sessions).iter().map(|b| browser_key(b)));
+        keys.extend(self.visible_browsers(sessions).iter().map(BrowserTarget::key));
         if self.file_visible()
             && let Some(f) = &self.file_tab {
                 keys.insert(f.key());
@@ -714,7 +783,7 @@ impl WorkspaceState {
             return Some(sel.clone());
         }
         match &self.active {
-            ActiveView::Terminal { session_id } | ActiveView::Browser { session_id } => self
+            ActiveView::Terminal { session_id } | ActiveView::Browser { session_id, .. } => self
                 .pending
                 .iter()
                 .find(|p| &p.id == session_id)
@@ -727,10 +796,13 @@ impl WorkspaceState {
     }
 
     /// 关掉一个不代表会话的窗口（差异 / 文件）之后落到哪。
-    /// 顺序：最近的可见终端 → 还开着的文件窗口 → 差异窗口 → 项目空页 → 总览。
+    /// 顺序：最近的可见终端 → 浏览器 → 文件 → 差异 → 项目空页 → 总览。
     fn fallback_active(&self, sessions: &[SessionWithProject]) -> ActiveView {
         if let Some(last) = self.visible_tabs(sessions).last() {
             return ActiveView::Terminal { session_id: last.clone() };
+        }
+        if let Some(view) = self.visible_browsers(sessions).last().and_then(|browser| pane_view(&browser.key())) {
+            return view;
         }
         if self.file_visible()
             && let Some(f) = &self.file_tab {
@@ -783,12 +855,12 @@ impl WorkspaceState {
         let previous_len = self.tabs.len();
         let previous_browsers_len = self.browsers.len();
         self.tabs.retain(|t| visible(t) || may_be_unavailable(t));
-        self.browsers.retain(|b| visible(b) || may_be_unavailable(b));
+        self.browsers.retain(|target| visible(&target.session_id) || may_be_unavailable(&target.session_id));
         let removed = self.tabs.len() != previous_len || self.browsers.len() != previous_browsers_len;
         if removed {
             self.resync();
         }
-        if let ActiveView::Terminal { session_id } | ActiveView::Browser { session_id } = &self.active
+        if let ActiveView::Terminal { session_id } | ActiveView::Browser { session_id, .. } = &self.active
             && !visible(session_id)
         {
             self.active = self.idle_view();
@@ -954,62 +1026,81 @@ impl WorkspaceState {
 
     // ---- reducer：浏览器窗口（ADR 0029） ----
 
-    /// 打开或聚焦某个终端会话对应的浏览器窗口。
+    /// 打开或聚焦一个远端浏览器实例。
     /// 首次打开时放在终端所在列的右边（同一块画布）；`focus = false` 用于自动弹出时不抢焦点。
-    pub fn open_browser(&mut self, session_id: &str, focus: bool, sessions: &[SessionWithProject]) -> bool {
-        let key = browser_key(session_id);
+    pub fn open_browser(&mut self, target: BrowserTarget, focus: bool, sessions: &[SessionWithProject]) -> bool {
+        let key = target.key();
+        let session_id = target.session_id.clone();
         let mut changed = false;
-        if !self.browsers.iter().any(|b| b == session_id) {
-            self.browsers.push(session_id.to_string());
-            let term = term_key(session_id);
+        if !self.browsers.contains(&target) {
+            self.browsers.push(target.clone());
+            let term = term_key(&session_id);
             let next_columns = match find_pane(&self.columns, &term) {
                 Some(at) if !self.columns[at.col].pinned => {
-                    if focus {
-                        self.term_zoomed = false;
-                    }
-                    let canvas = self.columns[at.col].canvas.clone();
-                    insert_column(&self.columns, &key, at.col + 1, canvas.as_deref())
+                    // 待分配的列优先落在终端右边。宽度不够时沿用工作区的自动拆分画布规则。
+                    insert_column(&self.columns, &key, at.col + 1, None)
                 }
                 _ => {
                     let at = self.new_column_at(None, sessions);
-                    let canvas = self.current_canvas(sessions);
-                    insert_column(&self.columns, &key, at, canvas.as_deref())
+                    insert_column(&self.columns, &key, at, None)
                 }
             };
             self.columns = next_columns;
             changed = true;
         }
         if focus {
-            let next = ActiveView::Browser { session_id: session_id.to_string() };
+            let next = ActiveView::Browser {
+                session_id: target.session_id.clone(),
+                browser_session: if target.is_default() { String::new() } else { target.browser_session },
+            };
+            if self.term_zoomed {
+                self.term_zoomed = false;
+                changed = true;
+            }
             if self.active != next {
                 self.active = next;
                 changed = true;
             }
-            if let Some(pid) = tab_project_id(session_id, sessions, &self.pending).map(str::to_string) {
+            if let Some(pid) = tab_project_id(&session_id, sessions, &self.pending).map(str::to_string) {
                 self.selected_project_id = Some(pid);
             }
         }
         changed
     }
 
-    /// 关掉某个会话的浏览器窗口（不碰终端会话）。
-    pub fn close_browser(&mut self, session_id: &str, sessions: &[SessionWithProject]) -> bool {
+    /// 关掉一个浏览器实例（不碰终端会话，也不影响同终端的其他实例）。
+    pub fn close_browser(&mut self, target: &BrowserTarget, sessions: &[SessionWithProject]) -> bool {
         let before = self.browsers.len();
-        self.browsers.retain(|b| b != session_id);
-        let key = browser_key(session_id);
+        self.browsers.retain(|candidate| candidate != target);
+        let key = target.key();
         let had_pane = find_pane(&self.columns, &key).is_some();
         if had_pane {
             self.columns = remove_pane(&self.columns, &key);
         }
-        let was_active = matches!(&self.active, ActiveView::Browser { session_id: s } if s == session_id);
+        let was_active = match &self.active {
+            ActiveView::Browser { session_id, browser_session } => {
+                BrowserTarget::new(session_id, browser_session) == *target
+            }
+            _ => false,
+        };
         if was_active {
-            self.active = if self.tabs.iter().any(|t| t == session_id) {
-                ActiveView::Terminal { session_id: session_id.to_string() }
+            self.active = if self.tabs.iter().any(|t| t == &target.session_id) {
+                ActiveView::Terminal { session_id: target.session_id.clone() }
             } else {
                 self.fallback_active(sessions)
             };
         }
         self.browsers.len() != before || had_pane || was_active
+    }
+
+    /// Terminate / 清除记录时移除该终端的全部浏览器实例；普通 Detach 不调用这里。
+    pub fn drop_browsers_for_session(&mut self, session_id: &str, sessions: &[SessionWithProject]) -> bool {
+        let targets: Vec<_> = self.browsers.iter().filter(|target| target.session_id == session_id).cloned().collect();
+        let mut changed = false;
+        for target in targets {
+            changed |= self.close_browser(&target, sessions);
+        }
+        changed
     }
 
     // ---- reducer：查看窗口 ----
@@ -1361,6 +1452,33 @@ mod tests {
 
     fn shape(cols: &[ColumnLayout]) -> Vec<Vec<String>> {
         cols.iter().map(|c| c.panes.iter().map(|p| p.key.clone()).collect()).collect()
+    }
+
+    #[test]
+    fn restores_and_closes_browser_instances_independently() {
+        let sid = "node:work:dGVybWluYWw";
+        let sessions = [session(sid, "p1", 0)];
+        let mut state = WorkspaceState::from_persisted(&load_workspace(Some(&json!({
+            "tabs": [sid], "browsers": [sid], "active": {"kind": "browser", "sessionId": sid},
+        }).to_string())));
+        let default = BrowserTarget::default_for(sid);
+        assert_eq!(active_key(&state.active), Some(default.key()));
+        let first = BrowserTarget::new(sid, "vinci-a");
+        let second = BrowserTarget::new(sid, "vinci-b");
+        assert!(state.open_browser(first.clone(), false, &sessions));
+        assert!(state.open_browser(second.clone(), true, &sessions));
+        assert!(!state.open_browser(second.clone(), true, &sessions));
+        let saved = state.persisted();
+        let raw = serialize_workspace(&saved);
+        assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["browsers"][0], sid);
+        let restored = load_workspace(Some(&raw));
+        assert_eq!(restored, saved);
+        let mut state = WorkspaceState::from_persisted(&restored);
+        assert_eq!(active_key(&state.active), Some(second.key()));
+        assert!(state.close_browser(&second, &sessions));
+        assert_eq!(state.browsers, vec![default, first]);
+        assert!(state.drop_browsers_for_session(sid, &sessions));
+        assert_eq!(state.live_pane_keys(), vec![term_key(sid)]);
     }
 
     #[test]

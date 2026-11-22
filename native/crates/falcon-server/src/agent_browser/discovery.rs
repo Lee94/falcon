@@ -8,32 +8,33 @@ use std::path::Path;
 
 use falcon_proto::MIN_AGENT_BROWSER_VERSION;
 
-use super::is_valid_session_id;
+use super::{BrowserKey, is_valid_browser_session_name, is_valid_session_id, policy_dir};
 
-/// 发现结果：某个终端会话当前存活的 agent-browser stream 端点。
+/// 发现结果：某个终端会话的一个 agent-browser stream 端点。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredBrowser {
-    pub session_id: String,
+    pub key: BrowserKey,
     pub port: u16,
     pub pid: u32,
     pub version: (u32, u32, u32),
 }
 
-/// 扫描阶段被拒（版本过低）的条目，供调用方按 (session_id, pid) 去重打一次日志。
+/// 扫描阶段被拒（版本过低）的条目，供调用方按实例与 pid 去重打一次日志。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedBrowser {
-    pub session_id: String,
+    pub key: BrowserKey,
     pub pid: u32,
     pub raw_version: String,
 }
 
 #[derive(Debug, Default)]
 pub struct ScanReport {
-    pub active: HashMap<String, DiscoveredBrowser>,
+    pub active: HashMap<BrowserKey, DiscoveredBrowser>,
     pub rejected: Vec<RejectedBrowser>,
 }
 
-/// 扫描 `<dataDir>/agent-browser/run/`，找出所有满足条件（有 `.stream`、`.pid` 存活、`.version` 达标）的浏览器会话。
+/// 扫描 `<dataDir>/agent-browser/run/`，找出所有满足条件（有 `.stream`、`.pid` 存活、`.version` 达标）
+/// 且能关联到 Falcon 终端的浏览器实例。
 pub fn scan_run_dir(run_dir: &Path) -> ScanReport {
     scan_run_dir_with_probe(run_dir, pid_alive)
 }
@@ -45,8 +46,7 @@ fn scan_run_dir_with_probe(run_dir: &Path, is_alive: impl Fn(u32) -> bool) -> Sc
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
         let Some(stem) = name.strip_suffix(".stream") else { continue };
-        let Some(session_id) = stem.strip_prefix("falcon-") else { continue };
-        if !is_valid_session_id(session_id) {
+        if !is_valid_browser_session_name(stem) {
             continue;
         }
         let Ok(stream_raw) = std::fs::read_to_string(&path) else { continue };
@@ -59,35 +59,40 @@ fn scan_run_dir_with_probe(run_dir: &Path, is_alive: impl Fn(u32) -> bool) -> Sc
             continue;
         }
 
+        // 命名实例通过继承的 policy 归属终端。没有该元数据的默认实例仍沿用原命名规则。
+        let session_id = owner_from_policy_config(run_dir, stem).or_else(|| {
+            stem.strip_prefix("falcon-").filter(|id| is_valid_session_id(id)).map(str::to_owned)
+        });
+        let Some(key) = session_id.and_then(|id| BrowserKey::new(&id, stem)) else { continue };
+
         let version_path = run_dir.join(format!("{stem}.version"));
         let version_raw = std::fs::read_to_string(&version_path).unwrap_or_default();
         let Some(version) = parse_semver(&version_raw) else {
-            report.rejected.push(RejectedBrowser {
-                session_id: session_id.to_string(),
-                pid,
-                raw_version: version_raw.trim().to_string(),
-            });
+            report.rejected.push(RejectedBrowser { key, pid, raw_version: version_raw.trim().to_string() });
             continue;
         };
         if version < MIN_AGENT_BROWSER_VERSION {
-            report.rejected.push(RejectedBrowser {
-                session_id: session_id.to_string(),
-                pid,
-                raw_version: version_raw.trim().to_string(),
-            });
+            report.rejected.push(RejectedBrowser { key, pid, raw_version: version_raw.trim().to_string() });
             continue;
         }
-        report.active.insert(
-            session_id.to_string(),
-            DiscoveredBrowser {
-                session_id: session_id.to_string(),
-                port,
-                pid,
-                version,
-            },
-        );
+        report.active.insert(key.clone(), DiscoveredBrowser { key, port, pid, version });
     }
     report
+}
+
+/// 自定义 browser session 仍继承 `<dataDir>/agent-browser/policy/<sessionId>.json`。
+/// 只接受与注入路径完全相等的绝对 / 相对词法路径，不能仅凭任意 JSON 里的文件名认领实例。
+fn owner_from_policy_config(run_dir: &Path, browser_session: &str) -> Option<String> {
+    let stored = super::policy::read_policy_setting(&run_dir.join(format!("{browser_session}.config")))?;
+    let stored_path = Path::new(&stored);
+    let file_name = stored_path.file_name()?.to_str()?;
+    let session_id = file_name.strip_suffix(".json")?;
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
+    let agent_browser_root = run_dir.parent()?;
+    let expected = policy_dir(agent_browser_root.parent()?).join(format!("{session_id}.json"));
+    (stored_path == expected).then(|| session_id.to_string())
 }
 
 /// 解析 `.stream` 文件里的端口号：兼容纯数字与 JSON `{"port": 12345}`。
@@ -112,7 +117,7 @@ pub fn parse_pid(raw: &str) -> Option<u32> {
     u32::try_from(pid).ok().filter(|&p| p > 0)
 }
 
-/// 解析 `.version` 文件：`0.43.0`、`v0.43`、`0.43.1-beta.1` 或 JSON `{"version":"0.43.0"}`。
+/// 解析 `.version` 文件：`0.43.0`、`v0.43`、`0.43.1-beta.1` 或 JSON `{"version":"0.43"}`。
 pub fn parse_semver(raw: &str) -> Option<(u32, u32, u32)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -139,13 +144,26 @@ pub fn parse_semver(raw: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
-    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    if pid <= 0 {
+        return false;
+    }
+    let r = unsafe { libc::kill(pid, 0) };
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
-    pid > 0
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let alive = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
+    unsafe { CloseHandle(handle) };
+    alive
 }
 
 #[cfg(test)]
@@ -169,34 +187,45 @@ mod tests {
     }
 
     #[test]
-    fn scans_fixture_files_with_version_and_pid_checks() {
-        let dir = tempfile::tempdir().unwrap();
-        // 正常会话
-        std::fs::write(dir.path().join("falcon-sess-ok.stream"), "43123\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-ok.pid"), "1001\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-ok.version"), "0.43.0\n").unwrap();
-        // 版本过低
-        std::fs::write(dir.path().join("falcon-sess-old.stream"), "43124\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-old.pid"), "1002\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-old.version"), "0.42.9\n").unwrap();
-        // 进程已死
-        std::fs::write(dir.path().join("falcon-sess-dead.stream"), "43125\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-dead.pid"), "9999\n").unwrap();
-        std::fs::write(dir.path().join("falcon-sess-dead.version"), "0.45.0\n").unwrap();
-        // 非 falcon 会话
-        std::fs::write(dir.path().join("other.stream"), "43126\n").unwrap();
-        std::fs::write(dir.path().join("other.pid"), "1001\n").unwrap();
-        std::fs::write(dir.path().join("other.version"), "0.45.0\n").unwrap();
+    fn scans_default_and_policy_owned_named_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("agent-browser");
+        let run = root.join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        let write = |stem: &str, port: u16, pid: u32, version: &str| {
+            std::fs::write(run.join(format!("{stem}.stream")), format!("{port}\n")).unwrap();
+            std::fs::write(run.join(format!("{stem}.pid")), format!("{pid}\n")).unwrap();
+            std::fs::write(run.join(format!("{stem}.version")), format!("{version}\n")).unwrap();
+        };
+        write("falcon-sess-ok", 43123, 1001, "0.43.0");
+        write("falcon-sess-old", 43124, 1002, "0.42.9");
+        write("falcon-sess-dead", 43125, 9999, "0.45.0");
+        write("other", 43126, 1001, "0.45.0");
 
-        let report = scan_run_dir_with_probe(dir.path(), |pid| pid != 9999);
-        assert_eq!(report.active.len(), 1);
-        let ok = report.active.get("sess-ok").unwrap();
-        assert_eq!(ok.port, 43123);
-        assert_eq!(ok.pid, 1001);
-        assert_eq!(ok.version, (0, 43, 0));
+        // 同一个终端可以有第二个、由脚本自行命名的浏览器。
+        write("vinci-viewer", 43127, 1003, "0.43.0");
+        let policy = root.join("policy").join("sess-ok.json");
+        std::fs::write(
+            run.join("vinci-viewer.config"),
+            serde_json::json!({"action_policy": policy.to_string_lossy()}).to_string(),
+        )
+        .unwrap();
+        // policy 不属于 Falcon 注入目录的实例不能认领。
+        write("unowned", 43128, 1004, "0.43.0");
+        std::fs::write(run.join("unowned.config"), r#"{"action_policy":"/other/sess-ok.json"}"#).unwrap();
+
+        let report = scan_run_dir_with_probe(&run, |pid| pid != 9999);
+        assert_eq!(report.active.len(), 2);
+        let default_key = BrowserKey::for_request("sess-ok", None).unwrap();
+        assert_eq!(report.active.get(&default_key).unwrap().port, 43123);
+        let named_key = BrowserKey::new("sess-ok", "vinci-viewer").unwrap();
+        let named = report.active.get(&named_key).unwrap();
+        assert_eq!(named.port, 43127);
+        assert_eq!(named.pid, 1003);
+        assert_eq!(named.version, (0, 43, 0));
 
         assert_eq!(report.rejected.len(), 1);
-        assert_eq!(report.rejected[0].session_id, "sess-old");
+        assert_eq!(report.rejected[0].key.session_id, "sess-old");
         assert_eq!(report.rejected[0].raw_version, "0.42.9");
     }
 }

@@ -22,7 +22,7 @@ use web_time::Instant;
 use falcon_core::layout::{
     self, CANVAS_GAP_PX, CanvasGroup, ColumnLayout, ColumnRect, DropSpot, PaneRect, Viewport,
 };
-use falcon_core::pane_key::{PaneItem, parse_pane_key};
+use falcon_core::pane_key::{BrowserTarget, PaneItem, parse_pane_key};
 use falcon_core::term_canvas::{CanvasSwipe, WheelAxis, WheelAxisLock, WheelSample};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::ContextMenuExt;
@@ -181,8 +181,8 @@ impl Canvas {
                     window.focus(&handle, cx);
                 }
             }
-            Some(PaneItem::Browser { session_id, .. }) => {
-                if let Some(view) = self.ws.read(cx).browsers.get(&session_id).cloned() {
+            Some(PaneItem::Browser { .. }) => {
+                if let Some(view) = self.ws.read(cx).browsers.get(key).cloned() {
                     let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
                     window.focus(&handle, cx);
                 }
@@ -813,11 +813,14 @@ fn pane_label(ws: &Workspace, key: &str) -> String {
             .session(&id)
             .map(|s| crate::labels::session_title(s).unwrap_or_else(|| s.project_name.clone()))
             .unwrap_or_else(|| t!("tab.creating").to_string()),
-        Some(PaneItem::Browser { session_id, .. }) => ws
-            .session(&session_id)
-            .and_then(|s| s.browser.as_ref())
-            .and_then(|b| crate::panels::browser_view::url_domain(&b.url))
-            .unwrap_or_else(|| t!("browser.title").to_string()),
+        Some(PaneItem::Browser { session_id, browser_session, .. }) => {
+            let target = BrowserTarget::new(&session_id, &browser_session);
+            ws.session(&session_id)
+                .and_then(|s| falcon_core::workspace::browser_brief_for_target(&s.session, &target))
+                .and_then(|b| crate::panels::browser_view::url_domain(&b.url))
+                .map(|domain| if target.is_default() { domain } else { format!("{} · {domain}", target.browser_session) })
+                .unwrap_or_else(|| if target.is_default() { t!("browser.title").to_string() } else { target.browser_session })
+        }
         Some(PaneItem::File { path, .. }) => basename(&path),
         Some(PaneItem::Diff { .. }) => ws
             .state
@@ -1068,15 +1071,16 @@ impl Canvas {
                 }
                 info = info.child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(where_));
             }
-            PaneItem::Browser { session_id, .. } => {
+            PaneItem::Browser { session_id, browser_session, .. } => {
+                let target = BrowserTarget::new(session_id, browser_session);
                 let session = ws.session(session_id);
                 let host_label = ws
                     .browsers
-                    .get(session_id)
+                    .get(key)
                     .and_then(|v| crate::panels::browser_view::url_domain(v.read(cx).current_url()))
                     .or_else(|| {
                         session
-                            .and_then(|s| s.browser.as_ref())
+                            .and_then(|s| falcon_core::workspace::browser_brief_for_target(&s.session, &target))
                             .and_then(|b| crate::panels::browser_view::url_domain(&b.url))
                     });
                 let session_name = session
@@ -1171,24 +1175,32 @@ impl Canvas {
             }))
             .child(info)
             .children(edge);
-        // 终端标题栏上的浏览器标记（ADR 0029）：显示当前页面域名，点击打开或聚焦浏览器窗口
         if let PaneItem::Terminal { id, .. } = &item
-            && let Some(brief) = ws.session(id).and_then(|s| s.browser.as_ref())
+            && let Some(session) = ws.session(id)
+            && let briefs = falcon_core::workspace::browser_briefs(&session.session)
+            && !briefs.is_empty()
         {
-            let domain = crate::panels::browser_view::url_domain(&brief.url)
-                .unwrap_or_else(|| t!("browser.badge").to_string());
-            let is_human = brief.control == falcon_proto::BrowserControlHolder::Human;
-            let ws_browser = self.ws.clone();
-            let sid = id.clone();
-            let tip: SharedString = if brief.url.is_empty() {
-                t!("browser.openHint").to_string().into()
-            } else {
-                brief.url.clone().into()
-            };
-            header = header.child(
+            use gpui_kit::component::Sizable;
+            use gpui_kit::component::button::Button;
+            use gpui_kit::component::menu::DropdownMenu;
+
+            let badge_id = SharedString::from(format!("pane-browser-badge-{id}"));
+            let control = if let [brief] = briefs {
+                let target = falcon_core::workspace::browser_target_for_brief(id, brief);
+                let label = if target.is_default() {
+                    crate::panels::browser_view::url_domain(&brief.url).unwrap_or_else(|| t!("browser.badge").into_owned())
+                } else {
+                    target.browser_session.clone()
+                };
+                let tip: SharedString = if brief.url.is_empty() {
+                    t!("browser.openHint").to_string().into()
+                } else {
+                    brief.url.clone().into()
+                };
+                let human = brief.control == falcon_proto::BrowserControlHolder::Human;
+                let ws = self.ws.clone();
                 div()
-                    .id(SharedString::from(format!("pane-browser-badge-{id}")))
-                    .flex_none()
+                    .id(badge_id)
                     .h(zpx(20.))
                     .max_w(zpx(160.))
                     .px(zpx(6.))
@@ -1199,19 +1211,38 @@ impl Canvas {
                     .text_size(zpx(11.))
                     .cursor_pointer()
                     .border_1()
-                    .border_color(if is_human { ui.primary } else { ui.border })
-                    .bg(if is_human { ui.primary.opacity(0.14) } else { ui.app.opacity(0.6) })
-                    .text_color(if is_human { ui.primary } else { ui.foreground })
+                    .border_color(if human { ui.primary } else { ui.border })
+                    .bg(if human { ui.primary.opacity(0.14) } else { ui.app.opacity(0.6) })
+                    .text_color(if human { ui.primary } else { ui.foreground })
                     .hover(|s| s.bg(ui.tint))
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .on_mouse_down(MouseButton::Left, isolate)
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        ws_browser.update(cx, |w, cx| w.open_browser(&sid, true, cx));
+                        ws.update(cx, |w, cx| w.open_browser(target.clone(), true, cx));
                     })
                     .child(icon(IconName::Globe).size(zpx(11.)).flex_none())
-                    .child(div().min_w_0().truncate().child(domain)),
-            );
+                    .child(div().min_w_0().truncate().child(label))
+                    .into_any_element()
+            } else {
+                let items = briefs.iter().map(|brief| {
+                    let target = falcon_core::workspace::browser_target_for_brief(id, brief);
+                    let ws = self.ws.clone();
+                    let label = if target.is_default() { t!("browser.badge").into_owned() } else { target.browser_session.clone() };
+                    let label = match crate::panels::browser_view::url_domain(&brief.url) {
+                        Some(domain) => format!("{label} · {domain}"),
+                        None => label,
+                    };
+                    MenuItemSpec::new(label, move |_, cx| ws.update(cx, |w, cx| w.open_browser(target.clone(), true, cx)))
+                }).collect::<Vec<_>>();
+                Button::new(badge_id)
+                    .outline()
+                    .xsmall()
+                    .icon(IconName::Globe)
+                    .label(t!("browser.instances", n = briefs.len()).to_string())
+                    .dropdown_menu(move |menu, _, _| to_popup(menu, items.clone()))
+                    .into_any_element()
+            };
+            header = header.child(div().flex_none().on_mouse_down(MouseButton::Left, isolate).child(control));
         }
         // PTY 的尺寸跟着别的窗口（ADR 0022）：字缩小了、四周有空白，标出来免得当成显示出错
         if let PaneItem::Terminal { id, .. } = &item
@@ -1263,7 +1294,9 @@ impl Canvas {
                 ws_close.update(cx, |w, cx| match &item_close {
                     PaneItem::Terminal { id, .. } if shift => w.detach_tab(id, cx),
                     PaneItem::Terminal { id, .. } => w.close_tab(id, cx),
-                    PaneItem::Browser { session_id, .. } => w.close_browser(session_id, cx),
+                    PaneItem::Browser { session_id, browser_session, .. } => {
+                        w.close_browser(&BrowserTarget::new(session_id, browser_session), cx)
+                    }
                     PaneItem::File { .. } => w.close_file(cx),
                     PaneItem::Diff { .. } => w.close_diff(cx),
                 });
@@ -1279,9 +1312,9 @@ impl Canvas {
         };
 
         let browser_human = match &item {
-            PaneItem::Browser { session_id, .. } => ws
+            PaneItem::Browser { .. } => ws
                 .browsers
-                .get(session_id)
+                .get(key)
                 .is_some_and(|v| v.read(cx).is_human_control()),
             _ => false,
         };
@@ -1292,9 +1325,9 @@ impl Canvas {
                 Some(view) => view.clone().into_any_element(),
                 None => self.pending_body(id, cx),
             },
-            PaneItem::Browser { session_id, .. } => ws
+            PaneItem::Browser { .. } => ws
                 .browsers
-                .get(session_id)
+                .get(key)
                 .map(|v| v.clone().into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
             PaneItem::File { .. } => self
@@ -1552,7 +1585,9 @@ impl Canvas {
                 MenuItemSpec::new(label.to_string(), move |_, cx| {
                     ws.update(cx, |w, cx| match &it {
                         PaneItem::Terminal { id, .. } => w.close_tab(id, cx),
-                        PaneItem::Browser { session_id, .. } => w.close_browser(session_id, cx),
+                        PaneItem::Browser { session_id, browser_session, .. } => {
+                            w.close_browser(&BrowserTarget::new(session_id, browser_session), cx)
+                        }
                         PaneItem::File { .. } => w.close_file(cx),
                         PaneItem::Diff { .. } => w.close_diff(cx),
                     })

@@ -1,0 +1,31 @@
+[
+  {
+    "browser": {
+      "control": "agent",
+      "title": "",
+      "url": ""
+    },
+    "browsers": [
+      {
+        "control": "agent",
+        "title": "",
+        "url": ""
+      },
+      {
+        "browserSession": "named-preview",
+        "control": "agent",
+        "title": "",
+        "url": ""
+      }
+    ],
+    "createdAt": 0,
+    "durable": true,
+    "id": "terminal-1",
+    "lastActiveAt": 0,
+    "name": "",
+    "projectId": "project-1",
+    "projectName": "browser fixture",
+    "projectType": "local",
+    "state": "active"
+  }
+]

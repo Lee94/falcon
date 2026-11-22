@@ -11,6 +11,21 @@ use falcon_proto::{BrowserEvent, BrowserEventKind, BrowserLogPage};
 
 use super::{is_valid_session_id, log_dir, thumbs_dir};
 
+/// 默认实例直接使用终端 id；命名实例使用 `<终端 id>.<64 位小写十六进制哈希>`。
+/// 这里校验的是存储键，不是 agent-browser 的原始 session 名。
+fn is_valid_storage_id(storage_id: &str) -> bool {
+    let mut parts = storage_id.split('.');
+    let Some(session_id) = parts.next() else { return false };
+    if !is_valid_session_id(session_id) {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, None) => true,
+        (Some(hash), None) => hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        _ => false,
+    }
+}
+
 pub const MAX_LOG_ENTRIES: usize = 5000;
 const COMPACT_THRESHOLD: usize = 5500;
 pub const MAX_THUMBS_PER_SESSION: usize = 300;
@@ -42,7 +57,7 @@ impl SessionLog {
         let mut disk_lines = 0usize;
         let thumb_ids = existing_thumb_ids(data_dir, session_id);
 
-        if is_valid_session_id(session_id) {
+        if is_valid_storage_id(session_id) {
             let path = log_file_path(data_dir, session_id);
             if let Ok(raw) = std::fs::read_to_string(&path) {
                 for line in raw.lines() {
@@ -90,7 +105,7 @@ impl SessionLog {
 
     /// 保存某条 `Result` 事件对应的帧缩略图，并在超过 300 张时清理最早的缩略图。
     pub fn save_thumb(&mut self, event_id: u64, jpeg: &[u8]) -> Option<String> {
-        if !is_valid_session_id(&self.session_id) || jpeg.is_empty() {
+        if !is_valid_storage_id(&self.session_id) || jpeg.is_empty() {
             return None;
         }
         let dir = session_thumbs_dir(&self.data_dir, &self.session_id);
@@ -146,7 +161,7 @@ impl SessionLog {
     }
 
     fn append_disk(&mut self, ev: &BrowserEvent) {
-        if !is_valid_session_id(&self.session_id) {
+        if !is_valid_storage_id(&self.session_id) {
             return;
         }
         let dir = log_dir(&self.data_dir);
@@ -218,7 +233,7 @@ impl SessionLog {
 
 fn existing_thumb_ids(data_dir: &Path, session_id: &str) -> HashSet<u64> {
     let mut ids = HashSet::new();
-    if !is_valid_session_id(session_id) {
+    if !is_valid_storage_id(session_id) {
         return ids;
     }
     let dir = session_thumbs_dir(data_dir, session_id);
@@ -236,19 +251,36 @@ fn existing_thumb_ids(data_dir: &Path, session_id: &str) -> HashSet<u64> {
 
 /// 读取单张缩略图 JPEG 字节；严格校验 id 格式防止路径穿越。
 pub fn read_thumb(data_dir: &Path, session_id: &str, thumb_id: &str) -> Option<Vec<u8>> {
-    if !is_valid_session_id(session_id) || thumb_id.is_empty() || !thumb_id.bytes().all(|b| b.is_ascii_digit()) {
+    if !is_valid_storage_id(session_id) || thumb_id.is_empty() || !thumb_id.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     std::fs::read(session_thumbs_dir(data_dir, session_id).join(format!("{thumb_id}.jpg"))).ok()
 }
 
-/// 删除会话的所有记录与缩略图。
+/// 删除终端会话的所有浏览器记录与缩略图（默认实例 + 所有命名实例）。
 pub fn remove_session_logs(data_dir: &Path, session_id: &str) {
     if !is_valid_session_id(session_id) {
         return;
     }
     let _ = std::fs::remove_file(log_file_path(data_dir, session_id));
     let _ = std::fs::remove_dir_all(session_thumbs_dir(data_dir, session_id));
+    let prefix = format!("{session_id}.");
+    for (dir, is_log) in [(log_dir(data_dir), true), (thumbs_dir(data_dir), false)] {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let storage_id = if is_log { name.strip_suffix(".jsonl") } else { Some(name) };
+            if !storage_id.is_some_and(|id| id.starts_with(&prefix) && is_valid_storage_id(id)) {
+                continue;
+            }
+            if is_log {
+                let _ = std::fs::remove_file(entry.path());
+            } else {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

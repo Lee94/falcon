@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use falcon_proto::{
     BrowserClientMessage, InstallServerMessage, NonDurableReason, ServerMessage, WS_CLOSE_UNAUTHORIZED,
@@ -299,22 +299,32 @@ fn positive_int(v: &Value) -> Option<u16> {
     (f.is_finite() && f.trunc() == f && f > 0.0 && f <= f64::from(u16::MAX)).then_some(f as u16)
 }
 
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BrowserWsQuery {
+    browser_session: Option<String>,
+}
+
 async fn browser(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<BrowserWsQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let Some(key) = crate::agent_browser::BrowserKey::for_request(&id, query.browser_session.as_deref()) else {
+        return super::error::ApiError::bad_request("浏览器会话标识无效").into_response();
+    };
     let authed = state.authenticated(&headers);
     upgrade(ws).on_upgrade(move |socket| async move {
         if !authed {
             return close_unauthorized(socket).await;
         }
-        run_browser(state, id, socket).await;
+        run_browser(state, key, socket).await;
     })
 }
 
-async fn run_browser(state: AppState, id: String, socket: WebSocket) {
+async fn run_browser(state: AppState, key: crate::agent_browser::BrowserKey, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (viewer, mut rx) = BrowserViewer::new();
     let viewer_id = viewer.id;
@@ -344,8 +354,8 @@ async fn run_browser(state: AppState, id: String, socket: WebSocket) {
     });
 
     {
-        let id = id.clone();
-        state.engine.send(move |engine| engine.browser.add_viewer(&id, Rc::new(viewer)));
+        let key = key.clone();
+        state.engine.send(move |engine| engine.browser.add_viewer(&key, Rc::new(viewer)));
     }
 
     while let Some(Ok(msg)) = stream.next().await {
@@ -357,14 +367,14 @@ async fn run_browser(state: AppState, id: String, socket: WebSocket) {
             _ => continue,
         };
         let Ok(parsed) = serde_json::from_str::<BrowserClientMessage>(text) else { continue };
-        let id = id.clone();
+        let key = key.clone();
         state
             .engine
-            .send(move |engine| engine.browser.handle_client_message(&id, viewer_id, parsed));
+            .send(move |engine| engine.browser.handle_client_message(&key, viewer_id, parsed));
     }
 
     let _ = stop_tx.send(());
-    state.engine.send(move |engine| engine.browser.remove_viewer(&id, viewer_id));
+    state.engine.send(move |engine| engine.browser.remove_viewer(&key, viewer_id));
     if let Ok(Ok(mut sink)) = tokio::time::timeout(std::time::Duration::from_secs(5), writer).await {
         let _ = sink.close().await;
     }

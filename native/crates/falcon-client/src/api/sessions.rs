@@ -101,26 +101,36 @@ impl FalconClient {
         })
     }
 
-    /// `GET /api/sessions/:id/browser/log?before=&limit=`：分页拉取 agent 浏览器操作记录（ADR 0029）。
+    /// 分页拉取终端默认浏览器的记录。
     pub fn browser_log(
+        &self, session_id: &str, before: Option<u64>, limit: Option<usize>,
+    ) -> impl Future<Output = ApiResult<BrowserLogPage>> + MaybeSend + 'static {
+        self.browser_instance_log(session_id, None, before, limit)
+    }
+
+    /// `GET /api/sessions/:id/browser/log?browserSession=&before=&limit=`。
+    pub fn browser_instance_log(
         &self,
         session_id: &str,
+        browser_session: Option<&str>,
         before: Option<u64>,
         limit: Option<usize>,
     ) -> impl Future<Output = ApiResult<BrowserLogPage>> + MaybeSend + 'static {
-        let mut q = Query::new();
-        if let Some(b) = before {
-            q = q.push("before", &b.to_string());
-        }
-        if let Some(l) = limit {
-            q = q.push("limit", &l.to_string());
-        }
-        let query = q.finish();
+        let query = Query::new()
+            .opt("browserSession", browser_session)
+            .opt("before", before.map(|id| id.to_string()).as_deref())
+            .opt("limit", limit.map(|limit| limit.to_string()).as_deref())
+            .finish();
         self.get(format!("/api/sessions/{}/browser/log{query}", seg(session_id)))
     }
 
-    /// 浏览器记录缩略图的站内路径，交给 [`FalconClient::raw_bytes`] 取 JPEG 字节。
     pub fn browser_thumb_path(session_id: &str, thumb_id: &str) -> String {
-        format!("/api/sessions/{}/browser/thumbs/{}", seg(session_id), seg(thumb_id))
+        Self::browser_instance_thumb_path(session_id, None, thumb_id)
+    }
+
+    /// 浏览器实例的缩略图站内路径，交给 [`FalconClient::raw_bytes`] 取 JPEG 字节。
+    pub fn browser_instance_thumb_path(session_id: &str, browser_session: Option<&str>, thumb_id: &str) -> String {
+        let query = Query::new().opt("browserSession", browser_session).finish();
+        format!("/api/sessions/{}/browser/thumbs/{}{query}", seg(session_id), seg(thumb_id))
     }
 }

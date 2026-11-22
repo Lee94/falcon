@@ -1212,6 +1212,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_instances_stay_on_owner_and_reconnect_through_gateway() {
+        use base64::Engine as _;
+        use falcon_proto::{BrowserControlHolder, BrowserServerMessage, decode_browser_frame};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let gateway = TestApp::new();
+        let owner = TestApp::new();
+        owner.local_project("project");
+        let terminal_id = "terminal-1";
+        owner.state.db.insert_session(&crate::db::SessionRow {
+            id: terminal_id.into(),
+            project_id: "project".into(),
+            state: "active".into(),
+            ..Default::default()
+        });
+        let run = crate::agent_browser::run_dir(&owner.data_dir);
+        let policy = crate::agent_browser::policy::write_allow(&owner.data_dir, terminal_id).unwrap();
+        std::fs::create_dir_all(&run).unwrap();
+        let (owner_address, _owner_task) = serve(&owner).await;
+        let (gateway_address, _gateway_task) = serve(&gateway).await;
+        attach(&gateway, &owner, owner_address, "work");
+        let public_id = resource_id(&owner.state.db.instance_id(), terminal_id);
+        let encoded_id = crate::api::encode_uri_component(&public_id);
+        let upstream = |name: &str, seq: u64| {
+            let name = name.to_owned();
+            let run = run.clone();
+            let policy = policy.clone();
+            async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                std::fs::write(run.join(format!("{name}.config")), json!({"action_policy": policy}).to_string()).unwrap();
+                std::fs::write(run.join(format!("{name}.version")), "0.43.0").unwrap();
+                std::fs::write(run.join(format!("{name}.pid")), std::process::id().to_string()).unwrap();
+                std::fs::write(run.join(format!("{name}.stream")), port.to_string()).unwrap();
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let task = tokio::spawn(async move {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                    let jpeg = base64::engine::general_purpose::STANDARD.encode([seq as u8]);
+                    for event in [
+                        json!({"type":"url","url":format!("http://localhost/{name}")}),
+                        json!({"type":"result","action":"snapshot","ok":true}),
+                        json!({"type":"frame","seq":seq,"data":jpeg,"metadata":{"deviceWidth":1280,"deviceHeight":720}}),
+                    ] {
+                        socket.send(Message::Text(event.to_string().into())).await.unwrap();
+                    }
+                    while let Some(Ok(Message::Text(text))) = socket.next().await {
+                        let _ = tx.send(serde_json::from_str::<Value>(&text).unwrap());
+                    }
+                });
+                (rx, task)
+            }
+        };
+        let scan = || owner.state.engine.call(|engine| async move { engine.browser.scan_now() });
+        let (mut events_a, upstream_a) = upstream("falcon-terminal-1", 1).await;
+        let (mut events_b, upstream_b) = upstream("预览_二", 2).await;
+        scan().await.unwrap();
+
+        let token = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("browserSession", "预览_二")
+            .finish();
+        let base = format!("ws://{gateway_address}/ws/browser/{encoded_id}");
+        let (mut a, _) = tokio_tungstenite::connect_async(&base).await.unwrap();
+        let (mut b, _) = tokio_tungstenite::connect_async(format!("{base}?{token}")).await.unwrap();
+        for (socket, seq) in [(&mut a, 1u64), (&mut b, 2)] {
+            let frame = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Message::Binary(frame) = socket.next().await.unwrap().unwrap() {
+                        break frame;
+                    }
+                }
+            }).await.unwrap();
+            let (header, jpeg) = decode_browser_frame(&frame).unwrap();
+            assert_eq!(header.seq, seq);
+            assert_eq!(jpeg, &[seq as u8]);
+        }
+        let (_, sessions) = json_of(gateway.get("/api/sessions").await).await;
+        assert_eq!(sessions[0]["id"], public_id);
+        assert_eq!(sessions[0]["browser"]["url"], "http://localhost/falcon-terminal-1");
+        assert_eq!(sessions[0]["browsers"][1]["browserSession"], "预览_二");
+        assert!(gateway.state.db.list_sessions().is_empty());
+
+        let path = format!("/api/sessions/{encoded_id}/browser");
+        for (query, name, jpeg) in [(String::new(), "falcon-terminal-1", 1u8), (format!("?{token}"), "预览_二", 2)] {
+            let (status, log) = json_of(gateway.get(&format!("{path}/log{query}")).await).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(log["events"][0]["url"], format!("http://localhost/{name}"));
+            let thumb = log["events"][1]["thumbId"].as_str().unwrap();
+            let response = gateway.get(&format!("{path}/thumbs/{thumb}{query}")).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+            assert_eq!(bytes.as_ref(), &[jpeg]);
+        }
+
+        a.send(Message::Text(r#"{"type":"takeover"}"#.into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(Message::Text(text))) = b.next().await {
+                if matches!(serde_json::from_str(&text), Ok(BrowserServerMessage::Control { holder: BrowserControlHolder::Human, .. })) {
+                    return;
+                }
+            }
+            panic!("同终端的另一个浏览器没有收到接管状态");
+        }).await.unwrap();
+        b.send(Message::Text(r#"{"type":"text","text":"x"}"#.into())).await.unwrap();
+        let input = tokio::time::timeout(Duration::from_secs(5), events_b.recv()).await.unwrap().unwrap();
+        assert_eq!(input["type"], "input_keyboard");
+        assert!(events_a.try_recv().is_err());
+
+        b.close(None).await.unwrap();
+        a.close(None).await.unwrap();
+        // 客户端断开后还可在同一台节点接回原有浏览器和最后一帧。
+        let (mut again, _) = tokio_tungstenite::connect_async(format!("{base}?{token}")).await.unwrap();
+        let hello = tokio::time::timeout(Duration::from_secs(5), again.next()).await.unwrap();
+        let Some(Ok(Message::Text(hello))) = hello else { panic!("重连缺少 Hello") };
+        assert!(matches!(serde_json::from_str(&hello), Ok(BrowserServerMessage::Hello { gone: false, .. })));
+
+        upstream_a.abort();
+        upstream_b.abort();
+    }
+
+    #[tokio::test]
     async fn two_gateways_share_owner_projects_and_sessions_without_local_session_rows() {
         let a = TestApp::new();
         let b = TestApp::new();

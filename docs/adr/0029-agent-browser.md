@@ -1,6 +1,6 @@
 # Agent 浏览器：看 agent 操控的浏览器，一键接管
 
-状态：提议（2026-11-21），未实施。
+状态：已实施（桌面端）。
 
 在 falcon 的终端里跑 Claude Code / Codex，agent 经常要开浏览器：查文档、点后台、走一遍登录。浏览器在宿主机 B 上无界面地跑，用户看不到它在干什么，卡在验证码 / 二次验证 / 登录页时也帮不上手，只能等 agent 自己放弃。
 
@@ -9,7 +9,7 @@
 ## 用户看到的
 
 1. **不用配置。** 在 falcon 的终端里跑 agent，agent 用 agent-browser 打开网页即可。B 上只要装了 agent-browser。
-2. **自动出现。** 终端窗口标题栏多一个「浏览器」标记（显示当前页面的域名）。这个会话**第一次**出现浏览器时，falcon 自动在终端旁边打开浏览器窗口；用户关掉后不再自动弹，点标记再打开。
+2. **自动出现。** 终端标题栏提供浏览器入口。多个实例同时运行时，入口列出名称和域名。工作区里的终端首次发现某个实例时，Falcon 会按设置打开对应的窗口；用户关掉后可从标题栏再次打开。
 3. **浏览器窗口**：中间是画面；顶条是地址、标签页数、状态和**一个按钮**；底部是可展开的「记录」。
 4. **接管**：点「接管」，或者直接在画面上点一下（这一下只用来接管，不送进页面，免得误点）。窗口描边变强调色，顶条写「你在操作」。此时 agent 的浏览器命令会被拦下，它只能看、不能动。
 5. **交还**：点「交还」。关掉浏览器窗口也算交还（有 30 秒宽限，网络断一下不会立刻交还）。
@@ -40,18 +40,18 @@
 ADR 0027 之后，B 上的终端会话由 B 上的 falcon 节点持有，agent-browser 也跑在 B 上。所以这项功能**全部写在 falcon-server 里，并且只连 `ws://127.0.0.1:<端口>`**：
 
 - 客户端直连 B 时，就是本机连接。
-- 客户端经 A 的网关访问时，`/ws/browser/...` 也是 `/ws/` 开头的路径，网关会原样转给节点（`nodes/gateway.rs` 的 WebSocket 转发），**网关一行代码都不用改**，也不用自己去写 `forward_out`。
+- 客户端经 A 的网关访问时，网关解析浏览器路由里的终端 ID，把请求与实例查询参数转给所属节点。实例、画面来源与记录均留在 B 上。
 - B 不开端口、不改防火墙，也不用起 agent-browser 的面板。
 
 B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用 `agent-browser install --with-deps` 装系统库）。不需要 Xvfb。0027 之前建的、不经节点的旧 SSH 会话不支持这项功能。
 
-## 决定三：浏览器会话与终端会话一一对应，靠启动时注入的环境变量
+## 决定三：浏览器实例从属于终端会话，归属来自启动时注入的环境变量
 
-**每个**终端会话都注入下面这些变量（不只是 agent 会话：用户也可能在普通 shell 里手动起 claude）。注入点和 `FALCON_SESSION_ID` 放在一起（`askpass/install.rs`）：
+**每个**终端会话都注入下面这些变量（不只是 agent 会话：用户也可能在普通 shell 里手动起 claude）。注入与本机的终端启动流程共用（`sessions/local.rs`）：
 
 | 变量 | 值 | 作用 |
 |---|---|---|
-| `AGENT_BROWSER_SESSION` | `falcon-<会话 id>` | 这个终端里开的浏览器都归这个会话。名字只含字母、数字和 `-`，符合 agent-browser 对会话名的限制 |
+| `AGENT_BROWSER_SESSION` | `falcon-<会话 id>` | 指定终端的默认浏览器实例名，允许 agent 另行指定名称 |
 | `AGENT_BROWSER_SOCKET_DIR` | `<数据目录>/agent-browser/run` | 固定守护进程的文件目录，falcon 才能找到它（见下） |
 | `AGENT_BROWSER_ACTION_POLICY` | `<数据目录>/agent-browser/policy/<会话 id>.json` | 接管用的锁（决定五） |
 | `AGENT_BROWSER_STREAM_QUALITY` | `60` | 控制带宽；默认是 80 |
@@ -62,9 +62,9 @@ B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用
 - **用户自己设过的变量不覆盖**：登录环境里已经有同名变量时，以用户的为准，相应的能力关闭（见决定五最后一条）。
 - **会话重开（ADR 0024）沿用同一个 id**，浏览器会话名也就不变，agent 的浏览器状态可以接上。
 
-## 决定四：被动发现浏览器；服务端只开一条上游连接，扇出给所有窗口
+## 决定四：被动发现浏览器，每个实例共享一条上游连接
 
-**发现**：监听 `run/` 目录（notify，另每 2 秒扫一遍兜底）。看到 `falcon-<id>.stream`（内容是端口号），且对应的 `.pid` 进程还活着、`.version` 不低于最低版本，就认定这个会话有浏览器。**不调用 CLI**：`stream status` 之类的命令可能顺手拉起守护进程。这套文件布局是 agent-browser 的内部实现，所以解析只放在 `agent_browser/discovery.rs` 一处，并用固定的样例文件做测试；布局变了，最多是发现不了，不影响安全。
+**发现**：监听 `run/` 目录（notify，另每 2 秒扫一遍兜底）。扫描 `*.stream`（内容是端口号），检查对应的 `.pid` 进程与 `.version`。命名实例的 `.config` 必须指向对应终端的 Falcon policy 路径，默认实例也可按 `falcon-<id>` 关联。宿主机数据库必须仍有该终端的记录。**不调用 CLI**：`stream status` 之类的命令可能顺手拉起守护进程。这套文件布局是 agent-browser 的内部实现，所以解析只放在 `agent_browser/discovery.rs` 一处，并用固定的样例文件做测试；布局变了，最多是发现不了，不影响安全。
 
 **上游连接**：发现浏览器后，服务端开**一条**上游连接 `ws://127.0.0.1:<端口>/?pacing=ack&maxFps=10`，浏览器在多久就保持多久。`command` / `result` 只从 stream 里来，这条连接要一直开着才记得到。所有 falcon 窗口共用它，服务端负责分发。
 
@@ -75,7 +75,7 @@ B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用
 - 没有看得见的窗口时，服务端不再 ack，上游也就不再发帧；只在每次 `result` 之后放行一帧，留作记录的缩略图。
 - agent-browser 文档要求经代理时转发渲染端的 ack。这里虽然多了一跳，但服务端只在下游回 ack 之后才向上游 ack，等价于原样转发：SSH 链路上同时最多只有一帧在路上，不会拖慢同一条连接上的终端回显。
 
-**在场信息**：会话摘要加一个字段 `browser: Option<BrowserBrief { url, title, control }>`，经现有的会话列表推送发给客户端，终端标题栏的「浏览器」标记和自动弹出窗口都靠它。
+**在场信息**：会话列表通过 `browsers[]` 提供各个在运行的实例，保留 `browser` 供旧客户端读取默认实例。实例的身份是终端 ID 和浏览器名称。默认实例省略名称，网关包装终端 ID 后仍可按原路由访问。
 
 ## 决定五：接管就是"人和 agent 之间的一把锁"，用 action policy 实现
 
@@ -89,8 +89,8 @@ B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用
 - **原子写**（临时文件 + rename）。即使读到半个文件也是安全的：agent-browser 读不出合法 policy 时，除 `close` 外一律拒绝。
 - **会话启动前就要写好平时用的文件**：环境变量指向一个不存在的文件，会让 agent 的所有浏览器命令都失败。
 - 服务端启动时把所有 policy 重置成 allow，重启后不会留下卡住的锁。会话删除时一并删掉这个文件。
-- **锁只区分人和 agent，人和人之间不分**：任何客户端的任何窗口都能接管、操作、交还。锁的状态存在服务端，按会话记，并推给所有窗口。没在接管状态时，窗口发来的输入服务端直接丢弃。
-- **何时交还**：用户点「交还」；这个会话的浏览器窗口全部关闭或断线满 30 秒；服务端重启；浏览器关了。**空闲不自动交还**：用户可能正停下来看页面，这时交还，agent 会接着操作。所以顶条上显示已接管多久，提醒用户。
+- **锁只区分人和 agent，人和人之间不分**：任何客户端的任何窗口都能接管、操作、交还。锁的状态存在服务端，按终端记，并同步给该终端的所有浏览器窗口。接管期间的输入只发送给当前窗口对应的实例。没在接管状态时，窗口发来的输入服务端直接丢弃。
+- **何时交还**：用户点「交还」；该终端所有仍在运行的浏览器都没有连接的窗口满 30 秒；服务端重启；该终端的所有浏览器均已关闭。**空闲不自动交还**：用户可能正停下来看页面，这时交还，agent 会接着操作。所以顶条上显示已接管多久，提醒用户。
 - **agent 那边看到什么**：被拦时，agent 收到的是 `Action 'click' denied by policy: Action 'click' is not in the allow list`，并不知道原因。第三阶段给 falcon 启动的 Claude Code（ADR 0013 的启动脚本）加一个 PreToolUse 钩子，在用户接管期间拦下 `agent-browser` 命令，并告诉它"用户正在 falcon 里操作这个浏览器，请等用户交还"。Codex 有没有同类机制，待查。
 - **锁失效的情况**：如果用户自己设了 `AGENT_BROWSER_ACTION_POLICY`（决定三不会覆盖它），或者 agent 用了 `--action-policy` 参数（命令行参数优先于环境变量），或者会话的 `<session>.settings` 里存了另一份 policy（守护进程重启后会优先用它），锁就不起作用。这时仍然可以接管和操作，但「接管」按钮旁会提示"agent 可能同时在操作"。至于 `~/.agent-browser/config.json` 里的 `actionPolicy`，环境变量优先，不受影响。
 
@@ -106,20 +106,20 @@ B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用
 
 服务端按会话保存：`command`（action 与参数）、`result`（成功与否、耗时）、`console` 中的 warn / error、`page_error`、`url`，以及接管 / 交还的标记（记下是哪台设备）。
 
-- 存放位置：`<数据目录>/agent-browser/log/<会话 id>.jsonl`，权限 0600。最多 5000 条，超出后丢最早的。缩略图取每次 `result` 之后的那一帧，每个会话最多 300 张。会话删除时一并删除。
+- 记录和缩略图按浏览器实例各自存放。默认实例沿用 `<数据目录>/agent-browser/log/<终端 id>.jsonl`，命名实例在终端 ID 后加浏览器名称的哈希。每个实例最多保留 5000 条记录和 300 张缩略图。清除终端记录时一并删除。
 - agent-browser 的文档写明了 console 事件不能当审计日志用（客户端跟不上时会丢）。这里的上游连接在本机回环上，又是一直开着的，基本不会丢；但不保证一条不丢，所以也不把它当审计日志宣传。
-- 客户端打开窗口时，先用 `GET /api/sessions/:id/browser/log?before=` 拉最近 200 条，之后跟着 WS 增量更新。
+- 客户端打开窗口时，先用 `GET /api/sessions/:id/browser/log?before=` 拉最近 200 条，之后跟着 WebSocket 增量更新。记录与缩略图请求都使用 `browserSession` 选择命名实例。
 - `fill` / `type` 的文本可能是密码：界面上默认打码，点开才显示。磁盘上原样保存，敏感程度和终端回滚内容相同。
 
 ## 协议
 
-新增 `falcon_proto::browser`。WebSocket 路径是 `/ws/browser/:sessionId`，鉴权和终端 WS 相同。
+新增 `falcon_proto::browser`。WebSocket 路径是 `/ws/browser/:sessionId`，可用 `browserSession` 选择命名实例。旧客户端的无参数路径连接默认实例。鉴权和终端 WebSocket 相同。
 
 - 服务端 → 客户端：`Hello { control, status, url, tabs }`、二进制帧、`Event(BrowserEvent)`、`Control { holder: Agent | Human, since }`、`Status`、`Gone`。
 - 客户端 → 服务端：`Ack { seq }`、`Visibility { visible }`、`Takeover`、`Release`、`Pointer { kind, x, y, button, clicks, modifiers, seq }`、`Wheel { x, y, dx, dy, seq }`、`Key { kind, key, code, modifiers }`、`Text { text }`。
 - 双方遇到不认识的消息一律忽略（`#[serde(other)]`），不升协议版本。
 
-工作区新增一种窗口 `PaneItem::Browser { key, session_id }`，它的落点和持久化规则与其他窗口相同（ADR 0012）。自动弹出时，放在终端所在列的右边。
+浏览器窗口在工作区中记录终端 ID 和实例名，默认实例沿用原有的 `b:<终端 id>` 布局键。各个窗口可独立关闭和重连。客户端断开时，宿主机上的浏览器继续运行。宿主机重启后，需要由 `agent-browser` 本身恢复其浏览器状态。
 
 ## 分阶段
 
@@ -129,7 +129,7 @@ B 上要准备的只有：装好 agent-browser 和它的浏览器（Linux 上用
 
 ## 代价与限制
 
-- 只支持 agent-browser。agent 自己用 `--session` 换了会话名，falcon 就看不到这个浏览器；用 `--action-policy` 时锁不住（界面会提示）。
+- 仅接入 `agent-browser`。使用 `--session` 自定义名称时，实例必须继承终端的 Falcon policy 路径才能被关联。默认实例的 policy 被覆盖时，界面会提示接管锁可能失效。
 - 浏览器存在期间，始终开着一条 stream 连接。没人看时不 ack，上游不出帧，但 Chrome 那边的 screencast 仍然开着，会占多少 CPU 待测。
 - 依赖 agent-browser 的内部文件布局（`.stream` / `.pid` / `.version`）。
 - 没有鼠标指针形状，不能把页面里的内容复制回本机剪贴板，也弹不出文件选择框（接管期间上传不了文件，交给 agent 的 `upload` 命令）。

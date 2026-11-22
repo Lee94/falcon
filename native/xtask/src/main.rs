@@ -46,7 +46,7 @@ const USAGE: &str = "用法：cargo xtask <命令> [参数]
   vendor-themes [--from <目录> | --github]
 
 协议 fixture
-  fixtures [--node-updates-only]         起真服务端生成协议样本；可只更新节点与升级接口
+  fixtures [--node-updates-only | --browsers-only]  起真服务端生成协议样本
   compare-fixtures <基准目录> <对照目录>  比两套 fixture 的形状
 
 平台名：darwin-arm64 / linux-x64 / linux-arm64 / win32-x64（Windows 产物加 .exe）。";

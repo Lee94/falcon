@@ -114,6 +114,7 @@ fn table() -> Vec<(&'static str, Check)> {
         // 会话
         "session-create" => Session,
         "sessions" => Vec<SessionWithProject>,
+        "sessions-with-browsers" => Vec<SessionWithProject>,
         "sessions-after-terminate" => Vec<SessionWithProject>,
         "sessions-with-dead" => Vec<SessionWithProject>,
         "session-foreground" => SessionForeground,

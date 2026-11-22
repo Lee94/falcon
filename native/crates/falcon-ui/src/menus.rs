@@ -218,6 +218,7 @@ pub fn clear_all_dead(ws: &Entity<Workspace>, cx: &mut App) {
         cx.update(|cx| {
             ws.update(cx, |w, cx| {
                 for id in &dead {
+                    w.state.drop_browsers_for_session(id, &w.sessions);
                     w.drop_tab(id, cx);
                 }
                 w.refresh_inventory(cx);

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use falcon_client::MoveProjectInput;
 use falcon_core::layout::DropSpot;
-use falcon_core::pane_key::{self, PaneItem};
+use falcon_core::pane_key::{self, BrowserTarget, PaneItem};
 use falcon_proto::{SessionAgent, SessionState, SessionWithProject};
 use gpui_kit::Context;
 use rust_i18n::t;
@@ -87,18 +87,18 @@ impl Workspace {
 
     // ---------------- 浏览器窗口（ADR 0029） ----------------
 
-    pub fn open_browser(&mut self, session_id: &str, focus: bool, cx: &mut Context<Self>) {
-        if self.session(session_id).is_none() || self.hidden_sessions.contains_key(session_id) {
+    pub fn open_browser(&mut self, target: BrowserTarget, focus: bool, cx: &mut Context<Self>) {
+        if self.session(&target.session_id).is_none() || self.hidden_sessions.contains_key(&target.session_id) {
             return;
         }
-        self.auto_opened_browsers.insert(session_id.to_string());
-        if self.state.open_browser(session_id, focus, &self.sessions) {
+        self.auto_opened_browsers.insert(target.key());
+        if self.state.open_browser(target, focus, &self.sessions) {
             self.commit(focus, cx);
         }
     }
 
-    pub fn close_browser(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.state.close_browser(session_id, &self.sessions) {
+    pub fn close_browser(&mut self, target: &BrowserTarget, cx: &mut Context<Self>) {
+        if self.state.close_browser(target, &self.sessions) {
             self.commit(false, cx);
         }
     }
@@ -276,6 +276,12 @@ impl Workspace {
     fn remove_session_from_view(&mut self, id: &str, cx: &mut Context<Self>) {
         self.sessions.retain(|session| session.id != id);
         self.selected.retain(|selected| selected != id);
+        self.state.drop_browsers_for_session(id, &self.sessions);
+        self.auto_opened_browsers.retain(|key| {
+            pane_key::parse_pane_key(key)
+                .and_then(|pane| pane.browser_target())
+                .is_none_or(|target| target.session_id != id)
+        });
         self.state.drop_tab(id, &self.sessions);
         self.dismiss_program_alert(id, cx);
     }
@@ -290,7 +296,9 @@ impl Workspace {
         for key in keys {
             match pane_key::parse_pane_key(&key) {
                 Some(PaneItem::Terminal { id, .. }) => self.close_tab(&id, cx),
-                Some(PaneItem::Browser { session_id, .. }) => self.close_browser(&session_id, cx),
+                Some(PaneItem::Browser { session_id, browser_session, .. }) => {
+                    self.close_browser(&BrowserTarget::new(&session_id, &browser_session), cx)
+                }
                 Some(PaneItem::File { .. }) => self.close_file(cx),
                 Some(PaneItem::Diff { .. }) => self.close_diff(cx),
                 None => {}
@@ -299,6 +307,7 @@ impl Workspace {
     }
 
     pub fn clear_dead(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.state.drop_browsers_for_session(id, &self.sessions);
         self.drop_tab(id, cx);
         let client = self.client.clone();
         let id = id.to_string();

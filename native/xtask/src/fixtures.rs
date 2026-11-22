@@ -80,18 +80,12 @@ fn png() -> Vec<u8> {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    // 新节点/升级协议可单独生成，避免局部修改需要启动旧工具链中的全部历史场景。
-    if args == ["--node-updates-only"] {
-        let bin = env_path("FALCON_FIXTURE_SERVER_BIN").map(std::path::absolute).transpose()?.unwrap_or(default_server_bin()?);
-        let out = env_path("FALCON_FIXTURE_OUT").map(std::path::absolute).transpose()?.unwrap_or_else(||util::native().join("crates/falcon-proto/tests/fixtures"));
-        return capture_node_updates(&bin,&out);
-    }
-    if let Some(arg) = args.first() {
-        bail!(
-            "fixtures 不带参数（收到 {arg}）：换服务端 / 输出目录用环境变量 \
-             FALCON_FIXTURE_SERVER_BIN / FALCON_FIXTURE_OUT"
-        );
-    }
+    let subset: Option<fn(&Api, &mut Out, &Path) -> Result<()>> = match args {
+        [] => None,
+        [arg] if arg == "--node-updates-only" => Some(capture_node_updates),
+        [arg] if arg == "--browsers-only" => Some(capture_browser_sessions),
+        _ => bail!("用法：cargo xtask fixtures [--node-updates-only | --browsers-only]"),
+    };
     let server_bin = match env_path("FALCON_FIXTURE_SERVER_BIN") {
         Some(p) => std::path::absolute(p)?,
         None => default_server_bin()?,
@@ -102,6 +96,9 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     if !server_bin.exists() {
         bail!("没找到 {}：先 (cd native && cargo build -p falcon-server)", server_bin.display());
+    }
+    if let Some(capture) = subset {
+        return capture_isolated(&server_bin, &out_dir, capture);
     }
     cleanup_dirs();
     let mut server: Option<Child> = None;
@@ -148,39 +145,93 @@ fn generate(server_bin: &Path, out_dir: &Path, server: &mut Option<Child>) -> Re
     }
     let mut out = Out { dir: out_dir.to_path_buf(), written: 0 };
     capture(&mut api, &mut out)?;
+    capture_isolated(server_bin, out_dir, capture_browser_sessions)?;
     let shown = out_dir.strip_prefix(util::root()).unwrap_or(out_dir);
     println!("写了 {} 个 fixture 到 {}/", out.written, shown.display());
     Ok(())
 }
 
-fn capture_node_updates(bin:&Path,out_dir:&Path)->Result<()> {
-    let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-    let data=env::temp_dir().join(format!("falcon-node-fixture-{}-{nonce}",std::process::id()));
+fn capture_isolated(
+    bin: &Path, out_dir: &Path, capture: impl FnOnce(&Api, &mut Out, &Path) -> Result<()>,
+) -> Result<()> {
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    // 浏览器 Unix socket 有长度限制，在短路径下启动。目录名独立，便于并行采样。
+    let temp = if cfg!(target_os = "macos") { PathBuf::from(TMP) } else { env::temp_dir() };
+    let data = temp.join(format!("ff-{nonce:x}"));
     fs::create_dir(&data)?;
-    let port=free_port(4940,4999)?;
-    let log=fs::File::create(data.join("server.log"))?;
-    let mut command=Command::new(bin);
-    command.args(["--host","127.0.0.1","--port",&port.to_string(),"--data-dir"]).arg(&data);
-    for (key,_) in env::vars_os() {
-        if key.to_str().is_some_and(|k|k.starts_with("FALCON_")||k.starts_with("MOJITO_")){command.env_remove(key);}
-    }
-    command.env("HOME",&data).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
-    let mut child=command.spawn().with_context(||format!("起不来 {}",bin.display()))?;
-    let result=(|| {
-        let api=Api {port,cookie:None};
-        wait_ready(&api,&mut child)?;
-        fs::create_dir_all(out_dir)?;
-        let mut out=Out {dir:out_dir.to_path_buf(),written:0};
-        out.save("node-info",&api.get("/api/node")?)?;
-        out.save("nodes",&api.get("/api/nodes")?)?;
-        out.save("server-update-status",&api.get("/api/system/update/status")?)?;
-        out.save("server-update-check",&api.get("/api/system/update")?)?;
-        println!("写了 {} 个节点与升级 fixture 到 {}",out.written,out_dir.display());
-        Ok(())
+    let result = (|| {
+        let port = free_port(4940, 4999)?;
+        let log = fs::File::create(data.join("server.log"))?;
+        let mut cmd = Command::new(bin);
+        cmd.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--data-dir"]).arg(&data);
+        for (key, _) in env::vars_os() {
+            if key.to_str().is_some_and(|key| key.starts_with("FALCON_") || key.starts_with("MOJITO_")) {
+                cmd.env_remove(key);
+            }
+        }
+        cmd.env("HOME", &data).env("SHELL", "/bin/sh").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+        let mut child = cmd.spawn().with_context(|| format!("起不来 {}", bin.display()))?;
+        let result = (|| {
+            let api = Api { port, cookie: None };
+            wait_ready(&api, &mut child)?;
+            fs::create_dir_all(out_dir)?;
+            let mut out = Out { dir: out_dir.to_path_buf(), written: 0 };
+            capture(&api, &mut out, &data)?;
+            println!("写了 {} 个 fixture 到 {}", out.written, out_dir.display());
+            Ok(())
+        })();
+        stop_server(Some(child));
+        result
     })();
-    stop_server(Some(child));
     fs::remove_dir_all(&data)?;
     result
+}
+
+fn capture_node_updates(api: &Api, out: &mut Out, _: &Path) -> Result<()> {
+    out.save("node-info", &api.get("/api/node")?)?;
+    out.save("nodes", &api.get("/api/nodes")?)?;
+    out.save("server-update-status", &api.get("/api/system/update/status")?)?;
+    out.save("server-update-check", &api.get("/api/system/update")?)
+}
+
+fn capture_browser_sessions(api: &Api, out: &mut Out, data: &Path) -> Result<()> {
+    let project = api.call("POST", "/api/projects", json!({
+        "name": "browser fixture", "type": "local", "workingDir": data, "shell": "/bin/sh",
+    }))?;
+    let session = api.call("POST", &format!("/api/projects/{}/sessions", id(&project)?), json!({}))?;
+    let sid = id(&session)?;
+    let result = (|| {
+        let root = data.join("agent-browser");
+        let run = root.join("run");
+        let policy = root.join("policy").join(format!("{sid}.json"));
+        // 这里只采集发现摘要。保持端口监听，具体画面、输入和重连接入由网关测试覆盖。
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        fs::create_dir_all(&run)?;
+        for name in [format!("falcon-{sid}"), "named-preview".to_owned()] {
+            fs::write(run.join(format!("{name}.config")), json!({"action_policy": policy}).to_string())?;
+            fs::write(run.join(format!("{name}.pid")), std::process::id().to_string())?;
+            fs::write(run.join(format!("{name}.version")), "0.43.0")?;
+            fs::write(run.join(format!("{name}.stream")), port.to_string())?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Js::Arr(sessions) = api.get("/api/sessions")?
+                && let Some(mut session) = sessions.into_iter().find(|value| value.text("id").ok().as_deref() == Some(&sid))
+                && matches!(session.get("browsers"), Some(Js::Arr(browsers)) if browsers.len() == 2)
+            {
+                session.set("id", Js::str("terminal-1"));
+                session.set("projectId", Js::str("project-1"));
+                session.set("createdAt", Js::Num(0.));
+                session.set("lastActiveAt", Js::Num(0.));
+                return out.save("sessions-with-browsers", &Js::Arr(vec![session]));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        bail!("未发现默认和命名浏览器实例")
+    })();
+    let cleanup = api.bare("POST", &format!("/api/sessions/{sid}/terminate"));
+    result.and(cleanup.map(|_| ()))
 }
 
 fn capture(api: &mut Api, out: &mut Out) -> Result<()> {

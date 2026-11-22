@@ -1525,6 +1525,7 @@ impl Db {
                 .map(|r| NonDurableReason::from_wire(r).unwrap_or(NonDurableReason::Unknown)),
             program_status: None,
             browser: None,
+            browsers: Vec::new(),
             dead_reason: row.dead_reason.as_deref().map(|r| DeadReason::from_wire(r).unwrap_or(DeadReason::Unknown)),
             created_at: row.created_at,
             last_active_at: row.last_active_at,

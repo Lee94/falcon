@@ -411,7 +411,7 @@ impl SessionManager {
             SessionManager {
                 forwards: ForwardManager::new(db.clone(), link_for.clone(), want_reconnect.clone()),
                 shares: ShareManager::new(db.clone(), data_dir.clone(), link_for, want_reconnect),
-                browser: crate::agent_browser::manager::BrowserManager::new(data_dir.clone()),
+                browser: crate::agent_browser::manager::BrowserManager::new(data_dir.clone(), db.clone()),
                 local: LocalHost::new(data_dir.clone()),
                 db,
                 secrets,

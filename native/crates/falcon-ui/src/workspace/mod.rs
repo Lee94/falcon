@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use falcon_client::{FalconClient, ProbeTarget};
 use falcon_core::layout::{self as layout, ColumnLayout};
-use falcon_core::pane_key::{PaneItem, parse_pane_key};
+use falcon_core::pane_key::{BrowserTarget, PaneItem, parse_pane_key};
 use falcon_platform::Platform;
 pub use falcon_core::workspace::{
     ActiveView, DiffTabTarget, FileTabTarget, NewTerminalPlace, PendingSession, RightPanelId,
@@ -153,9 +153,9 @@ pub struct Workspace {
 
     /// 活着的终端视图：在 tabs 里就常驻（不卸载，沿用 React 版——卸载 = 关 WS，再挂要重连 + 回放）
     pub terminals: HashMap<String, Entity<TerminalView>>,
-    /// 打开着的 agent 浏览器视图（ADR 0029），按 session_id 索引
+    /// 打开着的远端浏览器视图，按完整 pane key（终端 id + browserSession）索引
     pub browsers: HashMap<String, Entity<BrowserView>>,
-    /// 已经处理过「首次出现浏览器」自动弹出的会话 id；用户关掉浏览器窗口后不再自动弹
+    /// 已经处理过「首次出现浏览器」自动弹出的完整 pane key；用户关掉后不再自动弹
     auto_opened_browsers: HashSet<String>,
     /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
     program_alerts: falcon_core::program_status::BlockedAlerts,
@@ -200,7 +200,7 @@ impl Workspace {
             profile.route,
         );
         let state = WorkspaceState::from_persisted(&persist::load(&*platform, &profile));
-        let auto_opened_browsers: HashSet<String> = state.browsers.iter().cloned().collect();
+        let auto_opened_browsers: HashSet<String> = state.browsers.iter().map(BrowserTarget::key).collect();
         let mut this = Self {
             profile,
             client,
@@ -789,28 +789,26 @@ impl Workspace {
                 })
             })
         };
-        let mut layout_changed = self.state.apply_sessions(&self.sessions, preserve);
-        // 首次发现某个会话打开了 agent 浏览器：若设置开启且该终端已开在工作区里，自动在终端右侧弹出（ADR 0029）
-        let auto_open = auto_open_enabled(cx);
-        let new_browsers: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|s| s.browser.is_some() && !self.auto_opened_browsers.contains(&s.id))
-            .map(|s| s.id.clone())
-            .collect();
-        for sid in new_browsers {
-            self.auto_opened_browsers.insert(sid.clone());
-            if auto_open
-                && self.state.tabs.iter().any(|t| t == &sid)
-                && self.state.open_browser(&sid, false, &self.sessions)
-            {
-                layout_changed = true;
+        let mut layout_changed = self.state.apply_sessions(&self.sessions, &preserve);
+        if auto_open_enabled(cx) {
+            // 终端第一次出现在工作区时也接入已经在节点上运行的浏览器。
+            let open_sessions: HashSet<_> = self.state.tabs.iter().cloned().collect();
+            for session in self.sessions.iter().filter(|s| open_sessions.contains(&s.id)) {
+                for brief in falcon_core::workspace::browser_briefs(&session.session) {
+                    let target = falcon_core::workspace::browser_target_for_brief(&session.id, brief);
+                    if self.auto_opened_browsers.insert(target.key()) {
+                        layout_changed |= self.state.open_browser(target, false, &self.sessions);
+                    }
+                }
             }
         }
         if changed {
             let alive: HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
             self.selected.retain(|id| alive.contains(id.as_str()));
-            self.auto_opened_browsers.retain(|id| alive.contains(id.as_str()));
+            self.auto_opened_browsers.retain(|key| {
+                matches!(parse_pane_key(key), Some(PaneItem::Browser { session_id, .. })
+                    if alive.contains(session_id.as_str()) || preserve(&session_id))
+            });
         }
         if changed || layout_changed {
             self.sync_terminals();
@@ -1073,7 +1071,7 @@ impl Workspace {
             .iter()
             .flat_map(|c| c.panes.iter())
             .filter_map(|p| match parse_pane_key(&p.key) {
-                Some(PaneItem::Browser { session_id, .. }) => Some(session_id),
+                Some(PaneItem::Browser { key, .. }) => Some(key),
                 _ => None,
             })
             .collect()
@@ -1172,10 +1170,13 @@ impl Workspace {
     /// 不在 tabs 或实时列表里的视图 Detach（关 WS）；重新出现时按原排布补建。
     pub fn sync_terminals(&mut self) {
         let wanted: HashSet<&String> = self.state.tabs.iter().collect();
-        let wanted_browsers: HashSet<&String> = self.state.browsers.iter().collect();
         let live: HashSet<&String> = self.sessions.iter().map(|s| &s.id).collect();
+        let wanted_browsers: HashSet<_> = self.state.browsers.iter()
+            .filter(|target| live.contains(&target.session_id))
+            .map(BrowserTarget::key)
+            .collect();
         self.terminals.retain(|id, _| wanted.contains(id) && live.contains(id));
-        self.browsers.retain(|id, _| wanted_browsers.contains(id) && live.contains(id));
+        self.browsers.retain(|key, _| wanted_browsers.contains(key));
     }
 
     /// 在窗口上下文里补建缺的终端视图（Workspace 本身拿不到 Window）
@@ -1224,20 +1225,20 @@ impl Workspace {
             view.update(cx, |v, _| v.set_file_context(project));
         }
         let visible_browsers = self.visible_browser_ids();
-        let missing_browsers: Vec<String> = self
+        let missing_browsers: Vec<BrowserTarget> = self
             .state
             .browsers
             .iter()
-            .filter(|id| self.session(id).is_some() && !self.browsers.contains_key(*id))
+            .filter(|target| self.session(&target.session_id).is_some() && !self.browsers.contains_key(&target.key()))
             .cloned()
             .collect();
-        for id in missing_browsers {
+        for target in missing_browsers {
             let client = self.client.clone();
-            let initial_visible = visible_browsers.contains(&id);
-            let sid = id.clone();
-            let view = cx.new(|cx| BrowserView::new(sid, client, initial_visible, window, cx));
+            let key = target.key();
+            let initial_visible = visible_browsers.contains(&key);
+            let view = cx.new(|cx| BrowserView::new(target, client, initial_visible, window, cx));
             cx.subscribe(&view, |_, _, _: &BrowserViewEvent, cx| cx.notify()).detach();
-            self.browsers.insert(id, view);
+            self.browsers.insert(key, view);
         }
         // 新建的视图在 socket 上默认看得见；建在后台画布上的要在它报格子之前说清楚
         self.sync_terminal_visibility(cx);

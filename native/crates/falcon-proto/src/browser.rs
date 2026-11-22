@@ -94,6 +94,9 @@ impl Default for BrowserControl {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserBrief {
+    /// agent-browser 的独立会话名。默认实例和旧服务端省略此字段，客户端使用无参数路由。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub browser_session: String,
     #[serde(default)]
     pub url: String,
     #[serde(default)]

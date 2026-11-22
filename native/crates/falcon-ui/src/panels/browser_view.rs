@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use falcon_client::{BrowserSocket, BrowserSocketEvent, FalconClient};
+use falcon_core::pane_key::BrowserTarget;
 use falcon_proto::{
     BrowserControl, BrowserControlHolder, BrowserEvent, BrowserEventKind, BrowserFrameHeader,
     BrowserServerMessage, BrowserTab, KeyKind, PointerButton, PointerKind,
@@ -71,6 +72,9 @@ enum ThumbState {
 
 pub struct BrowserView {
     pub session_id: String,
+    browser_session: Option<String>,
+    /// 同一终端的多个浏览器实例用各自 key 隔离 GPUI 元素 ID。
+    view_key: String,
     client: FalconClient,
     socket: BrowserSocket,
     focus: FocusHandle,
@@ -115,17 +119,26 @@ impl Focusable for BrowserView {
 
 impl BrowserView {
     pub fn new(
-        session_id: String,
+        target: BrowserTarget,
         client: FalconClient,
         initial_visible: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let view_key = target.key();
+        let browser_session = (!target.is_default()).then_some(target.browser_session);
+        let session_id = target.session_id;
         let focus = cx.focus_handle();
         let (tx, mut rx) = unbounded::<BrowserSocketEvent>();
-        let socket = BrowserSocket::open(&client, session_id.clone(), initial_visible, move |ev| {
-            let _ = tx.unbounded_send(ev);
-        });
+        let socket = BrowserSocket::open_instance(
+            &client,
+            &session_id,
+            browser_session.as_deref(),
+            initial_visible,
+            move |ev| {
+                let _ = tx.unbounded_send(ev);
+            },
+        );
 
         let mut tasks = Vec::new();
         tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -157,6 +170,8 @@ impl BrowserView {
 
         let mut view = Self {
             session_id,
+            browser_session,
+            view_key,
             client,
             socket,
             focus,
@@ -323,7 +338,12 @@ impl BrowserView {
             return;
         }
         self.log_loading = true;
-        let fut = self.client.browser_log(&self.session_id, None, Some(LOG_PAGE_SIZE));
+        let fut = self.client.browser_instance_log(
+            &self.session_id,
+            self.browser_session.as_deref(),
+            None,
+            Some(LOG_PAGE_SIZE),
+        );
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
@@ -352,7 +372,12 @@ impl BrowserView {
         }
         let Some(before) = self.events.first().map(|e| e.id) else { return };
         self.log_loading = true;
-        let fut = self.client.browser_log(&self.session_id, Some(before), Some(LOG_PAGE_SIZE));
+        let fut = self.client.browser_instance_log(
+            &self.session_id,
+            self.browser_session.as_deref(),
+            Some(before),
+            Some(LOG_PAGE_SIZE),
+        );
         cx.spawn(async move |this, cx| {
             let res = fut.await;
             this.update(cx, |this, cx| {
@@ -387,7 +412,11 @@ impl BrowserView {
             return;
         }
         self.thumbs.insert(event_id, ThumbState::Loading);
-        let url = FalconClient::browser_thumb_path(&self.session_id, &thumb_id);
+        let url = FalconClient::browser_instance_thumb_path(
+            &self.session_id,
+            self.browser_session.as_deref(),
+            &thumb_id,
+        );
         let fut = self.client.raw_bytes(&url);
         let svg = cx.svg_renderer();
         cx.spawn(async move |this, cx| {
@@ -647,10 +676,21 @@ impl BrowserView {
             .border_color(ui.border)
             .text_xs();
 
+        if let Some(browser_session) = &self.browser_session {
+            bar = bar.child(
+                div()
+                    .flex_none()
+                    .max_w(zpx(160.))
+                    .truncate()
+                    .text_color(ui.muted_foreground)
+                    .child(browser_session.clone()),
+            );
+        }
+
         // 地址
         bar = bar.child(
             div()
-                .id(SharedString::from(format!("browser-url-{}", self.session_id)))
+                .id(SharedString::from(format!("browser-url-{}", self.view_key)))
                 .flex_1()
                 .min_w_0()
                 .flex()
@@ -685,7 +725,7 @@ impl BrowserView {
                 .into();
             bar = bar.child(
                 div()
-                    .id(SharedString::from(format!("browser-tabs-{}", self.session_id)))
+                    .id(SharedString::from(format!("browser-tabs-{}", self.view_key)))
                     .flex_none()
                     .px(zpx(6.))
                     .h(zpx(20.))
@@ -729,7 +769,7 @@ impl BrowserView {
         if !self.gone {
             if self.control.holder == BrowserControlHolder::Human {
                 bar = bar.child(
-                    Button::new(SharedString::from(format!("browser-release-{}", self.session_id)))
+                    Button::new(SharedString::from(format!("browser-release-{}", self.view_key)))
                         .outline()
                         .xsmall()
                         .label(t!("browser.release").to_string())
@@ -737,7 +777,7 @@ impl BrowserView {
                 );
             } else {
                 bar = bar.child(
-                    Button::new(SharedString::from(format!("browser-takeover-{}", self.session_id)))
+                    Button::new(SharedString::from(format!("browser-takeover-{}", self.view_key)))
                         .primary()
                         .xsmall()
                         .label(t!("browser.takeover").to_string())
@@ -764,7 +804,7 @@ impl BrowserView {
         };
 
         div()
-            .id(SharedString::from(format!("browser-viewport-{}", self.session_id)))
+            .id(SharedString::from(format!("browser-viewport-{}", self.view_key)))
             .relative()
             .flex_1()
             .min_h_0()
@@ -825,7 +865,7 @@ impl BrowserView {
     fn render_log_drawer(&self, ui: &Ui, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.events.len();
         let toggle = div()
-            .id(SharedString::from(format!("browser-log-toggle-{}", self.session_id)))
+            .id(SharedString::from(format!("browser-log-toggle-{}", self.view_key)))
             .h(zpx(26.))
             .flex_none()
             .flex()
@@ -861,7 +901,7 @@ impl BrowserView {
         }
 
         let mut list = div()
-            .id(SharedString::from(format!("browser-log-list-{}", self.session_id)))
+            .id(SharedString::from(format!("browser-log-list-{}", self.view_key)))
             .h(zpx(210.))
             .w_full()
             .overflow_y_scroll()
@@ -878,7 +918,7 @@ impl BrowserView {
             let loading = self.log_loading;
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("browser-log-more-{}", self.session_id)))
+                    .id(SharedString::from(format!("browser-log-more-{}", self.view_key)))
                     .py_1()
                     .text_center()
                     .cursor_pointer()
@@ -953,7 +993,10 @@ impl BrowserView {
                     let display = if revealed { secret.clone() } else { "••••••".to_string() };
                     line = line.child(
                         div()
-                            .id(SharedString::from(format!("browser-secret-{ev_id}")))
+                            .id(SharedString::from(format!(
+                                "browser-secret-{}-{ev_id}",
+                                self.view_key
+                            )))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -1011,7 +1054,10 @@ impl BrowserView {
                     let active = self.expanded_thumb == Some(ev_id);
                     line = line.child(
                         div()
-                            .id(SharedString::from(format!("browser-thumb-btn-{ev_id}")))
+                            .id(SharedString::from(format!(
+                                "browser-thumb-btn-{}-{ev_id}",
+                                self.view_key
+                            )))
                             .flex_none()
                             .flex()
                             .items_center()

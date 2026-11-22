@@ -119,8 +119,9 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
                     session.title = engine.sessions.title_of(&row.id);
                     // 程序状态同理：守护进程推来的，没人在看的会话也靠它在列表上显示
                     session.program_status = engine.sessions.program_status_of(&row.id);
-                    // Agent 浏览器在场摘要（ADR 0029）
-                    session.browser = engine.browser.brief_of(&row.id);
+                    // 旧客户端访问无参数路由，只能打开默认实例。
+                    session.browsers = engine.browser.briefs_of(&row.id);
+                    session.browser = session.browsers.first().filter(|brief| brief.browser_session.is_empty()).cloned();
                     let (project_name, project_type) = if falcon_proto::is_standalone_project_id(&row.project_id) {
                         (
                             "无项目".into(),
@@ -214,9 +215,25 @@ async fn rename(State(state): State<AppState>, Path(id): Path<String>, body: Len
 }
 
 #[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct BrowserLogQuery {
     before: Option<u64>,
     limit: Option<usize>,
+    browser_session: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BrowserThumbQuery {
+    browser_session: Option<String>,
+}
+
+fn browser_key(
+    session_id: &str,
+    browser_session: Option<&str>,
+) -> ApiResult<crate::agent_browser::BrowserKey> {
+    crate::agent_browser::BrowserKey::for_request(session_id, browser_session)
+        .ok_or_else(|| ApiError::bad_request("浏览器会话标识无效"))
 }
 
 async fn browser_log(
@@ -225,9 +242,10 @@ async fn browser_log(
     Query(q): Query<BrowserLogQuery>,
 ) -> ApiResult<Json<BrowserLogPage>> {
     let limit = q.limit.unwrap_or(crate::agent_browser::log::DEFAULT_LOG_LIMIT);
+    let key = browser_key(&id, q.browser_session.as_deref())?;
     let page = state
         .engine
-        .call(move |engine| async move { engine.browser.log_page(&id, q.before, limit) })
+        .call(move |engine| async move { engine.browser.log_page(&key, q.before, limit) })
         .await?;
     Ok(Json(page))
 }
@@ -235,10 +253,12 @@ async fn browser_log(
 async fn browser_thumb(
     State(state): State<AppState>,
     Path((id, thumb_id)): Path<(String, String)>,
+    Query(q): Query<BrowserThumbQuery>,
 ) -> ApiResult<Response> {
+    let key = browser_key(&id, q.browser_session.as_deref())?;
     let data = state
         .engine
-        .call(move |engine| async move { engine.browser.read_thumb(&id, &thumb_id) })
+        .call(move |engine| async move { engine.browser.read_thumb(&key, &thumb_id) })
         .await?;
     let Some(bytes) = data else {
         return Err(ApiError::not_found("缩略图不存在"));
