@@ -114,7 +114,7 @@ pub struct Session {
     pub browser: Option<BrowserBrief>,
     /// unix 毫秒
     pub created_at: i64,
-    /// unix 毫秒
+    /// 最近一次真实终端输入的 unix 毫秒；接入、重连、resize 与终端自动查询应答不算用户活动
     pub last_active_at: i64,
 }
 

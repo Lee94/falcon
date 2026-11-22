@@ -41,7 +41,7 @@ use super::ssh::SshLink;
 use super::ssh_host::{AttachOptions, HostFacts};
 use super::term_size::{TermSize, ViewerAttach, ViewerAttachInput, decide_viewer_attach, fallback_term_size, parse_stored_term_size};
 use super::viewer::Viewer;
-use super::viewer_arbiter::ViewerArbiter;
+use super::viewer_arbiter::{ViewerArbiter, is_user_input};
 use crate::askpass::hub::{AskpassHub, AskpassPrompt, uuid_v4};
 use crate::askpass::install::write_local_askpass;
 use crate::auth::now_ms;
@@ -1735,7 +1735,7 @@ impl SessionManager {
         self.send_replay(&entry, &viewer);
         viewer.send(&ServerMessage::State { state: SessionState::Active, dead_reason: None });
         self.flush_askpass(&viewer, session_id);
-        self.touch(session_id, true);
+        // 接入 / 自动重连不算用户活动：不能在这里刷新 last_active_at，否则侧栏的空闲时长会归零。
         // 刚打开的窗口不等节流窗口，立刻给一次标题
         self.spawn_probe_title(&entry);
     }
@@ -1769,7 +1769,10 @@ impl SessionManager {
                 b.write(data);
             }
         }
-        self.touch(session_id, false);
+        // 自动重放后的 DA / DSR 等终端查询应答也不是用户活动，沿用尺寸与深浅仲裁的同一套判定。
+        if is_user_input(data) {
+            self.touch(session_id);
+        }
     }
 
     pub fn resize(&self, session_id: &str, viewer_id: u64, cols: u16, rows: u16) {
@@ -2280,10 +2283,11 @@ impl SessionManager {
         });
     }
 
-    fn touch(&self, session_id: &str, force: bool) {
+    /// 只有真实终端输入会刷新最近活动时间；接入、重连与 resize 都只是查看或恢复连接。
+    fn touch(&self, session_id: &str) {
         let now = now_ms();
         let last = self.last_touch.borrow().get(session_id).copied().unwrap_or(0);
-        if force || now - last > 30_000 {
+        if now - last > 30_000 {
             self.last_touch.borrow_mut().insert(session_id.to_string(), now);
             self.db.touch_session(session_id, now);
         }
