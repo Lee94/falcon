@@ -123,7 +123,8 @@ pub fn parse_upstream_message(text: &str, fallback_seq: u64) -> Option<UpstreamM
                 .and_then(Value::as_bool)
                 .unwrap_or_else(|| val.get("error").is_none_or(Value::is_null));
             let duration_ms = val
-                .get("durationMs")
+                .get("duration_ms")
+                .or_else(|| val.get("durationMs"))
                 .or_else(|| val.get("duration"))
                 .and_then(Value::as_u64);
             let error = val.get("error").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
@@ -159,7 +160,8 @@ pub fn parse_upstream_message(text: &str, fallback_seq: u64) -> Option<UpstreamM
         }
         "page_error" | "pageError" => {
             let message = val
-                .get("message")
+                .get("text")
+                .or_else(|| val.get("message"))
                 .or_else(|| val.get("error"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()

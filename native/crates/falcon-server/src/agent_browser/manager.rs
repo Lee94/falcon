@@ -52,6 +52,7 @@ struct TerminalTakeover {
 /// 一个连到 `/ws/browser/:sessionId` 的下游窗口句柄。
 pub struct BrowserViewer {
     pub id: u64,
+    read_only: bool,
     ctrl_tx: mpsc::UnboundedSender<String>,
     frame_slot: Arc<LatestFrameSlot>,
     visible: Cell<bool>,
@@ -95,11 +96,12 @@ pub struct BrowserViewerRx {
 }
 
 impl BrowserViewer {
-    pub fn new() -> (Self, BrowserViewerRx) {
+    pub fn new(read_only: bool) -> (Self, BrowserViewerRx) {
         let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let viewer = Self {
             id: VIEWER_ID.fetch_add(1, Ordering::Relaxed),
+            read_only,
             ctrl_tx,
             frame_slot: frame_slot.clone(),
             visible: Cell::new(true),
@@ -188,6 +190,10 @@ impl SessionBrowser {
             inflight_commands: HashMap::new(),
             viewers: HashMap::new(),
         }
+    }
+
+    fn has_control_viewer(&self) -> bool {
+        self.viewers.values().any(|viewer| !viewer.read_only)
     }
 
     fn has_visible_viewer(&self) -> bool {
@@ -442,7 +448,7 @@ impl BrowserManager {
                 self.refresh_control(entry);
                 entry.discovered = Some(found.clone());
                 entry.alive = true;
-                if !entry.viewers.is_empty()
+                if entry.has_control_viewer()
                     && let Some(takeover) = self.takeovers.borrow_mut().get_mut(&key.session_id)
                 {
                     takeover.release_timer = None;
@@ -734,7 +740,7 @@ impl BrowserManager {
         let mut entries = self.entries.borrow_mut();
         let entry = entries.entry(key.clone()).or_insert_with(|| SessionBrowser::new(&self.data_dir, key));
         self.refresh_control(entry);
-        if entry.alive && let Some(takeover) = self.takeovers.borrow_mut().get_mut(&key.session_id) {
+        if entry.alive && !viewer.read_only && let Some(takeover) = self.takeovers.borrow_mut().get_mut(&key.session_id) {
             takeover.release_timer = None;
         }
         viewer.send_json(&BrowserServerMessage::Hello {
@@ -754,7 +760,7 @@ impl BrowserManager {
     /// 只统计连着存活浏览器的窗口；显示「浏览器已关闭」的旧窗口不能一直持有接管锁。
     fn is_watched(&self, session_id: &str) -> bool {
         self.entries.borrow().values().any(|entry| {
-            entry.session_id == session_id && entry.alive && !entry.viewers.is_empty()
+            entry.session_id == session_id && entry.alive && entry.has_control_viewer()
         })
     }
 
@@ -808,6 +814,9 @@ impl BrowserManager {
         let mut entries = self.entries.borrow_mut();
         let Some(entry) = entries.get_mut(key) else { return };
         let Some(viewer) = entry.viewers.get(&viewer_id) else { return };
+        if viewer.read_only && !matches!(msg, BrowserClientMessage::Ack { .. } | BrowserClientMessage::Visibility { .. }) {
+            return;
+        }
         match msg {
             BrowserClientMessage::Takeover { device } if entry.alive => {
                 drop(entries);
@@ -989,7 +998,7 @@ mod tests {
                 let mut entry = SessionBrowser::new(dir.path(), &key);
                 entry.alive = true;
                 mgr.entries.borrow_mut().insert(key.clone(), entry);
-                let (viewer, rx) = BrowserViewer::new();
+                let (viewer, rx) = BrowserViewer::new(false);
                 let id = viewer.id;
                 mgr.add_viewer(&key, Rc::new(viewer));
                 (key, id, rx)
@@ -1008,6 +1017,11 @@ mod tests {
             mgr.mark_gone(&first);
             assert!(mgr.takeovers.borrow()[session_id].release_timer.is_none());
             mgr.remove_viewer(&second, second_id);
+            // 面板一直停留在此实例，也应按时交还给 agent。
+            let (observer, _rx) = BrowserViewer::new(true);
+            let observer_id = observer.id;
+            mgr.add_viewer(&second, Rc::new(observer));
+            mgr.handle_client_message(&second, observer_id, BrowserClientMessage::Release);
             tokio::task::yield_now().await;
             tokio::time::advance(RELEASE_GRACE - Duration::from_secs(1)).await;
             assert_eq!(std::fs::read_to_string(&policy).unwrap(), super::super::policy::TAKEOVER_POLICY_JSON);
@@ -1076,7 +1090,7 @@ mod tests {
                 assert!(!mgr.briefs_of("s1").is_empty());
 
                 // 挂一个下游 viewer
-                let (viewer, mut rx) = BrowserViewer::new();
+                let (viewer, mut rx) = BrowserViewer::new(false);
                 let vid = viewer.id;
                 mgr.add_viewer(&key, Rc::new(viewer));
                 let hello_raw = rx.ctrl_rx.recv().await.unwrap();

@@ -299,6 +299,7 @@ fn project_json(mut value: Value, remote: &Remote) -> Value {
         }
         if object.contains_key("projectType") {
             object.insert("projectType".into(), json!("ssh"));
+            object.insert("hostName".into(), json!(remote.host.name));
         }
         if let Some(base) = object
             .get("rawBase")
@@ -1172,7 +1173,7 @@ mod tests {
     fn attach(gateway: &TestApp, owner: &TestApp, address: std::net::SocketAddr, host_id: &str) {
         let host = SshHostRow {
             id: host_id.into(),
-            name: "B".into(),
+            name: host_id.into(),
             host: "isolated.invalid".into(),
             port: 22,
             username: "test".into(),
@@ -1219,26 +1220,27 @@ mod tests {
 
         let gateway = TestApp::new();
         let owner = TestApp::new();
-        owner.local_project("project");
+        let other_owner = TestApp::new();
         let terminal_id = "terminal-1";
-        owner.state.db.insert_session(&crate::db::SessionRow {
-            id: terminal_id.into(),
-            project_id: "project".into(),
-            state: "active".into(),
-            ..Default::default()
-        });
-        let run = crate::agent_browser::run_dir(&owner.data_dir);
-        let policy = crate::agent_browser::policy::write_allow(&owner.data_dir, terminal_id).unwrap();
-        std::fs::create_dir_all(&run).unwrap();
-        let (owner_address, _owner_task) = serve(&owner).await;
+        for (node, host_id) in [(&owner, "work"), (&other_owner, "lab")] {
+            node.local_project("project");
+            node.state.db.insert_session(&crate::db::SessionRow {
+                id: terminal_id.into(),
+                project_id: "project".into(),
+                state: "active".into(),
+                ..Default::default()
+            });
+            let (address, _task) = serve(node).await;
+            attach(&gateway, node, address, host_id);
+        }
         let (gateway_address, _gateway_task) = serve(&gateway).await;
-        attach(&gateway, &owner, owner_address, "work");
         let public_id = resource_id(&owner.state.db.instance_id(), terminal_id);
         let encoded_id = crate::api::encode_uri_component(&public_id);
-        let upstream = |name: &str, seq: u64| {
+        let upstream = |node: &TestApp, name: &str, seq: u64| {
             let name = name.to_owned();
-            let run = run.clone();
-            let policy = policy.clone();
+            let run = crate::agent_browser::run_dir(&node.data_dir);
+            std::fs::create_dir_all(&run).unwrap();
+            let policy = crate::agent_browser::policy::write_allow(&node.data_dir, terminal_id).unwrap();
             async move {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let port = listener.local_addr().unwrap().port();
@@ -1265,10 +1267,12 @@ mod tests {
                 (rx, task)
             }
         };
-        let scan = || owner.state.engine.call(|engine| async move { engine.browser.scan_now() });
-        let (mut events_a, upstream_a) = upstream("falcon-terminal-1", 1).await;
-        let (mut events_b, upstream_b) = upstream("预览_二", 2).await;
-        scan().await.unwrap();
+        let (mut events_a, upstream_a) = upstream(&owner, "falcon-terminal-1", 1).await;
+        let (mut events_b, upstream_b) = upstream(&owner, "预览_二", 2).await;
+        let (_events_c, upstream_c) = upstream(&other_owner, "预览_二", 3).await;
+        for node in [&owner, &other_owner] {
+            node.state.engine.call(|engine| async move { engine.browser.scan_now() }).await.unwrap();
+        }
 
         let token = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("browserSession", "预览_二")
@@ -1276,7 +1280,10 @@ mod tests {
         let base = format!("ws://{gateway_address}/ws/browser/{encoded_id}");
         let (mut a, _) = tokio_tungstenite::connect_async(&base).await.unwrap();
         let (mut b, _) = tokio_tungstenite::connect_async(format!("{base}?{token}")).await.unwrap();
-        for (socket, seq) in [(&mut a, 1u64), (&mut b, 2)] {
+        let other_id = resource_id(&other_owner.state.db.instance_id(), terminal_id);
+        let other_path = crate::api::encode_uri_component(&other_id);
+        let (mut c, _) = tokio_tungstenite::connect_async(format!("ws://{gateway_address}/ws/browser/{other_path}?{token}")).await.unwrap();
+        for (socket, seq) in [(&mut a, 1u64), (&mut b, 2), (&mut c, 3)] {
             let frame = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     if let Message::Binary(frame) = socket.next().await.unwrap().unwrap() {
@@ -1289,9 +1296,15 @@ mod tests {
             assert_eq!(jpeg, &[seq as u8]);
         }
         let (_, sessions) = json_of(gateway.get("/api/sessions").await).await;
-        assert_eq!(sessions[0]["id"], public_id);
-        assert_eq!(sessions[0]["browser"]["url"], "http://localhost/falcon-terminal-1");
-        assert_eq!(sessions[0]["browsers"][1]["browserSession"], "预览_二");
+        let rows = sessions.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let first = rows.iter().find(|row| row["id"] == public_id).unwrap();
+        let second = rows.iter().find(|row| row["id"] == other_id).unwrap();
+        assert_eq!(first["hostName"], "work");
+        assert_eq!(second["hostName"], "lab");
+        assert_eq!(second["browsers"][0]["browserSession"], "预览_二");
+        assert_eq!(first["browser"]["url"], "http://localhost/falcon-terminal-1");
+        assert_eq!(first["browsers"][1]["browserSession"], "预览_二");
         assert!(gateway.state.db.list_sessions().is_empty());
 
         let path = format!("/api/sessions/{encoded_id}/browser");
@@ -1330,6 +1343,7 @@ mod tests {
 
         upstream_a.abort();
         upstream_b.abort();
+        upstream_c.abort();
     }
 
     #[tokio::test]

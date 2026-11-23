@@ -11,6 +11,7 @@ pub mod app_icon;
 pub mod askpass;
 pub mod auth_routes;
 pub mod body;
+mod dashboard;
 pub mod error;
 pub mod files;
 pub mod git_routes;
@@ -158,6 +159,7 @@ fn public_router() -> Router<AppState> {
 fn protected_router() -> Router<AppState> {
     Router::new()
         .merge(sessions::router())
+        .merge(dashboard::router())
         .merge(askpass::router())
         .merge(system::router())
         .merge(server_update::router())

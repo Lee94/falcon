@@ -287,6 +287,15 @@ pub fn session_menu_items(ws: &Entity<Workspace>, session: &SessionWithProject, 
             ws.update(cx, |w, cx| w.open_session(&id, cx))
         }));
     }
+    for brief in falcon_core::workspace::browser_briefs(&session.session) {
+        let target = falcon_core::workspace::browser_target_for_brief(&id, brief);
+        let name = if target.is_default() { "default" } else { &target.browser_session };
+        let label = t!("session.browserControlWindow", name = name).to_string();
+        let ws = ws.clone();
+        items.push(MenuItemSpec::new(label, move |_, cx| {
+            ws.update(cx, |w, cx| w.open_browser(target.clone(), true, cx))
+        }));
+    }
     if let Some(project) = project {
         {
             let ws = ws.clone();
@@ -411,7 +420,8 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
     }
     let mut items = new_session_items(ws, &project.id, None, cx);
     // 去别处看：px0 审阅、外部编辑器，一组
-    let mut elsewhere = Vec::new();
+    let dashboard = format!("{}/browser-dashboard", w.client.base_url().trim_end_matches('/'));
+    let mut elsewhere = vec![MenuItemSpec::new(t!("project.browserDashboard").to_string(), move |_, cx| cx.open_url(&dashboard))];
     // px0 审阅（ADR 0017）：px0 跑在服务端那边，这里只把入口交给系统浏览器，不嵌进
     // WebView。能连上服务就允许使用，浏览器打开这个地址即可。
     // 多仓库项目看的是成员仓库（有没有工作目录都一样），服务端在入口页上让用户挑成员

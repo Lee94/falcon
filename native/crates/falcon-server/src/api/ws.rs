@@ -302,6 +302,8 @@ fn positive_int(v: &Value) -> Option<u16> {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct BrowserWsQuery {
+    #[serde(default)]
+    read_only: bool,
     browser_session: Option<String>,
 }
 
@@ -320,13 +322,13 @@ async fn browser(
         if !authed {
             return close_unauthorized(socket).await;
         }
-        run_browser(state, key, socket).await;
+        run_browser(state, key, socket, query.read_only).await;
     })
 }
 
-async fn run_browser(state: AppState, key: crate::agent_browser::BrowserKey, socket: WebSocket) {
+async fn run_browser(state: AppState, key: crate::agent_browser::BrowserKey, socket: WebSocket, read_only: bool) {
     let (mut sink, mut stream) = socket.split();
-    let (viewer, mut rx) = BrowserViewer::new();
+    let (viewer, mut rx) = BrowserViewer::new(read_only);
     let viewer_id = viewer.id;
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 

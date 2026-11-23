@@ -80,6 +80,7 @@
     "delete": "删除项目…",
     "edit": "编辑项目…",
     "derive": "派生附属项目…",
+    "browserDashboard": "查看各主机浏览器会话",
     "px0Review": "用 px0 审阅",
     "openIn": "用 %{editor} 打开",
     "openInFailed": "没能用 %{editor} 打开",
@@ -436,6 +437,7 @@
     "omp": "Oh My Pi"
   },
   "session": {
+    "browserControlWindow": "打开浏览器接管窗口 · %{name}",
     "createFailed": "创建会话失败",
     "state_active": "运行中",
     "state_unverified": "待接回",

@@ -40,9 +40,9 @@ const MOVE_THROTTLE: Duration = Duration::from_millis(16);
 const ELAPSED_TICK: Duration = Duration::from_secs(15);
 const LOG_PAGE_SIZE: usize = 200;
 
-/// 设置开关：「agent 打开浏览器时自动弹出窗口」，默认开。
+/// 设置开关：「agent 打开浏览器时自动弹出窗口」，默认关闭。
 pub fn auto_open_enabled(cx: &App) -> bool {
-    Prefs::global(cx).get(AUTO_OPEN_PREF_KEY) != Some("off")
+    Prefs::global(cx).get(AUTO_OPEN_PREF_KEY) == Some("on")
 }
 
 pub fn set_auto_open_enabled(on: bool, cx: &mut App) {

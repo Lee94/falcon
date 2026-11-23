@@ -1,0 +1,1534 @@
+diff --git a/packages/dashboard/next.config.ts b/packages/dashboard/next.config.ts
+index 33aa316..f168211 100644
+--- a/packages/dashboard/next.config.ts
++++ b/packages/dashboard/next.config.ts
+@@ -4,6 +4,7 @@ const DAEMON_ORIGIN = process.env.DAEMON_URL || "http://localhost:4848";
+ 
+ const config: NextConfig = {
+   output: "export",
++  basePath: "/browser-dashboard",
+   images: { unoptimized: true },
+   devIndicators: false,
+   env: {
+diff --git a/packages/dashboard/src/app/layout.tsx b/packages/dashboard/src/app/layout.tsx
+index c9e4f8c..c201e82 100644
+--- a/packages/dashboard/src/app/layout.tsx
++++ b/packages/dashboard/src/app/layout.tsx
+@@ -1,12 +1,12 @@
+ import type { Metadata } from "next";
+ import "./globals.css";
+-import { Geist } from "next/font/google";
++
+ import { cn } from "@/lib/utils";
+ import { TooltipProvider } from "@/components/ui/tooltip";
+ import { JotaiProvider } from "@/store/provider";
+ import { ThemeProvider } from "@/components/theme-provider";
+ 
+-const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
++
+ 
+ export const metadata: Metadata = {
+   title: "agent-browser",
+@@ -19,7 +19,7 @@ export default function RootLayout({
+   children: React.ReactNode;
+ }) {
+   return (
+-    <html lang="en" className={cn("font-sans antialiased", geist.variable)} suppressHydrationWarning>
++    <html lang="en" className={cn("font-sans antialiased")} suppressHydrationWarning>
+       <body>
+         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
+           <JotaiProvider>
+diff --git a/packages/dashboard/src/app/page.tsx b/packages/dashboard/src/app/page.tsx
+index 83ff53f..f133ed5 100644
+--- a/packages/dashboard/src/app/page.tsx
++++ b/packages/dashboard/src/app/page.tsx
+@@ -27,12 +27,12 @@ import { Button } from "@/components/ui/button";
+ import { Plus } from "lucide-react";
+ 
+ export default function DashboardPage() {
+-  initializeDashboardAccessToken();
++
+   const activePort = useAtomValue(activePortAtom);
+   useStreamSync(activePort);
+   useSessionsSync();
+-  useActivitySync();
+-  useChatStatusSync();
++
++
+ 
+   const sessions = useAtomValue(sessionsAtom);
+   const hasSessions = sessions.length > 0;
+@@ -42,10 +42,9 @@ export default function DashboardPage() {
+   const activeExtensions = useAtomValue(activeExtensionsAtom);
+ 
+   const sidePanel = (
+-    <Tabs defaultValue="chat" className="flex h-full flex-col">
++    <Tabs defaultValue="activity" className="flex h-full flex-col">
+       <div className="shrink-0 px-2 pt-1">
+         <TabsList variant="line" className="h-7 w-full">
+-          <TabsTrigger value="chat" className="text-[11px]">Chat</TabsTrigger>
+           <TabsTrigger value="activity" className="text-[11px]">Activity</TabsTrigger>
+           <TabsTrigger value="console" className="text-[11px]">
+             Console
+@@ -53,14 +52,6 @@ export default function DashboardPage() {
+               <span className="ml-1 inline-flex size-1.5 rounded-full bg-destructive" />
+             )}
+           </TabsTrigger>
+-          <TabsTrigger value="network" className="text-[11px]">Network</TabsTrigger>
+-          <TabsTrigger value="storage" className="text-[11px]">Storage</TabsTrigger>
+-          <TabsTrigger value="extensions" className="text-[11px]">
+-            Extensions
+-            {activeExtensions.length > 0 && (
+-              <span className="ml-1 text-[9px] tabular-nums text-muted-foreground">{activeExtensions.length}</span>
+-            )}
+-          </TabsTrigger>
+         </TabsList>
+       </div>
+       <TabsContent value="activity" className="min-h-0 flex-1 overflow-hidden">
+@@ -69,18 +60,6 @@ export default function DashboardPage() {
+       <TabsContent value="console" className="min-h-0 flex-1 overflow-hidden">
+         <ConsolePanel />
+       </TabsContent>
+-      <TabsContent value="network" className="min-h-0 flex-1 overflow-hidden">
+-        <NetworkPanel />
+-      </TabsContent>
+-      <TabsContent value="storage" className="min-h-0 flex-1 overflow-hidden">
+-        <StoragePanel />
+-      </TabsContent>
+-      <TabsContent value="extensions" className="min-h-0 flex-1 overflow-hidden">
+-        <ExtensionsPanel />
+-      </TabsContent>
+-      <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
+-        <ChatPanel />
+-      </TabsContent>
+     </Tabs>
+   );
+ 
+@@ -101,15 +80,7 @@ export default function DashboardPage() {
+                 <div className="text-center space-y-4">
+                   <div className="space-y-2">
+                     <p className="text-sm text-muted-foreground">No active sessions</p>
+-                    <p className="text-xs text-muted-foreground/60">Create a session to get started</p>
+                   </div>
+-                  <Button
+-                    size="sm"
+-                    onClick={() => setNewSessionDialog(true)}
+-                  >
+-                    <Plus className="size-3.5" />
+-                    New session
+-                  </Button>
+                 </div>
+               </div>
+             </ResizablePanel>
+diff --git a/packages/dashboard/src/components/activity-feed.tsx b/packages/dashboard/src/components/activity-feed.tsx
+index e9b8de6..589e6f3 100644
+--- a/packages/dashboard/src/components/activity-feed.tsx
++++ b/packages/dashboard/src/components/activity-feed.tsx
+@@ -3,7 +3,7 @@
+ import { useEffect, useRef, useState } from "react";
+ import { useAtomValue, useSetAtom } from "jotai/react";
+ import type { ActivityEvent } from "@/types";
+-import { combinedEventsAtom, persistActivityAtom, togglePersistAtom, clearActivityAtom } from "@/store/activity";
++import { streamEventsAtom } from "@/store/stream";
+ import { Bookmark, Trash2 } from "lucide-react";
+ import { cn } from "@/lib/utils";
+ import { Badge } from "@/components/ui/badge";
+@@ -162,11 +162,7 @@ function ConsoleEntry({
+ }
+ 
+ export function ActivityFeed() {
+-  const events = useAtomValue(combinedEventsAtom);
+-  const persist = useAtomValue(persistActivityAtom);
+-  const togglePersist = useSetAtom(togglePersistAtom);
+-  const clearActivity = useSetAtom(clearActivityAtom);
+-
++  const events = useAtomValue(streamEventsAtom);
+   const bottomRef = useRef<HTMLDivElement>(null);
+   const containerRef = useRef<HTMLDivElement>(null);
+   const autoScrollRef = useRef(true);
+@@ -191,28 +187,6 @@ export function ActivityFeed() {
+         <Badge variant="secondary" className="ml-auto h-4 px-1.5 text-[10px]">
+           {events.length}
+         </Badge>
+-        <button
+-          type="button"
+-          onClick={() => togglePersist()}
+-          className={cn(
+-            "flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] transition-colors",
+-            persist
+-              ? "border-accent-foreground/30 bg-accent text-accent-foreground"
+-              : "border-border text-muted-foreground hover:text-foreground",
+-          )}
+-          title={persist ? "Activity is persisted across reloads. Click to disable." : "Persist activity across reloads"}
+-        >
+-          <Bookmark className="size-3" />
+-          {persist ? "On" : "Off"}
+-        </button>
+-        <button
+-          type="button"
+-          onClick={() => clearActivity()}
+-          className="flex h-5 items-center gap-1 rounded border border-border px-1.5 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+-          title="Clear activity"
+-        >
+-          <Trash2 className="size-3" />
+-        </button>
+       </div>
+       <Separator />
+ 
+diff --git a/packages/dashboard/src/components/session-tree.tsx b/packages/dashboard/src/components/session-tree.tsx
+index 19b8e7d..5b5ac3e 100644
+--- a/packages/dashboard/src/components/session-tree.tsx
++++ b/packages/dashboard/src/components/session-tree.tsx
+@@ -6,6 +6,7 @@ import { useAtomValue, useSetAtom } from "jotai/react";
+ import type { SessionInfo, TabInfo } from "@/types";
+ import {
+   sessionsAtom,
++  streamPaths,
+   activePortAtom,
+   createSessionAtom,
+   closeSessionAtom,
+@@ -106,44 +107,12 @@ function ProviderLogo({ provider }: { provider: string }) {
+   return <BrandLogo name={provider} logos={PROVIDER_LOGOS} />;
+ }
+ 
+-function getFaviconUrl(url: string): string | null {
+-  try {
+-    const { hostname } = new URL(url);
+-    if (!hostname || hostname === "localhost") return null;
+-    return `https://www.google.com/s2/favicons?domain=${hostname}&sz=32`;
+-  } catch {
+-    return null;
+-  }
+-}
+-
+-function TabFavicon({ url }: { url: string }) {
+-  const src = getFaviconUrl(url);
+-  if (!src) {
+-    return <span className="flex size-4 shrink-0 items-center justify-center rounded-sm bg-muted text-[8px] text-muted-foreground">&#9679;</span>;
+-  }
+-  const handleError = (e: SyntheticEvent<HTMLImageElement>) => {
+-    (e.target as HTMLImageElement).style.display = "none";
+-  };
+-  return (
+-    <img
+-      src={src}
+-      alt=""
+-      width={16}
+-      height={16}
+-      className="size-4 shrink-0 rounded-sm"
+-      onError={handleError}
+-    />
+-  );
+-}
+-
+ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSession }: { tab: TabInfo; isViewed: boolean; isSessionActive: boolean; onClose: () => void; onSwitch: () => void; onSelectSession: () => void }) {
+   const handleClick = () => {
+     if (!isSessionActive) {
+       onSelectSession();
+     }
+-    if (!tab.active) {
+-      onSwitch();
+-    }
++
+   };
+   const isClickable = !isViewed;
+   return (
+@@ -158,7 +127,7 @@ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSe
+               : "text-muted-foreground cursor-pointer hover:text-foreground",
+           )}
+         >
+-          <TabFavicon url={tab.url} />
++          
+           <span className="min-w-0 flex-1 truncate">
+             {tab.title || tab.url || `Tab ${tab.label ?? tab.tabId}`}
+           </span>
+@@ -169,9 +138,7 @@ function TabNode({ tab, isViewed, isSessionActive, onClose, onSwitch, onSelectSe
+           )}
+         </button>
+       </ContextMenuTrigger>
+-      <ContextMenuContent>
+-        <ContextMenuItem onClick={onClose}>Close tab</ContextMenuItem>
+-      </ContextMenuContent>
++
+     </ContextMenu>
+   );
+ }
+@@ -230,7 +197,7 @@ function SessionNode({
+   }
+ 
+   return (
+-    <Collapsible open={expanded} onOpenChange={() => onToggle()}>
++    <Collapsible open={expanded} onOpenChange={() => { onSelect(); onToggle(); }}>
+       <ContextMenu>
+         <ContextMenuTrigger asChild>
+           <CollapsibleTrigger
+@@ -260,63 +227,7 @@ function SessionNode({
+             </span>
+           </CollapsibleTrigger>
+         </ContextMenuTrigger>
+-        <ContextMenuContent>
+-          <ContextMenuItem onClick={() => setConfirmClose(true)}>Close session</ContextMenuItem>
+-          <ContextMenuItem className="text-destructive focus:text-destructive" onClick={() => setConfirmKill(true)}>Kill session</ContextMenuItem>
+-        </ContextMenuContent>
+       </ContextMenu>
+-
+-      <Dialog open={confirmClose} onOpenChange={setConfirmClose}>
+-        <DialogContent className="sm:max-w-sm">
+-          <DialogHeader>
+-            <DialogTitle>Close session</DialogTitle>
+-          </DialogHeader>
+-          <p className="text-sm text-muted-foreground">
+-            Close <span className="font-mono font-semibold text-foreground">{session.session}</span> and its browser? This action cannot be undone.
+-          </p>
+-          <DialogFooter>
+-            <Button variant="ghost" size="sm" onClick={() => setConfirmClose(false)}>
+-              Cancel
+-            </Button>
+-            <Button
+-              variant="destructive"
+-              size="sm"
+-              onClick={() => {
+-                setConfirmClose(false);
+-                onClose();
+-              }}
+-            >
+-              Close
+-            </Button>
+-          </DialogFooter>
+-        </DialogContent>
+-      </Dialog>
+-
+-      <Dialog open={confirmKill} onOpenChange={setConfirmKill}>
+-        <DialogContent className="sm:max-w-sm">
+-          <DialogHeader>
+-            <DialogTitle>Kill session</DialogTitle>
+-          </DialogHeader>
+-          <p className="text-sm text-muted-foreground">
+-            Force-kill <span className="font-mono font-semibold text-foreground">{session.session}</span>? This immediately terminates the process without cleanup.
+-          </p>
+-          <DialogFooter>
+-            <Button variant="ghost" size="sm" onClick={() => setConfirmKill(false)}>
+-              Cancel
+-            </Button>
+-            <Button
+-              variant="destructive"
+-              size="sm"
+-              onClick={() => {
+-                setConfirmKill(false);
+-                onKill();
+-              }}
+-            >
+-              Kill
+-            </Button>
+-          </DialogFooter>
+-        </DialogContent>
+-      </Dialog>
+       <CollapsibleContent>
+         <div className="overflow-hidden pb-1">
+           {tabs.map((tab) => {
+@@ -333,13 +244,7 @@ function SessionNode({
+               />
+             );
+           })}
+-          <button
+-            onClick={onAddTab}
+-            className="flex w-full items-center gap-2 py-1 pr-1 pl-7 text-xs text-muted-foreground hover:text-foreground"
+-          >
+-            <Plus className="size-4" />
+-            Add tab
+-          </button>
++
+         </div>
+       </CollapsibleContent>
+     </Collapsible>
+@@ -413,30 +318,6 @@ export function SessionTree() {
+         <span className="text-xs text-muted-foreground">Sessions</span>
+         <div className="ml-auto flex items-center gap-0.5">
+           <ThemeToggle />
+-          {sessions.some((s) => !s.pending) && (
+-            <button
+-              type="button"
+-              onClick={() => setCloseAllOpen(true)}
+-              className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+-              title="Close all sessions"
+-            >
+-              <Trash2 className="size-3" />
+-            </button>
+-          )}
+-          <button
+-            type="button"
+-            onClick={() => {
+-              const existing = new Set(sessions.map((s) => s.session));
+-              let n = sessions.length + 1;
+-              while (existing.has(`session-${n}`)) n++;
+-              setNewSessionName(`session-${n}`);
+-              setNewSessionOpen(true);
+-            }}
+-            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+-            title="New session"
+-          >
+-            <Plus className="size-3.5" />
+-          </button>
+         </div>
+       </div>
+       <Separator />
+@@ -456,7 +337,15 @@ export function SessionTree() {
+                 engine={getEngineForSession(s.port)}
+                 provider={s.provider ?? ""}
+                 expanded={isExpanded(s.port)}
+-                onSelect={() => setActivePort(s.port)}
++                onSelect={() => {
++                  setActivePort(s.port);
++                  const path = streamPaths.get(s.port);
++                  if (!path) return;
++                  const target = new URL(path, location.origin);
++                  const query = new URLSearchParams(target.search);
++                  query.set("terminal", decodeURIComponent(target.pathname.slice("/ws/browser/".length)));
++                  history.replaceState(null, "", location.pathname + "?" + query);
++                }}
+                 onToggle={() => toggleExpanded(s.port)}
+                 onCloseTab={(tabRef) => dispatchCloseTab({ port: s.port, tabRef })}
+                 onAddTab={() => dispatchAddTab(s.port)}
+diff --git a/packages/dashboard/src/components/viewport.tsx b/packages/dashboard/src/components/viewport.tsx
+index 54c89be..c577ca6 100644
+--- a/packages/dashboard/src/components/viewport.tsx
++++ b/packages/dashboard/src/components/viewport.tsx
+@@ -1,557 +1,43 @@
+ "use client";
+-
+-import { useCallback, useEffect, useRef, useState } from "react";
+-import { useAtomValue, useSetAtom } from "jotai/react";
+-import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
++import { useEffect, useRef } from "react";
++import { useAtomValue } from "jotai/react";
+ import { cn } from "@/lib/utils";
+-import { execCommand, sessionArgs } from "@/lib/exec";
+-import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+-import { Badge } from "@/components/ui/badge";
+ import { Separator } from "@/components/ui/separator";
+-import {
+-  Tooltip,
+-  TooltipContent,
+-  TooltipProvider,
+-  TooltipTrigger,
+-} from "@/components/ui/tooltip";
+-import {
+-  DropdownMenu,
+-  DropdownMenuContent,
+-  DropdownMenuItem,
+-  DropdownMenuLabel,
+-  DropdownMenuSeparator,
+-  DropdownMenuTrigger,
+-} from "@/components/ui/dropdown-menu";
+-import {
+-  Dialog,
+-  DialogContent,
+-  DialogFooter,
+-  DialogHeader,
+-  DialogTitle,
+-} from "@/components/ui/dialog";
+-import { Button } from "@/components/ui/button";
+-import {
+-  currentFrameAtom,
+-  viewportWidthAtom,
+-  viewportHeightAtom,
+-  browserConnectedAtom,
+-  screencastingAtom,
+-  recordingAtom,
+-  streamEngineAtom,
+-  activeUrlAtom,
+-  sendInputAtom,
+-} from "@/store/stream";
+-import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
+-
+-const SCREENCAST_ENGINES = new Set(["chrome"]);
+-
+-function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
+-  let m = 0;
+-  if (e.altKey) m |= 1;
+-  if (e.ctrlKey) m |= 2;
+-  if (e.metaKey) m |= 4;
+-  if (e.shiftKey) m |= 8;
+-  return m;
+-}
+-
+-const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
+-  Enter: { text: "\r", keyCode: 13 },
+-  Tab: { text: "\t", keyCode: 9 },
+-  Backspace: { text: "\b", keyCode: 8 },
+-  Escape: { keyCode: 27 },
+-  ArrowLeft: { keyCode: 37 },
+-  ArrowUp: { keyCode: 38 },
+-  ArrowRight: { keyCode: 39 },
+-  ArrowDown: { keyCode: 40 },
+-  Delete: { keyCode: 46 },
+-  Home: { keyCode: 36 },
+-  End: { keyCode: 35 },
+-  PageUp: { keyCode: 33 },
+-  PageDown: { keyCode: 34 },
+-};
+-
+-function printableKeyCode(key: string): number {
+-  if (key.length !== 1) return 0;
+-  const code = key.charCodeAt(0);
+-  if (code >= 65 && code <= 90) return code;
+-  if (code >= 97 && code <= 122) return code - 32;
+-  if (code >= 48 && code <= 57) return code;
+-  switch (key) {
+-    case " ": return 32;
+-    case ";": case ":": return 186;
+-    case "=": case "+": return 187;
+-    case ",": case "<": return 188;
+-    case "-": case "_": return 189;
+-    case ".": case ">": return 190;
+-    case "/": case "?": return 191;
+-    case "`": case "~": return 192;
+-    case "[": case "{": return 219;
+-    case "\\": case "|": return 220;
+-    case "]": case "}": return 221;
+-    case "'": case "\"": return 222;
+-    default: return 0;
+-  }
+-}
+-
+-function cdpButton(btn: number): string {
+-  switch (btn) {
+-    case 0: return "left";
+-    case 1: return "middle";
+-    case 2: return "right";
+-    default: return "none";
+-  }
+-}
+-
+-const DIMENSION_PRESETS: { label: string; ratio?: [number, number] }[] = [
+-  { label: "1:1", ratio: [1, 1] },
+-  { label: "4:3", ratio: [4, 3] },
+-  { label: "16:9", ratio: [16, 9] },
+-  { label: "9:16", ratio: [9, 16] },
+-  { label: "21:9", ratio: [21, 9] },
+-];
+-
+-const DEVICE_PRESETS = [
+-  { label: "iPhone 15", value: "iPhone 15" },
+-  { label: "iPhone 16", value: "iPhone 16" },
+-  { label: "iPhone 16 Pro", value: "iPhone 16 Pro" },
+-  { label: "iPhone 17", value: "iPhone 17" },
+-  { label: "iPad", value: "iPad" },
+-  { label: "iPad Pro", value: "iPad Pro" },
+-  { label: "Pixel 9", value: "Pixel 9" },
+-  { label: "Galaxy S25", value: "Galaxy S25" },
+-];
+-
+-type ColorScheme = "light" | "dark" | "no-preference";
+-
+-function computePresetSize(
+-  ratio: [number, number],
+-  availableWidth: number,
+-  availableHeight: number,
+-): { w: number; h: number } {
+-  const [rw, rh] = ratio;
+-  let w = availableWidth;
+-  let h = Math.round(w * rh / rw);
+-  if (h > availableHeight) {
+-    h = availableHeight;
+-    w = Math.round(h * rw / rh);
+-  }
+-  return { w: Math.max(w, 1), h: Math.max(h, 1) };
+-}
+-
+-function normalizeUrl(input: string): string {
+-  const trimmed = input.trim();
+-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+-  return `https://${trimmed}`;
+-}
++import { currentFrameAtom, browserConnectedAtom, screencastingAtom, activeUrlAtom } from "@/store/stream";
+ 
+ export function Viewport() {
+   const frame = useAtomValue(currentFrameAtom);
+-  const viewportWidth = useAtomValue(viewportWidthAtom);
+-  const viewportHeight = useAtomValue(viewportHeightAtom);
+   const browserConnected = useAtomValue(browserConnectedAtom);
+   const screencasting = useAtomValue(screencastingAtom);
+-  const recording = useAtomValue(recordingAtom);
+-  const engine = useAtomValue(streamEngineAtom);
+   const url = useAtomValue(activeUrlAtom);
+-  const sessionName = useAtomValue(activeSessionNameAtom);
+-  const streamPort = useAtomValue(activePortAtom);
+-  const sendInput = useSetAtom(sendInputAtom);
+-
+   const canvasRef = useRef<HTMLCanvasElement>(null);
+-  const containerRef = useRef<HTMLDivElement>(null);
+-  const canvasAreaRef = useRef<HTMLDivElement>(null);
+-  const addressRef = useRef<HTMLInputElement>(null);
+-  const [addressValue, setAddressValue] = useState(url);
+-  const [navigating, setNavigating] = useState(false);
+-  const [canvasArea, setCanvasArea] = useState({ width: 0, height: 0 });
+-  const [customDialogOpen, setCustomDialogOpen] = useState(false);
+-  const [customValue, setCustomValue] = useState("");
+-  const customInputRef = useRef<HTMLInputElement>(null);
+-  const [recordDialogOpen, setRecordDialogOpen] = useState(false);
+-  const [recordPath, setRecordPath] = useState("recording.webm");
+-  const recordInputRef = useRef<HTMLInputElement>(null);
+-  const [activeDevice, setActiveDevice] = useState<string | null>(null);
+-  const [colorScheme, setColorScheme] = useState<ColorScheme>("no-preference");
+-  const [offline, setOffline] = useState(false);
+-
+   useEffect(() => {
+-    if (customDialogOpen) {
+-      requestAnimationFrame(() => customInputRef.current?.select());
+-    }
+-  }, [customDialogOpen]);
+-
+-  useEffect(() => {
+-    if (recordDialogOpen) {
+-      requestAnimationFrame(() => recordInputRef.current?.select());
+-    }
+-  }, [recordDialogOpen]);
+-
+-  useEffect(() => {
+-    setAddressValue(url);
+-  }, [url]);
+-
+-  useEffect(() => {
+-    setActiveDevice(null);
+-    setColorScheme("no-preference");
+-    setOffline(false);
+-  }, [sessionName]);
+-
+-  useEffect(() => {
+-    const el = canvasAreaRef.current;
+-    if (!el) return;
+-    const ro = new ResizeObserver(([entry]) => {
+-      const { width, height } = entry.contentRect;
+-      setCanvasArea({ width: Math.floor(width), height: Math.floor(height) });
+-    });
+-    ro.observe(el);
+-    return () => ro.disconnect();
+-  }, []);
+-
+-  const runCmd = useCallback(
+-    (...args: string[]) => execCommand(sessionArgs(sessionName, ...args)),
+-    [sessionName],
+-  );
+-
+-  const handleNavigate = useCallback(async () => {
+-    if (!addressValue.trim() || navigating) return;
+-
+-    addressRef.current?.blur();
+-
+-    const target = normalizeUrl(addressValue);
+-    const previousUrl = url;
+-    setAddressValue(target);
+-    setNavigating(true);
+-    try {
+-      const result = await runCmd("navigate", target);
+-      if (!result.success) {
+-        setAddressValue(previousUrl || "about:blank");
++    if (!frame) return;
++    let current = true;
++    createImageBitmap(frame).then(bmp => {
++      const canvas = canvasRef.current;
++      if (current && canvas) {
++        canvas.width = bmp.width;
++        canvas.height = bmp.height;
++        canvas.getContext("2d")?.drawImage(bmp, 0, 0);
+       }
+-    } catch {
+-      setAddressValue(previousUrl || "about:blank");
+-    } finally {
+-      setNavigating(false);
+-    }
+-  }, [addressValue, navigating, runCmd, url]);
+-
+-  const drawFrame = useCallback((base64: string) => {
+-    const canvas = canvasRef.current;
+-    if (!canvas) return;
+-
+-    const bin = atob(base64);
+-    const bytes = new Uint8Array(bin.length);
+-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+-
+-    createImageBitmap(new Blob([bytes], { type: "image/jpeg" })).then((bmp) => {
+-      canvas.width = bmp.width;
+-      canvas.height = bmp.height;
+-      const ctx = canvas.getContext("2d");
+-      if (ctx) ctx.drawImage(bmp, 0, 0);
+       bmp.close();
+-    });
+-  }, []);
+-
+-  useEffect(() => {
+-    if (frame) {
+-      drawFrame(frame);
+-    }
+-  }, [frame, drawFrame]);
+-
+-  const isFit =
+-    canvasArea.width > 0 &&
+-    viewportWidth === canvasArea.width &&
+-    viewportHeight === canvasArea.height;
+-
+-  const handleFit = useCallback(() => {
+-    if (canvasArea.width <= 0) return;
+-    const w = canvasArea.width;
+-    const h = canvasArea.height;
+-    if (w > 0 && h > 0) {
+-      runCmd("set", "viewport", String(w), String(h));
+-    }
+-  }, [canvasArea, runCmd]);
+-
+-  const handlePreset = useCallback(
+-    (ratio: [number, number]) => {
+-      if (canvasArea.width <= 0) return;
+-      const avail = { w: canvasArea.width, h: canvasArea.height };
+-      const { w, h } = computePresetSize(ratio, avail.w, avail.h);
+-      runCmd("set", "viewport", String(w), String(h));
+-    },
+-    [canvasArea, runCmd],
+-  );
+-
+-  const submitCustomDimensions = useCallback(() => {
+-    setCustomDialogOpen(false);
+-    const match = customValue.trim().match(/^(\d+)\s*[x,\s]\s*(\d+)$/);
+-    if (!match) return;
+-    const w = parseInt(match[1], 10);
+-    const h = parseInt(match[2], 10);
+-    if (w > 0 && h > 0) {
+-      runCmd("set", "viewport", String(w), String(h));
+-    }
+-  }, [customValue, runCmd]);
+-
+-  const handleRecordStart = useCallback(async () => {
+-    const path = recordPath.trim();
+-    if (!path) return;
+-    setRecordDialogOpen(false);
+-    await execCommand(sessionArgs(sessionName, "record", "start", path));
+-  }, [recordPath, sessionName]);
+-
+-  const handleRecordStop = useCallback(async () => {
+-    await execCommand(sessionArgs(sessionName, "record", "stop"));
+-  }, [sessionName]);
+-
+-  const handleSetDevice = useCallback(async (device: string) => {
+-    setActiveDevice(device);
+-    await execCommand(sessionArgs(sessionName, "set", "device", device));
+-  }, [sessionName]);
+-
+-  const handleResetDevice = useCallback(async () => {
+-    setActiveDevice(null);
+-    if (canvasArea.width > 0 && canvasArea.height > 0) {
+-      await runCmd("set", "viewport", String(canvasArea.width), String(canvasArea.height));
+-    }
+-  }, [canvasArea.width, canvasArea.height, runCmd]);
+-
+-  const handleSetColorScheme = useCallback(async (scheme: ColorScheme) => {
+-    setColorScheme(scheme);
+-    const args = sessionArgs(sessionName, "set", "media");
+-    if (scheme !== "no-preference") args.push(scheme);
+-    await execCommand(args);
+-  }, [sessionName]);
+-
+-  const handleToggleOffline = useCallback(async () => {
+-    const next = !offline;
+-    setOffline(next);
+-    const args = sessionArgs(sessionName, "set", "offline");
+-    if (!next) args.push("off");
+-    await execCommand(args);
+-  }, [offline, sessionName]);
+-
+-  const toViewport = useCallback(
+-    (e: React.MouseEvent): { x: number; y: number } | null => {
+-      const canvas = canvasRef.current;
+-      if (!canvas) return null;
+-      const rect = canvas.getBoundingClientRect();
+-      const scaleX = viewportWidth / rect.width;
+-      const scaleY = viewportHeight / rect.height;
+-      return {
+-        x: Math.round((e.clientX - rect.left) * scaleX),
+-        y: Math.round((e.clientY - rect.top) * scaleY),
+-      };
+-    },
+-    [viewportWidth, viewportHeight],
+-  );
+-
+-  const handleMouseEvent = useCallback(
+-    (e: React.MouseEvent, eventType: string) => {
+-      const pos = toViewport(e);
+-      if (!pos) return;
+-      sendInput({
+-        type: "input_mouse",
+-        eventType,
+-        x: pos.x,
+-        y: pos.y,
+-        button: cdpButton(e.button),
+-        clickCount: eventType === "mousePressed" ? 1 : 0,
+-        modifiers: cdpModifiers(e),
+-      });
+-    },
+-    [toViewport, sendInput],
+-  );
+-
+-  const handleWheel = useCallback(
+-    (e: React.WheelEvent) => {
+-      const pos = toViewport(e);
+-      if (!pos) return;
+-      sendInput({
+-        type: "input_mouse",
+-        eventType: "mouseWheel",
+-        x: pos.x,
+-        y: pos.y,
+-        button: "none",
+-        clickCount: 0,
+-        deltaX: e.deltaX,
+-        deltaY: e.deltaY,
+-        modifiers: cdpModifiers(e),
+-      });
+-    },
+-    [toViewport, sendInput],
+-  );
+-
+-  const dispatchKey = useCallback(
+-    (e: KeyboardEvent, eventType: string) => {
+-      const info = KEY_INFO[e.key];
+-      const text = eventType === "keyDown"
+-        ? (info?.text ?? (Array.from(e.key).length === 1 ? e.key : undefined))
+-        : undefined;
+-      const keyCode = info?.keyCode ?? printableKeyCode(e.key);
+-      let m = 0;
+-      if (e.altKey) m |= 1;
+-      if (e.ctrlKey) m |= 2;
+-      if (e.metaKey) m |= 4;
+-      if (e.shiftKey) m |= 8;
+-      sendInput({
+-        type: "input_keyboard",
+-        eventType,
+-        key: e.key,
+-        code: e.code,
+-        text,
+-        windowsVirtualKeyCode: keyCode,
+-        modifiers: m,
+-      });
+-    },
+-    [sendInput],
+-  );
+-
+-  useEffect(() => {
+-    const handler = (e: KeyboardEvent) => {
+-      if (document.activeElement !== canvasRef.current) return;
+-      e.preventDefault();
+-      e.stopPropagation();
+-      dispatchKey(e, e.type === "keydown" ? "keyDown" : "keyUp");
+-    };
+-    window.addEventListener("keydown", handler, true);
+-    window.addEventListener("keyup", handler, true);
+-    return () => {
+-      window.removeEventListener("keydown", handler, true);
+-      window.removeEventListener("keyup", handler, true);
+-    };
+-  }, [dispatchKey]);
+-
++    }).catch(() => {});
++    return () => { current = false; };
++  }, [frame]);
+   return (
+-    <div ref={containerRef} className="flex h-full flex-col">
+-      {browserConnected && (
+-        <>
+-          <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
+-            <TooltipProvider delayDuration={300}>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={() => runCmd("back")}
+-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+-                  >
+-                    <ArrowLeft className="size-4" />
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>Back</p></TooltipContent>
+-              </Tooltip>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={() => runCmd("forward")}
+-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+-                  >
+-                    <ArrowRight className="size-4" />
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>Forward</p></TooltipContent>
+-              </Tooltip>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={() => runCmd("reload")}
+-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+-                  >
+-                    <RotateCw className="size-3.5" />
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>Refresh</p></TooltipContent>
+-              </Tooltip>
+-            </TooltipProvider>
+-            <div className="flex min-w-0 flex-1 items-center rounded-md bg-muted px-2.5 py-1">
+-              <input
+-                ref={addressRef}
+-                type="text"
+-                value={addressValue}
+-                onChange={(e) => setAddressValue(e.target.value)}
+-                onKeyDown={(e) => {
+-                  if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+-                    e.preventDefault();
+-                    handleNavigate();
+-                  }
+-                }}
+-                className={cn(
+-                  "w-full bg-transparent font-mono text-xs text-muted-foreground outline-none placeholder:text-muted-foreground/50",
+-                  navigating && "opacity-50",
+-                )}
+-                placeholder="Enter URL..."
+-                spellCheck={false}
+-              />
+-            </div>
+-            <TooltipProvider delayDuration={300}>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={() => runCmd("snapshot")}
+-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+-                  >
+-                    <FileCode className="size-4" />
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>Snapshot</p></TooltipContent>
+-              </Tooltip>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={() => runCmd("screenshot")}
+-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+-                  >
+-                    <Camera className="size-4" />
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>Screenshot</p></TooltipContent>
+-              </Tooltip>
+-              <Tooltip>
+-                <TooltipTrigger asChild>
+-                  <button
+-                    type="button"
+-                    onClick={recording ? handleRecordStop : () => setRecordDialogOpen(true)}
+-                    className={cn(
+-                      "shrink-0 rounded p-1 transition-colors",
+-                      recording
+-                        ? "text-destructive hover:bg-destructive/10"
+-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+-                    )}
+-                  >
+-                    {recording ? <Square className="size-3.5" /> : <Circle className="size-4" />}
+-                  </button>
+-                </TooltipTrigger>
+-                <TooltipContent side="bottom"><p>{recording ? "Stop recording" : "Record"}</p></TooltipContent>
+-              </Tooltip>
+-            </TooltipProvider>
+-          </div>
+-          <Separator />
+-        </>
+-      )}
+-
+-      <div ref={canvasAreaRef} className="flex min-h-0 flex-1 items-center justify-center">
++    <div className="flex h-full flex-col">
++      <div className="flex min-h-0 flex-1 items-center justify-center">
+         {frame ? (
+           <canvas
+             ref={canvasRef}
+             tabIndex={0}
+             className="max-h-full max-w-full object-contain outline-none"
+-            onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
+-            onMouseDown={(e) => {
+-              canvasRef.current?.focus();
+-              handleMouseEvent(e, "mousePressed");
+-            }}
+-            onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
+-            onWheel={handleWheel}
+-            onContextMenu={(e) => e.preventDefault()}
+           />
+         ) : (
+           <div className="text-center text-sm text-muted-foreground">
+             {browserConnected
+-              ? SCREENCAST_ENGINES.has(engine)
+-                ? "Waiting for frames..."
+-                : `Screencast not available for ${engine}`
++              ? "Waiting for frames..."
+               : "No browser connected"}
+           </div>
+         )}
+@@ -574,181 +60,10 @@ export function Viewport() {
+         </span>
+         {browserConnected && (
+           <span className="text-xs text-muted-foreground/60 font-mono">
+-            {getSessionStreamUrl(streamPort)}
++            {url}
+           </span>
+         )}
+-        <div className="ml-auto flex items-center gap-2">
+-          {browserConnected && (
+-            <>
+-              <DropdownMenu>
+-                <DropdownMenuTrigger asChild>
+-                  <Badge
+-                    variant="outline"
+-                    className="flex h-4 cursor-pointer items-center gap-1 px-1.5 text-[10px] hover:bg-muted"
+-                  >
+-                    {colorScheme === "dark" ? (
+-                      <Moon className="size-2.5" />
+-                    ) : (
+-                      <Sun className="size-2.5" />
+-                    )}
+-                    {colorScheme === "dark" ? "Dark" : colorScheme === "light" ? "Light" : "System"}
+-                  </Badge>
+-                </DropdownMenuTrigger>
+-                <DropdownMenuContent align="end" side="top">
+-                  <DropdownMenuLabel className="text-xs">Color Scheme</DropdownMenuLabel>
+-                  <DropdownMenuItem
+-                    onClick={() => handleSetColorScheme("no-preference")}
+-                    className={cn("text-xs", colorScheme === "no-preference" && "font-semibold")}
+-                  >
+-                    System
+-                  </DropdownMenuItem>
+-                  <DropdownMenuItem
+-                    onClick={() => handleSetColorScheme("light")}
+-                    className={cn("text-xs", colorScheme === "light" && "font-semibold")}
+-                  >
+-                    <Sun className="mr-1.5 size-3" />
+-                    Light
+-                  </DropdownMenuItem>
+-                  <DropdownMenuItem
+-                    onClick={() => handleSetColorScheme("dark")}
+-                    className={cn("text-xs", colorScheme === "dark" && "font-semibold")}
+-                  >
+-                    <Moon className="mr-1.5 size-3" />
+-                    Dark
+-                  </DropdownMenuItem>
+-                </DropdownMenuContent>
+-              </DropdownMenu>
+-
+-              <Badge
+-                variant="outline"
+-                onClick={handleToggleOffline}
+-                className={cn(
+-                  "flex h-4 cursor-pointer items-center gap-1 px-1.5 text-[10px] hover:bg-muted",
+-                  offline && "border-destructive/50 bg-destructive/10 text-destructive hover:bg-destructive/20",
+-                )}
+-              >
+-                {offline ? <WifiOff className="size-2.5" /> : <Wifi className="size-2.5" />}
+-                {offline ? "Offline" : "Online"}
+-              </Badge>
+-            </>
+-          )}
+-
+-          <DropdownMenu>
+-            <DropdownMenuTrigger asChild>
+-              <Badge
+-                variant="outline"
+-                className="flex h-4 cursor-pointer items-center gap-1 px-1.5 text-[10px] tabular-nums hover:bg-muted"
+-              >
+-                {activeDevice && <Smartphone className="size-2.5" />}
+-                {activeDevice ?? `${viewportWidth} x ${viewportHeight}`}
+-              </Badge>
+-            </DropdownMenuTrigger>
+-            <DropdownMenuContent align="end" side="top">
+-              <DropdownMenuLabel className="text-xs">Aspect Ratio</DropdownMenuLabel>
+-              {DIMENSION_PRESETS.map((p) => (
+-                <DropdownMenuItem
+-                  key={p.label}
+-                  onClick={() => handlePreset(p.ratio!)}
+-                  className="text-xs"
+-                >
+-                  {p.label}
+-                </DropdownMenuItem>
+-              ))}
+-              <DropdownMenuSeparator />
+-              <DropdownMenuLabel className="text-xs">Devices</DropdownMenuLabel>
+-              {DEVICE_PRESETS.map((d) => (
+-                <DropdownMenuItem
+-                  key={d.value}
+-                  onClick={() => handleSetDevice(d.value)}
+-                  className={cn("text-xs", activeDevice === d.value && "font-semibold")}
+-                >
+-                  <Smartphone className="mr-1.5 size-3" />
+-                  {d.label}
+-                </DropdownMenuItem>
+-              ))}
+-              <DropdownMenuSeparator />
+-              {!isFit && (
+-                <DropdownMenuItem onClick={handleFit} className="text-xs">
+-                  <Maximize className="mr-1.5 size-3" />
+-                  Fit
+-                </DropdownMenuItem>
+-              )}
+-              <DropdownMenuItem
+-                onClick={() => {
+-                  setCustomValue(`${viewportWidth} x ${viewportHeight}`);
+-                  setCustomDialogOpen(true);
+-                }}
+-                className="text-xs"
+-              >
+-                Custom...
+-              </DropdownMenuItem>
+-            </DropdownMenuContent>
+-          </DropdownMenu>
+-        </div>
+       </div>
+-
+-      <Dialog open={customDialogOpen} onOpenChange={setCustomDialogOpen}>
+-        <DialogContent className="max-w-xs">
+-          <DialogHeader>
+-            <DialogTitle>Custom Dimensions</DialogTitle>
+-          </DialogHeader>
+-          <input
+-            ref={customInputRef}
+-            type="text"
+-            value={customValue}
+-            onChange={(e) => setCustomValue(e.target.value)}
+-            onKeyDown={(e) => {
+-              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+-                e.preventDefault();
+-                submitCustomDimensions();
+-              }
+-            }}
+-            placeholder="1280 x 720"
+-            className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
+-          />
+-          <DialogFooter>
+-            <Button variant="outline" size="sm" onClick={() => setCustomDialogOpen(false)}>
+-              Cancel
+-            </Button>
+-            <Button size="sm" onClick={submitCustomDimensions}>
+-              Apply
+-            </Button>
+-          </DialogFooter>
+-        </DialogContent>
+-      </Dialog>
+-
+-      <Dialog open={recordDialogOpen} onOpenChange={setRecordDialogOpen}>
+-        <DialogContent className="max-w-xs">
+-          <DialogHeader>
+-            <DialogTitle>Start Recording</DialogTitle>
+-          </DialogHeader>
+-          <input
+-            ref={recordInputRef}
+-            type="text"
+-            value={recordPath}
+-            onChange={(e) => setRecordPath(e.target.value)}
+-            onKeyDown={(e) => {
+-              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+-                e.preventDefault();
+-                handleRecordStart();
+-              }
+-            }}
+-            placeholder="recording.webm"
+-            className="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono text-sm outline-none focus:ring-1 focus:ring-ring"
+-          />
+-          <p className="text-xs text-muted-foreground">
+-            Output path for the WebM video file.
+-          </p>
+-          <DialogFooter>
+-            <Button variant="outline" size="sm" onClick={() => setRecordDialogOpen(false)}>
+-              Cancel
+-            </Button>
+-            <Button size="sm" onClick={handleRecordStart} disabled={!recordPath.trim()}>
+-              Record
+-            </Button>
+-          </DialogFooter>
+-        </DialogContent>
+-      </Dialog>
+     </div>
+   );
+ }
+diff --git a/packages/dashboard/src/store/sessions.ts b/packages/dashboard/src/store/sessions.ts
+index a972fd3..d3e654e 100644
+--- a/packages/dashboard/src/store/sessions.ts
++++ b/packages/dashboard/src/store/sessions.ts
+@@ -28,7 +28,7 @@ function getSessionsUrl(): string {
+ // Primitive atoms
+ // ---------------------------------------------------------------------------
+ 
+-export const activePortAtom = atom(getPort());
++export const activePortAtom = atom(0);
+ 
+ export const polledSessionsAtom = atom<SessionInfo[]>([]);
+ 
+@@ -203,87 +203,80 @@ const reconcileSessionsAtom = atom(
+ // Sync hook
+ // ---------------------------------------------------------------------------
+ 
+-export function useSessionsSync(pollInterval = 5000) {
+-  const failCountRef = useRef(0);
+-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
++interface FalconSession {
++  id: string;
++  hostName?: string;
++  projectName: string;
++  name: string;
++  title?: string;
++  browsers?: BrowserBrief[];
++  browser?: BrowserBrief;
++}
+ 
+-  const reconcile = useAtomCallback(
+-    useCallback((_get, set) => {
+-      set(reconcileSessionsAtom);
+-    }, []),
+-  );
++interface BrowserBrief { browserSession?: string; url: string; title: string }
+ 
+-  const fetchSessions = useAtomCallback(
+-    useCallback(
+-      async (get, set) => {
+-        try {
+-          const resp = await fetch(getSessionsUrl());
+-          if (resp.ok) {
+-            failCountRef.current = 0;
+-            const data: SessionInfo[] = await resp.json();
+-            data.sort((a, b) => a.session.localeCompare(b.session));
+-            const names = new Set(data.map((x) => x.session));
+-            for (const prev of get(polledSessionsAtom)) {
+-              if (!names.has(prev.session)) disposeChat(prev.session);
+-            }
+-            set(polledSessionsAtom, data);
+-
+-            // Reconcile pending/closing
+-            reconcile();
+-
+-            // Seed engine cache from session list
+-            const engineCache = get(engineCacheAtom);
+-            const nextEngine = { ...engineCache };
+-            let engineChanged = false;
+-            for (const s of data) {
+-              if (s.engine && !nextEngine[s.port]) {
+-                nextEngine[s.port] = s.engine;
+-                engineChanged = true;
+-              }
+-            }
+-            if (engineChanged) set(engineCacheAtom, nextEngine);
+-
+-            // Auto-select first session if current port is not in list
+-            const activePort = get(activePortAtom);
+-            const sessions = get(sessionsAtom);
+-            if (sessions.length > 0 && !sessions.some((s) => s.port === activePort)) {
+-              set(activePortAtom, sessions[0].port);
+-            }
+-
+-            // Poll tabs for all sessions
+-            for (const s of data) {
+-              try {
+-                const tabsResp = await fetch(getSessionTabsPath(s.port)).catch(
+-                  () => null,
+-                );
+-                if (tabsResp?.ok) {
+-                  const tabs = await tabsResp.json();
+-                  if (tabs.length > 0) {
+-                    set(tabCacheAtom, (prev) => ({ ...prev, [s.port]: tabs }));
+-                  }
+-                }
+-              } catch {
+-                // Session unreachable
+-              }
+-            }
+-
+-            return;
+-          }
+-        } catch {
+-          // Server unreachable
+-        }
+-        failCountRef.current++;
+-        if (failCountRef.current >= 2) set(polledSessionsAtom, []);
+-      },
+-      [reconcile],
+-    ),
+-  );
++// The official UI uses a numeric selection key. The actual route always uses
++// the gateway-qualified terminal id and the browser instance name.
++export const streamPaths = new Map<number, string>();
++const selectionKeys = new Map<string, number>();
++let nextKey = 1;
++
++export function useSessionsSync(pollInterval = 5000) {
++  const update = useAtomCallback(useCallback((get, set, rows: FalconSession[], preferred: string | null) => {
++    const sessions: SessionInfo[] = [];
++    const livePaths = new Set<string>();
++    const cache: Record<number, import("@/types").TabInfo[]> = {};
++    let preferredKey = 0;
++    for (const row of rows) {
++      for (const brief of row.browsers?.length ? row.browsers : (row.browser ? [row.browser] : [])) {
++        const name = brief.browserSession ?? "";
++        const query = name ? "?" + new URLSearchParams({browserSession: name}) : "";
++        const path = "/ws/browser/" + encodeURIComponent(row.id) + query;
++        const key = selectionKeys.get(path) ?? nextKey++;
++        livePaths.add(path);
++        selectionKeys.set(path, key);
++        streamPaths.set(key, path);
++        if (path === preferred) preferredKey = key;
++        const host = row.hostName || (row.id.startsWith("node:") ? row.id.split(":")[1] : "localhost");
++        sessions.push({ port: key, session: [host, row.projectName, row.name || row.title, name || "default"].filter(Boolean).join(" / ") });
++        cache[key] = brief.url ? [{tabId: "active", type: "page", active: true, url: brief.url, title: brief.title}] : [];
++      }
++    }
++    for (const [path, key] of selectionKeys) {
++      if (!livePaths.has(path)) {
++        selectionKeys.delete(path);
++        streamPaths.delete(key);
++      }
++    }
++    set(polledSessionsAtom, sessions);
++    set(tabCacheAtom, cache);
++    if (preferredKey || !sessions.some(s => s.port === get(activePortAtom))) {
++      set(activePortAtom, preferredKey || sessions[0]?.port || 0);
++    }
++    return !!preferredKey;
++  }, []));
+ 
+   useEffect(() => {
+-    fetchSessions();
+-    timerRef.current = setInterval(fetchSessions, pollInterval);
+-    return () => {
+-      if (timerRef.current) clearInterval(timerRef.current);
+-    };
+-  }, [fetchSessions, pollInterval]);
++    const abort = new AbortController();
++    let timer: ReturnType<typeof setTimeout>;
++    const params = new URLSearchParams(location.search);
++    const terminal = params.get("terminal");
++    const name = params.get("browserSession");
++    let preferred = terminal ? "/ws/browser/" + encodeURIComponent(terminal) +
++      (name ? "?" + new URLSearchParams({browserSession: name}) : "") : null;
++    async function poll() {
++      try {
++        const result = await fetch("/api/sessions", {signal: abort.signal, cache: "no-store"});
++        if (!result.ok) throw new Error(String(result.status));
++        const rows = await result.json();
++        if (!abort.signal.aborted && update(rows, preferred)) preferred = null;
++      } catch {
++        if (!abort.signal.aborted) update([], null);
++      } finally {
++        if (!abort.signal.aborted) timer = setTimeout(poll, pollInterval);
++      }
++    }
++    poll();
++    return () => { abort.abort(); clearTimeout(timer); };
++  }, [pollInterval, update]);
+ }
+diff --git a/packages/dashboard/src/store/stream.ts b/packages/dashboard/src/store/stream.ts
+index 412e9af..b414074 100644
+--- a/packages/dashboard/src/store/stream.ts
++++ b/packages/dashboard/src/store/stream.ts
+@@ -9,7 +9,7 @@ import type {
+   StreamMessage,
+   TabInfo,
+ } from "@/types";
+-import { getSessionStreamUrl } from "@/lib/dashboard-routes";
++import { streamPaths } from "@/store/sessions";
+ import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
+ 
+ const MAX_EVENTS = 500;
+@@ -24,7 +24,7 @@ export const screencastingAtom = atom(false);
+ export const recordingAtom = atom(false);
+ export const viewportWidthAtom = atom(1280);
+ export const viewportHeightAtom = atom(720);
+-export const currentFrameAtom = atom<string | null>(null);
++export const currentFrameAtom = atom<Blob | null>(null);
+ export const streamEventsAtom = atom<ActivityEvent[]>([]);
+ export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
+ export const streamTabsAtom = atom<TabInfo[]>([]);
+@@ -120,16 +120,71 @@ export function useStreamSync(port: number) {
+     if (port <= 0) return;
+     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+ 
+-    const ws = new WebSocket(getSessionStreamUrl(port));
++    const path = streamPaths.get(port);
++    if (!path) return;
++    const endpoint = new URL(path, location.origin);
++    endpoint.searchParams.set("readOnly", "true");
++    endpoint.protocol = location.protocol === "https:" ? "wss:" : "ws:";
++    const ws = new WebSocket(endpoint);
++    ws.binaryType = "arraybuffer";
+     wsRef.current = ws;
+     setWsRef(ws);
+ 
++    type LogEntry = {
++      id: number; ts: number; kind: string; action?: string; command_id?: string;
++      summary?: string; ok?: boolean; duration_ms?: number; error?: string;
++      level?: string; text?: string; message?: string; url?: string;
++    };
++    const liveEntries = new Map<number, LogEntry>();
++    const applyEvent = (item: LogEntry) => {
++      liveEntries.set(item.id, item);
++      if (liveEntries.size > MAX_EVENTS) liveEntries.delete(liveEntries.keys().next().value!);
++      const id = item.command_id || String(item.id);
++      const timestamp = item.ts;
++      if (item.kind === "command" || item.kind === "result") {
++        const action = item.action || "";
++        const entry: ActivityEvent = item.kind === "command"
++          ? { type: "command", id, action, params: item.summary ? {summary: item.summary} : {}, timestamp }
++          : { type: "result", id, action, success: !!item.ok, data: item.error, duration_ms: item.duration_ms ?? 0, timestamp };
++        const earlier = eventsRef.current.filter(e => e.type !== "command" || e.id !== id);
++        eventsRef.current = [...earlier, entry].slice(-MAX_EVENTS);
++        setEvents(eventsRef.current);
++      } else if (item.kind === "console" || item.kind === "pageError") {
++        const entry: ConsoleEntry = item.kind === "console"
++          ? {type: "console", text: item.text || "", level: item.level || "log", timestamp}
++          : {type: "page_error", text: item.message || "", line: null, column: null, timestamp};
++        consoleRef.current = [...consoleRef.current, entry].slice(-MAX_EVENTS);
++        setConsoleLogs(consoleRef.current);
++      }
++    };
++    async function loadHistory() {
++      const route = new URL(path!, location.origin);
++      route.pathname = route.pathname.replace("/ws/browser/", "/api/sessions/") + "/browser/log";
++      route.searchParams.set("limit", String(MAX_EVENTS));
++      try {
++        const response = await fetch(route, {cache: "no-store"});
++        if (!response.ok) return;
++        const history: {events: LogEntry[]} = await response.json();
++        if (wsRef.current !== ws) return;
++        const merged = new Map(history.events.map(e => [e.id, e]));
++        for (const [id, event] of liveEntries) merged.set(id, event);
++        eventsRef.current = [];
++        consoleRef.current = [];
++        setEvents([]);
++        setConsoleLogs([]);
++        for (const event of [...merged.values()].sort((a,b) => a.id-b.id).slice(-MAX_EVENTS)) applyEvent(event);
++      } catch { /* Live updates continue while the log is unavailable. */ }
++    }
++
+     ws.onopen = () => {
+       retryCountRef.current = 0;
+       setConnected(true);
+     };
+ 
+     ws.onclose = () => {
++      if (wsRef.current !== ws) return;
++      setFrame(null);
++      setBrowserConnected(false);
+       setConnected(false);
+       const delay = Math.min(2000 * 2 ** retryCountRef.current, 30000);
+       retryCountRef.current++;
+@@ -141,82 +196,28 @@ export function useStreamSync(port: number) {
+     };
+ 
+     ws.onmessage = (event) => {
+-      let msg: StreamMessage;
+-      try {
+-        msg = JSON.parse(event.data);
+-      } catch {
++      if (wsRef.current !== ws) return;
++      if (event.data instanceof ArrayBuffer) {
++        const frame = new DataView(event.data);
++        if (frame.byteLength <= 33 || frame.getUint8(0) !== 1) return;
++        setFrame(new Blob([new Uint8Array(event.data, 33)], {type: "image/jpeg"}));
++        ws.send(JSON.stringify({type: "ack", seq: Number(frame.getBigUint64(1))}));
+         return;
+       }
+-
+-      switch (msg.type) {
+-        case "frame":
+-          setFrame(msg.data);
+-          break;
+-
+-        case "status":
+-          setBrowserConnected(msg.connected);
+-          setScreencasting(msg.screencasting);
+-          if (msg.recording != null) setRecording(msg.recording);
+-          setVpWidth(msg.viewportWidth);
+-          setVpHeight(msg.viewportHeight);
+-          if (msg.engine) {
+-            setEngine(msg.engine);
+-            setEngineCache((prev) => ({ ...prev, [port]: msg.engine! }));
+-          }
+-          break;
+-
+-        case "command": {
+-          const updated = [...eventsRef.current, msg].slice(-MAX_EVENTS);
+-          eventsRef.current = updated;
+-          setEvents(updated);
+-          break;
+-        }
+-
+-        case "console": {
+-          const conUpdated = [...consoleRef.current, msg].slice(-MAX_EVENTS);
+-          consoleRef.current = conUpdated;
+-          setConsoleLogs(conUpdated);
+-          break;
+-        }
+-
+-        case "page_error": {
+-          const conUpdated = [...consoleRef.current, msg].slice(-MAX_EVENTS);
+-          consoleRef.current = conUpdated;
+-          setConsoleLogs(conUpdated);
+-          break;
+-        }
+-
+-        case "result": {
+-          const cmdIdx = eventsRef.current.findIndex(
+-            (e) => e.type === "command" && e.id === msg.id,
+-          );
+-          const base =
+-            cmdIdx >= 0
+-              ? [
+-                  ...eventsRef.current.slice(0, cmdIdx),
+-                  ...eventsRef.current.slice(cmdIdx + 1),
+-                ]
+-              : eventsRef.current;
+-          const updated = [...base, msg].slice(-MAX_EVENTS);
+-          eventsRef.current = updated;
+-          setEvents(updated);
+-          break;
+-        }
+-
+-        case "tabs":
+-          setTabs(msg.tabs);
+-          setTabCache((prev) => ({ ...prev, [port]: msg.tabs }));
+-          break;
+-
+-        case "url":
+-          setTabs((prev) =>
+-            prev.map((t) => (t.active ? { ...t, url: msg.url } : t)),
+-          );
+-          break;
+-
+-        case "error":
+-          break;
++      let packet;
++      try { packet = JSON.parse(event.data); } catch { return; }
++      if (packet.type === "hello" || packet.type === "status") {
++        setBrowserConnected(packet.status.connected);
++        setScreencasting(packet.status.screencasting);
++        if (packet.tabs) setTabs(packet.tabs.map((tab: TabInfo & {index: number}) =>
++          ({...tab, tabId: String(tab.index), type: "page"})));
++        if (packet.gone) ws.close();
++        else if (packet.type === "hello") void loadHistory();
++        return;
+       }
++      if (packet.type === "gone") { ws.close(); return; }
++      if (packet.type !== "event") return;
++      applyEvent(packet.event);
+     };
+   }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+ 
+@@ -224,7 +225,9 @@ export function useStreamSync(port: number) {
+     connect();
+     return () => {
+       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+-      wsRef.current?.close();
++      const socket = wsRef.current;
++      wsRef.current = null;
++      socket?.close();
+       setWsRef(null);
+     };
+   }, [connect, setWsRef]);

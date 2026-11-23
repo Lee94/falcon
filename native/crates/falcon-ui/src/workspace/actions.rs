@@ -87,6 +87,17 @@ impl Workspace {
 
     // ---------------- 浏览器窗口（ADR 0029） ----------------
 
+    pub fn open_browser_dashboard(&self, target: &BrowserTarget, cx: &mut Context<Self>) {
+        if let Ok(mut url) = url::Url::parse(self.client.base_url()) {
+            url.set_path("/browser-dashboard");
+            url.query_pairs_mut().clear().append_pair("terminal", &target.session_id);
+            if !target.is_default() {
+                url.query_pairs_mut().append_pair("browserSession", &target.browser_session);
+            }
+            cx.open_url(url.as_str());
+        }
+    }
+
     pub fn open_browser(&mut self, target: BrowserTarget, focus: bool, cx: &mut Context<Self>) {
         if self.session(&target.session_id).is_none() || self.hidden_sessions.contains_key(&target.session_id) {
             return;

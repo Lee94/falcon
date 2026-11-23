@@ -10,4 +10,6 @@
 
 - [本地 coding agent CLI 检测](.agents/memory/agent-cli-detection.md)：检测范围、刷新与菜单共用规则，以及新增 CLI 的修改位置。
 
+- [多主机浏览器面板](.agents/memory/browser-dashboard.md)：会话路由、官方面板版本与静态资源更新步骤。
+
 Android 终端使用 Google vtfx，最低支持 Android 10（API 29）。生产源码、许可证、上游提交和本地适配记录在 `android/vtfx/`。修改终端时可运行 Android Gradle 任务 `:app:testDebugUnitTest --tests '*VtfxSessionTest'`。构建前通过 `cargo xtask android --jni-only` 准备字体和原生库。

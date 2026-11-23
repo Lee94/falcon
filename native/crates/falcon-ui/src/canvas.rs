@@ -1218,7 +1218,7 @@ impl Canvas {
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        ws.update(cx, |w, cx| w.open_browser(target.clone(), true, cx));
+                        ws.update(cx, |w, cx| w.open_browser_dashboard(&target, cx));
                     })
                     .child(icon(IconName::Globe).size(zpx(11.)).flex_none())
                     .child(div().min_w_0().truncate().child(label))
@@ -1232,7 +1232,7 @@ impl Canvas {
                         Some(domain) => format!("{label} · {domain}"),
                         None => label,
                     };
-                    MenuItemSpec::new(label, move |_, cx| ws.update(cx, |w, cx| w.open_browser(target.clone(), true, cx)))
+                    MenuItemSpec::new(label, move |_, cx| ws.update(cx, |w, cx| w.open_browser_dashboard(&target, cx)))
                 }).collect::<Vec<_>>();
                 Button::new(badge_id)
                     .outline()
