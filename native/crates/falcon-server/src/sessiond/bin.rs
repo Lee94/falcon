@@ -11,6 +11,7 @@
 //! Mac 上的后端也会连 Linux arm64 的远端，所以发布版把 4 个目标全编进去。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sha2::Digest as _;
@@ -152,8 +153,10 @@ pub fn install_local(data_dir: &Path, bin: &SessiondBinary) -> std::io::Result<P
         return Ok(dest);
     }
     std::fs::create_dir_all(&dir)?;
-    // 先写临时文件再改名：两个进程同时释放也不会看到半截文件
-    let tmp = dir.join(format!(".{}.tmp-{}", bin.file_name(), std::process::id()));
+    // 先写临时文件再改名：两个进程或同进程并发释放也不会互相覆盖临时文件
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{}.tmp-{}-{seq}", bin.file_name(), std::process::id()));
     std::fs::write(&tmp, bin.bytes.as_slice())?;
     #[cfg(unix)]
     {

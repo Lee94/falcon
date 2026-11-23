@@ -123,18 +123,43 @@ fn binary(target: SessiondTarget) -> Result<SessiondBinary, InstallError> {
     })
 }
 
+/// 本机刚写出可执行文件后立刻 `exec` 时，Linux 多线程进程里可能因其他线程 `fork()` 尚未
+/// `execve()` 而短暂继承了该文件的可写文件描述符，内核返回 `ETXTBSY`（`ExecutableFileBusy`）。
+/// 该描述符在子进程 `execve` 时自动关闭（`O_CLOEXEC`），短暂退避再试即可。
+const LOCAL_BUSY_BACKOFF_MS: [u64; 5] = [20, 50, 100, 200, 500];
+
+async fn retry_on_busy<T, F, Fut>(backoff_ms: &[u64], mut f: F) -> std::io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    let mut step = 0;
+    loop {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && step < backoff_ms.len() => {
+                tokio::time::sleep(Duration::from_millis(backoff_ms[step])).await;
+                step += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// 后端本机：拷进数据目录、握手
 pub async fn ensure_local(data_dir: &Path) -> Result<Deployed, InstallError> {
     let target = local_target().ok_or_else(|| InstallError::new(InstallFailure::ArchUnsupported, None))?;
     let bin = binary(target)?;
     let path = install_local(data_dir, &bin).map_err(|e| InstallError::new(InstallFailure::DirNotWritable, Some(e.to_string())))?;
-    let out = tokio::process::Command::new(&path)
-        .no_window()
-        .args(["version", "--json"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| InstallError::new(InstallFailure::VerifyFailed, Some(e.to_string())))?;
+    let out = retry_on_busy(&LOCAL_BUSY_BACKOFF_MS, || {
+        tokio::process::Command::new(&path)
+            .no_window()
+            .args(["version", "--json"])
+            .stdin(std::process::Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| InstallError::new(InstallFailure::VerifyFailed, Some(e.to_string())))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() || !version_matches(&stdout, target) {
         return Err(InstallError::new(
@@ -295,5 +320,39 @@ mod tests {
     fn ghostty_commit_is_read_from_the_handshake() {
         assert_eq!(ghostty_of("noise\n{\"version\":\"x\",\"protoMin\":1,\"protoMax\":1,\"ghostty\":\"abc\",\"target\":\"t\"}\n"), "abc");
         assert_eq!(ghostty_of(""), "");
+    }
+
+    #[tokio::test]
+    async fn retry_on_busy_retries_only_executable_file_busy() {
+        let calls = std::cell::Cell::new(0);
+        let ok: std::io::Result<&'static str> = retry_on_busy(&[1, 1, 1], || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            async move {
+                if n < 3 {
+                    Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+                } else {
+                    Ok("ready")
+                }
+            }
+        })
+        .await;
+        assert_eq!((ok.unwrap(), calls.get()), ("ready", 3));
+
+        let calls = std::cell::Cell::new(0);
+        let exhausted: std::io::Result<()> = retry_on_busy(&[1, 1], || {
+            calls.set(calls.get() + 1);
+            async { Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)) }
+        })
+        .await;
+        assert_eq!((exhausted.unwrap_err().kind(), calls.get()), (std::io::ErrorKind::ExecutableFileBusy, 3));
+
+        let calls = std::cell::Cell::new(0);
+        let other: std::io::Result<()> = retry_on_busy(&[1, 1], || {
+            calls.set(calls.get() + 1);
+            async { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) }
+        })
+        .await;
+        assert_eq!((other.unwrap_err().kind(), calls.get()), (std::io::ErrorKind::PermissionDenied, 1));
     }
 }

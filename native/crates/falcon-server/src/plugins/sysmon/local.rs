@@ -154,8 +154,35 @@ mod tests {
     /// 真机冒烟：在跑测试的这台机器上采一次，形状说得过去
     #[test]
     fn samples_this_machine() {
+        struct StopOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>, Option<std::thread::JoinHandle<u64>>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(h) = self.1.take() {
+                    let _ = h.join();
+                }
+            }
+        }
         let mut s = LocalSampler::new();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        // 首次采样窗口里主线程在 sleep；空载的 Linux CI 上整机可能一个时钟滴答都没计到，
+        // 临时起一个忙线程保证本进程在窗口内产生 CPU 消耗，验证第一帧就能采到非零进程 CPU
+        let guard = StopOnDrop(
+            stop,
+            Some(std::thread::spawn(move || {
+                let mut acc = 0u64;
+                while !flag.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < deadline {
+                    for _ in 0..10_000 {
+                        acc = std::hint::black_box(acc.wrapping_add(1));
+                    }
+                }
+                acc
+            })),
+        );
         let snap = s.sample();
+        drop(guard);
         assert!(snap.cores > 0);
         assert!(snap.mem_total > 0 && snap.mem_used <= snap.mem_total);
         let cpu = snap.cpu.unwrap();
