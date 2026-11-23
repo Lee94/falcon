@@ -156,7 +156,7 @@ pub struct PendingSession {
 /// 新建终端窗口落的位置
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NewTerminalPlace {
-    /// 默认（⌘T / 侧栏 ＋）：独占一列并新建一块画布，紧跟在当前画布后面
+    /// 默认（⌘T / 侧栏 ＋）：独占一列并新建一块画布，追加到末尾
     #[default]
     Auto,
     /// 向右分屏（⌘D / 在右侧新建）：在锚点窗口所在列的右边插一列，留在同一块画布
@@ -903,7 +903,7 @@ impl WorkspaceState {
     }
 
     /// 新建会话的第一步（React 版 `createSessionNow` 发请求之前的 `set`）：先摆一扇 pending
-    /// 窗口。默认独占一列并新建一块画布，紧跟在当前画布后面；`after` 给了就插在那扇窗口所在列
+    /// 窗口。默认独占一列并新建一块画布，追加到末尾；`after` 给了就插在那扇窗口所在列
     /// 的右边（留在同一块画布）。开在别的项目里就接到最右——当前画布是这个项目的，与它无关。
     /// 新开的终端不能建在一个收着的检出里，顺手摊开。返回 pending id。
     pub fn begin_pending(
@@ -951,7 +951,7 @@ impl WorkspaceState {
                     insert_column(&self.columns, &key, col_at, canvas.as_deref())
                 }
                 None => {
-                    let at = self.new_column_at(None, sessions);
+                    let at = pin_edge(&self.columns);
                     insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
                 }
             },
@@ -962,16 +962,12 @@ impl WorkspaceState {
                     insert_pane(&cleared, &key, PaneAt { col: at.col, index: at.index + 1 })
                 }
                 None => {
-                    let at = self.new_column_at(None, sessions);
+                    let at = pin_edge(&self.columns);
                     insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
                 }
             },
             NewTerminalPlace::Auto => {
-                let at = if self.selected_project_id.as_deref() == Some(project_id) {
-                    self.new_column_at(None, sessions)
-                } else {
-                    self.columns.len()
-                };
+                let at = pin_edge(&self.columns);
                 insert_column(&self.columns, &key, at, Some(&new_canvas_id()))
             }
         };
@@ -1573,7 +1569,7 @@ mod tests {
         let out = serialize_workspace(&ws.persisted());
         assert_eq!(
             out,
-            r#"{"tabs":["s1"],"columns":[{"basis":null,"panes":[{"key":"t:s1","basis":null}],"pinned":false}],"active":{"kind":"project"},"sidebarOpen":true,"rightOpen":false,"rightPanel":"files","collapsed":{"s:local":true},"sessionsOpen":{},"selectedProjectId":"p","showArchived":false,"sidebarWidth":260,"rightWidth":260,"termZoomed":false}"#
+            r#"{"tabs":["s1"],"columns":[{"basis":null,"panes":[{"key":"t:s1","basis":null}],"pinned":false,"canvas":"CANVAS"}],"active":{"kind":"project"},"sidebarOpen":true,"rightOpen":false,"rightPanel":"files","collapsed":{"s:local":true},"sessionsOpen":{},"selectedProjectId":"p","showArchived":false,"sidebarWidth":260,"rightWidth":260,"termZoomed":false}"#.replace("CANVAS", ws.columns[0].canvas.as_deref().unwrap())
         );
         // 读回来还是同一份
         assert_eq!(load_workspace(Some(&out)), ws.persisted());
@@ -1775,24 +1771,24 @@ mod tests {
     }
 
     #[test]
-    fn settle_assigns_canvases_once_the_width_is_known() {
+    fn terminals_have_independent_canvases_before_measurement() {
         let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
         let mut ws = WorkspaceState::default();
         for id in ["a", "b", "c"] {
             ws.open_session(id, &sessions);
         }
-        // 还没量出画布宽：不分，显示上都挤在一块
+        // 未测量宽度时，每个终端已有独立画布。
         assert_eq!(ws.settle_canvases(&sessions), Settled { columns: false, changed: true });
-        assert_eq!(canvases(&ws, &sessions).len(), 1);
+        assert_eq!(canvases(&ws, &sessions).len(), 3);
         assert!(ws.set_canvas_width(TWO));
         let settled = ws.settle_canvases(&sessions);
-        assert!(settled.columns && settled.changed);
-        assert_eq!(canvases(&ws, &sessions), [vec![vec!["t:a"], vec!["t:b"]], vec![vec!["t:c"]]]);
+        assert!(!settled.columns);
+        assert_eq!(canvases(&ws, &sessions), [vec![vec!["t:a"]], vec![vec!["t:b"]], vec![vec!["t:c"]]]);
         // 收敛之后再跑一遍什么也不变
         assert_eq!(ws.settle_canvases(&sessions), Settled::default());
-        // 当前画布跟着活动窗口（c 在第二块）
-        assert_eq!(ws.current_canvas(&sessions), Some(ws.view_canvases(&sessions)[1].id.clone()));
-        // 画布落盘，读回来还是同两块
+        // 当前画布跟着活动窗口（c 在第三块）
+        assert_eq!(ws.current_canvas(&sessions), Some(ws.view_canvases(&sessions)[2].id.clone()));
+        // 画布落盘，读回来还是同三块
         let saved = ws.persisted();
         assert!(saved.columns.iter().all(|c| c.canvas.is_some()));
         let back = WorkspaceState::from_persisted(&load_workspace(Some(&serialize_workspace(&saved))));
@@ -1800,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn new_terminals_open_on_a_new_canvas_after_the_current_one() {
+    fn new_terminals_append_after_the_last_canvas() {
         let sessions = vec![session("a", "p", 1), session("b", "p", 2), session("c", "p", 3)];
         let mut ws = WorkspaceState::default();
         for id in ["a", "b", "c"] {
@@ -1808,7 +1804,7 @@ mod tests {
         }
         ws.set_canvas_width(TWO);
         ws.settle_canvases(&sessions);
-        // 回到第一块（已满）开一个：另起一块紧跟在它后面，不跑到 c 那块
+        // 从第一块新建也追加到末尾。
         ws.focus_pane("t:a");
         ws.settle_canvases(&sessions);
         let pid = ws.begin_pending("p", None, None, &sessions);
@@ -1816,7 +1812,7 @@ mod tests {
         let pending = format!("t:{pid}");
         assert_eq!(
             canvases(&ws, &sessions),
-            [vec![vec!["t:a".to_string()], vec!["t:b".into()]], vec![vec![pending.clone()]], vec![vec!["t:c".into()]]]
+            [vec![vec!["t:a".to_string()]], vec![vec!["t:b".into()]], vec![vec!["t:c".into()]], vec![vec![pending.clone()]]]
         );
         // 在第三块（只有 c，还放得下）开一个：同样新建一块画布，不主动塞进当前画布
         ws.focus_pane("t:c");
@@ -1826,9 +1822,8 @@ mod tests {
         assert_eq!(
             canvases(&ws, &sessions),
             [
-                vec![vec!["t:a".to_string()], vec!["t:b".into()]],
-                vec![vec![pending]],
-                vec![vec!["t:c".into()]],
+                vec![vec!["t:a".to_string()]], vec![vec!["t:b".into()]],
+                vec![vec!["t:c".into()]], vec![vec![pending]],
                 vec![vec![format!("t:{pid2}")]],
             ]
         );
@@ -1841,6 +1836,7 @@ mod tests {
         for id in ["a", "b", "c"] {
             ws.open_session(id, &sessions);
         }
+        ws.columns[1].canvas = ws.columns[0].canvas.clone();
         ws.set_canvas_width(TWO);
         ws.settle_canvases(&sessions);
         ws.focus_pane("t:b");
@@ -1888,6 +1884,7 @@ mod tests {
         let mut ws = WorkspaceState::default();
         ws.open_session("a", &sessions);
         ws.open_session("b", &sessions);
+        ws.columns[1].canvas = ws.columns[0].canvas.clone();
         ws.set_canvas_width(TWO);
         ws.settle_canvases(&sessions);
         assert_eq!(canvases(&ws, &sessions).len(), 1);
@@ -1994,6 +1991,7 @@ mod tests {
         let mut ws = WorkspaceState::default();
         ws.open_session("a", &sessions);
         ws.open_session("b", &sessions);
+        ws.columns[1].canvas = ws.columns[0].canvas.clone();
         ws.set_canvas_width(TWO);
         ws.settle_canvases(&sessions);
         ws.term_zoomed = true;

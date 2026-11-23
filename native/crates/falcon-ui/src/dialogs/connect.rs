@@ -392,14 +392,7 @@ impl ConnectView {
                     let mut list = div().flex().flex_col().gap_1();
                     for peer in peers {
                         let hit = self.probe_hits.get(&peer.id).cloned();
-                        let target_host = peer
-                            .dns_name
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .or(peer.ipv4.as_deref().filter(|s| !s.is_empty()))
-                            .unwrap_or(peer.host.as_str())
-                            .trim_end_matches('.')
-                            .to_owned();
+                        let target_host = peer.connection_host().to_owned();
                         if target_host.is_empty() {
                             continue;
                         }

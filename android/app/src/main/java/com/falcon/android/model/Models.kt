@@ -40,7 +40,9 @@ data class TailnetPeer(
     val ipv4: String?,
     val os: String?,
     val online: Boolean
-)
+) {
+    val connectionHost: String get() = (ipv4?.takeIf { it.isNotBlank() } ?: host).trimEnd('.')
+}
 
 data class TailnetStatus(
     val state: String,

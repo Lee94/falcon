@@ -184,14 +184,7 @@ pub fn probe_tailnet_servers(
             let sem = Arc::new(tokio::sync::Semaphore::new(8));
             let mut handles = Vec::new();
             for dev in devices.into_iter().filter(|d| d.online) {
-                let target_host = dev
-                    .dns_name
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .or(dev.ipv4.as_deref().filter(|s| !s.is_empty()))
-                    .unwrap_or(dev.host.as_str())
-                    .trim_end_matches('.')
-                    .to_owned();
+                let target_host = dev.connection_host().to_owned();
                 if target_host.is_empty() {
                     continue;
                 }

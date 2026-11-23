@@ -54,6 +54,7 @@ struct ProjectDrag {
 }
 
 pub struct Sidebar {
+    terminal_positions: std::collections::HashMap<String, (usize, usize, usize)>,
     ws: Entity<Workspace>,
 }
 
@@ -71,7 +72,7 @@ impl Sidebar {
             }
         })
         .detach();
-        Self { ws }
+        Self { ws, terminal_positions: Default::default() }
     }
 }
 
@@ -93,6 +94,7 @@ impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
+        self.terminal_positions = falcon_core::layout::terminal_positions(&ws.state.columns);
         // 本机分组一律画出来，独立会话直接列在机器下面，见 [`Sidebar::server_node`]。
         let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived);
         let empty = ws.projects.is_empty() && ws.hosts.is_empty();
@@ -258,18 +260,14 @@ impl Sidebar {
             let mut has_standalone = false;
             if let Some(id) = standalone_id.as_deref() {
                 let ws = self.ws.read(cx);
-                let active = match &ws.state.active {
-                    ActiveView::Terminal { session_id } => Some(session_id.as_str()),
-                    _ => None,
-                };
-                for s in ws.sessions.iter().filter(|s| s.project_id == id) {
-                    has_standalone = true;
-                    node = node.child(self.session_row(s, 1, active == Some(s.id.as_str()), cx));
-                }
-                for p in ws.state.pending.iter().filter(|p| p.project_id == id) {
-                    has_standalone = true;
-                    node = node.child(pending_row(p, 1, cx));
-                }
+                let rows = self.terminal_rows(
+                    ws.sessions.iter().filter(|s| s.project_id == id),
+                    ws.state.pending.iter().filter(|p| p.project_id == id),
+                    1,
+                    cx,
+                );
+                has_standalone = !rows.is_empty();
+                node = node.children(rows);
             }
             if server.folders.is_empty() {
                 if !has_standalone {
@@ -474,16 +472,7 @@ impl Sidebar {
 
         let mut node = div().relative().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expandable && sessions_open {
-            let active = match &ws.state.active {
-                ActiveView::Terminal { session_id: id } => Some(id.clone()),
-                _ => None,
-            };
-            for s in &mine {
-                node = node.child(self.session_row(s, 2, active.as_deref() == Some(s.id.as_str()), cx));
-            }
-            for p in mine_pending {
-                node = node.child(pending_row(p, 2, cx));
-            }
+            node = node.children(self.terminal_rows(mine.into_iter(), mine_pending.into_iter(), 2, cx));
         }
         if archived_at.is_none() {
             for after in [false, true] {
@@ -584,20 +573,28 @@ impl Sidebar {
 
         let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expandable && sessions_open {
-            let active = match &ws.state.active {
-                ActiveView::Terminal { session_id: id } => Some(id.clone()),
-                _ => None,
-            };
-            let rows: Vec<AnyElement> = mine
-                .iter()
-                .map(|s| self.session_row(s, 3, active.as_deref() == Some(s.id.as_str()), cx))
-                .collect();
-            node = node.children(rows);
-            for p in mine_pending {
-                node = node.child(pending_row(p, 3, cx));
-            }
+            node = node.children(self.terminal_rows(mine.into_iter(), mine_pending.into_iter(), 3, cx));
         }
         node.into_any_element()
+    }
+
+    fn terminal_rows<'a>(
+        &self,
+        sessions: impl Iterator<Item = &'a SessionWithProject>,
+        pending: impl Iterator<Item = &'a PendingSession>,
+        depth: usize,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let ws = self.ws.read(cx);
+        let active = match &ws.state.active {
+            ActiveView::Terminal { session_id } => Some(session_id.as_str()),
+            _ => None,
+        };
+        let mut rows: Vec<_> = sessions.map(|s| {
+            (s.id.as_str(), self.session_row(s, depth, active == Some(s.id.as_str()), cx))
+        }).chain(pending.map(|p| (p.id.as_str(), pending_row(p, depth, cx)))).collect();
+        rows.sort_by_key(|(id, _)| self.terminal_positions.get(*id).copied().unwrap_or((usize::MAX, 0, 0)));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
     fn session_row(&self, session: &SessionWithProject, depth: usize, selected: bool, cx: &App) -> AnyElement {

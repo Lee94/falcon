@@ -44,6 +44,15 @@ pub struct TailscaleDevice {
     pub owner: Option<String>,
 }
 
+impl TailscaleDevice {
+    /// 从设备列表探测或添加主机时优先连接 Tailscale IPv4 地址。
+    pub fn connection_host(&self) -> &str {
+        self.ipv4.as_deref().filter(|ip| !ip.trim().is_empty())
+            .unwrap_or(&self.host)
+            .trim_end_matches('.')
+    }
+}
+
 /// `GET /api/tailscale/devices`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +90,10 @@ mod tests {
                 owner: Some("Ada".into()),
             }],
         };
+        let mut device = v.devices[0].clone();
+        assert_eq!(device.connection_host(), "100.2.2.2");
+        device.ipv4 = None;
+        assert_eq!(device.connection_host(), "work.tail.ts.net");
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("suggestedUsername"));
         assert!(!s.contains("reason"));

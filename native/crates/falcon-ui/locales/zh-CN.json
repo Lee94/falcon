@@ -573,7 +573,7 @@
     "add": "添加主机",
     "fromTailscale": "从 Tailscale 添加",
     "tailscaleTitle": "从 Tailscale 添加",
-    "tailscaleHint": "列出 falcon 后端这台机器所在的 Tailscale 网络。选一台后打开主机表单：地址用 MagicDNS 名（没有就用 Tailscale IP），用户名先填本机登录名，认证方式先用 SSH agent，保存前可以改。",
+    "tailscaleHint": "列出 falcon 后端这台机器所在的 Tailscale 网络。选一台后打开主机表单：地址优先使用 Tailscale IPv4，没有 IPv4 时使用设备提供的主机名或 IPv6 地址，用户名先填本机登录名，认证方式先用 SSH agent，保存前可以改。",
     "tailscaleLoading": "正在读取 Tailscale…",
     "tailscaleEmpty": "这台机器的 Tailscale 网络里没有其他设备。",
     "tailscaleNoMatch": "没有匹配的设备。",

@@ -857,9 +857,7 @@ fun DashboardScreen(
                                     }
                                     for (peer in peers) {
                                         val hit = tailscaleHits[peer.id]
-                                        val targetHost = (peer.dnsName?.takeIf { it.isNotBlank() }
-                                            ?: peer.ipv4?.takeIf { it.isNotBlank() }
-                                            ?: peer.host).trimEnd('.')
+                                        val targetHost = peer.connectionHost
                                         if (targetHost.isEmpty()) continue
                                         Row(
                                             modifier = Modifier

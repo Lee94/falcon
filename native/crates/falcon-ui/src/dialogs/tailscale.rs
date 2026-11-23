@@ -1,7 +1,7 @@
 //! 从 falcon 后端这台机器的 Tailscale 里挑一台，预填远端主机表单。
 //!
 //! 列表来自 `GET /api/tailscale/devices`（后端本机的 `tailscale status`）。点一台打开
-//! [`host_form`]：地址用 MagicDNS 名或 Tailscale IP，用户名先填后端的登录名，认证方式先用
+//! [`host_form`]：地址优先用 Tailscale IPv4，用户名先填后端的登录名，认证方式先用
 //! SSH agent。保存前都能改。表单叠在这个对话框上面，存完还能继续加下一台。
 
 use falcon_proto::{SshAuthMethod, SshHost, TailscaleDevice, TailscaleDevices, TailscaleUnavailable};
@@ -81,7 +81,7 @@ impl TailscalePicker {
         let draft = HostDraft {
             name: fresh_name(&device.name, &hosts),
             ssh: SshInit {
-                host: device.host.clone(),
+                host: device.connection_host().to_owned(),
                 port: 22,
                 username,
                 // Tailscale 网络里的机器多半已经能用本机 SSH agent 的密钥登录。

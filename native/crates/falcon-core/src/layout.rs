@@ -25,7 +25,7 @@
 //! 元素每帧按快照重画，挂在树的哪个位置都一样），但几何仍然从这里出，列宽 / 窗口高
 //! 沿用 React 版的同一套算法。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -273,7 +273,7 @@ pub fn set_pane_basis(columns: &[ColumnLayout], key: &str, basis: Option<f64>) -
 }
 
 /// 与数据源对账：`live` 之外的 key 一律摘掉（会话结束、文件关了），`live` 里还没排布的
-/// 按给定顺序各自追加成新列。新列还没分画布，由 [`assign_canvases`] 按排不排得下去分。
+/// 按给定顺序各自追加成新列。终端列各用独立画布，其他新列由 [`assign_canvases`] 按排不排得下去分。
 ///
 /// 每次改动数据源之后都跑：漏掉一次，画布上就会有一扇连着死会话的窗口，或者开出来的
 /// 会话找不到落脚的地方。
@@ -291,14 +291,13 @@ pub fn sync_columns<S: AsRef<str>>(columns: &[ColumnLayout], live: &[S]) -> Vec<
     );
     let have: HashSet<String> = pane_keys(&kept).into_iter().collect();
     let missing: Vec<&str> = live.iter().map(AsRef::as_ref).filter(|k| !have.contains(*k)).collect();
-    if missing.is_empty() {
-        return kept;
-    }
-    // 补的新列也得让开固定列
     let at = pin_edge(&kept);
-    let tail = kept.split_off(at);
-    kept.extend(missing.into_iter().map(|k| column([k], None)));
-    kept.extend(tail);
+    kept.splice(at..at, missing.into_iter().map(|k| column([k], None)));
+    for c in &mut kept {
+        if !c.pinned && c.canvas.is_none() && c.panes.iter().any(|p| p.key.starts_with("t:")) {
+            c.canvas = Some(new_canvas_id());
+        }
+    }
     kept
 }
 
@@ -367,6 +366,21 @@ pub fn canvas_groups(columns: &[ColumnLayout]) -> Vec<CanvasGroup> {
         g.columns.push(pinned.clone());
     }
     groups
+}
+
+/// 侧栏按画布顺序逐行列出终端，固定列只在首次出现时计入。
+pub fn terminal_positions(columns: &[ColumnLayout]) -> HashMap<String, (usize, usize, usize)> {
+    let mut positions = HashMap::new();
+    for (canvas, group) in canvas_groups(columns).into_iter().enumerate() {
+        for (col, column) in group.columns.into_iter().enumerate() {
+            for (row, pane) in column.panes.into_iter().enumerate() {
+                if let Some(id) = pane.key.strip_prefix("t:") {
+                    positions.entry(id.to_owned()).or_insert((canvas, row, col));
+                }
+            }
+        }
+    }
+    positions
 }
 
 /// 按画布排好的可见列（画布一块接一块，固定列在最后）：切窗口的快捷键按它走
@@ -893,6 +907,18 @@ pub fn pane_max_height(column_height: f64, above: f64, below: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_reads_each_canvas_row_from_left_to_right() {
+        let mut columns = vec![column(["t:a", "t:c"], None), column(["t:b"], None), column(["t:d"], None)];
+        for (column, group) in columns.iter_mut().zip(["one", "one", "two"]) {
+            column.canvas = Some(group.into());
+        }
+        let positions = terminal_positions(&columns);
+        let mut ids = ["d", "c", "b", "a"];
+        ids.sort_by_key(|id| positions[*id]);
+        assert_eq!(ids, ["a", "b", "c", "d"]);
+    }
 
     #[test]
     fn column_ids_are_unique_and_web_shaped() {

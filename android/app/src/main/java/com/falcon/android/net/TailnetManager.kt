@@ -417,9 +417,7 @@ object TailnetManager {
         val sem = Semaphore(8)
         coroutineScope {
             snap.status.peers.filter { it.online }.mapNotNull { peer ->
-                val targetHost = (peer.dnsName?.takeIf { it.isNotBlank() }
-                    ?: peer.ipv4?.takeIf { it.isNotBlank() }
-                    ?: peer.host).trimEnd('.')
+                val targetHost = peer.connectionHost
                 if (targetHost.isEmpty()) return@mapNotNull null
                 async {
                     sem.withPermit {
