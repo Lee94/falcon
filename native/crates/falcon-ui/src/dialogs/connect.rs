@@ -632,7 +632,6 @@ impl Render for ConnectView {
             .flex_col()
             .bg(crate::window_background::fill(cx))
             .text_color(ui.foreground)
-            .font_family(crate::fonts::BERKELEY)
             .text_size(zpx(13.))
             .pt(zpx(40.))
             .child(

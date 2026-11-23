@@ -3,7 +3,7 @@
 //! 活动栏不成岛：图标直接落在窗口底上。点同一格关面板，点另一格切过去。
 //! 面板视图在右侧栏开着时切走不卸载（切回来要立刻有东西），关掉右侧栏才卸——沿用 React 版的规则。
 //!
-//! 内置的两格之后隔一道短线是插件（ADR 0025）：服务端列表里启用着、清单没坏的那些，
+//! 内置按钮之后隔一道短线是插件（ADR 0025）：服务端列表里启用着、清单没坏的那些，
 //! 一个插件一格，面板都是 [`PluginPanel`]。
 
 use gpui_kit::assets::IconName;
@@ -105,6 +105,17 @@ impl Render for RightBar {
             let id = format!("rb-{}", panel.as_wire());
             bar = bar.child(bar_button(id, icon_name, tip, on, &ui, move |_, _, cx| toggle(&ws, panel.clone(), cx)));
         }
+        bar = bar.child(bar_button(
+            "rb-local-browser-dashboard".into(),
+            IconName::LayoutDashboard,
+            t!("project.localBrowserDashboard").to_string().into(),
+            false,
+            &ui,
+            |_, _, cx| {
+                let base = falcon_platform::get(cx).local_server_url();
+                cx.open_url(&format!("{}/browser-dashboard", base.trim_end_matches('/')));
+            },
+        ));
         if !plugins.is_empty() {
             bar = bar.child(div().w(zpx(14.)).h(zpx(1.)).my(zpx(4.)).bg(ui.border));
         }

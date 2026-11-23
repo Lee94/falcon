@@ -780,10 +780,9 @@ impl Render for ServerWindow {
             .size_full()
             .flex()
             .flex_col()
-            // 岛在各自的视图里另铺实色，这里只铺窗口底
+            // 岛在各自的视图里另铺实色，这里只铺窗口底；界面字体与中文优化回退链由 Root 的 UiFontPlugin 统一挂上
             .bg(crate::window_background::fill(cx))
             .text_color(ui.foreground)
-            .font_family(crate::fonts::BERKELEY)
             .text_size(zpx(13.))
             .on_mouse_move(cx.listener(Self::on_panel_drag))
             .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(Self::on_panel_drag_end))

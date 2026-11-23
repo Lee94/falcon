@@ -65,6 +65,8 @@ pub mod term_scroll;
 pub mod paste_image;
 /// 对应 React 版的 lib/term.ts：终端偏好模型（falcon.term）
 pub mod term;
+/// 软件界面字体偏好（falcon.uiFont），与终端字体独立
+pub mod ui_font;
 /// 应用窗口底的透明效果（实色 / 透出桌面 / 系统模糊）
 pub mod window_background;
 /// 对应 React 版的 lib/shortcuts.ts：快捷键定义表

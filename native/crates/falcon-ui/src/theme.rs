@@ -10,6 +10,10 @@
 //!   按钮 / 菜单 / 输入框与我们的界面同色；
 //! - [`TerminalLook`]：终端配色 + 字体 + 光标 + 告诉服务端的外观（OscColorGate 代答用）。
 
+use falcon_core::term::{
+    TERM_PREF_KEY, TermCursorStyle, TermPref, fallback_families, load_term_pref,
+};
+use falcon_core::ui_font::{UI_FONT_PREF_KEY, UiFontPref, load_ui_font_pref};
 use falcon_proto::{OscColorHint, TermAppearance};
 use falcon_term::alacritty_terminal::vte::ansi::CursorShape;
 use falcon_theme::{
@@ -17,7 +21,11 @@ use falcon_theme::{
     ThemeSettings, derive_theme, load_theme_settings, resolve_theme_mode, save_theme_settings,
 };
 use gpui_kit::component::theme::{Theme as KitTheme, ThemeMode as KitMode};
-use gpui_kit::{App, FontWeight, Global, Hsla, Rgba, Window, WindowAppearance, px};
+use gpui_kit::prelude::*;
+use gpui_kit::{
+    App, Context, FontFallbacks, FontWeight, Global, Hsla, IntoElement, Render, Rgba, SharedString,
+    Window, WindowAppearance, px,
+};
 
 use crate::fonts;
 use crate::prefs::Prefs;
@@ -131,57 +139,53 @@ pub mod radius {
 /// 岛之间的缝（ADR 0011；与画布的列间缝 CANVAS_GAP_PX 同为 8，窗口里只有一种缝宽）
 pub const GAP: gpui_kit::Pixels = px(8.);
 
-/// 终端偏好（偏好键 `falcon.term`，沿用 React 版）。
-#[derive(Clone, Debug, PartialEq)]
-pub struct TermPrefs {
-    pub family: String,
-    pub fallback_families: Vec<String>,
-    pub font_size: f32,
-    pub line_height: f32,
-    pub cursor_shape: CursorShape,
-    pub cursor_blink: bool,
+/// 当前生效的软件界面字体（与终端字体独立）。
+///
+/// 由 [`UiFontPlugin`] 挂在每个窗口的 `Root` 上，使主界面、对话框、弹出菜单、通知与提示框
+/// 统一使用同一套界面字体与中文优化回退链。
+#[derive(Clone, Debug)]
+pub struct UiFont {
+    pub family: SharedString,
+    pub fallbacks: FontFallbacks,
+    /// 用户显式请求的预设或自定义字体在本机是否可用；`false` 时已回退到系统默认界面字体
+    pub requested_available: bool,
 }
 
-impl Default for TermPrefs {
-    fn default() -> Self {
-        Self {
-            family: fonts::BERKELEY.to_string(),
-            fallback_families: Vec::new(),
-            font_size: 13.0,
-            line_height: 1.0,
-            cursor_shape: CursorShape::Block,
-            cursor_blink: true,
-        }
+impl Global for UiFont {}
+
+impl UiFont {
+    pub fn global(cx: &App) -> &Self {
+        cx.global::<Self>()
     }
 }
 
-impl TermPrefs {
-    /// 读 `falcon.term`，清洗规则在 falcon-core（照 React 版的口径）
-    pub fn load(prefs: &Prefs) -> Self {
-        use falcon_core::term::{TERM_PREF_KEY, load_term_pref};
-        Self::from_pref(&load_term_pref(prefs.get(TERM_PREF_KEY)))
-    }
+/// 挂在 `gpui_base::Root` 上的字体插件：在 `gpui-component` 的 `WindowState` 之后设置
+/// `font_family` 与 `font_fallbacks`，确保根表面以及对话框、浮层、通知均继承中文优化回退链。
+struct UiFontPlugin;
 
-    /// 偏好（形状沿用 React 版）→ 终端渲染用的这份。`system` 交给 Menlo（React 版是整条交给
-    /// 系统回退栈，GPUI 没有"系统等宽"这个名字）；`custom` 空着回落默认字体
-    pub fn from_pref(pref: &falcon_core::term::TermPref) -> Self {
-        use falcon_core::term::{TermCursorStyle, TermFontId, fallback_families, primary_family};
-        let family = match pref.font_id {
-            TermFontId::System => "Menlo".to_string(),
-            _ => primary_family(pref).unwrap_or_else(|| fonts::BERKELEY.to_string()),
-        };
-        Self {
-            family,
-            fallback_families: fallback_families(pref),
-            font_size: pref.font_size as f32,
-            line_height: pref.line_height as f32,
-            cursor_shape: match pref.cursor_style {
-                TermCursorStyle::Block => CursorShape::Block,
-                TermCursorStyle::Bar => CursorShape::Beam,
-                TermCursorStyle::Underline => CursorShape::Underline,
-            },
-            cursor_blink: pref.cursor_blink,
-        }
+impl UiFontPlugin {
+    fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        Self
+    }
+}
+
+impl Render for UiFontPlugin {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
+impl gpui_kit::base::RootPlugin for UiFontPlugin {
+    fn style(
+        &self,
+        surface: &mut gpui_kit::Stateful<gpui_kit::Div>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        let ui_font = UiFont::global(cx);
+        let text = surface.text_style();
+        text.font_family = Some(ui_font.family.clone());
+        text.font_fallbacks = Some(ui_font.fallbacks.clone());
     }
 }
 
@@ -193,6 +197,8 @@ pub struct TerminalLook {
     pub cursor_shape: CursorShape,
     pub cursor_blink: bool,
     pub appearance: OscColorHint,
+    /// 用户显式请求的终端预设或自定义字体在本机是否可用；`false` 时已回退到内置等宽字体
+    pub requested_font_available: bool,
 }
 
 impl Global for TerminalLook {}
@@ -207,7 +213,10 @@ impl TerminalLook {
 pub struct ThemeState {
     pub settings: ThemeSettings,
     pub resolved: ResolvedTheme,
-    pub term: TermPrefs,
+    /// 启动时由组件库解析出的平台系统界面字体（macOS / Windows 为 `.SystemUIFont`，Linux 为已安装的无衬线体）
+    pub system_ui_family: SharedString,
+    pub ui_font_pref: UiFontPref,
+    pub term_pref: TermPref,
     /// 系统此刻是不是深色（跟随系统时用）
     pub system_dark: bool,
 }
@@ -221,15 +230,20 @@ impl ThemeState {
 }
 
 pub fn init(cx: &mut App) {
+    gpui_kit::base::Root::register_plugin(cx, UiFontPlugin::new);
+    let system_ui_family = KitTheme::global(cx).font_family.clone();
     let settings = load_theme_settings(Some(Prefs::global(cx) as &dyn falcon_theme::StorageLike));
-    let term = TermPrefs::load(Prefs::global(cx));
+    let ui_font_pref = load_ui_font_pref(Prefs::global(cx).get(UI_FONT_PREF_KEY));
+    let term_pref = load_term_pref(Prefs::global(cx).get(TERM_PREF_KEY));
     let system_dark = matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark);
     let mode = resolve_theme_mode(settings.mode, system_dark);
     let resolved = derive_theme(&settings.slot(mode).colors);
     cx.set_global(ThemeState {
         settings,
         resolved,
-        term,
+        system_ui_family,
+        ui_font_pref,
+        term_pref,
         system_dark,
     });
     apply(cx);
@@ -254,10 +268,22 @@ pub fn update_settings(cx: &mut App, f: impl FnOnce(&mut ThemeSettings)) {
     recompute(cx);
 }
 
-pub fn update_term(cx: &mut App, term: TermPrefs, raw_json: String) {
-    cx.global_mut::<Prefs>().set("falcon.term", raw_json);
-    cx.global_mut::<ThemeState>().term = term;
-    apply(cx);
+pub fn update_ui_font(cx: &mut App, pref: UiFontPref, raw_json: String) {
+    cx.global_mut::<Prefs>().set(UI_FONT_PREF_KEY, raw_json);
+    cx.global_mut::<ThemeState>().ui_font_pref = pref;
+    let ui_font = build_ui_font(cx);
+    KitTheme::global_mut(cx).font_family = ui_font.family.clone();
+    KitTheme::sync_base(cx);
+    cx.set_global(ui_font);
+    cx.refresh_windows();
+}
+
+pub fn update_term(cx: &mut App, pref: TermPref, raw_json: String) {
+    cx.global_mut::<Prefs>().set(TERM_PREF_KEY, raw_json);
+    cx.global_mut::<ThemeState>().term_pref = pref;
+    let look = build_terminal_look(cx);
+    cx.set_global(look);
+    cx.refresh_windows();
 }
 
 /// 预览一套主题（主题选择器高亮到哪项就实时预览哪项），不落盘。
@@ -343,53 +369,83 @@ fn apply(cx: &mut App) {
         },
     };
 
-    let t = &r.terminal;
-    let term = &state.term;
-    let look = TerminalLook {
-        palette: TermPalette {
-            foreground: hsla(t.foreground),
-            background: hsla(t.background),
-            cursor: hsla(t.cursor),
-            cursor_text: hsla(t.cursor_accent),
-            selection_background: hsla(t.selection_background),
-            selection_foreground: t.selection_foreground.map(hsla),
-            ansi: t.ansi.map(hsla),
-            extended: t.extended_ansi.as_ref().map(|ext| ext.iter().copied().map(hsla).collect()),
-        },
-        text: TermTextStyle {
-            font: {
-                let mut f = fonts::mono(term.family.clone(), &term.fallback_families);
-                f.weight = FontWeight::NORMAL;
-                f
-            },
-            font_size: px(term.font_size),
-            line_height_factor: term.line_height,
-        },
-        cursor_shape: term.cursor_shape,
-        cursor_blink: term.cursor_blink,
-        appearance: OscColorHint {
-            appearance: Some(match r.hint.appearance {
-                Appearance::Light => TermAppearance::Light,
-                Appearance::Dark => TermAppearance::Dark,
-            }),
-            background: Some(r.hint.background.to_hex()),
-            foreground: Some(r.hint.foreground.to_hex()),
-        },
-    };
+    let ui_font = build_ui_font(cx);
+    let look = build_terminal_look(cx);
 
-    apply_kit_theme(&ui, cx);
+    apply_kit_theme(&ui, &ui_font, cx);
     cx.set_global(ui);
+    cx.set_global(ui_font);
     cx.set_global(look);
     cx.refresh_windows();
 }
 
+fn build_ui_font(cx: &App) -> UiFont {
+    let state = ThemeState::global(cx);
+    let info = falcon_platform::get(cx).info();
+    let (family, requested_available) =
+        fonts::resolve_ui_family(&state.ui_font_pref, &state.system_ui_family, cx);
+    UiFont {
+        fallbacks: fonts::ui_fallbacks(info, family.as_ref()),
+        family,
+        requested_available,
+    }
+}
+
+fn build_terminal_look(cx: &App) -> TerminalLook {
+    let state = ThemeState::global(cx);
+    let r = &state.resolved;
+    let t = &r.terminal;
+    let palette = TermPalette {
+        foreground: hsla(t.foreground),
+        background: hsla(t.background),
+        cursor: hsla(t.cursor),
+        cursor_text: hsla(t.cursor_accent),
+        selection_background: hsla(t.selection_background),
+        selection_foreground: t.selection_foreground.map(hsla),
+        ansi: t.ansi.map(hsla),
+        extended: t.extended_ansi.as_ref().map(|ext| ext.iter().copied().map(hsla).collect()),
+    };
+    let appearance = OscColorHint {
+        appearance: Some(match r.hint.appearance {
+            Appearance::Light => TermAppearance::Light,
+            Appearance::Dark => TermAppearance::Dark,
+        }),
+        background: Some(r.hint.background.to_hex()),
+        foreground: Some(r.hint.foreground.to_hex()),
+    };
+    let info = falcon_platform::get(cx).info();
+    let (term_family, term_available) = fonts::resolve_term_family(&state.term_pref, info, cx);
+    let term_custom_fallbacks = fallback_families(&state.term_pref);
+    let cursor_shape = match state.term_pref.cursor_style {
+        TermCursorStyle::Block => CursorShape::Block,
+        TermCursorStyle::Bar => CursorShape::Beam,
+        TermCursorStyle::Underline => CursorShape::Underline,
+    };
+    TerminalLook {
+        palette,
+        text: TermTextStyle {
+            font: {
+                let mut f = fonts::mono(term_family, &term_custom_fallbacks, info);
+                f.weight = FontWeight::NORMAL;
+                f
+            },
+            font_size: px(state.term_pref.font_size as f32),
+            line_height_factor: state.term_pref.line_height as f32,
+        },
+        cursor_shape,
+        cursor_blink: state.term_pref.cursor_blink,
+        appearance,
+        requested_font_available: term_available,
+    }
+}
+
 /// 把语义 token 映射到 gpui-component 的颜色字段上。映射的原则：组件库的"面"一律落在我们的
 /// 语义色上（popover / muted / accent / primary …），hover / active 用 tint 与 muted 推。
-fn apply_kit_theme(ui: &Ui, cx: &mut App) {
+fn apply_kit_theme(ui: &Ui, ui_font: &UiFont, cx: &mut App) {
     // 先让组件库按深浅装上它自己的默认值（字体、圆角、滚动条等非颜色设置），再覆盖颜色
     KitTheme::change(if ui.is_dark { KitMode::Dark } else { KitMode::Light }, None, cx);
     let theme = KitTheme::global_mut(cx);
-    theme.font_family = fonts::BERKELEY.into();
+    theme.font_family = ui_font.family.clone();
     theme.mono_font_family = fonts::BERKELEY.into();
     // font_size 就是窗口的 rem（Root 每帧拿它 set_rem_size），必须与浏览器同为 16px，缩放只乘倍数；
     // 正文 13px 显式挂在窗口根上（见 zoom.rs）

@@ -454,7 +454,7 @@ fn legacy_probe_command(kind: HostKind, root: &str) -> String {
          x=${{c%% *}}; e=${{x##*/}}; marker=FALCON_NODE_LEGACY; case \"$e\" in falcon-node-*) marker=FALCON_NODE_STARTING;; esac; \
          case \"$e\" in falcon|falcon-server|falcon-v*|falcon-node-*) \
          case \"$c\" in *'--data-dir '*) d=${{c##*--data-dir }}; case \"$d\" in \"$r\"|\"$r \"*) printf '%s\\n' \"$marker\";; esac;; \
-         *) case \"$x\" in \"$r\"/bin/*) printf '%s\\n' \"$marker\";; *) case \"$r\" in \"$HOME/.falcon\"|\"$HOME/.mojito\") printf '%s\\n' \"$marker\";; esac;; esac;; esac; done",
+         *) case \"$x\" in \"$r\"/bin/*) printf '%s\\n' \"$marker\";; *) case \"$r\" in \"$HOME/.falcon\"|\"$HOME/.mojito\") printf '%s\\n' \"$marker\";; esac;; esac;; esac;; esac; done",
         quote_posix(root)
     );
     format!("sh -c {}", quote_posix(&script))
@@ -671,5 +671,7 @@ mod tests {
         assert!(!cmd.contains("--version"));
         assert!(!cmd.contains("service start"));
         assert!(cmd.contains("$HOME/.falcon"));
+        #[cfg(unix)]
+        assert!(std::process::Command::new("sh").args(["-c", &cmd]).status().unwrap().success());
     }
 }

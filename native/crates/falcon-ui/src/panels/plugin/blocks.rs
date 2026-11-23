@@ -20,7 +20,7 @@ use super::chart::chart;
 use super::{PluginPanel, plugin_icon};
 use crate::menus::{MenuItemSpec, to_popup};
 use crate::panels::widgets::{pill, segmented};
-use crate::theme::{TerminalLook, Ui, radius};
+use crate::theme::{Ui, radius};
 use crate::ui::{icon, sunken};
 use crate::zoom::zpx;
 
@@ -86,7 +86,7 @@ impl PluginPanel {
             PluginBlock::Text { text, tone, mono } => {
                 let mut d = div().text_size(zpx(12.)).line_height(relative(1.5)).text_color(tone_color(tone, ui.foreground, &ui));
                 if mono {
-                    d = d.font_family(TerminalLook::global(cx).text.font.family.clone()).text_size(zpx(11.5));
+                    d = d.font_family(crate::fonts::BERKELEY).text_size(zpx(11.5));
                 }
                 d.child(text).into_any_element()
             }
@@ -403,7 +403,6 @@ fn chart_block(
 
 fn kv(items: Vec<PluginKv>, cx: &App) -> Div {
     let ui = Ui::global(cx).clone();
-    let mono = TerminalLook::global(cx).text.font.family.clone();
     let mut col = div().flex().flex_col().gap(zpx(3.));
     for item in items {
         let mut value = div()
@@ -414,7 +413,7 @@ fn kv(items: Vec<PluginKv>, cx: &App) -> Div {
             .text_size(zpx(12.))
             .text_color(tone_color(item.tone, ui.foreground, &ui));
         if item.mono {
-            value = value.font_family(mono.clone());
+            value = value.font_family(crate::fonts::BERKELEY);
         }
         col = col.child(
             div()

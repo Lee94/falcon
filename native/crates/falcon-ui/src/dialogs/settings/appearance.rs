@@ -1,13 +1,17 @@
-//! 外观：明暗模式、窗口底的透明效果、浅 / 深两个主题槽位（ADR 0006）、应用图标（ADR 0018，
-//! app_icon.rs）、终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。旧 React 版的 AppearancePane。
+//! 外观：明暗模式、窗口底的透明效果、浅 / 深两个主题槽位（ADR 0006）、界面字体、应用图标
+//! （ADR 0018，app_icon.rs）、终端字体 / 字号 / 行高 / 光标 / 闪烁与预览。旧 React 版的 AppearancePane。
 //!
-//! 旧 React 版还有一节"实验性 · 终端渲染引擎（xterm.js / Rio）"，随 React 前端删了：两种产物
-//! 现在只有一套终端渲染（alacritty_terminal + GPUI）。偏好 JSON 里遗留的 `engine` 键读入时丢掉。
+//! 界面字体（`falcon.uiFont`）与终端字体（`falcon.term`）相互独立：前者控制整个软件界面并默认
+//! 优化中文显示，后者仅作用于终端画面并始终保留内置 `Symbols Nerd Font Mono` 图标托底。
 
 use falcon_core::term::{
     TERM_FONT_SIZE_MAX, TERM_FONT_SIZE_MIN, TERM_LINE_HEIGHT_MAX, TERM_LINE_HEIGHT_MIN, TERM_PREF_KEY,
     TermCursorStyle, TermFontId, TermPref, clamp_font_size, clamp_line_height, load_term_pref,
     sanitize_term_pref, serialize_term_pref,
+};
+use falcon_core::ui_font::{
+    UI_FONT_PREF_KEY, UiFontId, UiFontPref, load_ui_font_pref, sanitize_ui_font_pref,
+    serialize_ui_font_pref,
 };
 use falcon_core::window_background::AppBackground;
 use falcon_theme::{FALCON_DARK, FALCON_LIGHT, ThemeMode, ThemePref, choice_of, is_default_theme_settings};
@@ -31,7 +35,7 @@ use crate::dialogs::theme_picker::ThemePicker;
 use crate::fonts;
 use crate::menus::{MenuItemSpec, to_popup};
 use crate::prefs::Prefs;
-use crate::theme::{TermPrefs, TerminalLook, ThemeState, Ui, radius};
+use crate::theme::{TerminalLook, ThemeState, Ui, UiFont, radius};
 use crate::ui::icon;
 use crate::workspace::Workspace;
 use crate::zoom::zpx;
@@ -41,19 +45,59 @@ fn load_term(cx: &App) -> TermPref {
     load_term_pref(Prefs::global(cx).get(TERM_PREF_KEY))
 }
 
-/// TermPref（形状沿用 React 版）→ 终端渲染用的 TermPrefs（映射在 theme.rs，启动时读偏好也走它）
-fn term_look(pref: &TermPref) -> TermPrefs {
-    TermPrefs::from_pref(pref)
+/// 读偏好里的 `falcon.uiFont`，过一遍 falcon-core 的清洗
+fn load_ui_font(cx: &App) -> UiFontPref {
+    load_ui_font_pref(Prefs::global(cx).get(UI_FONT_PREF_KEY))
 }
 
 fn font_label(id: TermFontId) -> String {
     t!(format!("term.font_{}", id.as_str().replace('-', "_"))).to_string()
 }
 
+fn ui_font_label(id: UiFontId) -> String {
+    t!(format!("uiFont.font_{}", id.as_str().replace('-', "_"))).to_string()
+}
+
+/// 按当前运行平台筛选界面字体下拉菜单选项：避免在 macOS 显示微软雅黑或在 Windows 显示苹方，
+/// 同时保留已安装的跨平台字体、内置字体、当前已选值（跨平台迁移偏好时不丢失选中项）与「自定义…」。
+fn ui_font_options(current: UiFontId, cx: &App) -> Vec<UiFontId> {
+    let info = falcon_platform::get(cx).info();
+    let mut list = vec![UiFontId::System];
+    let push_unique = |list: &mut Vec<UiFontId>, id: UiFontId| {
+        if !list.contains(&id) {
+            list.push(id);
+        }
+    };
+    if info.mac {
+        push_unique(&mut list, UiFontId::PingFang);
+        push_unique(&mut list, UiFontId::Hiragino);
+    } else if info.windows {
+        push_unique(&mut list, UiFontId::MicrosoftYaHei);
+    } else {
+        push_unique(&mut list, UiFontId::NotoSansSc);
+    }
+    for optional in [UiFontId::NotoSansSc, UiFontId::Inter] {
+        if let Some(family) = optional.family()
+            && (fonts::is_family_listed(family, cx) || current == optional)
+        {
+            push_unique(&mut list, optional);
+        }
+    }
+    push_unique(&mut list, UiFontId::Berkeley);
+    push_unique(&mut list, UiFontId::Maple);
+    if current != UiFontId::Custom {
+        push_unique(&mut list, current);
+    }
+    push_unique(&mut list, UiFontId::Custom);
+    list
+}
+
 pub struct AppearancePane {
     app_icon: Entity<AppIconPicker>,
     light: Entity<ThemePicker>,
     dark: Entity<ThemePicker>,
+    ui_font: UiFontPref,
+    ui_custom_font: Entity<InputState>,
     term: TermPref,
     custom_font: Entity<InputState>,
     fallback_font: Entity<InputState>,
@@ -63,10 +107,23 @@ pub struct AppearancePane {
 
 impl AppearancePane {
     pub fn new(ws: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ui_font = load_ui_font(cx);
         let term = load_term(cx);
         let app_icon = cx.new(|cx| AppIconPicker::new(ws, cx));
         let light = cx.new(|cx| ThemePicker::new(ThemeMode::Light, window, cx));
         let dark = cx.new(|cx| ThemePicker::new(ThemeMode::Dark, window, cx));
+        let ui_custom_font = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("settings.uiCustomFontPlaceholder").to_string())
+                .default_value(ui_font.custom_family.clone())
+        });
+        cx.subscribe(&ui_custom_font, |this, input, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::Change) {
+                let v = input.read(cx).value().to_string();
+                this.set_ui_font(|f| f.custom_family = v, cx);
+            }
+        })
+        .detach();
         let custom_font = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(t!("settings.termCustomFontPlaceholder").to_string())
@@ -119,10 +176,34 @@ impl AppearancePane {
             }
         })
         .detach();
-        Self { app_icon, light, dark, term, custom_font, fallback_font, font_size, line_height }
+        Self {
+            app_icon,
+            light,
+            dark,
+            ui_font,
+            ui_custom_font,
+            term,
+            custom_font,
+            fallback_font,
+            font_size,
+            line_height,
+        }
     }
 
-    /// React 版的 `setTerm(patch)`：合并 → 清洗 → 落盘，终端立即换上
+    /// 合并界面字体修改 → 清洗 → 写入偏好，界面立即切换且不影响终端字体
+    fn set_ui_font(&mut self, patch: impl FnOnce(&mut UiFontPref), cx: &mut Context<Self>) {
+        let mut next = self.ui_font.clone();
+        patch(&mut next);
+        let next = sanitize_ui_font_pref(&serde_json::to_value(&next).unwrap_or_default());
+        if next == self.ui_font {
+            return;
+        }
+        crate::theme::update_ui_font(cx, next.clone(), serialize_ui_font_pref(&next));
+        self.ui_font = next;
+        cx.notify();
+    }
+
+    /// React 版的 `setTerm(patch)`：合并 → 清洗 → 写入偏好，终端立即换上且不影响界面字体
     fn set_term(&mut self, patch: impl FnOnce(&mut TermPref), cx: &mut Context<Self>) {
         let mut next = self.term.clone();
         patch(&mut next);
@@ -130,7 +211,7 @@ impl AppearancePane {
         if next == self.term {
             return;
         }
-        crate::theme::update_term(cx, term_look(&next), serialize_term_pref(&next));
+        crate::theme::update_term(cx, next.clone(), serialize_term_pref(&next));
         self.term = next;
         cx.notify();
     }
@@ -141,13 +222,18 @@ impl AppearancePane {
         self.fallback_font.update(cx, |i, cx| i.set_value(d.fallback_families.clone(), window, cx));
         self.font_size.update(cx, |s, cx| s.set_value(d.font_size as f32, window, cx));
         self.line_height.update(cx, |s, cx| s.set_value(d.line_height as f32, window, cx));
-        crate::theme::update_term(cx, term_look(&d), serialize_term_pref(&d));
+        crate::theme::update_term(cx, d.clone(), serialize_term_pref(&d));
         self.term = d;
         cx.notify();
     }
 
     fn render_theme_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let ui = Ui::global(cx).clone();
         let settings = ThemeState::global(cx).settings.clone();
+        let ui_font_available = UiFont::global(cx).requested_available;
+        let ui_font_pref = self.ui_font.clone();
+        let this = cx.entity().downgrade();
+
         let mode = segmented(
             "theme-mode",
             settings.mode,
@@ -178,17 +264,55 @@ impl AppearancePane {
             |value, window, cx| crate::window_background::set(value, window, cx),
             cx,
         );
-        let mut children = rows(
-            vec![
-                (t!("theme.label").to_string(), None, mode.into_any_element()),
-                (t!("settings.windowBackground").to_string(), None, background.into_any_element()),
-                (t!("theme.lightTheme").to_string(), None, self.light.clone().into_any_element()),
-                (t!("theme.darkTheme").to_string(), None, self.dark.clone().into_any_element()),
-                (t!("native.settings.uiZoom").to_string(), None, zoom_control(cx)),
-            ],
-            true,
-            cx,
-        );
+        let ui_font_items: Vec<MenuItemSpec> = ui_font_options(ui_font_pref.font_id, cx)
+            .into_iter()
+            .map(|id| {
+                let this = this.clone();
+                MenuItemSpec::new(ui_font_label(id), move |_, cx| {
+                    this.update(cx, |p, cx| p.set_ui_font(|f| f.font_id = id, cx)).ok();
+                })
+                .checked(ui_font_pref.font_id == id)
+            })
+            .collect();
+        let ui_font_control = Button::new("ui-font")
+            .outline()
+            .small()
+            .w(zpx(256.))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().truncate().text_left().child(ui_font_label(ui_font_pref.font_id)))
+                    .child(icon(IconName::ChevronDown).size(zpx(14.)).text_color(ui.muted_foreground)),
+            )
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| to_popup(menu, ui_font_items.clone()));
+
+        let ui_font_hint = if !ui_font_available && ui_font_pref.font_id != UiFontId::Custom {
+            t!("settings.fontNotFound").to_string()
+        } else {
+            t!("settings.uiFontHint").to_string()
+        };
+        let mut list = vec![
+            (t!("theme.label").to_string(), None, mode.into_any_element()),
+            (t!("settings.windowBackground").to_string(), None, background.into_any_element()),
+            (t!("theme.lightTheme").to_string(), None, self.light.clone().into_any_element()),
+            (t!("theme.darkTheme").to_string(), None, self.dark.clone().into_any_element()),
+            (t!("settings.uiFont").to_string(), Some(ui_font_hint), ui_font_control.into_any_element()),
+        ];
+        if ui_font_pref.font_id == UiFontId::Custom {
+            let custom_hint = (!ui_font_available && !ui_font_pref.custom_family.trim().is_empty())
+                .then(|| t!("settings.fontNotFound").to_string());
+            list.push((
+                t!("settings.uiCustomFont").to_string(),
+                custom_hint,
+                div().w(zpx(256.)).child(Input::new(&self.ui_custom_font).small()).into_any_element(),
+            ));
+        }
+        list.push((t!("native.settings.uiZoom").to_string(), None, zoom_control(cx)));
+
+        let mut children = rows(list, true, cx);
         children.push(
             div()
                 .flex()
@@ -213,9 +337,10 @@ impl AppearancePane {
         section(t!("settings.appearanceTitle").to_string(), None, children, cx).into_any_element()
     }
 
-    fn render_term_section(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_term_section(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let term = self.term.clone();
+        let term_font_available = TerminalLook::global(cx).requested_font_available;
         let this = cx.entity().downgrade();
 
         let items: Vec<MenuItemSpec> = TermFontId::ALL
@@ -294,11 +419,22 @@ impl AppearancePane {
                 this.set_term(|t| t.cursor_blink = v, cx);
             }));
 
-        let mut list = vec![(t!("settings.termFont").to_string(), None, font.into_any_element())];
+        let term_font_hint = if !term_font_available && term.font_id != TermFontId::Custom {
+            t!("settings.fontNotFound").to_string()
+        } else {
+            t!("settings.termFontHint").to_string()
+        };
+        let mut list = vec![(
+            t!("settings.termFont").to_string(),
+            Some(term_font_hint),
+            font.into_any_element(),
+        )];
         if term.font_id == TermFontId::Custom {
+            let custom_hint = (!term_font_available && !term.custom_family.trim().is_empty())
+                .then(|| t!("settings.fontNotFound").to_string());
             list.push((
                 t!("settings.termCustomFont").to_string(),
-                None,
+                custom_hint,
                 div().w(zpx(256.)).child(Input::new(&self.custom_font).small()).into_any_element(),
             ));
         }
@@ -332,7 +468,7 @@ impl AppearancePane {
                                 .on_click(cx.listener(|this, _, window, cx| this.reset_term(window, cx))),
                         ),
                 )
-                .child(term_preview(cx))
+                .child(term_preview(window, cx))
                 .into_any_element(),
         );
         section(t!("settings.terminalTitle").to_string(), None, children, cx)
@@ -408,18 +544,28 @@ fn zoom_control(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// 终端预览：当前主题的终端配色 + 当前字体 / 字号 / 行高画几行典型输出（React 版的 TermPreview），
-/// 含一个 CJK 字与三个 Nerd 图标，换字体时一眼看出回退链是否接得上。
-fn term_preview(cx: &App) -> AnyElement {
+/// 终端预览：当前主题的终端配色 + 当前终端字体 / 字号 / 行高画几行典型输出（React 版的 TermPreview），
+/// 含中文与多个 Nerd Font 图标（Powerline、Devicon、FontAwesome），图标与真终端走同一条托底逻辑。
+fn term_preview(window: &Window, cx: &App) -> AnyElement {
     let look = TerminalLook::global(cx);
     let ui = Ui::global(cx);
     let pal = &look.palette;
     let a = &pal.ansi;
-    let span = |text: &str, color| div().text_color(color).child(SharedString::from(text.to_string()));
-    let plain = |text: &str| div().child(SharedString::from(text.to_string()));
-    let line = |parts: Vec<gpui_kit::Div>| div().flex().whitespace_nowrap().children(parts);
     let mut font = look.text.font.clone();
     font.weight = gpui_kit::FontWeight::NORMAL;
+    let text_system = window.text_system();
+
+    let span = |text: &str, color| div().text_color(color).child(SharedString::from(text.to_string()));
+    let icon_span = |ch: char, color| {
+        let mut d = div().text_color(color);
+        if fonts::should_use_nerd_icon_fallback(ch, &font, text_system) {
+            d = d.font(fonts::nerd_icon_font());
+        }
+        d.child(SharedString::from(ch.to_string()))
+    };
+    let plain = |text: &str| div().child(SharedString::from(text.to_string()));
+    let line = |parts: Vec<gpui_kit::Div>| div().flex().whitespace_nowrap().children(parts);
+
     div()
         .overflow_hidden()
         .rounded(radius::SM)
@@ -430,7 +576,7 @@ fn term_preview(cx: &App) -> AnyElement {
         .child(
             div()
                 .p_3()
-                .font(font)
+                .font(font.clone())
                 .text_size(look.text.font_size)
                 .line_height(relative(look.text.line_height_factor))
                 .flex()
@@ -441,30 +587,40 @@ fn term_preview(cx: &App) -> AnyElement {
                     span("host", a[4]),
                     plain(" "),
                     span("~/falcon", a[6]),
+                    plain(" "),
+                    icon_span('\u{e0a0}', a[5]),
+                    span(" main", a[5]),
                 ]))
                 .child(line(vec![span("$", a[5]), plain(" git status")]))
                 .child(line(vec![span("On branch", a[3]), plain(" main")]))
                 .child(line(vec![plain("nothing to commit, working tree clean")]))
-                .child(line(vec![span("$", a[5]), plain(" echo 你好 · "), span("\u{e718}", a[2]), plain(" node")]))
+                .child(line(vec![
+                    span("$", a[5]),
+                    plain(" echo 你好 · "),
+                    icon_span('\u{e718}', a[2]),
+                    plain(" node"),
+                ]))
                 .child(line(vec![
                     span("$", a[5]),
                     plain(" "),
-                    span("\u{f111}", a[1]),
+                    icon_span('\u{f111}', a[1]),
                     plain(" "),
-                    span("\u{f00c}", a[2]),
+                    icon_span('\u{f00c}', a[2]),
+                    plain(" "),
+                    icon_span('\u{e0b0}', a[4]),
                 ])),
         )
         .into_any_element()
 }
 
 impl Render for AppearancePane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .child(self.render_theme_section(cx))
             .child(self.app_icon.clone())
-            .child(self.render_term_section(cx))
+            .child(self.render_term_section(window, cx))
             .child(self.render_browser_section(cx))
     }
 }

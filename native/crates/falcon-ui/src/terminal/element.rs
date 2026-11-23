@@ -26,7 +26,7 @@ use gpui_kit::{
     App, Bounds, ContentMask, Element, ElementId, Entity, FocusHandle, Font, FontStyle,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InputHandler, IntoElement,
     LayoutId, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun, UTF16Selection,
-    UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    UnderlineStyle, Window, WindowTextSystem, fill, outline, point, px, relative, size,
 };
 
 use super::view::TerminalView;
@@ -616,7 +616,11 @@ struct CursorPaint {
 }
 
 impl TerminalElement {
-    fn layout_grid(&self, colors: &Colorizer<'_>) -> (Vec<LayoutRect>, Vec<LayoutRect>, Vec<BatchedTextRun>, Vec<BlockElementLayoutRect>) {
+    fn layout_grid(
+        &self,
+        colors: &Colorizer<'_>,
+        text_system: &WindowTextSystem,
+    ) -> (Vec<LayoutRect>, Vec<LayoutRect>, Vec<BatchedTextRun>, Vec<BlockElementLayoutRect>) {
         let snap = &*self.snapshot;
         let cols = snap.size.cols;
         let mut runs: Vec<BatchedTextRun> = Vec::with_capacity(snap.size.rows * 4);
@@ -694,7 +698,7 @@ impl TerminalElement {
                     .hovered_link
                     .as_ref()
                     .is_some_and(|l| l.contains(row, col));
-                let style = self.cell_run_style(cell, color, hovered);
+                let style = self.cell_run_style(cell, color, hovered, text_system);
 
                 match current.as_mut() {
                     Some(batch)
@@ -745,7 +749,13 @@ impl TerminalElement {
         )
     }
 
-    fn cell_run_style(&self, cell: &Cell, color: Hsla, hovered_link: bool) -> TextRun {
+    fn cell_run_style(
+        &self,
+        cell: &Cell,
+        color: Hsla,
+        hovered_link: bool,
+        text_system: &WindowTextSystem,
+    ) -> TextRun {
         let flags = cell.flags;
         let underline = (flags.intersects(Flags::ALL_UNDERLINES) || hovered_link).then(|| UnderlineStyle {
             color: Some(color),
@@ -756,23 +766,30 @@ impl TerminalElement {
             color: Some(color),
             thickness: px(1.0),
         });
+        let mut font = Font {
+            weight: if flags.contains(Flags::BOLD) {
+                FontWeight::BOLD
+            } else {
+                self.style.font.weight
+            },
+            style: if flags.contains(Flags::ITALIC) {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            },
+            ..self.style.font.clone()
+        };
+        // 终端图标托底：用户选用的终端字体缺少 Nerd Font 图标字形时，显式切到内嵌
+        // Symbols Nerd Font Mono（跳过带 U+FE0F 彩色表情变体选择器的序列，保留彩色 Emoji）
+        let wants_color_emoji = cell.zerowidth().is_some_and(|z| z.contains(&'\u{fe0f}'));
+        if !wants_color_emoji && crate::fonts::should_use_nerd_icon_fallback(cell.c, &font, text_system) {
+            font = crate::fonts::nerd_icon_font();
+        }
         TextRun {
             len: cell.c.len_utf8(),
             color,
             background_color: None,
-            font: Font {
-                weight: if flags.contains(Flags::BOLD) {
-                    FontWeight::BOLD
-                } else {
-                    self.style.font.weight
-                },
-                style: if flags.contains(Flags::ITALIC) {
-                    FontStyle::Italic
-                } else {
-                    FontStyle::Normal
-                },
-                ..self.style.font.clone()
-            },
+            font,
             underline,
             strikethrough,
         }
@@ -916,7 +933,7 @@ impl Element for TerminalElement {
             palette: &self.palette,
             snapshot: &self.snapshot,
         };
-        let (rects, selection_rects, runs, block_rects) = self.layout_grid(&colors);
+        let (rects, selection_rects, runs, block_rects) = self.layout_grid(&colors, &text_system);
 
         let cursor = self.snapshot.cursor.and_then(|c| {
             if c.row >= self.snapshot.size.rows || c.col >= self.snapshot.size.cols {
@@ -929,7 +946,7 @@ impl Element for TerminalElement {
             );
             let cell = self.snapshot.cell(c.row, c.col);
             let text = (c.shape == CursorShape::Block && self.focused && cell.c != ' ').then(|| {
-                let mut style = self.cell_run_style(cell, self.palette.cursor_text, false);
+                let mut style = self.cell_run_style(cell, self.palette.cursor_text, false, &text_system);
                 style.underline = None;
                 let mut run = BatchedTextRun::new_from_char(LayoutPoint::new(c.row as i32, c.col as i32), cell.c, style);
                 if let Some(z) = cell.zerowidth() {

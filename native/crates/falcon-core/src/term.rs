@@ -150,6 +150,30 @@ pub const BERKELEY_FONT_FAMILY: &str = "TX-02";
 pub const IOSKELEY_FONT_FAMILY: &str = "IoskeleyMonoTerm Nerd Font Mono";
 /// 内置 Maple 的 family 名（React 版的 maple-mono.css）
 pub const MAPLE_FONT_FAMILY: &str = "Maple Mono NL NF CN";
+/// 内置 Nerd Font 纯图标字体的 family 名（用于终端图标托底）
+pub const NERD_SYMBOLS_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// 判断字符是否属于 Nerd Font 图标码位范围（对应内置 `SymbolsNerdFontMono-Regular` 覆盖的
+/// Powerline / Devicons / Codicons / FontAwesome / Octicons / Material Design / IEC 电源符号等）。
+///
+/// 终端渲染层仅对命中的字符检查主字体是否缺失字形，对普通 ASCII 与 CJK 零额外开销；
+/// 主字体缺字时切到内置图标字体绘制，保证 macOS / Windows / Linux 下任意终端字体均有图标托底。
+pub fn is_nerd_icon_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        // IEC Power Symbols 与少量提示符/状态符号（SymbolsNerdFontMono v3.5.0 非 PUA 码位）
+        0x23FB..=0x23FE
+            | 0x2630
+            | 0x2665
+            | 0x26A1
+            | 0x276C..=0x2771
+            | 0x2B58
+            // BMP 私用区：Powerline、Pomicons、Seti-UI、Devicons、Codicons、FontAwesome、Octicons 等
+            | 0xE000..=0xF8FF
+            // 补充私用区 A：Nerd Fonts v3 Material Design Icons
+            | 0xF0000..=0xFFFFD
+    )
+}
 
 /// 这份偏好的正文字体 family：命名字体给它的 family，`custom` 给去掉首尾空白的
 /// `customFamily`（空的算没有），`system` 没有。
@@ -310,5 +334,17 @@ mod tests {
         assert_eq!(load_term_pref(None), TermPref::default());
         assert_eq!(primary_family(&TermPref::default()).as_deref(), Some("TX-02"));
         assert_eq!(TermFontId::System.family(), None);
+    }
+
+    #[test]
+    fn nerd_icon_char_classification() {
+        // 典型 Nerd Font 图标（Powerline、Devicon、FontAwesome、Codicon、Material Design、IEC Power）
+        for ch in ['\u{e0a0}', '\u{e0b0}', '\u{e718}', '\u{ea60}', '\u{f00c}', '\u{f111}', '\u{f0001}', '\u{23fb}'] {
+            assert!(is_nerd_icon_char(ch), "expected icon: U+{:04X}", ch as u32);
+        }
+        // 普通 ASCII、中文、盒线、一般符号不走图标分支
+        for ch in ['a', 'Z', '0', ' ', '中', '文', '─', '│', '█', '→'] {
+            assert!(!is_nerd_icon_char(ch), "unexpected icon: U+{:04X}", ch as u32);
+        }
     }
 }
