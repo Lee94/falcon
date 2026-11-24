@@ -5,11 +5,13 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.os.Build
+import android.os.Process
 import com.falcon.android.bridge.FalconNative
 import com.falcon.android.model.ServerRoute
 import com.falcon.android.model.TailnetProbeHit
 import com.falcon.android.model.TailnetProxy
 import com.falcon.android.model.TailnetStatus
+import dalvik.system.BaseDexClassLoader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +35,7 @@ import java.io.File
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.ZipFile
 
 data class TailnetUiState(
     val libraryAvailable: Boolean = false,
@@ -72,17 +75,48 @@ private fun sanitizeHostname(raw: String): String {
     return sb.toString()
 }
 
+internal fun findTailnetLibraryInPaths(
+    nativeLibraryDir: String?,
+    apkPaths: List<String>,
+    abis: List<String>,
+    libFileName: String = "libfalcon_tailnet.so"
+): String? {
+    if (!nativeLibraryDir.isNullOrBlank()) {
+        val extracted = File(nativeLibraryDir, libFileName)
+        if (extracted.isFile) return extracted.absolutePath
+    }
+    for (apkPath in apkPaths) {
+        if (apkPath.isBlank()) continue
+        val apkFile = File(apkPath)
+        if (!apkFile.isFile) continue
+        val matched = runCatching {
+            ZipFile(apkFile).use { zip ->
+                abis.firstNotNullOfOrNull { abi ->
+                    val entryPath = "lib/$abi/$libFileName"
+                    val entry = zip.getEntry(entryPath)
+                    if (entry != null && !entry.isDirectory) "$apkPath!/$entryPath" else null
+                }
+            }
+        }.getOrNull()
+        if (matched != null) return matched
+    }
+    return null
+}
+
 object TailnetManager {
     private const val PREFS_NAME = "falcon_tailnet_prefs"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_HOSTNAME = "hostname"
     private const val KEY_CONTROL_URL = "control_url"
     private const val KEY_AUTH_KEY = "auth_key"
+    private const val TAILNET_LIB_NAME = "falcon_tailnet"
+    private const val CORE_JNI_LIB_NAME = "falcon_android"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val initialized = AtomicBoolean(false)
 
     private lateinit var appContext: Context
+    private var resolvedLibraryPath: String? = null
     private var pollJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -92,7 +126,9 @@ object TailnetManager {
     fun init(context: Context) {
         if (!initialized.compareAndSet(false, true)) return
         appContext = context.applicationContext
-        val libAvailable = File(appContext.applicationInfo.nativeLibraryDir, "libfalcon_tailnet.so").isFile
+        val libPath = resolveTailnetLibraryPath(appContext)
+        resolvedLibraryPath = libPath
+        val libAvailable = libPath != null
         val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(KEY_ENABLED, false)
         val hostname = prefs.getString(KEY_HOSTNAME, "") ?: ""
@@ -112,6 +148,31 @@ object TailnetManager {
         if (enabled && libAvailable) {
             startNode()
         }
+    }
+
+    private fun resolveTailnetLibraryPath(context: Context): String? {
+        // build.gradle.kts 启用了 packaging.jniLibs.useLegacyPackaging = false（extractNativeLibs=false），
+        // 安装时 .so 不会解压到 nativeLibraryDir，而是留在 APK 内按页对齐直接映射。
+        // BaseDexClassLoader.findLibrary 沿用与 System.loadLibrary 相同的查找逻辑，能同时覆盖
+        // base.apk!/lib/<abi>/...、Split APK 与旧版解压目录，且只查找路径不触发 dlopen（保持懒加载）。
+        val loader = TailnetManager::class.java.classLoader as? BaseDexClassLoader
+        if (loader != null) {
+            val fromLoader = runCatching { loader.findLibrary(TAILNET_LIB_NAME) }.getOrNull()
+            if (!fromLoader.isNullOrBlank()) return fromLoader
+            // 若 BaseDexClassLoader 能定位核心 JNI 库（libfalcon_android.so），说明当前进程 ABI 的查找链路有效；
+            // 此时未找到 libfalcon_tailnet.so 即表示该 ABI 确实未打入，不再跨 ABI 扫描 APK，避免误命中其他架构。
+            val coreLib = runCatching { loader.findLibrary(CORE_JNI_LIB_NAME) }.getOrNull()
+            if (!coreLib.isNullOrBlank()) return null
+        }
+
+        val appInfo = context.applicationInfo
+        val apkPaths = buildList {
+            if (!appInfo.sourceDir.isNullOrBlank()) add(appInfo.sourceDir)
+            appInfo.splitSourceDirs?.forEach { if (!it.isNullOrBlank()) add(it) }
+        }
+        val abis = (if (Process.is64Bit()) Build.SUPPORTED_64_BIT_ABIS else Build.SUPPORTED_32_BIT_ABIS)
+            .toList()
+        return findTailnetLibraryInPaths(appInfo.nativeLibraryDir, apkPaths, abis)
     }
 
     private fun stateDir(): File = File(appContext.filesDir, "tailnet")
@@ -147,7 +208,7 @@ object TailnetManager {
         }
     }
 
-    private fun pushLinkProperties(lp: LinkProperties) {
+    private fun buildLinkPropertiesPayload(lp: LinkProperties): String {
         val ifaces = JSONArray()
         val name = lp.interfaceName
         if (!name.isNullOrBlank()) {
@@ -172,11 +233,20 @@ object TailnetManager {
             val ip = addr.hostAddress?.substringBefore('%') ?: continue
             dns.put(ip)
         }
-        val payload = JSONObject().apply {
+        return JSONObject().apply {
             put("interfaces", ifaces)
             put("dns", dns)
         }.toString()
-        pushInterfacesJson(payload)
+    }
+
+    private fun pushLinkProperties(lp: LinkProperties) {
+        pushInterfacesJson(buildLinkPropertiesPayload(lp))
+    }
+
+    private fun pushCurrentNetworkSync() {
+        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val lp = runCatching { cm.activeNetwork?.let { cm.getLinkProperties(it) } }.getOrNull() ?: return
+        runCatching { FalconNative.tailnetSetInterfaces(buildLinkPropertiesPayload(lp)) }
     }
 
     private fun pushInterfacesJson(json: String) {
@@ -252,20 +322,36 @@ object TailnetManager {
         )
         val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val authKey = prefs.getString(KEY_AUTH_KEY, null)?.takeIf { it.isNotBlank() }
+        val libPath = resolvedLibraryPath
         val cfg = JSONObject().apply {
             put("stateDir", stateDir().absolutePath)
             put("hostname", cur.effectiveHostname)
             if (cur.controlUrl.isNotBlank()) put("controlUrl", cur.controlUrl)
             if (authKey != null) put("authKey", authKey)
+            if (!libPath.isNullOrBlank()) put("libraryPath", libPath)
         }.toString()
 
         scope.launch {
-            val raw = runCatching { FalconNative.tailnetStart(cfg) }
-                .getOrElse { """{"ok":false,"error":"${it.message ?: "启动失败"}"}""" }
-            val obj = runCatching { JSONObject(raw) }.getOrNull()
-            val ok = obj?.optBoolean("ok", false) ?: false
-            val missing = obj?.optBoolean("missing", false) ?: false
-            val err = obj?.optString("error")?.takeIf { it.isNotBlank() }
+            // 在 tsnet.Start() 之前同步推入当前网卡与 DNS，避免 init 阶段异步回调尚未落库。
+            pushCurrentNetworkSync()
+            // 显式启用时才由 ART 在当前 classloader-namespace 加载库（保持懒加载），
+            // 随后 Rust 侧再经 dlopen(libraryPath) 取符号并复用同一份已加载库。
+            runCatching { System.loadLibrary(TAILNET_LIB_NAME) }
+
+            val callResult = runCatching { FalconNative.tailnetStart(cfg) }
+            val ok: Boolean
+            val missing: Boolean
+            val err: String?
+            if (callResult.isFailure) {
+                ok = false
+                missing = false
+                err = callResult.exceptionOrNull()?.message?.takeIf { it.isNotBlank() } ?: "启动失败"
+            } else {
+                val obj = runCatching { JSONObject(callResult.getOrThrow()) }.getOrNull()
+                ok = obj?.optBoolean("ok", false) ?: false
+                missing = obj?.optBoolean("missing", false) ?: false
+                err = obj?.optString("error")?.takeIf { it.isNotBlank() }
+            }
             if (!ok) {
                 _state.value = _state.value.copy(
                     busy = false,

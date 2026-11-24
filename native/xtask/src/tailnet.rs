@@ -218,9 +218,10 @@ fn build(go: &Path, t: &Target) -> Result<PathBuf> {
     env.push(("GOOS", t.goos.into()));
     env.push(("GOARCH", t.goarch.into()));
     // -s -w 去掉符号表与 DWARF，体积小一截。安卓 15 起有 16 KB 页的设备，Play 要求 .so 按
-    // 16 KB 对齐（NDK r28 起缺省如此，旧 NDK 要显式给）
+    // 16 KB 对齐（NDK r28 起缺省如此，旧 NDK 要显式给）；同时写入 DT_SONAME，保证 System.loadLibrary
+    // 加载 APK 内路径后，dlopen("libfalcon_tailnet.so") 也能按 soname 命中同一份已加载库
     let ldflags = if t.goos == "android" {
-        "-ldflags=-s -w -extldflags=-Wl,-z,max-page-size=16384"
+        "-ldflags=-s -w -extldflags=-Wl,-z,max-page-size=16384,-soname,libfalcon_tailnet.so"
     } else {
         "-ldflags=-s -w"
     };
