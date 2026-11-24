@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -102,6 +103,13 @@ func (n *nodeState) start(c startConfig) error {
 	}
 	if err := os.Chmod(c.StateDir, 0o700); err != nil {
 		return fail(err)
+	}
+	if runtime.GOOS == "android" {
+		// tsnet.Dir 只指定节点状态目录。Android 没有可用的默认日志目录，
+		// 必须在 Start 前指定已创建的私有目录，否则 logpolicy.LogsDir 会 panic。
+		if err := os.Setenv("TS_LOGS_DIR", c.StateDir); err != nil {
+			return fail(err)
+		}
 	}
 	s := &tsnet.Server{
 		Dir:        c.StateDir,

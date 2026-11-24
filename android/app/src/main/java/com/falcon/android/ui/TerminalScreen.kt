@@ -410,7 +410,7 @@ fun TerminalScreen(
             .navigationBarsPadding()
             .imePadding()
     ) {
-        // 顶部单行超紧凑标题栏（34dp + 1.5dp 状态色线）：严格固定高度，不随状态增删终端视图行高
+        // 固定标题栏高度，连接状态变化时维持终端网格尺寸。
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -419,7 +419,7 @@ fun TerminalScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(34.dp)
+                    .height(52.dp)
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -431,7 +431,7 @@ fun TerminalScreen(
                     onClick = onBackDetach
                 )
 
-                // 状态圆点 + 标题 + 项目名 + 网格/连接状态内联单行排布
+                // 标题下方显示项目和连接状态。
                 Row(
                     modifier = Modifier
                         .weight(1f)
@@ -452,37 +452,37 @@ fun TerminalScreen(
                             .background(dotColor)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = effectiveTitle,
-                        color = theme.foreground,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        fontFamily = monoFont,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    val metaText = buildString {
-                        append(session.projectName)
-                        when {
-                            terminatingSession -> append(" · 正在终止")
-                            !wsConnected -> append(" · 重连($wsRetryAttempt)")
-                            sshReconnectAttempt > 0 -> append(" · SSH($sshReconnectAttempt)")
-                            sessionState == "unverified" -> append(" · 待接回")
-                            sessionState == "dead" -> append(" · 已结束")
-                            !isSizeOwner -> append(" · 跟随 ${gridSize.first}×${gridSize.second}")
-                            else -> append(" · ${gridSize.first}×${gridSize.second}")
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = effectiveTitle,
+                            color = theme.foreground,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFamily = monoFont,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val metaText = buildString {
+                            append(session.projectName)
+                            when {
+                                terminatingSession -> append(" · 正在终止")
+                                !wsConnected -> append(" · 重连($wsRetryAttempt)")
+                                sshReconnectAttempt > 0 -> append(" · SSH($sshReconnectAttempt)")
+                                sessionState == "unverified" -> append(" · 待接回")
+                                sessionState == "dead" -> append(" · 已结束")
+                                !isSizeOwner -> append(" · 跟随 ${gridSize.first}×${gridSize.second}")
+                                else -> append(" · ${gridSize.first}×${gridSize.second}")
+                            }
                         }
+                        Text(
+                            text = metaText,
+                            color = theme.mutedForeground,
+                            fontSize = 12.sp,
+                            fontFamily = monoFont,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
-                    Text(
-                        text = metaText,
-                        color = theme.mutedForeground,
-                        fontSize = 10.5.sp,
-                        fontFamily = monoFont,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                 }
 
                 // 程序状态胶囊（OSC 7501）
@@ -547,7 +547,7 @@ fun TerminalScreen(
 
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(36.dp)
                         .clip(RoundedCornerShape(5.dp))
                         .clickable(enabled = !uploadingImage && !terminatingSession && wsConnected && sessionState == "active" && sshReconnectAttempt == 0) {
                             imagePickerLauncher.launch("image/*")
@@ -565,7 +565,7 @@ fun TerminalScreen(
                             imageVector = Icons.Default.Image,
                             contentDescription = "粘贴图片到终端",
                             tint = theme.mutedForeground,
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -926,7 +926,7 @@ private fun TerminalHeaderIconButton(
 ) {
     Box(
         modifier = Modifier
-            .size(26.dp)
+            .size(36.dp)
             .clip(RoundedCornerShape(5.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
@@ -935,7 +935,7 @@ private fun TerminalHeaderIconButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = tint,
-            modifier = Modifier.size(15.dp)
+            modifier = Modifier.size(18.dp)
         )
     }
 }
@@ -978,20 +978,20 @@ private fun MobileTerminalKeyBar(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 2.5.dp),
-            verticalArrangement = Arrangement.spacedBy(2.5.dp)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             // 第一排：左侧高频修饰与方向键滚动区 + 右侧常驻固定软键盘与单/双排切换键
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 Row(
                     modifier = Modifier
                         .weight(1f)
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     KeyBarButton("ESC", theme, monoFont) {
@@ -1076,13 +1076,13 @@ private fun MobileTerminalKeyBar(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         KeyBarButton("^C", theme, monoFont) {
@@ -1170,7 +1170,7 @@ private fun KeyBarButton(
     val fg = if (active) theme.primaryForeground else theme.foreground
     Box(
         modifier = Modifier
-            .height(24.dp)
+            .height(32.dp)
             .clip(RoundedCornerShape(4.dp))
             .background(bg)
             .clickable(onClick = onClick)
@@ -1180,7 +1180,7 @@ private fun KeyBarButton(
         Text(
             text = label,
             color = fg,
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             fontFamily = monoFont,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1
@@ -1197,7 +1197,7 @@ private fun KeyBarIconButton(
 ) {
     Box(
         modifier = Modifier
-            .height(24.dp)
+            .height(32.dp)
             .clip(RoundedCornerShape(4.dp))
             .background(theme.card)
             .clickable(onClick = onClick)

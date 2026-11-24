@@ -1,6 +1,7 @@
 package com.falcon.android.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,9 +39,7 @@ import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -57,6 +57,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -123,6 +124,7 @@ fun DashboardScreen(
     var themeSearchQuery by remember { mutableStateOf("") }
     var showSettingsMenu by remember { mutableStateOf(false) }
     var showTailscaleDialog by remember { mutableStateOf(false) }
+    var showAppUpdate by rememberSaveable { mutableStateOf(false) }
     var showAbout by remember(activeServer.url) { mutableStateOf(false) }
     var showNodeSettings by remember(activeServer.url) { mutableStateOf(false) }
     var updateTarget by remember { mutableStateOf<UpdateTarget?>(null) }
@@ -184,24 +186,24 @@ fun DashboardScreen(
             .background(theme.app)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 6.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // 顶部紧凑浮动岛：第一行服务器与快捷动作，第二行下沉分段切换与内联筛选/状态计数
+        // 服务端身份、导航和当前视图的筛选条件分层显示。
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(theme.background)
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(28.dp),
+                    .heightIn(min = 48.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // 下沉式服务端切换胶囊
                 val statusColor = when {
@@ -218,7 +220,7 @@ fun DashboardScreen(
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .height(28.dp)
+                        .heightIn(min = 48.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .background(theme.app)
                         .clickable { showServerDialog = true }
@@ -232,24 +234,24 @@ fun DashboardScreen(
                             .background(statusColor)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = activeServer.name,
-                        color = theme.foreground,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = shortEndpoint,
-                        color = theme.mutedForeground,
-                        fontSize = 10.5.sp,
-                        fontFamily = monoFont,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = activeServer.name,
+                            color = theme.foreground,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = shortEndpoint,
+                            color = theme.mutedForeground,
+                            fontSize = 12.sp,
+                            fontFamily = monoFont,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     if (TailnetManager.isRoutedViaTailnet(activeServer.url, activeServer.route)) {
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
@@ -281,9 +283,17 @@ fun DashboardScreen(
                         onClick = { showSettingsMenu = true }
                     )
                     DropdownMenu(expanded = showSettingsMenu, onDismissRequest = { showSettingsMenu = false }) {
+                        DropdownMenuItem(text = { Text("切换主题") }, onClick = {
+                            showSettingsMenu = false
+                            showThemeDialog = true
+                        })
                         DropdownMenuItem(text = { Text("Tailscale") }, onClick = {
                             showSettingsMenu = false
                             showTailscaleDialog = true
+                        })
+                        DropdownMenuItem(text = { Text("客户端更新") }, onClick = {
+                            showSettingsMenu = false
+                            showAppUpdate = true
                         })
                         DropdownMenuItem(text = { Text(t("settings.aboutTitle")) }, onClick = {
                             showSettingsMenu = false
@@ -296,19 +306,10 @@ fun DashboardScreen(
                     }
                 }
 
-                // 主题按钮（紧凑 28dp，避免 Material IconButton 默认 48dp 撑高）
-                CompactIconBox(
-                    icon = Icons.Default.Palette,
-                    contentDescription = "切换主题",
-                    tint = theme.mutedForeground,
-                    bgColor = theme.app,
-                    onClick = { showThemeDialog = true }
-                )
-
                 // 刷新按钮
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
+                        .size(44.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .background(theme.app)
                         .clickable(onClick = onRefresh),
@@ -333,7 +334,7 @@ fun DashboardScreen(
                 // 快速本机独立终端按钮
                 Row(
                     modifier = Modifier
-                        .height(28.dp)
+                        .heightIn(min = 48.dp)
                         .clip(RoundedCornerShape(6.dp))
                         .background(theme.tint)
                         .clickable {
@@ -389,94 +390,88 @@ fun DashboardScreen(
                 }
             }
 
-            // 第二行：左侧下沉分段控件（项目树 / 全部会话），右侧状态摘要或内联过滤胶囊
+            // 导航与筛选分别占一行，窄屏可横向浏览全部筛选项。
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(26.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                Modifier.fillMaxWidth().height(40.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(theme.app).padding(2.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                // 下沉式分段槽（借窗口底色 theme.app）
+                SegmentedTabButton(
+                    title = "项目树",
+                    selected = currentTab == 0,
+                    theme = theme,
+                    onClick = { currentTab = 0 }
+                )
+                SegmentedTabButton(
+                    title = "会话 (${dashboard.allSessions.size})",
+                    badgeDotColor = if (blockedCount > 0) theme.warning else null,
+                    selected = currentTab == 1,
+                    theme = theme,
+                    onClick = { currentTab = 1 }
+                )
+            }
+
+            if (currentTab == 1 || blockedCount + unverifiedCount + activeCount > 0) {
                 Row(
-                    modifier = Modifier
-                        .height(26.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(theme.app)
-                        .padding(2.dp),
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    SegmentedTabButton(
-                        title = "项目树",
-                        selected = currentTab == 0,
-                        theme = theme,
-                        onClick = { currentTab = 0 }
-                    )
-                    SegmentedTabButton(
-                        title = "会话 (${dashboard.allSessions.size})",
-                        badgeDotColor = if (blockedCount > 0) theme.warning else null,
-                        selected = currentTab == 1,
-                        theme = theme,
-                        onClick = { currentTab = 1 }
-                    )
-                }
-
-                Spacer(modifier = Modifier.weight(1f))
-
-                if (currentTab == 0) {
-                    // 项目树模式下展示紧凑状态速览芯片，点击直接切到对应筛选的会话列表
-                    if (blockedCount > 0) {
-                        StatusSummaryPill(
-                            dotColor = theme.warning,
-                            text = "$blockedCount 等你",
-                            bgColor = theme.warning.copy(alpha = 0.15f),
-                            textColor = theme.warning,
-                            monoFont = monoFont,
-                            onClick = {
-                                sessionFilter = "active"
-                                currentTab = 1
-                            }
-                        )
-                    }
-                    if (unverifiedCount > 0) {
-                        StatusSummaryPill(
-                            dotColor = theme.warning,
-                            text = "$unverifiedCount 待接回",
-                            bgColor = theme.app,
-                            textColor = theme.warning,
-                            monoFont = monoFont,
-                            onClick = {
-                                sessionFilter = "unverified"
-                                currentTab = 1
-                            }
-                        )
-                    }
-                    if (activeCount > 0) {
-                        StatusSummaryPill(
-                            dotColor = theme.success,
-                            text = "$activeCount 运行",
-                            bgColor = theme.app,
-                            textColor = theme.mutedForeground,
-                            monoFont = monoFont,
-                            onClick = {
-                                sessionFilter = "active"
-                                currentTab = 1
-                            }
-                        )
-                    }
-                } else {
-                    // 全部会话模式下直接把筛选胶囊内联在同一行，省去额外工具栏行高
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        FilterChip("全部", sessionFilter == "all", theme) { sessionFilter = "all" }
-                        FilterChip("运行", sessionFilter == "active", theme) { sessionFilter = "active" }
-                        if (unverifiedCount > 0 || sessionFilter == "unverified") {
-                            FilterChip("待接回", sessionFilter == "unverified", theme) { sessionFilter = "unverified" }
+                    if (currentTab == 0) {
+                        // 项目树模式下展示紧凑状态速览芯片，点击直接切到对应筛选的会话列表
+                        if (blockedCount > 0) {
+                            StatusSummaryPill(
+                                dotColor = theme.warning,
+                                text = "$blockedCount 等你",
+                                bgColor = theme.warning.copy(alpha = 0.15f),
+                                textColor = theme.warning,
+                                monoFont = monoFont,
+                                onClick = {
+                                    sessionFilter = "active"
+                                    currentTab = 1
+                                }
+                            )
                         }
-                        if (deadCount > 0 || sessionFilter == "dead") {
-                            FilterChip("已丢失", sessionFilter == "dead", theme) { sessionFilter = "dead" }
+                        if (unverifiedCount > 0) {
+                            StatusSummaryPill(
+                                dotColor = theme.warning,
+                                text = "$unverifiedCount 待接回",
+                                bgColor = theme.app,
+                                textColor = theme.warning,
+                                monoFont = monoFont,
+                                onClick = {
+                                    sessionFilter = "unverified"
+                                    currentTab = 1
+                                }
+                            )
+                        }
+                        if (activeCount > 0) {
+                            StatusSummaryPill(
+                                dotColor = theme.success,
+                                text = "$activeCount 运行",
+                                bgColor = theme.app,
+                                textColor = theme.mutedForeground,
+                                monoFont = monoFont,
+                                onClick = {
+                                    sessionFilter = "active"
+                                    currentTab = 1
+                                }
+                            )
+                        }
+                    } else {
+                        // 会话状态筛选
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            FilterChip("全部", sessionFilter == "all", theme) { sessionFilter = "all" }
+                            FilterChip("运行", sessionFilter == "active", theme) { sessionFilter = "active" }
+                            if (unverifiedCount > 0 || sessionFilter == "unverified") {
+                                FilterChip("待接回", sessionFilter == "unverified", theme) { sessionFilter = "unverified" }
+                            }
+                            if (deadCount > 0 || sessionFilter == "dead") {
+                                FilterChip("已丢失", sessionFilter == "dead", theme) { sessionFilter = "dead" }
+                            }
                         }
                     }
                 }
@@ -609,7 +604,7 @@ fun DashboardScreen(
                 }
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = customSessionName,
                         onValueChange = { customSessionName = it },
@@ -714,6 +709,7 @@ fun DashboardScreen(
     if (showTailscaleDialog) {
         TailscaleSettingsDialog(onDismiss = { showTailscaleDialog = false }, onToast = onToast)
     }
+    if (showAppUpdate) AppUpdateDialog(onDismiss = { showAppUpdate = false })
     if (showAbout) {
         ServerAboutDialog(activeServer, onDismiss = { showAbout = false }, onUpdate = { updateTarget = it })
     }
@@ -788,7 +784,7 @@ fun DashboardScreen(
                         .fillMaxWidth()
                         .heightIn(max = 460.dp)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     if (showTailscalePicker) {
                         Column(
@@ -797,7 +793,7 @@ fun DashboardScreen(
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(theme.background)
                                 .padding(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             when {
                                 !tailnetState.libraryAvailable -> {
@@ -871,7 +867,7 @@ fun DashboardScreen(
                                                     serverRouteInput = ServerRoute.AUTO
                                                     showTailscalePicker = false
                                                 }
-                                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                         ) {
@@ -940,7 +936,7 @@ fun DashboardScreen(
                                     }
                                     showServerDialog = false
                                 }
-                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -973,7 +969,7 @@ fun DashboardScreen(
                                     onSelectServer(profile)
                                     showServerDialog = false
                                 }
-                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -1139,7 +1135,7 @@ fun DashboardScreen(
                 Text("选择主题（465 套）", color = theme.foreground, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         value = themeSearchQuery,
                         onValueChange = { themeSearchQuery = it },
@@ -1158,7 +1154,7 @@ fun DashboardScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(34.dp)
+                                    .heightIn(min = 48.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(if (isSelected) theme.tint else theme.background)
                                     .clickable {
@@ -1377,8 +1373,8 @@ private fun ProjectTreeList(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        contentPadding = PaddingValues(8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         items(servers, key = { it.key }) { server ->
             if (server.unavailableNode != null) {
@@ -1399,14 +1395,14 @@ private fun ProjectTreeList(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .background(theme.app.copy(alpha = 0.55f))
-                    .padding(horizontal = 6.dp, vertical = 5.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // 机器分组标题行（对齐桌面侧栏：折叠箭头 + 3dp 主机身份色条 + 图标 + 主机名 + 连接串 + 独立终端）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(26.dp)
+                        .heightIn(min = 44.dp)
                         .clip(RoundedCornerShape(5.dp))
                         .clickable {
                             collapsedServers[server.key] = !isCollapsed
@@ -1437,26 +1433,20 @@ private fun ProjectTreeList(
                         modifier = Modifier.size(13.dp)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = server.name,
-                        color = theme.foreground,
-                        fontSize = 12.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    server.conn?.let { conn ->
-                        Spacer(modifier = Modifier.width(6.dp))
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            text = conn,
-                            color = theme.mutedForeground,
-                            fontSize = 10.5.sp,
-                            fontFamily = monoFont,
+                            text = server.name,
+                            color = theme.foreground,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
+                            overflow = TextOverflow.Ellipsis
                         )
-                    } ?: Spacer(modifier = Modifier.weight(1f))
+                        server.conn?.let { conn ->
+                            Text(conn, color = theme.mutedForeground, fontSize = 12.sp, fontFamily = monoFont,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
 
                     if (isCollapsed && totalServerSessions > 0) {
                         Text(
@@ -1475,7 +1465,7 @@ private fun ProjectTreeList(
                     server.standaloneId?.let { standaloneId ->
                         Row(
                             modifier = Modifier
-                                .height(20.dp)
+                                .heightIn(min = 36.dp)
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(theme.card)
                                 .clickable {
@@ -1621,14 +1611,14 @@ private fun CompactProjectBlock(
             .padding(start = if (isWorktree) 10.dp else 0.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(if (isWorktree) theme.background.copy(alpha = 0.65f) else theme.background)
-            .padding(horizontal = 6.dp, vertical = 3.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        // 单行高密度项目头（26dp）
+        // 项目标题下方显示分支和路径。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(26.dp)
+                .heightIn(min = 44.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .clickable(onClick = onToggleCollapse)
                 .padding(horizontal = 2.dp),
@@ -1641,41 +1631,20 @@ private fun CompactProjectBlock(
                 modifier = Modifier.size(13.dp)
             )
             Spacer(modifier = Modifier.width(5.dp))
-            Text(
-                text = title,
-                color = theme.foreground,
-                fontSize = 12.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (!branchTag.isNullOrBlank()) {
-                Spacer(modifier = Modifier.width(5.dp))
+            Column(Modifier.weight(1f)) {
                 Text(
-                    text = branchTag,
-                    color = theme.tintStrong,
-                    fontSize = 9.5.sp,
-                    fontFamily = monoFont,
+                    text = title,
+                    color = theme.foreground,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(3.dp))
-                        .background(theme.tint.copy(alpha = 0.45f))
-                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                    overflow = TextOverflow.Ellipsis
                 )
-            }
-            if (!pathHint.isNullOrBlank()) {
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = pathHint,
-                    color = theme.mutedForeground.copy(alpha = 0.8f),
-                    fontSize = 10.5.sp,
-                    fontFamily = monoFont,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
+                val details = listOfNotNull(branchTag, pathHint).filter { it.isNotBlank() }.joinToString(" · ")
+                if (details.isNotEmpty()) {
+                    Text(details, color = theme.mutedForeground, fontSize = 12.sp, fontFamily = monoFont,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
 
             // 会话计数徽标（参考桌面端 session_count_badge：折叠或有异常时醒目提示）
@@ -1715,10 +1684,10 @@ private fun CompactProjectBlock(
                 }
             }
 
-            // 紧凑 `+` 新建会话按钮（22×20dp）
+            // 新建项目会话
             Box(
                 modifier = Modifier
-                    .size(width = 22.dp, height = 20.dp)
+                    .size(36.dp)
                     .clip(RoundedCornerShape(4.dp))
                     .background(theme.secondary)
                     .clickable(onClick = onNewSession),
@@ -1733,7 +1702,7 @@ private fun CompactProjectBlock(
             }
         }
 
-        // 会话列表（带左侧 1.5dp 树引导竖线，每行单行 30dp）
+        // 会话列表（带左侧 1.5dp 树引导竖线）
         if (!collapsed && sessions.isNotEmpty()) {
             Row(
                 modifier = Modifier
@@ -1847,7 +1816,7 @@ private fun AllSessionsOverview(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 6.dp, vertical = 6.dp),
+            .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         if (deadCount > 0) {
@@ -1883,7 +1852,7 @@ private fun AllSessionsOverview(
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(unavailableHosts, key = { it.key }) { host ->
                     UnavailableHostRow(host, theme, monoFont)
@@ -1905,10 +1874,6 @@ private fun AllSessionsOverview(
     }
 }
 
-/**
- * 单行高密度会话行（30dp 高度，参考桌面端 `sidebar.rs::session_row` 与 Termius / Prompt 3 紧凑列表）：
- * `[状态点] [Agent胶囊/Shell图标] [会话标题] [项目名(总览)] [OSC 7501 徽标/状态] [相对时长] [⋯]`
- */
 @Composable
 private fun SessionItemRow(
     session: SessionUi,
@@ -1936,7 +1901,7 @@ private fun SessionItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(30.dp)
+            .heightIn(min = 52.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(theme.card)
             .clickable(onClick = onClick)
@@ -1968,60 +1933,25 @@ private fun SessionItemRow(
         }
         Spacer(modifier = Modifier.width(6.dp))
 
-        // 2. Agent 标识胶囊或终端图标
-        if (!session.agent.isNullOrBlank()) {
+        Column(
+            modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Text(
-                text = session.agent,
-                color = theme.secondaryForeground,
-                fontSize = 9.5.sp,
-                fontFamily = monoFont,
-                fontWeight = FontWeight.SemiBold,
+                text = session.displayLabel,
+                color = if (isDead) theme.mutedForeground else theme.foreground,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(theme.secondary)
-                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                overflow = TextOverflow.Ellipsis
             )
-        } else {
-            Icon(
-                imageVector = Icons.Default.Terminal,
-                contentDescription = null,
-                tint = theme.mutedForeground,
-                modifier = Modifier.size(12.dp)
-            )
-        }
-        Spacer(modifier = Modifier.width(6.dp))
-
-        // 3. 会话主标题（单行截断）
-        Text(
-            text = session.displayLabel,
-            color = if (isDead) theme.mutedForeground else theme.foreground,
-            fontSize = 12.sp,
-            fontFamily = monoFont,
-            fontWeight = if (session.badge?.tone == "done" || session.badge?.tone == "blocked") {
-                FontWeight.SemiBold
-            } else {
-                FontWeight.Medium
-            },
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-
-        // 4. 总览模式下的所属项目短标签
-        if (showProjectName) {
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = session.projectName,
-                color = theme.mutedForeground,
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(theme.app)
-                    .padding(horizontal = 4.dp, vertical = 1.dp)
-            )
+            val details = listOfNotNull(
+                session.agent, session.projectName.takeIf { showProjectName }, relativeAge
+            ).filter { it.isNotBlank() }.joinToString(" · ")
+            if (details.isNotEmpty()) {
+                Text(details, color = theme.mutedForeground, fontSize = 12.sp,
+                    fontFamily = monoFont, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
         }
 
         // 5. 状态说明 / OSC 7501 程序状态胶囊
@@ -2031,7 +1961,7 @@ private fun SessionItemRow(
                 Text(
                     text = session.deadReasonText ?: "已丢失",
                     color = theme.destructive,
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     maxLines = 1
                 )
             }
@@ -2039,7 +1969,7 @@ private fun SessionItemRow(
                 Text(
                     text = "待接回",
                     color = theme.warning,
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1
                 )
@@ -2067,7 +1997,7 @@ private fun SessionItemRow(
                     Text(
                         text = badgeText,
                         color = badgeColor,
-                        fontSize = 9.5.sp,
+                        fontSize = 12.sp,
                         fontFamily = monoFont,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1
@@ -2078,29 +2008,16 @@ private fun SessionItemRow(
                 Text(
                     text = "非持久",
                     color = theme.mutedForeground,
-                    fontSize = 9.5.sp,
+                    fontSize = 12.sp,
                     maxLines = 1
                 )
             }
         }
 
-        // 6. 相对活跃时间（对齐桌面端 age_text / idle_text）
-        if (relativeAge.isNotEmpty()) {
-            Spacer(modifier = Modifier.width(5.dp))
-            Text(
-                text = relativeAge,
-                color = theme.mutedForeground.copy(alpha = 0.8f),
-                fontSize = 10.sp,
-                fontFamily = monoFont,
-                maxLines = 1
-            )
-        }
-
-        // 7. 紧凑更多菜单（22dp 点击热区，不使用撑高行距的 Material IconButton）
         Box {
             Box(
                 modifier = Modifier
-                    .size(22.dp)
+                    .size(40.dp)
                     .clip(RoundedCornerShape(4.dp))
                     .clickable { menuExpanded = true },
                 contentAlignment = Alignment.Center
@@ -2170,7 +2087,7 @@ private fun CompactIconBox(
 ) {
     Box(
         modifier = Modifier
-            .size(28.dp)
+            .size(44.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(bgColor)
             .clickable(onClick = onClick),
@@ -2180,13 +2097,13 @@ private fun CompactIconBox(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = tint,
-            modifier = Modifier.size(15.dp)
+            modifier = Modifier.size(19.dp)
         )
     }
 }
 
 @Composable
-private fun SegmentedTabButton(
+private fun RowScope.SegmentedTabButton(
     title: String,
     badgeDotColor: Color? = null,
     selected: Boolean,
@@ -2195,18 +2112,19 @@ private fun SegmentedTabButton(
 ) {
     Row(
         modifier = Modifier
+            .weight(1f)
             .fillMaxHeight()
             .clip(RoundedCornerShape(4.dp))
             .background(if (selected) theme.secondary else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally)
     ) {
         Text(
             text = title,
             color = if (selected) theme.secondaryForeground else theme.mutedForeground,
-            fontSize = 11.sp,
+            fontSize = 14.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
         )
         if (badgeDotColor != null) {
@@ -2231,7 +2149,7 @@ private fun StatusSummaryPill(
 ) {
     Row(
         modifier = Modifier
-            .height(22.dp)
+            .heightIn(min = 32.dp)
             .clip(RoundedCornerShape(5.dp))
             .background(bgColor)
             .clickable(onClick = onClick)
@@ -2248,7 +2166,7 @@ private fun StatusSummaryPill(
         Text(
             text = text,
             color = textColor,
-            fontSize = 10.5.sp,
+            fontSize = 12.sp,
             fontFamily = monoFont,
             fontWeight = FontWeight.Medium
         )
@@ -2264,7 +2182,7 @@ private fun FilterChip(
 ) {
     Box(
         modifier = Modifier
-            .height(22.dp)
+            .heightIn(min = 32.dp)
             .clip(RoundedCornerShape(5.dp))
             .background(if (selected) theme.tint else theme.app)
             .clickable(onClick = onClick)
@@ -2274,7 +2192,7 @@ private fun FilterChip(
         Text(
             text = label,
             color = if (selected) theme.tintForeground else theme.mutedForeground,
-            fontSize = 10.5.sp,
+            fontSize = 12.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
         )
     }
@@ -2292,7 +2210,7 @@ private fun AgentChoiceRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(34.dp)
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(if (selected) theme.tint else theme.background)
             .border(

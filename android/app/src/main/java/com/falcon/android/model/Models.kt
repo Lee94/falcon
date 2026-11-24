@@ -338,7 +338,7 @@ object JsonParsers {
             id = obj.optString("id"),
             name = obj.optString("name"),
             type = obj.optString("type", "local"),
-            workingDir = obj.optString("workingDir", ""),
+            workingDir = if (obj.isNull("workingDir")) "" else obj.getString("workingDir"),
             branch = branch,
             isWorktree = obj.optBoolean("isWorktree", false),
             isMulti = obj.optBoolean("isMulti", false),

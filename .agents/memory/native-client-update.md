@@ -4,6 +4,8 @@
 
 设置「关于」和菜单栏「检查更新」对照 `Lee94/falcon` 的 GitHub Release（ADR 0026）。macOS 下载 pkg、展开 `Falcon.app`、改名换入后，按 LaunchAgent 原来的参数执行 `service install`，再经正常退出重新打开新应用。没保存的文件修改会先问一句，取消则不退出。开发构建不在 `.app` 里，不退出当前进程。同版本号的本地提交不会被当成新版本。下面这一节仍是开发机上从源码替换已安装应用的步骤。
 
+Android 首页设置菜单中的「客户端更新」直接检查同一仓库的稳定版。下载完成后核对发布资产的大小与 SHA-256、应用包名、版本名和版本代码，再通过系统安装器覆盖安装。首次安装需在系统设置中允许 Falcon 安装应用。局部验证可在 `android/` 运行 `./gradlew :app:testDebugUnitTest --tests '*AppUpdatesTest' :app:assembleDebug`。
+
 ## 只更新客户端
 
 - 正式构建：在 `native/` 执行 `cargo build --release -p falcon-desktop`，不启用 `snapshot` 或 `automation`。
