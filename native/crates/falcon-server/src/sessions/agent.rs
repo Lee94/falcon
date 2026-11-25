@@ -137,10 +137,6 @@ fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
             ),
             format!("unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV}; "),
         )
-    } else if agent == SessionAgent::Codex {
-        // Codex 0.172 的图片检测只认固定终端。提示仅传给这次调用，退出后的 shell
-        // 仍使用 Falcon 的正常环境。ConPTY 是否转发 APC 要单独验证。
-        (format!("KITTY_WINDOW_ID=1 {bin}"), String::new())
     } else {
         (bin.to_string(), String::new())
     };
@@ -395,13 +391,13 @@ mod tests {
     /// 固定启动脚本形状：POSIX 在登录配置后恢复 askpass PATH，Windows 沿用原命令。
     /// claude / grok 的续接分支另有真实脚本回归。
     #[test]
-    fn codex_launcher_enables_inline_graphics_on_posix() {
+    fn codex_launcher_runs_in_the_session_environment() {
         assert_eq!(
             launcher_body(SessionAgent::Codex, HostKind::Posix, "/bin/zsh"),
             "#!/bin/sh\n\
              # falcon: 以 codex 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。\n\
              exec '/bin/zsh' -i -l -c 'if [ -n \"${FALCON_ASKPASS_BIN:-}\" ]; then export PATH=\"$FALCON_ASKPASS_BIN:$PATH\"; fi; \
-             if command -v codex >/dev/null 2>&1; then KITTY_WINDOW_ID=1 codex; \
+             if command -v codex >/dev/null 2>&1; then codex; \
              else printf '\\''%s\\n'\\'' '\\''falcon: PATH 里找不到 codex，先装好它再开这种会话。'\\'' >&2; fi; \
              exec '\\''/bin/zsh'\\'' -i -l'\n"
         );

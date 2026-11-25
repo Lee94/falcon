@@ -609,10 +609,10 @@ pub(crate) mod tests {
                     ..Default::default()
                 };
                 let (r, _) = attach_local(&host, &opts, cb).await.unwrap();
-                r.backend.write("printf '%s|%s\\n' \"$TERM\" 中文; stty size; exit\n");
+                r.backend.write("printf '%s|%s|%s\\n' \"$TERM\" \"$KITTY_WINDOW_ID\" 中文; stty size; exit\n");
                 tokio::time::timeout(Duration::from_secs(10), exit_rx).await.unwrap().unwrap();
                 let text = out.borrow().clone();
-                assert!(text.contains("xterm-256color|中文"), "{text:?}");
+                assert!(text.contains("xterm-256color|1|中文"), "{text:?}");
                 assert!(text.contains("30 120"), "{text:?}");
             })
             .await;

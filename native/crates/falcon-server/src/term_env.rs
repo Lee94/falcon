@@ -91,7 +91,8 @@ fn fallback(appearance: TermAppearance) -> (&'static str, &'static str) {
 pub fn term_pty_env(appearance: Option<TermAppearance>, host: HostKind) -> Vec<(&'static str, &'static str)> {
     let mut env = vec![("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "falcon")];
     if host == HostKind::Posix {
-        env.push(("FORCE_HYPERLINK", "1"));
+        // Codex 0.172 根据这个变量启用 Kitty 内联图片；Windows ConPTY 尚未验证。
+        env.extend([("FORCE_HYPERLINK", "1"), ("KITTY_WINDOW_ID", "1")]);
     }
     match appearance {
         Some(TermAppearance::Light) => {
@@ -470,6 +471,8 @@ mod tests {
         let bare = term_pty_env(None, HostKind::Posix);
         assert_eq!(get_static(&bare, "COLORTERM"), Some("truecolor"));
         assert_eq!(get_static(&bare, "TERM_PROGRAM"), Some("falcon"));
+        assert_eq!(get_static(&bare, "KITTY_WINDOW_ID"), Some("1"));
+        assert_eq!(get_static(&term_pty_env(None, HostKind::Windows), "KITTY_WINDOW_ID"), None);
         assert_eq!(get_static(&bare, "COLORFGBG"), None);
         assert_eq!(get_static(&bare, "GROK_APPEARANCE"), None);
 
@@ -620,7 +623,7 @@ mod tests {
         // 已有的 TERM 就地改值，新键追加在后
         let env = apply_term_pty_env([("TERM", "dumb".to_string()), ("PATH", "/bin".to_string())], None, HostKind::Posix);
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["TERM", "PATH", "COLORTERM", "TERM_PROGRAM", "FORCE_HYPERLINK"]);
+        assert_eq!(keys, ["TERM", "PATH", "COLORTERM", "TERM_PROGRAM", "FORCE_HYPERLINK", "KITTY_WINDOW_ID"]);
         assert_eq!(get(&env, "TERM"), Some("xterm-256color"));
     }
 }
