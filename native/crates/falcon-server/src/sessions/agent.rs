@@ -140,8 +140,10 @@ fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
     } else {
         (bin.to_string(), String::new())
     };
+    // zsh -i -c 在前台命令被 SIGINT 中断时会放弃整个命令串，跳过最后的 exec。
+    // 捕获信号并返回，外部 CLI 仍按默认方式接收 SIGINT；exec 后新 shell 自行处理信号。
     let inner = format!(
-        "{askpass}if command -v {bin} >/dev/null 2>&1; then {run}; \
+        "trap : INT; {askpass}if command -v {bin} >/dev/null 2>&1; then {run}; \
          else printf '%s\\n' {} >&2; fi; \
          {unset}exec {} -i -l",
         quote_posix(&format!("falcon: PATH 里找不到 {bin}，先装好它再开这种会话。")),
@@ -396,7 +398,7 @@ mod tests {
             launcher_body(SessionAgent::Codex, HostKind::Posix, "/bin/zsh"),
             "#!/bin/sh\n\
              # falcon: 以 codex 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。\n\
-             exec '/bin/zsh' -i -l -c 'if [ -n \"${FALCON_ASKPASS_BIN:-}\" ]; then export PATH=\"$FALCON_ASKPASS_BIN:$PATH\"; fi; \
+             exec '/bin/zsh' -i -l -c 'trap : INT; if [ -n \"${FALCON_ASKPASS_BIN:-}\" ]; then export PATH=\"$FALCON_ASKPASS_BIN:$PATH\"; fi; \
              if command -v codex >/dev/null 2>&1; then codex; \
              else printf '\\''%s\\n'\\'' '\\''falcon: PATH 里找不到 codex，先装好它再开这种会话。'\\'' >&2; fi; \
              exec '\\''/bin/zsh'\\'' -i -l'\n"
@@ -408,6 +410,35 @@ mod tests {
              ) else (\r\n  call codex\r\n)\r\n\"C:\\Windows\\System32\\powershell.exe\"\r\n"
         );
         assert_eq!(local_launcher_dir(Path::new("/data")), PathBuf::from("/data/agents"));
+    }
+
+    /// 用控制终端触发 zsh 的前台作业中断逻辑；返回交互提示符时由 precmd 退出。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interrupted_codex_returns_to_interactive_zsh() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        std::fs::write(&codex, "#!/bin/sh\ntouch \"$ZDOTDIR/ran-codex\"\nkill -INT $$\ntouch \"$ZDOTDIR/ignored-int\"\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            tmp.path().join(".zshrc"),
+            "export PATH=\"$ZDOTDIR:/usr/bin:/bin\"\nprecmd() { exit 47; }\n",
+        ).unwrap();
+        let launcher = write_local_launcher(tmp.path(), SessionAgent::Codex, "/bin/zsh").unwrap();
+        let mut cmd = CommandBuilder::new(launcher);
+        cmd.env("HOME", tmp.path());
+        cmd.env("ZDOTDIR", tmp.path());
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut output = pair.master.try_clone_reader().unwrap();
+        std::io::copy(&mut output, &mut std::io::sink()).unwrap();
+        assert_eq!(child.wait().unwrap().exit_code(), 47);
+        assert!(tmp.path().join("ran-codex").exists());
+        assert!(!tmp.path().join("ignored-int").exists());
     }
 
     /// 真跑一遍生成的 sh 命令：落盘内容与 launcher_body 一致、可执行；脚本本身能跑通
