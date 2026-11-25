@@ -211,21 +211,38 @@ async fn derive_multi(
     if members.is_empty() {
         return Err(ApiError::conflict("容器没有成员仓库"));
     }
-    let mode = match str_field(&input, "mode") {
-        Some("new-branch") => MultiWorktreeMode::NewBranch,
-        Some("existing-branch") => MultiWorktreeMode::ExistingBranch,
-        Some("auto") => MultiWorktreeMode::Auto,
-        _ => return Err(ApiError::bad_request("未知的派生方式")),
-    };
+    let mode = str_field(&input, "mode")
+        .and_then(MultiWorktreeMode::from_wire)
+        .ok_or_else(|| ApiError::bad_request("未知的派生方式"))?;
     if present(field(&input, "startPoint")) {
         return Err(ApiError::bad_request("批量派生不支持在请求里指定基点，新建分支用源项目的默认 worktree 基点"));
     }
-    let Some(branch) = trimmed(&input, "branch").filter(|b| !b.is_empty()).map(str::to_string) else {
-        return Err(ApiError::bad_request("分支名不能为空"));
+    let mut member_branches = std::collections::BTreeMap::new();
+    let branch = if mode == MultiWorktreeMode::MemberBranches {
+        let choices = input
+            .get("memberBranches")
+            .and_then(Value::as_object)
+            .ok_or_else(|| ApiError::bad_request("请为每个成员仓库选择分支"))?;
+        for m in &members {
+            let choice = choices
+                .get(&m.dir)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::bad_request(format!("成员仓库缺少分支：{}", m.dir)))?;
+            member_branches.insert(m.dir.clone(), choice.to_string());
+        }
+        if choices.len() != members.len() {
+            return Err(ApiError::bad_request("分支选择包含未知的成员仓库"));
+        }
+        member_branches[&members[0].dir].clone()
+    } else {
+        trimmed_non_empty(&input, "branch").ok_or_else(|| ApiError::bad_request("分支名不能为空"))?
     };
     let multi_input = MultiWorktreeInput {
         name: str_field(&input, "name").map(str::to_string),
         mode,
+        member_branches,
         branch: branch.clone(),
         dir: str_field(&input, "dir").map(str::to_string),
     };
@@ -256,7 +273,12 @@ async fn derive_multi(
             let central: Vec<CentralMember> = outcome
                 .members
                 .iter()
-                .map(|m| CentralMember { base: basename_of(host.kind, &m.dir), repo_dir: m.repo_dir.clone() })
+                .zip(&members)
+                .map(|(m, source)| CentralMember {
+                    base: basename_of(host.kind, &m.dir),
+                    repo_dir: m.repo_dir.clone(),
+                    branch: multi_input.member_branches.get(&source.dir).cloned(),
+                })
                 .collect();
             let files = central_manifest_files(&row.name, &branch, &central);
             if let Err(e) = write_central_manifest(&engine, &src, host.kind, &outcome.central_dir, &files, &host.exec).await

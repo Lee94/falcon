@@ -31,6 +31,14 @@ use crate::theme::{Ui, radius};
 use crate::workspace::{ToastKind, Workspace};
 use crate::zoom::zpx;
 
+fn branch_opt(b: &RepoBranch) -> Opt {
+    match &b.checked_out_at {
+        Some(at) => Opt::new(b.name.clone(), format!("{} · {}", b.name, t!("worktree.inUse", path = at.clone())))
+            .disabled(true),
+        None => Opt::new(b.name.clone(), b.name.clone()),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Preset {
     /// 预填的分支名。多仓库表单带了它就用 new-branch 模式（照 React 版的 preset）
@@ -292,10 +300,6 @@ impl SingleForm {
         kit::reset_select(&self.start_select, options, &self.start_point, window, cx);
 
         // 检出已有分支：已在别处检出的灰掉，并写明在哪
-        let branch_opt = |b: &RepoBranch| match &b.checked_out_at {
-            Some(at) => Opt::new(b.name.clone(), format!("{} · {}", b.name, t!("worktree.inUse", path = at.clone()))).disabled(true),
-            None => Opt::new(b.name.clone(), b.name.clone()),
-        };
         let options = Options::grouped(
             Vec::new(),
             vec![
@@ -467,6 +471,7 @@ pub struct MultiForm {
     branch_text: Entity<InputState>,
     picked_ref: String,
     pick_select: Entity<OptState>,
+    member_selects: Vec<Entity<OptState>>,
     name: Entity<InputState>,
     error: Option<String>,
     busy: bool,
@@ -501,6 +506,15 @@ impl MultiForm {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(probe) => {
+                        for member in &probe.members {
+                            let items = member.info.branches.iter().filter(|b| !b.remote).map(branch_opt).collect();
+                            let select = cx.new(|cx| kit::new_select(Options::flat(items), "", window, cx));
+                            cx.subscribe_in(&select, window, |this, _, _: &SelectEvent<Options>, window, cx| {
+                                this.sync_name(window, cx);
+                                cx.notify();
+                            }).detach();
+                            this.member_selects.push(select);
+                        }
                         this.probe = Some(probe);
                         this.sync_select(window, cx);
                     }
@@ -524,6 +538,7 @@ impl MultiForm {
             branch_text,
             picked_ref: String::new(),
             pick_select,
+            member_selects: Vec::new(),
             name,
             error: None,
             busy: false,
@@ -532,6 +547,7 @@ impl MultiForm {
 
     fn branch(&self, cx: &App) -> String {
         match self.mode {
+            MultiWorktreeMode::MemberBranches => self.member_selects.first().and_then(|s| kit::selected(s, cx)).unwrap_or_default(),
             MultiWorktreeMode::ExistingBranch => self.picked_ref.trim().to_string(),
             _ => self.branch_text.read(cx).value().trim().to_string(),
         }
@@ -570,13 +586,23 @@ impl MultiForm {
             .map(|p| {
                 p.members
                     .iter()
-                    .map(|m| {
-                        let action = (!branch.is_empty()).then(|| evaluate_member(&m.info, self.mode, &branch));
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let target = if self.mode == MultiWorktreeMode::MemberBranches {
+                            kit::selected(&self.member_selects[i], cx).unwrap_or_default()
+                        } else {
+                            branch.clone()
+                        };
+                        let action = (!target.is_empty()).then(|| evaluate_member(&m.info, self.mode, &target));
                         (m.dir.clone(), m.info.clone(), action)
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn all_selected(&self, cx: &App) -> bool {
+        self.mode != MultiWorktreeMode::MemberBranches || self.member_selects.iter().all(|s| kit::selected(s, cx).is_some())
     }
 
     fn blocked_count(&self, cx: &App) -> usize {
@@ -614,12 +640,22 @@ impl MultiForm {
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let branch = self.branch(cx);
-        if self.busy || branch.is_empty() || self.probe.is_none() || self.blocked_count(cx) > 0 {
+        let Some(probe) = &self.probe else { return };
+        if self.busy || !self.all_selected(cx) || branch.is_empty() || self.blocked_count(cx) > 0 {
             return;
         }
         let name = self.name.read(cx).value().trim().to_string();
-        let members = self.probe.as_ref().map(|p| p.members.len()).unwrap_or(0);
-        let input = MultiWorktreeInput { name: (!name.is_empty()).then_some(name), mode: self.mode, branch: branch.clone(), dir: None };
+        let members = probe.members.len();
+        let individual = self.mode == MultiWorktreeMode::MemberBranches;
+        let member_branches = if individual {
+            probe.members.iter().zip(&self.member_selects)
+                .filter_map(|(m, s)| Some((m.dir.clone(), kit::selected(s, cx)?))).collect()
+        } else {
+            Default::default()
+        };
+        let input = MultiWorktreeInput {
+            name: (!name.is_empty()).then_some(name), mode: self.mode, branch: branch.clone(), member_branches, dir: None,
+        };
         self.busy = true;
         self.error = None;
         let request = self.ws.read(cx).client.create_worktree(&self.project.id, DeriveInput::Multi(input));
@@ -630,12 +666,16 @@ impl MultiForm {
                 match result {
                     Ok(created) => {
                         let n = created.multi.as_ref().map(|m| m.repos.len()).unwrap_or(members);
-                        let body = t!(
-                            "multi.createdBody",
-                            dir = created.working_dir.clone().unwrap_or_default(),
-                            n = n,
-                            branch = created.worktree.as_ref().map(|w| w.branch.clone()).unwrap_or(branch.clone())
-                        );
+                        let body = if individual {
+                            t!("multi.memberCreatedBody", dir = created.working_dir.clone().unwrap_or_default(), n = n)
+                        } else {
+                            t!(
+                                "multi.createdBody",
+                                dir = created.working_dir.clone().unwrap_or_default(),
+                                n = n,
+                                branch = created.worktree.as_ref().map(|w| w.branch.clone()).unwrap_or(branch.clone())
+                            )
+                        };
                         this.ws.update(cx, |w, cx| {
                             w.refresh_inventory(cx);
                             w.toast(
@@ -696,11 +736,12 @@ impl Render for MultiForm {
         };
         let branch = self.branch(cx);
         let evals = self.evals(cx);
+        let individual = self.mode == MultiWorktreeMode::MemberBranches;
         d = d.child(note(t!("multi.intro", n = probe.members.len()).to_string(), cx));
 
         let mut members = div()
             .id("mwt-members")
-            .max_h(zpx(192.))
+            .max_h(zpx(if individual { 256. } else { 192. }))
             .overflow_y_scroll()
             .rounded(radius::MD)
             .bg(ui.app)
@@ -708,8 +749,12 @@ impl Render for MultiForm {
             .flex()
             .flex_col()
             .gap_1();
-        for (dir, info, action) in &evals {
-            let (text, err) = self.member_line(info, action);
+        for (i, (dir, info, action)) in evals.iter().enumerate() {
+            let (text, err) = if individual && info.derivable && !info.branches.iter().any(|b| !b.remote && b.checked_out_at.is_none()) {
+                (t!("multi.noAvailableBranch").to_string(), true)
+            } else {
+                self.member_line(info, action)
+            };
             members = members.child(
                 div()
                     .flex()
@@ -727,8 +772,10 @@ impl Render for MultiForm {
                             .child(text),
                     ),
             );
+            if individual {
+                members = members.child(div().flex_none().child(Select::new(&self.member_selects[i]).w_full()));
+            }
         }
-        d = d.child(members);
 
         let seg = |mode: MultiWorktreeMode, label: String, cx: &mut Context<Self>| SegItem {
             label,
@@ -739,8 +786,9 @@ impl Render for MultiForm {
             seg(MultiWorktreeMode::Auto, t!("multi.modeAuto").to_string(), cx),
             seg(MultiWorktreeMode::NewBranch, t!("worktree.modeNew").to_string(), cx),
             seg(MultiWorktreeMode::ExistingBranch, t!("worktree.modeExisting").to_string(), cx),
+            seg(MultiWorktreeMode::MemberBranches, t!("multi.memberBranches").to_string(), cx),
         ];
-        d = d.child(segmented("mwt-mode", items, cx));
+        d = d.child(segmented("mwt-mode", items, cx)).child(members);
 
         if self.mode == MultiWorktreeMode::ExistingBranch {
             let infos: Vec<&RepoInfo> = probe.members.iter().map(|m| &m.info).collect();
@@ -748,7 +796,7 @@ impl Render for MultiForm {
                 .is_empty()
                 .then(|| (t!("multi.noCommonBranch").to_string(), Tone::Muted));
             d = d.child(field(Some(t!("worktree.pickBranch").to_string()), Select::new(&self.pick_select).w_full(), hint, cx));
-        } else {
+        } else if self.mode != MultiWorktreeMode::MemberBranches {
             d = d.child(field(Some(t!("worktree.branch").to_string()), Input::new(&self.branch_text), None, cx));
         }
 
@@ -763,14 +811,16 @@ impl Render for MultiForm {
                 .flex()
                 .flex_col()
                 .child(div().truncate().child(central));
-            for (dir, info, _) in &evals {
-                preview = preview.child(
-                    div()
-                        .pl_4()
-                        .truncate()
-                        .text_color(ui.muted_foreground)
-                        .child(format!("{}/", member_basename(info.repo_dir.as_deref().unwrap_or(dir)))),
-                );
+            if !individual {
+                for (dir, info, _) in &evals {
+                    preview = preview.child(
+                        div()
+                            .pl_4()
+                            .truncate()
+                            .text_color(ui.muted_foreground)
+                            .child(format!("{}/", member_basename(info.repo_dir.as_deref().unwrap_or(dir)))),
+                    );
+                }
             }
             d = d.child(field(
                 Some(t!("multi.dirPreview").to_string()),
@@ -788,7 +838,7 @@ impl Render for MultiForm {
         if let Some(e) = self.error.clone() {
             d = d.child(error_line(e, cx));
         }
-        let can = !branch.is_empty() && blocked == 0;
+        let can = self.all_selected(cx) && !branch.is_empty() && blocked == 0;
         d.child(footer(self.busy, can, cx.listener(|this, _, window, cx| this.submit(window, cx))))
     }
 }

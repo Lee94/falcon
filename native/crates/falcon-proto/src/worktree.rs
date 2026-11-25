@@ -171,12 +171,14 @@ pub struct MultiRepoInfo {
 pub const MULTI_REPO_MAX: usize = 16;
 
 wire_enum! {
-    /// [`MultiWorktreeInput::mode`]。比 [`WorktreeMode`] 多一个 auto。
+    /// [`MultiWorktreeInput::mode`]。支持统一分支与按成员检出。
     pub enum MultiWorktreeMode {
         NewBranch => "new-branch",
         ExistingBranch => "existing-branch",
         /// 分支存在则检出、不存在则从各自 HEAD 新建
         Auto => "auto",
+        /// 按成员仓库分别检出已有的本地分支
+        MemberBranches => "member-branches",
     }
 }
 
@@ -194,8 +196,11 @@ pub struct MultiWorktreeInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub mode: MultiWorktreeMode,
-    /// 目标分支的**本地**名，对全部成员统一
+    /// 统一分支名；逐仓库检出时取首个成员的分支，用于默认名称与目录
     pub branch: String,
+    /// 逐仓库检出时以容器成员的配置路径为键
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub member_branches: std::collections::BTreeMap<String, String>,
     /// 集中目录；缺省 = 第一个成员仓库根的父目录 + <容器名slug>-<分支slug>
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,

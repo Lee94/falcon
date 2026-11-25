@@ -36,6 +36,56 @@ pub fn log_file_path(data_dir: &Path, session_id: &str) -> PathBuf {
     log_dir(data_dir).join(format!("{session_id}.jsonl"))
 }
 
+/// 路由上的记录标识只允许 default 或命名实例的哈希，始终限制在所属终端。
+pub fn history_storage_id(session_id: &str, record: &str) -> Option<String> {
+    if !is_valid_session_id(session_id) {
+        return None;
+    }
+    if record == "default" {
+        return Some(session_id.to_owned());
+    }
+    let id = format!("{session_id}.{record}");
+    is_valid_storage_id(&id).then_some(id)
+}
+
+pub fn remember_instance_name(data_dir: &Path, key: &super::BrowserKey) {
+    if key.is_default() {
+        return;
+    }
+    let dir = log_dir(data_dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join(format!("{}.name", key.storage_id())), &key.browser_session);
+    }
+}
+
+pub fn history_entries(data_dir: &Path, session_id: &str) -> std::io::Result<Vec<falcon_proto::BrowserHistoryEntry>> {
+    let dir = log_dir(data_dir);
+    let entries = match dir.read_dir() {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let prefix = format!("{session_id}.");
+    let mut result = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let record = if stem == session_id { "default" } else {
+            let Some(hash) = stem.strip_prefix(&prefix) else { continue };
+            hash
+        };
+        if history_storage_id(session_id, record).as_deref() != Some(stem) { continue; }
+        let Ok(meta) = path.metadata() else { continue };
+        if !meta.is_file() || meta.len() == 0 { continue; }
+        let modified_at = meta.modified()?.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        let name = std::fs::read_to_string(path.with_extension("name")).ok();
+        result.push(falcon_proto::BrowserHistoryEntry { record: record.into(), name, modified_at });
+    }
+    result.sort_by_key(|entry| (std::cmp::Reverse(entry.modified_at), entry.record.clone()));
+    Ok(result)
+}
+
 pub fn session_thumbs_dir(data_dir: &Path, session_id: &str) -> PathBuf {
     thumbs_dir(data_dir).join(session_id)
 }
@@ -270,7 +320,7 @@ pub fn remove_session_logs(data_dir: &Path, session_id: &str) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let storage_id = if is_log { name.strip_suffix(".jsonl") } else { Some(name) };
+            let storage_id = if is_log { name.strip_suffix(".jsonl").or_else(|| name.strip_suffix(".name")) } else { Some(name) };
             if !storage_id.is_some_and(|id| id.starts_with(&prefix) && is_valid_storage_id(id)) {
                 continue;
             }
@@ -286,6 +336,25 @@ pub fn remove_session_logs(data_dir: &Path, session_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_discovers_legacy_named_logs_without_running_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = super::super::BrowserKey::new("sess-a", "浏览器").unwrap();
+        let storage = key.storage_id();
+        let mut log = SessionLog::load(dir.path(), &storage);
+        log.append(1, BrowserEventKind::Unknown);
+        let entries = history_entries(dir.path(), "sess-a").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].name.is_none());
+        assert_eq!(history_storage_id("sess-a", &entries[0].record), Some(storage.clone()));
+        assert!(history_storage_id("sess-a", "../sess-b").is_none());
+        assert!(history_entries(dir.path(), "sess-b").unwrap().is_empty());
+        remember_instance_name(dir.path(), &key);
+        assert_eq!(history_entries(dir.path(), "sess-a").unwrap()[0].name.as_deref(), Some("浏览器"));
+        remove_session_logs(dir.path(), "sess-a");
+        assert_eq!(log_dir(dir.path()).read_dir().unwrap().count(), 0);
+    }
 
     #[test]
     fn append_reload_pagination_and_thumbs() {

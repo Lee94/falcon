@@ -40,6 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/sessions/{id}/terminate", post(terminate))
         .route("/api/sessions/{id}", axum::routing::delete(delete_dead).patch(rename))
         .route("/api/sessions/{id}/paste-image", post(paste_image))
+        .route("/api/sessions/{id}/browser/history", get(browser_history))
+        .route("/api/sessions/{id}/browser/history/{record}", get(browser_history_page))
         .route("/api/sessions/{id}/browser/log", get(browser_log))
         .route("/api/sessions/{id}/browser/thumbs/{thumb_id}", get(browser_thumb))
 }
@@ -234,6 +236,29 @@ fn browser_key(
 ) -> ApiResult<crate::agent_browser::BrowserKey> {
     crate::agent_browser::BrowserKey::for_request(session_id, browser_session)
         .ok_or_else(|| ApiError::bad_request("浏览器会话标识无效"))
+}
+
+async fn browser_history(
+    State(state): State<AppState>, Path(id): Path<String>,
+) -> ApiResult<Json<Vec<falcon_proto::BrowserHistoryEntry>>> {
+    let dir = state.config.data_dir.clone();
+    let entries = tokio::task::spawn_blocking(move || crate::agent_browser::log::history_entries(&dir, &id))
+        .await.map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(entries))
+}
+
+async fn browser_history_page(
+    State(state): State<AppState>, Path((id, record)): Path<(String, String)>, Query(q): Query<BrowserLogQuery>,
+) -> ApiResult<Json<BrowserLogPage>> {
+    use crate::agent_browser::log::{DEFAULT_LOG_LIMIT, SessionLog, history_storage_id, log_file_path};
+    let storage = history_storage_id(&id, &record).ok_or_else(|| ApiError::bad_request("浏览器记录标识无效"))?;
+    let dir = state.config.data_dir.clone();
+    let page = tokio::task::spawn_blocking(move || {
+        if !log_file_path(&dir, &storage).is_file() { return Err(ApiError::not_found("浏览器记录不存在")); }
+        Ok(SessionLog::load(&dir, &storage).query(q.before, q.limit.unwrap_or(DEFAULT_LOG_LIMIT)))
+    }).await.map_err(|e| ApiError::internal(e.to_string()))??;
+    Ok(Json(page))
 }
 
 async fn browser_log(

@@ -61,6 +61,7 @@ pub struct CentralMember {
     pub base: String,
     /// 源仓库根
     pub repo_dir: String,
+    pub branch: Option<String>,
 }
 
 /// Windows 远端的一条写入：命令 + 喂给它 stdin 的 base64（配 `SshLink.execWithInput`）
@@ -110,19 +111,25 @@ pub fn render_container_agents_md<S: AsRef<str>>(project_name: &str, member_dirs
 
 /// 集中目录版：成员都在 cwd 内，用相对路径；不需要"cwd 下没有代码"的告诫
 pub fn render_central_agents_md(project_name: &str, branch: &str, members: &[CentralMember]) -> String {
+    let individual = members.iter().any(|m| m.branch.is_some());
+    let title_branch = if individual { String::new() } else { format!("，分支 {branch}") };
+    let checkout = if individual { String::new() } else { format!("（统一检出分支 {branch}）") };
     let list = members
         .iter()
-        .map(|m| format!("- ./{}/（源仓库 {}）", m.base, m.repo_dir))
+        .map(|m| {
+            let selected = m.branch.as_ref().map(|b| format!("，分支 {b}")).unwrap_or_default();
+            format!("- ./{}/（源仓库 {}{selected}）", m.base, m.repo_dir)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "<!-- {FALCON_GENERATED_MARK} -->
 <!-- 本文件由 falcon 在批量派生时生成，删除该派生项目时会被一并清理。 -->
 
-# {project_name}（多仓库批量派生，分支 {branch}）
+# {project_name}（多仓库批量派生{title_branch}）
 
 当前目录是 falcon 批量派生出的集中目录，下列子目录各是一个成员仓库的
-git worktree（统一检出分支 {branch}）。各成员是相互独立的仓库，
+git worktree{checkout}。各成员是相互独立的仓库，
 提交、分支操作要逐个成员进行。
 
 ## 成员
@@ -346,7 +353,7 @@ mod tests {
     }
 
     fn central(base: &str, repo_dir: &str) -> CentralMember {
-        CentralMember { base: base.into(), repo_dir: repo_dir.into() }
+        CentralMember { base: base.into(), repo_dir: repo_dir.into(), branch: None }
     }
 
     /// TS：describe("virtualProjectDir")

@@ -3,6 +3,8 @@ pub fn asset(path: &str) -> Option<(&'static str, &'static [u8])> {
     match path {
         "index.html" => Some(("text/html; charset=utf-8", include_bytes!("assets/index.html.gz"))),
         "favicon.ico" => Some(("image/x-icon", include_bytes!("assets/favicon.ico.gz"))),
+        "_next/static/G2e7eY1PNM-XuqhAr-R3G/_buildManifest.js" => Some(("text/javascript", include_bytes!("assets/_next/static/G2e7eY1PNM-XuqhAr-R3G/_buildManifest.js.gz"))),
+        "_next/static/G2e7eY1PNM-XuqhAr-R3G/_ssgManifest.js" => Some(("text/javascript", include_bytes!("assets/_next/static/G2e7eY1PNM-XuqhAr-R3G/_ssgManifest.js.gz"))),
         "_next/static/chunks/125-7f8e390ff5031384.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/125-7f8e390ff5031384.js.gz"))),
         "_next/static/chunks/798-7f61004d7dc69076.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/798-7f61004d7dc69076.js.gz"))),
         "_next/static/chunks/84df2e8f-32ce223a44563964.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/84df2e8f-32ce223a44563964.js.gz"))),
@@ -10,7 +12,7 @@ pub fn asset(path: &str) -> Option<(&'static str, &'static [u8])> {
         "_next/static/chunks/app/_global-error/page-e83ff658acefdd24.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/app/_global-error/page-e83ff658acefdd24.js.gz"))),
         "_next/static/chunks/app/_not-found/page-7750af49d7cda480.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/app/_not-found/page-7750af49d7cda480.js.gz"))),
         "_next/static/chunks/app/layout-d458d4cc2d60ba3d.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/app/layout-d458d4cc2d60ba3d.js.gz"))),
-        "_next/static/chunks/app/page-3d35e6c24598bd3e.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/app/page-3d35e6c24598bd3e.js.gz"))),
+        "_next/static/chunks/app/page-872888f619717fa2.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/app/page-872888f619717fa2.js.gz"))),
         "_next/static/chunks/framework-014a6a4690f2fe5a.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/framework-014a6a4690f2fe5a.js.gz"))),
         "_next/static/chunks/main-574661cd3d5f5549.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/main-574661cd3d5f5549.js.gz"))),
         "_next/static/chunks/main-app-31bf9bf74f0afcfe.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/main-app-31bf9bf74f0afcfe.js.gz"))),
@@ -21,9 +23,7 @@ pub fn asset(path: &str) -> Option<(&'static str, &'static [u8])> {
         "_next/static/chunks/next/dist/client/components/builtin/unauthorized-e83ff658acefdd24.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/next/dist/client/components/builtin/unauthorized-e83ff658acefdd24.js.gz"))),
         "_next/static/chunks/polyfills-42372ed130431b0a.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/polyfills-42372ed130431b0a.js.gz"))),
         "_next/static/chunks/webpack-d357f5664f3f4757.js" => Some(("text/javascript", include_bytes!("assets/_next/static/chunks/webpack-d357f5664f3f4757.js.gz"))),
-        "_next/static/css/88b7b423d1fc2347.css" => Some(("text/css", include_bytes!("assets/_next/static/css/88b7b423d1fc2347.css.gz"))),
-        "_next/static/viIQMvoi2FOd7OWntuIWg/_buildManifest.js" => Some(("text/javascript", include_bytes!("assets/_next/static/viIQMvoi2FOd7OWntuIWg/_buildManifest.js.gz"))),
-        "_next/static/viIQMvoi2FOd7OWntuIWg/_ssgManifest.js" => Some(("text/javascript", include_bytes!("assets/_next/static/viIQMvoi2FOd7OWntuIWg/_ssgManifest.js.gz"))),
+        "_next/static/css/de704611f213fa58.css" => Some(("text/css", include_bytes!("assets/_next/static/css/de704611f213fa58.css.gz"))),
         _ => None,
     }
 }

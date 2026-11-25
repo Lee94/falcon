@@ -190,6 +190,15 @@ pub enum BrowserEventKind {
     Unknown,
 }
 
+/// 已保存的实例。旧版命名实例只有文件名中的哈希，无法还原原名。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserHistoryEntry {
+    pub record: String,
+    pub name: Option<String>,
+    pub modified_at: u64,
+}
+
 /// `GET /api/sessions/:id/browser/log` 的响应。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

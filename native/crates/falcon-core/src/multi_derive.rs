@@ -49,7 +49,7 @@ pub fn evaluate_member(info: &RepoInfo, mode: MultiWorktreeMode, branch: &str) -
     let new_branch = match mode {
         MultiWorktreeMode::Auto => hit.is_none(),
         MultiWorktreeMode::NewBranch => true,
-        MultiWorktreeMode::ExistingBranch => false,
+        MultiWorktreeMode::ExistingBranch | MultiWorktreeMode::MemberBranches => false,
     };
     if new_branch {
         return if hit.is_some() { MemberAction::BranchExists } else { MemberAction::Create };

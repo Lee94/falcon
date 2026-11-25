@@ -441,6 +441,7 @@ impl BrowserManager {
                     .or_insert_with(|| SessionBrowser::new(&self.data_dir, key));
                 let replaced = entry.discovered.as_ref() != Some(found);
                 if replaced {
+                    super::log::remember_instance_name(&self.data_dir, key);
                     entry.policy_bypassed = false;
                     entry.pending_thumb_event_id = None;
                     entry.last_frame = None;

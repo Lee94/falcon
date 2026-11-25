@@ -132,7 +132,7 @@ fn member_fail(reason: WorktreeFailure, message: String, detail: Option<String>,
     member_error(WorktreeError::new(reason, message, detail), member_dir, Vec::new()).into()
 }
 
-/// 批量派生：对容器全部成员按统一分支名各建一棵 worktree，集中放进一个新目录。
+/// 批量派生：对容器全部成员按指定分支名各建一棵 worktree，集中放进一个新目录。
 ///
 /// `container_name` / `members` 是容器行的名字与成员（成员 dir 是用户配置的路径）；
 /// `start_point` 是新建分支的共同基点（源项目的 defaultWorktreeBranch），缺省各自 HEAD。
@@ -251,7 +251,14 @@ pub async fn derive_multi_worktrees(
     // ---- 预检批 3：分支存在性，解析每个成员的实际模式 ----
     // auto = 存在则检出、不存在则从各自 HEAD 新建；new/existing 两种严格模式下
     // 这批结果用来在动手之前拦住必然的失败（拦住一个就省一轮回滚）
-    let argvs: Vec<Vec<String>> = roots.iter().map(|r| gc::branch_exists_args(git, r, branch)).collect();
+    let branches: Vec<&String> = members.iter().map(|m| {
+        if input.mode == MultiWorktreeMode::MemberBranches {
+            input.member_branches.get(&m.dir).ok_or_else(|| MultiVetoError(format!("成员仓库缺少分支：{}", m.dir)))
+        } else {
+            Ok(branch)
+        }
+    }).collect::<Result<_, _>>()?;
+    let argvs: Vec<Vec<String>> = roots.iter().zip(&branches).map(|(r, b)| gc::branch_exists_args(git, r, b)).collect();
     let exists = batch_git(host, &argvs, gc::GIT_ENV_RO, &o).await?;
     let mut modes: Vec<WorktreeMode> = Vec::with_capacity(members.len());
     for (i, (res, m)) in exists.results.iter().zip(members).enumerate() {
@@ -264,18 +271,19 @@ pub async fn derive_multi_worktrees(
                 &m.dir,
             ));
         };
+        let branch = branches[i];
         let has = code == 0;
         if input.mode == MultiWorktreeMode::NewBranch && has {
             let r = WorktreeFailure::BranchExists;
             return Err(member_fail(r, worktree_failure_text(r).into(), Some(branch.clone()), &m.dir));
         }
-        if input.mode == MultiWorktreeMode::ExistingBranch && !has {
+        if matches!(input.mode, MultiWorktreeMode::ExistingBranch | MultiWorktreeMode::MemberBranches) && !has {
             let r = WorktreeFailure::BranchUnknown;
             return Err(member_fail(r, worktree_failure_text(r).into(), Some(branch.clone()), &m.dir));
         }
         let mode = match input.mode {
             MultiWorktreeMode::NewBranch => WorktreeMode::NewBranch,
-            MultiWorktreeMode::ExistingBranch => WorktreeMode::ExistingBranch,
+            MultiWorktreeMode::ExistingBranch | MultiWorktreeMode::MemberBranches => WorktreeMode::ExistingBranch,
             MultiWorktreeMode::Auto if has => WorktreeMode::ExistingBranch,
             MultiWorktreeMode::Auto => WorktreeMode::NewBranch,
         };
@@ -303,7 +311,7 @@ pub async fn derive_multi_worktrees(
             }
             let opts = AddWorktreeOptions {
                 mode: modes[i],
-                branch: branch.clone(),
+                branch: branches[i].clone(),
                 // 只对 new-branch 有意义；existing-branch 路径会忽略
                 start_point: start_point.map(str::to_string),
                 dir: target.clone(),
@@ -390,11 +398,39 @@ mod tests {
     // ---------------- 批量派生（真 git，临时目录）----------------
 
     fn input(mode: MultiWorktreeMode, branch: &str) -> MultiWorktreeInput {
-        MultiWorktreeInput { name: None, mode, branch: branch.into(), dir: None }
+        MultiWorktreeInput { name: None, mode, branch: branch.into(), member_branches: Default::default(), dir: None }
     }
 
     fn member(dir: &Path) -> MultiRepoMember {
         MultiRepoMember { dir: dir.to_str().unwrap().into(), repo_dir: None }
+    }
+
+    #[tokio::test]
+    async fn member_branches_check_each_repository_before_creating_worktrees() {
+        if !have_git() {
+            return;
+        }
+        let (_temp, base) = real_tempdir();
+        let (web, srv) = (base.join("web"), base.join("srv"));
+        init_repo(&web);
+        init_repo(&srv);
+        sh(&web, "git branch frontend");
+        let members = [member(&web), member(&srv)];
+        let mut request = input(MultiWorktreeMode::MemberBranches, "frontend");
+        request.member_branches.insert(members[1].dir.clone(), "backend".into());
+        request.member_branches.insert(members[0].dir.clone(), "frontend".into());
+
+        let host = local_host("local");
+        let err = derive_multi_worktrees(&host, "app", &members, &request, None).await.unwrap_err();
+        let DeriveMultiError::Member(err) = err else { panic!("{err:?}") };
+        assert_eq!(err.reason, WorktreeFailure::BranchUnknown);
+        assert_eq!(err.member_dir, members[1].dir);
+        assert!(!base.join("app-frontend").exists());
+
+        sh(&srv, "git branch backend");
+        let result = derive_multi_worktrees(&host, "app", &members, &request, None).await.unwrap();
+        sh(Path::new(&result.members[0].dir), "test \"$(git branch --show-current)\" = frontend");
+        sh(Path::new(&result.members[1].dir), "test \"$(git branch --show-current)\" = backend");
     }
 
     #[tokio::test]

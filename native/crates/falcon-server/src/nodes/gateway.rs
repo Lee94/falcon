@@ -1308,6 +1308,13 @@ mod tests {
         assert!(gateway.state.db.list_sessions().is_empty());
 
         let path = format!("/api/sessions/{encoded_id}/browser");
+        let (status, archives) = json_of(gateway.get(&format!("{path}/history")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        let named = archives.as_array().unwrap().iter().find(|row| row["name"] == "预览_二").unwrap();
+        let record = named["record"].as_str().unwrap();
+        let (status, page) = json_of(gateway.get(&format!("{path}/history/{record}?before=2")).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["events"][0]["url"], "http://localhost/预览_二");
         for (query, name, jpeg) in [(String::new(), "falcon-terminal-1", 1u8), (format!("?{token}"), "预览_二", 2)] {
             let (status, log) = json_of(gateway.get(&format!("{path}/log{query}")).await).await;
             assert_eq!(status, StatusCode::OK);

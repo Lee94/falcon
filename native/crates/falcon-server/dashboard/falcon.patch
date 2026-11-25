@@ -39,14 +39,35 @@ index c9e4f8c..c201e82 100644
          <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
            <JotaiProvider>
 diff --git a/packages/dashboard/src/app/page.tsx b/packages/dashboard/src/app/page.tsx
-index 83ff53f..f133ed5 100644
+index 83ff53f..41462ef 100644
 --- a/packages/dashboard/src/app/page.tsx
 +++ b/packages/dashboard/src/app/page.tsx
-@@ -27,12 +27,12 @@ import { Button } from "@/components/ui/button";
+@@ -1,5 +1,7 @@
+ "use client";
+
++import { useState } from "react";
++import { BrowserHistory } from "@/components/browser-history";
+ import { useAtomValue, useSetAtom } from "jotai/react";
+ import { activePortAtom, sessionsAtom, newSessionDialogAtom } from "@/store/sessions";
+ import { useSessionsSync } from "@/store/sessions";
+@@ -27,12 +29,25 @@ import { Button } from "@/components/ui/button";
  import { Plus } from "lucide-react";
  
  export default function DashboardPage() {
 -  initializeDashboardAccessToken();
++  const [history, setHistory] = useState(false);
++  return (
++    <div className="flex h-screen flex-col bg-background">
++      <nav aria-label="浏览器总览" className="flex gap-2 border-b px-3 py-1">
++        <Button size="sm" variant={history ? "ghost" : "secondary"} aria-pressed={!history} onClick={() => setHistory(false)}>实时会话</Button>
++        <Button size="sm" variant={history ? "secondary" : "ghost"} aria-pressed={history} onClick={() => setHistory(true)}>历史会话</Button>
++      </nav>
++      <div className="min-h-0 flex-1">{history ? <BrowserHistory /> : <LiveDashboard />}</div>
++    </div>
++  );
++}
++
++function LiveDashboard() {
 +
    const activePort = useAtomValue(activePortAtom);
    useStreamSync(activePort);
@@ -58,7 +79,7 @@ index 83ff53f..f133ed5 100644
  
    const sessions = useAtomValue(sessionsAtom);
    const hasSessions = sessions.length > 0;
-@@ -42,10 +42,9 @@ export default function DashboardPage() {
+@@ -42,10 +57,9 @@ export default function DashboardPage() {
    const activeExtensions = useAtomValue(activeExtensionsAtom);
  
    const sidePanel = (
@@ -70,7 +91,7 @@ index 83ff53f..f133ed5 100644
            <TabsTrigger value="activity" className="text-[11px]">Activity</TabsTrigger>
            <TabsTrigger value="console" className="text-[11px]">
              Console
-@@ -53,14 +52,6 @@ export default function DashboardPage() {
+@@ -53,14 +67,6 @@ export default function DashboardPage() {
                <span className="ml-1 inline-flex size-1.5 rounded-full bg-destructive" />
              )}
            </TabsTrigger>
@@ -85,7 +106,7 @@ index 83ff53f..f133ed5 100644
          </TabsList>
        </div>
        <TabsContent value="activity" className="min-h-0 flex-1 overflow-hidden">
-@@ -69,18 +60,6 @@ export default function DashboardPage() {
+@@ -69,25 +75,13 @@ export default function DashboardPage() {
        <TabsContent value="console" className="min-h-0 flex-1 overflow-hidden">
          <ConsolePanel />
        </TabsContent>
@@ -104,7 +125,15 @@ index 83ff53f..f133ed5 100644
      </Tabs>
    );
  
-@@ -101,15 +80,7 @@ export default function DashboardPage() {
+   if (isDesktop) {
+     if (!hasSessions) {
+       return (
+-        <div className="flex h-screen flex-col bg-background">
++        <div className="flex h-full flex-col bg-background">
+           <ResizablePanelGroup
+             orientation="horizontal"
+             className="min-h-0 flex-1"
+@@ -101,15 +95,7 @@ export default function DashboardPage() {
                  <div className="text-center space-y-4">
                    <div className="space-y-2">
                      <p className="text-sm text-muted-foreground">No active sessions</p>
@@ -120,6 +149,24 @@ index 83ff53f..f133ed5 100644
                  </div>
                </div>
              </ResizablePanel>
+@@ -119,7 +105,7 @@ export default function DashboardPage() {
+     }
+
+     return (
+-      <div className="flex h-screen flex-col bg-background">
++      <div className="flex h-full flex-col bg-background">
+         <ResizablePanelGroup
+           orientation="horizontal"
+           className="min-h-0 flex-1"
+@@ -141,7 +127,7 @@ export default function DashboardPage() {
+   }
+
+   return (
+-    <div className="flex h-screen flex-col bg-background">
++    <div className="flex h-full flex-col bg-background">
+       <Tabs defaultValue="viewport" className="min-h-0 flex-1">
+         <div className="shrink-0 px-2 pt-2">
+           <TabsList className="w-full">
 diff --git a/packages/dashboard/src/components/activity-feed.tsx b/packages/dashboard/src/components/activity-feed.tsx
 index e9b8de6..589e6f3 100644
 --- a/packages/dashboard/src/components/activity-feed.tsx
@@ -175,6 +222,115 @@ index e9b8de6..589e6f3 100644
        </div>
        <Separator />
  
+diff --git a/packages/dashboard/src/components/browser-history.tsx b/packages/dashboard/src/components/browser-history.tsx
+new file mode 100644
+index 0000000..9beb387
+--- /dev/null
++++ b/packages/dashboard/src/components/browser-history.tsx
+@@ -0,0 +1,103 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { Button } from "@/components/ui/button";
++
++type Terminal = { id: string; hostName?: string; projectName: string; name?: string; title?: string };
++type Archive = { record: string; name?: string; modifiedAt: number };
++type Event = { id: number; ts: number; kind: string; action?: string; summary?: string; ok?: boolean;
++  error?: string; url?: string; title?: string; level?: string; text?: string; message?: string; holder?: string };
++type Page = { events: Event[]; hasMore: boolean };
++
++async function read<T>(url: string, signal: AbortSignal): Promise<T> {
++  const res = await fetch(url, { signal, cache: "no-store" });
++  if (!res.ok) throw new Error(res.status === 404 ? "此节点未提供该历史记录或尚未升级。" : `读取失败（${res.status}）`);
++  return res.json();
++}
++
++function describe(e: Event) {
++  switch (e.kind) {
++    case "command": return [e.action, e.summary].filter(Boolean).join(" · ");
++    case "result": return [e.action, e.ok ? "成功" : "失败", e.error].filter(Boolean).join(" · ");
++    case "url": return [e.title, e.url].filter(Boolean).join(" · ");
++    case "console": return [e.level, e.text].filter(Boolean).join(" · ");
++    case "pageError": return e.message;
++    case "control": return e.holder;
++    default: return e.kind;
++  }
++}
++
++function Events({ url }: { url: string }) {
++  const [events, setEvents] = useState<Event[]>([]);
++  const [before, setBefore] = useState<number>();
++  const [more, setMore] = useState(false);
++  const [error, setError] = useState("");
++  const [attempt, setAttempt] = useState(0);
++  useEffect(() => {
++    const abort = new AbortController();
++    setError("");
++    read<Page>(url + (before ? "?before=" + before : ""), abort.signal)
++      .then(page => {
++        if (abort.signal.aborted) return;
++        setEvents(prev => [...prev, ...page.events.reverse()]);
++        setMore(page.hasMore);
++      }).catch(e => { if (!abort.signal.aborted) setError(e.message); });
++    return () => abort.abort();
++  }, [url, before, attempt]);
++  return <section className="space-y-2" aria-label="操作记录">
++    {events.map(e => <div key={e.id} className="border-b py-2 text-sm">
++      <div className="text-xs text-muted-foreground">{new Date(e.ts).toLocaleString()} · {e.kind}</div>
++      <div className="whitespace-pre-wrap break-all">{describe(e)}</div>
++    </div>)}
++    {error ? <p role="alert">{error} <Button onClick={() => setAttempt(a => a + 1)}>重试</Button></p> :
++      more && <Button onClick={() => { setMore(false); setBefore(events[events.length - 1].id); }}>加载更早记录</Button>}
++  </section>;
++}
++
++function Archives({ terminal }: { terminal: string }) {
++  const base = "/api/sessions/" + encodeURIComponent(terminal) + "/browser/history";
++  const [entries, setEntries] = useState<Archive[]>();
++  const [selected, setSelected] = useState("");
++  const [error, setError] = useState("");
++  useEffect(() => {
++    const abort = new AbortController();
++    read<Archive[]>(base, abort.signal).then(rows => {
++      if (!abort.signal.aborted) { setEntries(rows); setSelected(rows[0]?.record ?? ""); }
++    }).catch(e => { if (!abort.signal.aborted) setError(e.message); });
++    return () => abort.abort();
++  }, [base]);
++  if (error) return <p role="alert">{error}</p>;
++  if (!entries) return <p>正在读取历史会话…</p>;
++  if (!entries.length) return <p>这个终端没有已保存的浏览器记录。</p>;
++  return <>
++    <label className="block">浏览器实例 <select className="max-w-full rounded border p-1" value={selected} onChange={e => setSelected(e.target.value)}>
++      {entries.map(a => <option key={a.record} value={a.record}>
++        {a.name || (a.record === "default" ? "默认实例" : a.record.slice(0, 12))} · {new Date(a.modifiedAt).toLocaleString()}
++      </option>)}
++    </select></label>
++    {selected && <Events key={selected} url={base + "/" + encodeURIComponent(selected)} />}
++  </>;
++}
++
++export function BrowserHistory() {
++  const [terminals, setTerminals] = useState<Terminal[]>();
++  const [selected, setSelected] = useState("");
++  const [error, setError] = useState("");
++  useEffect(() => {
++    const abort = new AbortController();
++    read<Terminal[]>("/api/sessions", abort.signal).then(rows => {
++      if (abort.signal.aborted) return;
++      const requested = new URLSearchParams(location.search).get("terminal");
++      setTerminals(rows);
++      setSelected(rows.find(t => t.id === requested)?.id ?? rows[0]?.id ?? "");
++    }).catch(e => { if (!abort.signal.aborted) setError(e.message); });
++    return () => abort.abort();
++  }, []);
++  return <main className="h-full space-y-4 overflow-auto p-4 text-sm">
++    {error ? <p role="alert">{error}</p> : !terminals ? <p>正在读取终端…</p> : !terminals.length ? <p>没有可查看的终端。</p> :
++      <label className="block">宿主机 / 项目 / 终端 <select className="max-w-full rounded border p-1" value={selected} onChange={e => setSelected(e.target.value)}>
++        {terminals.map(t => <option key={t.id} value={t.id}>{[t.hostName || "localhost", t.projectName, t.name || t.title || t.id.split(":").pop()?.slice(0, 12)].join(" / ")}</option>)}
++      </select></label>}
++    {selected && <Archives key={selected} terminal={selected} />}
++  </main>;
++}
 diff --git a/packages/dashboard/src/components/session-tree.tsx b/packages/dashboard/src/components/session-tree.tsx
 index 19b8e7d..5b5ac3e 100644
 --- a/packages/dashboard/src/components/session-tree.tsx
