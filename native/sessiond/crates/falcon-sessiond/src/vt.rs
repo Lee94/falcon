@@ -113,6 +113,7 @@ impl Handler for VtHandler {
 }
 
 fn configure(t: &mut Terminal<VtHandler>, scrollback: usize) -> Result<()> {
+    t.enable_inline_images()?;
     t.set_continuation_max_bytes(CONTINUATION_MAX_BYTES)?;
     t.set_scrollback_max_lines(scrollback)?;
     t.set_scrollback_max_bytes(SCROLLBACK_MAX_BYTES)?;
@@ -206,6 +207,8 @@ fn screen_bytes<H: Handler>(t: &Terminal<H>) -> Vec<u8> {
             out.extend_from_slice(b"\r\n");
         }
     }
+    // Place images before the formatter restores the cursor and origin mode.
+    out.extend_from_slice(&t.visible_image_commands());
     out.extend_from_slice(extras);
     out.extend_from_slice(&late);
     out
@@ -361,6 +364,21 @@ mod tests {
         let mut t = Terminal::new(40, 10, h).unwrap();
         configure(&mut t, 1000).unwrap();
         t
+    }
+
+    #[test]
+    fn visible_codex_image_survives_reconnect() {
+        let mut t = term();
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGN4IKDwHwAE9AIQSxHK3gAAAABJRU5ErkJggg==";
+        feed(&mut t, &format!("\x1b[3;4H\x1b_Ga=T,t=d,f=100,c=4,r=2,i=7,q=2,C=1,m=0;{png}\x1b\\\x1b[7;8H"));
+        let replay = replay_bytes(&t);
+        let mut restored = term();
+        restored.vt_write(&replay);
+        let images = restored.visible_image_commands();
+        assert!(images.starts_with(b"\x1b[3;4H\x1b_Ga=T,t=d,f=100,c=4,r=2,i=7,"), "{images:?}");
+        assert_eq!(restored.cursor(), (7, 6));
+        feed(&mut restored, "\x1b_Ga=d,d=I,i=7,q=2;\x1b\\");
+        assert!(restored.visible_image_commands().is_empty());
     }
 
     #[test]

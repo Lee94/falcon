@@ -111,6 +111,7 @@ const MIN_FOLLOW_SCALE: f32 = 0.5;
 pub struct TerminalElement {
     view: Entity<TerminalView>,
     snapshot: Arc<Snapshot>,
+    images: Vec<Arc<gpui_kit::RenderImage>>,
     palette: TermPalette,
     style: TermTextStyle,
     focus: FocusHandle,
@@ -131,6 +132,7 @@ impl TerminalElement {
     pub fn new(
         view: Entity<TerminalView>,
         snapshot: Arc<Snapshot>,
+        images: Vec<Arc<gpui_kit::RenderImage>>,
         palette: TermPalette,
         style: TermTextStyle,
         focus: FocusHandle,
@@ -143,6 +145,7 @@ impl TerminalElement {
         Self {
             view,
             snapshot,
+            images,
             palette,
             style,
             focus,
@@ -1032,6 +1035,22 @@ impl Element for TerminalElement {
             }
             for rect in &layout.block_rects {
                 rect.paint(origin, &geo, window);
+            }
+
+            for (row, image) in self.snapshot.image_rows.iter().zip(&self.images) {
+                let x = origin.x + geo.cell_width * row.col as f32;
+                let y = origin.y + geo.line_height * row.row as f32;
+                let width = geo.cell_width * f32::from(row.placement.cols);
+                let full = Bounds::new(point(x, y - geo.line_height * f32::from(row.source_row)),
+                    size(width, geo.line_height * f32::from(row.placement.rows)));
+                let width = width.min(geo.cell_width * (geo.cols - row.col) as f32);
+                let strip = Bounds::new(point(x, y), size(width, geo.line_height));
+                // 按终端行裁剪屏幕坐标，保持所有行共用整张图片的采样坐标。
+                window.with_content_mask(Some(ContentMask { bounds: strip }), |window| {
+                    if let Err(err) = window.paint_image(full, full, Default::default(), image.clone(), 0, false) {
+                        log::debug!("终端图片绘制失败：{err:#}");
+                    }
+                });
             }
 
             let marked = self.marked_text.as_ref().filter(|t| !t.is_empty());

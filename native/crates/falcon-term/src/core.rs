@@ -180,6 +180,15 @@ pub struct SnapSelection {
     pub is_block: bool,
 }
 
+/// A visible row of a Kitty placement. A row can scroll into history independently.
+#[derive(Clone)]
+pub struct ImageRow {
+    pub row: usize,
+    pub col: usize,
+    pub source_row: u16,
+    pub placement: alacritty_terminal::term::graphics::Placement,
+}
+
 /// 一帧要画的全部东西。拷贝出来之后与 Term 无关，可以离锁排版。
 /// （alacritty 的 `Colors` 没有 Debug，所以这里也不派生。）
 #[derive(Clone)]
@@ -187,6 +196,7 @@ pub struct Snapshot {
     pub size: TermSize,
     /// 行优先，rows × cols
     pub cells: Vec<Cell>,
+    pub image_rows: Vec<ImageRow>,
     pub cursor: Option<SnapCursor>,
     pub selection: Option<SnapSelection>,
     pub mode: TermMode,
@@ -379,6 +389,7 @@ impl TermCore {
         let content = term.renderable_content();
         let display_offset = content.display_offset;
         let mut cells = vec![Cell::default(); size.cols * size.rows];
+        let mut image_rows = Vec::new();
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + display_offset as i32;
             if row < 0 || row as usize >= size.rows {
@@ -387,6 +398,9 @@ impl TermCore {
             let col = indexed.point.column.0;
             if col >= size.cols {
                 continue;
+            }
+            if let Some((placement, source_row)) = indexed.cell.image_anchor() {
+                image_rows.push(ImageRow { row: row as usize, col, source_row, placement });
             }
             cells[row as usize * size.cols + col] = indexed.cell.clone();
         }
@@ -442,6 +456,7 @@ impl TermCore {
         Snapshot {
             size,
             cells,
+            image_rows,
             cursor,
             selection,
             mode: content.mode,
@@ -604,6 +619,61 @@ mod tests {
 
     fn row_string(s: &Snapshot, row: usize) -> String {
         s.row_text(row).0.trim_end().to_string()
+    }
+
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGN4IKDwHwAE9AIQSxHK3gAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn codex_kitty_preview_tracks_chunks_sync_scroll_move_and_delete() {
+        let core = TermCore::new(TermSize::new(12, 4), TermOptions::default());
+        let (first, last) = PIXEL.split_at(32);
+        let sequence = format!("\x1b[?2026h\x1b[3;4H\x1b_Ga=T,t=d,f=100,c=4,r=2,q=2,i=7,m=1,C=1;{first}\x1b\\\x1b_Gm=0;{last}\x1b\\");
+        for b in sequence.bytes() { core.advance(&[b]); }
+        assert!(core.snapshot().image_rows.is_empty());
+        core.advance(b"\x1b[?2026l");
+        let snap = core.snapshot();
+        assert_eq!(snap.image_rows.len(), 2);
+        let first = &snap.image_rows[0];
+        assert_eq!((first.row, first.col, first.source_row), (2, 3, 0));
+        assert_eq!(first.placement.pixels.get_pixel(0, 0).0, [224, 16, 32, 255]);
+        core.advance(b"\x1b[4;1H\n");
+        assert_eq!(core.snapshot().image_rows[0].row, 1);
+        core.advance(b"\x1b_Ga=d,d=i,i=7,q=2;\x1b\\");
+        assert!(core.snapshot().image_rows.is_empty());
+        core.advance(b"\x1b[2;3H\x1b_Ga=p,i=7,c=6,r=1,C=1,q=2;\x1b\\");
+        let snap = core.snapshot();
+        assert_eq!(snap.image_rows.len(), 1);
+        assert_eq!((snap.image_rows[0].row, snap.image_rows[0].col), (1, 2));
+        core.advance(b"\x1b_Ga=d,d=I,i=7,q=2;\x1b\\\x1b_Ga=p,i=7,c=1,r=1;\x1b\\");
+        assert!(core.snapshot().image_rows.is_empty());
+    }
+
+    #[test]
+    fn invalid_kitty_transfers_do_not_hide_following_text_or_replace_an_image() {
+        let core = TermCore::new(TermSize::new(12, 4), TermOptions::default());
+        let send = |header: &str, payload: &str| {
+            core.advance(format!("\x1b_G{header};{payload}\x1b\\").as_bytes());
+        };
+        send("a=T,t=d,f=100,c=1,r=1,i=1", PIXEL);
+        send("a=T,t=f,f=100,c=1,r=1,i=1", PIXEL);
+        send("a=T,t=d,f=100,c=1,r=1,i=1", "broken");
+        send("a=T,t=d,f=100,c=1,r=1,i=2", &"x".repeat(9000));
+        core.advance(b"\x1b[2;1Hafter");
+        let snap = core.snapshot();
+        assert_eq!(snap.image_rows.len(), 1);
+        assert_eq!(row_string(&snap, 1), "after");
+    }
+
+    #[test]
+    fn kitty_raw_replay_and_alternate_screen() {
+        let core = TermCore::new(TermSize::new(12, 4), TermOptions::default());
+        let replay = format!("\x1b[?1049h\x1b_Ga=T,t=d,f=100,c=3,r=2,q=2,i=1,m=0,C=1;{PIXEL}\x1b\\");
+        core.replace_with_replay(replay.as_bytes());
+        assert_eq!(core.snapshot().image_rows.len(), 2);
+        core.advance(b"\x1b[?1049l");
+        assert!(core.snapshot().image_rows.is_empty());
+        core.replace_with_replay(b"plain replay");
+        assert!(core.snapshot().image_rows.is_empty());
     }
 
     #[test]

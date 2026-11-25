@@ -27,6 +27,7 @@ use crate::vte::ansi::{
 };
 
 pub mod cell;
+pub mod graphics;
 pub mod color;
 pub mod search;
 
@@ -266,6 +267,8 @@ impl TermDamageState {
 }
 
 pub struct Term<T> {
+    graphics: graphics::Graphics,
+    inactive_graphics: graphics::Graphics,
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
 
@@ -424,6 +427,8 @@ impl<T> Term<T> {
 
         Term {
             inactive_grid,
+            graphics: Default::default(),
+            inactive_graphics: Default::default(),
             scroll_region,
             event_proxy,
             damage,
@@ -721,8 +726,10 @@ impl<T> Term<T> {
 
             // Reset alternate screen contents.
             self.inactive_grid.reset_region(..);
+            self.inactive_graphics = Default::default();
         }
 
+        mem::swap(&mut self.graphics, &mut self.inactive_graphics);
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
         let keyboard_mode =
             self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE).into();
@@ -1057,6 +1064,10 @@ impl<T> Dimensions for Term<T> {
 }
 
 impl<T: EventListener> Handler for Term<T> {
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        self.graphics.command(data, &mut self.grid);
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -1833,6 +1844,8 @@ impl<T: EventListener> Handler for Term<T> {
     /// Reset all important fields in the term struct.
     #[inline]
     fn reset_state(&mut self) {
+        self.graphics = Default::default();
+        self.inactive_graphics = Default::default();
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }

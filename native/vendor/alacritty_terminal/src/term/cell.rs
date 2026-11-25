@@ -123,6 +123,8 @@ impl ResetDiscriminant<Color> for Cell {
 #[derive(Default, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CellExtra {
+    #[cfg_attr(feature = "serde", serde(skip))]
+    image: Option<(super::graphics::Anchor, u16)>,
     zerowidth: Vec<char>,
     underline_color: Option<Color>,
     hyperlink: Option<Hyperlink>,
@@ -153,6 +155,15 @@ impl Default for Cell {
 }
 
 impl Cell {
+    pub fn image_anchor(&self) -> Option<(super::graphics::Placement, u16)> {
+        let (anchor, row) = self.extra.as_ref()?.image.as_ref()?;
+        Some((anchor.0.upgrade()?.as_ref().clone(), *row))
+    }
+
+    pub(super) fn set_image_anchor(&mut self, placement: super::graphics::Anchor, row: u16) {
+        Arc::make_mut(self.extra.get_or_insert_with(Default::default)).image = Some((placement, row));
+    }
+
     /// Zerowidth characters stored in this cell.
     #[inline]
     pub fn zerowidth(&self) -> Option<&[char]> {
@@ -183,7 +194,7 @@ impl Cell {
             && self
                 .extra
                 .as_ref()
-                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.hyperlink.is_none())
+                .is_none_or(|extra| extra.image.is_none() && extra.zerowidth.is_empty() && extra.hyperlink.is_none())
         {
             self.extra = None;
         } else {
@@ -204,7 +215,7 @@ impl Cell {
             && self
                 .extra
                 .as_ref()
-                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.underline_color.is_none());
+                .is_none_or(|extra| extra.image.is_none() && extra.zerowidth.is_empty() && extra.underline_color.is_none());
 
         if should_drop {
             self.extra = None;
@@ -224,7 +235,7 @@ impl Cell {
 impl GridCell for Cell {
     #[inline]
     fn is_empty(&self) -> bool {
-        (self.c == ' ' || self.c == '\t')
+        self.image_anchor().is_none() && (self.c == ' ' || self.c == '\t')
             && self.bg == Color::Named(NamedColor::Background)
             && self.fg == Color::Named(NamedColor::Foreground)
             && !self.flags.intersects(
@@ -276,7 +287,7 @@ impl LineLength for grid::Row<Cell> {
         }
 
         for (index, cell) in self[..].iter().rev().enumerate() {
-            if cell.c != ' '
+            if cell.image_anchor().is_some() || cell.c != ' '
                 || cell.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) == Some(false)
             {
                 length = Column(self.len() - index);

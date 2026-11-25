@@ -17,6 +17,8 @@ use std::marker::PhantomData;
 
 use ghostty_vt_sys as sys;
 
+mod graphics;
+
 pub use sys::GHOSTTY_COMMIT;
 
 /// libghostty-vt 的错误码

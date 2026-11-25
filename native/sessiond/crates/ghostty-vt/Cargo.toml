@@ -8,3 +8,5 @@ description = "libghostty-vt 的安全封装：只覆盖守护进程的 VT 进�
 
 [dependencies]
 ghostty-vt-sys.workspace = true
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }

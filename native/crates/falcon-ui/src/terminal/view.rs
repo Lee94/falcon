@@ -280,6 +280,8 @@ pub struct TerminalView {
     /// 标题栏上「尺寸跟着另一扇窗口」的提示最近一次按的是哪个尺寸
     following_shown: Option<(usize, usize)>,
     snapshot: Arc<Snapshot>,
+    // Keep the source Arc alive while its allocation address is a cache key.
+    image_cache: std::collections::HashMap<usize, (Arc<image::RgbaImage>, Arc<gpui_kit::RenderImage>)>,
     marked_text: Option<String>,
     cursor_on: bool,
     blink_epoch: usize,
@@ -404,6 +406,11 @@ impl TerminalView {
             cx.notify();
         });
 
+        cx.on_release(|this, cx| {
+            for (_, (_, image)) in this.image_cache.drain() {
+                cx.drop_image(image, None);
+            }
+        }).detach();
         let snapshot = Arc::new(core.snapshot());
         let mut this = Self {
             session_id,
@@ -417,6 +424,7 @@ impl TerminalView {
             visible: true,
             following_shown: None,
             snapshot,
+            image_cache: Default::default(),
             marked_text: None,
             cursor_on: true,
             blink_epoch: 0,
@@ -1456,9 +1464,26 @@ impl Render for TerminalView {
         self.scrollbar.state = Some(ScrollState::from_grid(snap.display_offset, snap.history_size, snap.size.rows));
         let look = TerminalLook::global(cx).clone();
         let focused = self.focus.is_focused(window) && window.is_window_active();
+        let mut images = Vec::with_capacity(snap.image_rows.len());
+        let mut previous = std::mem::take(&mut self.image_cache);
+        for row in &snap.image_rows {
+            let pixels = &row.placement.pixels;
+            let key = Arc::as_ptr(pixels) as usize;
+            let (_, render) = self.image_cache.entry(key).or_insert_with(|| {
+                previous.remove(&key).unwrap_or_else(|| {
+                    let mut bgra = pixels.as_ref().clone();
+                    for pixel in bgra.pixels_mut() { pixel.0.swap(0, 2); }
+                    let image = gpui_kit::RenderImage::new(vec![image::Frame::new(bgra)]);
+                    (pixels.clone(), Arc::new(image))
+                })
+            });
+            images.push(render.clone());
+        }
+        for (_, (_, image)) in previous { cx.drop_image(image, Some(window)); }
         let element = TerminalElement::new(
             cx.entity(),
             self.snapshot.clone(),
+            images,
             look.palette.clone(),
             look.text.clone(),
             self.focus.clone(),
