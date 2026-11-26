@@ -15,3 +15,5 @@
 Android 终端使用 Google vtfx，最低支持 Android 10（API 29）。生产源码、许可证、上游提交和本地适配记录在 `android/vtfx/`。修改终端时可运行 Android Gradle 任务 `:app:testDebugUnitTest --tests '*VtfxSessionTest'`。构建前通过 `cargo xtask android --jni-only` 准备字体和原生库。
 
 桌面端的 Codex 图片预览使用 Kitty 协议的内联 PNG 传输。解析在 `native/vendor/vte/` 与 `native/vendor/alacritty_terminal/src/term/graphics.rs`，回归用例可用 `cd native && cargo test -p falcon-term kitty` 运行。macOS / Linux 宿主机的新建 Falcon 终端统一设置 `KITTY_WINDOW_ID=1`，在普通终端直接运行 `codex` 即可预览。新版会话守护进程在重连快照中重新编码当前屏内的预览，可用 sessiond 工作区的 `visible_codex_image_survives_reconnect` 测试验证。
+
+Linux 的 systemd 服务使用 `KillMode=process`。会话守护进程调用 `setsid` 后仍属于服务控制组，默认的 `KillMode=control-group` 会在服务重启时终止持久终端。排查时用 `systemctl --user show falcon -p KillMode` 查看生效配置，系统级服务去掉 `--user`。

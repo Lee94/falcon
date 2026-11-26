@@ -233,6 +233,9 @@ pub fn systemd_quote(a: &str) -> String {
     }
 }
 
+/// 持久终端的 holder 脱离了进程组，但仍在服务的控制组里。停止服务时只终止主进程，
+/// 让新实例接回原 holder 和它持有的终端。
+///
 /// unit 文件全文。`program_args` 同 [`launchd_plist`]。
 ///
 /// TS 的 `systemdUnit(serverArgs, rootMode)` 在里面调 `installProgramArguments`（SEA 时会顺手
@@ -247,6 +250,7 @@ After=network.target
 
 [Service]
 ExecStart={exec}
+KillMode=process
 Restart=always
 RestartSec=2
 
@@ -393,14 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn systemd_unit_matches_ts_byte_for_byte() {
+    fn systemd_units_preserve_session_processes() {
         let args =
             strings(&["/opt/falcon dir/bin/falcon", "--host", "0.0.0.0", "--data-dir", "/srv/a\"b\\c", "tab\there"]);
         let root = from_json(
-            r#""[Unit]\nDescription=falcon terminal server\nAfter=network.target\n\n[Service]\nExecStart=\"/opt/falcon dir/bin/falcon\" --host 0.0.0.0 --data-dir \"/srv/a\\\"b\\\\c\" \"tab\there\"\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n""#,
+            r#""[Unit]\nDescription=falcon terminal server\nAfter=network.target\n\n[Service]\nExecStart=\"/opt/falcon dir/bin/falcon\" --host 0.0.0.0 --data-dir \"/srv/a\\\"b\\\\c\" \"tab\there\"\nKillMode=process\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=multi-user.target\n""#,
         );
         let user = from_json(
-            r#""[Unit]\nDescription=falcon terminal server\nAfter=network.target\n\n[Service]\nExecStart=\"/opt/falcon dir/bin/falcon\" --host 0.0.0.0 --data-dir \"/srv/a\\\"b\\\\c\" \"tab\there\"\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n""#,
+            r#""[Unit]\nDescription=falcon terminal server\nAfter=network.target\n\n[Service]\nExecStart=\"/opt/falcon dir/bin/falcon\" --host 0.0.0.0 --data-dir \"/srv/a\\\"b\\\\c\" \"tab\there\"\nKillMode=process\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n""#,
         );
         assert_eq!(systemd_unit(&args, true), root);
         assert_eq!(systemd_unit(&args, false), user);
