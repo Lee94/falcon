@@ -154,6 +154,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
 
 async fn create(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Session>> {
     let project = resolve_session_owner(&state.db, &id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    if project.environment_context.is_some() && project.source_project_id.is_none() { return Err(ApiError::conflict("请选择线程后再创建终端")); }
     // 存档的项目到期会连目录一起删掉，不能再往里开终端
     if project.worktree_archived_at.is_some() {
         return Err(ApiError::conflict("项目已存档，请先恢复再新建终端"));

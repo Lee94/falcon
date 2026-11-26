@@ -19,6 +19,7 @@ pub mod hosts;
 pub mod input;
 pub mod plugins;
 pub mod projects;
+pub mod threads;
 pub mod px0;
 pub mod relays;
 pub mod sessions;
@@ -172,6 +173,7 @@ fn protected_router() -> Router<AppState> {
         .merge(relays::router())
         .merge(git_routes::router())
         .merge(worktrees::router())
+        .merge(threads::router())
         .merge(plugins::router())
         .merge(px0::router())
         // 没有对应路由的 /api/*：404。账户门禁去掉之后不再先回 401。

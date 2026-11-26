@@ -63,6 +63,7 @@ pub enum AuthPhase {
 
 /// 工作区对外的事件（窗口据此开浮层）
 pub enum WorkspaceEvent {
+    CreateThread(String),
     /// 有新的 sudo 提示排到了队头
     Askpass,
     /// 某扇窗口要拿焦点
@@ -1120,6 +1121,7 @@ impl Workspace {
                 ssh: None,
                 host_id: None,
                 worktree: None,
+                environment_context: None,
                 default_worktree_branch: None,
                 multi: None,
                 created_at: 0,
@@ -1143,6 +1145,7 @@ impl Workspace {
                 }),
                 host_id: Some(host.id.clone()),
                 worktree: None,
+                environment_context: None,
                 default_worktree_branch: None,
                 multi: None,
                 created_at: host.created_at,

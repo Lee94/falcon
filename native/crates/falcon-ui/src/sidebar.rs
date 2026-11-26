@@ -1,4 +1,4 @@
-//! 侧栏：服务器 → 项目 →（多个 worktree 时的检出 →）会话（旧 React 版的 `components/Sidebar.tsx`）。
+//! 侧栏主树为机器 → 环境 → 线程。旧项目与独立终端可从侧栏底部显示。
 //!
 //! 多仓库项目与没有附属 worktree 的单仓库项目不往下挂检出：项目行自己承接会话。
 //! 单仓库有附属 worktree 时才显示各条检出，批量派生出来的多仓库项目与源项目同级。
@@ -19,7 +19,7 @@ use falcon_proto::{Project, SessionState, SessionWithProject};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
-use gpui_kit::component::{Sizable, tooltip::Tooltip};
+use gpui_kit::component::{Disableable, Sizable, tooltip::Tooltip};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FontWeight, IntoElement, Pixels, Render, SharedString, Window, div, relative,
@@ -54,6 +54,7 @@ struct ProjectDrag {
 }
 
 pub struct Sidebar {
+    show_legacy: bool,
     terminal_positions: std::collections::HashMap<String, (usize, usize, usize)>,
     ws: Entity<Workspace>,
 }
@@ -72,7 +73,7 @@ impl Sidebar {
             }
         })
         .detach();
-        Self { ws, terminal_positions: Default::default() }
+        Self { ws, show_legacy: false, terminal_positions: Default::default() }
     }
 }
 
@@ -97,6 +98,7 @@ impl Render for Sidebar {
         self.terminal_positions = falcon_core::layout::terminal_positions(&ws.state.columns);
         // 本机分组一律画出来，独立会话直接列在机器下面，见 [`Sidebar::server_node`]。
         let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived);
+        let has_env = ws.projects.iter().any(|p| p.is_environment());
         let empty = ws.projects.is_empty() && ws.hosts.is_empty();
 
         let mut tree = div()
@@ -141,6 +143,15 @@ impl Render for Sidebar {
                         crate::dialogs::settings::open(&ws_handle, Default::default(), window, cx)
                     }),
             )
+            .when(has_env, |d| d.child(Button::new("new-thread").ghost().small().icon(IconName::Plus)
+                .tooltip(t!("env.thread").to_string()).on_click(cx.listener(|this, _, window, cx| {
+                    crate::dialogs::worktree_form::open_thread(&this.ws, "", window, cx)
+                }))))
+            .child(Button::new("show-legacy").ghost().small().icon(IconName::Folders)
+                .tooltip(t!("env.legacy").to_string()).on_click(cx.listener(|this, _, _, cx| {
+                    this.show_legacy = !this.show_legacy;
+                    cx.notify();
+                })))
             .child(div().flex_1())
             .child(
                 Button::new("sidebar-collapse")
@@ -162,9 +173,10 @@ impl Render for Sidebar {
 }
 
 impl Sidebar {
-    fn server_node(&self, server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
+    fn server_node(&self, mut server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
+        if !self.show_legacy { server.folders.retain(|f| f.project.environment_context.is_some()); }
         let unavailable = server.host.as_ref().and_then(|host| ws.node_status(&host.id)).filter(|node| !node.online);
         let expanded = unavailable.is_none() && !ws.state.collapsed.get(&server.key).copied().unwrap_or(false);
         let key = server.key.clone();
@@ -189,10 +201,11 @@ impl Sidebar {
 
         let ws_new = self.ws.clone();
         let preset = match (&server.kind, &server.host) {
-            (ServerKind::Host, Some(h)) => crate::dialogs::project_form::Preset::ssh(Some(h.id.clone()), false),
-            (ServerKind::Local, _) => crate::dialogs::project_form::Preset::local(false),
-            _ => crate::dialogs::project_form::Preset::ssh(None, false),
+            (ServerKind::Host, Some(h)) => crate::dialogs::project_form::Preset::ssh(Some(h.id.clone()), true),
+            (ServerKind::Local, _) => crate::dialogs::project_form::Preset::local(true),
+            _ => crate::dialogs::project_form::Preset::ssh(None, true),
         };
+        let can_create = unavailable.is_none() && server.kind != ServerKind::Legacy;
         let offline = unavailable.is_some_and(|node| node.error.is_some());
         let status = unavailable.map(|_| {
             if offline { t!("sidebar.hostOffline") } else { t!("sidebar.hostConnecting") }.to_string()
@@ -238,7 +251,8 @@ impl Sidebar {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Plus)
-                        .tooltip(t!("sidebar.newProject").to_string())
+                        .disabled(!can_create)
+                        .tooltip(t!("env.create").to_string())
                         .on_click(move |_, window, cx| {
                             crate::dialogs::project_form::open(&ws_new, None, preset.clone(), window, cx)
                         }),
@@ -258,7 +272,7 @@ impl Sidebar {
         let mut node = div().mb(zpx(ROW_GAP)).flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expanded {
             let mut has_standalone = false;
-            if let Some(id) = standalone_id.as_deref() {
+            if self.show_legacy && let Some(id) = standalone_id.as_deref() {
                 let ws = self.ws.read(cx);
                 let rows = self.terminal_rows(
                     ws.sessions.iter().filter(|s| s.project_id == id),
@@ -293,7 +307,8 @@ impl Sidebar {
 
     /// `group` / `index`：所在服务器分组的键与组内下标，拖拽排序用
     fn folder_node(&self, folder: FolderGroup, group: &str, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        if folder.project.multi.is_some() || folder.worktrees.is_empty() {
+        let env = folder.project.is_environment();
+        if !env && (folder.project.multi.is_some() || folder.worktrees.is_empty()) {
             return self.flat_folder_node(folder, group, index, cx);
         }
         let ws = self.ws.read(cx);
@@ -312,6 +327,14 @@ impl Sidebar {
         let pid = project.id.clone();
         let title = project.working_dir.clone().unwrap_or_else(|| project.name.clone());
         let items = menus::project_menu_items(&self.ws, &project, cx);
+        let new_items = env.then(|| {
+            let ws = self.ws.clone();
+            let id = project.id.clone();
+            vec![menus::MenuItemSpec::new(t!("env.thread").to_string(), move |window, cx| {
+                crate::dialogs::worktree_form::open_thread(&ws, &id, window, cx)
+            })]
+        });
+        let edit = project.clone();
         let row = tree_row(TreeRowOpts {
             id: format!("fld-{}", project.id),
             depth: 1,
@@ -324,25 +347,33 @@ impl Sidebar {
             muted: false,
             selected: false,
             on_toggle: Some(Box::new(move |cx| ws_toggle.update(cx, |w, cx| w.toggle_collapsed(&fkey, cx)))),
-            on_select: Some(Box::new(move |cx| ws_select.update(cx, |w, cx| w.select_project(&pid, cx)))),
+            on_select: Some(Box::new(move |window, cx| {
+                if env {
+                    crate::dialogs::project_form::open(&ws_select, Some(edit.clone()), Default::default(), window, cx)
+                } else {
+                    ws_select.update(cx, |w, cx| w.select_project(&pid, cx))
+                }
+            })),
             menu: Some(items.clone()),
             context: Some(items),
-            on_new: None,
+            on_new: new_items,
             trailing: None,
             drag: sortable.then(|| ProjectDrag { id: project.id.clone(), group: group.to_string(), index }),
         }, cx);
 
         let mut node = div().relative().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if open {
-            let label = checkout_label(&project, head.as_ref());
-            node = node.child(self.checkout_node(
-                &project,
-                label,
-                None,
-                changes.get(&project.id).cloned(),
-                selected.as_deref() == Some(project.id.as_str()),
-                cx,
-            ));
+            if !env {
+                let label = checkout_label(&project, head.as_ref());
+                node = node.child(self.checkout_node(
+                    &project,
+                    label,
+                    None,
+                    changes.get(&project.id).cloned(),
+                    selected.as_deref() == Some(project.id.as_str()),
+                    cx,
+                ));
+            }
             for wt in &folder.worktrees {
                 node = node.child(self.checkout_node(
                     wt,
@@ -406,7 +437,7 @@ impl Sidebar {
             project.working_dir.clone().unwrap_or_else(|| project.name.clone())
         };
         let count = mine.len() + mine_pending.len();
-        let expandable = archived_at.is_none() && count > 0;
+        let expandable = archived_at.is_none() && count > 0 && project.environment_context.is_none();
         let worst = worst_state(&mine, &mine_pending);
         let blocked = mine
             .iter()
@@ -458,8 +489,8 @@ impl Sidebar {
                 on_toggle: expandable.then(|| -> Box<dyn Fn(&mut App)> {
                     Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
                 }),
-                on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut App)> {
-                    Box::new(move |cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
+                on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
+                    Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
                 }),
                 menu: Some(items.clone()),
                 context: Some(items),
@@ -521,7 +552,7 @@ impl Sidebar {
         };
         let count = mine.len() + mine_pending.len();
         // 存档的检出开不了会话，也就没有会话行可摊
-        let expandable = archived_at.is_none() && count > 0;
+        let expandable = archived_at.is_none() && count > 0 && project.environment_context.is_none();
         let worst = worst_state(&mine, &mine_pending);
         // 收着的检出里有程序在等人：计数徽标上挂「在等你」的记号（与会话行同一个），不用摊开也看得见
         let blocked = mine
@@ -561,8 +592,8 @@ impl Sidebar {
             on_toggle: expandable.then(|| -> Box<dyn Fn(&mut App)> {
                 Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
             }),
-            on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut App)> {
-                Box::new(move |cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
+            on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
+                Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
             }),
             menu: None,
             context: Some(ctx_items),
@@ -856,7 +887,7 @@ struct TreeRowOpts {
     muted: bool,
     selected: bool,
     on_toggle: Option<Box<dyn Fn(&mut App)>>,
-    on_select: Option<Box<dyn Fn(&mut App)>>,
+    on_select: Option<Box<dyn Fn(&mut Window, &mut App)>>,
     menu: Option<Vec<menus::MenuItemSpec>>,
     context: Option<Vec<menus::MenuItemSpec>>,
     /// 行尾的 ＋：新建会话的菜单（普通终端 / 各家 CLI）
@@ -892,7 +923,7 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
         row.hover(|s| s.bg(ui.muted))
     };
     if let Some(select) = o.on_select {
-        row = row.cursor_pointer().on_click(move |_, _, cx| select(cx));
+        row = row.cursor_pointer().on_click(move |_, window, cx| select(window, cx));
     }
     if let Some(drag) = o.drag {
         // 按下挪过几像素才算拖，点一下照旧是选中
@@ -930,13 +961,16 @@ fn tree_row(o: TreeRowOpts, cx: &App) -> AnyElement {
         );
     }
     if let Some(items) = o.on_new {
+        let label = if items.len() == 1 { items[0].label.clone() } else {
+            format!("{} · {}", t!("sidebar.newTerminal"), crate::ui::chord("newTerminal"))
+        };
         row = row.child(
             div().opacity(0.).group_hover(group.clone(), |s| s.opacity(1.)).child(
                 Button::new(SharedString::from(format!("{}-new", o.id)))
                     .ghost()
                     .xsmall()
                     .icon(IconName::Plus)
-                    .tooltip(format!("{} · {}", t!("sidebar.newTerminal"), crate::ui::chord("newTerminal")))
+                    .tooltip(label)
                     .dropdown_menu(move |menu, _, _| to_popup(menu, items.clone())),
             ),
         );

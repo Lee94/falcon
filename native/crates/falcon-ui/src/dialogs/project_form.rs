@@ -20,7 +20,7 @@ use falcon_client::ProbeTarget;
 use falcon_proto::{Project, ProjectInput, ProjectType, ShellsInfo, SshConfigInput, SshHost};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent};
 use gpui_kit::component::{Disableable, Sizable, WindowExt};
 use gpui_kit::prelude::*;
@@ -40,14 +40,15 @@ pub struct Preset {
     pub kind: Option<&'static str>,
     pub host_id: Option<String>,
     pub multi: bool,
+    pub initial_repos: Vec<String>,
 }
 
 impl Preset {
     pub fn local(multi: bool) -> Self {
-        Self { kind: Some("local"), host_id: None, multi }
+        Self { kind: Some("local"), host_id: None, multi, initial_repos: Vec::new() }
     }
     pub fn ssh(host_id: Option<String>, multi: bool) -> Self {
-        Self { kind: Some("ssh"), host_id, multi }
+        Self { kind: Some("ssh"), host_id, multi, initial_repos: Vec::new() }
     }
 }
 
@@ -74,6 +75,7 @@ pub struct ProjectForm {
     preset_multi: bool,
     name: Entity<InputState>,
     working_dir: Entity<InputState>,
+    context: Entity<TextareaState>,
     /// 多仓库档的成员清单（成员路径原文，可手改可从选择器追加）
     repos: Vec<Entity<InputState>>,
     /// 派生产物的成员由派生决定：只读展示，提交不带 repos（PUT 会拒）
@@ -132,9 +134,10 @@ impl ProjectForm {
             Some(_) => FormKind::Local,
             None if preset.multi => FormKind::Multi,
             None if preset.kind == Some("ssh") => FormKind::Ssh,
-            None => FormKind::Local,
+            None if preset.kind == Some("local") => FormKind::Local,
+            None => FormKind::Multi,
         };
-        let preset_multi = existing.is_none() && preset.multi;
+        let preset_multi = existing.is_none() && preset.multi && preset.initial_repos.is_empty();
         let locked = existing.is_none() && preset.kind.is_some();
         let text = |value: String, placeholder: Option<String>, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
@@ -146,6 +149,7 @@ impl ProjectForm {
             })
         };
         let name = text(existing.as_ref().map(|p| p.name.clone()).unwrap_or_default(), None, window, cx);
+        let context = cx.new(|cx| TextareaState::new(window, cx).rows(4).default_value(existing.as_ref().and_then(|p| p.environment_context.clone()).unwrap_or_default()));
         let placeholder = match kind {
             FormKind::Local => Some("D:\\code\\my-project".to_string()),
             FormKind::Ssh => Some("/home/user/project".to_string()),
@@ -156,7 +160,7 @@ impl ProjectForm {
             .as_ref()
             .and_then(|p| p.multi.as_ref())
             .map(|m| m.repos.iter().map(|r| text(r.dir.clone(), None, window, cx)).collect())
-            .unwrap_or_default();
+            .unwrap_or_else(|| preset.initial_repos.iter().map(|r| text(r.clone(), None, window, cx)).collect());
         let repos_readonly = existing.as_ref().is_some_and(|p| p.multi.is_some() && p.worktree.is_some());
         let shell = existing.as_ref().and_then(|p| p.shell.clone()).unwrap_or_default();
         let shell_input = text(shell.clone(), None, window, cx);
@@ -248,6 +252,7 @@ impl ProjectForm {
             preset_multi,
             name,
             working_dir,
+            context,
             repos,
             repos_readonly,
             shell,
@@ -275,7 +280,7 @@ impl ProjectForm {
         // 从服务器进来：单仓库直接选文件夹；多仓库先弹一次添加仓库，选完落回表单继续添加
         if preset_multi {
             this.open_repo_picker(window, cx);
-        } else if locked {
+        } else if locked && !preset.multi {
             this.open_picker(window, cx);
         }
         this
@@ -312,6 +317,10 @@ impl ProjectForm {
         self.picking || self.picking_repo
     }
 
+    fn environment(&self) -> bool {
+        self.kind == FormKind::Multi && self.existing.as_ref().is_none_or(|p| p.is_environment())
+    }
+
     fn title(&self) -> String {
         if self.any_picking() {
             if self.project_type() == ProjectType::Ssh {
@@ -319,6 +328,8 @@ impl ProjectForm {
             } else {
                 t!("project.pickTitle").to_string()
             }
+        } else if self.environment() {
+            if self.existing.is_some() { t!("env.edit").to_string() } else { t!("env.create").to_string() }
         } else if self.existing.is_some() {
             t!("project.editTitle").to_string()
         } else {
@@ -672,8 +683,9 @@ impl ProjectForm {
             name,
             project_type: ty,
             working_dir: nonempty(&working_dir),
-            shell: nonempty(&self.shell_value(cx)),
+            shell: if self.environment() { Some(self.shell_value(cx)) } else { nonempty(&self.shell_value(cx)) },
             // 派生产物的成员由派生决定，不上送（PUT 会拒）；容器每次全量替换
+            environment_context: self.environment().then(|| self.context.read(cx).value().to_string()),
             repos: multi.then_some(clean_repos),
             host_id: (ty == ProjectType::Ssh && !self.host_id.is_empty()).then(|| self.host_id.clone()),
             ssh,
@@ -706,7 +718,12 @@ impl ProjectForm {
                                 if !w.projects.iter().any(|p| p.id == project.id) {
                                     w.projects.push(project.clone());
                                 }
-                                w.select_project(&project.id, cx);
+                                if project.environment_context.is_none() {
+                                    w.select_project(&project.id, cx);
+                                } else {
+                                    let machine = project.host_id.as_ref().map(|id| format!("s:host:{id}")).unwrap_or_else(|| "s:local".into());
+                                    w.state.collapsed.remove(&machine);
+                                }
                             }
                             w.refresh_inventory(cx);
                         });
@@ -856,7 +873,9 @@ impl ProjectForm {
                 }
                 let hint = self.repos_readonly.then(|| (t!("multi.reposReadonly").to_string(), Tone::Muted));
                 form = form.child(field(Some(t!("multi.repos").to_string()), self.render_repos(cx), hint, cx));
-                if !self.repos_readonly {
+                if self.environment() {
+                    form = form.child(field(Some(t!("env.context").to_string()), Textarea::new(&self.context), None, cx));
+                } else if !self.repos_readonly {
                     let all_empty = self.repo_values(cx).iter().all(|r| r.trim().is_empty());
                     let control = div()
                         .flex()
@@ -951,7 +970,7 @@ impl ProjectForm {
         }
         form = form.child(field(Some(t!("project.shell").to_string()), shell, None, cx));
 
-        if self.existing.as_ref().is_none_or(|p| p.worktree.is_none()) {
+        if !self.environment() && self.existing.as_ref().is_none_or(|p| p.worktree.is_none()) {
             form = form.child(field(
                 Some(t!("project.defaultWorktreeBranch").to_string()),
                 Input::new(&self.default_wt),

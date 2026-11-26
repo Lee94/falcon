@@ -1,0 +1,22 @@
+{
+  "id": "8f1b975b-9f4c-42ca-ac59-48eb34c9be74",
+  "name": "sample task",
+  "type": "local",
+  "workingDir": "/private/tmp/ff-18eb8bbc75ea9518/threads/8f1b975b-9f4c-42ca-ac59-48eb34c9be74",
+  "worktree": {
+    "sourceProjectId": "d4b7050a-70d8-45d0-b60f-5d7412537cb0",
+    "branch": "falcon/thread-8f1b975b-9f4c-42ca-ac59-48eb34c9be74",
+    "repoDir": "",
+    "createdByFalcon": true
+  },
+  "multi": {
+    "repos": [
+      {
+        "dir": "/private/tmp/ff-18eb8bbc75ea9518/threads/8f1b975b-9f4c-42ca-ac59-48eb34c9be74/projects/sample",
+        "repoDir": "/private/tmp/ff-18eb8bbc75ea9518/sample"
+      }
+    ]
+  },
+  "environmentContext": "# sample task\n\n## 环境 · sample\n\ntest\n\n## 任务\n\n\n\n## 项目\n\n- `projects/sample` ← `/private/tmp/ff-18eb8bbc75ea9518/sample` @ `2c649ec5efe20d57805260cf90a0ecb043f91dfe`（`falcon/thread-8f1b975b-9f4c-42ca-ac59-48eb34c9be74`）\n",
+  "createdAt": 1795682519524
+}

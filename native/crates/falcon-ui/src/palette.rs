@@ -275,6 +275,16 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
     let mut project_items: Vec<PickItem> = Vec::new();
     for p in ws.projects.iter().filter(|p| p.worktree.as_ref().is_none_or(|w| w.archived_at.is_none())) {
         let host = host_label(&p.id);
+        if p.is_environment() {
+            let (w, id) = (ws_entity.clone(), p.id.clone());
+            project_items.push(PickItem {
+                key: format!("#{} {}", p.name, t!("env.thread")),
+                label: format!("{} · {}", t!("env.thread"), p.name),
+                meta: Some(host), icon: icon(IconName::Plus), tone: None,
+                run: run(move |window, cx| crate::dialogs::worktree_form::open_thread(&w, &id, window, cx)),
+            });
+            continue;
+        }
         {
             let (w, pid) = (ws_entity.clone(), p.id.clone());
             project_items.push(PickItem {

@@ -418,7 +418,25 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
             .danger(),
         ];
     }
-    let mut items = new_session_items(ws, &project.id, None, cx);
+    let is_env = project.is_environment();
+    let mut items = if is_env { Vec::new() } else { new_session_items(ws, &project.id, None, cx) };
+    if project.environment_context.is_none() && project.worktree.is_none() {
+        let roots: Vec<_> = match &project.multi {
+            Some(multi) => multi.repos.iter().map(|m| m.dir.clone()).collect(),
+            None => project.working_dir.clone().into_iter().collect(),
+        };
+        if !roots.is_empty() && (project.project_type == falcon_proto::ProjectType::Local || project.host_id.is_some()) {
+            let ws = ws.clone();
+            let mut preset = match &project.host_id {
+                Some(host) => dialogs::project_form::Preset::ssh(Some(host.clone()), true),
+                None => dialogs::project_form::Preset::local(true),
+            };
+            preset.initial_repos = roots;
+            items.push(MenuItemSpec::new(t!("env.fromProject").to_string(), move |window, cx| {
+                dialogs::project_form::open(&ws, None, preset.clone(), window, cx)
+            }));
+        }
+    }
     // 去别处看：px0 审阅、外部编辑器，一组
     let dashboard = format!("{}/browser-dashboard", w.client.base_url().trim_end_matches('/'));
     let mut elsewhere = vec![MenuItemSpec::new(t!("project.browserDashboard").to_string(), move |_, cx| cx.open_url(&dashboard))];
@@ -466,7 +484,7 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
         {
             let ws = ws.clone();
             let pid = project.id.clone();
-            let label = if project.multi.is_some() {
+            let label = if is_env { t!("env.thread") } else if project.multi.is_some() {
                 t!("multi.derive")
             } else {
                 t!("project.derive")
@@ -494,7 +512,7 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
                 .checked(w.state.show_archived),
             );
         }
-    } else {
+    } else if project.environment_context.is_none() {
         let ws = ws.clone();
         let p = project.clone();
         items.push(

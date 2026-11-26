@@ -67,6 +67,8 @@ fn table() -> Vec<(&'static str, Check)> {
         "host-test" => SshProbeResult,
         "host-test-draft" => SshProbeResult,
         // 项目 / 附属项目
+        "environment-create" => Project,
+        "thread-create" => Project,
         "project-create-local" => Project,
         "project-create-ssh" => Project,
         "project-create-multi" => Project,

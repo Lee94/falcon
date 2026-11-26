@@ -82,9 +82,10 @@ fn png() -> Vec<u8> {
 pub fn run(args: &[String]) -> Result<()> {
     let subset: Option<fn(&Api, &mut Out, &Path) -> Result<()>> = match args {
         [] => None,
+        [arg] if arg == "--threads-only" => Some(capture_threads),
         [arg] if arg == "--node-updates-only" => Some(capture_node_updates),
         [arg] if arg == "--browsers-only" => Some(capture_browser_sessions),
-        _ => bail!("用法：cargo xtask fixtures [--node-updates-only | --browsers-only]"),
+        _ => bail!("用法：cargo xtask fixtures [--node-updates-only | --browsers-only | --threads-only]"),
     };
     let server_bin = match env_path("FALCON_FIXTURE_SERVER_BIN") {
         Some(p) => std::path::absolute(p)?,
@@ -146,6 +147,7 @@ fn generate(server_bin: &Path, out_dir: &Path, server: &mut Option<Child>) -> Re
     let mut out = Out { dir: out_dir.to_path_buf(), written: 0 };
     capture(&mut api, &mut out)?;
     capture_isolated(server_bin, out_dir, capture_browser_sessions)?;
+    capture_isolated(server_bin, out_dir, capture_threads)?;
     let shown = out_dir.strip_prefix(util::root()).unwrap_or(out_dir);
     println!("写了 {} 个 fixture 到 {}/", out.written, shown.display());
     Ok(())
@@ -185,6 +187,18 @@ fn capture_isolated(
     })();
     fs::remove_dir_all(&data)?;
     result
+}
+
+fn capture_threads(api: &Api, out: &mut Out, data: &Path) -> Result<()> {
+    let repo = data.join("sample");
+    fs::create_dir(&repo)?;
+    util::run("git", ["init", "-q", "-b", "main"], Some(&repo))?;
+    util::run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "init"], Some(&repo))?;
+    let env = api.call("POST", "/api/environments", json!({"name":"sample", "type":"local", "repos":[repo], "environmentContext":"test"}))?;
+    out.save("environment-create", &env)?;
+    let thread = api.call("POST", &format!("/api/projects/{}/threads", id(&env)?), json!({"name":"sample task"}))?;
+    out.save("thread-create", &thread)
 }
 
 fn capture_node_updates(api: &Api, out: &mut Out, _: &Path) -> Result<()> {

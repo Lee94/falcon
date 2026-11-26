@@ -173,8 +173,29 @@ pub struct Project {
     /// 空 = 当前 HEAD。只对源项目有意义；附属项目不能再派生。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_worktree_branch: Option<String>,
+    /// 环境的上下文或线程创建时的上下文快照。旧项目省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_context: Option<String>,
     /// unix 毫秒
     pub created_at: i64,
+}
+
+impl Project {
+    pub fn is_environment(&self) -> bool {
+        self.environment_context.is_some() && self.worktree.is_none()
+    }
+
+    pub fn is_thread(&self) -> bool {
+        self.environment_context.is_some() && self.worktree.is_some()
+    }
+}
+
+/// POST /api/projects/{环境 ID}/threads。工作树路径与分支由所属节点生成。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThreadInput {
+    pub name: String,
+    #[serde(default)]
+    pub task: String,
 }
 
 /// 创建 / 更新项目的请求体。secret 为明文密码或 passphrase，仅在写入方向出现。
@@ -202,6 +223,9 @@ pub struct ProjectInput {
     /// 派生时新建分支的默认基点。空 / 省略 = 当前 HEAD
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_worktree_branch: Option<String>,
+    /// 环境的上下文或线程创建时的上下文快照。旧项目省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_context: Option<String>,
 }
 
 /// [`ProjectInput::ssh`]：手写的 SSH 连接配置（TS 里是内联的匿名类型）。

@@ -103,6 +103,10 @@ pub fn head_branch_args(git: &str, dir: &str) -> Vec<String> {
     at(git, dir, &["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
+pub fn head_commit_args(git: &str, dir: &str) -> Vec<String> {
+    at(git, dir, &["rev-parse", "--verify", "HEAD^{commit}"])
+}
+
 pub fn head_short_sha_args(git: &str, dir: &str) -> Vec<String> {
     at(git, dir, &["rev-parse", "--short", "HEAD"])
 }

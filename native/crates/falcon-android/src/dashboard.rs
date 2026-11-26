@@ -70,6 +70,10 @@ pub fn build_dashboard_view(projects_json: &str, sessions_json: &str, hosts_json
             "workingDir": p.working_dir,
             "branch": p.worktree.as_ref().map(|w| w.branch.clone()),
             "isWorktree": p.worktree.is_some(),
+            "isEnvironment": p.is_environment(),
+            "isThread": p.is_thread(),
+            "environmentContext": p.environment_context.as_ref().filter(|_| p.worktree.is_none()),
+            "repos": p.multi.iter().flat_map(|m| m.repos.iter().map(|r| &r.dir)).collect::<Vec<_>>(),
             "isMulti": p.multi.is_some(),
             "sessions": proj_sessions,
         })

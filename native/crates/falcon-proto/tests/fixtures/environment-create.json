@@ -1,0 +1,14 @@
+{
+  "id": "d4b7050a-70d8-45d0-b60f-5d7412537cb0",
+  "name": "sample",
+  "type": "local",
+  "multi": {
+    "repos": [
+      {
+        "dir": "/private/tmp/ff-18eb8bbc75ea9518/sample"
+      }
+    ]
+  },
+  "environmentContext": "test",
+  "createdAt": 1795682519451
+}

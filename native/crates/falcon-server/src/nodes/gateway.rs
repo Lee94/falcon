@@ -52,7 +52,7 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    fn lock(&self, key: &str) -> Arc<AsyncMutex<()>> {
+    pub(crate) fn lock(&self, key: &str) -> Arc<AsyncMutex<()>> {
         self.locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -873,7 +873,7 @@ async fn destination(
     if remote.is_none()
         && matches!(
             path,
-            "/api/projects" | "/api/agents" | "/api/shells" | "/api/fs/list"
+            "/api/projects" | "/api/environments" | "/api/agents" | "/api/shells" | "/api/fs/list"
         )
     {
         let host = payload
@@ -1013,7 +1013,7 @@ async fn rewrite_response(mut response: Response, remote: &Remote) -> Response {
 async fn idempotent(state: &AppState, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let create = req.method() == Method::POST
-        && (path == "/api/projects" || path.ends_with("/sessions") || path.ends_with("/worktrees"));
+        && (path == "/api/projects" || path == "/api/environments" || path.ends_with("/sessions") || path.ends_with("/worktrees") || path.ends_with("/threads"));
     if !create {
         return next.run(req).await;
     }
@@ -1351,6 +1351,33 @@ mod tests {
         upstream_a.abort();
         upstream_b.abort();
         upstream_c.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thread_inventory_is_shared_by_gateways_and_owned_by_remote_node() {
+        let a = TestApp::new();
+        let b = TestApp::new();
+        let c = TestApp::new();
+        let repo = b.root.join("repo");
+        crate::git::repo::tests::init_repo(&repo);
+        let (addr, task) = serve(&b).await;
+        attach(&a, &b, addr, "a-b");
+        attach(&c, &b, addr, "c-b");
+        let (code, env) = json_of(a.post_json("/api/environments", json!({"type":"ssh","hostId":"a-b","name":"dev","repos":[repo],"environmentContext":"ctx"})).await).await;
+        assert_eq!(code, StatusCode::OK, "{env}");
+        let id = env["id"].as_str().unwrap();
+        let (code, thread) = json_of(c.post_json(&format!("/api/projects/{id}/threads"), json!({"name":"task"})).await).await;
+        assert_eq!(code, StatusCode::OK, "{thread}");
+        assert_eq!(thread["worktree"]["sourceProjectId"], id);
+        assert_eq!(thread["hostId"], "c-b");
+        assert!(a.state.db.list_projects().is_empty());
+        assert!(c.state.db.list_projects().is_empty());
+        assert_eq!(b.state.db.list_projects().len(), 2);
+        assert!(std::path::Path::new(thread["workingDir"].as_str().unwrap()).starts_with(&b.data_dir));
+        let (_, list) = json_of(a.get("/api/projects").await).await;
+        assert!(list.as_array().unwrap().iter().any(|p| p["id"] == thread["id"] && p["hostId"] == "a-b"));
+        task.abort();
     }
 
     #[tokio::test]

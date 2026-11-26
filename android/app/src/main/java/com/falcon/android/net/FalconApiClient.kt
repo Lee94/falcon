@@ -206,6 +206,29 @@ object FalconApiClient {
             }
         }
 
+    suspend fun saveEnvironment(baseUrl: String, hostId: String?, id: String?, name: String, context: String, repos: List<String>): Result<Unit> {
+        val payload = JSONObject().put("name", name).put("environmentContext", context)
+            .put("repos", JSONArray(repos)).put("type", if (hostId == null) "local" else "ssh")
+        if (hostId != null) payload.put("hostId", hostId)
+        val path = id?.let { "/api/projects/${URLEncoder.encode(it, "UTF-8")}" } ?: "/api/environments"
+        return saveWorkspace(baseUrl, path, payload, id != null)
+    }
+
+    suspend fun createThread(baseUrl: String, env: String, name: String, task: String): Result<Unit> =
+        saveWorkspace(baseUrl, "/api/projects/${URLEncoder.encode(env, "UTF-8")}/threads",
+            JSONObject().put("name", name).put("task", task), false)
+
+    private suspend fun saveWorkspace(baseUrl: String, path: String, data: JSONObject, edit: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url(normalizeBaseUrl(baseUrl) + path)
+                .header("Idempotency-Key", java.util.UUID.randomUUID().toString())
+                .method(if (edit) "PUT" else "POST", data.toString().toRequestBody(jsonMediaType)).build()
+            clientFor(baseUrl).newCall(request).execute().use {
+                if (!it.isSuccessful) error(extractErrorMessage(it.body.string(), it.code))
+            }
+        }
+    }
+
     suspend fun createSession(
         baseUrl: String,
         projectId: String,

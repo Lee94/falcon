@@ -19,7 +19,7 @@ use falcon_proto::{
     WorktreeInput, WorktreeMode,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent};
 use gpui_kit::component::{Disableable, WindowExt};
 use gpui_kit::prelude::*;
@@ -53,6 +53,10 @@ pub fn open(ws: &Entity<Workspace>, source_project_id: &str, preset: Preset, win
     let Some(project) = ws.read(cx).project(source_project_id).cloned() else {
         return;
     };
+    if project.environment_context.is_some() {
+        if project.worktree.is_none() { open_thread(ws, source_project_id, window, cx); }
+        return;
+    }
     // 多仓库容器走批量派生表单；单仓库路径对应 React 版的 SingleWorktreeForm
     if project.multi.is_some() {
         let form = cx.new(|cx| MultiForm::new(ws.clone(), project, preset, window, cx));
@@ -64,6 +68,80 @@ pub fn open(ws: &Entity<Workspace>, source_project_id: &str, preset: Preset, win
         let title = t!("worktree.title", name = form.read(cx).project.name.clone()).to_string();
         open_dialog(form.clone(), title, |f, window, cx| f.update(cx, |this, cx| this.submit(window, cx)), window, cx);
         form.read(cx).new_branch.clone().update(cx, |i, cx| i.focus(window, cx));
+    }
+}
+
+struct ThreadForm {
+    ws: Entity<Workspace>,
+    env: Entity<OptState>,
+    name: Entity<InputState>,
+    task: Entity<TextareaState>,
+    busy: bool,
+    error: Option<String>,
+}
+
+pub fn open_thread(ws: &Entity<Workspace>, selected: &str, window: &mut Window, cx: &mut App) {
+    let w = ws.read(cx);
+    let options = w.projects.iter().filter(|p| p.is_environment()).map(|p| {
+        let machine = p.host_id.as_ref().and_then(|id| w.hosts.iter().find(|h| &h.id == id))
+            .map(|h| h.name.clone()).unwrap_or_else(crate::labels::local_word);
+        Opt::new(p.id.clone(), format!("{machine} / {}", p.name))
+    }).collect();
+    let form = cx.new(|cx| {
+        let env = cx.new(|cx| kit::new_select(Options::flat(options), selected, window, cx));
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let task = cx.new(|cx| TextareaState::new(window, cx).rows(4));
+        on_text_change(&name, window, cx, |_: &mut ThreadForm, _, _| {});
+        cx.observe(&env, |_, _, cx| cx.notify()).detach();
+        ThreadForm { ws: ws.clone(), env, name, task, busy: false, error: None }
+    });
+    open_dialog(form.clone(), t!("env.thread").to_string(), |f, window, cx| f.update(cx, |f, cx| f.submit(window, cx)), window, cx);
+    form.read(cx).name.clone().update(cx, |i, cx| i.focus(window, cx));
+}
+
+impl ThreadForm {
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(env) = kit::selected(&self.env, cx) else { return };
+        let name = self.name.read(cx).value().trim().to_owned();
+        if self.busy || name.is_empty() { return; }
+        self.busy = true;
+        self.error = None;
+        let request = self.ws.read(cx).client.create_thread(&env, &name, &self.task.read(cx).value());
+        cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(thread) => {
+                        this.ws.update(cx, |w, cx| {
+                            if !w.projects.iter().any(|p| p.id == thread.id) { w.projects.push(thread.clone()); }
+                            w.state.collapsed.remove(&falcon_core::project_tree::folder_key(&env));
+                            w.select_project(&thread.id, cx);
+                            w.refresh_inventory(cx);
+                        });
+                        window.close_dialog(cx);
+                    }
+                    Err(err) => {
+                        this.ws.update(cx, |w, cx| w.handle_error(&err, cx));
+                        this.error = Some(err.to_string());
+                    }
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
+        cx.notify();
+    }
+}
+
+impl Render for ThreadForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let valid = !self.name.read(cx).value().trim().is_empty() && kit::selected(&self.env, cx).is_some();
+        div().flex().flex_col().gap_3()
+            .child(field(Some(t!("env.choose").to_string()), Select::new(&self.env).w_full(), None, cx))
+            .child(field(Some(t!("env.name").to_string()), Input::new(&self.name), None, cx))
+            .child(field(Some(t!("env.task").to_string()), Textarea::new(&self.task), None, cx))
+            .when_some(self.error.clone(), |d, e| d.child(error_line(e, cx)))
+            .child(footer(self.busy, valid, if self.busy { t!("project.creating") } else { t!("project.create") }.to_string(), cx.listener(|this, _, window, cx| this.submit(window, cx))))
     }
 }
 
@@ -92,7 +170,7 @@ fn open_dialog<V: Render + 'static>(
     });
 }
 
-fn footer(busy: bool, can_submit: bool, on_submit: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static) -> gpui_kit::Div {
+fn footer(busy: bool, can_submit: bool, label: String, on_submit: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static) -> gpui_kit::Div {
     div()
         .mt_1()
         .flex()
@@ -107,7 +185,7 @@ fn footer(busy: bool, can_submit: bool, on_submit: impl Fn(&gpui_kit::ClickEvent
         .child(
             Button::new("wt-submit")
                 .primary()
-                .label(if busy { t!("worktree.creating") } else { t!("worktree.create") }.to_string())
+                .label(label)
                 .disabled(busy || !can_submit)
                 .on_click(on_submit),
         )
@@ -456,7 +534,7 @@ impl Render for SingleForm {
             d = d.child(error_line(e, cx));
         }
         let can = !self.effective_branch(cx).is_empty();
-        d.child(footer(self.busy, can, cx.listener(|this, _, window, cx| this.submit(window, cx))))
+        d.child(footer(self.busy, can, if self.busy { t!("worktree.creating") } else { t!("worktree.create") }.to_string(), cx.listener(|this, _, window, cx| this.submit(window, cx))))
     }
 }
 
@@ -839,6 +917,6 @@ impl Render for MultiForm {
             d = d.child(error_line(e, cx));
         }
         let can = self.all_selected(cx) && !branch.is_empty() && blocked == 0;
-        d.child(footer(self.busy, can, cx.listener(|this, _, window, cx| this.submit(window, cx))))
+        d.child(footer(self.busy, can, if self.busy { t!("worktree.creating") } else { t!("worktree.create") }.to_string(), cx.listener(|this, _, window, cx| this.submit(window, cx))))
     }
 }

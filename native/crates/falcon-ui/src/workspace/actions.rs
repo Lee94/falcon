@@ -486,6 +486,10 @@ impl Workspace {
         let Some(project) = self.owner_project(project_id) else {
             return;
         };
+        if project.is_environment() {
+            cx.emit(WorkspaceEvent::CreateThread(project.id));
+            return;
+        }
         if project.project_type == falcon_proto::ProjectType::Ssh {
             let client = self.client.clone();
             let pid = project_id.to_string();

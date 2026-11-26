@@ -311,6 +311,7 @@ impl ServerWindow {
                 self.requested_pane_focus = Some(key.clone());
                 cx.notify();
             }
+            WorkspaceEvent::CreateThread(env) => dialogs::worktree_form::open_thread(&self.ws, env, window, cx),
             WorkspaceEvent::NeedsInstall { project_id, agent } => {
                 dialogs::install::open(&self.ws, project_id, Some(*agent), window, cx)
             }

@@ -1,4 +1,4 @@
-//! 「服务器 → 文件夹 → 检出」的分组视图模型。对应旧 React 版的 `lib/projectTree.ts`。
+//! 「机器 → 环境 → 线程」与旧项目共用的分组视图模型。对应旧 React 版的 `lib/projectTree.ts`。
 //!
 //! 侧栏与切换面板共用：两边必须看到同一棵树，分组规则只能有一份。纯函数，零 I/O。
 //! 这里的"服务器"是 SSH Host 分组（本机 / 已保存主机 / 没绑主机的存量 SSH），
@@ -68,9 +68,9 @@ pub struct FolderGroup {
 
 /// 侧栏上独占一行的项目：普通源项目，以及多仓库项目。
 ///
-/// 批量派生仍记下 `source_project_id`（删除级联和存档靠它），但多仓库行不再缩进。
+/// 旧多仓库派生行与源项目同级；线程始终挂在所属环境下。
 fn is_sidebar_folder(p: &Project) -> bool {
-    p.worktree.is_none() || p.multi.is_some()
+    p.worktree.is_none() || (p.multi.is_some() && p.environment_context.is_none())
 }
 
 pub fn folder_key(project_id: &str) -> String {
@@ -82,6 +82,7 @@ pub fn folder_key(project_id: &str) -> String {
 /// 多仓库容器没有单一 HEAD，返回空串。侧栏不再给多仓库项目画检出行。
 /// `??` 语义照抄：探到的分支名是空串也原样用，不往下落。派生行（含多仓库派生）用分支名。
 pub fn checkout_label(project: &Project, head: Option<&ProjectHead>) -> String {
+    if project.environment_context.is_some() { return project.name.clone(); }
     if let Some(wt) = &project.worktree {
         return wt.branch.clone();
     }
@@ -124,7 +125,7 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
         };
         if source_ids.contains(src) {
             kids_by_source.entry(src).or_default().push(p);
-        } else {
+        } else if !p.is_thread() {
             orphans.push(p);
         }
     }
@@ -315,6 +316,19 @@ mod tests {
         assert!(group_servers(&projects, &[], "本机", false)[0].folders[0].worktrees.is_empty());
         assert_eq!(group_servers(&projects, &[], "本机", true)[0].folders[0].worktrees.len(), 1);
         assert_eq!(folder_key("s"), "p:s");
+    }
+
+    #[test]
+    fn thread_is_nested_under_environment_even_with_multiple_repos() {
+        let env = p(r#"{"id":"env","name":"env","type":"local","createdAt":0,"environmentContext":"","multi":{"repos":[{"dir":"/a"},{"dir":"/b"}]}}"#);
+        let task = p(r#"{"id":"thread","name":"task","type":"local","createdAt":1,"environmentContext":"notes",
+            "multi":{"repos":[{"dir":"/threads/x/projects/a"},{"dir":"/threads/x/projects/b"}]},
+            "worktree":{"sourceProjectId":"env","branch":"falcon/thread-x","repoDir":"","createdByFalcon":true}}"#);
+        let servers = group_servers(&[task, env], &[], "本机", false);
+        let folders = &servers[0].folders;
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].project.id, "env");
+        assert_eq!(checkout_label(&folders[0].worktrees[0], None), "task");
     }
 
     #[test]

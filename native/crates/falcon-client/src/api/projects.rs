@@ -58,9 +58,15 @@ impl FalconClient {
         self.get("/api/projects".to_owned())
     }
 
+    pub fn create_thread(&self, env: &str, name: &str, task: &str) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
+        let input = falcon_proto::ThreadInput { name: name.to_owned(), task: task.to_owned() };
+        self.json(Method::POST, format!("/api/projects/{}/threads", seg(env)), json_body(&input))
+    }
+
     /// 校验失败（路径不存在、SSH 字段不全）是 400，`message` 就是服务端的原话。
     pub fn create_project(&self, input: &ProjectInput) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {
-        self.json(Method::POST, "/api/projects".to_owned(), json_body(input))
+        let path = if input.environment_context.is_some() { "/api/environments" } else { "/api/projects" };
+        self.json(Method::POST, path.to_owned(), json_body(input))
     }
 
     pub fn update_project(

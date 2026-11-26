@@ -26,6 +26,7 @@ use crate::sessions::local::local_kind;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/environments", axum::routing::post(create_environment))
         .route("/api/projects", get(list).post(create))
         .route("/api/projects/{id}", axum::routing::put(update).delete(remove))
         .route("/api/projects/{id}/move", axum::routing::post(move_project))
@@ -170,6 +171,11 @@ fn resolve_project_ssh(state: &AppState, input: &Value, existing: Option<&Projec
     })
 }
 
+fn context_field(input: &Value) -> ApiResult<Option<String>> {
+    input.get("environmentContext").map(|v| v.as_str().map(str::to_owned)
+        .ok_or_else(|| ApiError::bad_request("环境上下文必须是文本"))).transpose()
+}
+
 fn members_json(repos: &[String]) -> String {
     let members: Vec<MultiRepoMember> = repos.iter().map(|dir| MultiRepoMember { dir: dir.clone(), repo_dir: None }).collect();
     serde_json::to_string(&members).expect("成员清单总能序列化")
@@ -191,15 +197,25 @@ async fn list(State(state): State<AppState>) -> Json<Vec<Project>> {
     Json(state.db.list_projects().iter().filter(|p| p.project_type == "local").map(Db::to_project).collect())
 }
 
+async fn create_environment(state: State<AppState>, mut body: LenientJson) -> ApiResult<Json<Project>> {
+    let object = body.0.as_object_mut().ok_or_else(|| ApiError::bad_request("环境参数无效"))?;
+    object.entry("environmentContext").or_insert_with(|| Value::String(String::new()));
+    create(state, body).await
+}
+
 async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<Json<Project>> {
     let input = &body.0;
-    let repos = resolve_repos(input).map_err(ApiError::bad_request)?;
+    let mut repos = resolve_repos(input).map_err(ApiError::bad_request)?;
+    let environment_context = context_field(input)?;
     if let Some(err) = validate_project_input(input, repos.is_some()) {
         return Err(ApiError::bad_request(err));
     }
     if str_field(input, "type") == Some("ssh") {
         // 网关只转发绑定到已保存主机的创建请求，不能把旧客户端的内联 SSH 项目落到入口库。
         return Err(ApiError::bad_request("请通过已保存的远端主机创建 SSH 项目"));
+    }
+    if environment_context.is_some() {
+        repos = Some(super::threads::environment_repos(&state, repos).await?);
     }
     let default_worktree_branch = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).unwrap_or(None);
 
@@ -221,14 +237,17 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         // 同样只能经 worktrees 端点进来
         multi_repos: repos.as_deref().map(members_json),
         default_worktree_branch,
+        environment_context,
         ..Default::default()
     };
-    state.db.insert_project(&row);
+    state.db.try_insert_project(&row, &row.id, row.created_at).map_err(ApiError::internal)?;
     sync_after_project_change(&state, &row.project_type, row.host_id.as_deref()).await;
     Ok(Json(Db::to_project(&row)))
 }
 
 async fn update(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Project>> {
+    let lock = state.nodes.lock(&format!("environment:{id}"));
+    let _guard = lock.lock().await;
     let existing = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     let input = &body.0;
     if str_field(input, "type") != Some(existing.project_type.as_str()) {
@@ -251,7 +270,14 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
             return Err(ApiError::bad_request("普通项目不能改成多仓库项目"));
         }
     }
-    let repos = resolve_repos(input).map_err(ApiError::bad_request)?;
+    let mut repos = resolve_repos(input).map_err(ApiError::bad_request)?;
+    let context = context_field(input)?;
+    if context.is_some() && (existing.environment_context.is_none() || existing.source_project_id.is_some()) {
+        return Err(ApiError::bad_request("只有环境可以修改环境上下文"));
+    }
+    if existing.environment_context.is_some() && repos.is_some() {
+        repos = Some(super::threads::environment_repos(&state, repos).await?);
+    }
     let container = existing.multi_repos.is_some() && existing.source_project_id.is_none();
     if let Some(err) = validate_project_input(input, container) {
         return Err(ApiError::bad_request(err));
@@ -262,19 +288,23 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let mut row = ProjectRow {
         name: trimmed(input, "name").unwrap_or_default().to_string(),
         working_dir: trimmed_non_empty(input, "workingDir"),
-        shell: trimmed_non_empty(input, "shell"),
+        shell: if existing.environment_context.is_some() && field(input, "shell").is_none() {
+            existing.shell.clone()
+        } else { trimmed_non_empty(input, "shell") },
         // 附属项目不能再派生，这项对它们没有意义；仍照单全收，避免 PUT 形状因行而异
         default_worktree_branch,
+        environment_context: context.or_else(|| existing.environment_context.clone()),
         ..existing.clone()
     };
     ssh.apply(&mut row);
-    state.db.update_project(&row);
+
     if container && let Some(repos) = &repos {
         let members: Vec<MultiRepoMember> =
             repos.iter().map(|dir| MultiRepoMember { dir: dir.clone(), repo_dir: None }).collect();
-        state.db.update_multi_repos(&row.id, &members);
+        if row.environment_context.is_none() { state.db.update_multi_repos(&row.id, &members); }
         row.multi_repos = Some(members_json(repos));
     }
+    state.db.try_update_project(&row).map_err(ApiError::internal)?;
     if row.project_type == "ssh" {
         // 附属项目的 ssh_* 是从源项目复制来的（让 SshLink / get_link / GET host 全都
         // 不用改），代价就是这条手动传播。本地项目没有可传播的东西。
@@ -291,7 +321,7 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let refreshed = row.clone();
     state.engine.send(move |engine| {
         let id = refreshed.id.clone();
-        if container {
+        if container && refreshed.environment_context.is_none() {
             // 名字与成员都会进虚拟目录的清单（见 virtualdir.rs），编辑后作废缓存。
             // 刷新是 fire-and-forget：宿主离线不能挡编辑；正在跑的会话尽快看到新清单
             // 即可，失败也无妨——attach 路径不走缓存，下次开会话/文件面板会重写
@@ -365,11 +395,22 @@ async fn remove(
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<DeleteProjectResult>> {
+    let lock = state.nodes.lock(&format!("environment:{id}"));
+    let _guard = lock.lock().await;
     let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
 
     // 附属项目连坐。会话数要把它们的也算进去，否则确认框上的数字对不上
     let mut targets =
         if project.source_project_id.is_some() { Vec::new() } else { state.db.list_worktree_children(&id) };
+    if project.environment_context.is_some() && !targets.is_empty() {
+        return Err(ApiError::conflict("请先删除该环境中的线程"));
+    }
+    if project.environment_context.is_some() && project.source_project_id.is_some() && q.force.as_deref() != Some("true") {
+        let Json(status) = super::worktrees::status(State(state.clone()), Path(id.clone())).await?;
+        if status.dirty_count != 0 || status.ignored_count != 0 || status.error.is_some() {
+            return Err(ApiError::with(StatusCode::CONFLICT, "线程中有待检查的文件，请确认后删除", serde_json::json!({"status":status})));
+        }
+    }
     targets.push(project); // 先删附属，最后删自己
     let alive: Vec<String> = targets
         .iter()

@@ -489,6 +489,8 @@ fun DashboardScreen(
             if (currentTab == 0) {
                 ProjectTreeList(
                     servers = dashboard.servers,
+                    baseUrl = activeServer.url,
+                    onRefresh = onRefresh,
                     collapsedServers = collapsedServers,
                     collapsedProjects = collapsedProjects,
                     theme = theme,
@@ -1346,8 +1348,46 @@ private fun handleSessionClick(
     }
 }
 
+private data class WorkspaceForm(val server: ServerGroupUi, val env: ProjectUi? = null, val thread: Boolean = false)
+
+@Composable
+private fun WorkspaceDialog(baseUrl: String, form: WorkspaceForm, close: () -> Unit, refresh: () -> Unit) {
+    val env = form.env
+    var name by remember { mutableStateOf(if (form.thread) "" else env?.name.orEmpty()) }
+    var context by remember { mutableStateOf(if (form.thread) "" else env?.environmentContext.orEmpty()) }
+    var repos by remember { mutableStateOf(env?.repos.orEmpty().joinToString("\n")) }
+    var error by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(onDismissRequest = { if (!busy) close() },
+        title = { Text(if (form.thread) "新建线程" else if (env == null) "新建环境" else "编辑环境") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(if (form.thread) "${form.server.name} / ${env?.name}" else form.server.name)
+                OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true)
+                if (!form.thread) OutlinedTextField(repos, { repos = it }, label = { Text("Git 仓库绝对路径，每行一个") }, maxLines = 4)
+                OutlinedTextField(context, { context = it }, label = { Text(if (form.thread) "任务说明" else "环境上下文") }, maxLines = 5)
+                if (error.isNotEmpty()) Text(error)
+            }
+        },
+        dismissButton = { TextButton(enabled = !busy, onClick = close) { Text("取消") } },
+        confirmButton = {
+            TextButton(enabled = !busy && name.isNotBlank() && (form.thread || repos.isNotBlank()), onClick = {
+                busy = true
+                scope.launch {
+                    val result = if (form.thread) FalconApiClient.createThread(baseUrl, requireNotNull(env).id, name, context)
+                    else FalconApiClient.saveEnvironment(baseUrl, form.server.hostId, env?.id, name, context, repos.lines().map { it.trim() }.filter { it.isNotEmpty() })
+                    busy = false
+                    result.onSuccess { refresh(); close() }.onFailure { error = it.message.orEmpty() }
+                }
+            }) { Text("保存") }
+        })
+}
+
 @Composable
 private fun ProjectTreeList(
+    baseUrl: String,
+    onRefresh: () -> Unit,
     servers: List<ServerGroupUi>,
     collapsedServers: MutableMap<String, Boolean>,
     collapsedProjects: MutableMap<String, Boolean>,
@@ -1359,6 +1399,26 @@ private fun ProjectTreeList(
     onTerminateSession: (SessionUi) -> Unit,
     onDeleteDeadSession: (SessionUi) -> Unit
 ) {
+    var form by remember(baseUrl) { mutableStateOf<WorkspaceForm?>(null) }
+    var legacy by remember { mutableStateOf(false) }
+    var selectedThread by remember(baseUrl) { mutableStateOf<String?>(null) }
+    val thread = selectedThread?.let { id ->
+        servers.asSequence().flatMap { it.folders.asSequence() }.flatMap { it.worktrees.asSequence() }.find { it.id == id }
+    }
+    if (thread != null) {
+        AlertDialog(
+            onDismissRequest = { selectedThread = null },
+            title = { Text(thread.name) },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                for (session in thread.sessions.sortedByDescending { it.lastActiveAt }) {
+                    TextButton(onClick = { selectedThread = null; onClickSession(session) }) { Text(session.displayLabel) }
+                }
+            } },
+            confirmButton = { TextButton(onClick = { selectedThread = null; onNewSession(thread.id, thread.name) }) { Text("新建终端") } },
+            dismissButton = { TextButton(onClick = { selectedThread = null }) { Text("关闭") } }
+        )
+    }
+    form?.let { target -> WorkspaceDialog(baseUrl, target, { form = null }, onRefresh) }
     if (servers.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
@@ -1376,6 +1436,9 @@ private fun ProjectTreeList(
         contentPadding = PaddingValues(8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (servers.any { it.standaloneSessions.isNotEmpty() || it.folders.any { f -> !f.project.isEnvironment } }) {
+            item { TextButton(onClick = { legacy = !legacy }) { Text(if (legacy) "收起旧项目与独立终端" else "旧项目与独立终端") } }
+        }
         items(servers, key = { it.key }) { server ->
             if (server.unavailableNode != null) {
                 UnavailableHostRow(server, theme, monoFont)
@@ -1462,7 +1525,10 @@ private fun ProjectTreeList(
                         )
                     }
 
-                    server.standaloneId?.let { standaloneId ->
+                    if (server.kind == "local" || server.hostId != null) {
+                        TextButton(onClick = { form = WorkspaceForm(server) }) { Text("新建环境") }
+                    }
+                    if (legacy) server.standaloneId?.let { standaloneId ->
                         Row(
                             modifier = Modifier
                                 .heightIn(min = 36.dp)
@@ -1493,7 +1559,7 @@ private fun ProjectTreeList(
 
                 if (!isCollapsed) {
                     // 独立会话直接显示在机器下面，不单独套「无项目」分组
-                    if (server.standaloneSessions.isNotEmpty()) {
+                    if (legacy && server.standaloneSessions.isNotEmpty()) {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1516,6 +1582,7 @@ private fun ProjectTreeList(
                     // 各项目文件夹及其附属 worktree
                     for (folder in server.folders) {
                         val proj = folder.project
+                        if (!legacy && !proj.isEnvironment) continue
                         val projCollapsed = collapsedProjects[proj.id] == true
                         CompactProjectBlock(
                             icon = Icons.Default.Folder,
@@ -1525,41 +1592,49 @@ private fun ProjectTreeList(
                             sessions = proj.sessions,
                             isWorktree = false,
                             collapsed = projCollapsed,
+                            onEdit = if (proj.isEnvironment) ({ form = WorkspaceForm(server, proj) }) else null,
+                            actionLabel = if (proj.isEnvironment) "新建线程" else "新建终端",
                             onToggleCollapse = {
-                                if (proj.sessions.isNotEmpty()) {
+                                if (proj.isEnvironment || proj.sessions.isNotEmpty()) {
                                     collapsedProjects[proj.id] = !projCollapsed
                                 } else {
                                     onNewSession(proj.id, proj.name)
                                 }
                             },
-                            onNewSession = { onNewSession(proj.id, proj.name) },
+                            onNewSession = { if (proj.isEnvironment) form = WorkspaceForm(server, proj, true) else onNewSession(proj.id, proj.name) },
                             theme = theme,
                             monoFont = monoFont,
                             onClickSession = onClickSession,
                             onRenameSession = onRenameSession,
                             onTerminateSession = onTerminateSession,
                             onDeleteDeadSession = onDeleteDeadSession,
-                            worktreesContent = if (folder.worktrees.isNotEmpty()) {
+                            worktreesContent = if (folder.worktrees.isNotEmpty() && (!proj.isEnvironment || !projCollapsed)) {
                                 {
                                     for (wt in folder.worktrees) {
                                         val wtCollapsed = collapsedProjects[wt.id] == true
                                         CompactProjectBlock(
                                             icon = Icons.Default.AccountTree,
-                                            title = wt.branch ?: wt.name,
-                                            branchTag = "worktree",
+                                            title = if (wt.isThread) wt.name else wt.branch ?: wt.name,
+                                            branchTag = if (wt.isThread) null else "worktree",
                                             pathHint = shortenPath(wt.workingDir),
                                             sessions = wt.sessions,
                                             isWorktree = true,
-                                            collapsed = wtCollapsed,
+                                            collapsed = wt.isThread || wtCollapsed,
                                             onToggleCollapse = {
-                                                if (wt.sessions.isNotEmpty()) {
+                                                if (wt.isThread) {
+                                                    when (wt.sessions.size) {
+                                                        0 -> onNewSession(wt.id, wt.name)
+                                                        1 -> onClickSession(wt.sessions.first())
+                                                        else -> selectedThread = wt.id
+                                                    }
+                                                } else if (wt.sessions.isNotEmpty()) {
                                                     collapsedProjects[wt.id] = !wtCollapsed
                                                 } else {
-                                                    onNewSession(wt.id, "${proj.name} · ${wt.branch ?: wt.name}")
+                                                    onNewSession(wt.id, "${proj.name} · ${if (wt.isThread) wt.name else wt.branch ?: wt.name}")
                                                 }
                                             },
                                             onNewSession = {
-                                                onNewSession(wt.id, "${proj.name} · ${wt.branch ?: wt.name}")
+                                                onNewSession(wt.id, "${proj.name} · ${if (wt.isThread) wt.name else wt.branch ?: wt.name}")
                                             },
                                             theme = theme,
                                             monoFont = monoFont,
@@ -1596,6 +1671,8 @@ private fun CompactProjectBlock(
     onRenameSession: (SessionUi) -> Unit,
     onTerminateSession: (SessionUi) -> Unit,
     onDeleteDeadSession: (SessionUi) -> Unit,
+    actionLabel: String = "新建终端",
+    onEdit: (() -> Unit)? = null,
     worktreesContent: (@Composable () -> Unit)? = null
 ) {
     val hasBlocked = remember(sessions) {
@@ -1684,6 +1761,7 @@ private fun CompactProjectBlock(
                 }
             }
 
+            onEdit?.let { edit -> TextButton(onClick = edit) { Text("编辑") } }
             // 新建项目会话
             Box(
                 modifier = Modifier
@@ -1695,7 +1773,7 @@ private fun CompactProjectBlock(
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
-                    contentDescription = "新建终端",
+                    contentDescription = actionLabel,
                     tint = theme.secondaryForeground,
                     modifier = Modifier.size(12.dp)
                 )

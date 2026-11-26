@@ -1,4 +1,15 @@
 {
+  "env": {
+    "create": "新建环境",
+    "edit": "编辑环境",
+    "context": "环境上下文",
+    "choose": "所属机器与环境",
+    "thread": "新建线程",
+    "name": "线程名称",
+    "task": "任务说明",
+    "legacy": "旧项目与独立终端",
+    "fromProject": "以此项目创建环境"
+  },
   "login": {
     "title": "访问 Falcon",
     "password": "访问密码",
@@ -17,8 +28,8 @@
     "collapse": "收起侧栏",
     "sessionCount": "%{n} 个会话 · 点击展开",
     "projectContext": "右键打开菜单",
-    "empty": "还没有项目。新建一个本地文件夹或远程 SSH 项目开始。",
-    "emptyServer": "这台服务器上还没有项目",
+    "empty": "在机器上新建环境，添加 Git 仓库后即可创建线程。",
+    "emptyServer": "这台机器上还没有环境",
     "hostOffline": "离线",
     "hostConnecting": "连接中",
     "standalone": "无项目",
@@ -162,7 +173,7 @@
     "reason_link_failed": "命令没能在宿主机上跑起来"
   },
   "multi": {
-    "typeMulti": "多仓库",
+    "typeMulti": "环境",
     "location": "位置",
     "locationLocal": "本机",
     "repos": "成员仓库",
@@ -175,7 +186,7 @@
     "deleteVirtualDirFootnote": "会一并删除 Falcon 生成的虚拟项目目录及其中的全部文件；成员仓库和自定义工作目录不会被删除。",
     "useCommonParent": "填入共同父目录",
     "needRepo": "至少添加一个成员仓库",
-    "newProject": "新建多仓库项目…",
+    "newProject": "新建环境…",
     "repoCount": "%{n} 个仓库",
     "pickRepo": "选择成员仓库",
     "derive": "派生多仓库项目…",

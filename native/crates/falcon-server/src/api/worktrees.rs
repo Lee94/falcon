@@ -78,7 +78,7 @@ fn worktree_api_error(e: &WorktreeError) -> ApiError {
 ///
 /// 顺带一个白捡的正确行为：主机授权（`session_hosts`）按 host+port+username 记，所以附属项目第一次开
 /// 会话不会再弹一次安装授权。
-fn derived_row(src: &ProjectRow, name: String, working_dir: String, branch: &str) -> ProjectRow {
+pub(super) fn derived_row(src: &ProjectRow, name: String, working_dir: String, branch: &str) -> ProjectRow {
     ProjectRow {
         id: uuid_v4(),
         name,
@@ -99,6 +99,7 @@ fn derived_row(src: &ProjectRow, name: String, working_dir: String, branch: &str
         worktree_created_by_mojito: Some(1),
         worktree_archived_at: None,
         multi_repos: None,
+        environment_context: None,
         default_worktree_branch: None,
     }
 }
@@ -107,6 +108,7 @@ fn derived_row(src: &ProjectRow, name: String, working_dir: String, branch: &str
 async fn derive(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Project>> {
     let src = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
 
+    if src.environment_context.is_some() { return Err(ApiError::conflict("请从环境创建线程")); }
     // 禁止二级派生。git 本身允许（从 linked worktree 建的 worktree 仍属同一仓库），
     // 但删除级联要递归，而收益是零——从源项目派生完全等价。多仓库派生在侧栏
     // 与源项目同级，仍带 source_project_id，这里同样挡住。将来若要放开：把 source
@@ -354,7 +356,7 @@ fn multi_error(e: &DeriveMultiError) -> ApiError {
 ///
 /// 读不到状态不阻断删除，只是让确认框改口说"无法确认里面有没有未保存的东西"——
 /// 把"读不到"和"是干净的"混成一个答案，才是真会让用户丢东西的做法。
-async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<WorktreeStatus>> {
+pub(super) async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<WorktreeStatus>> {
     let row = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     let Some(working_dir) = row.working_dir.clone().filter(|_| row.source_project_id.is_some()).filter(|d| !d.is_empty())
     else {
@@ -378,6 +380,14 @@ async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
                 ahead: None,
                 error: None,
             };
+            if let Some(initial) = &row.environment_context {
+                for (name, expected) in [("AGENTS.md", initial.as_str()), ("CLAUDE.md", crate::virtualdir::CLAUDE_MD_BODY)] {
+                    if !super::threads::matches_context(&std::path::Path::new(&working_dir).join(name), expected) {
+                        merged.dirty_count += 1;
+                        merged.dirty_sample.push(name.to_string());
+                    }
+                }
+            }
             for m in &members {
                 let s = worktree_status(&host, &m.dir, &RunOpts::default()).await?;
                 let base = basename_of(host.kind, &m.dir);
@@ -416,6 +426,7 @@ async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiRes
 /// （Node 版"终止失败就整体放弃"的分支在这里走不到：terminate 不会失败。）
 async fn archive(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Project>> {
     let row = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
+    if row.environment_context.is_some() { return Err(ApiError::bad_request("线程保留至显式删除")); }
     if row.source_project_id.is_none() {
         return Err(ApiError::bad_request("只有附属项目能存档"));
     }

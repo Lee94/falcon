@@ -57,6 +57,7 @@ pub struct ProjectRow {
     /// 源项目的派生基点。空 = 用当前 HEAD。不是删除护栏的判据，所以走 update_project。
     /// 附属项目恒为 None（不能再派生）。
     pub default_worktree_branch: Option<String>,
+    pub environment_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -200,6 +201,7 @@ fn project_from_row(r: &Row) -> rusqlite::Result<ProjectRow> {
         worktree_created_by_mojito: r.get("worktree_created_by_mojito")?,
         worktree_archived_at: r.get("worktree_archived_at")?,
         multi_repos: r.get("multi_repos")?,
+        environment_context: r.get("environment_context")?,
         default_worktree_branch: r.get("default_worktree_branch")?,
     })
 }
@@ -465,6 +467,7 @@ impl Db {
             add_column(&conn, "projects", "default_worktree_branch", "TEXT")?;
             // 侧栏的拖拽排序（全局一条，侧栏按服务器分组时保留相对顺序）。空 = 没排过，按创建时间
             // 排在排过的后面——新建的项目自然落在末尾；挪一次就把所有行重编成 0..n
+            add_column(&conn, "projects", "environment_context", "TEXT")?;
             add_column(&conn, "projects", "sort_order", "INTEGER")?;
             // 宿主机跨端同步（host-projects.json）：updated_at 记最近一次变更时刻，remote_id 记该项目在宿主机上的固定 id
             add_column(&conn, "projects", "updated_at", "INTEGER")?;
@@ -789,6 +792,7 @@ impl Db {
                 archived_at: row.worktree_archived_at,
             }),
             multi: members.map(|repos| MultiRepoInfo { repos }),
+            environment_context: row.environment_context.clone(),
             default_worktree_branch: row.default_worktree_branch.clone(),
             created_at: row.created_at,
         }
@@ -843,11 +847,17 @@ impl Db {
     }
 
     pub fn insert_synced_project(&self, row: &ProjectRow, remote_id: &str, updated_at: i64) {
-        self.exec(
+        if let Err(e) = self.try_insert_project(row, remote_id, updated_at) {
+            log::error!("无法保存项目 {}：{e}", row.id);
+        }
+    }
+
+    pub(crate) fn try_insert_project(&self, row: &ProjectRow, remote_id: &str, updated_at: i64) -> rusqlite::Result<()> {
+        self.lock().execute(
             "INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, default_worktree_branch, updated_at, remote_id)
+               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, environment_context, default_worktree_branch, updated_at, remote_id)
              VALUES (:id, :name, :type, :working_dir, :shell, :ssh_host, :ssh_port, :ssh_username, :ssh_auth_method, :ssh_key_path, :ssh_secret_enc, :host_id, :created_at,
-               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :default_worktree_branch, :updated_at, :remote_id)",
+               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :environment_context, :default_worktree_branch, :updated_at, :remote_id)",
             named_params! {
                 ":id": row.id, ":name": row.name, ":type": row.project_type, ":working_dir": row.working_dir,
                 ":shell": row.shell, ":ssh_host": row.ssh_host, ":ssh_port": row.ssh_port,
@@ -858,21 +868,20 @@ impl Db {
                 ":worktree_repo_dir": row.worktree_repo_dir,
                 ":worktree_created_by_mojito": row.worktree_created_by_mojito,
                 ":worktree_archived_at": row.worktree_archived_at, ":multi_repos": row.multi_repos,
-                ":default_worktree_branch": row.default_worktree_branch,
+                ":default_worktree_branch": row.default_worktree_branch, ":environment_context": row.environment_context,
                 ":updated_at": updated_at, ":remote_id": remote_id,
             },
-        );
+        ).map(|_| ())
     }
 
-    /// 刻意不更新 source_project_id / worktree_* 四列，也不更新 multi_repos。
-    ///
-    /// 它们是删除护栏的判据（"这个目录是 falcon 建的、属于那个仓库"）。一旦能从
-    /// PUT /api/projects/:id 改写，护栏就等于不存在——攻击面是"改一行 JSON 让 falcon
-    /// 去 rm -rf 任意路径"。附属项目的这些属性在创建时定死，此后只读；
-    /// ProjectInput 里也没有对应字段，所以这条从类型层面就够不到。
-    /// multi_repos 在派生行上是删除目标清单，同罪；容器改成员走 update_multi_repos。
-    /// default_worktree_branch 不在此列：它只是派生时的默认基点，改了改不了任何路径。
+    /// 派生行的工作树成员和上下文快照只读，环境的上下文与成员必须一起更新。
     pub fn update_project(&self, row: &ProjectRow) {
+        if let Err(e) = self.try_update_project(row) {
+            log::error!("无法更新项目 {}：{e}", row.id);
+        }
+    }
+
+    pub(crate) fn try_update_project(&self, row: &ProjectRow) -> rusqlite::Result<()> {
         let now = crate::auth::now_ms();
         let old = self.query_one("SELECT * FROM projects WHERE id = ?", [&row.id], sync_project_from_row);
         let new_scope = project_sync_scope(row);
@@ -888,10 +897,11 @@ impl Db {
                 }
             }
         }
-        self.exec(
+        self.lock().execute(
             "UPDATE projects SET name=:name, working_dir=:working_dir, shell=:shell, ssh_host=:ssh_host, ssh_port=:ssh_port,
              ssh_username=:ssh_username, ssh_auth_method=:ssh_auth_method, ssh_key_path=:ssh_key_path, ssh_secret_enc=:ssh_secret_enc,
-             host_id=:host_id, default_worktree_branch=:default_worktree_branch,
+             host_id=:host_id, default_worktree_branch=:default_worktree_branch, environment_context=CASE WHEN source_project_id IS NULL THEN :environment_context ELSE environment_context END,
+             multi_repos=CASE WHEN environment_context IS NOT NULL AND source_project_id IS NULL THEN :members ELSE multi_repos END,
              updated_at=MAX(COALESCE(updated_at, created_at, 0) + 1, :now)
              WHERE id=:id",
             named_params! {
@@ -899,10 +909,10 @@ impl Db {
                 ":ssh_host": row.ssh_host, ":ssh_port": row.ssh_port, ":ssh_username": row.ssh_username,
                 ":ssh_auth_method": row.ssh_auth_method, ":ssh_key_path": row.ssh_key_path,
                 ":ssh_secret_enc": row.ssh_secret_enc, ":host_id": row.host_id,
-                ":default_worktree_branch": row.default_worktree_branch,
-                ":now": now,
+                ":default_worktree_branch": row.default_worktree_branch, ":environment_context": row.environment_context,
+                ":members": row.multi_repos, ":now": now,
             },
-        );
+        ).map(|_| ())
     }
 
     /// 宿主机清单同步过来的更新：同样严守 worktree 四列与派生行 working_dir / multi_repos 只读护栏

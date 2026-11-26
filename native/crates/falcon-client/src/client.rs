@@ -185,8 +185,8 @@ pub(crate) enum ReqBody {
 
 impl Req {
     pub(crate) fn new(method: Method, path: String, body: ReqBody) -> Self {
-        let create = method == Method::POST && (path == "/api/projects"
-            || (path.starts_with("/api/projects/") && (path.ends_with("/sessions") || path.ends_with("/worktrees"))));
+        let create = method == Method::POST && (path == "/api/projects" || path == "/api/environments"
+            || (path.starts_with("/api/projects/") && (path.ends_with("/sessions") || path.ends_with("/worktrees") || path.ends_with("/threads"))));
         let idempotency_key = create.then(|| {
             static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let time = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn create_requests_reuse_idempotency_header_when_built_again() {
         let client = FalconClient::new(Url::parse("http://127.0.0.1:4941").unwrap());
-        for path in ["/api/projects", "/api/projects/p/sessions", "/api/projects/p/worktrees"] {
+        for path in ["/api/projects", "/api/environments", "/api/projects/p/threads", "/api/projects/p/sessions", "/api/projects/p/worktrees"] {
             let req = Req::new(Method::POST, path.into(), ReqBody::Json(Bytes::from_static(b"{}")));
             let build = || crate::runtime::runtime().block_on(client.inner.build(&req)).unwrap().build().unwrap();
             let first = build();

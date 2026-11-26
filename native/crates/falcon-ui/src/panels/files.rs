@@ -187,7 +187,11 @@ impl FilesPanel {
             let pid = ws.focus_project_id();
             let project = pid.as_deref().and_then(|p| ws.owner_project(p));
             let wd = project.as_ref().and_then(|p| p.working_dir.clone());
-            let roots = project.as_ref().and_then(|p| p.multi.as_ref()).map(|m| m.repos.iter().map(|r| r.dir.clone()).collect()).unwrap_or_default();
+            let mut roots: Vec<String> = project.as_ref().and_then(|p| p.multi.as_ref())
+                .map(|m| m.repos.iter().map(|r| r.dir.clone()).collect()).unwrap_or_default();
+            if project.as_ref().is_some_and(|p| p.is_thread()) && let Some(root) = &wd {
+                roots.insert(0, root.clone());
+            }
             let initial = project.as_ref().and_then(project_nav_root).and_then(|p| parse_nav_path(&p, None)).unwrap_or_default();
             (pid, wd, roots, initial)
         };

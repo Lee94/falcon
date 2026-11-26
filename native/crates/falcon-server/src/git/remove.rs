@@ -497,7 +497,13 @@ async fn cleanup_multi_worktree<S: AsRef<str>>(row: &ProjectRow, host: &GitHost,
     if all_gone {
         // falcon 派生时写进集中目录的引导清单（AGENTS.md / CLAUDE.md，见 virtualdir）：
         // 不先删掉它们，下面的空目录删除永远非空、永远留 warning
-        remove_central_manifests(host, &central).await;
+        if let Some(initial) = &row.environment_context {
+            let root = std::path::Path::new(&central);
+            crate::api::threads::remove_context_files(root, initial);
+            let _ = std::fs::remove_dir(root.join("projects"));
+        } else {
+            remove_central_manifests(host, &central).await;
+        }
         if let Some(problem) = remove_empty_dir(host, &central).await {
             warn.push(problem);
         }

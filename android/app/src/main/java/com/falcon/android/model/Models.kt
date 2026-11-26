@@ -180,6 +180,10 @@ data class ProjectUi(
     val branch: String?,
     val isWorktree: Boolean,
     val isMulti: Boolean,
+    val isEnvironment: Boolean = false,
+    val isThread: Boolean = false,
+    val environmentContext: String = "",
+    val repos: List<String> = emptyList(),
     val sessions: List<SessionUi>
 )
 
@@ -341,6 +345,10 @@ object JsonParsers {
             workingDir = if (obj.isNull("workingDir")) "" else obj.getString("workingDir"),
             branch = branch,
             isWorktree = obj.optBoolean("isWorktree", false),
+            isEnvironment = obj.optBoolean("isEnvironment"),
+            isThread = obj.optBoolean("isThread"),
+            environmentContext = obj.optString("environmentContext").takeUnless { obj.isNull("environmentContext") }.orEmpty(),
+            repos = obj.optJSONArray("repos")?.let { a -> List(a.length()) { a.getString(it) } }.orEmpty(),
             isMulti = obj.optBoolean("isMulti", false),
             sessions = parseSessionList(obj.optJSONArray("sessions"))
         )

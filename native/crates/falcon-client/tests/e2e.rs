@@ -77,6 +77,7 @@ fn session_survives_backend_restarts() {
         host_id: None,
         ssh: None,
         repos: None,
+        environment_context: None,
         default_worktree_branch: None,
     }))
     .unwrap();
