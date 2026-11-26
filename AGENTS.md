@@ -8,7 +8,7 @@
 
 - [本地原生客户端更新](.agents/memory/native-client-update.md)：客户端单独更新、应用备份与签名校验，以及服务端版本探测的注意事项。
 
-- [本地 coding agent CLI 检测](.agents/memory/agent-cli-detection.md)：检测范围、刷新与菜单共用规则、新增 CLI 的修改位置，以及本机 Codex 被中断后返回 shell 的回归测试。
+- [本地 coding agent CLI 检测](.agents/memory/agent-cli-detection.md)：检测范围、刷新与菜单共用规则、新增 CLI 的修改位置，本机 Codex 被中断后返回 shell 的回归测试，以及桌面端 Claude 独立对话的启动和验证。
 
 - [多主机浏览器面板](.agents/memory/browser-dashboard.md)：会话路由、官方面板版本与静态资源更新步骤。
 

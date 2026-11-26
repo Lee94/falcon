@@ -56,6 +56,7 @@ mod wire;
 
 /// Agent 浏览器协议：在场摘要、控制权、流画面帧与记录（ADR 0029）
 pub mod browser;
+pub mod claude;
 pub mod files;
 pub mod forward;
 pub mod git;

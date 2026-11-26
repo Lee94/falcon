@@ -11,6 +11,7 @@ pub mod app_icon;
 pub mod askpass;
 pub mod auth_routes;
 pub mod body;
+mod claude;
 mod dashboard;
 pub mod error;
 pub mod files;
@@ -135,6 +136,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes::router())
         .merge(ws::router())
+        .merge(claude::router())
         .merge(public_router())
         .merge(protected_router().layer(middleware::from_fn_with_state(state.clone(), require_login)))
         .fallback(not_found)

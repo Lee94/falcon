@@ -73,7 +73,7 @@ pub async fn detect_local_agents() -> Vec<SessionAgent> {
     agents
 }
 
-fn agents_in_env(env: &[(String, String)]) -> Vec<SessionAgent> {
+fn search_paths(env: &[(String, String)]) -> (Vec<PathBuf>, Vec<String>) {
     let get = |key: &str| {
         if cfg!(windows) {
             env.iter()
@@ -85,7 +85,21 @@ fn agents_in_env(env: &[(String, String)]) -> Vec<SessionAgent> {
     };
     let dirs: Vec<PathBuf> = std::env::split_paths(get("PATH").unwrap_or_default()).collect();
     let extensions = executable_extensions(cfg!(windows), get("PATHEXT"));
+    (dirs, extensions)
+}
+
+fn agents_in_env(env: &[(String, String)]) -> Vec<SessionAgent> {
+    let (dirs, extensions) = search_paths(env);
     agents_in_paths(&dirs, &extensions)
+}
+
+/// 非交互式进程使用检测到的绝对路径，避免宿主机工作目录影响程序解析。
+pub async fn local_agent_command(agent: SessionAgent) -> Option<(PathBuf, Vec<(String, String)>)> {
+    let env = resolve_base_env().await;
+    tokio::task::spawn_blocking(move || {
+        let (dirs, extensions) = search_paths(&env);
+        find_agent(agent, &dirs, &extensions).map(|path| (path, env))
+    }).await.ok().flatten()
 }
 
 fn executable_extensions(windows: bool, pathext: Option<&str>) -> Vec<String> {
@@ -104,14 +118,14 @@ fn agents_in_paths(dirs: &[PathBuf], extensions: &[String]) -> Vec<SessionAgent>
     SESSION_AGENTS
         .iter()
         .copied()
-        .filter(|agent| {
-            dirs.iter().filter(|dir| dir.is_absolute()).any(|dir| {
-                extensions
-                    .iter()
-                    .any(|ext| is_executable(&dir.join(format!("{}{ext}", agent.as_str()))))
-            })
-        })
+        .filter(|agent| find_agent(*agent, dirs, extensions).is_some())
         .collect()
+}
+
+fn find_agent(agent: SessionAgent, dirs: &[PathBuf], extensions: &[String]) -> Option<PathBuf> {
+    dirs.iter().filter(|dir| dir.is_absolute())
+        .flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{}{ext}", agent.as_str()))))
+        .find(|path| is_executable(path))
 }
 
 fn is_executable(path: &Path) -> bool {

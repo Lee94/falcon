@@ -41,7 +41,7 @@ fn upgrade(ws: WebSocketUpgrade) -> WebSocketUpgrade {
     ws.max_message_size(WS_MAX_PAYLOAD_BYTES).max_frame_size(WS_MAX_PAYLOAD_BYTES)
 }
 
-async fn close_unauthorized(mut socket: WebSocket) {
+pub(super) async fn close_unauthorized(mut socket: WebSocket) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame { code: WS_CLOSE_UNAUTHORIZED, reason: Utf8Bytes::from_static("unauthorized") })))
         .await;

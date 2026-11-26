@@ -37,7 +37,7 @@ rand = "0.10.3"
 hex = "0.4.3"
 subtle = "2.6.1"
 axum = { version = "0.8.9", features = ["ws"] }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["rt", "codec"] }
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2", "des"] }
 sha2 = "0.11.0"
 indexmap = "2"

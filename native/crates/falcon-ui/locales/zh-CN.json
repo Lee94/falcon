@@ -1,4 +1,18 @@
 {
+  "claudeChat": {
+    "title": "Claude 对话",
+    "placeholder": "输入消息",
+    "send": "发送",
+    "you": "你",
+    "tools": "工具",
+    "allow": "允许一次",
+    "deny": "拒绝",
+    "permission": "Claude 请求使用 %{tool}",
+    "connecting": "正在连接 Claude Code…",
+    "working": "Claude 正在处理…",
+    "error": "此轮对话失败",
+    "closed": "对话已断开"
+  },
   "env": {
     "create": "新建环境",
     "edit": "编辑环境",

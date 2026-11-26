@@ -62,6 +62,7 @@ pub use tailnet::{
     tailnet_failure_hint, tailnet_proxy, tailnet_status,
 };
 pub use ws::browser::{BrowserSink, BrowserSocket, BrowserSocketEvent};
+pub use ws::claude::ClaudeSocket;
 pub use ws::install::{InstallEvent, InstallSocket};
 pub use ws::session::{SessionEvent, SessionSink, SessionSocket, SocketOptions};
 

@@ -4,6 +4,7 @@
 //! 分发在这里由 Root 的对话框栈负责）。
 
 pub mod askpass;
+pub mod claude;
 pub mod connect;
 pub mod folder_picker;
 pub mod host_form;

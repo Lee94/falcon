@@ -1,6 +1,7 @@
 //! WebSocket 公共部分：会话通道与安装通道共用的一层薄接口 [`WsConn`]。
 
 pub(crate) mod browser;
+pub(crate) mod claude;
 pub(crate) mod install;
 pub(crate) mod session;
 

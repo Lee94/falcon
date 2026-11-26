@@ -256,6 +256,13 @@ pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option
         let pid = project_id.to_string();
         let after = after.clone();
         let agent: SessionAgent = *agent;
+        if agent == SessionAgent::Claude {
+            let ws = ws.clone();
+            let pid = pid.clone();
+            items.push(MenuItemSpec::new(t!("claudeChat.title").to_string(), move |_, cx| {
+                dialogs::claude::open(&ws, &pid, cx)
+            }).icon(crate::session_icon::session_icon(Some(agent))));
+        }
         let mut item = MenuItemSpec::new(t!(format!("agent.{}", agent.as_str())).to_string(), move |_, cx| {
             ws.update(cx, |w, cx| w.new_terminal(&pid, Some(agent), after.clone(), cx))
         }).icon(crate::session_icon::session_icon(Some(agent)));

@@ -297,6 +297,16 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
             });
         }
         for agent in ws.session_agents(&p.id) {
+            if *agent == falcon_proto::SessionAgent::Claude {
+                let (w, pid) = (ws_entity.clone(), p.id.clone());
+                let label = t!("claudeChat.title").to_string();
+                project_items.push(PickItem {
+                    key: format!("#{} {label}", p.name),
+                    label: t!("palette.newAgentIn", agent = label, name = p.name.clone()).to_string(),
+                    meta: Some(host.clone()), icon: crate::session_icon::session_icon(Some(*agent)), tone: None,
+                    run: run(move |_, cx| crate::dialogs::claude::open(&w, &pid, cx)),
+                });
+            }
             let agent_name = t!(format!("agent.{}", agent.as_str())).to_string();
             let (w, pid, a) = (ws_entity.clone(), p.id.clone(), *agent);
             project_items.push(PickItem {
