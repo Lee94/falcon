@@ -36,11 +36,12 @@ name: package
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "next"]
     tags: ["v*"]
     # branches / tags 各自匹配；路径过滤仅约束分支推送，版本 tag 始终打包。
     paths:
       - "native/**"
+      - "android/**"
       - ".github/workflows/package.yml"
       - ".github/scripts/**"
   schedule:
@@ -65,7 +66,7 @@ env:
 jobs:
   gate:
     # 只在 main 推送时判断；tag / 定时 / 手动运行时本 job 跳过，下游照常执行
-    if: github.event_name == 'push' && github.ref_type == 'branch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       tagged: ${{ steps.tag.outputs.tagged }}
@@ -362,7 +363,7 @@ jobs:
           ./native/target/release/xtask server --target darwin-arm64 --skip-sessiond --skip-cargo
           ./native/target/release/xtask pkg --skip-bin --skip-cargo
 
-      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+      - if: github.ref == 'refs/heads/next' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: falcon-macos
@@ -500,7 +501,7 @@ jobs:
           .\native\target\release\xtask.exe win --skip-cargo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+      - if: github.ref == 'refs/heads/next' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: falcon-windows
@@ -600,7 +601,7 @@ jobs:
           ./native/target/release/xtask server --target ${{ matrix.platform }} --skip-sessiond --skip-cargo
           ./native/target/release/xtask linux --target ${{ matrix.platform }}
 
-      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+      - if: github.ref == 'refs/heads/next' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: falcon-server-${{ matrix.platform }}
@@ -714,7 +715,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./native/target/release/xtask android
 
-      - if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+      - if: github.ref == 'refs/heads/next' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: falcon-android
