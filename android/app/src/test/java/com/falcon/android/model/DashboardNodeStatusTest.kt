@@ -41,6 +41,33 @@ class DashboardNodeStatusTest {
         }
     }
 
+    @Test fun threadWithEnvironmentIdKeepsItsSessionsUnderTheRightEnvironment() {
+        val view = JsonParsers.parseDashboard(
+            """{
+                "servers":[{"folders":[
+                    {"project":{"id":"unrelated","isEnvironment":true}},
+                    {"project":{"id":"env","isEnvironment":true,"repos":["/repo"]},
+                     "worktrees":[{"id":"legacy-thread","isThread":true,"isWorktree":true}]},
+                    {"project":{"id":"thread","sessions":[{"id":"terminal","projectId":"thread"}]}}
+                ]}],
+                "allSessions":[{"id":"terminal","projectId":"thread"}]
+            }""",
+            """[{"id":"env","defaultWorktreeBranch":"origin/main"},
+                {"id":"thread","threadEnvironmentId":"env"}]"""
+        )
+        val folders = view.servers.single().folders
+        assertEquals(listOf("unrelated", "env"), folders.map { it.project.id })
+        assertTrue(folders.first().worktrees.isEmpty())
+        val environment = folders.last()
+        assertEquals(listOf("/repo"), environment.project.repos)
+        assertEquals("origin/main", environment.project.defaultWorktreeBranch)
+        assertEquals(listOf("legacy-thread", "thread"), environment.worktrees.map { it.id })
+        val thread = environment.worktrees.last()
+        assertTrue(thread.isThread)
+        assertTrue(!thread.isEnvironment && !thread.isWorktree)
+        assertEquals(view.allSessions.single(), thread.sessions.single())
+    }
+
     @Test fun olderServersAndOnlineNodesKeepTheirLists() {
         assertSame(dashboard, dashboard.withNodeStatuses(emptyList()))
         val view = dashboard.withNodeStatuses(listOf(NodeStatus("h1", "0.4.12", true, null)))

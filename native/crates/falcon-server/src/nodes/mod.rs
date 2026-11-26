@@ -53,7 +53,7 @@ pub fn map_resource_fields(value: &mut Value, map: &impl Fn(&str) -> String) {
                 || (object.contains_key("workingDir") || object.contains_key("type"))
                     && object.contains_key("createdAt");
             for (key, value) in object.iter_mut() {
-                if matches!(key.as_str(), "projectId" | "sourceProjectId" | "sessionId")
+                if matches!(key.as_str(), "projectId" | "sourceProjectId" | "threadEnvironmentId" | "sessionId")
                     || key == "id" && resource
                 {
                     if let Some(id) = value.as_str() {

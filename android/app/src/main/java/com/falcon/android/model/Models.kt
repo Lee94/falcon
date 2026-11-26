@@ -184,8 +184,12 @@ data class ProjectUi(
     val isThread: Boolean = false,
     val environmentContext: String = "",
     val repos: List<String> = emptyList(),
-    val sessions: List<SessionUi>
+    val sessions: List<SessionUi>,
+    val threadEnvironmentId: String? = null,
+    val defaultWorktreeBranch: String? = null
 )
+
+data class RepoBranch(val name: String, val head: Boolean)
 
 data class FolderGroupUi(
     val project: ProjectUi,
@@ -336,8 +340,10 @@ object JsonParsers {
         return list
     }
 
-    private fun parseProject(obj: JSONObject): ProjectUi {
+    private fun parseProject(obj: JSONObject, wire: JSONObject?): ProjectUi {
         val branch = if (obj.has("branch") && !obj.isNull("branch")) obj.optString("branch") else null
+        val threadEnvironmentId = wire?.takeUnless { it.isNull("threadEnvironmentId") }
+            ?.optString("threadEnvironmentId")?.takeIf { it.isNotEmpty() }
         return ProjectUi(
             id = obj.optString("id"),
             name = obj.optString("name"),
@@ -345,19 +351,37 @@ object JsonParsers {
             workingDir = if (obj.isNull("workingDir")) "" else obj.getString("workingDir"),
             branch = branch,
             isWorktree = obj.optBoolean("isWorktree", false),
-            isEnvironment = obj.optBoolean("isEnvironment"),
-            isThread = obj.optBoolean("isThread"),
+            isEnvironment = threadEnvironmentId == null && obj.optBoolean("isEnvironment"),
+            isThread = threadEnvironmentId != null || obj.optBoolean("isThread"),
             environmentContext = obj.optString("environmentContext").takeUnless { obj.isNull("environmentContext") }.orEmpty(),
             repos = obj.optJSONArray("repos")?.let { a -> List(a.length()) { a.getString(it) } }.orEmpty(),
             isMulti = obj.optBoolean("isMulti", false),
-            sessions = parseSessionList(obj.optJSONArray("sessions"))
+            sessions = parseSessionList(obj.optJSONArray("sessions")),
+            threadEnvironmentId = threadEnvironmentId,
+            defaultWorktreeBranch = wire?.takeUnless { it.isNull("defaultWorktreeBranch") }
+                ?.optString("defaultWorktreeBranch")?.takeIf { it.isNotEmpty() }
         )
     }
 
-    fun parseDashboard(rawJson: String): DashboardData {
+    private fun attachThreads(folders: List<FolderGroupUi>): List<FolderGroupUi> {
+        // 旧版 JNI 视图把没有 worktree 的线程列成独立文件夹，原始项目响应才有环境 ID。
+        val topLevelThreads = folders.map { it.project }.filter { it.threadEnvironmentId != null }
+        if (topLevelThreads.isEmpty()) return folders
+        val threadsByEnvironment = topLevelThreads.groupBy { it.threadEnvironmentId }
+        return folders.filter { it.project.threadEnvironmentId == null }.map { folder ->
+            val threads = threadsByEnvironment[folder.project.id]
+            if (!folder.project.isEnvironment || threads == null) folder
+            else folder.copy(worktrees = (folder.worktrees + threads).distinctBy { it.id })
+        }
+    }
+
+    fun parseDashboard(rawJson: String, projectsJson: String = "[]"): DashboardData {
         if (rawJson.isBlank()) return DashboardData(emptyList(), emptyList())
         return try {
             val root = JSONObject(rawJson)
+            val wireProjects = runCatching { JSONArray(projectsJson) }.getOrElse { JSONArray() }
+            val projectsById = (0 until wireProjects.length()).mapNotNull { wireProjects.optJSONObject(it) }
+                .associateBy { it.optString("id") }
             val serversArr = root.optJSONArray("servers") ?: JSONArray()
             val servers = ArrayList<ServerGroupUi>(serversArr.length())
             for (i in 0 until serversArr.length()) {
@@ -371,11 +395,11 @@ object JsonParsers {
                     val worktrees = ArrayList<ProjectUi>(wtArr.length())
                     for (k in 0 until wtArr.length()) {
                         val wObj = wtArr.optJSONObject(k) ?: continue
-                        worktrees.add(parseProject(wObj))
+                        worktrees.add(parseProject(wObj, projectsById[wObj.optString("id")]))
                     }
                     folders.add(
                         FolderGroupUi(
-                            project = parseProject(pObj),
+                            project = parseProject(pObj, projectsById[pObj.optString("id")]),
                             worktrees = worktrees
                         )
                     )
@@ -390,7 +414,7 @@ object JsonParsers {
                         conn = conn,
                         standaloneId = standaloneId,
                         standaloneSessions = parseSessionList(sObj.optJSONArray("standaloneSessions")),
-                        folders = folders,
+                        folders = attachThreads(folders),
                         hostId = if (sObj.isNull("hostId")) null else sObj.optString("hostId")
                     )
                 )

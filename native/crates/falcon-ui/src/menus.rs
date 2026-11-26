@@ -251,12 +251,19 @@ pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option
             .icon(crate::session_icon::session_icon(None)),
         );
     }
+    let durable_thread = ws.read(cx).project(project_id).is_some_and(|p| p.thread_environment_id.is_some());
+    if durable_thread {
+        let (ws, pid) = (ws.clone(), project_id.to_owned());
+        items.insert(0, MenuItemSpec::new(t!("env.openThread").to_string(), move |_, cx| {
+            dialogs::claude::open(&ws, &pid, cx)
+        }).icon(crate::session_icon::session_icon(Some(SessionAgent::Claude))));
+    }
     for (i, agent) in ws.read(cx).session_agents(project_id).iter().enumerate() {
         let ws = ws.clone();
         let pid = project_id.to_string();
         let after = after.clone();
         let agent: SessionAgent = *agent;
-        if agent == SessionAgent::Claude {
+        if agent == SessionAgent::Claude && !durable_thread {
             let ws = ws.clone();
             let pid = pid.clone();
             items.push(MenuItemSpec::new(t!("claudeChat.title").to_string(), move |_, cx| {
@@ -427,22 +434,20 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
     }
     let is_env = project.is_environment();
     let mut items = if is_env { Vec::new() } else { new_session_items(ws, &project.id, None, cx) };
-    if project.environment_context.is_none() && project.worktree.is_none() {
-        let roots: Vec<_> = match &project.multi {
-            Some(multi) => multi.repos.iter().map(|m| m.dir.clone()).collect(),
-            None => project.working_dir.clone().into_iter().collect(),
+    let directory = project.working_dir.as_ref().filter(|dir| !dir.trim().is_empty());
+    if !is_env && !project.is_thread() && project.worktree.is_none()
+        && (directory.is_some() || project.multi.as_ref().is_some_and(|multi| !multi.repos.is_empty()))
+        && (project.project_type == falcon_proto::ProjectType::Local || project.host_id.is_some())
+    {
+        let ws = ws.clone();
+        let mut preset = match &project.host_id {
+            Some(host) => dialogs::project_form::Preset::ssh(Some(host.clone()), true),
+            None => dialogs::project_form::Preset::local(true),
         };
-        if !roots.is_empty() && (project.project_type == falcon_proto::ProjectType::Local || project.host_id.is_some()) {
-            let ws = ws.clone();
-            let mut preset = match &project.host_id {
-                Some(host) => dialogs::project_form::Preset::ssh(Some(host.clone()), true),
-                None => dialogs::project_form::Preset::local(true),
-            };
-            preset.initial_repos = roots;
-            items.push(MenuItemSpec::new(t!("env.fromProject").to_string(), move |window, cx| {
-                dialogs::project_form::open(&ws, None, preset.clone(), window, cx)
-            }));
-        }
+        preset.initial_dir = directory.cloned();
+        items.push(MenuItemSpec::new(t!("env.fromProject").to_string(), move |window, cx| {
+            dialogs::project_form::open(&ws, None, preset.clone(), window, cx)
+        }));
     }
     // 去别处看：px0 审阅、外部编辑器，一组
     let dashboard = format!("{}/browser-dashboard", w.client.base_url().trim_end_matches('/'));
@@ -487,7 +492,7 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
         );
     }
     // 附属项目不能再派生：树永远只有两级，删除级联也就不必递归
-    if project.worktree.is_none() {
+    if project.worktree.is_none() && !project.is_thread() {
         {
             let ws = ws.clone();
             let pid = project.id.clone();
@@ -519,7 +524,7 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
                 .checked(w.state.show_archived),
             );
         }
-    } else if project.environment_context.is_none() {
+    } else if project.worktree.is_some() && !project.is_thread() {
         let ws = ws.clone();
         let p = project.clone();
         items.push(
@@ -891,8 +896,7 @@ pub fn host_menu_items(ws: &Entity<Workspace>, host: &SshHost) -> Vec<MenuItemSp
         MenuItemSpec::new(t!("host.addProject").to_string(), move |window, cx| {
             dialogs::project_form::open(&ws1, None, Preset::ssh(Some(h1.clone()), false), window, cx)
         }),
-        // 多仓库项目的成员必须同宿主机，所以入口挂在主机上：位置随主机定死
-        MenuItemSpec::new(t!("multi.newProject").to_string(), move |window, cx| {
+        MenuItemSpec::new(t!("env.create").to_string(), move |window, cx| {
             dialogs::project_form::open(&ws2, None, Preset::ssh(Some(h2.clone()), true), window, cx)
         }),
         MenuItemSpec::new(t!("host.edit").to_string(), move |window, cx| {
@@ -928,10 +932,9 @@ pub fn server_menu_items(ws: &Entity<Workspace>, local: bool) -> Vec<MenuItemSpe
         let preset = if local { Preset::local(false) } else { Preset::ssh(None, false) };
         dialogs::project_form::open(&ws1, None, preset, window, cx)
     })];
-    // legacy（未绑定主机的存量 SSH）不给：多仓库 v1 不支持手写 ssh 字段
     if local {
         let ws2 = ws.clone();
-        items.push(MenuItemSpec::new(t!("multi.newProject").to_string(), move |window, cx| {
+        items.push(MenuItemSpec::new(t!("env.create").to_string(), move |window, cx| {
             dialogs::project_form::open(&ws2, None, Preset::local(true), window, cx)
         }));
     }

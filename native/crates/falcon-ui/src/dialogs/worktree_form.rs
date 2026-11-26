@@ -53,8 +53,11 @@ pub fn open(ws: &Entity<Workspace>, source_project_id: &str, preset: Preset, win
     let Some(project) = ws.read(cx).project(source_project_id).cloned() else {
         return;
     };
-    if project.environment_context.is_some() {
-        if project.worktree.is_none() { open_thread(ws, source_project_id, window, cx); }
+    if project.is_environment() {
+        open_thread(ws, source_project_id, window, cx);
+        return;
+    }
+    if project.is_thread() {
         return;
     }
     // 多仓库容器走批量派生表单；单仓库路径对应 React 版的 SingleWorktreeForm
@@ -106,7 +109,8 @@ impl ThreadForm {
         if self.busy || name.is_empty() { return; }
         self.busy = true;
         self.error = None;
-        let request = self.ws.read(cx).client.create_thread(&env, &name, &self.task.read(cx).value());
+        let task = self.task.read(cx).value().trim().to_owned();
+        let request = self.ws.read(cx).client.create_thread(&env, &name, &task);
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
@@ -120,6 +124,10 @@ impl ThreadForm {
                             w.refresh_inventory(cx);
                         });
                         window.close_dialog(cx);
+                        if thread.thread_environment_id.is_some() {
+                            let prompt = (!task.is_empty()).then_some(task.as_str());
+                            crate::dialogs::claude::open_with_prompt(&this.ws, &thread.id, prompt, cx);
+                        }
                     }
                     Err(err) => {
                         this.ws.update(cx, |w, cx| w.handle_error(&err, cx));

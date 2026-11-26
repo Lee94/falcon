@@ -356,7 +356,7 @@ fn outgoing_value(mut value: Value, node_id: &str, state: &AppState) -> anyhow::
                 for (key, value) in object {
                     if matches!(
                         key.as_str(),
-                        "projectId" | "sourceProjectId" | "sessionId" | "target"
+                        "projectId" | "sourceProjectId" | "threadEnvironmentId" | "sessionId" | "target"
                     ) {
                         if let Some(id) = value.as_str() {
                             *value = json!(outgoing_id(state, node_id, id)?);
@@ -731,7 +731,7 @@ async fn canonical_request(state: &AppState, request: &mut Request) -> anyhow::R
                     }
                     Value::Object(object) => {
                         for (key, value) in object {
-                            if matches!(key.as_str(), "projectId" | "sourceProjectId") {
+                            if matches!(key.as_str(), "projectId" | "sourceProjectId" | "threadEnvironmentId") {
                                 if let Some(id) = value.as_str() {
                                     if state.db.get_project(id).is_none() {
                                         if let Some(local) = state.db.local_project_id(id)? {
@@ -873,7 +873,7 @@ async fn destination(
     if remote.is_none()
         && matches!(
             path,
-            "/api/projects" | "/api/environments" | "/api/agents" | "/api/shells" | "/api/fs/list"
+            "/api/projects" | "/api/environments" | "/api/environments/branches" | "/api/agents" | "/api/shells" | "/api/fs/list"
         )
     {
         let host = payload
@@ -902,7 +902,7 @@ async fn destination(
     }
     pairs.retain(|(key, _)| key != "hostId");
     // fs/shells 的宿主探查在 B 上就是本机，不需要再按 SSH 项目解析。
-    if matches!(path, "/api/fs/list" | "/api/shells") {
+    if matches!(path, "/api/fs/list" | "/api/shells" | "/api/environments/branches") {
         pairs.retain(|(key, _)| key != "projectId");
     }
     let original: Vec<&str> = uri.path().split('/').collect();
@@ -1364,17 +1364,22 @@ mod tests {
         let (addr, task) = serve(&b).await;
         attach(&a, &b, addr, "a-b");
         attach(&c, &b, addr, "c-b");
-        let (code, env) = json_of(a.post_json("/api/environments", json!({"type":"ssh","hostId":"a-b","name":"dev","repos":[repo],"environmentContext":"ctx"})).await).await;
+        let path = crate::api::encode_uri_component(repo.to_str().unwrap());
+        let (code, branches) = json_of(a.get(&format!("/api/environments/branches?hostId=a-b&path={path}")).await).await;
+        assert_eq!(code, StatusCode::OK, "{branches}");
+        assert!(branches.as_array().unwrap().iter().any(|branch| branch["head"] == true));
+        let (code, env) = json_of(a.post_json("/api/environments", json!({"type":"ssh","hostId":"a-b","name":"dev","workingDir":repo,"environmentContext":"ctx"})).await).await;
         assert_eq!(code, StatusCode::OK, "{env}");
         let id = env["id"].as_str().unwrap();
         let (code, thread) = json_of(c.post_json(&format!("/api/projects/{id}/threads"), json!({"name":"task"})).await).await;
         assert_eq!(code, StatusCode::OK, "{thread}");
-        assert_eq!(thread["worktree"]["sourceProjectId"], id);
+        assert_eq!(thread["threadEnvironmentId"], id);
+        assert!(thread.get("worktree").is_none());
         assert_eq!(thread["hostId"], "c-b");
         assert!(a.state.db.list_projects().is_empty());
         assert!(c.state.db.list_projects().is_empty());
         assert_eq!(b.state.db.list_projects().len(), 2);
-        assert!(std::path::Path::new(thread["workingDir"].as_str().unwrap()).starts_with(&b.data_dir));
+        assert_eq!(thread["workingDir"], env["workingDir"]);
         let (_, list) = json_of(a.get("/api/projects").await).await;
         assert!(list.as_array().unwrap().iter().any(|p| p["id"] == thread["id"] && p["hostId"] == "a-b"));
         task.abort();

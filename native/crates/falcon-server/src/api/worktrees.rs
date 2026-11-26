@@ -100,6 +100,7 @@ pub(super) fn derived_row(src: &ProjectRow, name: String, working_dir: String, b
         worktree_archived_at: None,
         multi_repos: None,
         environment_context: None,
+        thread_environment_id: None,
         default_worktree_branch: None,
     }
 }
@@ -108,7 +109,9 @@ pub(super) fn derived_row(src: &ProjectRow, name: String, working_dir: String, b
 async fn derive(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Project>> {
     let src = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
 
-    if src.environment_context.is_some() { return Err(ApiError::conflict("请从环境创建线程")); }
+    if src.environment_context.is_some() || src.thread_environment_id.is_some() {
+        return Err(ApiError::conflict("请从环境创建线程"));
+    }
     // 禁止二级派生。git 本身允许（从 linked worktree 建的 worktree 仍属同一仓库），
     // 但删除级联要递归，而收益是零——从源项目派生完全等价。多仓库派生在侧栏
     // 与源项目同级，仍带 source_project_id，这里同样挡住。将来若要放开：把 source

@@ -1,11 +1,11 @@
-//! 桌面端独立会话窗口。窗口持有连接；同一窗口内的各轮共享 Claude 上下文。
+//! 桌面端 Claude 对话窗口。线程历史由宿主机回放。
 use falcon_client::{ClaudeSocket, FalconClient};
 use falcon_proto::claude::{ClaudeEvent, ClaudeInput};
 use futures::StreamExt as _;
 use gpui_kit::component::{
     Disableable,
     button::{Button, ButtonVariants},
-    input::{Input, InputEvent, InputState},
+    input::{InputEvent, Textarea, TextareaState},
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -17,6 +17,15 @@ use rust_i18n::t;
 use crate::{theme::Ui, workspace::Workspace, zoom::zpx};
 
 pub fn open(ws: &Entity<Workspace>, project: &str, cx: &mut App) {
+    open_with_prompt(ws, project, None, cx);
+}
+
+pub fn open_with_prompt(
+    ws: &Entity<Workspace>,
+    project: &str,
+    initial: Option<&str>,
+    cx: &mut App,
+) {
     let owner = ws.read(cx);
     let name = owner
         .owner_project(project)
@@ -37,7 +46,7 @@ pub fn open(ws: &Entity<Workspace>, project: &str, cx: &mut App) {
         ..Default::default()
     };
     if let Err(err) = cx.open_window(options, |window, cx| {
-        let view = cx.new(|cx| Chat::new(client, project, window, cx));
+        let view = cx.new(|cx| Chat::new(client, project, initial, window, cx));
         cx.new(|cx| crate::window_background::mount_root(view, window, cx))
     }) {
         ws.update(cx, |w, cx| {
@@ -53,11 +62,12 @@ pub fn open(ws: &Entity<Workspace>, project: &str, cx: &mut App) {
 
 struct Chat {
     socket: ClaudeSocket,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     history: Vec<(Option<String>, SharedString)>,
     draft: String,
     permissions: Vec<(String, String, String)>,
     ready: bool,
+    durable: bool,
     busy: bool,
     closed: bool,
     scroll: ScrollHandle,
@@ -69,28 +79,46 @@ impl Chat {
     fn new(
         client: FalconClient,
         project: &str,
+        initial: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let (socket, mut events) = ClaudeSocket::open(&client, project);
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(t!("claudeChat.placeholder").to_string())
+            TextareaState::new(window, cx)
+                .auto_grow(1, 4)
+                .submit_on_enter(true)
+                .placeholder(t!("claudeChat.placeholder").to_string())
         });
         input.update(cx, |i, cx| i.focus(window, cx));
         let enter = cx.subscribe_in(
             &input,
             window,
             |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     this.submit(window, cx);
                 }
             },
         );
-        let task = cx.spawn(async move |this, cx| {
+        let mut initial = initial
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned);
+        let task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
-                    .update(cx, |this, cx| {
-                        this.event(event);
+                    .update_in(cx, |this, window, cx| {
+                        if matches!(event, ClaudeEvent::Ready) {
+                            if let Some(initial) = initial.take() {
+                                if this.durable
+                                    && this.history.is_empty()
+                                    && this.input.read(cx).value().is_empty()
+                                {
+                                    this.input
+                                        .update(cx, |i, cx| i.set_value(initial, window, cx));
+                                }
+                            }
+                        }
+                        this.event(event, window, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -106,6 +134,7 @@ impl Chat {
             permissions: Vec::new(),
             draft: String::new(),
             ready: false,
+            durable: false,
             busy: false,
             closed: false,
             scroll: ScrollHandle::new(),
@@ -120,17 +149,31 @@ impl Chat {
             return;
         }
         if self.socket.send(ClaudeInput::Prompt { text: text.clone() }) {
-            self.history
-                .push((Some(t!("claudeChat.you").to_string()), text.into()));
-            self.input.update(cx, |i, cx| i.set_value("", window, cx));
+            if !self.durable {
+                self.push_user(text);
+                self.input.update(cx, |i, cx| i.set_value("", window, cx));
+            }
             self.busy = true;
             self.scroll.scroll_to_bottom();
             cx.notify();
         }
     }
 
-    fn event(&mut self, event: ClaudeEvent) {
+    fn push_user(&mut self, text: String) {
+        self.history
+            .push((Some(t!("claudeChat.you").to_string()), text.into()));
+    }
+
+    fn event(&mut self, event: ClaudeEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            ClaudeEvent::ThreadHistory => self.durable = true,
+            ClaudeEvent::User { text } => {
+                // 用户可能已在写下一条草稿，回显只清除刚刚发送的内容。
+                if self.ready && self.input.read(cx).value().as_ref() == text {
+                    self.input.update(cx, |i, cx| i.set_value("", window, cx));
+                }
+                self.push_user(text);
+            }
             ClaudeEvent::Ready => self.ready = true,
             ClaudeEvent::Delta { text } => self.draft.push_str(&text),
             ClaudeEvent::Assistant { text, tools } => {
@@ -282,7 +325,7 @@ impl Render for Chat {
                 .flex()
                 .gap_2()
                 .items_center()
-                .child(div().flex_1().child(Input::new(&self.input)))
+                .child(div().flex_1().child(Textarea::new(&self.input)))
                 .child(
                     Button::new("send")
                         .primary()

@@ -3,6 +3,7 @@ package com.falcon.android.net
 import com.falcon.android.bridge.FalconNative
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.JsonParsers
+import com.falcon.android.model.RepoBranch
 import com.falcon.android.model.ServerProfile
 import com.falcon.android.model.ServerRoute
 import com.falcon.android.model.SessionUi
@@ -112,13 +113,15 @@ object FalconApiClient {
         return "HTTP $statusCode"
     }
 
+    internal class HttpStatusException(val status: Int, message: String) : RuntimeException(message)
+
     private fun getRaw(baseUrl: String, path: String): String {
         val url = "${normalizeBaseUrl(baseUrl)}$path"
         val req = Request.Builder().url(url).get().build()
         clientFor(baseUrl).newCall(req).execute().use { resp ->
             val bodyStr = resp.body?.string() ?: ""
             if (!resp.isSuccessful) {
-                throw RuntimeException(extractErrorMessage(bodyStr, resp.code))
+                throw HttpStatusException(resp.code, extractErrorMessage(bodyStr, resp.code))
             }
             return bodyStr
         }
@@ -188,7 +191,7 @@ object FalconApiClient {
             // 列表请求会触发节点探测，因此随后读取状态。旧服务端没有 /api/nodes 时仍可使用列表。
             val nodes = fetchNodeStatus(baseUrl).getOrDefault(emptyList())
             val enrichedJson = FalconNative.buildDashboardView(projectsJson, sessionsJson, hostsJson)
-            JsonParsers.parseDashboard(enrichedJson).withNodeStatuses(nodes)
+            JsonParsers.parseDashboard(enrichedJson, projectsJson).withNodeStatuses(nodes)
         }
     }
 
@@ -206,9 +209,36 @@ object FalconApiClient {
             }
         }
 
-    suspend fun saveEnvironment(baseUrl: String, hostId: String?, id: String?, name: String, context: String, repos: List<String>): Result<Unit> {
+    suspend fun fetchEnvironmentBranches(baseUrl: String, hostId: String?, path: String): Result<List<RepoBranch>?> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val query = "?path=${URLEncoder.encode(path, "UTF-8")}" +
+                    (hostId?.let { "&hostId=${URLEncoder.encode(it, "UTF-8")}" } ?: "")
+                val raw = getRaw(baseUrl, "/api/environments/branches$query").trim()
+                if (raw == "null") return@runCatching null
+                val branches = JSONArray(raw)
+                List(branches.length()) { i ->
+                    val branch = branches.getJSONObject(i)
+                    RepoBranch(branch.getString("name"), branch.getBoolean("head"))
+                }
+            }
+        }
+
+    suspend fun saveEnvironment(
+        baseUrl: String,
+        hostId: String?,
+        id: String?,
+        name: String,
+        context: String,
+        workingDir: String? = null,
+        defaultWorktreeBranch: String? = null,
+        legacyRepos: List<String>? = null
+    ): Result<Unit> {
         val payload = JSONObject().put("name", name).put("environmentContext", context)
-            .put("repos", JSONArray(repos)).put("type", if (hostId == null) "local" else "ssh")
+            .put("type", if (hostId == null) "local" else "ssh")
+        if (workingDir != null) payload.put("workingDir", workingDir)
+        if (defaultWorktreeBranch != null) payload.put("defaultWorktreeBranch", defaultWorktreeBranch)
+        if (legacyRepos != null) payload.put("repos", JSONArray(legacyRepos))
         if (hostId != null) payload.put("hostId", hostId)
         val path = id?.let { "/api/projects/${URLEncoder.encode(it, "UTF-8")}" } ?: "/api/environments"
         return saveWorkspace(baseUrl, path, payload, id != null)

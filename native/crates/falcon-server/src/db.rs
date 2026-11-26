@@ -58,6 +58,7 @@ pub struct ProjectRow {
     /// 附属项目恒为 None（不能再派生）。
     pub default_worktree_branch: Option<String>,
     pub environment_context: Option<String>,
+    pub thread_environment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -202,6 +203,7 @@ fn project_from_row(r: &Row) -> rusqlite::Result<ProjectRow> {
         worktree_archived_at: r.get("worktree_archived_at")?,
         multi_repos: r.get("multi_repos")?,
         environment_context: r.get("environment_context")?,
+        thread_environment_id: r.get("thread_environment_id")?,
         default_worktree_branch: r.get("default_worktree_branch")?,
     })
 }
@@ -468,6 +470,7 @@ impl Db {
             // 侧栏的拖拽排序（全局一条，侧栏按服务器分组时保留相对顺序）。空 = 没排过，按创建时间
             // 排在排过的后面——新建的项目自然落在末尾；挪一次就把所有行重编成 0..n
             add_column(&conn, "projects", "environment_context", "TEXT")?;
+            add_column(&conn, "projects", "thread_environment_id", "TEXT")?;
             add_column(&conn, "projects", "sort_order", "INTEGER")?;
             // 宿主机跨端同步（host-projects.json）：updated_at 记最近一次变更时刻，remote_id 记该项目在宿主机上的固定 id
             add_column(&conn, "projects", "updated_at", "INTEGER")?;
@@ -793,6 +796,7 @@ impl Db {
             }),
             multi: members.map(|repos| MultiRepoInfo { repos }),
             environment_context: row.environment_context.clone(),
+            thread_environment_id: row.thread_environment_id.clone(),
             default_worktree_branch: row.default_worktree_branch.clone(),
             created_at: row.created_at,
         }
@@ -855,9 +859,9 @@ impl Db {
     pub(crate) fn try_insert_project(&self, row: &ProjectRow, remote_id: &str, updated_at: i64) -> rusqlite::Result<()> {
         self.lock().execute(
             "INSERT INTO projects (id, name, type, working_dir, shell, ssh_host, ssh_port, ssh_username, ssh_auth_method, ssh_key_path, ssh_secret_enc, host_id, created_at,
-               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, environment_context, default_worktree_branch, updated_at, remote_id)
+               source_project_id, worktree_branch, worktree_repo_dir, worktree_created_by_mojito, worktree_archived_at, multi_repos, environment_context, thread_environment_id, default_worktree_branch, updated_at, remote_id)
              VALUES (:id, :name, :type, :working_dir, :shell, :ssh_host, :ssh_port, :ssh_username, :ssh_auth_method, :ssh_key_path, :ssh_secret_enc, :host_id, :created_at,
-               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :environment_context, :default_worktree_branch, :updated_at, :remote_id)",
+               :source_project_id, :worktree_branch, :worktree_repo_dir, :worktree_created_by_mojito, :worktree_archived_at, :multi_repos, :environment_context, :thread_environment_id, :default_worktree_branch, :updated_at, :remote_id)",
             named_params! {
                 ":id": row.id, ":name": row.name, ":type": row.project_type, ":working_dir": row.working_dir,
                 ":shell": row.shell, ":ssh_host": row.ssh_host, ":ssh_port": row.ssh_port,
@@ -869,6 +873,7 @@ impl Db {
                 ":worktree_created_by_mojito": row.worktree_created_by_mojito,
                 ":worktree_archived_at": row.worktree_archived_at, ":multi_repos": row.multi_repos,
                 ":default_worktree_branch": row.default_worktree_branch, ":environment_context": row.environment_context,
+                ":thread_environment_id": row.thread_environment_id,
                 ":updated_at": updated_at, ":remote_id": remote_id,
             },
         ).map(|_| ())

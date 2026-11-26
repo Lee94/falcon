@@ -176,6 +176,9 @@ pub struct Project {
     /// 环境的上下文或线程创建时的上下文快照。旧项目省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_context: Option<String>,
+    /// 新线程所属的执行环境。旧线程仍以 worktree.sourceProjectId 关联。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_environment_id: Option<String>,
     /// unix 毫秒
     pub created_at: i64,
 }
@@ -186,11 +189,11 @@ impl Project {
     }
 
     pub fn is_thread(&self) -> bool {
-        self.environment_context.is_some() && self.worktree.is_some()
+        self.thread_environment_id.is_some() || (self.environment_context.is_some() && self.worktree.is_some())
     }
 }
 
-/// POST /api/projects/{环境 ID}/threads。工作树路径与分支由所属节点生成。
+/// POST /api/projects/{环境 ID}/threads。任务说明由客户端用作初始草稿。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ThreadInput {
     pub name: String,

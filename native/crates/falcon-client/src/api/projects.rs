@@ -4,12 +4,12 @@ use std::future::Future;
 
 use falcon_proto::{
     DeleteProjectResult, HostInstallStatus, MultiRepoProbe, MultiWorktreeInput, OkResponse, Project,
-    ProjectInput, RepoInfo, WorktreeInput, WorktreeStatus,
+    ProjectInput, RepoBranch, RepoInfo, WorktreeInput, WorktreeStatus,
 };
 use reqwest::Method;
 use serde::Serialize;
 
-use super::seg;
+use super::{Query, seg, system::ProbeTarget};
 use crate::client::{FalconClient, json_body};
 use crate::error::ApiResult;
 use crate::runtime::MaybeSend;
@@ -56,6 +56,13 @@ pub struct MoveProjectInput {
 impl FalconClient {
     pub fn list_projects(&self) -> impl Future<Output = ApiResult<Vec<Project>>> + MaybeSend + 'static {
         self.get("/api/projects".to_owned())
+    }
+
+    pub fn environment_branches(
+        &self, target: &ProbeTarget, path: &str,
+    ) -> impl Future<Output = ApiResult<Option<Vec<RepoBranch>>>> + MaybeSend + 'static {
+        let query = target.query(Query::new().push("path", path)).finish();
+        self.get(format!("/api/environments/branches{query}"))
     }
 
     pub fn create_thread(&self, env: &str, name: &str, task: &str) -> impl Future<Output = ApiResult<Project>> + MaybeSend + 'static {

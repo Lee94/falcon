@@ -103,8 +103,23 @@ pub fn head_branch_args(git: &str, dir: &str) -> Vec<String> {
     at(git, dir, &["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
-pub fn head_commit_args(git: &str, dir: &str) -> Vec<String> {
-    at(git, dir, &["rev-parse", "--verify", "HEAD^{commit}"])
+pub fn environment_refs_args(git: &str, dir: &str) -> Vec<String> {
+    at(git, dir, &[
+        "for-each-ref", "--format=%(refname)%09%(HEAD)%09%(symref)", "refs/heads", "refs/remotes",
+    ])
+}
+
+pub fn environment_clone_args(git: &str, source: &str, dir: &str) -> Vec<String> {
+    [git, "clone", "--no-checkout", "--no-hardlinks", "--", source, dir]
+        .map(str::to_owned).into()
+}
+
+pub fn environment_fetch_args(git: &str, dir: &str, source: &str, base_ref: &str) -> Vec<String> {
+    at(git, dir, &["fetch", "--no-tags", "--", source, base_ref])
+}
+
+pub fn environment_checkout_args(git: &str, dir: &str, branch: &str) -> Vec<String> {
+    at(git, dir, &["switch", "-C", branch, "FETCH_HEAD"])
 }
 
 pub fn head_short_sha_args(git: &str, dir: &str) -> Vec<String> {

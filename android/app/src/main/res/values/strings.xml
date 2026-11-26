@@ -3,4 +3,10 @@
     <string name="app_name">Falcon</string>
     <string name="ssh_host_connecting">连接中…</string>
     <string name="ssh_host_offline">离线</string>
+    <string name="environment_working_directory">工作目录绝对路径</string>
+    <string name="environment_checking_directory">正在检查工作目录…</string>
+    <string name="environment_retry_directory_check">重试检查</string>
+    <string name="environment_base_branch">基础分支：%1$s</string>
+    <string name="environment_base_default">使用所选目录</string>
+    <string name="environment_current_branch">%1$s（当前分支）</string>
 </resources>

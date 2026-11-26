@@ -153,6 +153,7 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Vec<SessionWithPr
 }
 
 async fn create(State(state): State<AppState>, Path(id): Path<String>, body: LenientJson) -> ApiResult<Json<Session>> {
+    let guard = state.nodes.lock(&format!("environment:{id}")).lock_owned().await;
     let project = resolve_session_owner(&state.db, &id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
     if project.environment_context.is_some() && project.source_project_id.is_none() { return Err(ApiError::conflict("请选择线程后再创建终端")); }
     // 存档的项目到期会连目录一起删掉，不能再往里开终端
@@ -170,7 +171,10 @@ async fn create(State(state): State<AppState>, Path(id): Path<String>, body: Len
     let hint = sanitize_color_hint(&body.0);
     let res = state
         .engine
-        .call(move |engine| async move { engine.sessions.create_session(&project, name, hint, agent).await })
+        .call(move |engine| async move {
+            let _guard = guard;
+            engine.sessions.create_session(&project, name, hint, agent).await
+        })
         .await?;
     res.map(Json).map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("创建会话失败：{e}")))
 }

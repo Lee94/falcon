@@ -296,8 +296,21 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 run: run(move |_, cx| w.update(cx, |w, cx| w.new_terminal(&pid, None, None, cx))),
             });
         }
+        let durable_thread = p.thread_environment_id.is_some();
+        if durable_thread {
+            let (w, pid) = (ws_entity.clone(), p.id.clone());
+            let action = t!("env.openThread");
+            project_items.push(PickItem {
+                key: format!("#{} {action}", p.name),
+                label: format!("{action} · {}", p.name),
+                meta: Some(host.clone()),
+                icon: crate::session_icon::session_icon(Some(falcon_proto::SessionAgent::Claude)),
+                tone: None,
+                run: run(move |_, cx| crate::dialogs::claude::open(&w, &pid, cx)),
+            });
+        }
         for agent in ws.session_agents(&p.id) {
-            if *agent == falcon_proto::SessionAgent::Claude {
+            if *agent == falcon_proto::SessionAgent::Claude && !durable_thread {
                 let (w, pid) = (ws_entity.clone(), p.id.clone());
                 let label = t!("claudeChat.title").to_string();
                 project_items.push(PickItem {
@@ -335,8 +348,8 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
     {
         let w = ws_entity.clone();
         project_items.push(PickItem {
-            key: format!("#{}", t!("palette.newProject")),
-            label: t!("palette.newProject").to_string(),
+            key: format!("#{}", t!("env.create")),
+            label: t!("env.create").to_string(),
             meta: None,
             icon: icon(IconName::Plus),
             tone: None,

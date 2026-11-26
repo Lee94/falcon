@@ -177,7 +177,7 @@ fn set_menus(cx: &mut App) {
                 MenuItem::action(t!("sidebar.newTerminal").to_string(), NewTerminal),
                 MenuItem::action(t!("tab.newToRight").to_string(), SplitRight),
                 MenuItem::action(t!("tab.newBelow").to_string(), SplitDown),
-                MenuItem::action(t!("sidebar.newProject").to_string(), NewProject),
+                MenuItem::action(t!("env.create").to_string(), NewProject),
                 MenuItem::separator(),
                 MenuItem::action(t!("native.menu.closeTab").to_string(), CloseTab),
                 MenuItem::action(t!("native.menu.detachTab").to_string(), DetachTab),

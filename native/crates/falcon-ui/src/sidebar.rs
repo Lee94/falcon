@@ -176,7 +176,9 @@ impl Sidebar {
     fn server_node(&self, mut server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
-        if !self.show_legacy { server.folders.retain(|f| f.project.environment_context.is_some()); }
+        if !self.show_legacy {
+            server.folders.retain(|f| f.project.is_environment() || f.project.is_thread());
+        }
         let unavailable = server.host.as_ref().and_then(|host| ws.node_status(&host.id)).filter(|node| !node.online);
         let expanded = unavailable.is_none() && !ws.state.collapsed.get(&server.key).copied().unwrap_or(false);
         let key = server.key.clone();
@@ -455,6 +457,7 @@ impl Sidebar {
         let pid_toggle = pid.clone();
         let pid_badge = pid.clone();
         let pid_select = pid.clone();
+        let durable_thread = project.thread_environment_id.is_some();
         let items = menus::project_menu_items(&self.ws, &project, cx);
         let new_items = menus::new_session_items(&self.ws, &project.id, None, cx);
         let badge = expandable.then(|| {
@@ -475,6 +478,8 @@ impl Sidebar {
                 expanded: expandable.then_some(sessions_open),
                 icon: if archived_at.is_some() {
                     IconName::Archive
+                } else if durable_thread {
+                    IconName::MessageCircle
                 } else if is_multi {
                     IconName::Folders
                 } else {
@@ -490,7 +495,12 @@ impl Sidebar {
                     Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
                 }),
                 on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
-                    Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
+                    Box::new(move |_, cx| {
+                        ws3.update(cx, |w, cx| w.select_project(&pid_select, cx));
+                        if durable_thread {
+                            crate::dialogs::claude::open(&ws3, &pid_select, cx);
+                        }
+                    })
                 }),
                 menu: Some(items.clone()),
                 context: Some(items),
@@ -559,7 +569,14 @@ impl Sidebar {
             .iter()
             .any(|s| s.program_status.as_ref().is_some_and(|p| p.state == falcon_proto::ProgramState::Blocked));
 
-        let icon_name = if archived_at.is_some() { IconName::Archive } else { IconName::GitBranch };
+        let durable_thread = project.thread_environment_id.is_some();
+        let icon_name = if archived_at.is_some() {
+            IconName::Archive
+        } else if durable_thread {
+            IconName::MessageCircle
+        } else {
+            IconName::GitBranch
+        };
         let pid = project.id.clone();
         let (ws1, ws2, ws3) = (self.ws.clone(), self.ws.clone(), self.ws.clone());
         let pid_toggle = pid.clone();
@@ -593,7 +610,12 @@ impl Sidebar {
                 Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
             }),
             on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
-                Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
+                Box::new(move |_, cx| {
+                    ws3.update(cx, |w, cx| w.select_project(&pid_select, cx));
+                    if durable_thread {
+                        crate::dialogs::claude::open(&ws3, &pid_select, cx);
+                    }
+                })
             }),
             menu: None,
             context: Some(ctx_items),

@@ -432,7 +432,7 @@ impl SessionOverview {
                 div().mt(zpx(6.)).child(
                     Button::new("overview-new-project")
                         .primary()
-                        .label(t!("sidebar.newProject").to_string())
+                        .label(t!("env.create").to_string())
                         .on_click(move |_, window, cx| {
                             crate::dialogs::project_form::open(&ws, None, Default::default(), window, cx)
                         }),

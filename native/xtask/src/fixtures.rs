@@ -195,7 +195,7 @@ fn capture_threads(api: &Api, out: &mut Out, data: &Path) -> Result<()> {
     util::run("git", ["init", "-q", "-b", "main"], Some(&repo))?;
     util::run("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
         "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "init"], Some(&repo))?;
-    let env = api.call("POST", "/api/environments", json!({"name":"sample", "type":"local", "repos":[repo], "environmentContext":"test"}))?;
+    let env = api.call("POST", "/api/environments", json!({"name":"sample", "type":"local", "workingDir":repo, "environmentContext":"test"}))?;
     out.save("environment-create", &env)?;
     let thread = api.call("POST", &format!("/api/projects/{}/threads", id(&env)?), json!({"name":"sample task"}))?;
     out.save("thread-create", &thread)

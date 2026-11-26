@@ -70,7 +70,7 @@ pub struct FolderGroup {
 ///
 /// 旧多仓库派生行与源项目同级；线程始终挂在所属环境下。
 fn is_sidebar_folder(p: &Project) -> bool {
-    p.worktree.is_none() || (p.multi.is_some() && p.environment_context.is_none())
+    !p.is_thread() && (p.worktree.is_none() || p.multi.is_some())
 }
 
 pub fn folder_key(project_id: &str) -> String {
@@ -82,7 +82,7 @@ pub fn folder_key(project_id: &str) -> String {
 /// 多仓库容器没有单一 HEAD，返回空串。侧栏不再给多仓库项目画检出行。
 /// `??` 语义照抄：探到的分支名是空串也原样用，不往下落。派生行（含多仓库派生）用分支名。
 pub fn checkout_label(project: &Project, head: Option<&ProjectHead>) -> String {
-    if project.environment_context.is_some() { return project.name.clone(); }
+    if project.is_environment() || project.is_thread() { return project.name.clone(); }
     if let Some(wt) = &project.worktree {
         return wt.branch.clone();
     }
@@ -120,7 +120,9 @@ pub fn group_servers(projects: &[Project], hosts: &[SshHost], local_name: &str, 
             continue;
         }
         // sourceProjectId 为空串的附属项目在 TS 里既不是源、也不挂在谁下面，整个不出现
-        let Some(src) = p.worktree.as_ref().map(|w| w.source_project_id.as_str()).filter(|s| !s.is_empty()) else {
+        let Some(src) = p.thread_environment_id.as_deref()
+            .or_else(|| p.worktree.as_ref().map(|w| w.source_project_id.as_str()))
+            .filter(|s| !s.is_empty()) else {
             continue;
         };
         if source_ids.contains(src) {

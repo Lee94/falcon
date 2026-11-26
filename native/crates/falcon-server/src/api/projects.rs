@@ -8,7 +8,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
-use falcon_proto::{DeleteProjectResult, MultiRepoMember, Project};
+use falcon_proto::{DeleteProjectResult, MultiRepoMember, Project, RepoBranch, WorktreeFailure};
 use serde_json::Value;
 
 use super::AppState;
@@ -21,12 +21,18 @@ use crate::auth::now_ms;
 use crate::db::{Db, ProjectRow, SshHostRow};
 use crate::git::command::parse_default_worktree_branch;
 use crate::git::multi::validate_member_list;
-use crate::git::path::is_absolute;
+use crate::git::{
+    command::{self, GIT_ENV, GIT_ENV_RO},
+    host::GitHost,
+    path::{canon_key, is_absolute},
+    repo::{RunOpts, TIMEOUT_ADD, repo_root, run_git},
+};
 use crate::sessions::local::local_kind;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/environments", axum::routing::post(create_environment))
+        .route("/api/environments/branches", get(environment_branches))
         .route("/api/projects", get(list).post(create))
         .route("/api/projects/{id}", axum::routing::put(update).delete(remove))
         .route("/api/projects/{id}/move", axum::routing::post(move_project))
@@ -197,6 +203,133 @@ async fn list(State(state): State<AppState>) -> Json<Vec<Project>> {
     Json(state.db.list_projects().iter().filter(|p| p.project_type == "local").map(Db::to_project).collect())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentBranchQuery {
+    path: String,
+    host_id: Option<String>,
+    project_id: Option<String>,
+}
+
+fn environment_directory(dir: &str) -> ApiResult<String> {
+    if !is_absolute(local_kind(), dir) {
+        return Err(ApiError::bad_request("环境工作目录必须是绝对路径"));
+    }
+    dunce::canonicalize(dir).ok().filter(|path| path.is_dir())
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .ok_or_else(|| ApiError::bad_request("环境工作目录不存在或不可访问"))
+}
+
+fn git_error(error: crate::git::error::WorktreeError) -> ApiError {
+    ApiError::conflict(error.detail.unwrap_or(error.message))
+}
+
+async fn environment_refs(host: &GitHost, root: &str) -> ApiResult<Vec<(String, RepoBranch)>> {
+    let output = run_git(host, &command::environment_refs_args(&host.git, root),
+        WorktreeFailure::BranchUnknown, GIT_ENV_RO, &RunOpts::default()).await.map_err(git_error)?;
+    let mut refs = Vec::new();
+    for line in output.stdout.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let (Some(reference), Some(head), Some("")) = (fields.next(), fields.next(), fields.next()) else { continue };
+        let (name, remote) = if let Some(name) = reference.strip_prefix("refs/heads/") {
+            (name, false)
+        } else if let Some(name) = reference.strip_prefix("refs/remotes/") {
+            (name, true)
+        } else { continue };
+        let local_name = remote.then(|| name.split_once('/').map(|(_, branch)| branch.to_owned())).flatten();
+        let name = if remote && refs.iter().any(|(_, branch): &(String, RepoBranch)| branch.name == name) {
+            reference
+        } else { name };
+        refs.push((reference.to_owned(), RepoBranch {
+            name: name.to_owned(), remote, local_name, checked_out_at: None, head: head == "*",
+            suggested_dir: String::new(), dir_occupied: false,
+        }));
+    }
+    Ok(refs)
+}
+
+async fn environment_branches(
+    State(state): State<AppState>, Query(query): Query<EnvironmentBranchQuery>,
+) -> ApiResult<Json<Option<Vec<RepoBranch>>>> {
+    if query.host_id.is_some() || query.project_id.as_deref().is_some_and(|id| {
+        state.db.get_project(id).is_none_or(|row| row.project_type != "local")
+    }) {
+        return Err(ApiError::bad_request("所选主机或项目不存在"));
+    }
+    let dir = environment_directory(&query.path)?;
+    state.engine.call(move |engine| async move {
+        let local = ProjectRow { project_type: "local".into(), ..Default::default() };
+        let host = match engine.git_host(&local).await {
+            Ok(host) => host,
+            Err(e) if e.reason == WorktreeFailure::GitMissing => return Ok(Json(None)),
+            Err(e) => return Err(git_error(e)),
+        };
+        let root = match repo_root(&host, &dir, &RunOpts::default()).await {
+            Ok(root) => root,
+            Err(e) if matches!(e.reason, WorktreeFailure::NotARepo | WorktreeFailure::GitMissing) => return Ok(Json(None)),
+            Err(e) => return Err(git_error(e)),
+        };
+        Ok(Json(Some(environment_refs(&host, &root).await?.into_iter().map(|(_, branch)| branch).collect())))
+    }).await?
+}
+
+async fn insert_environment(state: &AppState, mut row: ProjectRow) -> ApiResult<ProjectRow> {
+    let dir = environment_directory(row.working_dir.as_deref().unwrap_or_default())?;
+    let Some(base) = row.default_worktree_branch.clone() else {
+        row.working_dir = Some(dir);
+        state.db.try_insert_project(&row, &row.id, row.created_at).map_err(ApiError::internal)?;
+        return Ok(row);
+    };
+    let environments = state.config.data_dir.join("environments");
+    state.engine.call(move |engine| async move {
+        let host = engine.git_host(&row).await.map_err(git_error)?;
+        let opts = RunOpts::timeout(TIMEOUT_ADD);
+        let root = repo_root(&host, &dir, &opts).await.map_err(git_error)?;
+        let subdir = std::path::Path::new(&dir).strip_prefix(dunce::canonicalize(&root).map_err(ApiError::internal)?)
+            .map_err(ApiError::internal)?;
+        let (reference, branch) = environment_refs(&host, &root).await?.into_iter()
+            .find(|(_, branch)| branch.name == base)
+            .ok_or_else(|| ApiError::bad_request("所选 Git 分支不存在"))?;
+        let data_dir = dunce::canonicalize(engine.sessions.data_dir()).map_err(ApiError::internal)?;
+        let parent = match dunce::canonicalize(&environments) {
+            Ok(path) => path,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => data_dir.join("environments"),
+            Err(e) => return Err(ApiError::internal(e)),
+        };
+        let checkout = parent.join(&row.id);
+        let checkout_path = checkout.to_str().ok_or_else(|| ApiError::internal("环境目录路径无效"))?;
+        if std::path::Path::new(&canon_key(host.kind, checkout_path))
+            .starts_with(canon_key(host.kind, &root))
+        {
+            return Err(ApiError::conflict("环境检出目录不能位于源仓库内"));
+        }
+        std::fs::create_dir_all(&parent).map_err(ApiError::internal)?;
+        std::fs::create_dir(&checkout).map_err(ApiError::internal)?;
+        let result = async {
+            for args in [
+                command::environment_clone_args(&host.git, &root, checkout_path),
+                command::environment_fetch_args(&host.git, checkout_path, &root, &reference),
+                command::environment_checkout_args(&host.git, checkout_path, branch.local_name.as_deref().unwrap_or(&base)),
+            ] {
+                run_git(&host, &args, WorktreeFailure::WorktreeAddFailed, GIT_ENV, &opts).await.map_err(git_error)?;
+            }
+            let root = dunce::canonicalize(&checkout).map_err(ApiError::internal)?;
+            let cwd = dunce::canonicalize(checkout.join(subdir)).ok()
+                .filter(|path| path.is_dir() && path.starts_with(&root))
+                .ok_or_else(|| ApiError::bad_request("所选分支中没有该工作目录"))?;
+            row.working_dir = Some(cwd.to_string_lossy().into_owned());
+            engine.db.try_insert_project(&row, &row.id, row.created_at).map_err(ApiError::internal)
+        }.await;
+        if let Err(e) = result {
+            if let Err(cleanup) = std::fs::remove_dir_all(&checkout) {
+                log::warn!("清理未创建的环境目录 {} 失败：{cleanup}", checkout.display());
+            }
+            return Err(e);
+        }
+        Ok(row)
+    }).await?
+}
+
 async fn create_environment(state: State<AppState>, mut body: LenientJson) -> ApiResult<Json<Project>> {
     let object = body.0.as_object_mut().ok_or_else(|| ApiError::bad_request("环境参数无效"))?;
     object.entry("environmentContext").or_insert_with(|| Value::String(String::new()));
@@ -214,8 +347,8 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         // 网关只转发绑定到已保存主机的创建请求，不能把旧客户端的内联 SSH 项目落到入口库。
         return Err(ApiError::bad_request("请通过已保存的远端主机创建 SSH 项目"));
     }
-    if environment_context.is_some() {
-        repos = Some(super::threads::environment_repos(&state, repos).await?);
+    if environment_context.is_some() && let Some(dirs) = repos.take() {
+        repos = Some(super::threads::environment_repos(&state, dirs).await?);
     }
     let default_worktree_branch = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).unwrap_or(None);
 
@@ -240,7 +373,12 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         environment_context,
         ..Default::default()
     };
-    state.db.try_insert_project(&row, &row.id, row.created_at).map_err(ApiError::internal)?;
+    let row = if row.environment_context.is_some() && row.multi_repos.is_none() {
+        insert_environment(&state, row).await?
+    } else {
+        state.db.try_insert_project(&row, &row.id, row.created_at).map_err(ApiError::internal)?;
+        row
+    };
     sync_after_project_change(&state, &row.project_type, row.host_id.as_deref()).await;
     Ok(Json(Db::to_project(&row)))
 }
@@ -275,20 +413,29 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     if context.is_some() && (existing.environment_context.is_none() || existing.source_project_id.is_some()) {
         return Err(ApiError::bad_request("只有环境可以修改环境上下文"));
     }
-    if existing.environment_context.is_some() && repos.is_some() {
-        repos = Some(super::threads::environment_repos(&state, repos).await?);
+    if existing.environment_context.is_some() && let Some(dirs) = repos.take() {
+        repos = Some(super::threads::environment_repos(&state, dirs).await?);
     }
     let container = existing.multi_repos.is_some() && existing.source_project_id.is_none();
-    if let Some(err) = validate_project_input(input, container) {
+    let fixed_dir = existing.thread_environment_id.is_some()
+        || (existing.environment_context.is_some() && existing.source_project_id.is_none() && !container);
+    if fixed_dir && field(input, "workingDir").is_some() && trimmed_non_empty(input, "workingDir") != existing.working_dir {
+        return Err(ApiError::bad_request("环境和线程的工作目录不可修改"));
+    }
+    let base = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).map_err(ApiError::bad_request)?;
+    if fixed_dir && field(input, "defaultWorktreeBranch").is_some() && base != existing.default_worktree_branch {
+        return Err(ApiError::bad_request("环境的 Git 基础分支不可修改"));
+    }
+    if let Some(err) = validate_project_input(input, container || fixed_dir) {
         return Err(ApiError::bad_request(err));
     }
     let ssh = resolve_project_ssh(&state, input, Some(&existing)).map_err(ApiError::bad_request)?;
-    let default_worktree_branch = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).unwrap_or(None);
+    let default_worktree_branch = if fixed_dir { existing.default_worktree_branch.clone() } else { base };
 
     let mut row = ProjectRow {
         name: trimmed(input, "name").unwrap_or_default().to_string(),
-        working_dir: trimmed_non_empty(input, "workingDir"),
-        shell: if existing.environment_context.is_some() && field(input, "shell").is_none() {
+        working_dir: if fixed_dir { existing.working_dir.clone() } else { trimmed_non_empty(input, "workingDir") },
+        shell: if (existing.environment_context.is_some() || existing.thread_environment_id.is_some()) && field(input, "shell").is_none() {
             existing.shell.clone()
         } else { trimmed_non_empty(input, "shell") },
         // 附属项目不能再派生，这项对它们没有意义；仍照单全收，避免 PUT 形状因行而异
@@ -298,6 +445,18 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     };
     ssh.apply(&mut row);
 
+    if container && existing.environment_context.is_some() {
+        let members = Db::parse_multi_repos(existing.multi_repos.as_deref()).unwrap_or_default();
+        let cwd = row.working_dir.as_deref().or_else(|| match &repos {
+            Some(dirs) => dirs.first().map(String::as_str),
+            None => members.first().map(|repo| repo.dir.as_str()),
+        });
+        if state.db.list_projects().iter().any(|thread| {
+            thread.thread_environment_id.as_deref() == Some(id.as_str()) && thread.working_dir.as_deref() != cwd
+        }) {
+            return Err(ApiError::conflict("已有线程的环境不能更换工作目录"));
+        }
+    }
     if container && let Some(repos) = &repos {
         let members: Vec<MultiRepoMember> =
             repos.iter().map(|dir| MultiRepoMember { dir: dir.clone(), repo_dir: None }).collect();
@@ -396,13 +555,15 @@ async fn remove(
     Query(q): Query<DeleteQuery>,
 ) -> ApiResult<Json<DeleteProjectResult>> {
     let lock = state.nodes.lock(&format!("environment:{id}"));
-    let _guard = lock.lock().await;
+    let guard = lock.lock_owned().await;
     let project = state.db.get_project(&id).ok_or_else(|| ApiError::not_found("项目不存在"))?;
 
     // 附属项目连坐。会话数要把它们的也算进去，否则确认框上的数字对不上
     let mut targets =
         if project.source_project_id.is_some() { Vec::new() } else { state.db.list_worktree_children(&id) };
-    if project.environment_context.is_some() && !targets.is_empty() {
+    if project.environment_context.is_some() && project.source_project_id.is_none()
+        && (!targets.is_empty() || state.db.list_projects().iter().any(|p| p.thread_environment_id.as_deref() == Some(&id)))
+    {
         return Err(ApiError::conflict("请先删除该环境中的线程"));
     }
     if project.environment_context.is_some() && project.source_project_id.is_some() && q.force.as_deref() != Some("true") {
@@ -411,6 +572,9 @@ async fn remove(
             return Err(ApiError::with(StatusCode::CONFLICT, "线程中有待检查的文件，请确认后删除", serde_json::json!({"status":status})));
         }
     }
+    let _thread_writer = if project.thread_environment_id.is_some() {
+        Some(super::claude::lock_thread(&state.config.data_dir, &id).map_err(|e| ApiError::conflict(e.to_string()))?)
+    } else { None };
     targets.push(project); // 先删附属，最后删自己
     let alive: Vec<String> = targets
         .iter()
@@ -425,6 +589,7 @@ async fn remove(
     let res = state
         .engine
         .call(move |engine| async move {
+            let (_guard, _thread_writer) = (guard, _thread_writer);
             // 先把所有会话终止掉再动任何目录。terminate 不会失败（链路故障只是等不到消失），
             // Node 版那条"终止失败就整体放弃"的 502 在这里走不到
             for sid in &alive {
@@ -455,6 +620,13 @@ async fn remove(
                             row.working_dir.as_deref().unwrap_or_default(),
                             e.detail.clone().unwrap_or_else(|| e.message.clone())
                         )),
+                    }
+                } else if row.environment_context.is_some() && row.default_worktree_branch.is_some()
+                    && row.multi_repos.is_none()
+                {
+                    let checkout = engine.sessions.data_dir().join("environments").join(&row.id);
+                    if checkout.is_dir() {
+                        warnings.push(format!("已保留环境的 Git 检出：{}", checkout.display()));
                     }
                 } else if row.multi_repos.is_some() {
                     // 容器：递归清理 falcon 根下的虚拟项目目录及其中的额外文件。
@@ -497,6 +669,45 @@ mod tests {
     use axum::http::Request;
     use axum::http::StatusCode;
     use serde_json::{Value, json};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn environment_base_branch_keeps_the_source_checkout_and_preserves_environment_files() {
+        let app = TestApp::new();
+        let repo = app.root.join("source repository");
+        crate::git::repo::tests::init_repo(&repo);
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["switch", "-c", "base"]);
+        std::fs::write(repo.join("a.txt"), "base contents").unwrap();
+        git(&["commit", "-am", "base"]);
+        git(&["update-ref", "refs/remotes/origin/base", "HEAD"]);
+        git(&["switch", "main"]);
+        std::fs::write(repo.join("a.txt"), "uncommitted work").unwrap();
+        let path = crate::api::encode_uri_component(repo.to_str().unwrap());
+        let (code, branches) = json_of(app.get(&format!("/api/environments/branches?path={path}")).await).await;
+        assert_eq!(code, StatusCode::OK, "{branches}");
+        assert!(branches.as_array().unwrap().iter().any(|branch| branch["name"] == "main" && branch["head"] == true));
+        let (code, env) = json_of(app.post_json("/api/environments", json!({
+            "type":"local", "name":"selected base", "workingDir":repo, "defaultWorktreeBranch":"origin/base",
+        })).await).await;
+        assert_eq!(code, StatusCode::OK, "{env}");
+        let cwd = std::path::Path::new(env["workingDir"].as_str().unwrap());
+        assert!(cwd.starts_with(&app.data_dir));
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "base contents");
+        assert_eq!(git(&["branch", "--show-current"]), "main");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "uncommitted work");
+        let uri = format!("/api/projects/{}", env["id"].as_str().unwrap());
+        let (code, edited) = json_of(app.put_json(&uri, json!({"type":"local", "name":"renamed"})).await).await;
+        assert_eq!(code, StatusCode::OK, "{edited}");
+        assert_eq!(edited["workingDir"], env["workingDir"]);
+        assert_eq!(edited["defaultWorktreeBranch"], "origin/base");
+        assert_eq!(app.send(Request::delete(uri).body(Body::empty()).unwrap()).await.status(), StatusCode::OK);
+        assert!(cwd.join("a.txt").exists());
+    }
 
     #[tokio::test]
     async fn deleting_multi_project_removes_nonempty_virtual_directory_but_keeps_member_repos() {

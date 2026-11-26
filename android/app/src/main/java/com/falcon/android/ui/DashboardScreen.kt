@@ -51,6 +51,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,6 +78,7 @@ import com.falcon.android.model.AgentCatalog
 import com.falcon.android.model.DashboardData
 import com.falcon.android.model.JsonParsers
 import com.falcon.android.model.ProjectUi
+import com.falcon.android.model.RepoBranch
 import com.falcon.android.model.ServerGroupUi
 import com.falcon.android.model.ServerProfile
 import com.falcon.android.model.ServerRoute
@@ -84,6 +86,7 @@ import com.falcon.android.model.SessionUi
 import com.falcon.android.model.TailnetProbeHit
 import com.falcon.android.net.FalconApiClient
 import com.falcon.android.net.TailnetManager
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -1353,30 +1356,112 @@ private data class WorkspaceForm(val server: ServerGroupUi, val env: ProjectUi? 
 @Composable
 private fun WorkspaceDialog(baseUrl: String, form: WorkspaceForm, close: () -> Unit, refresh: () -> Unit) {
     val env = form.env
+    val creatingEnv = env == null
+    val editingLegacyEnv = !form.thread && env?.isMulti == true
     var name by remember { mutableStateOf(if (form.thread) "" else env?.name.orEmpty()) }
     var context by remember { mutableStateOf(if (form.thread) "" else env?.environmentContext.orEmpty()) }
     var repos by remember { mutableStateOf(env?.repos.orEmpty().joinToString("\n")) }
+    var directory by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    var legacyCreate by remember { mutableStateOf(false) }
+    val chooseDirectory = creatingEnv && !legacyCreate
+    val usesRepos = legacyCreate || editingLegacyEnv
+    val path = directory.trim()
+    var branchLookup by remember(path) { mutableStateOf<Result<List<RepoBranch>?>?>(null) }
+    var selectedBranch by remember(path) { mutableStateOf<String?>(null) }
+    var branchMenuOpen by remember(path) { mutableStateOf(false) }
+    var lookupAttempt by remember { mutableIntStateOf(0) }
+    LaunchedEffect(baseUrl, form.server.hostId, chooseDirectory, path, lookupAttempt) {
+        if (chooseDirectory && path.isNotEmpty()) {
+            branchLookup = null
+            delay(350)
+            val lookup = FalconApiClient.fetchEnvironmentBranches(baseUrl, form.server.hostId, path)
+            if ((lookup.exceptionOrNull() as? FalconApiClient.HttpStatusException)?.status == 404) {
+                repos = path
+                legacyCreate = true
+            } else {
+                branchLookup = lookup
+            }
+        }
+    }
     AlertDialog(onDismissRequest = { if (!busy) close() },
-        title = { Text(if (form.thread) "新建线程" else if (env == null) "新建环境" else "编辑环境") },
+        title = { Text(if (form.thread) "新建线程" else if (creatingEnv) "新建环境" else "编辑环境") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(if (form.thread) "${form.server.name} / ${env?.name}" else form.server.name)
-                OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true)
-                if (!form.thread) OutlinedTextField(repos, { repos = it }, label = { Text("Git 仓库绝对路径，每行一个") }, maxLines = 4)
-                OutlinedTextField(context, { context = it }, label = { Text(if (form.thread) "任务说明" else "环境上下文") }, maxLines = 5)
+                OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true, enabled = !busy)
+                if (chooseDirectory) {
+                    OutlinedTextField(
+                        directory, { directory = it },
+                        label = { Text(stringResource(R.string.environment_working_directory)) },
+                        singleLine = true, enabled = !busy
+                    )
+                    if (path.isNotEmpty()) {
+                        val lookup = branchLookup
+                        val branches = lookup?.getOrNull().orEmpty()
+                        when {
+                            lookup == null -> Text(stringResource(R.string.environment_checking_directory))
+                            lookup.isFailure -> {
+                                Text(lookup.exceptionOrNull()?.message.orEmpty())
+                                TextButton(enabled = !busy, onClick = { lookupAttempt++ }) {
+                                    Text(stringResource(R.string.environment_retry_directory_check))
+                                }
+                            }
+                            branches.isNotEmpty() -> Box {
+                                val defaultLabel = stringResource(R.string.environment_base_default)
+                                TextButton(enabled = !busy, onClick = { branchMenuOpen = true }) {
+                                    Text(stringResource(R.string.environment_base_branch, selectedBranch ?: defaultLabel))
+                                }
+                                DropdownMenu(expanded = branchMenuOpen, onDismissRequest = { branchMenuOpen = false }) {
+                                    DropdownMenuItem(text = { Text(defaultLabel) }, onClick = {
+                                        selectedBranch = null
+                                        branchMenuOpen = false
+                                    })
+                                    for (branch in branches) {
+                                        DropdownMenuItem(text = {
+                                            Text(if (branch.head) stringResource(R.string.environment_current_branch, branch.name) else branch.name)
+                                        }, onClick = {
+                                            selectedBranch = branch.name
+                                            branchMenuOpen = false
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (usesRepos) {
+                    OutlinedTextField(repos, { repos = it }, label = { Text("Git 仓库绝对路径，每行一个") }, maxLines = 4, enabled = !busy)
+                } else if (!form.thread && env != null) {
+                    Text(env.workingDir)
+                    env.defaultWorktreeBranch?.let { Text(stringResource(R.string.environment_base_branch, it)) }
+                }
+                OutlinedTextField(context, { context = it }, label = { Text(if (form.thread) "任务说明" else "环境上下文") }, maxLines = 5, enabled = !busy)
                 if (error.isNotEmpty()) Text(error)
             }
         },
         dismissButton = { TextButton(enabled = !busy, onClick = close) { Text("取消") } },
         confirmButton = {
-            TextButton(enabled = !busy && name.isNotBlank() && (form.thread || repos.isNotBlank()), onClick = {
+            val canSave = when {
+                chooseDirectory -> path.isNotEmpty() && branchLookup?.isSuccess == true
+                usesRepos -> repos.isNotBlank()
+                else -> true
+            }
+            TextButton(enabled = !busy && name.isNotBlank() && canSave, onClick = {
                 busy = true
+                error = ""
                 scope.launch {
-                    val result = if (form.thread) FalconApiClient.createThread(baseUrl, requireNotNull(env).id, name, context)
-                    else FalconApiClient.saveEnvironment(baseUrl, form.server.hostId, env?.id, name, context, repos.lines().map { it.trim() }.filter { it.isNotEmpty() })
+                    val result = if (form.thread) {
+                        FalconApiClient.createThread(baseUrl, requireNotNull(env).id, name, context)
+                    } else {
+                        FalconApiClient.saveEnvironment(
+                            baseUrl, form.server.hostId, env?.id, name, context,
+                            workingDir = if (chooseDirectory) path else null,
+                            defaultWorktreeBranch = if (chooseDirectory) selectedBranch else null,
+                            legacyRepos = if (usesRepos) repos.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList() else null
+                        )
+                    }
                     busy = false
                     result.onSuccess { refresh(); close() }.onFailure { error = it.message.orEmpty() }
                 }
@@ -1418,7 +1503,12 @@ private fun ProjectTreeList(
             dismissButton = { TextButton(onClick = { selectedThread = null }) { Text("关闭") } }
         )
     }
-    form?.let { target -> WorkspaceDialog(baseUrl, target, { form = null }, onRefresh) }
+    form?.let { target ->
+        WorkspaceDialog(baseUrl, target, { form = null }) {
+            if (target.thread) target.env?.let { collapsedProjects[it.id] = false }
+            onRefresh()
+        }
+    }
     if (servers.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(
