@@ -29,6 +29,10 @@ use crate::term_env::js;
 use crate::term_env::sanitize_color_hint;
 use crate::host::HostKind;
 
+/// 新建会话时第一条消息的上限。它经环境变量交给启动脚本，macOS 上参数与环境合计约 1 MiB，
+/// 留出余量；正常的第一条消息远小于这个数
+const MAX_PROMPT_BYTES: usize = 64 * 1024;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/projects/{id}/host", get(host_status).post(host_update))
@@ -169,11 +173,16 @@ async fn create(State(state): State<AppState>, Path(id): Path<String>, body: Len
     // 编号名（"Terminal 3"）既没信息量，序号还会随删除重号
     let name = js::trim(body.str("name").unwrap_or("")).to_string();
     let hint = sanitize_color_hint(&body.0);
+    // 第一条消息经环境变量交给启动脚本，长度要挡在系统的参数与环境上限之下
+    let prompt = body.str("prompt").map(str::to_owned).filter(|p| !p.trim().is_empty());
+    if prompt.as_ref().is_some_and(|p| p.len() > MAX_PROMPT_BYTES) {
+        return Err(ApiError::bad_request("第一条消息太长"));
+    }
     let res = state
         .engine
         .call(move |engine| async move {
             let _guard = guard;
-            engine.sessions.create_session(&project, name, hint, agent).await
+            engine.sessions.create_session_with_prompt(&project, name, hint, agent, prompt).await
         })
         .await?;
     res.map(Json).map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("创建会话失败：{e}")))
@@ -381,6 +390,18 @@ mod tests {
         let app = TestApp::new();
         app.local_project("p");
         let (status, _) = json_of(app.post_json("/api/projects/p/sessions", json!({"agent":"codex","agentMode":"gui"})).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(app.state.db.list_sessions_by_project("p").is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejects_an_oversized_first_message_before_spawning() {
+        use crate::api::test_support::{TestApp, json_of};
+
+        let app = TestApp::new();
+        app.local_project("p");
+        let prompt = "x".repeat(MAX_PROMPT_BYTES + 1);
+        let (status, _) = json_of(app.post_json("/api/projects/p/sessions", json!({"agent":"codex","prompt":prompt})).await).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(app.state.db.list_sessions_by_project("p").is_empty());
     }

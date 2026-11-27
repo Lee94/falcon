@@ -1,4 +1,4 @@
-//! 右侧栏的面板（文件 / 修改 / 插件）与画布上的文件、差异窗口。转发与公网发布
+//! 右侧栏的面板（文件 / 修改 / 插件）与画布上的文件、差异、Claude 对话窗口。转发与公网发布
 //! 挪进了设置的「中转」页（dialogs/settings/relays.rs，ADR 0016）。
 //!
 //! 每个面板都是一个 GPUI 视图：`new(ws, window, cx)` 建出来，observe 工作区自己刷新。
@@ -6,6 +6,7 @@
 
 pub mod browser_view;
 pub mod changes;
+pub mod claude_chat;
 pub mod diff_view;
 pub mod file_view;
 pub mod files;

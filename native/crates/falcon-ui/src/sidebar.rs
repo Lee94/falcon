@@ -1,9 +1,14 @@
-//! 侧栏主树为机器 → 环境 → 线程。旧项目与独立终端可从侧栏底部显示。
+//! 侧栏默认是线程视图：顶上固定一行「新建线程」与线程过滤 / 排序条，下面平铺所有线程，默认按
+//! 创建时间倒序排列（[`filter_and_sort_threads`]）。机器与环境是新建线程对话框里的选项，侧栏不
+//! 单独给它们开入口，只在线程视图提供按关键词 / 状态 / 机器 / 环境过滤和常见排序；线程行上只用
+//! 淡色写所属环境，机器放在悬停提示里。
 //!
+//! 底栏的切换按钮打开按机器分组的兼容视图：机器 → 环境 → 线程，外加旧项目与独立终端。
+//! 编辑 / 删除环境、在机器上开独立终端、管理旧项目都在这一视图。
 //! 多仓库项目与没有附属 worktree 的单仓库项目不往下挂检出：项目行自己承接会话。
 //! 单仓库有附属 worktree 时才显示各条检出，批量派生出来的多仓库项目与源项目同级。
 //!
-//! - 顶上不设标题栏：树本身就是内容，新建项目走各服务器行 hover 的 ＋ / 右键 / 命令面板；
+//! - 兼容视图里新建环境与旧项目走各机器行 hover 的 ＋ / 右键 / 命令面板；
 //! - 行的 hover / 选中是内缩的圆角块（左右留内边距，贴着岛边会切掉圆角）；
 //! - 会话行默认收起：一个检出能挂五六个终端，全摊开就占满侧栏；检出行尾巴上摆计数徽标 +
 //!   最重的异常状态，折叠着也看得出出没出事——包括有程序卡在 blocked 等你（OSC 7501，ADR 0020）；
@@ -13,21 +18,25 @@
 
 use falcon_core::program_status::{RowReading, RowStatus};
 use falcon_core::project_tree::{
-    FolderGroup, ServerGroup, ServerKind, checkout_label, folder_key, group_servers, lands_in_place,
+    FolderGroup, ServerGroup, ServerKind, ThreadFilter, ThreadMachineFilter, ThreadRuntime, ThreadSort,
+    ThreadStatusFilter, archived_thread_count, checkout_label, filter_and_sort_threads, folder_key, group_servers,
+    lands_in_place, project_matches_machine, thread_environment, thread_list,
 };
-use falcon_proto::{Project, SessionState, SessionWithProject};
+use falcon_proto::{Project, ProjectType, SessionState, SessionWithProject};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu, PopupMenu};
 use gpui_kit::component::{Disableable, Sizable, tooltip::Tooltip};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, IntoElement, Pixels, Render, SharedString, Window, div, relative,
+    AnyElement, App, Context, Entity, FontWeight, IntoElement, KeyDownEvent, Pixels, Render, SharedString,
+    Subscription, WeakEntity, Window, div, relative,
 };
 use rust_i18n::t;
 
 use crate::labels::{age_text, local_word, session_label};
-use crate::menus::{self, to_popup};
+use crate::menus::{self, MenuItemSpec, to_popup};
 use crate::theme::{Ui, radius};
 use crate::ui::{DragLabel, Mark, host_bar, icon, needs_you_mark, spinner, status_mark};
 use crate::workspace::{ActiveView, PendingSession, ProjectChanges, Workspace};
@@ -38,6 +47,9 @@ const SESSION_ROW_H: f32 = 28.;
 /// 树里相邻两行之间的缝。选中的项目（检出行）与当前会话各自高亮、又常常上下挨着（会话行就摊在它的
 /// 检出下面），没有缝两块圆角底色会粘成一条；每一层的 flex_col 都要带上，跨层的相邻行才同样有缝
 const ROW_GAP: f32 = 2.;
+/// 过滤菜单里机器 / 环境超过这个数量时改用子菜单，免得下拉菜单过长
+const FILTER_INLINE_MACHINES: usize = 5;
+const FILTER_INLINE_ENVS: usize = 6;
 
 fn indent(depth: usize) -> Pixels {
     zpx(4. + depth as f32 * 12.)
@@ -54,14 +66,31 @@ struct ProjectDrag {
 }
 
 pub struct Sidebar {
-    show_legacy: bool,
+    /// 按机器分组的兼容视图；默认是平铺的线程视图
+    by_machine: bool,
+    /// 线程视图的关键词搜索框（仅当前窗口内存态，不持久化）
+    query_input: Entity<InputState>,
+    /// 线程视图的结构化过滤条件（状态 / 机器 / 环境）；渲染时合入搜索词与 `ws.state.show_archived`
+    filter: ThreadFilter,
     terminal_positions: std::collections::HashMap<String, (usize, usize, usize)>,
     ws: Entity<Workspace>,
+    _subs: Vec<Subscription>,
 }
 
 impl Sidebar {
-    pub fn new(ws: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&ws, |_, _, cx| cx.notify()).detach();
+    pub fn new(ws: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("sidebar.filterPlaceholder").to_string()));
+        let subs = vec![
+            cx.observe(&ws, |this, _, cx| {
+                this.reconcile_filter(cx);
+                cx.notify();
+            }),
+            cx.subscribe_in(&query_input, window, |_, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+        ];
         // 会话行尾巴上的时长按分钟走，列表没变时工作区不通知（轮询结果一样就跳过）：自己隔一会儿
         // 重画一次，不然「刚刚」能一直挂着。侧栏是缓存视图，半分钟一次重画不值一提
         cx.spawn(async move |this, cx| {
@@ -73,7 +102,136 @@ impl Sidebar {
             }
         })
         .detach();
-        Self { ws, show_legacy: false, terminal_positions: Default::default() }
+        Self {
+            ws,
+            by_machine: false,
+            query_input,
+            filter: ThreadFilter::default(),
+            terminal_positions: Default::default(),
+            _subs: subs,
+        }
+    }
+
+    /// 已被删除的主机不再保留在机器过滤里，免得列表一直被无效条件筛空。
+    /// 节点只是暂时离线时主机仍在 `ws.hosts` 里，不改动用户筛选。
+    fn reconcile_filter(&mut self, cx: &Context<Self>) {
+        let w = self.ws.read(cx);
+        if !w.inventory_loaded() {
+            return;
+        }
+        if let ThreadMachineFilter::Host(id) = &self.filter.machine
+            && !w.hosts.iter().any(|h| &h.id == id)
+        {
+            self.filter.machine = ThreadMachineFilter::All;
+            if let Some(env_id) = &self.filter.environment_id
+                && w.project(env_id).is_none()
+            {
+                self.filter.environment_id = None;
+            }
+        }
+    }
+
+    fn effective_filter(&self, cx: &App) -> ThreadFilter {
+        let mut f = self.filter.clone();
+        f.query = self.query_input.read(cx).value().to_string();
+        f.show_archived = self.ws.read(cx).state.show_archived;
+        f
+    }
+
+    fn set_status_filter(&mut self, status: ThreadStatusFilter, cx: &mut Context<Self>) {
+        if self.filter.status != status {
+            self.filter.status = status;
+            cx.notify();
+        }
+    }
+
+    fn set_machine_filter(&mut self, machine: ThreadMachineFilter, cx: &mut Context<Self>) {
+        if self.filter.machine == machine {
+            return;
+        }
+        self.filter.machine = machine;
+        // 切换机器时，若当前环境不属于新选中的机器则一并清掉，避免出现必然为空的组合
+        if let Some(env_id) = self.filter.environment_id.as_deref() {
+            let matches = self
+                .ws
+                .read(cx)
+                .project(env_id)
+                .is_some_and(|env| project_matches_machine(env, &self.filter.machine));
+            if !matches {
+                self.filter.environment_id = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_env_filter(&mut self, env_id: Option<String>, cx: &mut Context<Self>) {
+        if self.filter.environment_id != env_id {
+            self.filter.environment_id = env_id;
+            cx.notify();
+        }
+    }
+
+    fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.clear();
+        if !self.query_input.read(cx).value().is_empty() {
+            self.query_input.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    fn on_query_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key == "escape" {
+            cx.stop_propagation();
+            if !self.query_input.read(cx).value().is_empty() {
+                self.query_input.update(cx, |i, cx| i.set_value("", window, cx));
+                cx.notify();
+            } else {
+                window.blur(cx);
+            }
+        }
+    }
+
+    fn thread_runtime(&self, thread: &Project, cx: &App) -> ThreadRuntime {
+        let ws = self.ws.read(cx);
+        let mut rt = ThreadRuntime::from_sessions(ws.sessions.iter().filter(|s| s.project_id == thread.id));
+        for pending in ws.state.pending.iter().filter(|p| p.project_id == thread.id) {
+            if pending.error.is_some() {
+                rt.needs_attention = true;
+            } else {
+                rt.has_active = true;
+                rt.is_working = true;
+            }
+        }
+        if ws.state.chats.iter().any(|id| id == &thread.id) {
+            rt.has_active = true;
+            if let Some(chat) = ws.chats.get(&thread.id) {
+                let chat = chat.read(cx);
+                if chat.is_busy() {
+                    rt.is_working = true;
+                }
+                if chat.has_pending_permission() {
+                    rt.needs_attention = true;
+                }
+            }
+        }
+        rt.has_changes = ws.changes.get(&thread.id).is_some_and(|c| c.added > 0 || c.deleted > 0);
+        if let Some(env_name) = thread_environment(thread).and_then(|id| ws.project(id)).map(|p| p.name.clone()) {
+            rt.search_terms.push(env_name);
+        }
+        let machine = match thread.project_type {
+            ProjectType::Local => local_word(),
+            ProjectType::Ssh => thread
+                .host_id
+                .as_ref()
+                .and_then(|id| ws.hosts.iter().find(|h| &h.id == id))
+                .map(|h| h.name.clone())
+                .or_else(|| thread.ssh.as_ref().map(|s| s.host.clone()))
+                .unwrap_or_default(),
+        };
+        if !machine.is_empty() {
+            rt.search_terms.push(machine);
+        }
+        rt
     }
 }
 
@@ -94,38 +252,102 @@ fn worst_state(sessions: &[&SessionWithProject], pending: &[&PendingSession]) ->
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = Ui::global(cx).clone();
-        let ws = self.ws.read(cx);
-        self.terminal_positions = falcon_core::layout::terminal_positions(&ws.state.columns);
-        // 本机分组一律画出来，独立会话直接列在机器下面，见 [`Sidebar::server_node`]。
-        let servers: Vec<ServerGroup> = group_servers(&ws.projects, &ws.hosts, &local_word(), ws.state.show_archived);
-        let has_env = ws.projects.iter().any(|p| p.is_environment());
-        let empty = ws.projects.is_empty() && ws.hosts.is_empty();
+        let (columns, show_archived, sort, projects_empty, hosts_empty) = {
+            let ws = self.ws.read(cx);
+            (
+                ws.state.columns.clone(),
+                ws.state.show_archived,
+                ws.state.thread_sort,
+                ws.projects.is_empty(),
+                ws.hosts.is_empty(),
+            )
+        };
+        self.terminal_positions = falcon_core::layout::terminal_positions(&columns);
+        let filter = self.effective_filter(cx);
+
+        // 线程视图只要平铺的线程（按过滤与排序规则计算）；兼容视图里本机分组一律画出来，
+        // 独立会话直接列在机器下面，见 [`Sidebar::server_node`]。
+        let (threads, total_threads, servers) = if self.by_machine {
+            let ws = self.ws.read(cx);
+            (Vec::new(), 0, group_servers(&ws.projects, &ws.hosts, &local_word(), show_archived))
+        } else {
+            let projects = self.ws.read(cx).projects.clone();
+            let total = thread_list(&projects, show_archived).len();
+            let filtered = filter_and_sort_threads(&projects, &filter, sort, |t| self.thread_runtime(t, cx));
+            (filtered, total, Vec::new())
+        };
+        let empty = if self.by_machine { projects_empty && hosts_empty } else { threads.is_empty() };
+        let filtered_out = !self.by_machine && threads.is_empty() && total_threads > 0 && filter.is_active();
+
+        // 「新建线程」与线程过滤 / 排序条不跟着树滚动：列表再长也一直在顶上
+        let mut header = div().flex_none().px(zpx(8.)).pt(zpx(8.)).child(new_thread_row(&self.ws, cx));
+        if !self.by_machine {
+            header = header.child(self.render_thread_controls(&filter, sort, threads.len(), total_threads, cx));
+        }
 
         let mut tree = div()
             .id("sidebar-tree")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(zpx(8.))
+            .px(zpx(8.))
+            .pt(zpx(ROW_GAP))
+            .pb(zpx(8.))
             .flex()
             .flex_col();
         if empty {
-            tree = tree.child(
-                div()
-                    .px_2()
-                    .pt(zpx(6.))
-                    .pb(zpx(10.))
-                    .text_xs()
-                    .text_color(ui.muted_foreground)
-                    .child(t!("sidebar.empty").to_string()),
-            );
+            if filtered_out {
+                tree = tree.child(
+                    div()
+                        .px_2()
+                        .pt(zpx(8.))
+                        .pb(zpx(10.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(zpx(6.))
+                        .child(div().text_xs().text_color(ui.muted_foreground).child(t!("sidebar.filterEmpty").to_string()))
+                        .child(
+                            Button::new("sidebar-filter-empty-clear")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::RotateCcw)
+                                .label(t!("sidebar.filterClear").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx))),
+                        ),
+                );
+            } else {
+                let text = if self.by_machine { t!("sidebar.empty") } else { t!("sidebar.emptyThreads") };
+                tree = tree.child(
+                    div()
+                        .px_2()
+                        .pt(zpx(6.))
+                        .pb(zpx(10.))
+                        .text_xs()
+                        .text_color(ui.muted_foreground)
+                        .child(text.to_string()),
+                );
+            }
         }
-        for server in servers {
-            tree = tree.child(self.server_node(server, cx));
+        if self.by_machine {
+            for server in servers {
+                tree = tree.child(self.server_node(server, cx));
+            }
+        } else {
+            let mut list = div().flex().flex_col().gap(zpx(ROW_GAP));
+            for thread in &threads {
+                list = list.child(self.thread_node(thread, cx));
+            }
+            tree = tree.child(list);
         }
 
         let ws_handle = self.ws.clone();
         let ws_handle2 = self.ws.clone();
+        let (view_icon, view_tip) = if self.by_machine {
+            (IconName::MessageCircle, t!("sidebar.threadView"))
+        } else {
+            (IconName::Server, t!("sidebar.machineView"))
+        };
         let bottom = div()
             .h(zpx(40.))
             .flex_none()
@@ -143,13 +365,9 @@ impl Render for Sidebar {
                         crate::dialogs::settings::open(&ws_handle, Default::default(), window, cx)
                     }),
             )
-            .when(has_env, |d| d.child(Button::new("new-thread").ghost().small().icon(IconName::Plus)
-                .tooltip(t!("env.thread").to_string()).on_click(cx.listener(|this, _, window, cx| {
-                    crate::dialogs::worktree_form::open_thread(&this.ws, "", window, cx)
-                }))))
-            .child(Button::new("show-legacy").ghost().small().icon(IconName::Folders)
-                .tooltip(t!("env.legacy").to_string()).on_click(cx.listener(|this, _, _, cx| {
-                    this.show_legacy = !this.show_legacy;
+            .child(Button::new("sidebar-view").ghost().small().icon(view_icon)
+                .tooltip(view_tip.to_string()).on_click(cx.listener(|this, _, _, cx| {
+                    this.by_machine = !this.by_machine;
                     cx.notify();
                 })))
             .child(div().flex_1())
@@ -167,18 +385,176 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .text_color(ui.foreground)
+            .child(header)
             .child(tree)
             .child(bottom)
     }
 }
 
 impl Sidebar {
-    fn server_node(&self, mut server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
+    /// 线程视图顶部的过滤与排序控件：搜索框 + 过滤菜单 + 排序菜单；启用了状态 / 机器 / 环境
+    /// 过滤时，在下方紧跟着展示可一键取消的过滤芯片与命中计数。仅输入关键词时不另起一行，
+    /// 输入框自带清除按钮，避免打字时列表上下跳动。
+    fn render_thread_controls(
+        &self,
+        filter: &ThreadFilter,
+        sort: ThreadSort,
+        shown: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ui = Ui::global(cx).clone();
+        let me = cx.entity().downgrade();
+        let ws = self.ws.clone();
+
+        let filter_active = filter.has_structured_filter();
+        let filter_tip = if filter_active {
+            let summary = self.filter_summary(filter, cx).join(" · ");
+            t!("sidebar.filterActiveTooltip", summary = summary).to_string()
+        } else {
+            t!("sidebar.filterTooltip").to_string()
+        };
+        let me_filter = me.clone();
+        let ws_filter = ws.clone();
+        let mut filter_btn = Button::new("sidebar-thread-filter")
+            .ghost()
+            .xsmall()
+            .icon(IconName::ListFilter)
+            .tooltip(filter_tip);
+        filter_btn = if filter_active {
+            filter_btn.bg(ui.tint).text_color(ui.tint_foreground)
+        } else {
+            filter_btn.text_color(ui.muted_foreground)
+        };
+        let filter_btn = filter_btn.dropdown_menu(move |menu, window, cx| {
+            build_filter_menu(menu, &me_filter, &ws_filter, window, cx)
+        });
+
+        let sort_active = !sort.is_default();
+        let sort_tip = t!("sidebar.sortTooltip", name = sort_label(sort)).to_string();
+        let ws_sort = ws.clone();
+        let mut sort_btn = Button::new("sidebar-thread-sort")
+            .ghost()
+            .xsmall()
+            .icon(IconName::ArrowUpDown)
+            .tooltip(sort_tip);
+        sort_btn = if sort_active {
+            sort_btn.bg(ui.tint).text_color(ui.tint_foreground)
+        } else {
+            sort_btn.text_color(ui.muted_foreground)
+        };
+        let sort_btn = sort_btn.dropdown_menu(move |menu, _, cx| build_sort_menu(menu, &ws_sort, cx));
+
+        let bar = div()
+            .mt(zpx(4.))
+            .flex()
+            .items_center()
+            .gap(zpx(4.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .capture_key_down(cx.listener(Self::on_query_key))
+                    .child(
+                        Input::new(&self.query_input)
+                            .xsmall()
+                            .cleanable(true)
+                            .prefix(icon(IconName::Search).size(zpx(12.)).text_color(ui.muted_foreground)),
+                    ),
+            )
+            .child(filter_btn)
+            .child(sort_btn);
+
+        let mut box_el = div().pb(zpx(4.)).flex().flex_col().child(bar);
+        if filter_active {
+            let mut chips = div().mt(zpx(6.)).flex().flex_wrap().items_center().gap(zpx(4.));
+            if filter.status != ThreadStatusFilter::All {
+                chips = chips.child(filter_chip(
+                    "chip-status",
+                    status_filter_label(filter.status),
+                    cx.listener(|this, _, _, cx| this.set_status_filter(ThreadStatusFilter::All, cx)),
+                    cx,
+                ));
+            }
+            if filter.machine != ThreadMachineFilter::All {
+                let label = machine_filter_label(&filter.machine, self.ws.read(cx));
+                chips = chips.child(filter_chip(
+                    "chip-machine",
+                    label,
+                    cx.listener(|this, _, _, cx| this.set_machine_filter(ThreadMachineFilter::All, cx)),
+                    cx,
+                ));
+            }
+            if let Some(env_id) = filter.environment_id.as_deref() {
+                let label = env_filter_label(env_id, self.ws.read(cx));
+                chips = chips.child(filter_chip(
+                    "chip-env",
+                    label,
+                    cx.listener(|this, _, _, cx| this.set_env_filter(None, cx)),
+                    cx,
+                ));
+            }
+            chips = chips.child(
+                div()
+                    .ml(zpx(2.))
+                    .text_size(zpx(11.))
+                    .text_color(ui.muted_foreground)
+                    .child(t!("sidebar.filterCount", shown = shown, total = total).to_string()),
+            );
+            let active_count = usize::from(filter.status != ThreadStatusFilter::All)
+                + usize::from(filter.machine != ThreadMachineFilter::All)
+                + usize::from(filter.environment_id.is_some())
+                + usize::from(!filter.query.trim().is_empty());
+            if active_count > 1 {
+                chips = chips.child(
+                    div()
+                        .id("chip-clear-all")
+                        .px(zpx(4.))
+                        .h(zpx(20.))
+                        .flex()
+                        .items_center()
+                        .rounded(radius::SM)
+                        .text_size(zpx(11.))
+                        .text_color(ui.muted_foreground)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(ui.muted).text_color(ui.foreground))
+                        .child(t!("sidebar.filterClear").to_string())
+                        .on_click(cx.listener(|this, _, window, cx| this.clear_filters(window, cx))),
+                );
+            }
+            box_el = box_el.child(chips);
+        }
+        box_el.into_any_element()
+    }
+
+    fn filter_summary(&self, filter: &ThreadFilter, cx: &App) -> Vec<String> {
+        let ws = self.ws.read(cx);
+        let mut parts = Vec::new();
+        if filter.status != ThreadStatusFilter::All {
+            parts.push(status_filter_label(filter.status));
+        }
+        if filter.machine != ThreadMachineFilter::All {
+            parts.push(machine_filter_label(&filter.machine, ws));
+        }
+        if let Some(env_id) = filter.environment_id.as_deref() {
+            parts.push(env_filter_label(env_id, ws));
+        }
+        parts
+    }
+
+    /// 线程视图的一行：线程自己占第一层，会话摊在它下面。行尾淡色写所属环境
+    fn thread_node(&self, thread: &Project, cx: &mut Context<Self>) -> AnyElement {
+        let ws = self.ws.read(cx);
+        let env = thread_environment(thread).and_then(|id| ws.project(id)).map(|p| p.name.clone());
+        let changes = ws.changes.get(&thread.id).cloned();
+        let selected = ws.state.selected_project_id.as_deref() == Some(thread.id.as_str());
+        self.checkout_node(thread, checkout_label(thread, None), env, changes, selected, 0, cx)
+    }
+
+    /// 兼容视图的机器分组
+    fn server_node(&self, server: ServerGroup, cx: &mut Context<Self>) -> AnyElement {
         let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
-        if !self.show_legacy {
-            server.folders.retain(|f| f.project.is_environment() || f.project.is_thread());
-        }
         let unavailable = server.host.as_ref().and_then(|host| ws.node_status(&host.id)).filter(|node| !node.online);
         let expanded = unavailable.is_none() && !ws.state.collapsed.get(&server.key).copied().unwrap_or(false);
         let key = server.key.clone();
@@ -274,7 +650,7 @@ impl Sidebar {
         let mut node = div().mb(zpx(ROW_GAP)).flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expanded {
             let mut has_standalone = false;
-            if self.show_legacy && let Some(id) = standalone_id.as_deref() {
+            if let Some(id) = standalone_id.as_deref() {
                 let ws = self.ws.read(cx);
                 let rows = self.terminal_rows(
                     ws.sessions.iter().filter(|s| s.project_id == id),
@@ -327,13 +703,24 @@ impl Sidebar {
         let ws_select = self.ws.clone();
         let fkey = folder_key(&project.id);
         let pid = project.id.clone();
-        let title = project.working_dir.clone().unwrap_or_else(|| project.name.clone());
+        let member_dirs: Vec<&str> = project
+            .multi
+            .as_ref()
+            .map(|m| m.repos.iter().map(|r| r.dir.as_str()).collect())
+            .unwrap_or_default();
+        let title = if !member_dirs.is_empty() {
+            member_dirs.join(" · ")
+        } else {
+            project.working_dir.clone().unwrap_or_else(|| project.name.clone())
+        };
+        let meta = (!member_dirs.is_empty()).then(|| t!("env.dirCount", n = member_dirs.len()).to_string());
+        let icon = if !member_dirs.is_empty() { IconName::Folders } else { IconName::Folder };
         let items = menus::project_menu_items(&self.ws, &project, cx);
         let new_items = env.then(|| {
             let ws = self.ws.clone();
             let id = project.id.clone();
             vec![menus::MenuItemSpec::new(t!("env.thread").to_string(), move |window, cx| {
-                crate::dialogs::worktree_form::open_thread(&ws, &id, window, cx)
+                crate::dialogs::new_thread::open(&ws, &id, window, cx)
             })]
         });
         let edit = project.clone();
@@ -341,9 +728,9 @@ impl Sidebar {
             id: format!("fld-{}", project.id),
             depth: 1,
             expanded: Some(open),
-            icon: IconName::Folder,
+            icon,
             label: project.name.clone(),
-            meta: None,
+            meta,
             changes: None,
             title,
             muted: false,
@@ -373,6 +760,7 @@ impl Sidebar {
                     None,
                     changes.get(&project.id).cloned(),
                     selected.as_deref() == Some(project.id.as_str()),
+                    2,
                     cx,
                 ));
             }
@@ -383,6 +771,7 @@ impl Sidebar {
                     None,
                     changes.get(&wt.id).cloned(),
                     selected.as_deref() == Some(wt.id.as_str()),
+                    2,
                     cx,
                 ));
             }
@@ -495,12 +884,8 @@ impl Sidebar {
                     Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
                 }),
                 on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
-                    Box::new(move |_, cx| {
-                        ws3.update(cx, |w, cx| w.select_project(&pid_select, cx));
-                        if durable_thread {
-                            crate::dialogs::claude::open(&ws3, &pid_select, cx);
-                        }
-                    })
+                    // 线程里开着什么（对话、终端、Agent）都在它的画布上，选中就是切过去
+                    Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
                 }),
                 menu: Some(items.clone()),
                 context: Some(items),
@@ -523,6 +908,9 @@ impl Sidebar {
         node.into_any_element()
     }
 
+    /// 检出行，也画线程行。`depth`：兼容视图里挂在文件夹下面是 2，线程视图里线程自己占第一层是 0；
+    /// 会话行比它深一层
+    #[allow(clippy::too_many_arguments)]
     fn checkout_node(
         &self,
         project: &Project,
@@ -530,6 +918,7 @@ impl Sidebar {
         meta: Option<String>,
         changes: Option<ProjectChanges>,
         selected: bool,
+        depth: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ws = self.ws.read(cx);
@@ -551,7 +940,26 @@ impl Sidebar {
         // 存档的附属项目：置灰、显示删除倒计时、点击不再选中（要恢复走右键菜单）
         let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
         let archived_note = archived_at.map(archive_countdown);
-        let title = if project.worktree.is_some() {
+        let title = if project.is_thread() {
+            // 线程视图里机器只出现在这里：「机器 / 环境 · 工作目录」
+            let machine = project
+                .host_id
+                .as_ref()
+                .and_then(|id| ws.hosts.iter().find(|h| &h.id == id))
+                .map(|h| h.name.clone())
+                .unwrap_or_else(local_word);
+            let env = thread_environment(project).and_then(|id| ws.project(id)).map(|p| p.name.clone());
+            let mut parts = vec![match env {
+                Some(env) => format!("{machine} / {env}"),
+                None => machine,
+            }];
+            if let Some(dir) = &project.working_dir {
+                parts.push(dir.clone());
+            } else if let Some(multi) = &project.multi {
+                parts.extend(multi.repos.iter().map(|r| r.dir.clone()));
+            }
+            parts.join(" · ")
+        } else if project.worktree.is_some() {
             let mut parts = vec![t!("worktree.derivedFrom", name = source_name).to_string()];
             if let Some(dir) = &project.working_dir {
                 parts.push(dir.clone());
@@ -597,7 +1005,7 @@ impl Sidebar {
         });
         let row = tree_row(TreeRowOpts {
             id: format!("co-{pid}"),
-            depth: 2,
+            depth,
             expanded: expandable.then_some(sessions_open),
             icon: icon_name,
             label,
@@ -610,12 +1018,8 @@ impl Sidebar {
                 Box::new(move |cx| ws1.update(cx, |w, cx| w.toggle_sessions(&pid_toggle, cx)))
             }),
             on_select: archived_at.is_none().then(|| -> Box<dyn Fn(&mut Window, &mut App)> {
-                Box::new(move |_, cx| {
-                    ws3.update(cx, |w, cx| w.select_project(&pid_select, cx));
-                    if durable_thread {
-                        crate::dialogs::claude::open(&ws3, &pid_select, cx);
-                    }
-                })
+                // 线程里开着什么（对话、终端、Agent）都在它的画布上，选中就是切过去
+                Box::new(move |_, cx| ws3.update(cx, |w, cx| w.select_project(&pid_select, cx)))
             }),
             menu: None,
             context: Some(ctx_items),
@@ -626,7 +1030,7 @@ impl Sidebar {
 
         let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
         if expandable && sessions_open {
-            node = node.children(self.terminal_rows(mine.into_iter(), mine_pending.into_iter(), 3, cx));
+            node = node.children(self.terminal_rows(mine.into_iter(), mine_pending.into_iter(), depth + 1, cx));
         }
         node.into_any_element()
     }
@@ -794,6 +1198,40 @@ fn pending_row(p: &PendingSession, depth: usize, cx: &App) -> AnyElement {
         .child(div().flex_none().size(zpx(18.)))
         .child(status_mark(if p.error.is_some() { Mark::Dead } else { Mark::Creating }, zpx(12.), cx))
         .child(div().flex_1().min_w_0().truncate().pl_1().child(t!("tab.creating").to_string()))
+        .into_any_element()
+}
+
+/// 侧栏唯一的新建入口。画成与线程行同一套行高、缩进与图标列，＋ 正好对齐下面各行的图标；
+/// 机器、环境与第一个动作在新建线程的输入框里选（[`crate::dialogs::new_thread::open`]）
+fn new_thread_row(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
+    let ui = Ui::global(cx);
+    let ws = ws.clone();
+    div()
+        .id("sidebar-new-thread")
+        .h(zpx(ROW_H))
+        .flex()
+        .items_center()
+        .gap_1()
+        .pl(indent(0))
+        .pr(zpx(6.))
+        .rounded(radius::SM)
+        .cursor_pointer()
+        .hover(|s| s.bg(ui.muted))
+        .child(div().flex_none().size(zpx(18.)))
+        .child(icon(IconName::Plus).size(zpx(14.)).text_color(ui.foreground))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .pl_1()
+                .font_weight(FontWeight::MEDIUM)
+                .child(t!("env.thread").to_string()),
+        )
+        .tooltip(move |window, cx| {
+            Tooltip::new(format!("{} · {}", t!("env.thread"), crate::ui::chord("newThread"))).build(window, cx)
+        })
+        .on_click(move |_, window, cx| crate::dialogs::new_thread::open(&ws, "", window, cx))
         .into_any_element()
 }
 
@@ -1063,4 +1501,346 @@ fn drop_zone(ws: &Entity<Workspace>, target: &str, group: &str, index: usize, af
             .drag_over::<ProjectDrag>(move |s, _, _, _| s.border_t(zpx(ROW_GAP)).border_color(line))
     };
     zone.into_any_element()
+}
+
+// ---------------- 线程视图：过滤与排序辅助 ----------------
+
+fn filter_chip(
+    id: &'static str,
+    label: String,
+    on_remove: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let ui = Ui::global(cx);
+    div()
+        .id(id)
+        .h(zpx(20.))
+        .max_w(zpx(132.))
+        .px(zpx(6.))
+        .flex()
+        .items_center()
+        .gap(zpx(4.))
+        .rounded(radius::SM)
+        .bg(ui.tint)
+        .text_color(ui.tint_foreground)
+        .text_size(zpx(11.))
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.85))
+        .child(div().min_w_0().truncate().child(label))
+        .child(icon(IconName::X).size(zpx(10.)).flex_none())
+        .on_click(on_remove)
+        .into_any_element()
+}
+
+fn status_filter_label(status: ThreadStatusFilter) -> String {
+    match status {
+        ThreadStatusFilter::All => t!("sidebar.filterStatusAll"),
+        ThreadStatusFilter::Active => t!("sidebar.filterStatusActive"),
+        ThreadStatusFilter::Working => t!("sidebar.filterStatusWorking"),
+        ThreadStatusFilter::NeedsAttention => t!("sidebar.filterStatusNeedsAttention"),
+        ThreadStatusFilter::HasChanges => t!("sidebar.filterStatusHasChanges"),
+    }
+    .to_string()
+}
+
+fn status_filter_icon(status: ThreadStatusFilter) -> Option<IconName> {
+    match status {
+        ThreadStatusFilter::All => None,
+        ThreadStatusFilter::Active => Some(IconName::CircleDot),
+        ThreadStatusFilter::Working => Some(IconName::LoaderCircle),
+        ThreadStatusFilter::NeedsAttention => Some(IconName::CircleAlert),
+        ThreadStatusFilter::HasChanges => Some(IconName::FileDiff),
+    }
+}
+
+fn machine_filter_label(machine: &ThreadMachineFilter, ws: &Workspace) -> String {
+    match machine {
+        ThreadMachineFilter::All => t!("sidebar.filterMachineAll").to_string(),
+        ThreadMachineFilter::Local => local_word(),
+        ThreadMachineFilter::Host(id) => ws
+            .hosts
+            .iter()
+            .find(|h| &h.id == id)
+            .map(|h| h.name.clone())
+            .unwrap_or_else(|| id.clone()),
+    }
+}
+
+fn env_filter_label(env_id: &str, ws: &Workspace) -> String {
+    ws.project(env_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| t!("sidebar.filterEnvUnknown").to_string())
+}
+
+fn sort_label(sort: ThreadSort) -> String {
+    match sort {
+        ThreadSort::CreatedDesc => t!("sidebar.sortCreatedDesc"),
+        ThreadSort::LastActiveDesc => t!("sidebar.sortLastActiveDesc"),
+        ThreadSort::StatusPriority => t!("sidebar.sortStatusPriority"),
+        ThreadSort::NameAsc => t!("sidebar.sortNameAsc"),
+        ThreadSort::NameDesc => t!("sidebar.sortNameDesc"),
+        ThreadSort::CreatedAsc => t!("sidebar.sortCreatedAsc"),
+    }
+    .to_string()
+}
+
+fn sort_icon(sort: ThreadSort) -> IconName {
+    match sort {
+        ThreadSort::CreatedDesc => IconName::ArrowDownWideNarrow,
+        ThreadSort::LastActiveDesc => IconName::Activity,
+        ThreadSort::StatusPriority => IconName::CircleAlert,
+        ThreadSort::NameAsc => IconName::ArrowDownAZ,
+        ThreadSort::NameDesc => IconName::ArrowDownZA,
+        ThreadSort::CreatedAsc => IconName::ArrowUpNarrowWide,
+    }
+}
+
+fn build_sort_menu(menu: PopupMenu, ws: &Entity<Workspace>, cx: &App) -> PopupMenu {
+    let current = ws.read(cx).state.thread_sort;
+    let items: Vec<MenuItemSpec> = ThreadSort::ALL
+        .iter()
+        .copied()
+        .map(|sort| {
+            let ws = ws.clone();
+            let item = MenuItemSpec::new(sort_label(sort), move |_, cx| {
+                ws.update(cx, |w, cx| w.set_thread_sort(sort, cx));
+            })
+            .icon(icon(sort_icon(sort)))
+            .checked(sort == current);
+            // 最常用的三种排序（最近创建 / 最近活跃 / 状态优先）与名称、正序之间画分隔线
+            if sort == ThreadSort::NameAsc { item.sep() } else { item }
+        })
+        .collect();
+    to_popup(menu.label(t!("sidebar.sortLabel").to_string()), items)
+}
+
+fn build_filter_menu(
+    mut menu: PopupMenu,
+    sidebar: &WeakEntity<Sidebar>,
+    ws: &Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let Some(sb) = sidebar.upgrade() else {
+        return menu;
+    };
+    let current = sb.read(cx).effective_filter(cx);
+
+    // 1. 状态过滤
+    let status_items: Vec<MenuItemSpec> = ThreadStatusFilter::ALL
+        .iter()
+        .copied()
+        .map(|status| {
+            let sidebar = sidebar.clone();
+            let mut item = MenuItemSpec::new(status_filter_label(status), move |_, cx| {
+                sidebar.update(cx, |this, cx| this.set_status_filter(status, cx)).ok();
+            })
+            .checked(current.status == status);
+            if let Some(glyph) = status_filter_icon(status) {
+                item = item.icon(icon(glyph));
+            }
+            item
+        })
+        .collect();
+    menu = to_popup(menu.label(t!("sidebar.filterStatusLabel").to_string()), status_items);
+
+    // 2. 机器过滤（存在远端主机或已选中机器条件时展示）
+    let (hosts, envs, archived_count, show_archived) = {
+        let w = ws.read(cx);
+        let hosts = w.hosts.clone();
+        let envs: Vec<(String, String, Option<String>)> = w
+            .projects
+            .iter()
+            .filter(|p| p.is_environment() && project_matches_machine(p, &current.machine))
+            .map(|p| {
+                let host_name = match p.project_type {
+                    ProjectType::Local => (!w.hosts.is_empty()).then(local_word),
+                    ProjectType::Ssh => p
+                        .host_id
+                        .as_ref()
+                        .and_then(|id| w.hosts.iter().find(|h| &h.id == id))
+                        .map(|h| h.name.clone()),
+                };
+                (p.id.clone(), p.name.clone(), host_name)
+            })
+            .collect();
+        (hosts, envs, archived_thread_count(&w.projects), w.state.show_archived)
+    };
+
+    if !hosts.is_empty() || current.machine != ThreadMachineFilter::All {
+        let mut machine_items = Vec::with_capacity(hosts.len() + 2);
+        {
+            let sidebar = sidebar.clone();
+            machine_items.push(
+                MenuItemSpec::new(t!("sidebar.filterMachineAll").to_string(), move |_, cx| {
+                    sidebar.update(cx, |this, cx| this.set_machine_filter(ThreadMachineFilter::All, cx)).ok();
+                })
+                .checked(current.machine == ThreadMachineFilter::All),
+            );
+        }
+        {
+            let sidebar = sidebar.clone();
+            machine_items.push(
+                MenuItemSpec::new(local_word(), move |_, cx| {
+                    sidebar.update(cx, |this, cx| this.set_machine_filter(ThreadMachineFilter::Local, cx)).ok();
+                })
+                .icon(icon(IconName::Monitor))
+                .checked(current.machine == ThreadMachineFilter::Local),
+            );
+        }
+        for host in &hosts {
+            let sidebar = sidebar.clone();
+            let id = host.id.clone();
+            let checked = matches!(&current.machine, ThreadMachineFilter::Host(cur) if cur == &id);
+            machine_items.push(
+                MenuItemSpec::new(host.name.clone(), move |_, cx| {
+                    sidebar
+                        .update(cx, |this, cx| this.set_machine_filter(ThreadMachineFilter::Host(id.clone()), cx))
+                        .ok();
+                })
+                .icon(icon(IconName::Server))
+                .checked(checked),
+            );
+        }
+
+        menu = menu.separator();
+        if machine_items.len() <= FILTER_INLINE_MACHINES {
+            menu = to_popup(menu.label(t!("sidebar.filterMachineLabel").to_string()), machine_items);
+        } else {
+            let label = t!("sidebar.filterMachineSubmenu", name = machine_filter_label(&current.machine, ws.read(cx))).to_string();
+            menu = menu.submenu_with_icon(Some(icon(IconName::Server)), label, window, cx, move |sub, _, _| {
+                to_popup(sub, machine_items.clone())
+            });
+        }
+    }
+
+    // 3. 环境过滤（按当前选中的机器收敛候选环境）
+    if !envs.is_empty() || current.environment_id.is_some() {
+        let show_machine_suffix = current.machine == ThreadMachineFilter::All && !hosts.is_empty();
+        let mut env_items = Vec::with_capacity(envs.len() + 1);
+        {
+            let sidebar = sidebar.clone();
+            env_items.push(
+                MenuItemSpec::new(t!("sidebar.filterEnvAll").to_string(), move |_, cx| {
+                    sidebar.update(cx, |this, cx| this.set_env_filter(None, cx)).ok();
+                })
+                .checked(current.environment_id.is_none()),
+            );
+        }
+        for (id, name, host_name) in envs {
+            let label = match (show_machine_suffix, host_name) {
+                (true, Some(host)) => format!("{name} · {host}"),
+                _ => name,
+            };
+            let sidebar = sidebar.clone();
+            let checked = current.environment_id.as_deref() == Some(id.as_str());
+            env_items.push(
+                MenuItemSpec::new(label, move |_, cx| {
+                    sidebar.update(cx, |this, cx| this.set_env_filter(Some(id.clone()), cx)).ok();
+                })
+                .icon(icon(IconName::Folder))
+                .checked(checked),
+            );
+        }
+
+        menu = menu.separator();
+        if env_items.len() <= FILTER_INLINE_ENVS {
+            menu = to_popup(menu.label(t!("sidebar.filterEnvLabel").to_string()), env_items);
+        } else {
+            let cur_name = current
+                .environment_id
+                .as_deref()
+                .map(|id| env_filter_label(id, ws.read(cx)))
+                .unwrap_or_else(|| t!("sidebar.filterEnvAll").to_string());
+            let label = t!("sidebar.filterEnvSubmenu", name = cur_name).to_string();
+            menu = menu.submenu_with_icon(Some(icon(IconName::Folder)), label, window, cx, move |sub, _, _| {
+                to_popup(sub, env_items.clone())
+            });
+        }
+    }
+
+    // 4. 已存档的旧工作树线程开关
+    if archived_count > 0 || show_archived {
+        let ws = ws.clone();
+        menu = menu.separator();
+        menu = to_popup(
+            menu,
+            vec![
+                MenuItemSpec::new(t!("worktree.showArchived", n = archived_count).to_string(), move |_, cx| {
+                    ws.update(cx, |w, cx| w.toggle_show_archived(cx));
+                })
+                .icon(icon(IconName::Archive))
+                .checked(show_archived),
+            ],
+        );
+    }
+
+    // 5. 一键清除过滤
+    if current.is_active() {
+        let sidebar = sidebar.clone();
+        menu = menu.separator();
+        menu = to_popup(
+            menu,
+            vec![
+                MenuItemSpec::new(t!("sidebar.filterClear").to_string(), move |window, cx| {
+                    sidebar.update(cx, |this, cx| this.clear_filters(window, cx)).ok();
+                })
+                .icon(icon(IconName::RotateCcw)),
+            ],
+        );
+    }
+
+    menu
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_filter_and_sort_i18n_keys_exist() {
+        let locale: serde_json::Value = serde_json::from_str(include_str!("../locales/zh-CN.json")).unwrap();
+        let has = |key: &str| {
+            key.split('.')
+                .try_fold(&locale, |v, part| v.get(part))
+                .is_some_and(serde_json::Value::is_string)
+        };
+        for key in [
+            "sidebar.filterPlaceholder",
+            "sidebar.filterTooltip",
+            "sidebar.filterActiveTooltip",
+            "sidebar.filterStatusLabel",
+            "sidebar.filterStatusAll",
+            "sidebar.filterStatusActive",
+            "sidebar.filterStatusWorking",
+            "sidebar.filterStatusNeedsAttention",
+            "sidebar.filterStatusHasChanges",
+            "sidebar.filterMachineLabel",
+            "sidebar.filterMachineAll",
+            "sidebar.filterMachineSubmenu",
+            "sidebar.filterEnvLabel",
+            "sidebar.filterEnvAll",
+            "sidebar.filterEnvSubmenu",
+            "sidebar.filterEnvUnknown",
+            "sidebar.filterClear",
+            "sidebar.filterEmpty",
+            "sidebar.filterCount",
+            "sidebar.sortLabel",
+            "sidebar.sortTooltip",
+            "sidebar.sortCreatedDesc",
+            "sidebar.sortCreatedAsc",
+            "sidebar.sortLastActiveDesc",
+            "sidebar.sortStatusPriority",
+            "sidebar.sortNameAsc",
+            "sidebar.sortNameDesc",
+        ] {
+            assert!(has(key), "缺文案 key：{key}");
+        }
+        for &status in ThreadStatusFilter::ALL {
+            assert!(!status_filter_label(status).is_empty());
+        }
+        for &sort in ThreadSort::ALL {
+            assert!(!sort_label(sort).is_empty());
+        }
+    }
 }

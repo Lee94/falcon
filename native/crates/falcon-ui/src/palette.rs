@@ -281,7 +281,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                 key: format!("#{} {}", p.name, t!("env.thread")),
                 label: format!("{} · {}", t!("env.thread"), p.name),
                 meta: Some(host), icon: icon(IconName::Plus), tone: None,
-                run: run(move |window, cx| crate::dialogs::worktree_form::open_thread(&w, &id, window, cx)),
+                run: run(move |window, cx| crate::dialogs::new_thread::open(&w, &id, window, cx)),
             });
             continue;
         }
@@ -299,14 +299,14 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
         let durable_thread = p.thread_environment_id.is_some();
         if durable_thread {
             let (w, pid) = (ws_entity.clone(), p.id.clone());
-            let action = t!("env.openThread");
+            let action = t!("claudeChat.title");
             project_items.push(PickItem {
                 key: format!("#{} {action}", p.name),
                 label: format!("{action} · {}", p.name),
                 meta: Some(host.clone()),
                 icon: crate::session_icon::session_icon(Some(falcon_proto::SessionAgent::Claude)),
                 tone: None,
-                run: run(move |_, cx| crate::dialogs::claude::open(&w, &pid, cx)),
+                run: run(move |_, cx| w.update(cx, |w, cx| w.open_chat(&pid, None, cx))),
             });
         }
         for agent in ws.session_agents(&p.id) {
@@ -317,7 +317,7 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
                     key: format!("#{} {label}", p.name),
                     label: t!("palette.newAgentIn", agent = label, name = p.name.clone()).to_string(),
                     meta: Some(host.clone()), icon: crate::session_icon::session_icon(Some(*agent)), tone: None,
-                    run: run(move |_, cx| crate::dialogs::claude::open(&w, &pid, cx)),
+                    run: run(move |_, cx| w.update(cx, |w, cx| w.open_chat(&pid, None, cx))),
                 });
             }
             let agent_name = t!(format!("agent.{}", agent.as_str())).to_string();
@@ -358,6 +358,17 @@ fn build(ws_entity: &Entity<Workspace>, query: &str, cx: &App) -> Vec<PickGroup>
     }
 
     let mut actions: Vec<PickItem> = Vec::new();
+    {
+        let w = ws_entity.clone();
+        actions.push(PickItem {
+            key: format!(">{} thread", t!("env.thread")),
+            label: t!("env.thread").to_string(),
+            meta: Some(chord("newThread").to_string()),
+            icon: icon(IconName::Plus),
+            tone: None,
+            run: run(move |window, cx| crate::dialogs::new_thread::open(&w, "", window, cx)),
+        });
+    }
     for s in ws.sessions.iter().filter(|s| s.state == SessionState::Unverified) {
         let name = session_label(s, &ws.projects);
         let (w, id) = (ws_entity.clone(), s.id.clone());

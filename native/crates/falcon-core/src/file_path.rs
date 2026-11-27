@@ -83,8 +83,8 @@ pub fn parent_nav_path(path: &str) -> Option<String> {
 
 /// 多文件夹项目没有必需的 working_dir：先打开首个成员，不误列后端的启动目录。
 pub fn project_nav_root(project: &falcon_proto::Project) -> Option<String> {
-    if project.is_thread() {
-        return project.working_dir.clone();
+    if project.is_thread() && let Some(dir) = project.working_dir.clone() {
+        return Some(dir);
     }
     project
         .multi
@@ -272,6 +272,15 @@ mod tests {
             "worktree":{"sourceProjectId":"env","branch":"falcon/thread-t","repoDir":"","createdByFalcon":true}
         })).unwrap();
         assert_eq!(project_nav_root(&thread).as_deref(), Some("/threads/t"));
+    }
+
+    #[test]
+    fn multi_directory_thread_opens_at_first_member() {
+        let thread = serde_json::from_value(serde_json::json!({
+            "id":"t2","name":"task","type":"local","createdAt":2,"threadEnvironmentId":"env",
+            "multi":{"repos":[{"dir":"/code/web"},{"dir":"/code/api"}]}
+        })).unwrap();
+        assert_eq!(project_nav_root(&thread).as_deref(), Some("/code/web"));
     }
 
     #[test]

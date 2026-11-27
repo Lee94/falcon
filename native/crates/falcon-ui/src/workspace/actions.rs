@@ -114,6 +114,29 @@ impl Workspace {
         }
     }
 
+    // ---------------- Claude 对话窗口 ----------------
+
+    /// 在画布上打开（或聚焦）项目的 Claude 对话，并选中它。`prompt`：新建线程时的第一条消息，
+    /// 对话连上后自动发出
+    pub fn open_chat(&mut self, project_id: &str, prompt: Option<String>, cx: &mut Context<Self>) {
+        if self.project(project_id).is_none() {
+            return;
+        }
+        if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+            self.chat_prompts.insert(project_id.to_string(), prompt);
+        }
+        self.state.select_project(project_id, &self.projects, &self.sessions);
+        self.state.open_chat(project_id, &self.sessions);
+        self.commit(true, cx);
+    }
+
+    /// 关掉对话窗口；宿主机上的线程历史留着，下次打开接回
+    pub fn close_chat(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if self.state.close_chat(project_id, &self.sessions) {
+            self.commit(false, cx);
+        }
+    }
+
     // ---------------- 文件 / 差异窗口 ----------------
 
     /// 打开一个文件（文件窗口就地换内容）。正开着的文件有没存的修改时先问一句
@@ -188,6 +211,7 @@ impl Workspace {
 
     /// 只把窗口摘掉，不碰会话
     pub fn drop_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.pending_prompts.remove(id);
         self.state.drop_tab(id, &self.sessions);
         self.dismiss_program_alert(id, cx);
         self.commit(false, cx);
@@ -312,6 +336,7 @@ impl Workspace {
                 }
                 Some(PaneItem::File { .. }) => self.close_file(cx),
                 Some(PaneItem::Diff { .. }) => self.close_diff(cx),
+                Some(PaneItem::Chat { project_id, .. }) => self.close_chat(&project_id, cx),
                 None => {}
             }
         }
@@ -440,6 +465,13 @@ impl Workspace {
         self.commit(false, cx);
     }
 
+    pub fn set_thread_sort(&mut self, sort: falcon_core::project_tree::ThreadSort, cx: &mut Context<Self>) {
+        if self.state.set_thread_sort(sort) {
+            self.persist();
+            cx.notify();
+        }
+    }
+
     /// 侧栏拖拽排序：先在本地挪（松手就看得到），再落到服务端，完成后与节点状态一起刷新列表。
     /// 失败就提示并重新拉一次，乐观挪过的作废。挪的规则与服务端是同一个函数（`move_in_order`）
     pub fn move_project(&mut self, id: &str, target: &str, after: bool, cx: &mut Context<Self>) {
@@ -483,6 +515,24 @@ impl Workspace {
 
     /// 按指定位置新建终端（向右分屏 / 向下分屏 / 默认追加列）
     pub fn new_terminal_at(&mut self, project_id: &str, agent: Option<SessionAgent>, place: NewTerminalPlace, cx: &mut Context<Self>) {
+        self.new_terminal_prompted(project_id, agent, place, None, cx);
+    }
+
+    /// 新建线程的第一个动作：开一个 Agent（或普通）终端，第一条消息随建会话的请求交给服务端，
+    /// 能接的 CLI 开场就收到它（服务端 sessions/agent.rs 的 `accepts_prompt`）
+    pub fn new_terminal_with_prompt(&mut self, project_id: &str, agent: Option<SessionAgent>, prompt: Option<String>, cx: &mut Context<Self>) {
+        let prompt = prompt.filter(|p| agent.is_some() && !p.trim().is_empty());
+        self.new_terminal_prompted(project_id, agent, NewTerminalPlace::Auto, prompt, cx);
+    }
+
+    fn new_terminal_prompted(
+        &mut self,
+        project_id: &str,
+        agent: Option<SessionAgent>,
+        place: NewTerminalPlace,
+        prompt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.owner_project(project_id) else {
             return;
         };
@@ -499,10 +549,11 @@ impl Workspace {
                     // 没问过授权，或宿主机上没有这一版守护进程：先走对话框看着进度部署
                     let needs_setup = status.as_ref().is_ok_and(falcon_core::host_install::needs_host_setup);
                     if needs_setup {
+                        // 部署对话框之后照普通流程建会话，第一条消息不再随行
                         cx.emit(WorkspaceEvent::NeedsInstall { project_id: pid.clone(), agent });
                     } else {
                         // 查不到主机状态就照常建会话，由后端判定持久性
-                        this.create_session_at(&pid, agent, place.clone(), cx);
+                        this.create_session_prompted(&pid, agent, place.clone(), prompt.clone(), cx);
                     }
                 })
                 .ok();
@@ -510,7 +561,7 @@ impl Workspace {
             .detach();
             return;
         }
-        self.create_session_at(project_id, agent, place, cx);
+        self.create_session_prompted(project_id, agent, place, prompt, cx);
     }
 
     /// 相对当前活动窗口分屏新建终端（`down = false` 向右插列，`down = true` 向下叠放）
@@ -535,7 +586,21 @@ impl Workspace {
     }
 
     pub fn create_session_at(&mut self, project_id: &str, agent: Option<SessionAgent>, place: NewTerminalPlace, cx: &mut Context<Self>) {
+        self.create_session_prompted(project_id, agent, place, None, cx);
+    }
+
+    fn create_session_prompted(
+        &mut self,
+        project_id: &str,
+        agent: Option<SessionAgent>,
+        place: NewTerminalPlace,
+        prompt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let pending_id = self.state.begin_pending_at(project_id, agent, place, &self.sessions);
+        if let Some(prompt) = prompt {
+            self.pending_prompts.insert(pending_id.clone(), prompt);
+        }
         self.commit(false, cx);
         self.spawn_create(pending_id, project_id.to_string(), agent, cx);
     }
@@ -556,6 +621,7 @@ impl Workspace {
             return;
         };
         let hint = crate::theme::TerminalLook::global(cx).appearance.clone();
+        let prompt = self.pending_prompts.get(&pending_id).cloned();
         cx.spawn(async move |this, cx| {
             let request = falcon_proto::CreateSessionRequest {
                 name: None,
@@ -563,6 +629,7 @@ impl Workspace {
                 appearance: hint.appearance,
                 background: hint.background.clone(),
                 foreground: hint.foreground.clone(),
+                prompt,
             };
             let result = client.create_session(&project_id, &request).await;
             this.update(cx, |this, cx| match result {
@@ -578,6 +645,7 @@ impl Workspace {
                     }
                     // 途中那轮可能在创建之前已取回会话列表，不能拿它覆盖刚完成的创建。
                     this.session_revision += 1;
+                    this.pending_prompts.remove(&pending_id);
                     let was_active = this.state.active == ActiveView::Terminal { session_id: pending_id.clone() };
                     this.state.resolve_pending(&pending_id, &id);
                     this.commit(was_active, cx);

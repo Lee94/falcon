@@ -23,8 +23,9 @@ use tokio::io::AsyncReadExt as _;
 
 use super::backend::{AttachResult, Backend, BackendCallbacks};
 use super::login_env::{
-    PROBE_OUTPUT_CAP, PROBE_TIMEOUT_MS, RESOLVING_ENV_VAR, detect_fallback_lang, has_locale, login_env_probe_args,
-    merge_base_env, node_platform, parse_login_env, pick_login_probe_shell,
+    INHERITED_SESSION_ENV, PROBE_OUTPUT_CAP, PROBE_TIMEOUT_MS, RESOLVING_ENV_VAR, detect_fallback_lang, has_locale,
+    login_env_probe_args, merge_base_env, node_platform, parse_login_env, pick_login_probe_shell,
+    strip_inherited_session_env,
 };
 use super::ssh_host::{AttachOptions, spawn_spec};
 use crate::askpass::install::{askpass_session_env, prepend_path};
@@ -145,12 +146,14 @@ impl LocalHost {
     }
 }
 
-/// 进程环境（不含我们自己会写进去的东西——Rust 版不改写自身环境，不存在 SEA 把
-/// `FALCON_*` 漏进会话的问题）
+/// 进程环境（剥离外层 Claude Code / Falcon 会话的运行态标记，避免后端从嵌套会话启动时
+/// 把父会话标记带进新建终端与 Claude 对话）
 fn process_env() -> Vec<(String, String)> {
-    std::env::vars_os()
+    let mut env: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect()
+        .collect();
+    strip_inherited_session_env(&mut env);
+    env
 }
 
 /// 在后端本机起进程时用的基底环境，可注入。TS 里是模块级的 `resolveLocalBaseEnv()`，PTY、
@@ -195,8 +198,8 @@ pub(super) async fn resolve_base_env() -> Vec<(String, String)> {
 /// FALCON_RESOLVING_ENV=1 打给用户的 rc：想跳过重活（nvm、耗时的补全初始化）的可以用它判断，
 /// 等价于 VS Code 的 VSCODE_RESOLVING_ENVIRONMENT。
 async fn run_login_shell(shell: &str) -> Option<String> {
-    let mut child = tokio::process::Command::new(shell)
-        .no_window()
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.no_window()
         .args(login_env_probe_args())
         // rc 文件普遍假设从 home 起步；也避免探测把仓库目录当 cwd 产生副作用
         .current_dir(home_dir())
@@ -204,9 +207,11 @@ async fn run_login_shell(shell: &str) -> Option<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
+        .kill_on_drop(true);
+    for key in INHERITED_SESSION_ENV {
+        cmd.env_remove(key);
+    }
+    let mut child = cmd.spawn().ok()?;
     let mut out = child.stdout.take()?;
     let read = async {
         let mut buf = Vec::new();
@@ -283,6 +288,7 @@ pub async fn attach_local(
 ) -> anyhow::Result<(AttachResult, crate::agent_browser::env::InjectOutcome)> {
     let base = host.base_env().await;
     let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
+    strip_inherited_session_env(&mut env);
     let program = opts.shell.clone().unwrap_or_else(default_local_shell);
     let cwd = opts.cwd.clone();
     if let Some(bin) = &opts.askpass_bin {
@@ -422,14 +428,17 @@ fn endpoint(deployed: &Deployed, sid: &str) -> String {
 /// 跑一条守护进程子命令拿 stdout（spawn / list / kill）。15 秒兜底：spawn 自己等就绪最多 10 秒
 pub(super) async fn run_sessiond(argv: &[String]) -> Result<String, String> {
     let (bin, args) = argv.split_first().expect("argv");
-    let child = tokio::process::Command::new(bin)
-        .no_window()
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.no_window()
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    for key in INHERITED_SESSION_ENV {
+        cmd.env_remove(key);
+    }
+    let child = cmd.output();
     match tokio::time::timeout(Duration::from_secs(15), child).await {
         Ok(Ok(out)) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(Ok(out)) => {
@@ -460,6 +469,7 @@ pub async fn open_local_sessiond(
     if !opts.reattach {
         let base = host.base_env().await;
         let mut env = apply_term_pty_env(base.iter().map(|(k, v)| (k.clone(), Some(v.clone()))), opts.appearance, local_kind());
+        strip_inherited_session_env(&mut env);
         if let Some(bin) = &opts.askpass_bin {
             prepend_path(&mut env, bin);
             merge_env(&mut env, askpass_session_env(bin, &opts.session_id));
@@ -614,6 +624,65 @@ pub(crate) mod tests {
                 let text = out.borrow().clone();
                 assert!(text.contains("xterm-256color|1|中文"), "{text:?}");
                 assert!(text.contains("30 120"), "{text:?}");
+            })
+            .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn attach_local_strips_inherited_session_markers_while_keeping_current_session_env() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                let host = LocalHost::new(dir.path().to_path_buf());
+                let mut base = test_env();
+                base.extend([
+                    ("CLAUDECODE".into(), "1".into()),
+                    ("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()),
+                    ("CLAUDE_CODE_SESSION_ID".into(), "outer-claude".into()),
+                    ("FALCON_AGENT_SESSION".into(), "outer-agent".into()),
+                    ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), "128000".into()),
+                ]);
+                host.set_base_env(base);
+                let out = Rc::new(RefCell::new(String::new()));
+                let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<()>();
+                let exit_tx = RefCell::new(Some(exit_tx));
+                let o2 = out.clone();
+                let cb = BackendCallbacks {
+                    on_event: Rc::new(|_| {}),
+                    on_data: Rc::new(move |s| o2.borrow_mut().push_str(&s)),
+                    on_exit: Rc::new(move || {
+                        if let Some(tx) = exit_tx.borrow_mut().take() {
+                            let _ = tx.send(());
+                        }
+                    }),
+                };
+                let opts = AttachOptions {
+                    session_id: "new-session".into(),
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some(dir.path().to_string_lossy().into_owned()),
+                    durable: false,
+                    cols: 120,
+                    rows: 30,
+                    env: vec![("FALCON_AGENT_SESSION".into(), "current-agent".into())],
+                    ..Default::default()
+                };
+                let (r, _) = attach_local(&host, &opts, cb).await.unwrap();
+                r.backend.write(
+                    "printf 'MARK:%s|%s|%s|%s|%s\\n' \
+                     \"${CLAUDECODE-unset}\" \
+                     \"${CLAUDE_CODE_CHILD_SESSION-unset}\" \
+                     \"${CLAUDE_CODE_SESSION_ID-unset}\" \
+                     \"${FALCON_AGENT_SESSION-unset}\" \
+                     \"${CLAUDE_CODE_MAX_OUTPUT_TOKENS-unset}\"; exit\n",
+                );
+                tokio::time::timeout(Duration::from_secs(10), exit_rx).await.unwrap().unwrap();
+                let text = out.borrow().clone();
+                assert!(
+                    text.contains("MARK:unset|unset|unset|current-agent|128000"),
+                    "{text:?}"
+                );
             })
             .await;
     }

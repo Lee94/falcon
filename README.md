@@ -1,6 +1,6 @@
 # Falcon
 
-Falcon 是按**机器 → 环境 → 线程**组织工作的持久化终端工作台。接入本机或通过 SSH（安全外壳协议）连接远端主机后，在机器节点新建环境，选择该机上的一个或多个 Git 仓库并填写环境上下文。
+Falcon 是按**机器 → 环境 → 线程**组织工作的持久化终端工作台。接入本机或通过 SSH（安全外壳协议）连接远端主机后，在机器节点新建环境，选择该机上的一个或多个 Git 仓库。
 
 从环境新建线程，填写线程名称和任务说明。所属主机上的 Falcon 将每个仓库的当前提交检出到独立工作树，并在 `<数据目录>/threads/<线程 ID>/` 下生成 `AGENTS.md`、引用它的 `CLAUDE.md` 和 `projects/`。选择线程可打开终端或查看文件。关闭终端、断开连接或修改环境后，已有线程仍保留原目录和上下文。
 
@@ -45,3 +45,7 @@ cargo run -p falcon-desktop     # 原生客户端，连本机服务
 | [docs/develop.md](./docs/develop.md) | 工程结构、常用命令、升级 libghostty-vt |
 | [docs/plugins.md](./docs/plugins.md) | 右侧栏插件作者手册 |
 | [docs/adr/](./docs/adr/) | 架构决策 |
+
+### iPad 客户端
+
+用 Xcode 打开 `ipad/Falcon.xcodeproj`，选择 Falcon 和 iPad 运行目标。真机安装时在 Signing & Capabilities 中选择开发团队。应用支持 iPadOS 17 及以上版本。首次打开时输入 iPad 可访问的 Falcon 服务端地址，例如 `http://falcon.local:4923`。侧栏按项目列出会话，点按加号可新建终端；窗口变窄时通过系统返回按钮切换会话。

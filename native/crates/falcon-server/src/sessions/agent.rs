@@ -37,6 +37,33 @@ pub fn agent_bin(agent: SessionAgent) -> &'static str {
 /// 脚本从这两个环境变量知道要不要钉对话 id、是不是接着上次的对话（[`launch_env`]）
 pub const AGENT_SESSION_ENV: &str = "FALCON_AGENT_SESSION";
 pub const AGENT_RESUME_ENV: &str = "FALCON_AGENT_RESUME";
+/// 新建线程时写的第一条消息，脚本把它当 CLI 的初始提示词（[`accepts_prompt`]）
+pub const AGENT_PROMPT_ENV: &str = "FALCON_AGENT_PROMPT";
+
+/// 这个 CLI 能不能在交互模式开场时带一条初始提示词。判断与客户端共用一份（`SessionAgent::accepts_prompt`，
+/// 那里写了逐个核对的依据）。devin 要求消息写在 `--` 后面，脚本对所有 CLI 都这样写。
+/// 其余 CLI 照常开场，第一条消息不传
+pub fn accepts_prompt(agent: SessionAgent) -> bool {
+    agent.accepts_prompt()
+}
+
+/// 第一条消息整理成交给 CLI 的那个参数；空白消息不传。
+///
+/// 脚本把它写在 `--` 后面，以 `-` 开头的消息不会被当成选项。形如命令名的消息（只有 ASCII 字母、
+/// 数字、`-`、`_`）在末尾补一个空格：claude 用 commander 解析参数，`--` 之后的第一个操作数如果
+/// 恰好是子命令名（`update`、`doctor`、`mcp`……）照样会被当成子命令执行。末尾的空格对 agent 没有影响；
+/// 中文消息里没有空格，但不可能撞上子命令名，原样传
+pub fn initial_prompt(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut prompt = text.replace("\r\n", "\n");
+    if prompt.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        prompt.push(' ');
+    }
+    Some(prompt)
+}
 
 /// 这个 CLI 能不能由我们指定对话 id、事后按 id 接着聊。claude 与 grok 都有
 /// `--session-id <uuid>`（新对话用这个 id）和 `--resume <uuid>`；按 id 找不到对话时两个都是
@@ -52,13 +79,27 @@ pub fn resumable(agent: SessionAgent) -> bool {
 ///
 /// 不是 UUID 形状的会话 id（测试里手写的、上古数据）不钉：claude / grok 只认 UUID，钉了反而起不来。
 /// resume：宿主机上的会话没了、原地重开（manager 的 revive）。
-pub fn launch_env(agent: Option<SessionAgent>, session_id: &str, resume: bool) -> Vec<(String, String)> {
-    if !agent.is_some_and(resumable) || !is_uuid(session_id) {
-        return Vec::new();
+///
+/// prompt：新建线程时的第一条消息，只在新建会话时给（manager 只在 `AttachMode::Create` 传）。
+/// 原地重开接的是原来那段对话，再发一遍等于让 agent 把第一件事重做一次，所以 resume 时一律不带
+pub fn launch_env(
+    agent: Option<SessionAgent>,
+    session_id: &str,
+    resume: bool,
+    prompt: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if agent.is_some_and(resumable) && is_uuid(session_id) {
+        env.push((AGENT_SESSION_ENV.to_string(), session_id.to_string()));
+        if resume {
+            env.push((AGENT_RESUME_ENV.to_string(), "1".to_string()));
+        }
     }
-    let mut env = vec![(AGENT_SESSION_ENV.to_string(), session_id.to_string())];
-    if resume {
-        env.push((AGENT_RESUME_ENV.to_string(), "1".to_string()));
+    if !resume
+        && agent.is_some_and(accepts_prompt)
+        && let Some(prompt) = prompt.and_then(initial_prompt)
+    {
+        env.push((AGENT_PROMPT_ENV.to_string(), prompt));
     }
     env
 }
@@ -127,23 +168,36 @@ fn restore_askpass_path() -> String {
 /// 两个变量在落回 shell 前 unset，不留在用户之后的 shell 里。
 fn posix_launcher_body(agent: SessionAgent, shell: &str) -> String {
     let bin = agent_bin(agent);
+    // 能带第一条消息的 CLI：消息先挪进位置参数（`-- <消息>`，没有就清空），再把环境变量删掉——
+    // 不让它留在 CLI 及其子进程（agent 跑的命令）的环境里。每处调用末尾的 `"$@"` 没有消息时展开成空
+    let (prompt, args) = if accepts_prompt(agent) {
+        (
+            format!(
+                "if [ -n \"${{{AGENT_PROMPT_ENV}:-}}\" ]; then set -- -- \"${AGENT_PROMPT_ENV}\"; else set --; fi; \
+                 unset {AGENT_PROMPT_ENV}; "
+            ),
+            " \"$@\"",
+        )
+    } else {
+        (String::new(), "")
+    };
     let (run, unset) = if resumable(agent) {
         (
             format!(
-                "if [ -z \"${AGENT_SESSION_ENV}\" ]; then {bin}; \
+                "if [ -z \"${AGENT_SESSION_ENV}\" ]; then {bin}{args}; \
                  elif [ -n \"${AGENT_RESUME_ENV}\" ]; then \
-                 {bin} --resume \"${AGENT_SESSION_ENV}\" || {bin} --session-id \"${AGENT_SESSION_ENV}\"; \
-                 else {bin} --session-id \"${AGENT_SESSION_ENV}\"; fi"
+                 {bin} --resume \"${AGENT_SESSION_ENV}\"{args} || {bin} --session-id \"${AGENT_SESSION_ENV}\"{args}; \
+                 else {bin} --session-id \"${AGENT_SESSION_ENV}\"{args}; fi"
             ),
             format!("unset {AGENT_SESSION_ENV} {AGENT_RESUME_ENV}; "),
         )
     } else {
-        (bin.to_string(), String::new())
+        (format!("{bin}{args}"), String::new())
     };
     // zsh -i -c 在前台命令被 SIGINT 中断时会放弃整个命令串，跳过最后的 exec。
     // 捕获信号并返回，外部 CLI 仍按默认方式接收 SIGINT；exec 后新 shell 自行处理信号。
     let inner = format!(
-        "trap : INT; {askpass}if command -v {bin} >/dev/null 2>&1; then {run}; \
+        "trap : INT; {askpass}{prompt}if command -v {bin} >/dev/null 2>&1; then {run}; \
          else printf '%s\\n' {} >&2; fi; \
          {unset}exec {} -i -l",
         quote_posix(&format!("falcon: PATH 里找不到 {bin}，先装好它再开这种会话。")),
@@ -169,10 +223,17 @@ fn windows_launcher_body(agent: SessionAgent, shell: &str) -> String {
     let mut lines = vec![
         "@echo off".to_string(),
         format!("rem falcon: session that opens with {bin}; falls back to the shell on exit"),
+    ];
+    // cmd 展开 %VAR% 之后还会再解析一遍 & | > 和引号，把任意文本安全地当一个参数交出去做不到，
+    // Windows 宿主机上不传第一条消息。变量在 CLI 起来之前清掉，不留在它的环境里
+    if accepts_prompt(agent) {
+        lines.push(format!("set {AGENT_PROMPT_ENV}="));
+    }
+    lines.extend([
         format!("where {bin} >nul 2>&1"),
         "if errorlevel 1 (".to_string(),
         format!("  echo falcon: {bin} was not found on PATH; install it first."),
-    ];
+    ]);
     if resumable(agent) {
         let id = format!("%{AGENT_SESSION_ENV}%");
         lines.extend([
@@ -366,7 +427,7 @@ mod tests {
     #[test]
     fn extra_launch_env_pins_the_session_id_and_marks_resume() {
         const ID: &str = "0a1b2c3d-0000-4000-8000-00000000beef";
-        let env = |a, id: &str, r| launch_env(a, id, r);
+        let env = |a, id: &str, r| launch_env(a, id, r, None);
         assert_eq!(env(Some(SessionAgent::Claude), ID, false), vec![(AGENT_SESSION_ENV.into(), ID.into())]);
         assert_eq!(
             env(Some(SessionAgent::Grok), ID, true),
@@ -378,6 +439,39 @@ mod tests {
         assert!(env(Some(SessionAgent::Claude), "0a1b2c3d-0000-4000-8000-00000000beeg", false).is_empty());
     }
 
+    /// 第一条消息只在新建时给、只给能接的 CLI；不像 UUID 的会话 id 不钉对话，消息照样给
+    #[test]
+    fn extra_launch_env_carries_the_first_message_only_when_creating() {
+        const ID: &str = "0a1b2c3d-0000-4000-8000-00000000beef";
+        let prompt = (AGENT_PROMPT_ENV.to_string(), "修一下登录超时".to_string());
+        assert_eq!(
+            launch_env(Some(SessionAgent::Claude), ID, false, Some(" 修一下登录超时 ")),
+            vec![(AGENT_SESSION_ENV.into(), ID.into()), prompt.clone()]
+        );
+        assert_eq!(launch_env(Some(SessionAgent::Codex), "s", false, Some("修一下登录超时")), vec![prompt]);
+        // 原地重开接的是原来那段对话，不再发一遍
+        assert!(!launch_env(Some(SessionAgent::Claude), ID, true, Some("x y")).iter().any(|(k, _)| k == AGENT_PROMPT_ENV));
+        assert!(launch_env(Some(SessionAgent::Amp), ID, false, Some("x y")).is_empty());
+        assert!(launch_env(None, ID, false, Some("x y")).is_empty());
+        assert!(launch_env(Some(SessionAgent::Codex), ID, false, Some(" \n ")).is_empty());
+    }
+
+    #[test]
+    fn extra_initial_prompt_never_reads_as_a_subcommand() {
+        assert_eq!(initial_prompt("update").as_deref(), Some("update "));
+        assert_eq!(initial_prompt("setup-token").as_deref(), Some("setup-token "));
+        assert_eq!(initial_prompt("修一下登录超时").as_deref(), Some("修一下登录超时"));
+        assert_eq!(initial_prompt("fix it").as_deref(), Some("fix it"));
+        assert_eq!(initial_prompt("  修 bug\r\n第二行 ").as_deref(), Some("修 bug\n第二行"));
+        assert_eq!(initial_prompt("   "), None);
+        for agent in [SessionAgent::Claude, SessionAgent::Codex, SessionAgent::Grok, SessionAgent::Devin] {
+            assert!(accepts_prompt(agent), "{}", agent.as_str());
+        }
+        for agent in [SessionAgent::Amp, SessionAgent::Agy, SessionAgent::Omp, SessionAgent::Gemini, SessionAgent::Unknown] {
+            assert!(!accepts_prompt(agent), "{}", agent.as_str());
+        }
+    }
+
     /// Windows 的续接分支：先 --resume，失败再按同一个 id 新开；落回 shell 前清掉变量
     #[test]
     fn extra_windows_body_resumes_then_falls_back_to_a_pinned_new_conversation() {
@@ -385,9 +479,12 @@ mod tests {
         assert!(body.contains("\r\n) else if defined FALCON_AGENT_RESUME (\r\n  call claude --resume %FALCON_AGENT_SESSION%\r\n"));
         assert!(body.contains("  if errorlevel 1 call claude --session-id %FALCON_AGENT_SESSION%\r\n"));
         assert!(body.contains("set FALCON_AGENT_SESSION=\r\nset FALCON_AGENT_RESUME=\r\n\"C:"));
-        // 不能续接的没有这些
+        // 不能续接的没有这些；能带第一条消息的只在开头清掉那个变量（Windows 上不传）
         let codex = launcher_body(SessionAgent::Codex, HostKind::Windows, "powershell.exe");
-        assert!(!codex.contains("FALCON_AGENT"));
+        assert!(!codex.contains("FALCON_AGENT_SESSION") && !codex.contains("FALCON_AGENT_RESUME"));
+        assert_eq!(codex.matches("FALCON_AGENT_PROMPT").count(), 1);
+        assert!(codex.contains("\r\nset FALCON_AGENT_PROMPT=\r\nwhere codex"));
+        assert!(!launcher_body(SessionAgent::Amp, HostKind::Windows, "powershell.exe").contains("FALCON_AGENT"));
     }
 
     /// 固定启动脚本形状：POSIX 在登录配置后恢复 askpass PATH，Windows 沿用原命令。
@@ -399,14 +496,15 @@ mod tests {
             "#!/bin/sh\n\
              # falcon: 以 codex 开场的会话。CLI 退出后落回登录 shell，会话不跟着结束。\n\
              exec '/bin/zsh' -i -l -c 'trap : INT; if [ -n \"${FALCON_ASKPASS_BIN:-}\" ]; then export PATH=\"$FALCON_ASKPASS_BIN:$PATH\"; fi; \
-             if command -v codex >/dev/null 2>&1; then codex; \
+             if [ -n \"${FALCON_AGENT_PROMPT:-}\" ]; then set -- -- \"$FALCON_AGENT_PROMPT\"; else set --; fi; unset FALCON_AGENT_PROMPT; \
+             if command -v codex >/dev/null 2>&1; then codex \"$@\"; \
              else printf '\\''%s\\n'\\'' '\\''falcon: PATH 里找不到 codex，先装好它再开这种会话。'\\'' >&2; fi; \
              exec '\\''/bin/zsh'\\'' -i -l'\n"
         );
         assert_eq!(
             launcher_body(SessionAgent::Codex, HostKind::Windows, "C:\\Windows\\System32\\powershell.exe"),
             "@echo off\r\nrem falcon: session that opens with codex; falls back to the shell on exit\r\n\
-             where codex >nul 2>&1\r\nif errorlevel 1 (\r\n  echo falcon: codex was not found on PATH; install it first.\r\n\
+             set FALCON_AGENT_PROMPT=\r\nwhere codex >nul 2>&1\r\nif errorlevel 1 (\r\n  echo falcon: codex was not found on PATH; install it first.\r\n\
              ) else (\r\n  call codex\r\n)\r\n\"C:\\Windows\\System32\\powershell.exe\"\r\n"
         );
         assert_eq!(local_launcher_dir(Path::new("/data")), PathBuf::from("/data/agents"));
@@ -531,5 +629,48 @@ mod tests {
             run(&[(AGENT_SESSION_ENV, ID), (AGENT_RESUME_ENV, "1")]),
             format!("claude --resume {ID}\nclaude --session-id {ID}\n{back}")
         );
+    }
+    /// 真跑带第一条消息的脚本：消息原样成为 `--` 后面的一个参数（引号、`$( )`、换行都不展开、
+    /// 不拆开），CLI 的环境里已经没有那个变量；没有消息时 CLI 不多收任何参数
+    #[cfg(unix)]
+    #[test]
+    fn extra_first_message_reaches_the_cli_as_one_argument() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let tmp = tempfile::Builder::new().prefix("falcon-agent-").tempdir().unwrap();
+        let exe = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        exe(
+            &bin.join("codex"),
+            "#!/bin/sh\nprintf '%s|' \"$#\" \"$@\" >> \"$FAKE_LOG\"\nprintf '%s\\n' \"${FALCON_AGENT_PROMPT-unset}\" >> \"$FAKE_LOG\"\n",
+        );
+        let shell = tmp.path().join("fake sh");
+        exe(&shell, "#!/bin/sh\nif [ \"$3\" = -c ]; then exec /bin/sh -c \"$4\"; fi\necho shell >> \"$FAKE_LOG\"\n");
+        let script = write_local_launcher(tmp.path(), SessionAgent::Codex, shell.to_str().unwrap()).unwrap();
+        let log = tmp.path().join("log");
+        let run = |env: &[(&str, &str)]| {
+            let _ = std::fs::remove_file(&log);
+            let status = Command::new("/bin/sh")
+                .arg(&script)
+                // 消息里的 `$(touch pwned)` 万一被展开，文件落在这里，下面才查得到
+                .current_dir(tmp.path())
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env("FAKE_LOG", &log)
+                .envs(env.iter().copied())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            std::fs::read_to_string(&log).unwrap()
+        };
+        let message ="-n \"a  b\" $(touch pwned) `x` *\n第二行";
+        assert_eq!(run(&[(AGENT_PROMPT_ENV, message)]), format!("2|--|{message}|unset\nshell\n"));
+        assert!(!tmp.path().join("pwned").exists());
+        assert_eq!(run(&[]), "0|unset\nshell\n");
     }
 }

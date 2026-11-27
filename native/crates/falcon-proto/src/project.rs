@@ -173,7 +173,7 @@ pub struct Project {
     /// 空 = 当前 HEAD。只对源项目有意义；附属项目不能再派生。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_worktree_branch: Option<String>,
-    /// 环境的上下文或线程创建时的上下文快照。旧项目省略。
+    /// 存在 ⇔ 这是环境。新环境由表单提交空串，内容不再填写；旧工作树线程带创建时的快照。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_context: Option<String>,
     /// 新线程所属的执行环境。旧线程仍以 worktree.sourceProjectId 关联。
@@ -226,7 +226,7 @@ pub struct ProjectInput {
     /// 派生时新建分支的默认基点。空 / 省略 = 当前 HEAD
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_worktree_branch: Option<String>,
-    /// 环境的上下文或线程创建时的上下文快照。旧项目省略。
+    /// 存在 ⇒ 请求创建环境（客户端据此选 `/api/environments`）。空串即可，内容不再填写。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_context: Option<String>,
 }

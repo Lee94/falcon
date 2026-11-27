@@ -211,7 +211,7 @@ struct EnvironmentBranchQuery {
     project_id: Option<String>,
 }
 
-fn environment_directory(dir: &str) -> ApiResult<String> {
+pub(super) fn environment_directory(dir: &str) -> ApiResult<String> {
     if !is_absolute(local_kind(), dir) {
         return Err(ApiError::bad_request("环境工作目录必须是绝对路径"));
     }
@@ -347,16 +347,23 @@ async fn create(State(state): State<AppState>, body: LenientJson) -> ApiResult<J
         // 网关只转发绑定到已保存主机的创建请求，不能把旧客户端的内联 SSH 项目落到入口库。
         return Err(ApiError::bad_request("请通过已保存的远端主机创建 SSH 项目"));
     }
-    if environment_context.is_some() && let Some(dirs) = repos.take() {
-        repos = Some(super::threads::environment_repos(&state, dirs).await?);
-    }
     let default_worktree_branch = parse_default_worktree_branch(field(input, "defaultWorktreeBranch")).unwrap_or(None);
+    if environment_context.is_some() && let Some(dirs) = repos.take() {
+        if default_worktree_branch.is_some() {
+            return Err(ApiError::bad_request("多文件夹环境不支持选择基础分支"));
+        }
+        repos = Some(super::threads::environment_directories(dirs)?);
+    }
+    let working_dir = match trimmed_non_empty(input, "workingDir") {
+        Some(dir) if environment_context.is_some() && repos.is_some() => Some(environment_directory(&dir)?),
+        other => other,
+    };
 
     let row = ProjectRow {
         id: uuid_v4(),
         name: trimmed(input, "name").unwrap_or_default().to_string(),
         project_type: str_field(input, "type").unwrap_or_default().to_string(),
-        working_dir: trimmed_non_empty(input, "workingDir"),
+        working_dir,
         shell: trimmed_non_empty(input, "shell"),
         created_at: now_ms(),
         // 普通项目：worktree 四列一律 None。附属项目只能经
@@ -404,6 +411,9 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
         if existing.source_project_id.is_some() {
             return Err(ApiError::bad_request("附属项目的成员由派生决定，不可修改"));
         }
+        if existing.thread_environment_id.is_some() {
+            return Err(ApiError::bad_request("线程的工作目录由环境决定，不可修改"));
+        }
         if existing.multi_repos.is_none() {
             return Err(ApiError::bad_request("普通项目不能改成多仓库项目"));
         }
@@ -414,9 +424,9 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
         return Err(ApiError::bad_request("只有环境可以修改环境上下文"));
     }
     if existing.environment_context.is_some() && let Some(dirs) = repos.take() {
-        repos = Some(super::threads::environment_repos(&state, dirs).await?);
+        repos = Some(super::threads::environment_directories(dirs)?);
     }
-    let container = existing.multi_repos.is_some() && existing.source_project_id.is_none();
+    let container = existing.multi_repos.is_some() && existing.source_project_id.is_none() && existing.thread_environment_id.is_none();
     let fixed_dir = existing.thread_environment_id.is_some()
         || (existing.environment_context.is_some() && existing.source_project_id.is_none() && !container);
     if fixed_dir && field(input, "workingDir").is_some() && trimmed_non_empty(input, "workingDir") != existing.working_dir {
@@ -446,14 +456,13 @@ async fn update(State(state): State<AppState>, Path(id): Path<String>, body: Len
     ssh.apply(&mut row);
 
     if container && existing.environment_context.is_some() {
-        let members = Db::parse_multi_repos(existing.multi_repos.as_deref()).unwrap_or_default();
-        let cwd = row.working_dir.as_deref().or_else(|| match &repos {
-            Some(dirs) => dirs.first().map(String::as_str),
-            None => members.first().map(|repo| repo.dir.as_str()),
-        });
-        if state.db.list_projects().iter().any(|thread| {
-            thread.thread_environment_id.as_deref() == Some(id.as_str()) && thread.working_dir.as_deref() != cwd
-        }) {
+        let old_members = Db::parse_multi_repos(existing.multi_repos.as_deref()).unwrap_or_default();
+        let old_dirs: Vec<String> = old_members.iter().map(|repo| repo.dir.clone()).collect();
+        let new_dirs: Vec<String> = repos.clone().unwrap_or_else(|| old_dirs.clone());
+        let dirs_changed = new_dirs != old_dirs || row.working_dir != existing.working_dir;
+        if dirs_changed
+            && state.db.list_projects().iter().any(|thread| thread.thread_environment_id.as_deref() == Some(id.as_str()))
+        {
             return Err(ApiError::conflict("已有线程的环境不能更换工作目录"));
         }
     }

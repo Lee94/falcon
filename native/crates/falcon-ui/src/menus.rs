@@ -251,24 +251,27 @@ pub fn new_session_items(ws: &Entity<Workspace>, project_id: &str, after: Option
             .icon(crate::session_icon::session_icon(None)),
         );
     }
+    // Claude 对话开在画布上（panels/claude_chat.rs）。线程一律给、排在最前（对话就是线程的主线）；
+    // 普通项目要那台机器上测到了 Claude Code。无项目的独立会话分组没有项目可挂，不给
     let durable_thread = ws.read(cx).project(project_id).is_some_and(|p| p.thread_environment_id.is_some());
-    if durable_thread {
+    let has_project = ws.read(cx).project(project_id).is_some();
+    let chat_item = || {
         let (ws, pid) = (ws.clone(), project_id.to_owned());
-        items.insert(0, MenuItemSpec::new(t!("env.openThread").to_string(), move |_, cx| {
-            dialogs::claude::open(&ws, &pid, cx)
-        }).icon(crate::session_icon::session_icon(Some(SessionAgent::Claude))));
+        MenuItemSpec::new(t!("claudeChat.title").to_string(), move |_, cx| {
+            ws.update(cx, |w, cx| w.open_chat(&pid, None, cx))
+        })
+        .icon(crate::session_icon::session_icon(Some(SessionAgent::Claude)))
+    };
+    if durable_thread {
+        items.insert(0, chat_item());
     }
     for (i, agent) in ws.read(cx).session_agents(project_id).iter().enumerate() {
         let ws = ws.clone();
         let pid = project_id.to_string();
         let after = after.clone();
         let agent: SessionAgent = *agent;
-        if agent == SessionAgent::Claude && !durable_thread {
-            let ws = ws.clone();
-            let pid = pid.clone();
-            items.push(MenuItemSpec::new(t!("claudeChat.title").to_string(), move |_, cx| {
-                dialogs::claude::open(&ws, &pid, cx)
-            }).icon(crate::session_icon::session_icon(Some(agent))));
+        if agent == SessionAgent::Claude && !durable_thread && has_project {
+            items.push(chat_item());
         }
         let mut item = MenuItemSpec::new(t!(format!("agent.{}", agent.as_str())).to_string(), move |_, cx| {
             ws.update(cx, |w, cx| w.new_terminal(&pid, Some(agent), after.clone(), cx))
@@ -444,7 +447,12 @@ pub fn project_menu_items(ws: &Entity<Workspace>, project: &Project, cx: &App) -
             Some(host) => dialogs::project_form::Preset::ssh(Some(host.clone()), true),
             None => dialogs::project_form::Preset::local(true),
         };
-        preset.initial_dir = directory.cloned();
+        preset.initial_dirs = project
+            .multi
+            .as_ref()
+            .filter(|multi| !multi.repos.is_empty())
+            .map(|multi| multi.repos.iter().map(|r| r.dir.clone()).collect())
+            .unwrap_or_else(|| directory.cloned().into_iter().collect());
         items.push(MenuItemSpec::new(t!("env.fromProject").to_string(), move |window, cx| {
             dialogs::project_form::open(&ws, None, preset.clone(), window, cx)
         }));

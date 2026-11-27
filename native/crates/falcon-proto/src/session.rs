@@ -73,6 +73,19 @@ wire_enum! {
 /// TS 的 `SESSION_AGENTS`：＋ 菜单里按这个顺序列各家 CLI。
 pub const SESSION_AGENTS: &[SessionAgent] = SessionAgent::ALL;
 
+impl SessionAgent {
+    /// 这个 CLI 能不能在交互模式开场时带一条初始提示词（新建线程时写的第一条消息）。服务端的启动
+    /// 脚本据此把消息交给 CLI，客户端据此提示「这段文字只用作线程名称」，两边同一份判断。
+    ///
+    /// 2026-11-27 在本机核对各家 `--help`：`claude [options] [prompt]`、`codex [OPTIONS] [PROMPT]`、
+    /// `grok [OPTIONS] [PROMPT]`（"Initial prompt for the interactive session"）、`devin [-- <PROMPT>...]`。
+    /// agy 的 `-i` 语法、omp 的位置参数、amp 的 `-x`（执行完就退出）都对不上「开场带一条消息、之后
+    /// 照常交互」，不在内；本机没装的 gemini / qwen 等核实不了，也不在内
+    pub fn accepts_prompt(self) -> bool {
+        matches!(self, SessionAgent::Claude | SessionAgent::Codex | SessionAgent::Grok | SessionAgent::Devin)
+    }
+}
+
 /// `POST /api/projects/:id/sessions`、`POST /api/sessions/:id/reattach` 的响应。
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +200,10 @@ pub struct CreateSessionRequest {
     pub background: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<String>,
+    /// 新建线程时写的第一条消息。只有开场能带初始提示词的 CLI（claude / codex / grok / devin）会
+    /// 收到，普通终端与其余 CLI 忽略；服务端不保存。旧服务端不认这个字段，照常开会话
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 #[cfg(test)]

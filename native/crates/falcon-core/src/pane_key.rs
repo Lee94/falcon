@@ -1,5 +1,6 @@
 //! 窗口（pane）的 key 约定：`t:<sessionId>` / `b:<sessionId>` /
-//! `b2:<sessionId字节长度>:<sessionId>:<browserSession>` / `f:<projectId>:<path>` / `d`。
+//! `b2:<sessionId字节长度>:<sessionId>:<browserSession>` / `f:<projectId>:<path>` / `d` /
+//! `c:<projectId>`（线程的 Claude 对话，一个线程一扇；projectId 可能含冒号，取到 key 末尾）。
 //!
 //! 默认浏览器继续使用旧 `b:` key，已有工作区不用迁移。命名实例用长度标出终端 id 的字节边界，
 //! 因为远端会话 id 自身可以含冒号（`node:...`）；browserSession 一直取到 key 末尾。
@@ -47,6 +48,8 @@ pub enum PaneItem {
     Browser { key: String, session_id: String, browser_session: String },
     File { key: String, project_id: String, path: String },
     Diff { key: String },
+    /// 线程的 Claude 对话（宿主机上的 Claude Code，历史随线程保存）
+    Chat { key: String, project_id: String },
 }
 
 impl PaneItem {
@@ -55,7 +58,8 @@ impl PaneItem {
             PaneItem::Terminal { key, .. }
             | PaneItem::Browser { key, .. }
             | PaneItem::File { key, .. }
-            | PaneItem::Diff { key } => key,
+            | PaneItem::Diff { key }
+            | PaneItem::Chat { key, .. } => key,
         }
     }
 
@@ -82,9 +86,17 @@ pub fn file_key(project_id: &str, path: &str) -> String {
     format!("f:{project_id}:{path}")
 }
 
+pub fn chat_key(project_id: &str) -> String {
+    format!("c:{project_id}")
+}
+
 pub fn parse_pane_key(key: &str) -> Option<PaneItem> {
     if key == DIFF_KEY {
         return Some(PaneItem::Diff { key: key.to_string() });
+    }
+    if let Some(project_id) = key.strip_prefix("c:") {
+        return (!project_id.is_empty())
+            .then(|| PaneItem::Chat { key: key.to_string(), project_id: project_id.to_string() });
     }
     if let Some(id) = key.strip_prefix("t:") {
         return (!id.is_empty()).then(|| PaneItem::Terminal { key: key.to_string(), id: id.to_string() });
@@ -150,6 +162,11 @@ mod tests {
             parse_pane_key(&file_key("p1", "src/a:b.ts")),
             Some(PaneItem::File { key: "f:p1:src/a:b.ts".into(), project_id: "p1".into(), path: "src/a:b.ts".into() })
         );
+        // 网关上的线程 id 自带冒号，整段都是 projectId
+        assert_eq!(
+            parse_pane_key(&chat_key("node:n1:dGhyZWFk")),
+            Some(PaneItem::Chat { key: "c:node:n1:dGhyZWFk".into(), project_id: "node:n1:dGhyZWFk".into() })
+        );
     }
 
     #[test]
@@ -171,7 +188,7 @@ mod tests {
     #[test]
     fn rejects_malformed_keys() {
         for key in [
-            "t:", "f:", "f:p1", "f::a", "f:p1:", "x:1", "", "dd", "b2:", "b2:x:s1:n",
+            "t:", "f:", "f:p1", "f::a", "f:p1:", "x:1", "", "dd", "c:", "b2:", "b2:x:s1:n",
             "b2:2:s1:", "b2:1:s1:n", "b2:2:s1:falcon-s1", "b2:999:s1:n",
         ] {
             assert_eq!(parse_pane_key(key), None, "{key:?}");

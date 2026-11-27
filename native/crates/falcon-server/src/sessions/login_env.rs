@@ -155,6 +155,60 @@ pub fn parse_login_env(stdout: &str) -> Option<Vec<(String, String)>> {
 /// FALCON_RESOLVING_ENV 是我们打给 rc 的标记（见 runLoginShell）。
 const PROBE_NOISE: [&str; 5] = ["SHLVL", "PWD", "OLDPWD", "_", RESOLVING_ENV_VAR];
 
+/// 启动 falcon-server 的外层 Claude Code 或外层 Falcon 会话留下的进程级运行标记。
+/// 这些变量只描述「启动后端的那一个父会话」，不能继承到后端新建的终端、守护进程或 Claude 对话里：
+/// - Claude Code 的子会话标记（尤其是 `CLAUDE_CODE_CHILD_SESSION` 与 `CLAUDECODE`）会让新开的
+///   Claude Code 误判自己处于嵌套子会话，关闭会话记录落盘（`Transcript saving is off — inherited
+///   CLAUDE_CODE_CHILD_SESSION marker`）并影响 `--resume` 与进程间消息通道；
+/// - 外层 Falcon 的单会话变量会污染新会话的守护进程 / 续接 / askpass 标识（新会话会在各自附着路径上
+///   写入自己的值）。
+///
+/// 这里只清运行态标记，不动用户配置类变量（如 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`、
+/// `CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CONFIG_DIR`、`CLAUDE_EFFORT`）。
+pub const INHERITED_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_CHILD_HELD_TO_AUTO",
+    "CLAUDE_CODE_CHROME_MCP_ORG_DENIED",
+    "CLAUDE_CODE_EVAL_INTERVIEW_SESSION",
+    "CLAUDE_CODE_HOST_WORKTREE",
+    "CLAUDE_CODE_HOST_WORKTREE_FENCE",
+    "CLAUDE_PID",
+    "AI_AGENT",
+    "FALCON_SESSION_ID",
+    "FALCON_SESSIOND_ID",
+    "FALCON_AGENT_SESSION",
+    "FALCON_AGENT_RESUME",
+    "FALCON_AGENT_PROMPT",
+    "FALCON_ASKPASS_BIN",
+];
+
+/// 判断一个环境变量名是否属于不应继承到子会话的外层会话运行态标记。
+pub fn is_inherited_session_env(key: &str) -> bool {
+    INHERITED_SESSION_ENV.iter().any(|candidate| {
+        if cfg!(windows) {
+            candidate.eq_ignore_ascii_case(key)
+        } else {
+            *candidate == key
+        }
+    })
+}
+
+/// 就地删掉环境列表里的外层会话运行态标记。
+pub fn strip_inherited_session_env(env: &mut Vec<(String, String)>) {
+    env.retain(|(k, _)| !is_inherited_session_env(k));
+}
+
 /// LANG / LC_ALL / LC_CTYPE 任一非空（JS 真值：空串不算）
 pub fn has_locale(env: &[(String, String)]) -> bool {
     ["LANG", "LC_ALL", "LC_CTYPE"].iter().any(|k| env_get(env, k).is_some_and(|v| !v.is_empty()))
@@ -162,7 +216,8 @@ pub fn has_locale(env: &[(String, String)]) -> bool {
 
 /// 组合基底环境：process.env 打底，login env 覆盖（PATH / LANG 以登录环境
 /// 为准，这正是解析的目的；只存在于 process.env 的键——比如用户
-/// `FOO=bar falcon` 启动时注入的——原样保留）。合并后仍无任何 locale 线索
+/// `FOO=bar falcon` 启动时注入的——原样保留）。外层 Claude Code / Falcon
+/// 会话的运行态标记从两边一并剥离。合并后仍无任何 locale 线索
 /// 才注入 fallbackLang；LANG=C 这类显式设置视为用户的选择，不动。
 pub fn merge_base_env(
     process_env: &[(String, String)],
@@ -171,11 +226,14 @@ pub fn merge_base_env(
 ) -> Vec<(String, String)> {
     let mut merged: Vec<(String, String)> = Vec::with_capacity(process_env.len());
     for (k, v) in process_env {
+        if is_inherited_session_env(k) {
+            continue;
+        }
         env_set(&mut merged, k, v.clone());
     }
     if let Some(login_env) = login_env {
         for (k, v) in login_env {
-            if PROBE_NOISE.contains(&k.as_str()) {
+            if PROBE_NOISE.contains(&k.as_str()) || is_inherited_session_env(k) {
                 continue;
             }
             env_set(&mut merged, k, v.clone());
@@ -506,5 +564,43 @@ mod tests {
         assert_eq!(pick_login_probe_shell(Some(""), Some("/bin/zsh")), "/bin/zsh");
         assert_eq!(pick_login_probe_shell(Some("/bin/fish"), Some("/bin/zsh")), "/bin/fish");
         assert_eq!(pick_login_probe_shell(None, Some("")), "/bin/bash");
+    }
+
+    #[test]
+    fn merge_base_env_strips_inherited_claude_and_falcon_session_markers_but_keeps_user_config() {
+        let merged = merge_base_env(
+            &env(&[
+                ("PATH", "/usr/bin"),
+                ("CLAUDECODE", "1"),
+                ("CLAUDE_CODE_CHILD_SESSION", "1"),
+                ("CLAUDE_CODE_SESSION_ID", "00d14fe0-a976-4abb-9455-9fc7b6b06ef7"),
+                ("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/1.sock"),
+                ("CLAUDE_CODE_MESSAGING_TOKEN", "tok"),
+                ("CLAUDE_PID", "35765"),
+                ("AI_AGENT", "claude-code_2-1-332_agent"),
+                ("FALCON_SESSION_ID", "outer-session"),
+                ("FALCON_SESSIOND_ID", "outer-sd"),
+                ("FALCON_AGENT_SESSION", "outer-agent"),
+                ("FALCON_ASKPASS_BIN", "/outer/bin"),
+                ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "128000"),
+                ("CLAUDE_CONFIG_DIR", "/custom/claude"),
+                ("CLAUDE_EFFORT", "high"),
+            ]),
+            Some(&env(&[
+                ("PATH", "/opt/homebrew/bin:/usr/bin"),
+                ("CLAUDE_CODE_CHILD_SESSION", "1"),
+                ("CLAUDE_CODE_CHILD_NOTES_DIR", "/tmp/notes"),
+                ("CLAUDE_CODE_SESSION_ATTENDED", "1"),
+                ("FALCON_AGENT_RESUME", "1"),
+            ])),
+            None,
+        );
+        for key in INHERITED_SESSION_ENV {
+            assert_eq!(env_get(&merged, key), None, "should strip {key}");
+        }
+        assert_eq!(env_get(&merged, "PATH"), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(env_get(&merged, "CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("128000"));
+        assert_eq!(env_get(&merged, "CLAUDE_CONFIG_DIR"), Some("/custom/claude"));
+        assert_eq!(env_get(&merged, "CLAUDE_EFFORT"), Some("high"));
     }
 }

@@ -5,32 +5,27 @@ use falcon_proto::{Project, ThreadInput};
 
 use super::{AppState, error::{ApiError, ApiResult}};
 use crate::db::{Db, ProjectRow};
-use crate::git::{path::canon_key, repo::{RunOpts, list_worktrees, main_worktree_of, repo_root}};
+use crate::git::path::canon_key;
+use crate::sessions::local::local_kind;
 use crate::virtualdir::CLAUDE_MD_BODY;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/projects/{id}/threads", post(create))
 }
 
-pub(super) async fn environment_repos(state: &AppState, dirs: Vec<String>) -> ApiResult<Vec<String>> {
-    state.engine.call(move |engine| async move {
-        let local = ProjectRow { project_type: "local".into(), ..Default::default() };
-        let host = engine.git_host(&local).await.map_err(ApiError::internal)?;
-        let opts = RunOpts::default();
-        let mut seen = HashSet::new();
-        let mut roots = Vec::new();
-        for dir in dirs {
-            let root = repo_root(&host, &dir, &opts).await
-                .map_err(|e| ApiError::bad_request(format!("{dir}：{e}")))?;
-            let trees = list_worktrees(&host, &root, &opts).await.map_err(ApiError::internal)?;
-            let main = main_worktree_of(&trees, &root);
-            if !seen.insert(canon_key(host.kind, &main)) {
-                return Err(ApiError::bad_request(format!("环境中重复引用了仓库 {main}")));
-            }
-            roots.push(root);
+/// 校验并规范化多文件夹环境的目录列表：允许普通目录与 Git 仓库混选，按宿主机路径口径去重。
+pub(super) fn environment_directories(dirs: Vec<String>) -> ApiResult<Vec<String>> {
+    let kind = local_kind();
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let canonical = super::projects::environment_directory(&dir)?;
+        if !seen.insert(canon_key(kind, &canonical)) {
+            return Err(ApiError::bad_request(format!("环境中重复选择了目录 {canonical}")));
         }
-        Ok(roots)
-    }).await?
+        resolved.push(canonical);
+    }
+    Ok(resolved)
 }
 
 async fn create(
@@ -48,14 +43,17 @@ async fn create(
     if name.is_empty() {
         return Err(ApiError::bad_request("线程名称不能为空"));
     }
-    let cwd = env.working_dir.or_else(|| {
-        Db::parse_multi_repos(env.multi_repos.as_deref())?.into_iter().next().map(|repo| repo.dir)
-    }).ok_or_else(|| ApiError::conflict("环境缺少工作目录"))?;
+    let has_dirs = env.working_dir.as_deref().is_some_and(|d| !d.is_empty())
+        || Db::parse_multi_repos(env.multi_repos.as_deref()).is_some_and(|m| !m.is_empty());
+    if !has_dirs {
+        return Err(ApiError::conflict("环境缺少工作目录"));
+    }
     let thread = ProjectRow {
         id: crate::askpass::hub::uuid_v4(),
         name: name.into(),
         project_type: "local".into(),
-        working_dir: Some(cwd),
+        working_dir: env.working_dir,
+        multi_repos: env.multi_repos,
         shell: env.shell,
         created_at: crate::auth::now_ms(),
         thread_environment_id: Some(id),
@@ -120,5 +118,84 @@ mod tests {
         assert_eq!(app.send(del(env_id)).await.status(), StatusCode::OK);
         assert!(dir.is_dir());
         assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn thread_multi_directory_environment_allows_plain_folders_and_inherits_members() {
+        let app = TestApp::new();
+        let dir_a = app.root.join("alpha");
+        let dir_b = app.root.join("beta");
+        let dir_c = app.root.join("gamma");
+        for d in [&dir_a, &dir_b, &dir_c] {
+            std::fs::create_dir(d).unwrap();
+        }
+        std::fs::write(dir_a.join("keep.txt"), "a").unwrap();
+
+        // 重复目录与带基础分支的多文件夹环境都会被拒绝
+        let (code, _) = json_of(app.post_json("/api/environments", json!({
+            "type": "local", "name": "dup", "repos": [dir_a, dir_a],
+        })).await).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = json_of(app.post_json("/api/environments", json!({
+            "type": "local", "name": "branch", "repos": [dir_a, dir_b], "defaultWorktreeBranch": "main",
+        })).await).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+
+        // 允许多个普通（非 Git）文件夹创建环境
+        let (code, env) = json_of(app.post_json("/api/environments", json!({
+            "type": "local", "name": "multi-env", "environmentContext": "shared", "repos": [dir_a, dir_b],
+        })).await).await;
+        assert_eq!(code, StatusCode::OK, "{env}");
+        let env_id = env["id"].as_str().unwrap();
+        assert!(env.get("workingDir").is_none());
+        let expected_a = dunce::canonicalize(&dir_a).unwrap().to_string_lossy().into_owned();
+        let expected_b = dunce::canonicalize(&dir_b).unwrap().to_string_lossy().into_owned();
+        let expected_c = dunce::canonicalize(&dir_c).unwrap().to_string_lossy().into_owned();
+        assert_eq!(env["multi"]["repos"], json!([{"dir": expected_a}, {"dir": expected_b}]));
+
+        // 还没有线程时可以增删环境的文件夹
+        let (code, updated) = json_of(app.put_json(&format!("/api/projects/{env_id}"), json!({
+            "type": "local", "name": "multi-env", "environmentContext": "shared", "repos": [dir_a, dir_b, dir_c],
+        })).await).await;
+        assert_eq!(code, StatusCode::OK, "{updated}");
+        assert_eq!(updated["multi"]["repos"], json!([{"dir": expected_a}, {"dir": expected_b}, {"dir": expected_c}]));
+
+        // 创建线程：继承环境的全部目录
+        let (code, thread) = json_of(app.post_json(&format!("/api/projects/{env_id}/threads"), json!({
+            "name": "task-1",
+        })).await).await;
+        assert_eq!(code, StatusCode::OK, "{thread}");
+        let thread_id = thread["id"].as_str().unwrap();
+        assert_eq!(thread["threadEnvironmentId"], env_id);
+        assert!(thread.get("workingDir").is_none());
+        assert_eq!(thread["multi"]["repos"], json!([{"dir": expected_a}, {"dir": expected_b}, {"dir": expected_c}]));
+
+        // 文件接口首次打开会为多目录线程建出虚拟目录（含 AGENTS.md 与目录授权）
+        assert_eq!(app.get(&format!("/api/projects/{thread_id}/files")).await.status(), StatusCode::OK);
+        let vdir = app.data_dir.join("projects").join(thread_id);
+        assert!(vdir.join("AGENTS.md").is_file());
+        assert!(vdir.join(".claude/settings.json").is_file());
+
+        // 已有线程后：可改名/改上下文，不可改环境的目录列表，也不可改线程的目录列表
+        let (code, renamed) = json_of(app.put_json(&format!("/api/projects/{env_id}"), json!({
+            "type": "local", "name": "renamed-env", "environmentContext": "updated",
+        })).await).await;
+        assert_eq!(code, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["name"], "renamed-env");
+        let (code, _) = json_of(app.put_json(&format!("/api/projects/{env_id}"), json!({
+            "type": "local", "name": "renamed-env", "repos": [dir_a],
+        })).await).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        let (code, _) = json_of(app.put_json(&format!("/api/projects/{thread_id}"), json!({
+            "type": "local", "name": "task-1", "repos": [dir_a],
+        })).await).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+
+        // 删除线程时清掉线程自己的虚拟目录、保留源文件夹，之后可删除环境
+        let del = |id: &str| Request::delete(format!("/api/projects/{id}")).body(Body::empty()).unwrap();
+        assert_eq!(app.send(del(thread_id)).await.status(), StatusCode::OK);
+        assert!(!vdir.exists());
+        assert_eq!(std::fs::read_to_string(dir_a.join("keep.txt")).unwrap(), "a");
+        assert_eq!(app.send(del(env_id)).await.status(), StatusCode::OK);
     }
 }

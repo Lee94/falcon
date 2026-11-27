@@ -762,7 +762,8 @@ xterm.js 聚焦时几乎吞掉所有 `Ctrl+*` 组合键（`Ctrl+C`、`Ctrl+D`、
 | 动作 | macOS | Win / Linux |
 | --- | --- | --- |
 | 命令面板 | `⌘⇧P` / `F1` | `Ctrl+Shift+P` / `F1` |
-| 转到文件 | `⌘P` | `Alt+P` |
+| 新建线程（ADR 0031） | `⌘P` | `Alt+P` |
+| 转到文件 | `⌘O` | `Ctrl+Shift+O` |
 | 新建终端（当前项目） | `⌘T` | `Ctrl+Shift+T` |
 | 关闭当前 tab（Terminate） | `⌘W` | `Ctrl+Shift+W` |
 | 下一个 / 上一个 tab | `⌘⇧]` / `⌘⇧[` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |

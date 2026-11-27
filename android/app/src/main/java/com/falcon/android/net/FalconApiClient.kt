@@ -229,12 +229,12 @@ object FalconApiClient {
         hostId: String?,
         id: String?,
         name: String,
-        context: String,
         workingDir: String? = null,
         defaultWorktreeBranch: String? = null,
         legacyRepos: List<String>? = null
     ): Result<Unit> {
-        val payload = JSONObject().put("name", name).put("environmentContext", context)
+        // 空串只是「这是环境」的判别标志：表单不再填写环境上下文
+        val payload = JSONObject().put("name", name).put("environmentContext", "")
             .put("type", if (hostId == null) "local" else "ssh")
         if (workingDir != null) payload.put("workingDir", workingDir)
         if (defaultWorktreeBranch != null) payload.put("defaultWorktreeBranch", defaultWorktreeBranch)

@@ -1037,6 +1037,19 @@ impl SessionManager {
         hint: OscColorHint,
         agent: Option<SessionAgent>,
     ) -> Result<Session, SessionError> {
+        self.create_session_with_prompt(project, name, hint, agent, None).await
+    }
+
+    /// 同 [`Self::create_session`]，另带新建线程时写的第一条消息：能接的 CLI 开场就收到它
+    /// （sessions/agent.rs 的 `accepts_prompt`）。消息不落库——只对这一次新建有效，接回与原地重开都不带
+    pub async fn create_session_with_prompt(
+        &self,
+        project: &ProjectRow,
+        name: String,
+        hint: OscColorHint,
+        agent: Option<SessionAgent>,
+        prompt: Option<String>,
+    ) -> Result<Session, SessionError> {
         let id = uuid_v4();
         let now = now_ms();
 
@@ -1067,7 +1080,7 @@ impl SessionManager {
         });
         self.entries.borrow_mut().insert(id.clone(), entry.clone());
 
-        match self.attach_backend(&entry, project, &row, AttachMode::Create).await {
+        match self.attach_backend(&entry, project, &row, AttachMode::Create, prompt.as_deref()).await {
             Ok(()) => {}
             Err(e) if prep.durable => {
                 // 守护进程拉不起来（Windows 的 Job 不让脱离、WMI 也被禁了……）：按 ADR 0001 退成
@@ -1086,7 +1099,7 @@ impl SessionManager {
                     hint,
                 });
                 self.entries.borrow_mut().insert(id.clone(), entry.clone());
-                if let Err(e) = self.attach_backend(&entry, project, &row, AttachMode::Create).await {
+                if let Err(e) = self.attach_backend(&entry, project, &row, AttachMode::Create, prompt.as_deref()).await {
                     self.entries.borrow_mut().remove(&id);
                     return Err(e);
                 }
@@ -1125,12 +1138,14 @@ impl SessionManager {
         self.get_link(project).ensure_agent_launcher(agent, shell.as_deref()).await.or(shell)
     }
 
+    /// `prompt`：新建时的第一条消息，只有 [`AttachMode::Create`] 会带
     async fn attach_backend(
         &self,
         entry: &Rc<LiveEntry>,
         project: &ProjectRow,
         row: &SessionRow,
         mode: AttachMode,
+        prompt: Option<&str>,
     ) -> Result<(), SessionError> {
         let reattach = mode == AttachMode::Reattach;
         // 非持久会话：附着返回之前就可能有 OSC 查询要答（OscColorGate），先攒着，backend 到手再写
@@ -1195,7 +1210,8 @@ impl SessionManager {
                 Vec::new()
             } else {
                 let agent = row.agent.as_deref().and_then(SessionAgent::from_wire);
-                super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive)
+                let prompt = prompt.filter(|_| mode == AttachMode::Create);
+                super::agent::launch_env(agent, &row.id, mode == AttachMode::Revive, prompt)
             },
         };
 
@@ -1396,7 +1412,7 @@ impl SessionManager {
         self.clear_title(entry);
         self.broadcast(entry, &ServerMessage::ProgramStatus { records: Vec::new() });
         self.broadcast(entry, &ServerMessage::Title { title: None });
-        match self.attach_backend(entry, project, &row, AttachMode::Revive).await {
+        match self.attach_backend(entry, project, &row, AttachMode::Revive, None).await {
             Ok(()) => {
                 // 留下 agent 的就是能续接的那几种
                 let how = if row.agent.is_some() { "，接着原来的对话" } else { "" };
@@ -1459,7 +1475,7 @@ impl SessionManager {
                     let res = async {
                         let project = owner_row(&me.db, &row.project_id)
                             .ok_or_else(|| SessionError::NotFound("项目不存在".into()))?;
-                        match me.attach_backend(&e, &project, &row, AttachMode::Reattach).await {
+                        match me.attach_backend(&e, &project, &row, AttachMode::Reattach, None).await {
                             Ok(()) => {
                                 me.mark_active(&e, true);
                                 Ok(())

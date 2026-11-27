@@ -19,3 +19,5 @@ Android 终端使用 Google vtfx，最低支持 Android 10（API 29）。生产�
 Linux 的 systemd 服务使用 `KillMode=process`。会话守护进程调用 `setsid` 后仍属于服务控制组，默认的 `KillMode=control-group` 会在服务重启时终止持久终端。排查时用 `systemctl --user show falcon -p KillMode` 查看生效配置，系统级服务去掉 `--user`。
 
 环境与线程的宿主机存储和目录规则见 [ADR 0031](docs/adr/0031-environments-and-threads.md)，验证入口见[环境与线程验证](.agents/memory/environment-threads.md)。
+
+iPad 客户端位于 `ipad/Falcon.xcodeproj`，使用 SwiftUI 与 SwiftTerm。修改目标配置时同步 `ipad/project.yml` 并运行 `xcodegen generate --spec ipad/project.yml`。本地可用 `xcodebuild -project ipad/Falcon.xcodeproj -scheme Falcon -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build` 检查设备目标。

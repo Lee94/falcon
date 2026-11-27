@@ -30,6 +30,7 @@ use falcon_proto::{AppIconState, AuthStatus, NodeStatus, PluginList, Project, Se
 use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::panels::browser_view::{BrowserView, BrowserViewEvent, auto_open_enabled};
+use crate::panels::claude_chat::{ChatView, ChatViewEvent};
 use crate::profiles::ServerProfile;
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
 
@@ -43,6 +44,18 @@ pub use falcon_core::project_tree::ProjectHead;
 pub struct ProjectChanges {
     pub added: u32,
     pub deleted: u32,
+}
+
+/// 新建线程时的第一个动作：在线程的画布上开什么。只决定开场，之后在线程里照样可以再开别的
+/// Agent 或终端（侧栏线程行的 ＋）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadStart {
+    /// 画布上的 Claude 对话窗口（宿主机的 Claude Code，历史随线程保存）
+    Chat,
+    /// 普通终端
+    Terminal,
+    /// 以某个 CLI 开场的终端会话（ADR 0013）
+    Agent(SessionAgent),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,6 +169,16 @@ pub struct Workspace {
     pub terminals: HashMap<String, Entity<TerminalView>>,
     /// 打开着的远端浏览器视图，按完整 pane key（终端 id + browserSession）索引
     pub browsers: HashMap<String, Entity<BrowserView>>,
+    /// 画布上的 Claude 对话视图，按线程 id 索引。与终端一样在 `state.chats` 里就常驻（视图释放 =
+    /// socket 断开、宿主机回收 Claude Code）
+    pub chats: HashMap<String, Entity<ChatView>>,
+    /// 新建线程时写给对话窗口的第一条消息，建视图时交过去（[`Self::ensure_terminal_views`]）
+    chat_prompts: HashMap<String, String>,
+    /// 新建线程时写给 Agent 终端的第一条消息，按 pending id 记；随建会话的请求发出，成功才删
+    /// （失败重试还要用）
+    pending_prompts: HashMap<String, String>,
+    /// 上一次新建线程选的第一个动作；只在这次运行里记，下一次新建线程默认沿用
+    pub last_thread_start: Option<ThreadStart>,
     /// 已经处理过「首次出现浏览器」自动弹出的完整 pane key；用户关掉后不再自动弹
     auto_opened_browsers: HashSet<String>,
     /// blocked 提醒的去重（同一条只提醒一次，规则在 falcon-core）
@@ -236,6 +259,10 @@ impl Workspace {
             plugins: None,
             terminals: HashMap::new(),
             browsers: HashMap::new(),
+            chats: HashMap::new(),
+            chat_prompts: HashMap::new(),
+            pending_prompts: HashMap::new(),
+            last_thread_start: None,
             auto_opened_browsers,
             program_alerts: Default::default(),
             program_alert_sessions: HashSet::new(),
@@ -381,6 +408,10 @@ impl Workspace {
 
     pub fn ready(&self) -> bool {
         self.auth_phase == AuthPhase::Ready
+    }
+
+    pub fn inventory_loaded(&self) -> bool {
+        self.inventory_loaded
     }
 
     /// 启动之后：能问到认证状态就进入工作区，拉系统信息 + 项目 + 主机 + 会话。
@@ -1182,6 +1213,9 @@ impl Workspace {
             .collect();
         self.terminals.retain(|id, _| wanted.contains(id) && live.contains(id));
         self.browsers.retain(|key, _| wanted_browsers.contains(key));
+        let chats = &self.state.chats;
+        self.chats.retain(|id, _| chats.contains(id));
+        self.chat_prompts.retain(|id, _| chats.contains(id));
     }
 
     /// 在窗口上下文里补建缺的终端视图（Workspace 本身拿不到 Window）
@@ -1244,6 +1278,24 @@ impl Workspace {
             let view = cx.new(|cx| BrowserView::new(target, client, initial_visible, window, cx));
             cx.subscribe(&view, |_, _, _: &BrowserViewEvent, cx| cx.notify()).detach();
             self.browsers.insert(key, view);
+        }
+        // 对话窗口：线程得在项目列表里（网关上的线程在节点离线时不在，回来了再建）
+        let missing_chats: Vec<String> = self
+            .state
+            .chats
+            .iter()
+            .filter(|id| !self.chats.contains_key(*id) && self.project(id).is_some())
+            .cloned()
+            .collect();
+        for id in missing_chats {
+            let client = self.client.clone();
+            let initial = self.chat_prompts.remove(&id);
+            let view = cx.new(|cx| ChatView::new(client, &id, initial, window, cx));
+            cx.subscribe(&view, |_, _, ev: &ChatViewEvent, cx| match ev {
+                ChatViewEvent::StateChanged => cx.notify(),
+            })
+            .detach();
+            self.chats.insert(id, view);
         }
         // 新建的视图在 socket 上默认看得见；建在后台画布上的要在它报格子之前说清楚
         self.sync_terminal_visibility(cx);

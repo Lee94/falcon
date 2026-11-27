@@ -270,10 +270,12 @@ fn start_server(root: &Path, server: &LegacyServer, exe: &Path, managed: bool) -
     let log_path = root.join("node.log");
     let log = OpenOptions::new().create(true).append(true).open(log_path)?;
     command
-        .env_remove("FALCON_SESSION_ID")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    for key in crate::sessions::login_env::INHERITED_SESSION_ENV {
+        command.env_remove(key);
+    }
     detach(&mut command);
     match command.spawn() {
         Ok(child) => Ok(Some(child.id())),

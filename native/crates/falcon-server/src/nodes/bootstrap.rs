@@ -658,10 +658,12 @@ fn launch(root: &Path) -> anyhow::Result<Launched> {
     command
         .args(serve_args(root))
         .current_dir(root)
-        .env_remove("FALCON_SESSION_ID")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    for key in crate::sessions::login_env::INHERITED_SESSION_ENV {
+        command.env_remove(key);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

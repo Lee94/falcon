@@ -48,7 +48,7 @@ class EnvironmentApiTest {
             val baseUrl = server.url("/").toString()
             for (branch in listOf(null, "origin/main")) {
                 server.enqueue(MockResponse().setBody("{}"))
-                FalconApiClient.saveEnvironment(baseUrl, "host", null, "env", "context", "/work", branch).getOrThrow()
+                FalconApiClient.saveEnvironment(baseUrl, "host", null, "env", "/work", branch).getOrThrow()
                 val request = server.takeRequest()
                 val payload = JSONObject(request.body.readUtf8())
                 assertEquals("POST", request.method)
@@ -56,14 +56,14 @@ class EnvironmentApiTest {
                 assertTrue(!request.getHeader("Idempotency-Key").isNullOrBlank())
                 assertEquals("ssh", payload.getString("type"))
                 assertEquals("host", payload.getString("hostId"))
-                assertEquals("context", payload.getString("environmentContext"))
+                assertEquals("", payload.getString("environmentContext"))
                 assertEquals("/work", payload.getString("workingDir"))
                 assertFalse(payload.has("repos"))
                 assertEquals(branch, payload.opt("defaultWorktreeBranch"))
             }
 
             server.enqueue(MockResponse().setBody("{}"))
-            FalconApiClient.saveEnvironment(baseUrl, null, "env", "renamed", "context").getOrThrow()
+            FalconApiClient.saveEnvironment(baseUrl, null, "env", "renamed").getOrThrow()
             val edit = server.takeRequest()
             assertEquals("PUT", edit.method)
             assertEquals("/api/projects/env", edit.path)
@@ -72,7 +72,7 @@ class EnvironmentApiTest {
             assertFalse(editPayload.has("defaultWorktreeBranch"))
 
             server.enqueue(MockResponse().setBody("{}"))
-            FalconApiClient.saveEnvironment(baseUrl, null, null, "legacy", "", legacyRepos = listOf("/one", "/two")).getOrThrow()
+            FalconApiClient.saveEnvironment(baseUrl, null, null, "legacy", legacyRepos = listOf("/one", "/two")).getOrThrow()
             val legacy = JSONObject(server.takeRequest().body.readUtf8())
             assertEquals("/two", legacy.getJSONArray("repos").getString(1))
             assertFalse(legacy.has("workingDir"))

@@ -17,6 +17,7 @@ actions!(
     [
         Palette,
         QuickOpen,
+        NewThread,
         NewTerminal,
         SplitRight,
         SplitDown,
@@ -77,6 +78,7 @@ fn bind(cmd: Command, keys: &str, cx: &App) -> KeyBinding {
     match cmd {
         Command::Palette => dyn_binding(keys, Palette, None, cx),
         Command::QuickOpen => dyn_binding(keys, QuickOpen, None, cx),
+        Command::NewThread => dyn_binding(keys, NewThread, None, cx),
         Command::NewTerminal => dyn_binding(keys, NewTerminal, None, cx),
         Command::SplitRight => dyn_binding(keys, SplitRight, None, cx),
         Command::SplitDown => dyn_binding(keys, SplitDown, None, cx),
@@ -174,6 +176,7 @@ fn set_menus(cx: &mut App) {
         Menu {
             name: t!("native.menu.file").to_string().into(),
             items: vec![
+                MenuItem::action(t!("env.thread").to_string(), NewThread),
                 MenuItem::action(t!("sidebar.newTerminal").to_string(), NewTerminal),
                 MenuItem::action(t!("tab.newToRight").to_string(), SplitRight),
                 MenuItem::action(t!("tab.newBelow").to_string(), SplitDown),

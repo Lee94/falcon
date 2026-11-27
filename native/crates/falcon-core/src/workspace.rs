@@ -23,8 +23,9 @@ use crate::layout::{
     new_canvas_id, order_by_canvas, pane_keys, pin_edge, pin_pane, remove_pane, replace_pane, resolve_spot,
     set_column_basis, set_pane_basis, sync_columns, unpin_all, visible_columns,
 };
-use crate::pane_key::{BrowserTarget, DIFF_KEY, PaneItem, file_key, parse_pane_key, term_key};
+use crate::pane_key::{BrowserTarget, DIFF_KEY, PaneItem, chat_key, file_key, parse_pane_key, term_key};
 use crate::panel_width::{PANEL_WIDTH_DEFAULT, clamp_panel_width_default, parse_panel_width};
+use crate::project_tree::ThreadSort;
 
 pub const PENDING_PREFIX: &str = "pending:";
 
@@ -51,6 +52,8 @@ pub enum ActiveView {
     Diff,
     /// 文件查看窗口；path 一并带着，好让排布 key 认得出是哪个文件
     File { project_id: String, path: String },
+    /// 线程的 Claude 对话窗口
+    Chat { project_id: String },
 }
 
 /// 右侧栏打开的是哪一格。加面板时在这里加一个值，持久化形状不用改。
@@ -227,7 +230,10 @@ pub struct PersistedWorkspace {
     /// 打开着的 agent 浏览器窗口所属会话 id（ADR 0029）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub browsers: Vec<BrowserTarget>,
-    /// 主区排布：列 → 窗口。与 tabs / browsers 对账后才使用（见 [`sync_columns`]）
+    /// 打开着 Claude 对话窗口的线程 id。对话历史存在宿主机上，重开客户端后窗口照原样接回
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chats: Vec<String>,
+    /// 主区排布：列 → 窗口。与 tabs / browsers / chats 对账后才使用（见 [`sync_columns`]）
     pub columns: Vec<PersistedColumn>,
     pub active: ActiveView,
     pub sidebar_open: bool,
@@ -247,6 +253,9 @@ pub struct PersistedWorkspace {
     pub right_width: f64,
     /// 终端画布只显示当前活动的那一列（标题栏的最大化）
     pub term_zoomed: bool,
+    /// 侧栏线程列表的排序方式；默认按创建时间倒序（缺省时跳过写出，保持旧版 JSON 形状）
+    #[serde(default, skip_serializing_if = "ThreadSort::is_default")]
+    pub thread_sort: ThreadSort,
 }
 
 impl Default for PersistedWorkspace {
@@ -254,6 +263,7 @@ impl Default for PersistedWorkspace {
         PersistedWorkspace {
             tabs: Vec::new(),
             browsers: Vec::new(),
+            chats: Vec::new(),
             columns: Vec::new(),
             active: ActiveView::Overview,
             sidebar_open: true,
@@ -266,6 +276,7 @@ impl Default for PersistedWorkspace {
             sidebar_width: PANEL_WIDTH_DEFAULT,
             right_width: PANEL_WIDTH_DEFAULT,
             term_zoomed: false,
+            thread_sort: ThreadSort::default(),
         }
     }
 }
@@ -285,6 +296,7 @@ pub fn parse_persisted_columns(raw: Option<&Value>) -> Vec<PersistedColumn> {
             let keep = match parse_pane_key(key) {
                 Some(PaneItem::Terminal { id, .. }) => !is_pending_id(&id),
                 Some(PaneItem::Browser { session_id, .. }) => !is_pending_id(&session_id),
+                Some(PaneItem::Chat { .. }) => true,
                 _ => false,
             };
             if !keep {
@@ -349,20 +361,36 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
             .collect(),
         _ => Vec::new(),
     };
+    let mut chats: Vec<String> = match get("chats") {
+        Some(Value::Array(items)) => {
+            items.iter().filter_map(Value::as_str).filter(|id| !id.is_empty()).map(str::to_string).collect()
+        }
+        _ => Vec::new(),
+    };
     for col in &columns {
         for p in &col.panes {
-            if let Some(PaneItem::Browser { session_id, browser_session, .. }) = parse_pane_key(&p.key) {
-                let target = BrowserTarget::new(&session_id, &browser_session);
-                if !is_pending_id(&target.session_id) && !browsers.contains(&target) {
-                    browsers.push(target);
+            match parse_pane_key(&p.key) {
+                Some(PaneItem::Browser { session_id, browser_session, .. }) => {
+                    let target = BrowserTarget::new(&session_id, &browser_session);
+                    if !is_pending_id(&target.session_id) && !browsers.contains(&target) {
+                        browsers.push(target);
+                    }
                 }
+                Some(PaneItem::Chat { project_id, .. }) if !chats.contains(&project_id) => chats.push(project_id),
+                _ => {}
             }
         }
     }
     let active = {
         let a = get("active").and_then(Value::as_object);
         let kind = a.and_then(|a| a.get("kind")).and_then(Value::as_str);
+        // 对话窗口只有在 chats 里登记过才恢复成焦点，免得焦点停在一扇不存在的窗口上
+        let chat = a
+            .and_then(|a| a.get("projectId"))
+            .and_then(Value::as_str)
+            .filter(|id| chats.iter().any(|c| c == id));
         match (kind, a.and_then(|a| a.get("sessionId")).and_then(Value::as_str)) {
+            (Some("chat"), _) if chat.is_some() => ActiveView::Chat { project_id: chat.unwrap_or_default().to_string() },
             (Some("terminal"), Some(id)) => ActiveView::Terminal { session_id: id.to_string() },
             (Some("browser"), Some(id)) => ActiveView::Browser {
                 session_id: id.to_string(),
@@ -379,6 +407,7 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
     PersistedWorkspace {
         tabs,
         browsers,
+        chats,
         columns,
         active,
         sidebar_open: get("sidebarOpen") != Some(&Value::Bool(false)),
@@ -391,6 +420,7 @@ pub fn load_workspace(raw: Option<&str>) -> PersistedWorkspace {
         sidebar_width: parse_panel_width(get("sidebarWidth")),
         right_width: parse_panel_width(get("rightWidth")),
         term_zoomed: get("termZoomed") == Some(&Value::Bool(true)),
+        thread_sort: get("threadSort").and_then(Value::as_str).and_then(ThreadSort::from_wire).unwrap_or_default(),
     }
 }
 
@@ -414,6 +444,7 @@ pub fn restore_columns(ws: &PersistedWorkspace) -> Vec<ColumnLayout> {
         .collect();
     let mut live: Vec<String> = ws.tabs.iter().map(|t| term_key(t)).collect();
     live.extend(ws.browsers.iter().map(BrowserTarget::key));
+    live.extend(ws.chats.iter().map(|id| chat_key(id)));
     sync_columns(&columns, &live)
 }
 
@@ -449,6 +480,7 @@ pub fn active_key(active: &ActiveView) -> Option<String> {
         ActiveView::Browser { session_id, browser_session } => Some(BrowserTarget::new(session_id, browser_session).key()),
         ActiveView::File { project_id, path } => Some(file_key(project_id, path)),
         ActiveView::Diff => Some(DIFF_KEY.to_string()),
+        ActiveView::Chat { project_id } => Some(chat_key(project_id)),
         ActiveView::Overview | ActiveView::Project => None,
     }
 }
@@ -466,6 +498,7 @@ pub fn pane_view(key: &str) -> Option<ActiveView> {
         }
         PaneItem::File { project_id, path, .. } => ActiveView::File { project_id, path },
         PaneItem::Diff { .. } => ActiveView::Diff,
+        PaneItem::Chat { project_id, .. } => ActiveView::Chat { project_id },
     })
 }
 
@@ -523,7 +556,10 @@ pub struct WorkspaceState {
     pub tabs: Vec<String>,
     /// 打开的 agent 浏览器窗口所属会话 id（持久化，ADR 0029）
     pub browsers: Vec<BrowserTarget>,
-    /// 主区排布：列 → 窗口（终端 / 浏览器 / 文件 / 差异混排）。含**所有**项目的窗口，画之前按
+    /// 打开着 Claude 对话窗口的线程 id（持久化）。一个线程最多一扇：对话只有一条，
+    /// 宿主机上同一线程同时只允许一个写入方
+    pub chats: Vec<String>,
+    /// 主区排布：列 → 窗口（终端 / 浏览器 / 文件 / 差异 / 对话混排）。含**所有**项目的窗口，画之前按
     /// 当前项目过滤（[`WorkspaceState::layout_columns`]）；终端与浏览器部分持久化。
     pub columns: Vec<ColumnLayout>,
     pub active: ActiveView,
@@ -546,6 +582,8 @@ pub struct WorkspaceState {
     pub collapsed: BTreeMap<String, bool>,
     pub sessions_open: BTreeMap<String, bool>,
     pub show_archived: bool,
+    /// 侧栏线程列表的排序方式（持久化）
+    pub thread_sort: ThreadSort,
     /// 多仓库项目在「修改」面板里当前看的成员（projectId → 成员 dir）。不持久化；
     /// 面板与差异窗口必须看同一个成员，所以放这里不放面板自己
     pub multi_repo: BTreeMap<String, String>,
@@ -583,6 +621,7 @@ impl WorkspaceState {
         WorkspaceState {
             tabs: ws.tabs.clone(),
             browsers: ws.browsers.clone(),
+            chats: ws.chats.clone(),
             columns: restore_columns(ws),
             active: ws.active.clone(),
             pending: Vec::new(),
@@ -598,6 +637,7 @@ impl WorkspaceState {
             collapsed: ws.collapsed.clone(),
             sessions_open: ws.sessions_open.clone(),
             show_archived: ws.show_archived,
+            thread_sort: ws.thread_sort,
             multi_repo: BTreeMap::new(),
             selected_project_id: ws.selected_project_id.clone(),
             canvas_width: 0.0,
@@ -620,6 +660,7 @@ impl WorkspaceState {
                         match parse_pane_key(&p.key) {
                             Some(PaneItem::Terminal { id, .. }) => !is_pending_id(&id),
                             Some(PaneItem::Browser { session_id, .. }) => !is_pending_id(&session_id),
+                            Some(PaneItem::Chat { .. }) => true,
                             _ => false,
                         }
                     })
@@ -639,6 +680,7 @@ impl WorkspaceState {
         PersistedWorkspace {
             tabs: self.tabs.iter().filter(|t| !is_pending_id(t)).cloned().collect(),
             browsers: self.browsers.iter().filter(|b| !is_pending_id(&b.session_id)).cloned().collect(),
+            chats: self.chats.clone(),
             columns,
             active,
             sidebar_open: self.sidebar_open,
@@ -651,6 +693,7 @@ impl WorkspaceState {
             sidebar_width: self.sidebar_width,
             right_width: self.right_width,
             term_zoomed: self.term_zoomed,
+            thread_sort: self.thread_sort,
         }
     }
 
@@ -704,11 +747,18 @@ impl WorkspaceState {
             .collect()
     }
 
+    /// 当前项目下可见的对话窗口（线程 id）。只在侧栏选中了这个线程时出现：对话窗口没有会话
+    /// 可以反查归属，总览里也不该冒出一扇别的线程的对话
+    pub fn visible_chats(&self) -> Vec<String> {
+        self.chats.iter().filter(|id| self.selected_project_id.as_deref() == Some(id.as_str())).cloned().collect()
+    }
+
     /// 工作区里**所有**窗口的 key（含别的项目的）。排布与数据源的对账认它：不在这里面
     /// 的窗口一律从列里摘掉，在这里面却没排布的各自接一列。
     pub fn live_pane_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self.tabs.iter().map(|t| term_key(t)).collect();
         keys.extend(self.browsers.iter().map(BrowserTarget::key));
+        keys.extend(self.chats.iter().map(|id| chat_key(id)));
         if let Some(f) = &self.file_tab {
             keys.push(f.key());
         }
@@ -722,6 +772,7 @@ impl WorkspaceState {
     pub fn visible_pane_keys(&self, sessions: &[SessionWithProject]) -> HashSet<String> {
         let mut keys: HashSet<String> = self.visible_tabs(sessions).iter().map(|t| term_key(t)).collect();
         keys.extend(self.visible_browsers(sessions).iter().map(BrowserTarget::key));
+        keys.extend(self.visible_chats().iter().map(|id| chat_key(id)));
         if self.file_visible()
             && let Some(f) = &self.file_tab {
                 keys.insert(f.key());
@@ -789,20 +840,23 @@ impl WorkspaceState {
                 .find(|p| &p.id == session_id)
                 .map(|p| p.project_id.clone())
                 .or_else(|| sessions.iter().find(|s| &s.id == session_id).map(|s| s.project_id.clone())),
-            ActiveView::File { project_id, .. } => Some(project_id.clone()),
+            ActiveView::File { project_id, .. } | ActiveView::Chat { project_id } => Some(project_id.clone()),
             ActiveView::Diff => self.diff_tab.as_ref().map(|d| d.project_id.clone()),
             ActiveView::Overview | ActiveView::Project => None,
         }
     }
 
-    /// 关掉一个不代表会话的窗口（差异 / 文件）之后落到哪。
-    /// 顺序：最近的可见终端 → 浏览器 → 文件 → 差异 → 项目空页 → 总览。
+    /// 关掉一个不代表会话的窗口（差异 / 文件 / 对话）之后落到哪。
+    /// 顺序：最近的可见终端 → 浏览器 → 对话 → 文件 → 差异 → 项目空页 → 总览。
     fn fallback_active(&self, sessions: &[SessionWithProject]) -> ActiveView {
         if let Some(last) = self.visible_tabs(sessions).last() {
             return ActiveView::Terminal { session_id: last.clone() };
         }
         if let Some(view) = self.visible_browsers(sessions).last().and_then(|browser| pane_view(&browser.key())) {
             return view;
+        }
+        if let Some(project_id) = self.visible_chats().pop() {
+            return ActiveView::Chat { project_id };
         }
         if self.file_visible()
             && let Some(f) = &self.file_tab {
@@ -881,6 +935,18 @@ impl WorkspaceState {
             self.selected_project_id = None;
             if self.active == ActiveView::Project {
                 self.active = ActiveView::Overview;
+            }
+        }
+        // 删掉的线程连同它的对话窗口一起收起。网关上的线程（`node:` 前缀）在节点离线时也会暂时
+        // 从列表里消失，那时只是看不见，不能把窗口和它在画布上的位置一起丢掉
+        let before = self.chats.len();
+        self.chats.retain(|id| id.starts_with("node:") || projects.iter().any(|p| &p.id == id));
+        if self.chats.len() != before {
+            self.resync();
+            if let ActiveView::Chat { project_id } = &self.active
+                && !self.chats.contains(project_id)
+            {
+                self.active = self.idle_view();
             }
         }
     }
@@ -1099,6 +1165,44 @@ impl WorkspaceState {
         changed
     }
 
+    // ---- reducer：对话窗口 ----
+
+    /// 打开（或聚焦）线程的 Claude 对话窗口，并选中这个线程。线程里已经有窗口时接在当前画布的
+    /// 最后一列后面（排不下由 settle_canvases 另起一块）；还空着就像新建终端一样独占一块新画布。
+    /// 此后落盘。
+    pub fn open_chat(&mut self, project_id: &str, sessions: &[SessionWithProject]) {
+        self.selected_project_id = Some(project_id.to_string());
+        if !self.chats.iter().any(|c| c == project_id) {
+            let key = chat_key(project_id);
+            // 先算位置再登记：登记之后它自己也算"可见"，会被当成线程里已有的窗口
+            let has_panes = !self.layout_columns(sessions).is_empty();
+            self.columns = if has_panes {
+                let at = self.new_column_at(None, sessions);
+                insert_column(&self.columns, &key, at, None)
+            } else {
+                insert_column(&self.columns, &key, pin_edge(&self.columns), Some(&new_canvas_id()))
+            };
+            self.chats.push(project_id.to_string());
+        }
+        self.active = ActiveView::Chat { project_id: project_id.to_string() };
+    }
+
+    /// 关掉对话窗口。宿主机上的对话历史不动，下次打开照样接回。返回有没有变；变了要落盘
+    pub fn close_chat(&mut self, project_id: &str, sessions: &[SessionWithProject]) -> bool {
+        let before = self.chats.len();
+        self.chats.retain(|c| c != project_id);
+        let key = chat_key(project_id);
+        let had_pane = find_pane(&self.columns, &key).is_some();
+        if had_pane {
+            self.columns = remove_pane(&self.columns, &key);
+        }
+        let was_active = matches!(&self.active, ActiveView::Chat { project_id: p } if p == project_id);
+        if was_active {
+            self.active = self.fallback_active(sessions);
+        }
+        self.chats.len() != before || had_pane || was_active
+    }
+
     // ---- reducer：查看窗口 ----
 
     /// 在差异窗口里打开一个文件，就地替换上一个（React 版 `openDiff`）
@@ -1173,7 +1277,12 @@ impl WorkspaceState {
         extra.sort_by_key(|s| s.last_active_at);
         self.tabs.extend(extra.into_iter().map(|s| s.id.clone()));
         let mine = |id: &str| tab_project_id(id, sessions, &self.pending) == Some(project_id);
-        let keep_active = matches!(&self.active, ActiveView::Terminal { session_id } if self.tabs.contains(session_id) && mine(session_id));
+        let keep_active = match &self.active {
+            ActiveView::Terminal { session_id } => self.tabs.contains(session_id) && mine(session_id),
+            ActiveView::Chat { project_id: chat } => chat == project_id && self.chats.iter().any(|c| c == project_id),
+            _ => false,
+        };
+        let has_chat = self.chats.iter().any(|c| c == project_id);
         if !keep_active {
             let pending_last = self.pending.iter().rfind(|p| p.project_id == project_id);
             // 最近活跃的那个；并列时取列表里靠前的（与 JS 的稳定排序后取 [0] 一致）
@@ -1186,6 +1295,8 @@ impl WorkspaceState {
             self.active = match (pending_last, newest) {
                 (Some(p), _) => ActiveView::Terminal { session_id: p.id.clone() },
                 (None, Some(s)) => ActiveView::Terminal { session_id: s.id.clone() },
+                // 只开着对话的线程：焦点落在对话上，而不是一张空页
+                (None, None) if has_chat => ActiveView::Chat { project_id: project_id.to_string() },
                 (None, None) => ActiveView::Project,
             };
         }
@@ -1422,6 +1533,15 @@ impl WorkspaceState {
         self.show_archived = !self.show_archived;
     }
 
+    /// 切换侧栏线程列表的排序方式；有变化返回 true，调用方据此落盘。
+    pub fn set_thread_sort(&mut self, sort: ThreadSort) -> bool {
+        if self.thread_sort == sort {
+            return false;
+        }
+        self.thread_sort = sort;
+        true
+    }
+
     /// 多仓库项目：切换「修改」面板正在看的成员仓库
     pub fn set_multi_repo(&mut self, project_id: &str, dir: &str) {
         self.multi_repo.insert(project_id.to_string(), dir.to_string());
@@ -1448,6 +1568,70 @@ mod tests {
 
     fn shape(cols: &[ColumnLayout]) -> Vec<Vec<String>> {
         cols.iter().map(|c| c.panes.iter().map(|p| p.key.clone()).collect()).collect()
+    }
+
+    #[test]
+    fn chat_pane_lives_in_its_thread_and_survives_a_restart() {
+        let sessions = [session("s1", "t1", 0)];
+        let projects = [project("t1"), project("t2")];
+        let mut ws = WorkspaceState::default();
+        // 空线程：对话独占一块新画布，线程被选中、焦点在对话上
+        ws.open_chat("t2", &sessions);
+        assert_eq!(ws.selected_project_id.as_deref(), Some("t2"));
+        assert_eq!(ws.active, ActiveView::Chat { project_id: "t2".into() });
+        assert_eq!(shape(&ws.layout_columns(&sessions)), [["c:t2"]]);
+        // 再开一次只是聚焦，不会多出一扇
+        ws.open_chat("t2", &sessions);
+        assert_eq!(ws.chats, ["t2"]);
+
+        // 有终端的线程：对话接在同一块画布上，终端不让位
+        ws.select_project("t1", &projects, &sessions);
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "s1".into() });
+        ws.open_chat("t1", &sessions);
+        // 新列先不定画布，量出画布宽之后由 settle_canvases 分（与浏览器窗口同一条路）
+        ws.set_canvas_width(2400.0);
+        ws.settle_canvases(&sessions);
+        let cols = ws.layout_columns(&sessions);
+        assert_eq!(shape(&cols), [["t:s1"], ["c:t1"]]);
+        assert!(cols[1].canvas.is_some());
+        assert_eq!(cols[0].canvas, cols[1].canvas);
+        // 别的线程的对话不出现在这里
+        assert!(!pane_keys(&cols).contains(&"c:t2".to_string()));
+
+        // 落盘再读回：窗口、位置与焦点都在
+        let saved = load_workspace(Some(&serialize_workspace(&ws.persisted())));
+        assert_eq!(saved.chats, ["t2", "t1"]);
+        assert_eq!(saved.active, ActiveView::Chat { project_id: "t1".into() });
+        let back = WorkspaceState::from_persisted(&saved);
+        assert_eq!(shape(&back.layout_columns(&sessions)), [["t:s1"], ["c:t1"]]);
+
+        // 关掉对话回到终端；只有对话的线程再选中时焦点落在对话上
+        assert!(ws.close_chat("t1", &sessions));
+        assert_eq!(ws.active, ActiveView::Terminal { session_id: "s1".into() });
+        ws.select_project("t2", &projects, &sessions);
+        assert_eq!(ws.active, ActiveView::Chat { project_id: "t2".into() });
+
+        // 线程删掉后对话窗口一起收起；网关上的线程只是暂时看不见，保留
+        ws.open_chat("node:n1:dA", &sessions);
+        ws.apply_projects(&[project("t1")]);
+        assert_eq!(ws.chats, ["node:n1:dA"]);
+        assert!(find_pane(&ws.columns, "c:t2").is_none());
+    }
+
+    #[test]
+    fn chat_focus_is_restored_only_for_a_registered_chat() {
+        let stale = load_workspace(Some(r#"{"active":{"kind":"chat","projectId":"gone"}}"#));
+        assert_eq!(stale.active, ActiveView::Overview);
+        // 旧版本没写 chats，但排布里有对话窗口：照排布补登记
+        let from_columns = load_workspace(Some(
+            r#"{"columns":[{"panes":[{"key":"c:t1"}]}],"active":{"kind":"chat","projectId":"t1"}}"#,
+        ));
+        assert_eq!(from_columns.chats, ["t1"]);
+        assert_eq!(from_columns.active, ActiveView::Chat { project_id: "t1".into() });
+        assert_eq!(
+            serde_json::to_value(ActiveView::Chat { project_id: "t1".into() }).unwrap(),
+            json!({"kind": "chat", "projectId": "t1"})
+        );
     }
 
     #[test]
@@ -1545,6 +1729,15 @@ mod tests {
             RightPanelId::Plugin("sysmon".into())
         );
         assert_eq!(load_workspace(Some(r#"{"rightPanel":"plugin:"}"#)).right_panel, RightPanelId::Files);
+        assert_eq!(load_workspace(Some(r#"{"threadSort":"last_active_desc"}"#)).thread_sort, ThreadSort::LastActiveDesc);
+        assert_eq!(load_workspace(Some(r#"{"threadSort":"nope"}"#)).thread_sort, ThreadSort::CreatedDesc);
+
+        let mut ws_sort = WorkspaceState::default();
+        assert!(!ws_sort.set_thread_sort(ThreadSort::CreatedDesc));
+        assert!(ws_sort.set_thread_sort(ThreadSort::StatusPriority));
+        let saved = serialize_workspace(&ws_sort.persisted());
+        assert!(saved.contains(r#""threadSort":"status_priority""#));
+        assert_eq!(load_workspace(Some(&saved)).thread_sort, ThreadSort::StatusPriority);
     }
 
     #[test]

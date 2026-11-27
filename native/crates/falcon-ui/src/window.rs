@@ -311,7 +311,7 @@ impl ServerWindow {
                 self.requested_pane_focus = Some(key.clone());
                 cx.notify();
             }
-            WorkspaceEvent::CreateThread(env) => dialogs::worktree_form::open_thread(&self.ws, env, window, cx),
+            WorkspaceEvent::CreateThread(env) => dialogs::new_thread::open(&self.ws, env, window, cx),
             WorkspaceEvent::NeedsInstall { project_id, agent } => {
                 dialogs::install::open(&self.ws, project_id, Some(*agent), window, cx)
             }
@@ -789,6 +789,7 @@ impl Render for ServerWindow {
             .on_mouse_up(gpui_kit::MouseButton::Left, cx.listener(Self::on_panel_drag_end))
             .on_action(cx.listener(|this, _: &Palette, window, cx| palette::open(&this.ws, window, cx)))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| dialogs::quick_open::open(&this.ws, window, cx)))
+            .on_action(cx.listener(|this, _: &NewThread, window, cx| dialogs::new_thread::open(&this.ws, "", window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, _, cx| {
                 if let Some(pid) = this.ws.read(cx).current_project_id() {
                     this.ws.update(cx, |w, cx| w.new_terminal(&pid, None, None, cx));
@@ -810,6 +811,7 @@ impl Render for ServerWindow {
                     ),
                     ActiveView::File { .. } => w.close_file(cx),
                     ActiveView::Diff => w.close_diff(cx),
+                    ActiveView::Chat { project_id } => w.close_chat(&project_id, cx),
                     _ => {}
                 });
             }))

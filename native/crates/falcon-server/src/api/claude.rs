@@ -35,7 +35,11 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use super::AppState;
 use crate::{
     no_window::NoWindow,
-    sessions::{agent_detect::local_agent_command, machine::owner_row},
+    sessions::{
+        agent_detect::local_agent_command,
+        login_env::is_inherited_session_env,
+        machine::owner_row,
+    },
 };
 
 pub fn router() -> Router<AppState> {
@@ -570,41 +574,44 @@ async fn run(state: AppState, id: String, socket: &mut WebSocket) -> Result<()> 
     } else {
         None
     };
-    let environment_context = row
-        .thread_environment_id
-        .as_ref()
-        .and_then(|id| state.db.get_project(id))
-        .and_then(|environment| environment.environment_context)
-        .filter(|text| !text.trim().is_empty());
     let cwd: PathBuf = if let Some(dir) = row.working_dir.clone() {
         dir.into()
-    } else if history.is_some() {
-        bail!("线程缺少环境工作目录");
     } else if row.multi_repos.is_some() && row.source_project_id.is_none() {
+        let row_for_vdir = row.clone();
         state
             .engine
-            .call(move |e| async move { e.sessions.ensure_virtual_dir(&row, true).await })
+            .call(move |e| async move { e.sessions.ensure_virtual_dir(&row_for_vdir, true).await })
             .await??
             .into()
+    } else if history.is_some() {
+        bail!("线程缺少环境工作目录");
     } else {
         crate::config::home_dir()
     };
     let (program, env) = local_agent_command(falcon_proto::SessionAgent::Claude)
         .await
         .context("宿主机未找到 Claude Code")?;
-    let command = || {
-        let mut command = Command::new(&program);
-        command
-            .no_window()
-            .current_dir(&cwd)
-            .envs(env.iter().cloned())
-            .env_remove("CLAUDECODE");
-        if let Some(context) = &environment_context {
-            command.arg(format!("--append-system-prompt={context}"));
-        }
-        command
-    };
+    let command = || claude_command(&program, &cwd, &env);
     run_cli(socket, history, command).await
+}
+
+/// 构造启动 Claude Code 子进程的命令。
+///
+/// 显式 `env_clear()` 后再写入解析出的基底环境并过滤外层会话运行态标记，避免仅移除
+/// `CLAUDECODE` 时仍从服务端进程继承 `CLAUDE_CODE_CHILD_SESSION` 等变量，导致 Claude Code
+/// 关闭会话记录落盘并影响 `--resume`。
+fn claude_command(
+    program: &FsPath,
+    cwd: &FsPath,
+    env: &[(String, String)],
+) -> Command {
+    let mut command = Command::new(program);
+    command
+        .no_window()
+        .current_dir(cwd)
+        .env_clear()
+        .envs(env.iter().filter(|(k, _)| !is_inherited_session_env(k)).cloned());
+    command
 }
 
 async fn run_cli(
@@ -912,5 +919,40 @@ mod tests {
         assert!(
             matches!(chat.event(&message).unwrap(), Some(Event::Assistant { text, tools }) if text == "hi" && tools == ["Read"])
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_command_clears_inherited_claude_child_session_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("CLAUDECODE".into(), "1".into()),
+            ("CLAUDE_CODE_CHILD_SESSION".into(), "1".into()),
+            ("CLAUDE_CODE_SESSION_ID".into(), "outer-session".into()),
+            ("CLAUDE_PID".into(), "12345".into()),
+            ("FALCON_SESSION_ID".into(), "outer-falcon".into()),
+            ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), "128000".into()),
+        ];
+        let output = claude_command(FsPath::new("/usr/bin/env"), dir.path(), &env)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let keys: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(k, _)| k))
+            .collect();
+        for forbidden in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_PID",
+            "FALCON_SESSION_ID",
+        ] {
+            assert!(!keys.contains(&forbidden), "leaked {forbidden}: {stdout}");
+        }
+        assert!(stdout.lines().any(|line| line == "CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000"));
     }
 }

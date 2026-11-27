@@ -187,6 +187,13 @@ impl Canvas {
                     window.focus(&handle, cx);
                 }
             }
+            // 对话窗口的焦点落在输入框上，切过去就能接着写
+            Some(PaneItem::Chat { project_id, .. }) => {
+                if let Some(view) = self.ws.read(cx).chats.get(&project_id).cloned() {
+                    let handle = gpui_kit::Focusable::focus_handle(view.read(cx), cx);
+                    window.focus(&handle, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -358,7 +365,7 @@ impl Canvas {
                         && y <= p.y + p.height
                         && matches!(
                             parse_pane_key(&p.key),
-                            Some(PaneItem::File { .. } | PaneItem::Diff { .. } | PaneItem::Browser { .. })
+                            Some(PaneItem::File { .. } | PaneItem::Diff { .. } | PaneItem::Browser { .. } | PaneItem::Chat { .. })
                         )
                 })
         })
@@ -822,6 +829,10 @@ fn pane_label(ws: &Workspace, key: &str) -> String {
                 .unwrap_or_else(|| if target.is_default() { t!("browser.title").to_string() } else { target.browser_session })
         }
         Some(PaneItem::File { path, .. }) => basename(&path),
+        Some(PaneItem::Chat { project_id, .. }) => match ws.project(&project_id) {
+            Some(p) => format!("{} · {}", t!("claudeChat.title"), p.name),
+            None => t!("claudeChat.title").to_string(),
+        },
         Some(PaneItem::Diff { .. }) => ws
             .state
             .diff_tab
@@ -1022,7 +1033,7 @@ impl Canvas {
         let project_id = match &item {
             PaneItem::Terminal { id, .. } => ws.tab_project_id(id),
             PaneItem::Browser { session_id, .. } => ws.tab_project_id(session_id),
-            PaneItem::File { project_id, .. } => Some(project_id.clone()),
+            PaneItem::File { project_id, .. } | PaneItem::Chat { project_id, .. } => Some(project_id.clone()),
             PaneItem::Diff { .. } => ws.state.diff_tab.as_ref().map(|d| d.project_id.clone()),
         };
         let project = project_id.as_deref().and_then(|p| ws.owner_project(p));
@@ -1112,6 +1123,18 @@ impl Canvas {
                     .child(icon(IconName::FileText).size(zpx(14.)).text_color(ui.muted_foreground))
                     .child(div().flex_none().truncate().font_weight(FontWeight::MEDIUM).child(basename(path)))
                     .child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(path.clone()));
+            }
+            PaneItem::Chat { .. } => {
+                // 标题是固定的「Claude 对话」，右边跟线程名：同一线程只有一扇，名字够认
+                let thread = project.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                info = info
+                    .child(
+                        crate::session_icon::session_icon(Some(falcon_proto::SessionAgent::Claude))
+                            .size(zpx(14.))
+                            .text_color(ui.muted_foreground),
+                    )
+                    .child(div().flex_none().truncate().font_weight(FontWeight::MEDIUM).child(t!("claudeChat.title").to_string()))
+                    .child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(where_color).child(thread));
             }
             PaneItem::Diff { .. } => {
                 let path = ws.state.diff_tab.as_ref().map(|d| d.file.path.clone()).unwrap_or_default();
@@ -1299,6 +1322,7 @@ impl Canvas {
                     }
                     PaneItem::File { .. } => w.close_file(cx),
                     PaneItem::Diff { .. } => w.close_diff(cx),
+                    PaneItem::Chat { project_id, .. } => w.close_chat(project_id, cx),
                 });
             },
         )
@@ -1339,6 +1363,11 @@ impl Canvas {
                 .diff_view
                 .clone()
                 .map(|v| v.into_any_element())
+                .unwrap_or_else(|| div().into_any_element()),
+            PaneItem::Chat { project_id, .. } => ws
+                .chats
+                .get(project_id)
+                .map(|v| v.clone().into_any_element())
                 .unwrap_or_else(|| div().into_any_element()),
         };
 
@@ -1590,6 +1619,7 @@ impl Canvas {
                         }
                         PaneItem::File { .. } => w.close_file(cx),
                         PaneItem::Diff { .. } => w.close_diff(cx),
+                        PaneItem::Chat { project_id, .. } => w.close_chat(project_id, cx),
                     })
                 })
                 .sep(),

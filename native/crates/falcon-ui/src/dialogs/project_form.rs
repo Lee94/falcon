@@ -1,29 +1,30 @@
 //! 新建 / 编辑项目表单（旧 React 版的 `components/ProjectForm.tsx`）。
 //!
-//! 环境对应宿主机上的一个工作目录，可在创建时选 Git 基础分支。旧项目仍沿用各自的填法。
+//! 环境对应宿主机上的一个或多个工作目录：选单个目录时可在创建时选 Git 基础分支，选多个目录时
+//! 通过虚拟项目目录聚合。旧项目仍沿用各自的填法。
 //! 服务端的 type 只有 local / ssh；编辑时跟 existing 走，PUT 不许改类型。
 //!
-//! - SSH 从已保存主机里选（可就地「添加主机」或「从 Tailscale 添加」→ 主机表单，存完回调把新主机选进来）；存量项目
+//! - SSH 从已保存主机里选（可就地「添加主机」→ 主机表单，存完回调把新主机选进来）；存量项目
 //!   没有 hostId，可以继续手写 SSH 字段，也可以改绑到已保存主机。
-//! - 工作目录旁的「浏览…」打开 [`FolderPicker`]：列的是**宿主机**上的目录（本地项目是后端
+//! - 工作目录旁的「浏览…」/「添加文件夹…」打开 [`FolderPicker`]：列的是**宿主机**上的目录（本地项目是后端
 //!   所在机器，SSH 项目是远端），不是这台 Mac 的系统文件夹选择器。选择器嵌在同一个对话框里
 //!   （沿用 React 版，不叠第二层），Esc 只退回表单。
-//! - 从主机菜单新建时直接打开目录选择器。环境选好目录后回到表单，继续选基础分支、填写上下文；
-//!   旧项目保留选好目录就创建的快捷路径。
-//! - shell 下拉：自动侦测宿主机可用的 shell（本地问后端本机，SSH 问远端），失败静默——退回
-//!   "默认 + 自定义"，不打断创建。
+//! - 从主机菜单或新建线程叠开环境表单时直接打开多选目录选择器。环境选好目录后回到表单，单个目录可
+//!   继续选基础分支、多个目录可直接继续增删；旧项目保留选好目录就创建的快捷路径。
+//! - 不提供环境上下文与 shell 覆盖：多文件夹的说明由用户写进成员目录的 AGENTS.md，shell 用宿主机
+//!   探测到的登录 shell。
 
 pub(crate) mod kit;
 
 use std::time::Duration;
 
 use falcon_client::ProbeTarget;
-use falcon_proto::{Project, ProjectInput, ProjectType, ShellsInfo, SshConfigInput, SshHost};
+use falcon_proto::{Project, ProjectInput, ProjectType, SshConfigInput, SshHost};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_kit::component::{Disableable, Sizable, WindowExt};
+use gpui_kit::component::{Disableable, WindowExt};
 use gpui_kit::prelude::*;
 use gpui_kit::{App, Context, Entity, IntoElement, Render, SharedString, Task, Window, div};
 use rust_i18n::t;
@@ -41,7 +42,7 @@ pub struct Preset {
     pub kind: Option<&'static str>,
     pub host_id: Option<String>,
     pub environment: bool,
-    pub initial_dir: Option<String>,
+    pub initial_dirs: Vec<String>,
 }
 
 impl Preset {
@@ -53,10 +54,11 @@ impl Preset {
     }
 }
 
-/// shell 下拉的两个哨兵值（沿用 React 版的名字：它的 Radix Select 不接受空字符串当 value）
-const SHELL_AUTO: &str = "__auto__";
-const SHELL_CUSTOM: &str = "__custom__";
-/// 多仓库档「位置」下拉的本机哨兵，理由同上
+/// 新建成功后的回调。新建线程的表单叠开环境表单时靠它把刚建好的环境选进下拉框
+/// （同 `host_form::OnSaved`）
+pub type OnCreated = std::rc::Rc<dyn Fn(&Project, &mut Window, &mut App)>;
+
+/// 多仓库档「位置」下拉的本机哨兵（沿用 React 版的名字：它的 Radix Select 不接受空字符串当 value）
 const MULTI_LOCAL: &str = "__local__";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,20 +85,16 @@ pub struct ProjectForm {
     locked: bool,
     name: Entity<InputState>,
     working_dir: Entity<InputState>,
-    context: Entity<TextareaState>,
     /// 多仓库档的成员清单（成员路径原文，可手改可从选择器追加）
     repos: Vec<Entity<InputState>>,
     /// 派生产物的成员由派生决定：只读展示，提交不带 repos（PUT 会拒）
     repos_readonly: bool,
-    shell: String,
-    shell_custom: bool,
-    shells: Option<ShellsInfo>,
-    shell_select: Entity<OptState>,
-    shell_input: Entity<InputState>,
     default_wt: Entity<InputState>,
     base_branch: Entity<SelectState<SearchableVec<Opt>>>,
     branch_probe: BranchProbe,
     branch_probe_id: u64,
+    /// 上次发起分支探测的 `(host_id, path)`，避免编辑其它字段或空行时重复探测
+    branch_probe_key: Option<(String, String)>,
     _branch_task: Option<Task<()>>,
     host_id: String,
     host_select: Entity<OptState>,
@@ -109,10 +107,9 @@ pub struct ProjectForm {
     picking: bool,
     picking_repo: bool,
     picker: Option<Entity<FolderPicker>>,
-    /// 上一次侦测 shell 的目标，目标变了才重新侦测
-    shells_key: Option<String>,
     hosts_seen: Vec<(String, String)>,
-    _shells_task: Option<Task<()>>,
+    /// 只在新建时调用，编辑不调
+    on_created: Option<OnCreated>,
 }
 
 fn nonempty(s: &str) -> Option<String> {
@@ -141,8 +138,8 @@ fn host_options(hosts: &[SshHost]) -> Vec<Opt> {
 impl ProjectForm {
     fn new(ws: Entity<Workspace>, existing: Option<Project>, preset: Preset, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let kind = match &existing {
-            Some(p) if p.multi.is_some() => FormKind::Multi,
             Some(p) if p.is_environment() => FormKind::Environment,
+            Some(p) if p.multi.is_some() => FormKind::Multi,
             Some(p) if p.project_type == ProjectType::Ssh => FormKind::Ssh,
             Some(_) => FormKind::Local,
             None if preset.environment => FormKind::Environment,
@@ -162,26 +159,50 @@ impl ProjectForm {
             })
         };
         let name = text(existing.as_ref().map(|p| p.name.clone()).unwrap_or_default(), None, window, cx);
-        let context = cx.new(|cx| TextareaState::new(window, cx).rows(4).default_value(existing.as_ref().and_then(|p| p.environment_context.clone()).unwrap_or_default()));
         let placeholder = match kind {
             FormKind::Local => Some("D:\\code\\my-project".to_string()),
             FormKind::Ssh => Some("/home/user/project".to_string()),
             FormKind::Multi | FormKind::Environment => None,
         };
         let working_dir = text(
-            existing.as_ref().and_then(|p| p.working_dir.clone()).or(preset.initial_dir).unwrap_or_default(),
+            existing
+                .as_ref()
+                .and_then(|p| p.working_dir.clone())
+                .or_else(|| (kind != FormKind::Environment).then(|| preset.initial_dirs.first().cloned()).flatten())
+                .unwrap_or_default(),
             placeholder,
             window,
             cx,
         );
-        let repos: Vec<Entity<InputState>> = existing
+        let initial_env_dirs: Vec<String> = if kind == FormKind::Environment {
+            if let Some(p) = &existing {
+                if let Some(m) = &p.multi {
+                    m.repos.iter().map(|r| r.dir.clone()).collect()
+                } else {
+                    p.working_dir.clone().into_iter().collect()
+                }
+            } else if !preset.initial_dirs.is_empty() {
+                preset.initial_dirs.clone()
+            } else if !locked {
+                vec![String::new()]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        let repos: Vec<Entity<InputState>> = if kind == FormKind::Environment {
+            initial_env_dirs.into_iter().map(|d| Self::make_env_dir_input(d, window, cx)).collect()
+        } else {
+            existing
+                .as_ref()
+                .and_then(|p| p.multi.as_ref())
+                .map(|m| m.repos.iter().map(|r| text(r.dir.clone(), None, window, cx)).collect())
+                .unwrap_or_default()
+        };
+        let repos_readonly = existing
             .as_ref()
-            .and_then(|p| p.multi.as_ref())
-            .map(|m| m.repos.iter().map(|r| text(r.dir.clone(), None, window, cx)).collect())
-            .unwrap_or_default();
-        let repos_readonly = existing.as_ref().is_some_and(|p| p.multi.is_some() && p.worktree.is_some());
-        let shell = existing.as_ref().and_then(|p| p.shell.clone()).unwrap_or_default();
-        let shell_input = text(shell.clone(), None, window, cx);
+            .is_some_and(|p| p.multi.is_some() && (p.worktree.is_some() || p.thread_environment_id.is_some()));
         let default_wt = text(
             existing.as_ref().and_then(|p| p.default_worktree_branch.clone()).unwrap_or_default(),
             Some(t!("project.defaultWorktreeBranchPlaceholder").to_string()),
@@ -201,7 +222,6 @@ impl ProjectForm {
             let value = if host_id.is_empty() { MULTI_LOCAL } else { host_id.as_str() };
             kit::new_select(Options::flat(opts), value, window, cx)
         });
-        let shell_select = cx.new(|cx| kit::new_select(Options::default(), SHELL_AUTO, window, cx));
         let base_branch = cx.new(|cx| {
             SelectState::new(SearchableVec::new(Vec::<Opt>::new()), None, window, cx).searchable(true)
         });
@@ -230,7 +250,6 @@ impl ProjectForm {
         cx.subscribe_in(&working_dir, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => {
                 this.path_hint = None;
-                this.reprobe_branches(window, cx);
                 cx.notify();
             }
             // 只有本地项目的路径在失焦时去后端校验一次（远端路径校验不了）
@@ -249,11 +268,6 @@ impl ProjectForm {
             this.set_host(id, window, cx);
         })
         .detach();
-        cx.subscribe_in(&shell_select, window, |this, _, ev: &SelectEvent<Options>, window, cx| {
-            let SelectEvent::Confirm(Some(v)) = ev else { return };
-            this.pick_shell(v.clone(), window, cx);
-        })
-        .detach();
         // 主机列表变了（从这里新增了一台、别处删了一台）就重建两个下拉
         cx.observe_in(&ws, window, |this, ws, window, cx| {
             let seen: Vec<(String, String)> = ws.read(cx).hosts.iter().map(|h| (h.id.clone(), h.name.clone())).collect();
@@ -263,7 +277,7 @@ impl ProjectForm {
                 this.hosts_seen = seen;
                 this.sync_host_selects(window, cx);
                 if had_host != has_host {
-                    this.reprobe_branches(window, cx);
+                    this.reprobe_branches(true, window, cx);
                 }
             }
             cx.notify();
@@ -278,18 +292,13 @@ impl ProjectForm {
             locked,
             name,
             working_dir,
-            context,
             repos,
             repos_readonly,
-            shell,
-            shell_custom: false,
-            shells: None,
-            shell_select,
-            shell_input,
             default_wt,
             base_branch,
             branch_probe: BranchProbe::Idle,
             branch_probe_id: 0,
+            branch_probe_key: None,
             _branch_task: None,
             host_id,
             host_select,
@@ -301,17 +310,62 @@ impl ProjectForm {
             picking: false,
             picking_repo: false,
             picker: None,
-            shells_key: None,
             hosts_seen,
-            _shells_task: None,
+            on_created: None,
         };
-        this.sync_shell_select(window, cx);
-        this.reprobe_shells(window, cx);
-        this.reprobe_branches(window, cx);
-        if locked && this.working_dir.read(cx).value().is_empty() {
-            this.open_picker(window, cx);
+        this.reprobe_branches(true, window, cx);
+        if locked {
+            if this.kind == FormKind::Environment && this.env_dirs(cx).is_empty() {
+                this.open_env_picker(window, cx);
+            } else if this.kind != FormKind::Environment && this.working_dir.read(cx).value().is_empty() {
+                this.open_picker(window, cx);
+            }
         }
         this
+    }
+
+    fn make_env_dir_input(value: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.reprobe_branches(false, window, cx);
+                cx.notify();
+            }
+        })
+        .detach();
+        input
+    }
+
+    fn env_dirs(&self, cx: &App) -> Vec<String> {
+        self.repos
+            .iter()
+            .map(|r| r.read(cx).value().trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    fn env_has_threads(&self, cx: &App) -> bool {
+        let Some(env) = self.existing.as_ref().filter(|p| p.is_environment()) else {
+            return false;
+        };
+        self.ws.read(cx).projects.iter().any(|p| {
+            p.thread_environment_id.as_deref() == Some(env.id.as_str())
+                || p.worktree.as_ref().is_some_and(|w| w.source_project_id == env.id)
+        })
+    }
+
+    /// 编辑环境时：单目录环境的目录不可修改；多目录环境在已有线程后不可修改，无线程时允许增删
+    fn env_dirs_readonly(&self, cx: &App) -> bool {
+        let Some(env) = self.existing.as_ref() else {
+            return false;
+        };
+        env.multi.is_none() || self.env_has_threads(cx)
+    }
+
+    fn ensure_env_dir_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.kind == FormKind::Environment && self.repos.is_empty() && !self.env_dirs_readonly(cx) {
+            self.repos.push(Self::make_env_dir_input(String::new(), window, cx));
+        }
     }
 
     // ---------------- 派生出来的判断（React 版里那几个 const） ----------------
@@ -365,15 +419,7 @@ impl ProjectForm {
         }
     }
 
-    fn shell_value(&self, cx: &App) -> String {
-        if self.shell_custom {
-            self.shell_input.read(cx).value().to_string()
-        } else {
-            self.shell.clone()
-        }
-    }
-
-    /// 目录浏览 / shell 侦测的目标：编辑已有 SSH 项目问它的远端，选了主机问那台主机
+    /// 目录浏览与分支探测的目标：编辑已有 SSH 项目问它的远端，选了主机问那台主机
     fn probe_target(&self) -> ProbeTarget {
         match &self.existing {
             Some(p) if p.project_type == ProjectType::Ssh => ProbeTarget::Project(p.id.clone()),
@@ -396,7 +442,6 @@ impl ProjectForm {
             FormKind::Multi | FormKind::Environment => "",
         };
         self.working_dir.update(cx, |i, cx| i.set_placeholder(placeholder, window, cx));
-        self.reprobe_shells(window, cx);
         cx.notify();
     }
 
@@ -407,8 +452,7 @@ impl ProjectForm {
         self.host_id = id;
         self.path_hint = None;
         self.sync_host_selects(window, cx);
-        self.reprobe_shells(window, cx);
-        self.reprobe_branches(window, cx);
+        self.reprobe_branches(true, window, cx);
         cx.notify();
     }
 
@@ -416,22 +460,34 @@ impl ProjectForm {
         self.host_id.is_empty() || self.hosts_seen.iter().any(|(id, _)| id == &self.host_id)
     }
 
-    fn reprobe_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reprobe_branches(&mut self, force: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.kind != FormKind::Environment || self.existing.is_some() {
+            return;
+        }
+        let dirs = self.env_dirs(cx);
+        if dirs.len() != 1 || !self.has_environment_host() {
+            self._branch_task = None;
+            self.branch_probe_id += 1;
+            self.branch_probe_key = None;
+            self.base_branch.update(cx, |select, cx| {
+                select.set_items(SearchableVec::new(Vec::new()), window, cx);
+            });
+            self.branch_probe = BranchProbe::Idle;
+            cx.notify();
+            return;
+        }
+        let path = dirs[0].clone();
+        let key = (self.host_id.clone(), path.clone());
+        if !force && self.branch_probe_key.as_ref() == Some(&key) {
             return;
         }
         self._branch_task = None;
         self.branch_probe_id += 1;
         let id = self.branch_probe_id;
+        self.branch_probe_key = Some(key);
         self.base_branch.update(cx, |select, cx| {
             select.set_items(SearchableVec::new(Vec::new()), window, cx);
         });
-        let path = self.working_dir.read(cx).value().trim().to_owned();
-        if path.is_empty() || !self.has_environment_host() {
-            self.branch_probe = BranchProbe::Idle;
-            cx.notify();
-            return;
-        }
         self.branch_probe = BranchProbe::Loading;
         let client = self.ws.read(cx).client.clone();
         let target = self.probe_target();
@@ -470,87 +526,6 @@ impl ProjectForm {
         opts.extend(host_options(&hosts));
         let value = if self.host_id.is_empty() { MULTI_LOCAL.to_string() } else { self.host_id.clone() };
         kit::reset_select(&self.location_select, Options::flat(opts), &value, window, cx);
-    }
-
-    /// 侦测宿主机可用的 shell。本地问后端本机；SSH 有目标（选了主机或编辑已有 SSH 项目）才问远端
-    fn reprobe_shells(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (key, target) = if self.project_type() == ProjectType::Local {
-            (Some("local".to_string()), ProbeTarget::Backend)
-        } else if !self.host_id.is_empty() {
-            (Some(format!("host:{}", self.host_id)), ProbeTarget::SshHost(self.host_id.clone()))
-        } else {
-            match self.existing.as_ref().filter(|p| p.project_type == ProjectType::Ssh) {
-                Some(p) => (Some(format!("project:{}", p.id)), ProbeTarget::Project(p.id.clone())),
-                None => (None, ProbeTarget::Backend),
-            }
-        };
-        if key == self.shells_key {
-            return;
-        }
-        self.shells_key = key.clone();
-        self.shells = None;
-        self.sync_shell_select(window, cx);
-        let Some(key) = key else {
-            self._shells_task = None;
-            return;
-        };
-        let request = self.ws.read(cx).client.list_shells(&target);
-        self._shells_task = Some(cx.spawn_in(window, async move |this, cx| {
-            // 失败静默：表单退回"默认 + 自定义"，不打断创建
-            let Ok(info) = request.await else { return };
-            this.update_in(cx, |this, window, cx| {
-                if this.shells_key.as_deref() == Some(key.as_str()) {
-                    this.shells = Some(info);
-                    this.sync_shell_select(window, cx);
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
-    }
-
-    /// 下拉里必须包含当前值，哪怕侦测没跑完或它不在侦测结果里（存量项目手填过）
-    fn sync_shell_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let auto_label = match &self.shells {
-            Some(info) => t!("project.shellAutoDetected", shell = folder_name(&info.default)).to_string(),
-            None => t!("project.shellAuto").to_string(),
-        };
-        let mut shells: Vec<String> = self.shells.as_ref().map(|s| s.shells.clone()).unwrap_or_default();
-        if !self.shell.is_empty() && !self.shell_custom && !shells.contains(&self.shell) {
-            shells.insert(0, self.shell.clone());
-        }
-        let mut opts = vec![Opt::new(SHELL_AUTO, auto_label)];
-        opts.extend(shells.into_iter().map(|s| Opt::new(s.clone(), s)));
-        opts.push(Opt::new(SHELL_CUSTOM, t!("project.shellCustom").to_string()));
-        let value = if self.shell_custom {
-            SHELL_CUSTOM.to_string()
-        } else if self.shell.is_empty() {
-            SHELL_AUTO.to_string()
-        } else {
-            self.shell.clone()
-        };
-        kit::reset_select(&self.shell_select, Options::flat(opts), &value, window, cx);
-    }
-
-    fn pick_shell(&mut self, v: String, window: &mut Window, cx: &mut Context<Self>) {
-        if v == SHELL_AUTO {
-            self.shell.clear();
-            self.shell_custom = false;
-        } else if v == SHELL_CUSTOM {
-            // 自定义框从当前值起填
-            let current = self.shell.clone();
-            let placeholder = if self.project_type() == ProjectType::Local { "pwsh.exe / zsh" } else { "/usr/bin/zsh" };
-            self.shell_input.update(cx, |i, cx| {
-                i.set_value(current, window, cx);
-                i.set_placeholder(placeholder, window, cx);
-            });
-            self.shell_custom = true;
-        } else {
-            self.shell = v;
-            self.shell_custom = false;
-        }
-        self.sync_shell_select(window, cx);
-        cx.notify();
     }
 
     fn validate_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -637,6 +612,13 @@ impl ProjectForm {
         cx.notify();
     }
 
+    fn open_env_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_type() == ProjectType::Ssh && !self.can_browse_remote() && !self.locked {
+            return;
+        }
+        self.open_repo_picker(window, cx);
+    }
+
     fn pick_folder(&mut self, dir: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -645,7 +627,6 @@ impl ProjectForm {
         let typed = self.name.read(cx).value().trim().to_string();
         let next_name = if typed.is_empty() { base.clone() } else { typed.clone() };
         self.working_dir.update(cx, |i, cx| i.set_value(dir.clone(), window, cx));
-        self.reprobe_branches(window, cx);
         self.path_hint = Some((true, t!("project.pathOk").to_string()));
         if self.existing.is_none() && typed.is_empty() && !base.is_empty() {
             self.name.update(cx, |i, cx| i.set_value(base.clone(), window, cx));
@@ -658,9 +639,28 @@ impl ProjectForm {
         self.leave_picker(window, cx);
     }
 
-    /// 多仓库档「添加仓库」：一次追加全部选中目录，不关外层表单；重复选中静默去重
+    /// 多仓库档 / 环境表单「添加文件夹」：一次追加全部选中目录，不关外层表单；重复选中静默去重
     fn pick_repo_folders(&mut self, dirs: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
+            return;
+        }
+        if self.kind == FormKind::Environment {
+            self.repos.retain(|r| !r.read(cx).value().trim().is_empty());
+            for dir in dirs {
+                let dir = dir.trim().to_string();
+                if !dir.is_empty() && !self.repos.iter().any(|r| r.read(cx).value().trim() == dir) {
+                    self.repos.push(Self::make_env_dir_input(dir, window, cx));
+                }
+            }
+            let selected = self.env_dirs(cx);
+            if self.existing.is_none() && self.name.read(cx).value().trim().is_empty() && selected.len() == 1 {
+                let base = folder_name(&selected[0]);
+                if !base.is_empty() {
+                    self.name.update(cx, |i, cx| i.set_value(base, window, cx));
+                }
+            }
+            self.reprobe_branches(false, window, cx);
+            self.leave_picker(window, cx);
             return;
         }
         for dir in dirs {
@@ -688,6 +688,7 @@ impl ProjectForm {
         self.picking = false;
         self.picking_repo = false;
         self.picker = None;
+        self.ensure_env_dir_row(window, cx);
         self.name.update(cx, |i, cx| i.focus(window, cx));
         cx.notify();
     }
@@ -709,13 +710,24 @@ impl ProjectForm {
     // ---------------- 提交 ----------------
 
     fn can_submit(&self, cx: &App) -> bool {
-        !self.busy
-            && !self.name.read(cx).value().trim().is_empty()
-            && !(self.project_type() == ProjectType::Ssh && self.using_saved_host() && self.host_id.is_empty())
-            && (self.kind != FormKind::Environment
-                || self.existing.is_some()
-                || (self.has_environment_host()
-                    && matches!(self.branch_probe, BranchProbe::Git | BranchProbe::PlainDirectory | BranchProbe::Failed(_))))
+        if self.busy || self.name.read(cx).value().trim().is_empty() {
+            return false;
+        }
+        if self.project_type() == ProjectType::Ssh && self.using_saved_host() && self.host_id.is_empty() {
+            return false;
+        }
+        if self.kind == FormKind::Environment {
+            let dirs = self.env_dirs(cx);
+            if self.existing.is_some() {
+                return self.env_dirs_readonly(cx) || !dirs.is_empty();
+            }
+            if !self.has_environment_host() || dirs.is_empty() {
+                return false;
+            }
+            return dirs.len() > 1
+                || matches!(self.branch_probe, BranchProbe::Git | BranchProbe::PlainDirectory | BranchProbe::Failed(_));
+        }
+        true
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -753,6 +765,37 @@ impl ProjectForm {
             self.fail(t!("multi.needRepo").to_string(), window, cx);
             return;
         }
+        let (env_working_dir, env_repos, env_base_branch) = if self.kind == FormKind::Environment {
+            match &self.existing {
+                None => {
+                    if clean_repos.is_empty() {
+                        self.fail(t!("multi.needRepo").to_string(), window, cx);
+                        return;
+                    }
+                    if clean_repos.len() == 1 {
+                        let branch = self
+                            .base_branch
+                            .read(cx)
+                            .selected_value()
+                            .filter(|branch| !branch.is_empty())
+                            .cloned();
+                        (Some(clean_repos[0].clone()), None, branch)
+                    } else {
+                        (None, Some(clean_repos.clone()), None)
+                    }
+                }
+                Some(existing) => {
+                    let send_repos = existing.multi.is_some() && !self.env_dirs_readonly(cx);
+                    if send_repos && clean_repos.is_empty() {
+                        self.fail(t!("multi.needRepo").to_string(), window, cx);
+                        return;
+                    }
+                    (existing.working_dir.clone(), send_repos.then_some(clean_repos.clone()), None)
+                }
+            }
+        } else {
+            (None, None, None)
+        };
         let ssh = (ty == ProjectType::Ssh && self.host_id.is_empty()).then(|| {
             let v = self.legacy_ssh.values(cx);
             SshConfigInput {
@@ -767,23 +810,18 @@ impl ProjectForm {
         let input = ProjectInput {
             name,
             project_type: ty,
-            working_dir: if self.kind == FormKind::Environment && self.existing.is_none() {
-                nonempty(working_dir.trim())
-            } else {
-                nonempty(&working_dir)
-            },
-            shell: if self.environment() || self.existing.as_ref().is_some_and(|p| p.thread_environment_id.is_some()) {
-                Some(self.shell_value(cx))
-            } else {
-                nonempty(&self.shell_value(cx))
-            },
-            // 派生产物的成员由派生决定，不上送（PUT 会拒）；容器每次全量替换
-            environment_context: self.environment().then(|| self.context.read(cx).value().to_string()),
-            repos: multi.then_some(clean_repos),
+            working_dir: if self.kind == FormKind::Environment { env_working_dir } else { nonempty(&working_dir) },
+            // 表单不再提供 shell 覆盖：新建项目用宿主机的登录 shell；编辑已有项目时原样带回，
+            // 避免把旧项目已保存的自定义 shell 悄悄清掉
+            shell: self.existing.as_ref().and_then(|p| p.shell.clone()),
+            // 环境上下文输入已移除；空串只是「这是环境」的判别标志，服务端据此选择环境接口
+            environment_context: self.environment().then(String::new),
+            // 派生产物与线程的成员不可改，不上送（PUT 会拒）；容器每次全量替换
+            repos: if self.kind == FormKind::Environment { env_repos } else { multi.then_some(clean_repos) },
             host_id: (ty == ProjectType::Ssh && !self.host_id.is_empty()).then(|| self.host_id.clone()),
             ssh,
-            default_worktree_branch: if self.kind == FormKind::Environment && self.existing.is_none() {
-                self.base_branch.read(cx).selected_value().filter(|branch| !branch.is_empty()).cloned()
+            default_worktree_branch: if self.kind == FormKind::Environment {
+                env_base_branch
             } else {
                 nonempty(self.default_wt.read(cx).value().trim())
             },
@@ -824,7 +862,11 @@ impl ProjectForm {
                             }
                             w.refresh_inventory(cx);
                         });
+                        // 先关自己：叠在下面的表单拿回焦点后再收到新建的项目
                         window.close_dialog(cx);
+                        if created && let Some(on_created) = this.on_created.clone() {
+                            on_created(&project, window, cx);
+                        }
                     }
                     Err(err) => {
                         this.ws.update(cx, |w, cx| w.handle_error(&err, cx));
@@ -867,19 +909,6 @@ impl ProjectForm {
             .on_click(cx.listener(|this, _, window, cx| {
                 host_form::open(&this.ws, None, Some(this.on_host_saved(cx)), window, cx);
             }))
-    }
-
-    fn render_from_tailscale(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        // 对话框只有 448 宽，和主机下拉挤在一行会把下拉挤没。单独放一行
-        div().flex().child(
-            Button::new("pf-add-tailscale")
-                .outline()
-                .small()
-                .label(t!("host.fromTailscale").to_string())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    crate::dialogs::tailscale::open(&this.ws, Some(this.on_host_saved(cx)), window, cx);
-                })),
-        )
     }
 
     fn render_repos(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -933,6 +962,87 @@ impl ProjectForm {
         list
     }
 
+    fn render_env_dirs(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let readonly = self.env_dirs_readonly(cx);
+        let disabled_browse = self.project_type() == ProjectType::Ssh && !self.can_browse_remote();
+        let mut wrap = div().flex().flex_col().gap(zpx(6.));
+        let n = self.repos.len();
+        if !readonly && n == 1 && self.repos[0].read(cx).value().trim().is_empty() {
+            return wrap.child(
+                div()
+                    .flex()
+                    .gap(zpx(10.))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.repos[0])))
+                    .child(
+                        Button::new("pf-env-browse")
+                            .outline()
+                            .label(t!("project.browse").to_string())
+                            .disabled(disabled_browse)
+                            .on_click(cx.listener(|this, _, window, cx| this.open_env_picker(window, cx))),
+                    ),
+            );
+        }
+        let mut rows = div().flex().flex_col().gap(zpx(6.));
+        for (i, repo) in self.repos.iter().enumerate() {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().flex_1().min_w_0().child(Input::new(repo).readonly(readonly)));
+            if !readonly {
+                if n > 1 {
+                    row = row
+                        .child(
+                            Button::new(SharedString::from(format!("pf-env-up-{i}")))
+                                .ghost()
+                                .icon(IconName::ArrowUp)
+                                .tooltip(t!("multi.moveUp").to_string())
+                                .disabled(i == 0)
+                                .on_click(cx.listener(move |this, _, _, cx| this.move_repo(i, true, cx))),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("pf-env-down-{i}")))
+                                .ghost()
+                                .icon(IconName::ArrowDown)
+                                .tooltip(t!("multi.moveDown").to_string())
+                                .disabled(i + 1 == n)
+                                .on_click(cx.listener(move |this, _, _, cx| this.move_repo(i, false, cx))),
+                        );
+                }
+                row = row.child(
+                    Button::new(SharedString::from(format!("pf-env-rm-{i}")))
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip(t!("env.removeDirectory").to_string())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if i < this.repos.len() {
+                                this.repos.remove(i);
+                                this.ensure_env_dir_row(window, cx);
+                                this.reprobe_branches(false, window, cx);
+                                cx.notify();
+                            }
+                        })),
+                );
+            }
+            rows = rows.child(row);
+        }
+        if n > 4 {
+            wrap = wrap.child(div().id("pf-env-dirs").max_h(zpx(180.)).overflow_y_scroll().p(zpx(1.)).child(rows));
+        } else {
+            wrap = wrap.child(rows);
+        }
+        if !readonly {
+            wrap = wrap.child(
+                Button::new("pf-env-add-dir")
+                    .outline()
+                    .label(t!("env.addDirectory").to_string())
+                    .disabled(disabled_browse)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_env_picker(window, cx))),
+            );
+        }
+        wrap
+    }
+
     fn render_form(&mut self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let ty = self.project_type();
         let hosts = self.ws.read(cx).hosts.clone();
@@ -968,25 +1078,22 @@ impl ProjectForm {
                         .child(div().flex_1().min_w_0().child(Select::new(&self.location_select).w_full()))
                         .child(self.render_add_host(cx));
                     form = form.child(field(Some(t!("multi.location").to_string()), control, conn.map(|c| (c, Tone::Muted)), cx));
-                    form = form.child(self.render_from_tailscale(cx));
                 }
-                let mut directory = div().flex().gap(zpx(10.))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.working_dir).readonly(editing)));
-                if !editing {
-                    directory = directory.child(
-                        Button::new("pf-env-browse")
-                            .outline()
-                            .label(t!("project.browse").to_string())
-                            .on_click(cx.listener(|this, _, window, cx| this.open_picker(window, cx))),
-                    );
-                }
-                form = form.child(field(Some(t!("env.directory").to_string()), directory, None, cx));
+                let dir_count = self.env_dirs(cx).len();
+                let dir_hint = if editing && self.existing.as_ref().is_some_and(|p| p.multi.is_some()) && self.env_has_threads(cx) {
+                    Some((t!("env.dirsLockedByThreads").to_string(), Tone::Muted))
+                } else if !editing && dir_count > 1 {
+                    Some((t!("env.multiDirsHint").to_string(), Tone::Muted))
+                } else {
+                    None
+                };
+                form = form.child(field(Some(t!("env.directory").to_string()), self.render_env_dirs(cx), dir_hint, cx));
                 let branch_label = Some(t!("env.baseBranch").to_string());
                 if editing {
                     if self.existing.as_ref().is_some_and(|p| p.default_worktree_branch.is_some()) {
                         form = form.child(field(branch_label, Input::new(&self.default_wt).readonly(true), None, cx));
                     }
-                } else {
+                } else if dir_count == 1 {
                     form = match &self.branch_probe {
                         BranchProbe::Idle | BranchProbe::PlainDirectory => form,
                         BranchProbe::Loading => form.child(kit::note(t!("env.branchesLoading").to_string(), cx)),
@@ -999,10 +1106,9 @@ impl ProjectForm {
                         BranchProbe::Failed(message) => form
                             .child(error_line(message.clone(), cx))
                             .child(Button::new("pf-env-retry").outline().label(t!("env.retryBranches").to_string())
-                                .on_click(cx.listener(|this, _, window, cx| this.reprobe_branches(window, cx)))),
+                                .on_click(cx.listener(|this, _, window, cx| this.reprobe_branches(true, window, cx)))),
                     };
                 }
-                form = form.child(field(Some(t!("env.context").to_string()), Textarea::new(&self.context), None, cx));
             }
             (FormKind::Multi, _) => {
                 // 从主机菜单进来位置已定死，不再显示下拉
@@ -1013,13 +1119,14 @@ impl ProjectForm {
                         .child(div().flex_1().min_w_0().child(Select::new(&self.location_select).w_full()))
                         .child(self.render_add_host(cx));
                     form = form.child(field(Some(t!("multi.location").to_string()), control, conn.clone().map(|c| (c, Tone::Muted)), cx));
-                    form = form.child(self.render_from_tailscale(cx));
                 }
-                let hint = self.repos_readonly.then(|| (t!("multi.reposReadonly").to_string(), Tone::Muted));
-                form = form.child(field(Some(t!("multi.repos").to_string()), self.render_repos(cx), hint, cx));
-                if self.environment() {
-                    form = form.child(field(Some(t!("env.context").to_string()), Textarea::new(&self.context), None, cx));
-                } else if !self.repos_readonly {
+                let hint = self.repos_readonly.then(|| {
+                    let key = if durable_thread { "env.threadDirsReadonly" } else { "multi.reposReadonly" };
+                    (t!(key).to_string(), Tone::Muted)
+                });
+                let repos_label = if durable_thread { t!("env.directory") } else { t!("multi.repos") };
+                form = form.child(field(Some(repos_label.to_string()), self.render_repos(cx), hint, cx));
+                if !self.environment() && !self.repos_readonly {
                     let all_empty = self.repo_values(cx).iter().all(|r| r.trim().is_empty());
                     let control = div()
                         .flex()
@@ -1090,7 +1197,6 @@ impl ProjectForm {
                             .child(self.render_add_host(cx))
                     };
                     form = form.child(field(Some(label.to_string()), control, hint, cx));
-                    form = form.child(self.render_from_tailscale(cx));
                 }
                 if legacy && self.host_id.is_empty() {
                     form = form.children(self.legacy_ssh.render(cx));
@@ -1115,12 +1221,6 @@ impl ProjectForm {
                 form = form.child(field(Some(t!("project.remoteDir").to_string()), control, hint, cx));
             }
         }
-
-        let mut shell = div().flex().flex_col().gap_2().child(Select::new(&self.shell_select).w_full());
-        if self.shell_custom {
-            shell = shell.child(Input::new(&self.shell_input));
-        }
-        form = form.child(field(Some(t!("project.shell").to_string()), shell, None, cx));
 
         if !self.environment() && !durable_thread && self.existing.as_ref().is_none_or(|p| p.worktree.is_none()) {
             form = form.child(field(
@@ -1170,7 +1270,28 @@ impl Render for ProjectForm {
 }
 
 pub fn open(ws: &Entity<Workspace>, edit: Option<Project>, preset: Preset, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| ProjectForm::new(ws.clone(), edit, preset, window, cx));
+    present(ws, edit, preset, None, window, cx);
+}
+
+/// 新建环境，建好后调 `on_created`。新建线程的表单从这里叠开环境表单
+pub fn open_environment(ws: &Entity<Workspace>, mut preset: Preset, on_created: OnCreated, window: &mut Window, cx: &mut App) {
+    preset.environment = true;
+    present(ws, None, preset, Some(on_created), window, cx);
+}
+
+fn present(
+    ws: &Entity<Workspace>,
+    edit: Option<Project>,
+    preset: Preset,
+    on_created: Option<OnCreated>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let form = cx.new(|cx| {
+        let mut form = ProjectForm::new(ws.clone(), edit, preset, window, cx);
+        form.on_created = on_created;
+        form
+    });
     let f = form.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
         let (title, wide) = {

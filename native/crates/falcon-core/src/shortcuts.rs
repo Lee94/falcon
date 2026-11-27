@@ -24,6 +24,8 @@
 pub enum Command {
     Palette,
     QuickOpen,
+    /// 新建线程（⌘P）：机器、环境与第一个 Agent 都在弹出的输入框里选
+    NewThread,
     NewTerminal,
     /// 向右分屏新建终端（在当前窗口右侧插一列）
     SplitRight,
@@ -48,10 +50,11 @@ pub enum Command {
 }
 
 impl Command {
-    /// 固定的那些（不含 `Tab(n)`），React 版的书写顺序
-    pub const FIXED: [Command; 16] = [
+    /// 固定的那些（不含 `Tab(n)`），React 版的书写顺序；新建线程接在转到文件后面
+    pub const FIXED: [Command; 17] = [
         Command::Palette,
         Command::QuickOpen,
+        Command::NewThread,
         Command::NewTerminal,
         Command::SplitRight,
         Command::SplitDown,
@@ -68,7 +71,7 @@ impl Command {
         Command::PrevCanvas,
     ];
 
-    /// 全部命令：固定的 16 个 + tab1…tab9
+    /// 全部命令：固定的 17 个 + tab1…tab9
     pub fn all() -> Vec<Command> {
         Self::FIXED.into_iter().chain((1..=9).map(Command::Tab)).collect()
     }
@@ -78,6 +81,7 @@ impl Command {
         match self {
             Command::Palette => "palette".into(),
             Command::QuickOpen => "quickOpen".into(),
+            Command::NewThread => "newThread".into(),
             Command::NewTerminal => "newTerminal".into(),
             Command::SplitRight => "splitRight".into(),
             Command::SplitDown => "splitDown".into(),
@@ -135,6 +139,7 @@ pub fn shortcut_defs() -> Vec<ShortcutDef> {
     let mut out = vec![
         def(Palette, Some("palette.title"), General),
         def(QuickOpen, Some("palette.goToFile"), General),
+        def(NewThread, Some("env.thread"), Session),
         def(NewTerminal, Some("sidebar.newTerminal"), Session),
         def(SplitRight, Some("tab.newToRight"), Session),
         def(SplitDown, Some("tab.newBelow"), Session),
@@ -249,8 +254,11 @@ pub fn bindings(cmd: Command, mac: bool) -> Vec<Binding> {
             b(if mac { letter("k").cmd() } else { letter("k").ctrl() }, Secondary),
             b(Keystroke::new("f1"), Secondary),
         ],
-        Command::QuickOpen => {
-            // Win 不能绑 Ctrl+P：那是 shell 的上一条历史，所以非 mac 的主键位就是 Alt+P
+        // 转到文件让出 ⌘P 之后用 ⌘O（Win/Linux 的 Ctrl+Shift+O），与「打开」的习惯一致
+        Command::QuickOpen => plain("o"),
+        Command::NewThread => {
+            // ⌘P 原是转到文件，线程成了第一入口之后归新建线程。Win 不能绑 Ctrl+P：那是 shell 的
+            // 上一条历史，所以非 mac 的主键位就是 Alt+P（沿用原来转到文件的键位）
             if mac {
                 vec![b(letter("p").cmd(), Primary), b(letter("p").alt(), BrowserAlias)]
             } else {
@@ -316,8 +324,9 @@ pub fn chord(cmd: Command, mac: bool) -> String {
     let pick = |m: &str, o: &str| if mac { m.to_string() } else { o.to_string() };
     match cmd {
         Command::Palette => pick("⌘⇧P", "Ctrl+Shift+P"),
+        Command::QuickOpen => pick("⌘O", "Ctrl+Shift+O"),
         // Win 不能绑 Ctrl+P：那是 shell 的上一条历史
-        Command::QuickOpen => pick("⌘P", "Alt+P"),
+        Command::NewThread => pick("⌘P", "Alt+P"),
         Command::NewTerminal => pick("⌘T", "Ctrl+Shift+T"),
         Command::SplitRight => pick("⌘D", "Ctrl+Shift+D"),
         Command::SplitDown => pick("⌘⇧D", "Alt+Shift+D"),
@@ -356,7 +365,8 @@ pub fn alt_chord(cmd: Command, mac: bool) -> Option<&'static str> {
                 "Ctrl+K"
             }
         }
-        Command::QuickOpen => "Alt+P",
+        Command::QuickOpen => "Alt+O",
+        Command::NewThread => "Alt+P",
         Command::NextTab => "Alt+]",
         Command::PrevTab => "Alt+[",
         Command::NextCanvas if mac => "Alt+Shift+]",
@@ -389,7 +399,8 @@ fn alt_letter(code: &str) -> Option<Command> {
         "KeyF" => Command::OpenRelays,
         "KeyE" => Command::ToggleFilesPanel,
         "KeyR" => Command::Reattach,
-        "KeyP" => Command::QuickOpen,
+        "KeyP" => Command::NewThread,
+        "KeyO" => Command::QuickOpen,
         _ => return None,
     })
 }
@@ -405,6 +416,7 @@ fn modshift_letter(code: &str) -> Option<Command> {
         "KeyF" => Command::OpenRelays,
         "KeyE" => Command::ToggleFilesPanel,
         "KeyR" => Command::Reattach,
+        "KeyO" => Command::QuickOpen,
         _ => return None,
     })
 }
@@ -413,7 +425,8 @@ fn mac_mod_letter(code: &str) -> Option<Command> {
     Some(match code {
         // 旧主键位。VS Code 里 ⌘K 是 chord 前缀，这里没有 chord，留着当额外入口
         "KeyK" => Command::Palette,
-        "KeyP" => Command::QuickOpen,
+        "KeyP" => Command::NewThread,
+        "KeyO" => Command::QuickOpen,
         "KeyT" => Command::NewTerminal,
         "KeyD" => Command::SplitRight,
         "KeyW" => Command::CloseTab,
@@ -470,7 +483,7 @@ fn event_code(e: &KeyEventLike) -> String {
 }
 
 /// 命中则返回命令。React 版 `matchCommand` 的逐行移植（含它的优先级：F1 → Ctrl+Shift+` →
-/// Alt 别名 → 平台修饰键）。注意平台修饰键那一支不看 Alt：mac 上 ⌘⌥P 也是 quickOpen。
+/// Alt 别名 → 平台修饰键）。注意平台修饰键那一支不看 Alt：mac 上 ⌘⌥P 也是 newThread。
 pub fn match_command(e: &KeyEventLike, mac: bool) -> Option<Command> {
     let modifier = if mac { e.meta && !e.ctrl } else { e.ctrl && !e.meta };
     let code = event_code(e);
@@ -622,21 +635,33 @@ mod tests {
         assert_eq!(hit(false, "KeyK", CTRL), Some(Command::Palette));
     }
 
-    // ---- matchCommand: Quick Open ----
+    // ---- matchCommand: 新建线程与转到文件 ----
 
     #[test]
-    fn quick_open_is_cmd_p_on_mac_and_does_not_steal_ctrl_p_on_win() {
-        assert_eq!(hit(true, "KeyP", META), Some(Command::QuickOpen));
+    fn new_thread_is_cmd_p_on_mac_and_does_not_steal_ctrl_p_on_win() {
+        assert_eq!(hit(true, "KeyP", META), Some(Command::NewThread));
         assert_eq!(hit(false, "KeyP", CTRL), None);
         assert_eq!(hit(true, "KeyP", CTRL), None);
-        assert_eq!(chord(Command::QuickOpen, true), "⌘P");
-        assert_eq!(chord(Command::QuickOpen, false), "Alt+P");
+        assert_eq!(chord(Command::NewThread, true), "⌘P");
+        assert_eq!(chord(Command::NewThread, false), "Alt+P");
     }
 
     #[test]
-    fn alt_p_opens_quick_open_on_both_platforms() {
-        assert_eq!(hit(true, "KeyP", ALT), Some(Command::QuickOpen));
-        assert_eq!(hit(false, "KeyP", ALT), Some(Command::QuickOpen));
+    fn alt_p_opens_new_thread_on_both_platforms() {
+        assert_eq!(hit(true, "KeyP", ALT), Some(Command::NewThread));
+        assert_eq!(hit(false, "KeyP", ALT), Some(Command::NewThread));
+    }
+
+    #[test]
+    fn quick_open_moved_to_cmd_o() {
+        assert_eq!(hit(true, "KeyO", META), Some(Command::QuickOpen));
+        assert_eq!(hit(false, "KeyO", CTRL_SHIFT), Some(Command::QuickOpen));
+        assert_eq!(hit(true, "KeyO", ALT), Some(Command::QuickOpen));
+        assert_eq!(hit(false, "KeyO", ALT), Some(Command::QuickOpen));
+        // 裸 Ctrl+O 在终端里是 shell 的语义，不抢
+        assert_eq!(hit(false, "KeyO", CTRL), None);
+        assert_eq!(chord(Command::QuickOpen, true), "⌘O");
+        assert_eq!(chord(Command::QuickOpen, false), "Ctrl+Shift+O");
     }
 
     #[test]
@@ -727,11 +752,11 @@ mod tests {
                         matches!(cmd, Command::SplitDown | Command::NextCanvas | Command::PrevCanvas) || !a.keystroke.shift;
                     assert!(a.keystroke.alt && !a.keystroke.cmd && !a.keystroke.ctrl && shift_ok);
                 }
-                // 主键位本身就是 Alt 的（非 mac 的 quickOpen / overview / tabN / 翻画布 / 向下分屏）不再另标别名
+                // 主键位本身就是 Alt 的（非 mac 的 newThread / overview / tabN / 翻画布 / 向下分屏）不再另标别名
                 if !mac
                     && matches!(
                         cmd,
-                        Command::QuickOpen
+                        Command::NewThread
                             | Command::Overview
                             | Command::Tab(_)
                             | Command::SplitDown

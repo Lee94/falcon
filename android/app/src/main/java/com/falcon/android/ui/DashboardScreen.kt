@@ -1359,7 +1359,7 @@ private fun WorkspaceDialog(baseUrl: String, form: WorkspaceForm, close: () -> U
     val creatingEnv = env == null
     val editingLegacyEnv = !form.thread && env?.isMulti == true
     var name by remember { mutableStateOf(if (form.thread) "" else env?.name.orEmpty()) }
-    var context by remember { mutableStateOf(if (form.thread) "" else env?.environmentContext.orEmpty()) }
+    var context by remember { mutableStateOf("") }
     var repos by remember { mutableStateOf(env?.repos.orEmpty().joinToString("\n")) }
     var directory by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
@@ -1437,7 +1437,9 @@ private fun WorkspaceDialog(baseUrl: String, form: WorkspaceForm, close: () -> U
                     Text(env.workingDir)
                     env.defaultWorktreeBranch?.let { Text(stringResource(R.string.environment_base_branch, it)) }
                 }
-                OutlinedTextField(context, { context = it }, label = { Text(if (form.thread) "任务说明" else "环境上下文") }, maxLines = 5, enabled = !busy)
+                if (form.thread) {
+                    OutlinedTextField(context, { context = it }, label = { Text("任务说明") }, maxLines = 5, enabled = !busy)
+                }
                 if (error.isNotEmpty()) Text(error)
             }
         },
@@ -1456,7 +1458,7 @@ private fun WorkspaceDialog(baseUrl: String, form: WorkspaceForm, close: () -> U
                         FalconApiClient.createThread(baseUrl, requireNotNull(env).id, name, context)
                     } else {
                         FalconApiClient.saveEnvironment(
-                            baseUrl, form.server.hostId, env?.id, name, context,
+                            baseUrl, form.server.hostId, env?.id, name,
                             workingDir = if (chooseDirectory) path else null,
                             defaultWorktreeBranch = if (chooseDirectory) selectedBranch else null,
                             legacyRepos = if (usesRepos) repos.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList() else null
