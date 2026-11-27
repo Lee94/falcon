@@ -43,6 +43,8 @@ pub mod editor;
 pub mod file_text;
 /// 对应 React 版的 lib/mdLink.ts：Markdown 链接解析
 pub mod md_link;
+/// Claude 对话窗口的记录模型：事件流 → 一轮一轮的提示词 / 过程 / 回复
+pub mod claude_transcript;
 /// 对应 React 版的 lib/multiPath.ts：多仓库成员的公共父目录
 pub mod multi_path;
 /// 对应 React 版的 lib/multiDerive.ts：批量派生的预演

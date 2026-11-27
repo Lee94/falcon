@@ -1,7 +1,13 @@
 //! 侧栏默认是线程视图：顶上固定一行「新建线程」与线程过滤 / 排序条，下面平铺所有线程，默认按
 //! 创建时间倒序排列（[`filter_and_sort_threads`]）。机器与环境是新建线程对话框里的选项，侧栏不
-//! 单独给它们开入口，只在线程视图提供按关键词 / 状态 / 机器 / 环境过滤和常见排序；线程行上只用
-//! 淡色写所属环境，机器放在悬停提示里。
+//! 单独给它们开入口，只在线程视图提供按关键词 / 状态 / 机器 / 环境过滤和常见排序。
+//!
+//! 线程列表照 Claude 桌面版 / Orca 的样子画：
+//! - 按时间排时分「今天 / 昨天 / 过去 7 天 / 过去 30 天 / 更早」几段，状态优先时按状态分段，
+//!   按名称排不分段（[`thread_sections`]）；
+//! - 线程行两行：上面是状态记号 + 名称 + 时间，下面淡色写环境（远端再带机器）、改动行数与会话数。
+//!   行首那一格只画整条线程最要紧的一个状态（[`ThreadGlyph`]），一列里扫一眼就知道该点哪条；
+//! - 时间在悬停时让位给 ＋（新建会话）与「…」（线程菜单），行宽不变、名称不跳。
 //!
 //! 底栏的切换按钮打开按机器分组的兼容视图：机器 → 环境 → 线程，外加旧项目与独立终端。
 //! 编辑 / 删除环境、在机器上开独立终端、管理旧项目都在这一视图。
@@ -18,9 +24,9 @@
 
 use falcon_core::program_status::{RowReading, RowStatus};
 use falcon_core::project_tree::{
-    FolderGroup, ServerGroup, ServerKind, ThreadFilter, ThreadMachineFilter, ThreadRuntime, ThreadSort,
+    FolderGroup, ServerGroup, ServerKind, ThreadFilter, ThreadMachineFilter, ThreadRuntime, ThreadSection, ThreadSort,
     ThreadStatusFilter, archived_thread_count, checkout_label, filter_and_sort_threads, folder_key, group_servers,
-    lands_in_place, project_matches_machine, thread_environment, thread_list,
+    lands_in_place, project_matches_machine, thread_environment, thread_list, thread_sections, thread_sort_time,
 };
 use falcon_proto::{Project, ProjectType, SessionState, SessionWithProject};
 use gpui_kit::assets::IconName;
@@ -218,16 +224,7 @@ impl Sidebar {
         if let Some(env_name) = thread_environment(thread).and_then(|id| ws.project(id)).map(|p| p.name.clone()) {
             rt.search_terms.push(env_name);
         }
-        let machine = match thread.project_type {
-            ProjectType::Local => local_word(),
-            ProjectType::Ssh => thread
-                .host_id
-                .as_ref()
-                .and_then(|id| ws.hosts.iter().find(|h| &h.id == id))
-                .map(|h| h.name.clone())
-                .or_else(|| thread.ssh.as_ref().map(|s| s.host.clone()))
-                .unwrap_or_default(),
-        };
+        let machine = thread_machine(ws, thread);
         if !machine.is_empty() {
             rt.search_terms.push(machine);
         }
@@ -267,13 +264,19 @@ impl Render for Sidebar {
 
         // 线程视图只要平铺的线程（按过滤与排序规则计算）；兼容视图里本机分组一律画出来，
         // 独立会话直接列在机器下面，见 [`Sidebar::server_node`]。
+        // 运行态在过滤时算一遍就留着：分段与行尾时间都用它，不再逐行重算
+        let mut runtimes: std::collections::HashMap<String, ThreadRuntime> = Default::default();
         let (threads, total_threads, servers) = if self.by_machine {
             let ws = self.ws.read(cx);
             (Vec::new(), 0, group_servers(&ws.projects, &ws.hosts, &local_word(), show_archived))
         } else {
             let projects = self.ws.read(cx).projects.clone();
             let total = thread_list(&projects, show_archived).len();
-            let filtered = filter_and_sort_threads(&projects, &filter, sort, |t| self.thread_runtime(t, cx));
+            let filtered = filter_and_sort_threads(&projects, &filter, sort, |t| {
+                let rt = self.thread_runtime(t, cx);
+                runtimes.insert(t.id.clone(), rt.clone());
+                rt
+            });
             (filtered, total, Vec::new())
         };
         let empty = if self.by_machine { projects_empty && hosts_empty } else { threads.is_empty() };
@@ -334,9 +337,20 @@ impl Render for Sidebar {
                 tree = tree.child(self.server_node(server, cx));
             }
         } else {
+            let now = now_ms();
+            let none = ThreadRuntime::default();
+            let rt_of = |t: &Project| runtimes.get(&t.id).unwrap_or(&none);
+            let keys: Vec<(i64, u8)> =
+                threads.iter().map(|t| (thread_sort_time(sort, t, rt_of(t)), rt_of(t).status_rank())).collect();
+            let sections = thread_sections(sort, &keys, now, crate::local_time::utc_offset_at);
             let mut list = div().flex().flex_col().gap(zpx(ROW_GAP));
-            for thread in &threads {
-                list = list.child(self.thread_node(thread, cx));
+            let mut next_section = sections.iter().peekable();
+            for (i, thread) in threads.iter().enumerate() {
+                if let Some((section, _)) = next_section.next_if(|(_, start)| *start == i) {
+                    list = list.child(section_header(*section, i == 0, cx));
+                }
+                let age = (now - keys[i].0).max(0) as u64;
+                list = list.child(self.thread_node(thread, age, cx));
             }
             tree = tree.child(list);
         }
@@ -542,13 +556,239 @@ impl Sidebar {
         parts
     }
 
-    /// 线程视图的一行：线程自己占第一层，会话摊在它下面。行尾淡色写所属环境
-    fn thread_node(&self, thread: &Project, cx: &mut Context<Self>) -> AnyElement {
+    /// 线程视图的一行：两行式的线程行，会话摊在它下面（会话图标与线程名称对齐）。`age`：行尾写的
+    /// 时间距今多久（毫秒），口径见 [`thread_sort_time`]
+    fn thread_node(&self, thread: &Project, age: u64, cx: &mut Context<Self>) -> AnyElement {
+        let ui = Ui::global(cx).clone();
         let ws = self.ws.read(cx);
+        let mine: Vec<&SessionWithProject> = ws.sessions.iter().filter(|s| s.project_id == thread.id).collect();
+        let mine_pending: Vec<&PendingSession> = ws.state.pending.iter().filter(|p| p.project_id == thread.id).collect();
+        let sessions_open = ws.state.sessions_open.get(&thread.id).copied().unwrap_or(false);
+        // 活动会话摊在线程下面时只强调最具体的那一行；收起后才由线程行承担选中态
+        let active_child_visible = sessions_open
+            && match &ws.state.active {
+                ActiveView::Terminal { session_id } => mine.iter().any(|s| &s.id == session_id),
+                _ => false,
+            };
+        let archived_at = thread.worktree.as_ref().and_then(|w| w.archived_at);
+        let selected = archived_at.is_none()
+            && !active_child_visible
+            && ws.state.selected_project_id.as_deref() == Some(thread.id.as_str());
+        let count = mine.len() + mine_pending.len();
+        // 存档的线程开不了会话，也就没有会话行可摊
+        let expandable = archived_at.is_none() && count > 0 && thread.environment_context.is_none();
+        let glyph = self.thread_glyph(thread, &mine, &mine_pending, cx);
+        let changes = if archived_at.is_some() { None } else { ws.changes.get(&thread.id).cloned() };
+        let tooltip: SharedString = format!("{} · {}", thread_tooltip(ws, thread), t!("sidebar.projectContext")).into();
+
+        // 第二行：环境，远端线程再带上机器（同名环境在不同机器上很常见）；存档的写删除倒计时
         let env = thread_environment(thread).and_then(|id| ws.project(id)).map(|p| p.name.clone());
-        let changes = ws.changes.get(&thread.id).cloned();
-        let selected = ws.state.selected_project_id.as_deref() == Some(thread.id.as_str());
-        self.checkout_node(thread, checkout_label(thread, None), env, changes, selected, 0, cx)
+        let machine = (thread.project_type == ProjectType::Ssh).then(|| thread_machine(ws, thread));
+        let subtitle = match archived_at {
+            Some(at) => archive_countdown(at),
+            None => [env, machine].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
+        };
+
+        let id = thread.id.clone();
+        let group: SharedString = format!("th-{id}").into();
+        let menu_items = menus::project_menu_items(&self.ws, thread, cx);
+        let ctx_items = menu_items.clone();
+        let new_items = archived_at.is_none().then(|| menus::new_session_items(&self.ws, &thread.id, None, cx));
+        let (fg, sub) = if selected {
+            (ui.tint_foreground, ui.tint_foreground.opacity(0.7))
+        } else if archived_at.is_some() {
+            (ui.muted_foreground, ui.muted_foreground)
+        } else {
+            (ui.foreground, ui.muted_foreground)
+        };
+
+        // 行尾：平时写时间，悬停时同一格换成 ＋ 与「…」。按钮叠在时间上（绝对定位、靠右），格子
+        // 给够两个按钮的宽度，名称的截断位置不随悬停变
+        let mut actions = div().flex().items_center();
+        if let Some(items) = new_items {
+            let tip = if items.len() == 1 {
+                items[0].label.clone()
+            } else {
+                format!("{} · {}", t!("sidebar.newTerminal"), crate::ui::chord("newTerminal"))
+            };
+            actions = actions.child(
+                Button::new(SharedString::from(format!("th-new-{id}")))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip(tip)
+                    .dropdown_menu(move |menu, _, _| to_popup(menu, items.clone())),
+            );
+        }
+        actions = actions.child(
+            Button::new(SharedString::from(format!("th-menu-{id}")))
+                .ghost()
+                .xsmall()
+                .icon(IconName::Ellipsis)
+                .dropdown_menu(move |menu, _, _| to_popup(menu, menu_items.clone())),
+        );
+        let trailing = div()
+            .relative()
+            .flex_none()
+            .min_w(zpx(44.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(
+                div()
+                    .text_size(zpx(11.))
+                    .text_color(sub)
+                    .group_hover(group.clone(), |s| s.opacity(0.))
+                    .child(age_text(age)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(-zpx(4.))
+                    .flex()
+                    .items_center()
+                    .opacity(0.)
+                    .group_hover(group.clone(), |s| s.opacity(1.))
+                    .child(actions),
+            );
+
+        let title = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_color(fg)
+            // 跑完了还没看的线程名称加粗，与会话行的「未读」同一个口径
+            .when(glyph == ThreadGlyph::Unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+            .child(thread.name.clone());
+        let line1 = div()
+            .h(zpx(18.))
+            .flex()
+            .items_center()
+            .gap(zpx(4.))
+            .child(glyph_cell(glyph, &id, selected, cx))
+            .child(title)
+            .child(trailing);
+
+        let mut meta = div().flex_none().flex().items_center().gap(zpx(6.)).text_size(zpx(11.));
+        if let Some(badge) = changes.as_ref().and_then(|c| change_badge(c, cx)) {
+            meta = meta.child(badge);
+        }
+        if expandable {
+            let ws_toggle = self.ws.clone();
+            let pid = id.clone();
+            let label: SharedString = t!("sidebar.sessionCount", n = count).to_string().into();
+            meta = meta.child(
+                div()
+                    .id(SharedString::from(format!("th-sessions-{id}")))
+                    .flex()
+                    .items_center()
+                    .gap(zpx(3.))
+                    .px(zpx(3.))
+                    .rounded(zpx(4.))
+                    .text_color(if sessions_open { fg } else { sub })
+                    .hover(|s| s.text_color(fg))
+                    .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                    .child(icon(IconName::SquareTerminal).size(zpx(11.)))
+                    .child(count.to_string())
+                    .child(crate::ui::disclosure_chevron(
+                        SharedString::from(format!("th-sessions-chev-{id}")),
+                        sessions_open,
+                        zpx(10.),
+                    ))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        ws_toggle.update(cx, |w, cx| w.toggle_sessions(&pid, cx))
+                    }),
+            );
+        }
+        let line2 = div()
+            .h(zpx(16.))
+            .flex()
+            .items_center()
+            .gap(zpx(4.))
+            .child(div().flex_none().w(zpx(GLYPH_W)))
+            .child(div().flex_1().min_w_0().truncate().text_size(zpx(11.)).text_color(sub).child(subtitle))
+            .child(meta);
+
+        let mut row = div()
+            .id(SharedString::from(format!("th-{id}")))
+            .group(group)
+            .flex()
+            .flex_col()
+            .gap(zpx(1.))
+            .py(zpx(5.))
+            .pl(zpx(THREAD_PAD_L))
+            .pr(zpx(8.))
+            .rounded(radius::SM)
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(line1)
+            .child(line2);
+        row = if selected { row.bg(ui.tint) } else { row.hover(|s| s.bg(ui.muted)) };
+        if archived_at.is_none() {
+            let ws_select = self.ws.clone();
+            let pid = id.clone();
+            // 线程里开着什么（对话、终端、Agent）都在它的画布上，选中就是切过去
+            row = row
+                .cursor_pointer()
+                .on_click(move |_, _, cx| ws_select.update(cx, |w, cx| w.select_project(&pid, cx)));
+        }
+        let row = row.context_menu(move |menu, _, _| to_popup(menu, ctx_items.clone()));
+        let row = if selected {
+            crate::ui::selected_fade(format!("sel-th-{id}"), row, ui.tint).into_any_element()
+        } else {
+            row.into_any_element()
+        };
+
+        let mut node = div().flex().flex_col().gap(zpx(ROW_GAP)).child(row);
+        if expandable && sessions_open {
+            node = node.children(self.terminal_rows(mine.into_iter(), mine_pending.into_iter(), 0, cx));
+        }
+        node.into_any_element()
+    }
+
+    /// 线程行首那一格：整条线程（会话、创建中的会话、Claude 对话）里最要紧的那个状态
+    fn thread_glyph(
+        &self,
+        thread: &Project,
+        sessions: &[&SessionWithProject],
+        pending: &[&PendingSession],
+        cx: &App,
+    ) -> ThreadGlyph {
+        let ws = self.ws.read(cx);
+        let mut glyph = ThreadGlyph::None;
+        let mut bump = |g: ThreadGlyph| glyph = glyph.max(g);
+        for s in sessions {
+            bump(match s.state {
+                SessionState::Active => match ws.row_status(s).status {
+                    RowStatus::Working => ThreadGlyph::Working,
+                    RowStatus::NeedsYou => ThreadGlyph::NeedsYou,
+                    RowStatus::Unread { error: true } => ThreadGlyph::Error,
+                    RowStatus::Unread { error: false } => ThreadGlyph::Unread,
+                    RowStatus::Read { .. } | RowStatus::Idle | RowStatus::Inactive => ThreadGlyph::Live,
+                },
+                SessionState::Dead => ThreadGlyph::Error,
+                SessionState::Unverified | SessionState::Unknown => ThreadGlyph::Unverified,
+            });
+        }
+        for p in pending {
+            bump(if p.error.is_some() { ThreadGlyph::Error } else { ThreadGlyph::Working });
+        }
+        if ws.state.chats.iter().any(|id| id == &thread.id) {
+            bump(ThreadGlyph::Live);
+            if let Some(chat) = ws.chats.get(&thread.id) {
+                let chat = chat.read(cx);
+                if chat.is_busy() {
+                    bump(ThreadGlyph::Working);
+                }
+                if chat.has_pending_permission() {
+                    bump(ThreadGlyph::NeedsYou);
+                }
+            }
+        }
+        glyph
     }
 
     /// 兼容视图的机器分组
@@ -941,24 +1181,7 @@ impl Sidebar {
         let archived_at = project.worktree.as_ref().and_then(|w| w.archived_at);
         let archived_note = archived_at.map(archive_countdown);
         let title = if project.is_thread() {
-            // 线程视图里机器只出现在这里：「机器 / 环境 · 工作目录」
-            let machine = project
-                .host_id
-                .as_ref()
-                .and_then(|id| ws.hosts.iter().find(|h| &h.id == id))
-                .map(|h| h.name.clone())
-                .unwrap_or_else(local_word);
-            let env = thread_environment(project).and_then(|id| ws.project(id)).map(|p| p.name.clone());
-            let mut parts = vec![match env {
-                Some(env) => format!("{machine} / {env}"),
-                None => machine,
-            }];
-            if let Some(dir) = &project.working_dir {
-                parts.push(dir.clone());
-            } else if let Some(multi) = &project.multi {
-                parts.extend(multi.repos.iter().map(|r| r.dir.clone()));
-            }
-            parts.join(" · ")
+            thread_tooltip(ws, project)
         } else if project.worktree.is_some() {
             let mut parts = vec![t!("worktree.derivedFrom", name = source_name).to_string()];
             if let Some(dir) = &project.working_dir {
@@ -1183,6 +1406,117 @@ fn status_tip(session: &SessionWithProject, reading: RowReading) -> SharedString
         RowStatus::Inactive => t!("sidebar.statusInactive", t = age).to_string(),
     }
     .into()
+}
+
+/// 线程行的左内边距与行首状态格的宽度。会话行摊在线程下面时深度取 0：它的图标列
+/// （`indent(0)` + 18px 占位 + 行内间距）正好落在线程名称那一列
+const THREAD_PAD_L: f32 = 4.;
+const GLYPH_W: f32 = 18.;
+
+/// 线程行首的状态记号，按要紧程度从低到高排（取最大的那个）。只有「在等你」与「出错」上色，
+/// 其余跟着字色走，与会话行尾巴上的记号同一套口径（[`status_cell`]）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ThreadGlyph {
+    /// 什么都没开着
+    None,
+    /// 有活着的会话或对话，但都闲着：一颗淡的小圆点
+    Live,
+    /// 有程序跑完了还没看：实心的强调色圆点（像未读）
+    Unread,
+    /// 在跑：转圈
+    Working,
+    /// 会话待接回
+    Unverified,
+    /// 会话丢了、创建失败或程序报错
+    Error,
+    /// 有程序卡着等人（OSC 7501 blocked、Claude 对话等审批）
+    NeedsYou,
+}
+
+fn glyph_cell(glyph: ThreadGlyph, id: &str, selected: bool, cx: &App) -> AnyElement {
+    let ui = Ui::global(cx);
+    let fg = if selected { ui.tint_foreground } else { ui.foreground };
+    let dot = |size: f32, color| div().size(zpx(size)).rounded_full().bg(color).into_any_element();
+    let inner = match glyph {
+        ThreadGlyph::None => None,
+        ThreadGlyph::Live => Some(dot(5., if selected { ui.tint_foreground.opacity(0.5) } else { ui.muted_foreground.opacity(0.6) })),
+        ThreadGlyph::Unread => Some(dot(7., if selected { ui.tint_foreground } else { ui.tint_strong })),
+        ThreadGlyph::Working => Some(
+            div().text_color(fg).child(spinner(format!("th-spin-{id}"), IconName::LoaderCircle, zpx(12.))).into_any_element(),
+        ),
+        ThreadGlyph::Unverified => Some(status_mark(Mark::Unverified, zpx(12.), cx)),
+        ThreadGlyph::Error => Some(icon(IconName::TriangleAlert).size(zpx(12.)).text_color(ui.destructive).into_any_element()),
+        ThreadGlyph::NeedsYou => Some(needs_you_mark(zpx(12.), cx)),
+    };
+    div()
+        .flex_none()
+        .w(zpx(GLYPH_W))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .children(inner)
+        .into_any_element()
+}
+
+/// 线程列表的段标题（今天 / 昨天 / …，状态优先时是四档状态）
+fn section_header(section: ThreadSection, first: bool, cx: &App) -> AnyElement {
+    let ui = Ui::global(cx);
+    let key = match section {
+        ThreadSection::Today => "sidebar.sectionToday",
+        ThreadSection::Yesterday => "sidebar.sectionYesterday",
+        ThreadSection::Last7Days => "sidebar.sectionLast7Days",
+        ThreadSection::Last30Days => "sidebar.sectionLast30Days",
+        ThreadSection::Older => "sidebar.sectionOlder",
+        ThreadSection::NeedsAttention => "sidebar.filterStatusNeedsAttention",
+        ThreadSection::Working => "sidebar.filterStatusWorking",
+        ThreadSection::Active => "sidebar.filterStatusActive",
+        ThreadSection::Idle => "sidebar.sectionIdle",
+    };
+    div()
+        .flex_none()
+        .pt(zpx(if first { 4. } else { 10. }))
+        .pb(zpx(2.))
+        .pl(zpx(THREAD_PAD_L + 6.))
+        .text_size(zpx(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(ui.muted_foreground)
+        .child(t!(key).to_string())
+        .into_any_element()
+}
+
+/// 线程所在机器的名字：本机写「本机」，远端优先用已保存主机的名字
+fn thread_machine(ws: &Workspace, thread: &Project) -> String {
+    match thread.project_type {
+        ProjectType::Local => local_word(),
+        ProjectType::Ssh => thread
+            .host_id
+            .as_ref()
+            .and_then(|id| ws.hosts.iter().find(|h| &h.id == id))
+            .map(|h| h.name.clone())
+            .or_else(|| thread.ssh.as_ref().map(|s| s.host.clone()))
+            .unwrap_or_default(),
+    }
+}
+
+/// 线程行的悬停提示：「机器 / 环境 · 工作目录」（多目录线程列出各成员目录）
+fn thread_tooltip(ws: &Workspace, thread: &Project) -> String {
+    let machine = thread_machine(ws, thread);
+    let env = thread_environment(thread).and_then(|id| ws.project(id)).map(|p| p.name.clone());
+    let mut parts = vec![match env {
+        Some(env) => format!("{machine} / {env}"),
+        None => machine,
+    }];
+    if let Some(dir) = &thread.working_dir {
+        parts.push(dir.clone());
+    } else if let Some(multi) = &thread.multi {
+        parts.extend(multi.repos.iter().map(|r| r.dir.clone()));
+    }
+    parts.join(" · ")
+}
+
+fn now_ms() -> i64 {
+    web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 fn pending_row(p: &PendingSession, depth: usize, cx: &App) -> AnyElement {
@@ -1833,6 +2167,12 @@ mod tests {
             "sidebar.sortStatusPriority",
             "sidebar.sortNameAsc",
             "sidebar.sortNameDesc",
+            "sidebar.sectionToday",
+            "sidebar.sectionYesterday",
+            "sidebar.sectionLast7Days",
+            "sidebar.sectionLast30Days",
+            "sidebar.sectionOlder",
+            "sidebar.sectionIdle",
         ] {
             assert!(has(key), "缺文案 key：{key}");
         }

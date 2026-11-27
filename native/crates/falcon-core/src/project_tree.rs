@@ -493,7 +493,7 @@ pub fn filter_and_sort_threads(
             }
         }
 
-        let effective_last_active = rt.last_active_at.map_or(p.created_at, |t| t.max(p.created_at));
+        let effective_last_active = thread_last_active(p, &rt);
         let status_rank = rt.status_rank();
         entries.push(Entry {
             project: p.clone(),
@@ -531,6 +531,76 @@ pub fn filter_and_sort_threads(
     }
 
     entries.into_iter().map(|e| e.project).collect()
+}
+
+/// 线程的最近活动时间：会话的最近活跃时间与创建时间取晚的（没有会话就是创建时间）
+pub fn thread_last_active(thread: &Project, rt: &ThreadRuntime) -> i64 {
+    rt.last_active_at.map_or(thread.created_at, |t| t.max(thread.created_at))
+}
+
+/// 线程行尾巴上写的时间、分段也按它分：按创建时间排的看创建时间，其余看最近活动
+pub fn thread_sort_time(sort: ThreadSort, thread: &Project, rt: &ThreadRuntime) -> i64 {
+    match sort {
+        ThreadSort::CreatedDesc | ThreadSort::CreatedAsc => thread.created_at,
+        _ => thread_last_active(thread, rt),
+    }
+}
+
+/// 线程列表的分段（照 Claude 桌面版的「今天 / 昨天 / 过去 7 天」）。按时间排时按本地日期分，
+/// 状态优先时按 [`ThreadRuntime::status_rank`] 的四档分，按名称排不分段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadSection {
+    Today,
+    Yesterday,
+    Last7Days,
+    Last30Days,
+    Older,
+    NeedsAttention,
+    Working,
+    Active,
+    Idle,
+}
+
+/// 时间戳落在哪个日期段。按本地日历日比，不按「距今 24 小时」：昨晚 11 点的线程今早就算昨天。
+/// `offset_of(秒)` 是那一刻本地相对 UTC 的偏移（秒），逐个时间戳取，夏令时两边才都对；
+/// 比现在还晚的（别的机器时钟快）算今天
+pub fn day_section(ts_ms: i64, now_ms: i64, offset_of: impl Fn(i64) -> i64) -> ThreadSection {
+    let day = |ms: i64| (ms.div_euclid(1000) + offset_of(ms.div_euclid(1000))).div_euclid(86_400);
+    match day(now_ms) - day(ts_ms) {
+        ..=0 => ThreadSection::Today,
+        1 => ThreadSection::Yesterday,
+        2..=7 => ThreadSection::Last7Days,
+        8..=30 => ThreadSection::Last30Days,
+        _ => ThreadSection::Older,
+    }
+}
+
+/// 已排好序的线程列表从哪几行开始换段：`(段, 起始下标)`，相邻同段合并。`keys` 与列表逐行对应，
+/// 是 `(thread_sort_time, status_rank)`。按名称排返回空——名称排序下分段只会把字母切碎
+pub fn thread_sections(
+    sort: ThreadSort,
+    keys: &[(i64, u8)],
+    now_ms: i64,
+    offset_of: impl Fn(i64) -> i64,
+) -> Vec<(ThreadSection, usize)> {
+    let section_of = |&(time, rank): &(i64, u8)| match sort {
+        ThreadSort::NameAsc | ThreadSort::NameDesc => None,
+        ThreadSort::StatusPriority => Some(match rank {
+            0 => ThreadSection::NeedsAttention,
+            1 => ThreadSection::Working,
+            2 => ThreadSection::Active,
+            _ => ThreadSection::Idle,
+        }),
+        _ => Some(day_section(time, now_ms, &offset_of)),
+    };
+    let mut out: Vec<(ThreadSection, usize)> = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        let Some(section) = section_of(key) else { return Vec::new() };
+        if out.last().is_none_or(|(last, _)| *last != section) {
+            out.push((section, i));
+        }
+    }
+    out
 }
 
 /// 线程名称的字数上限（按字符）。侧栏一行放得下，又能看出是哪件事
@@ -592,6 +662,50 @@ mod tests {
 
     fn p(json: &str) -> Project {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn day_section_uses_local_calendar_days() {
+        const H: i64 = 3_600_000;
+        const D: i64 = 24 * H;
+        // 东八区 2026-11-27 09:00 = UTC 01:00
+        let now = 1_795_741_200_000_i64;
+        let cst = |_| 8 * 3600;
+        assert_eq!(day_section(now, now, cst), ThreadSection::Today);
+        assert_eq!(day_section(now + H, now, cst), ThreadSection::Today);
+        // 本地 00:30 还是今天，前一晚 23:30 已是昨天（只差一小时）
+        assert_eq!(day_section(now - 8 * H - 30 * 60_000, now, cst), ThreadSection::Today);
+        assert_eq!(day_section(now - 9 * H - 30 * 60_000, now, cst), ThreadSection::Yesterday);
+        assert_eq!(day_section(now - 2 * D, now, cst), ThreadSection::Last7Days);
+        assert_eq!(day_section(now - 7 * D, now, cst), ThreadSection::Last7Days);
+        assert_eq!(day_section(now - 8 * D, now, cst), ThreadSection::Last30Days);
+        assert_eq!(day_section(now - 31 * D, now, cst), ThreadSection::Older);
+        // 同一刻按 UTC 算是 01:00，两小时前就跨进了前一天：日期段跟着时区走
+        assert_eq!(day_section(now - 2 * H, now, |_| 0), ThreadSection::Yesterday);
+    }
+
+    #[test]
+    fn thread_sections_merge_runs_and_skip_name_sorts() {
+        const D: i64 = 86_400_000;
+        let now = 100 * D + D / 2;
+        let utc = |_| 0;
+        let keys = [(now, 3), (now - 1, 3), (now - D, 0), (now - 3 * D, 1), (now - 40 * D, 2)];
+        assert_eq!(
+            thread_sections(ThreadSort::CreatedDesc, &keys, now, utc),
+            vec![
+                (ThreadSection::Today, 0),
+                (ThreadSection::Yesterday, 2),
+                (ThreadSection::Last7Days, 3),
+                (ThreadSection::Older, 4),
+            ]
+        );
+        let ranks = [(0, 0), (0, 0), (0, 1), (0, 3)];
+        assert_eq!(
+            thread_sections(ThreadSort::StatusPriority, &ranks, now, utc),
+            vec![(ThreadSection::NeedsAttention, 0), (ThreadSection::Working, 2), (ThreadSection::Idle, 3)]
+        );
+        assert!(thread_sections(ThreadSort::NameAsc, &keys, now, utc).is_empty());
+        assert!(thread_sections(ThreadSort::CreatedDesc, &[], now, utc).is_empty());
     }
 
     #[test]

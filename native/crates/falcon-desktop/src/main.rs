@@ -23,6 +23,8 @@ mod local_service;
 mod menu_bar;
 mod passwords;
 mod platform;
+#[cfg(windows)]
+mod tray;
 
 use std::rc::Rc;
 
@@ -34,13 +36,19 @@ fn main() {
         falcon_ui::init(Rc::new(platform::Desktop::new()), cx);
         #[cfg(target_os = "macos")]
         menu_bar::install(cx);
+        #[cfg(windows)]
+        if std::env::var_os("FALCON_AUTOMATE").is_none() {
+            tray::install(cx);
+        }
 
-        // macOS：最后一扇窗口关掉之后进程还在，菜单栏继续管 launchd 里的服务。
-        // 激活策略改成 Accessory，Dock 图标一起收起，否则会剩一个没有窗口的普通应用。
-        // 自动化脚本靠关窗结束进程，不走这条路。Windows 没有菜单栏，关窗即退出
+        // 最后一扇窗口关掉之后进程还在：macOS 的菜单栏继续管 launchd 里的服务，激活策略改成
+        // Accessory，Dock 图标一起收起，否则会剩一个没有窗口的普通应用；Windows 的托盘图标继续
+        // 管计划任务里的服务（GPUI 在 Windows 上不会因为没窗口自己退出）。托盘没挂上就关窗即退出。
+        // 自动化脚本靠关窗结束进程，不走这条路
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 if keep_menu_bar_after_close() {
+                    #[cfg(target_os = "macos")]
                     cx.set_activation_policy(gpui_kit::ActivationPolicy::Accessory);
                 } else {
                     cx.quit();
@@ -59,7 +67,11 @@ fn keep_menu_bar_after_close() -> bool {
     {
         menu_bar::installed() && std::env::var_os("FALCON_AUTOMATE").is_none()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        tray::installed()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         false
     }

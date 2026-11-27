@@ -8,6 +8,9 @@
 //! | `ready` | 等工作区登录完、数据拉回来（最多 15s） |
 //! | `select:<项目名>` | 在侧栏选中项目 |
 //! | `new-terminal[:claude]` | 在当前项目新建终端（可带 agent） |
+//! | `chat[:<提示词>]` | 在当前项目打开 Claude 对话窗口；带提示词时对话空着就连上后发出（`;` 写成 `;`） |
+//! | `chat-send:<文本>` | 往当前项目已打开的 Claude 对话里发一条消息（要等它连上） |
+//! | `chat-expand` | 展开当前项目对话里每一轮的过程与工具输出 |
 //! | `open:<路径>` | 在当前项目的文件窗口里打开一个文件（工作目录相对路径；有没存的修改时同样先问） |
 //! | `panel:<面板>` | 打开右侧栏的这一格（`files` / `changes` / `plugin:<插件 id>`）；已经开着就不动 |
 //! | `settings[:<页>]` | 打开设置，停在这一页（`plugins`、`relays`…；缺省外观） |
@@ -157,6 +160,36 @@ async fn run_step(step: &str, window: AnyWindowHandle, ws: &Entity<Workspace>, c
                     ws.update(cx, |w, cx| w.new_terminal(&pid, agent, None, cx));
                 }
             });
+        }
+        "chat" => {
+            let prompt = (!arg.is_empty()).then(|| unescape(arg));
+            let ok = cx.update(|cx| {
+                let pid = ws.read(cx).current_project_id();
+                if let Some(pid) = &pid {
+                    ws.update(cx, |w, cx| w.open_chat(pid, prompt, cx));
+                }
+                pid.is_some()
+            });
+            if !ok {
+                return Err("没有选中的项目".into());
+            }
+        }
+        "chat-expand" => {
+            let view = cx.update(|cx| {
+                let w = ws.read(cx);
+                w.current_project_id().and_then(|pid| w.chats.get(&pid).cloned())
+            });
+            let view = view.ok_or("当前项目没有打开的对话")?;
+            cx.update(|cx| view.update(cx, |v, cx| v.automation_expand_all(cx)));
+        }
+        "chat-send" => {
+            let text = unescape(arg);
+            let view = cx.update(|cx| {
+                let w = ws.read(cx);
+                w.current_project_id().and_then(|pid| w.chats.get(&pid).cloned())
+            });
+            let view = view.ok_or("当前项目没有打开的对话")?;
+            let _ = window.update(cx, |_, window, cx| view.update(cx, |v, cx| v.automation_send(&text, window, cx)));
         }
         "open" => {
             let ok = cx.update(|cx| {

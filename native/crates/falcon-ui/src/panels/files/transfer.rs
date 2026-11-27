@@ -395,14 +395,15 @@ async fn upload_one(
 }
 
 /// 自动化验证的替身（只在 `automation` feature 下编进来）：锁屏时系统的打开 / 存储面板没法
-/// 操作，用环境变量直接给出"用户选了什么"。值是 `:` 分隔的本机路径
+/// 操作，用环境变量直接给出"用户选了什么"。值按 PATH 的规则分隔（Unix 用 `:`，Windows 用 `;`——
+/// Windows 路径自带 `C:`，按 `:` 切会切坏）
 #[cfg(feature = "automation")]
-fn test_paths(var: &str) -> Option<Vec<PathBuf>> {
-    std::env::var(var).ok().map(|v| v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
+pub(crate) fn test_paths(var: &str) -> Option<Vec<PathBuf>> {
+    std::env::var_os(var).map(|v| std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect())
 }
 
 #[cfg(not(feature = "automation"))]
-fn test_paths(_var: &str) -> Option<Vec<PathBuf>> {
+pub(crate) fn test_paths(_var: &str) -> Option<Vec<PathBuf>> {
     None
 }
 

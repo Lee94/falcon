@@ -47,6 +47,17 @@ wry = { package = "lb-wry", version = "=0.53.3", optional = true }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 keyring = "4"
 
+# 托盘图标（src/tray.rs）：通知区域图标、右键菜单与收消息的隐藏窗口。版本与服务端、GPUI 已经
+# 带进来的 windows-sys 一致
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # 运行时换 Dock 图标（src/dock.rs）、菜单栏状态项（src/menu_bar.rs）、「跑完了」的系统提示音
 # （src/chime.rs）与把编辑器链接交给 Launch Services（src/app_link.rs）。版本跟 GPUI / wry
 # 已经带进来的那份一致，不多编一套

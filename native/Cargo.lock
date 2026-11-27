@@ -2382,6 +2382,7 @@ name = "falcon-client"
 version = "0.4.28"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "bytes",
  "falcon-proto",
  "falcon-tailnet",
@@ -2437,6 +2438,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "serde_json",
  "url",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

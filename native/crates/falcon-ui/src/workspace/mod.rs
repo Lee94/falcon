@@ -30,7 +30,7 @@ use falcon_proto::{AppIconState, AuthStatus, NodeStatus, PluginList, Project, Se
 use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Task, Window};
 
 use crate::panels::browser_view::{BrowserView, BrowserViewEvent, auto_open_enabled};
-use crate::panels::claude_chat::{ChatView, ChatViewEvent};
+use crate::panels::claude_chat::{ChatView, ChatViewEvent, chat_location};
 use crate::profiles::ServerProfile;
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
 
@@ -1290,7 +1290,9 @@ impl Workspace {
         for id in missing_chats {
             let client = self.client.clone();
             let initial = self.chat_prompts.remove(&id);
-            let view = cx.new(|cx| ChatView::new(client, &id, initial, window, cx));
+            let ws = cx.entity();
+            let location = chat_location(self, &id);
+            let view = cx.new(|cx| ChatView::new(client, &ws, &id, location, initial, window, cx));
             cx.subscribe(&view, |_, _, ev: &ChatViewEvent, cx| match ev {
                 ChatViewEvent::StateChanged => cx.notify(),
             })

@@ -10,8 +10,9 @@
 //!    "本机"配置连的端口同样取自 plist（见 [`installed_service_args`]）。
 //!
 //! 会话活在 launchd 服务里，不在 App 进程里——**退出 App = 所有窗口 Detach**，永远不会
-//! Terminate。关掉窗口不等于退出：macOS 上菜单栏还在，启动 / 停止 / 重启走同一套
-//! `falcon service` 子命令（停止必须 bootout，否则 KeepAlive 会把进程拉起来）。
+//! Terminate。关掉窗口不等于退出：macOS 上菜单栏还在、Windows 上托盘图标还在（tray.rs），
+//! 启动 / 停止 / 重启走同一套 `falcon service` 子命令（macOS 停止必须 bootout，否则
+//! KeepAlive 会把进程拉起来）。
 //! 开发时（不在 .app 里跑）找不到捆绑的服务程序，就假定服务已经在跑
 //! （`cargo run -p falcon-server` 或已装好的服务），只做第 2 步。菜单栏这时改用
 //! LaunchAgent 里那份已安装的二进制执行子命令。
@@ -333,8 +334,8 @@ fn wait_for_port(url: &str) -> ServiceStatus {
     ServiceStatus::Unreachable(last_err)
 }
 
-/// 菜单栏上的三个动作
-#[cfg(any(target_os = "macos", test))]
+/// 菜单栏 / 托盘上的三个动作
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ServiceControl {
     Start,
@@ -343,7 +344,7 @@ pub(crate) enum ServiceControl {
 }
 
 /// launchd / 计划任务眼里的本机服务。没装过和装了没在跑要分开：前者「启动」得先 install
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ServicePresence {
     NotInstalled,
@@ -359,7 +360,7 @@ pub(crate) enum ServiceControlError {
     Failed(String),
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) struct ControlResult {
     pub presence: ServicePresence,
     pub error: Option<ServiceControlError>,
@@ -367,14 +368,14 @@ pub(crate) struct ControlResult {
 
 /// `falcon service` 实际要跑的 argv。没安装时启动和重启都落成 install，并带上原来的
 /// `--host` / `--port` / `--data-dir`（空则仍走服务端默认值）。停止一个没安装的服务是空操作
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 #[derive(Debug, PartialEq, Eq)]
 enum ControlPlan {
     Nothing,
     Run(Vec<String>),
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", windows, test))]
 fn control_plan(op: ServiceControl, installed: bool, keep: &[String]) -> ControlPlan {
     match (op, installed) {
         (ServiceControl::Stop, false) => ControlPlan::Nothing,
@@ -454,17 +455,81 @@ pub(crate) fn query_presence() -> ServicePresence {
     presence_from_launchd(true, &stdout)
 }
 
-#[cfg(target_os = "macos")]
+/// 本用户的计划任务在不在。`schtasks /Query /TN` 的退出码不看语言，比读输出可靠
+#[cfg(windows)]
+fn task_installed() -> bool {
+    local_process("schtasks")
+        .args(["/Query", "/TN", falcon_core::schtasks::schtasks_name().as_str()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// 问计划任务现在什么状态。阻塞，放在后台执行器上调。
+///
+/// 不读 `schtasks /Query` 的「状态」列：那一列跟系统语言走（中文系统是「正在运行」「就绪」）。
+/// `Get-ScheduledTask` 的 `State` 是枚举名，不翻译；pid 按任务里的程序路径找进程——任务
+/// 状态在服务崩溃、失败重启的间隙里会和进程对不上，有进程就算在跑
+#[cfg(windows)]
+pub(crate) fn query_presence() -> ServicePresence {
+    let name = falcon_core::schtasks::schtasks_name().replace('\'', "''");
+    let script = format!(
+        "$t = Get-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; \
+         if (-not $t) {{ 'missing'; exit }}; \
+         $exe = \"$($t.Actions[0].Execute)\".Trim('\"').Replace('/', '\\'); \
+         $p = Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq $exe }} | Select-Object -First 1; \
+         \"$($t.State)|$($p.Id)\""
+    );
+    let out = local_process("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            if let Some(presence) = presence_from_task(&String::from_utf8_lossy(&out.stdout)) {
+                return presence;
+            }
+        }
+        Ok(out) => log::warn!("查询计划任务失败：{}", String::from_utf8_lossy(&out.stderr).trim()),
+        Err(err) => log::warn!("powershell 起不来：{err}"),
+    }
+    // PowerShell 不可用（或 ScheduledTasks 模块被裁掉）时，至少分清装没装
+    if task_installed() { ServicePresence::Stopped } else { ServicePresence::NotInstalled }
+}
+
+/// `query_presence` 里那段脚本的输出：`missing`，或 `<State>|<pid 或空>`。认不出是 None
+#[cfg(any(windows, test))]
+fn presence_from_task(output: &str) -> Option<ServicePresence> {
+    let line = output.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    if line == "missing" {
+        return Some(ServicePresence::NotInstalled);
+    }
+    let (state, pid) = line.split_once('|')?;
+    let pid = pid.trim().parse::<u32>().ok();
+    if pid.is_some() || state.trim() == "Running" {
+        Some(ServicePresence::Running { pid })
+    } else {
+        Some(ServicePresence::Stopped)
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn run_control(op: ServiceControl) -> ControlResult {
+    #[cfg(target_os = "macos")]
     let installed = agent_installed();
+    #[cfg(windows)]
+    let installed = task_installed();
     let keep = installed_service_args().map(|args| args.to_install_args()).unwrap_or_default();
     let ran = match control_plan(op, installed, &keep) {
         ControlPlan::Nothing => Ok(()),
         ControlPlan::Run(args) => run_service(&args),
     };
     let error = ran.err();
-    // bootout 是异步的：stop 的命令已经返回，print 仍可能看见旧的 running。等它真正消失，
-    // 菜单才显示「已停止」。start / restart 的 CLI 自己会等到 bootstrap 成功
+    // bootout / schtasks /End 都是异步的：stop 的命令已经返回，查询仍可能看见旧的 running。
+    // 等它真正消失，菜单才显示「已停止」。start / restart 的 CLI 自己会等到起来（Windows 的
+    // restart 等旧进程退完再 /Run）
     let presence = if error.is_none() && matches!(op, ServiceControl::Stop) {
         wait_until_not_running()
     } else {
@@ -476,7 +541,7 @@ pub(crate) fn run_control(op: ServiceControl) -> ControlResult {
     ControlResult { presence, error }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn wait_until_not_running() -> ServicePresence {
     let mut last = query_presence();
     for _ in 0..20 {
@@ -575,6 +640,21 @@ mod tests {
             super::control_plan(ServiceControl::Stop, true, &keep),
             ControlPlan::Run(vec!["service".into(), "stop".into()])
         );
+    }
+
+    #[test]
+    fn presence_reads_the_task_script() {
+        use super::ServicePresence;
+        assert_eq!(super::presence_from_task("missing\r\n"), Some(ServicePresence::NotInstalled));
+        assert_eq!(super::presence_from_task("Running|4242\r\n"), Some(ServicePresence::Running { pid: Some(4242) }));
+        // 任务还在 Running、进程刚退（或路径对不上）：仍算在跑，只是没有 pid
+        assert_eq!(super::presence_from_task("Running|"), Some(ServicePresence::Running { pid: None }));
+        // 任务显示 Ready，但服务进程在：失败重启的间隙
+        assert_eq!(super::presence_from_task("Ready|17"), Some(ServicePresence::Running { pid: Some(17) }));
+        assert_eq!(super::presence_from_task("Ready|"), Some(ServicePresence::Stopped));
+        assert_eq!(super::presence_from_task("Disabled|"), Some(ServicePresence::Stopped));
+        assert_eq!(super::presence_from_task(""), None);
+        assert_eq!(super::presence_from_task("garbage"), None);
     }
 
     #[test]
